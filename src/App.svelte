@@ -637,11 +637,19 @@
   /** The broken symlink a `RepairLinkDialog` is open for (CPE-1209, epic CPE-715), or null when closed. */
   let repairLinkFor: DirEntry | null = null;
   /** Target paths + display label for an open `ShredConfirmDialog` (CPE-1240, epic CPE-738), or null
-   *  when closed. Set by `askShred`, cleared on close/done. */
-  let shredConfirmFor: { paths: string[]; what: string } | null = null;
+   *  when closed. Set by `askShred`, cleared on close/done. `inPaneB`/`dir` (CPE-1386): SNAPSHOT at
+   *  invocation time — before the dialog opens — mirroring `snapshotConfirmTarget`/`ConfirmTarget`
+   *  (CPE-1370): `paths` is already frozen the same way (the dialog's `paths` prop is bound to this
+   *  object, which is never mutated while open), so the destructive shred itself was already safe; `dir`
+   *  lets `onShredDone` refresh the pane the shred actually ran in even if the active pane changed while
+   *  the confirm dialog was open. */
+  let shredConfirmFor: { paths: string[]; what: string; inPaneB: boolean; dir: string } | null = null;
   /** The folder an open `VaultCreateDialog` is sealing (CPE-1250, epic CPE-738), or null when closed.
-   *  Set by the "vault-create" action, cleared on close/created. */
-  let vaultCreateFor: { folderPath: string; folderName: string } | null = null;
+   *  Set by the "vault-create" action, cleared on close/created. `inPaneB`/`dir` (CPE-1386): SNAPSHOT at
+   *  invocation time, same reasoning as `shredConfirmFor` above — the dialog's `folderPath` prop is bound
+   *  to this object (never mutated while open), so the create call (including its optional destructive
+   *  shred-original path) was already safe; `dir` lets `onVaultCreated` refresh the right pane. */
+  let vaultCreateFor: { folderPath: string; folderName: string; inPaneB: boolean; dir: string } | null = null;
   /** The archive path an open `ArchiveSafetyDialog` is scanning (CPE-1318, epic CPE-1002), or null when
    *  closed. Set by the "archive-safety" context-menu action, cleared on close. */
   let archiveSafetyFor: string | null = null;
@@ -678,10 +686,17 @@
    *  global `transfer://done` listener knows what to do once the queued run actually finishes — the
    *  same `onSuccess` shape `extractWithPasswordFallback` used to run inline before archive ops became
    *  async/queued. `cancelledNotice`/`failedNotice` are the fallback messages when the report itself
-   *  doesn't have a more specific error to show. Entries are consumed (deleted) once handled. */
+   *  doesn't have a more specific error to show. Entries are consumed (deleted) once handled.
+   *  `dir` (CPE-1386): the folder the op actually landed in/pulled from — a compress/extract queued from
+   *  a pane-B context menu can target pane B's own folder now, so the listener can no longer hard-code a
+   *  pane-A refresh. `onSuccess` still owns the op-specific notice + (pane-A-only) `pendingSelectPath`;
+   *  the listener does the actual refresh via `refreshBatchApplyTarget(dir)` — reused as-is rather than
+   *  adding a separate `inPaneB` flag, since it already matches `dir` against BOTH panes' live folders
+   *  (CPE-1371/1387's both-can-match reasoning) and simply no-ops for a pane renavigated elsewhere while
+   *  the op was in flight, exactly like a batch-rename/batch-media apply. */
   const pendingArchiveOps = new Map<
     number,
-    { onSuccess: () => void | Promise<void>; cancelledNotice: string; failedNotice: string }
+    { onSuccess: () => void | Promise<void>; cancelledNotice: string; failedNotice: string; dir: string }
   >();
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
@@ -1626,10 +1641,9 @@
       // it to a sibling folder instead, the closest equivalent to opening it that the backend supports.
       if (isPasswordError(e)) {
         const { dest, name } = extractHereDest(entry);
-        promptForExtractPassword(entry, dest, async () => {
+        promptForExtractPassword(entry, dest, currentPath, () => {
           pendingSelectPath = dest;
           showNotice(`"${entry.name}" is password-protected — extracted to "${name}" instead of opening in place.`);
-          await loadPath(currentPath);
         });
         return;
       }
@@ -2202,11 +2216,19 @@
   // listing and select the new blob (it lands as a sibling of the folder, i.e. in the current folder).
 
   /** Open the create-vault dialog for the single selected folder. Guarded to a real folder (never Home/
-   *  archive) — the same condition ContextMenu gates the menu item on. */
-  function askVaultCreate() {
-    const entry = selectedEntries[0];
-    if (!entry?.is_dir || isHome || archive) return;
-    vaultCreateFor = { folderPath: entry.path, folderName: entry.name };
+   *  archive) — the same condition ContextMenu gates the menu item on. `inPaneB` (CPE-1386): a
+   *  context-menu invocation targets whichever pane the menu was opened OVER (`runAction`'s `inPaneB`
+   *  local) — the folder + pane are SNAPSHOT into `vaultCreateFor` right now, mirroring
+   *  `beginBatchRename`'s reasoning (CPE-1384): the dialog stays open for as long as it takes to type a
+   *  passphrase, and a pane switch underneath it must never retarget the eventual (possibly destructive
+   *  shred-original) create. `archive`/`isHome` are pane-A-only concepts (pane B is always a plain real
+   *  folder), so they only gate a pane-A vault-create. */
+  function askVaultCreate(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const entry = pane.selectedEntries[0];
+    const dir = inPaneB ? paneBPath : currentPath;
+    if (!entry?.is_dir || (inPaneB ? dir === HOME : (isHome || archive))) return;
+    vaultCreateFor = { folderPath: entry.path, folderName: entry.name, inPaneB, dir };
   }
 
   // ---- Check archive safety (CPE-1318, epic CPE-1002) --------------------------------------------
@@ -2215,19 +2237,35 @@
   // guard, re-checked here defense-in-depth like `askVaultCreate` above); the dialog itself owns the
   // call + result rendering.
 
-  /** Open the archive-safety dialog for the single selected ZIP-family archive. */
-  function askArchiveSafety() {
-    const entry = selectedEntries[0];
-    if (!entry || isHome || archive || !isArchiveSafetyEligible(entry)) return;
+  /** Open the archive-safety dialog for the single selected ZIP-family archive. `inPaneB` (CPE-1386):
+   *  the dialog is a read-only, single-shot scan (no follow-up refresh needed), so this only needs to
+   *  read the right pane's selection — no snapshot object required beyond the plain `path` it already
+   *  passes down. */
+  function askArchiveSafety(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const entry = pane.selectedEntries[0];
+    const dir = inPaneB ? paneBPath : currentPath;
+    if (!entry || (inPaneB ? dir === HOME : (isHome || archive)) || !isArchiveSafetyEligible(entry)) return;
     archiveSafetyFor = entry.path;
   }
 
-  /** `VaultCreateDialog`'s `created` handler: the new `.cpevault` blob path. Refresh the current folder
-   *  (the blob is a sibling of the sealed folder, so it's in view) and select it, then notice. */
+  /** `VaultCreateDialog`'s `created` handler: the new `.cpevault` blob path. Refresh whichever pane(s)
+   *  currently show the SNAPSHOT `dir` `askVaultCreate` captured (CPE-1386, mirrors
+   *  `refreshBatchApplyTarget`'s both-can-match reasoning) — not live `currentPath`/`paneBPath`, so a
+   *  pane renavigated away while the dialog was open is left alone instead of getting a wrong refresh.
+   *  The pane-A branch keeps the exact pre-CPE-1386 call (`loadPath(currentPath, true)`, `pendingSelectPath`
+   *  set first) so single-pane behavior is byte-for-byte unchanged; pane B has no equivalent
+   *  post-load "select the new item" hook yet (same as batch-rename/batch-media), so it's a plain refresh. */
   async function onVaultCreated(dest: string) {
+    const target = vaultCreateFor;
     vaultCreateFor = null;
-    pendingSelectPath = dest; // the post-load hook selects it; the reactive block scrolls to it
-    await loadPath(currentPath, true);
+    if (!target) return;
+    const norm = normalizePath(target.dir);
+    if (norm === normalizePath(currentPath)) {
+      pendingSelectPath = dest; // the post-load hook selects it; the reactive block scrolls to it
+      await loadPath(currentPath, true);
+    }
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
     showNotice(`Created encrypted vault "${vaultDisplayName(dest)}".`);
   }
 
@@ -3255,31 +3293,39 @@
   }
 
   /** The base name for a new archive: the single selected item's name (folder) or stem (file), or
-   *  "Archive" for a multi-selection. Shared by every compress variant (CPE-251/1182/1183). */
-  function compressBaseName(): string {
-    return selectedEntries.length === 1
-      ? selectedEntries[0].is_dir
-        ? selectedEntries[0].name
-        : stripExt(selectedEntries[0].name)
+   *  "Archive" for a multi-selection. Shared by every compress variant (CPE-251/1182/1183). `sel`
+   *  (CPE-1386) is the pane-aware selection the caller already resolved — no longer reads the pane-A-only
+   *  `selectedEntries` global directly, so a pane-B compress computes the right base name. */
+  function compressBaseName(sel: DirEntry[]): string {
+    return sel.length === 1
+      ? sel[0].is_dir
+        ? sel[0].name
+        : stripExt(sel[0].name)
       : "Archive";
   }
 
   /** Compress the selection into a new .zip in the current folder (CPE-251), through the transfer
    *  queue (CPE-1184) so a large selection streams progress + stays cancellable instead of freezing the
-   *  UI on one blocking call. The actual "Compressed…" notice + folder refresh happen once the queued
-   *  run finishes, via the global `transfer://done` listener below. */
-  async function doCompress() {
-    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
-    const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
-    const dest = joinPath(currentPath, name);
-    const n = selectedEntries.length;
+   *  UI on one blocking call. The actual "Compressed…" notice happens once the queued run finishes, via
+   *  the global `transfer://done` listener below, which also does the folder refresh (`pendingArchiveOps`'
+   *  `dir`, CPE-1386). `inPaneB`: a context-menu invocation targets whichever pane the menu was opened
+   *  OVER (`runAction`'s `inPaneB` local) — `isHome`/`blockedInArchive()` are pane-A-only concepts (pane B
+   *  is always a plain real folder), so they only gate a pane-A compress; a pane-B compress is instead
+   *  gated on `paneBPath === HOME` (the closest pane-B equivalent, same as `copyMoveEligible`). */
+  async function doCompress(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && (isHome || blockedInArchive())) || (inPaneB && dir === HOME) || pane.selectedEntries.length === 0) return;
+    const name = uniqueNameWithExt(compressBaseName(pane.selectedEntries), ".zip", (inPaneB ? entriesB : entries).map((e) => e.name));
+    const dest = joinPath(dir, name);
+    const n = pane.selectedEntries.length;
     try {
-      const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, null);
+      const id = await startArchiveCompress(pane.selectedEntries.map((e) => e.path), dest, null);
       pendingArchiveOps.set(id, {
-        onSuccess: async () => {
-          pendingSelectPath = dest;
+        dir,
+        onSuccess: () => {
+          if (!inPaneB) pendingSelectPath = dest;
           showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
-          await loadPath(currentPath);
         },
         cancelledNotice: "Compress cancelled.",
         failedNotice: `Couldn't compress to "${name}".`,
@@ -3292,19 +3338,22 @@
   /** Compress the selection via the queued archive path (CPE-1183/1184), letting `ext` pick the format:
    *  `.zip` (deflate, same bytes as `doCompress`) or `.tar.gz` (gzip tarball). Kept as a separate
    *  function from `doCompress` so its callers/behaviour stay distinguishable, even though both now
-   *  queue through the same `start_archive_compress` command (dest's extension picks the format). */
-  async function doCompressAs(ext: ".zip" | ".tar.gz") {
-    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
-    const name = uniqueNameWithExt(compressBaseName(), ext, entries.map((e) => e.name));
-    const dest = joinPath(currentPath, name);
-    const n = selectedEntries.length;
+   *  queue through the same `start_archive_compress` command (dest's extension picks the format).
+   *  `inPaneB` (CPE-1386): same routing as `doCompress` above. */
+  async function doCompressAs(ext: ".zip" | ".tar.gz", inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && (isHome || blockedInArchive())) || (inPaneB && dir === HOME) || pane.selectedEntries.length === 0) return;
+    const name = uniqueNameWithExt(compressBaseName(pane.selectedEntries), ext, (inPaneB ? entriesB : entries).map((e) => e.name));
+    const dest = joinPath(dir, name);
+    const n = pane.selectedEntries.length;
     try {
-      const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, null);
+      const id = await startArchiveCompress(pane.selectedEntries.map((e) => e.path), dest, null);
       pendingArchiveOps.set(id, {
-        onSuccess: async () => {
-          pendingSelectPath = dest;
+        dir,
+        onSuccess: () => {
+          if (!inPaneB) pendingSelectPath = dest;
           showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
-          await loadPath(currentPath);
         },
         cancelledNotice: "Compress cancelled.",
         failedNotice: `Couldn't compress to "${name}".`,
@@ -3316,16 +3365,24 @@
 
   /** Compress the selection into a password-protected .zip (CPE-1182), queued (CPE-1184): collect the
    *  password via `PasswordPromptDialog`, then `startArchiveCompress` with it. An empty password
-   *  re-prompts (the backend itself rejects one, but asking again beats a raw error notice). */
-  async function doCompressWithPassword() {
-    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
-    const name = uniqueNameWithExt(compressBaseName(), ".zip", entries.map((e) => e.name));
-    const dest = joinPath(currentPath, name);
-    const n = selectedEntries.length;
-    promptForCompressPassword(dest, n, name, "");
+   *  re-prompts (the backend itself rejects one, but asking again beats a raw error notice). `inPaneB`
+   *  (CPE-1386): the selection + target dir are resolved HERE, before the password dialog opens, and
+   *  threaded through `promptForCompressPassword` — mirroring `promptForCompressPassword`'s doc comment. */
+  async function doCompressWithPassword(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && (isHome || blockedInArchive())) || (inPaneB && dir === HOME) || pane.selectedEntries.length === 0) return;
+    const name = uniqueNameWithExt(compressBaseName(pane.selectedEntries), ".zip", (inPaneB ? entriesB : entries).map((e) => e.name));
+    const dest = joinPath(dir, name);
+    const n = pane.selectedEntries.length;
+    promptForCompressPassword(pane.selectedEntries, inPaneB, dir, dest, n, name, "");
   }
 
-  function promptForCompressPassword(dest: string, n: number, name: string, error: string) {
+  /** `sel`/`inPaneB`/`dir` (CPE-1386): SNAPSHOT by `doCompressWithPassword` before this dialog opens —
+   *  the password prompt can stay open for as long as the user takes to type one, so re-deriving the
+   *  selection/pane from live state on submit (instead of the snapshot passed in) could otherwise let a
+   *  pane switch retarget the compress onto the OTHER pane, mirroring `askDelete`'s snapshot reasoning. */
+  function promptForCompressPassword(sel: DirEntry[], inPaneB: boolean, dir: string, dest: string, n: number, name: string, error: string) {
     passwordPrompt = {
       title: "Set a password",
       message: "Choose a password to protect this archive — you'll need it again to open the archive.",
@@ -3333,17 +3390,17 @@
       error,
       onSubmit: async (password) => {
         if (!password) {
-          promptForCompressPassword(dest, n, name, "A password is required.");
+          promptForCompressPassword(sel, inPaneB, dir, dest, n, name, "A password is required.");
           return;
         }
         try {
-          const id = await startArchiveCompress(selectedEntries.map((e) => e.path), dest, password);
+          const id = await startArchiveCompress(sel.map((e) => e.path), dest, password);
           passwordPrompt = null;
           pendingArchiveOps.set(id, {
-            onSuccess: async () => {
-              pendingSelectPath = dest;
+            dir,
+            onSuccess: () => {
+              if (!inPaneB) pendingSelectPath = dest;
               showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}" (password-protected).`);
-              await loadPath(currentPath);
             },
             cancelledNotice: "Compress cancelled.",
             failedNotice: `Couldn't compress to "${name}".`,
@@ -3365,11 +3422,13 @@
   }
 
   /** Where "extract here" (and a locked archive's forced-extract fallback, see `enterArchive`) puts an
-   *  archive's contents: a new subfolder of the current folder, named after the archive and
-   *  auto-numbered on collision (CPE-252/1182). */
-  function extractHereDest(entry: DirEntry): { dest: string; name: string } {
-    const name = uniqueName(archiveBaseName(entry.name), entries.map((e) => e.name));
-    return { dest: joinPath(currentPath, name), name };
+   *  archive's contents: a new subfolder of the TARGET folder, named after the archive and
+   *  auto-numbered on collision (CPE-252/1182). `inPaneB` (CPE-1386): dedupes against pane B's own
+   *  `entriesB` + lands inside `paneBPath` when the entry being extracted is pane B's own row. */
+  function extractHereDest(entry: DirEntry, inPaneB = false): { dest: string; name: string } {
+    const dir = inPaneB ? paneBPath : currentPath;
+    const name = uniqueName(archiveBaseName(entry.name), (inPaneB ? entriesB : entries).map((e) => e.name));
+    return { dest: joinPath(dir, name), name };
   }
 
   /** Try a plain extract queued through the transfer engine (CPE-1184: streamed progress + cancel
@@ -3377,12 +3436,15 @@
    *  synchronously (it checks the password up front before queuing anything — see its doc comment), so
    *  this still prompts for the password and retries exactly like the old one-shot version did
    *  (CPE-1182). `onSuccess` runs once the queued run actually finishes, via the global
-   *  `transfer://done` listener below — not inline here. */
-  async function extractWithPasswordFallback(entry: DirEntry, dest: string, onSuccess: () => void | Promise<void>) {
+   *  `transfer://done` listener below — not inline here. `refreshDir` (CPE-1386) is the folder the
+   *  listener refreshes on success (`pendingArchiveOps`' `dir`) — the pane's own folder for "extract
+   *  here", or the picked destination for "extract to…" (see each caller). */
+  async function extractWithPasswordFallback(entry: DirEntry, dest: string, refreshDir: string, onSuccess: () => void | Promise<void>) {
     try {
       const id = await startArchiveExtract(entry.path, dest, null);
       pendingArchiveOps.set(id, {
         onSuccess,
+        dir: refreshDir,
         cancelledNotice: "Extraction cancelled.",
         failedNotice: `Couldn't extract "${entry.name}".`,
       });
@@ -3391,13 +3453,14 @@
         showNotice(String(e), true);
         return;
       }
-      promptForExtractPassword(entry, dest, onSuccess);
+      promptForExtractPassword(entry, dest, refreshDir, onSuccess);
     }
   }
 
   function promptForExtractPassword(
     entry: DirEntry,
     dest: string,
+    refreshDir: string,
     onSuccess: () => void | Promise<void>,
     error = "",
   ) {
@@ -3412,6 +3475,7 @@
           passwordPrompt = null;
           pendingArchiveOps.set(id, {
             onSuccess,
+            dir: refreshDir,
             cancelledNotice: "Extraction cancelled.",
             failedNotice: `Couldn't extract "${entry.name}".`,
           });
@@ -3424,7 +3488,7 @@
             return;
           }
           // Wrong (or empty) password — re-prompt with the error line instead of dismissing.
-          promptForExtractPassword(entry, dest, onSuccess, "Wrong password — try again.");
+          promptForExtractPassword(entry, dest, refreshDir, onSuccess, "Wrong password — try again.");
         }
       },
     };
@@ -3433,31 +3497,41 @@
   /** Extract the selected archive into a new subfolder of the current folder
       (CPE-252). Named after the archive, auto-numbered to avoid collisions. Transparently prompts for a
       password when the archive is AES-encrypted (CPE-1182). Queued through the transfer engine so a
-      large archive streams progress + stays cancellable (CPE-1184). */
-  async function doExtract() {
-    if (isHome || blockedInArchive()) return;
-    const entry = selectedEntries[0];
-    if (selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
-    const { dest, name } = extractHereDest(entry);
-    await extractWithPasswordFallback(entry, dest, async () => {
-      pendingSelectPath = dest;
+      large archive streams progress + stays cancellable (CPE-1184). `inPaneB` (CPE-1386): same pane
+      routing as `doCompress` — `isHome`/`blockedInArchive()` only gate a pane-A extract; pane B is
+      instead gated on `paneBPath === HOME`. */
+  async function doExtract(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && (isHome || blockedInArchive())) || (inPaneB && dir === HOME)) return;
+    const entry = pane.selectedEntries[0];
+    if (pane.selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
+    const { dest, name } = extractHereDest(entry, inPaneB);
+    await extractWithPasswordFallback(entry, dest, dir, () => {
+      if (!inPaneB) pendingSelectPath = dest;
       showNotice(`Extracted "${entry.name}" to "${name}".`);
-      await loadPath(currentPath);
     });
   }
 
   /** Extract the selected archive into a folder chosen from the native picker (CPE-1183), alongside the
-   *  existing "extract here". Same password fallback as `doExtract`, same queue-routing (CPE-1184). */
-  async function doExtractTo() {
-    if (isHome || blockedInArchive()) return;
-    const entry = selectedEntries[0];
-    if (selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
+   *  existing "extract here". Same password fallback as `doExtract`, same queue-routing (CPE-1184).
+   *  `inPaneB` (CPE-1386): same pane routing as `doExtract`. The refresh target is the PICKED
+   *  destination itself (not `dir`) — reused via `refreshBatchApplyTarget` in the `transfer://done`
+   *  listener, so either pane showing that folder (not necessarily the one the menu was opened over)
+   *  refreshes, matching the pre-CPE-1386 "only refresh if it lands in view" intent but extended to
+   *  cover pane B too. */
+  async function doExtractTo(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && (isHome || blockedInArchive())) || (inPaneB && dir === HOME)) return;
+    const entry = pane.selectedEntries[0];
+    if (pane.selectedEntries.length !== 1 || !entry || !isExtractable(entry)) return;
     let dest: string | string[] | null;
     try {
       dest = await openFolderDialog({
         directory: true,
         multiple: false,
-        defaultPath: currentPath,
+        defaultPath: dir,
         title: `Extract "${entry.name}" to…`,
       });
     } catch {
@@ -3465,9 +3539,8 @@
     }
     if (!dest || typeof dest !== "string") return; // cancelled
     const target = dest;
-    await extractWithPasswordFallback(entry, target, async () => {
+    await extractWithPasswordFallback(entry, target, target, () => {
       showNotice(`Extracted "${entry.name}" to "${target}".`);
-      if (target === currentPath) await loadPath(currentPath);
     });
   }
 
@@ -3699,27 +3772,40 @@
    *  file's bytes then unlinks it — it isn't recursive — so a folder in the selection is refused with a
    *  clear notice rather than silently skipped mid-operation. `ContextMenu`'s `shreddable` prop already
    *  hides the row for a folder-containing selection; this is the belt-and-braces check for any other
-   *  caller (defense in depth, same reasoning as `blockedInArchive`'s re-checks elsewhere). */
-  function askShred() {
-    if (blockedInArchive() || selectedEntries.length === 0) return;
-    if (selectedEntries.some((e) => e.is_dir)) {
+   *  caller (defense in depth, same reasoning as `blockedInArchive`'s re-checks elsewhere). `inPaneB`
+   *  (CPE-1386): a context-menu invocation targets whichever pane the menu was opened OVER — the
+   *  DESTRUCTIVE, non-recoverable target paths + pane are SNAPSHOT into `shredConfirmFor` right now,
+   *  before the confirm dialog opens, mirroring `askDelete`'s `snapshotConfirmTarget` (CPE-1370) — this
+   *  is the one archive/vault op that deletes real files, so it gets the same treatment as a permanent
+   *  delete: never re-derive the target from live `activePane` after the dialog is showing. */
+  function askShred(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const dir = inPaneB ? paneBPath : currentPath;
+    if ((!inPaneB && blockedInArchive()) || (inPaneB && dir === HOME) || pane.selectedEntries.length === 0) return;
+    if (pane.selectedEntries.some((e) => e.is_dir)) {
       showNotice("Securely delete only works on files — remove folders from the selection first.", true);
       return;
     }
-    const n = selectedEntries.length;
+    const n = pane.selectedEntries.length;
     shredConfirmFor = {
-      paths: selectedEntries.map((e) => e.path),
-      what: n === 1 ? `"${selectedEntries[0].name}"` : `${n} items`,
+      paths: pane.selectedEntries.map((e) => e.path),
+      what: n === 1 ? `"${pane.selectedEntries[0].name}"` : `${n} items`,
+      inPaneB,
+      dir,
     };
   }
 
   /** `ShredConfirmDialog`'s `done` handler: per-path shred results are `OpResult`-shaped (plus extra
    *  pass/byte fields this summary doesn't need) — `reportResults` already handles a partial-failure
-   *  batch honestly. Reload so shredded files disappear from the listing. */
+   *  batch honestly. Refresh whichever pane(s) show the SNAPSHOT `dir` `askShred` captured (CPE-1386,
+   *  same `refreshBatchApplyTarget` reuse as `onVaultCreated`) so shredded files disappear from view —
+   *  not live `currentPath`/`paneBPath`, so a pane switch while the (irreversible) confirm was open can't
+   *  retarget the refresh either. */
   async function onShredDone(results: OpResult[]) {
+    const target = shredConfirmFor;
     shredConfirmFor = null;
     reportResults(results, "Securely deleted");
-    await loadPath(currentPath);
+    if (target) await refreshBatchApplyTarget(target.dir);
   }
 
   /** `ShredConfirmDialog`'s `error` handler — same reasoning as `onNewLinkError`/`onLinkRepairError`:
@@ -3833,19 +3919,19 @@
       case "copy": doCopy(inPaneB); break;
       case "paste": doPaste(inPaneB); break;
       case "duplicate": doDuplicate(inPaneB); break;
-      // Archive/vault ops stay pane-A-only concepts in v1 — pane B is always a plain real folder (see
-      // `beginRename`'s comment), and `<ContextMenu>`'s `compressible`/`extractable`/
-      // `archiveSafetyEligible`/`comparable`/`shreddable`/`vaultable`/`canTerminal` props are already
-      // forced off for a pane-B-opened menu below, so these rows simply don't show there (CPE-1384: left
-      // as a follow-up — they queue through the global `pendingArchiveOps`/transfer-done machinery, which
-      // isn't pane-routed yet).
+      // Compress/extract/archive-safety/shred/vault-create are pane-routed (CPE-1386, extending
+      // CPE-1384's reasoning to the archive/vault family): a context-menu invocation targets whichever
+      // pane the menu was opened OVER, same as cut/copy/paste/duplicate above — `<ContextMenu>`'s
+      // `compressible`/`extractable`/`archiveSafetyEligible`/`shreddable`/`vaultable` props are un-gated
+      // for pane B below (mirroring `copyMoveEligible`'s `paneBPath !== HOME` guard). `compare` stays
+      // pane-A-only (out of this ticket's scope) — `comparable` is still forced off for a pane-B menu.
       case "compare": compareFiles(); break;
-      case "compress": doCompress(); break;
-      case "compress-targz": doCompressAs(".tar.gz"); break;
-      case "compress-password": doCompressWithPassword(); break;
-      case "extract": doExtract(); break;
-      case "extract-to": doExtractTo(); break;
-      case "archive-safety": askArchiveSafety(); break;
+      case "compress": doCompress(inPaneB); break;
+      case "compress-targz": doCompressAs(".tar.gz", inPaneB); break;
+      case "compress-password": doCompressWithPassword(inPaneB); break;
+      case "extract": doExtract(inPaneB); break;
+      case "extract-to": doExtractTo(inPaneB); break;
+      case "archive-safety": askArchiveSafety(inPaneB); break;
       case "copy-path": doCopyPath(pane.selectedEntries); break;
       case "copy-name": doCopyName(pane.selectedEntries); break;
       case "reveal": revealInExplorer(pane.selectedEntries, inPaneB ? (paneBPath === HOME ? "" : paneBPath) : (isHome ? "" : currentPath)); break;
@@ -3861,8 +3947,8 @@
       case "batch-rename": beginBatchRename(inPaneB); break;
       case "batch-media": beginBatchMedia(inPaneB); break;
       case "delete": askDelete(false, inPaneB); break;
-      case "shred": askShred(); break;
-      case "vault-create": askVaultCreate(); break;
+      case "shred": askShred(inPaneB); break;
+      case "vault-create": askVaultCreate(inPaneB); break;
       case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
@@ -5011,7 +5097,10 @@
       const r = e.payload;
       // Archive compress/extract (CPE-1184) queue through the same engine but resolve via the
       // `onSuccess` closure the call site registered in `pendingArchiveOps` (it already knows the
-      // exact wording + what to refresh — a "Compressed"/"Extracted" notice, not "Copied").
+      // exact wording — a "Compressed"/"Extracted" notice, not "Copied"). The actual folder refresh
+      // (CPE-1386) is centralized HERE via `refreshBatchApplyTarget(pending.dir)` — reused as-is, so a
+      // pane-B-opened compress/extract refreshes pane B (and pane A too if it happens to mirror the same
+      // folder), instead of the pre-CPE-1386 hard-coded pane-A `loadPath(currentPath)`.
       if (r.op === "compress" || r.op === "extract") {
         const pending = pendingArchiveOps.get(r.id);
         pendingArchiveOps.delete(r.id);
@@ -5021,9 +5110,13 @@
           // startArchiveCompress(...)` continuation has run `pendingArchiveOps.set(id, ...)` (CPE-1254:
           // the operations panel still shows "N item(s) compressed" via its own independent listener
           // in `lib/transfers.ts`, but this listener — the one that owns the folder refresh — had
-          // nothing registered yet, so the new/extracted entry never appeared). On a clean finish,
-          // still refresh the folder so the entry shows up; fall back to a generic notice since the
-          // call site's specific wording isn't available here.
+          // nothing registered yet, so the new/extracted entry never appeared). This race predates pane
+          // routing and can't be fixed here — the transfer id isn't known until the same continuation
+          // that's racing against this event, so nothing can be keyed by it any earlier (CPE-1386: now
+          // that a pane-B compress/extract can also hit this window, the fallback below stays pane-A-only
+          // — a rare, pre-existing limitation, not a wrong-pane action against a specific op). On a clean
+          // finish, still refresh pane A's folder so the entry shows up there; fall back to a generic
+          // notice since the call site's specific wording isn't available here.
           if (!r.cancelled && r.failed === 0) {
             const verb = r.op === "compress" ? "compressed" : "extracted";
             showNotice(`${r.transferred} item${r.transferred === 1 ? "" : "s"} ${verb}.`);
@@ -5033,7 +5126,7 @@
         }
         if (r.cancelled) { showNotice(pending.cancelledNotice); return; }
         if (r.failed > 0) { showNotice(r.errors[0] || pending.failedNotice, true); return; }
-        Promise.resolve(pending.onSuccess()).catch(() => {});
+        Promise.resolve(pending.onSuccess()).then(() => refreshBatchApplyTarget(pending.dir)).catch(() => {});
         return;
       }
       // CPE-1380/CPE-1384: a clipboard-paste copy OR a "Copy to…" that targeted pane B is tagged in
@@ -5705,16 +5798,16 @@
     openIcon={ctxPane.selectedEntries.length === 1 ? iconFor(ctxPane.selectedEntries[0]) : "folder"}
     pinned={ctxPane.selectedEntries.length === 1 && pins.includes(ctxPane.selectedEntries[0].path)}
     favorited={ctxPane.selectedEntries.length === 1 && favorites.some((f) => f.path === ctxPane.selectedEntries[0].path)}
-    extractable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && isExtractable(ctxPane.selectedEntries[0])}
-    archiveSafetyEligible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && isArchiveSafetyEligible(ctxPane.selectedEntries[0])}
-    compressible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1}
+    extractable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && isExtractable(ctxPane.selectedEntries[0])}
+    archiveSafetyEligible={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && isArchiveSafetyEligible(ctxPane.selectedEntries[0])}
+    compressible={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length >= 1}
     comparable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 2 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
     mediaEligible={ctxPane.selectedEntries.length > 1 && ctxPane.selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!ctxInPaneB && !isHome && !archive}
     copyMoveEligible={ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)}
     sameTypeExt={ctxPane.selectedEntries.length === 1 && !ctxPane.selectedEntries[0].is_dir ? ctxPane.selectedEntries[0].extension : ""}
-    shreddable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
-    vaultable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
+    shreddable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length >= 1 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
+    vaultable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
     {view}
     {sortKey}
     {sortDir}

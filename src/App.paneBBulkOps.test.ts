@@ -9,9 +9,10 @@
  * source paths at invocation time, mirroring `askDelete`'s `snapshotConfirmTarget` (CPE-1370 review), so a
  * pane switch while the dialog/picker is open can never retarget the eventual op onto the other pane.
  *
- * `compress`/`extract`/`archive-safety`/`vault-create` stay pane-A-only in this ticket (already correctly
- * hidden from a pane-B menu via `ContextMenu`'s existing `!ctxInPaneB`-gated props) — they queue through
- * the global `pendingArchiveOps`/transfer-done machinery, which isn't pane-routed yet; left as a follow-up.
+ * `compress`/`extract`/`archive-safety`/`vault-create`/`shred` stayed pane-A-only in THIS ticket (already
+ * correctly hidden from a pane-B menu via `ContextMenu`'s existing `!ctxInPaneB`-gated props) — they queue
+ * through the global `pendingArchiveOps`/transfer-done machinery, which wasn't pane-routed yet; left as a
+ * follow-up. That follow-up is CPE-1386 (see App.paneBArchiveVault.test.ts) — done now.
  *
  * Same mounted-App-with-mocked-backend dual-pane harness as App.clipboardPaneRouting.test.ts /
  * App.deleteSnapshot.test.ts / App.paneBContextMenu.test.ts.
