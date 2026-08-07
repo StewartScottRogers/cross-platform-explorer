@@ -561,6 +561,10 @@
   let search = "";
   /** Active sidebar Tags filter — show only entries carrying this tag (CPE-639); "" = off. */
   let selectedTag = "";
+  /** Pane B's own Tags filter (CPE-1376) — kept separate from pane A's `selectedTag`, per-pane like the
+   *  CPE-1370 `selectionB`/`visibleB` split, so filtering by tag in one pane doesn't silently also
+   *  filter the other. Routed to by the (single, shared) Sidebar's `filterTag` event via `activePane`. */
+  let selectedTagB = "";
   /** Right-click menu for a sidebar tag (rename/delete), or null (CPE-653). */
   let tagMenu: { x: number; y: number; tag: string } | null = null;
   /** Right-click menu for a sidebar smart folder (rename/delete), or null (CPE-667). */
@@ -1866,6 +1870,7 @@
   async function navigateB(path: string) {
     paneBPath = path;
     settings.savePaneBPath(path);
+    selectedTagB = ""; // a tag filter is folder-scoped (CPE-639); mirrors pane A's loadPath reset
     await explorerPaneB?.loadListing(path, true);
   }
 
@@ -3333,10 +3338,32 @@
         });
         retagMoves(moves); // tags follow the moved files (CPE-657)
       }
-      await loadPath(currentPath);
+      await refreshDropSourcePane(paths);
     } catch (e) {
       showNotice(String(e), true);
     }
+  }
+
+  /** After a move via `dropInto`, refresh whichever pane's folder actually LOST the dragged items
+   *  (CPE-1371: pane B can now both originate and receive drags, so the refresh can no longer just
+   *  hard-code pane A). A `FileList` drop always lands ON a folder ROW inside the receiving pane's own
+   *  listing — never on that pane's own root — so the receiving pane's top-level listing is unaffected
+   *  by the move; only the pane the items came FROM needs to reload. The source is identified by the
+   *  dragged paths' parent directory: if it matches pane B's folder, refresh pane B; otherwise (pane A,
+   *  single-pane mode, or a Sidebar-driven drop whose source isn't a currently-open pane at all) fall
+   *  back to refreshing pane A, matching pre-CPE-1371 behavior. */
+  async function refreshDropSourcePane(paths: string[]) {
+    const parent = normalizePath(parentOfPath(paths[0] ?? ""));
+    const matchesB = !!(dualPane && paneBPath && parent === normalizePath(paneBPath));
+    const matchesA = parent === normalizePath(currentPath);
+    // Both can match at once — a common commander pattern is mirroring the SAME folder into both panes
+    // (compare/sort one dir two ways). A mutually-exclusive if/else here left the non-matched pane
+    // rendering a GHOST row for a file the move had already removed (CPE-1371 review/UAT: reproduced
+    // with `paneBPath === currentPath`). Refresh whichever pane(s) actually show the source folder,
+    // falling back to pane A when neither matches (Sidebar-driven drop whose source isn't a currently
+    // open pane at all), matching pre-fix behavior.
+    if (matchesB) await explorerPaneB?.loadListing(paneBPath, false);
+    if (matchesA || !matchesB) await loadPath(currentPath);
   }
 
   function askDelete(permanent: boolean) {
@@ -5007,12 +5034,17 @@
       selectedPath={selectedEntries.length === 1 && selectedEntries[0]?.is_dir ? selectedEntries[0].path : ""}
       {draggedPaths}
       {tagList}
-      {selectedTag}
+      selectedTag={dualPane && activePane === 1 ? selectedTagB : selectedTag}
       smartFolders={$smartFolders}
       activeSmartFolder={smartFolder?.id ?? ""}
       savedSearches={$savedSearches}
       activeSavedSearch={structuredSearch?.id ?? ""}
-      on:filterTag={(e) => (selectedTag = selectedTag === e.detail ? "" : e.detail)}
+      on:filterTag={(e) => {
+        // The Sidebar is shared by both panes (CPE-1376), so route the click to whichever pane is
+        // active — same `activePane` split as `commanderContext`/`activePaneState` (CPE-1370).
+        if (dualPane && activePane === 1) selectedTagB = selectedTagB === e.detail ? "" : e.detail;
+        else selectedTag = selectedTag === e.detail ? "" : e.detail;
+      }}
       on:tagMenu={(e) => (tagMenu = e.detail)}
       on:openSmartFolder={(e) => openSmartFolder(e.detail)}
       on:smartFolderMenu={(e) => (smartFolderMenu = e.detail)}
@@ -5152,10 +5184,18 @@
         {sortDir}
         {foldersFirst}
         {showHidden}
-        canDrag={false}
+        {search}
+        {fileFilter}
+        {cutPaths}
+        {showFolderSizes}
+        {folderSizes}
+        on:needSizes={(e) => fillFolderSizes(e.detail)}
+        bind:selectedTag={selectedTagB}
+        bind:draggedPaths
         on:open={(e) => openB(e.detail)}
         on:navigate={(e) => navigateB(e.detail)}
         on:openRecent={(e) => openRecent(e.detail)}
+        on:drop={(e) => dropInto(e.detail.paths, e.detail.dest, e.detail)}
       />
     </div>
   {:else if showDetails}
