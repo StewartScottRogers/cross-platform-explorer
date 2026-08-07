@@ -65,6 +65,7 @@ All media files carry this fixed metadata (the single source of truth is the top
 | `images/pixel.png`  | PNG (2×2)       | A real, openable raster (thumbnail/preview path) |
 | `documents/doc.pdf` | PDF             | `/Info` Title/Author/Subject/Keywords/Creator/Producer/Dates (read-only); a genuinely valid, loadable multi-page PDF (byte-accurate `xref`, per-page colour + text) — see "PDF fixtures" below |
 | `video/clip.mp4`    | MP4 / iTunes    | Real H.264/AAC clip (a few seconds), `ilst` Title/Artist/Album/Year (editable) |
+| `mail/sample.eml`   | RFC 822 / MIME  | `multipart/mixed` email: encoded-word Subject, quoted-printable body, one base64 attachment (`hello.txt`) — the structured `.eml` preview (CPE-1434) |
 | `text/notes.txt`, `readme.md`, `data.json`, `table.csv`, `table.tsv`, `hello.py` | Text | Plain-text/markdown/JSON/CSV/TSV/code preview + line/word counts |
 
 Beyond the metadata baseline, the tree also carries substantial non-metadata fixtures:
@@ -118,6 +119,7 @@ opening any format the app claims to support has real fixture coverage:
 | `csv`            | `text/table.csv`                                        |
 | `tsv`            | `text/table.tsv`                                        |
 | `archive`        | `archives/sample.zip`, `archives/sample.rar` (both list a real multi-folder tree; `rar` is wired into `ARCHIVE_EXT` as of CPE-1359) |
+| `email`          | `mail/sample.eml`                                       |
 | `font`           | `fonts/mini.ttf`                                        |
 | `data-grid`      | `database/mini.sqlite`                                  |
 | `info`           | `other/tiny.wasm`                                       |

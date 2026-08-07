@@ -21,6 +21,7 @@
   import DataBrowser from "./DataBrowser.svelte";
   import JwtPreview from "./JwtPreview.svelte";
   import CertPreview from "./CertPreview.svelte";
+  import EmailPreview from "./EmailPreview.svelte";
   import MediaPlayer from "./MediaPlayer.svelte";
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
@@ -1000,6 +1001,8 @@
     <HexView path={entry.path} size={entry.size} />
   {:else if provider.kind === "data-grid" && entry}
     <DataBrowser {entry} />
+  {:else if provider.kind === "email" && entry}
+    <EmailPreview path={entry.path} />
   {:else if provider.kind === "jwt" && entry}
     <JwtPreview path={entry.path} />
   {:else if provider.kind === "cert" && entry}

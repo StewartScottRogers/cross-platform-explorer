@@ -35,6 +35,7 @@ use common::{assert_no_panic, run_battery};
 
 use cpe_server::archive_format::{detect_format, ArchiveFormat};
 use cpe_server::cert_decode::cert_decode;
+use cpe_server::email_preview::email_preview;
 use cpe_server::column_extract::{extract_column, read_audio_tags, MetaColumn};
 use cpe_server::doc_column::doc_pages_cell;
 use cpe_server::jwt_preview::jwt_preview;
@@ -672,6 +673,21 @@ fn jwt_preview_never_panics() {
         let r = jwt_preview(&token);
         if b.is_empty() {
             assert!(r.error.is_some(), "jwt_preview(empty) must report an error, not panic");
+        }
+    });
+}
+
+#[test]
+fn email_preview_never_panics() {
+    // A real multipart/mixed message as "magic" — walks the boundary split + transfer-decode + encoded-
+    // word + HTML-strip paths under truncation/corruption, not just the no-headers early-out. `email_preview`
+    // takes `&[u8]` directly (it lossily decodes internally), so the battery's raw bytes go straight in.
+    let magic = b"From: a@b.com\r\nSubject: =?utf-8?B?SGk=?=\r\nContent-Type: multipart/mixed; boundary=\"B\"\r\n\r\n--B\r\nContent-Type: text/plain\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\nCaf=C3=A9\r\n--B\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\nContent-Disposition: attachment; filename=\"a.bin\"\r\n\r\naGVsbG8=\r\n--B--\r\n".to_vec();
+    let header_len = magic.len();
+    run_battery("email_preview::email_preview", &magic, header_len, |b| {
+        let r = email_preview(b);
+        if b.is_empty() {
+            assert!(r.error.is_some(), "email_preview(empty) must report an error, not panic");
         }
     });
 }

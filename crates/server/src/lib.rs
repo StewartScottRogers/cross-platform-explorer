@@ -393,6 +393,10 @@ pub mod data_preview;
 /// data-grid (CPE-847, epic CPE-721).
 pub mod data_browser;
 
+/// `.eml` email preview — read-only RFC 822/MIME viewer: headers + MIME parts + attachments + a
+/// sanitized plain-text body (never raw HTML, never remote resources) (CPE-1434, epic CPE-1433).
+pub mod email_preview;
+
 /// JWT preview decoder — read-only header/payload/claims viewer, no signature verification
 /// (CPE-1418, epic CPE-1417).
 pub mod jwt_preview;

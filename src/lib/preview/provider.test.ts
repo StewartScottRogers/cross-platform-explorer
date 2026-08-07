@@ -139,6 +139,15 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.rar", extension: "rar" })).editable).toBe(false);
   });
 
+  it("routes .eml to the email provider, before the generic text provider (CPE-1434)", () => {
+    const p = pickProvider(entry({ name: "message.eml", extension: "eml" }));
+    expect(p.kind).toBe("email");
+    // Read-only structured card, not editable source.
+    expect(p.editable).toBe(false);
+    // sanity: an ordinary text file still uses the text provider, not email.
+    expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).kind).toBe("text");
+  });
+
   it("previews fonts via the font provider (CPE-117)", () => {
     for (const ext of ["ttf", "otf", "woff", "woff2"]) {
       expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("font");

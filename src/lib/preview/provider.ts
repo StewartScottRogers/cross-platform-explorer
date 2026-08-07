@@ -26,6 +26,7 @@ export type PreviewKind =
   | "info"
   | "data-grid"
   | "font"
+  | "email"
   | "jwt"
   | "cert"
   | "hex"
@@ -136,6 +137,15 @@ const JWT_EXT = new Set(["jwt", "jws"]);
 const CERT_EXT = new Set(["pem", "crt", "cer", "der", "csr", "pub", "key"]);
 
 /**
+ * `.eml` email messages (RFC 822 / MIME): decoded via the `email_preview` backend command (CPE-1434,
+ * epic CPE-1433) into headers + MIME parts + attachments + a sanitized plain-text body, and rendered by
+ * `EmailPreview.svelte`. A read-only VIEWER — it never renders HTML and never loads remote resources.
+ * Must precede the generic text provider: `.eml` categorises as "text" in `filetypes.ts` and would
+ * otherwise be claimed by it and shown as raw source instead of the structured card.
+ */
+const EMAIL_EXT = new Set(["eml"]);
+
+/**
  * Ordered by priority — the first match wins. Markdown is listed before text
  * because a `.md` file's category is "text"; without the ordering, text would
  * claim it first.
@@ -242,6 +252,15 @@ export const providers: PreviewProvider[] = [
     kind: "font",
     editable: false,
     canPreview: (e) => !e.is_dir && FONT_EXT.has(e.extension),
+  },
+  // Must precede the generic text provider: .eml categorises as "text" and would otherwise be shown as
+  // raw source instead of the structured header/attachment/body card (CPE-1434, epic CPE-1433).
+  {
+    id: "email",
+    label: "Email",
+    kind: "email",
+    editable: false,
+    canPreview: (e) => !e.is_dir && EMAIL_EXT.has(e.extension),
   },
   // Must precede the generic text provider: .jwt/.jws have no CATEGORY_BY_EXT entry today (would
   // otherwise fall through to text/hex), and .pem/.crt/.cer/.csr categorise as "code" text.

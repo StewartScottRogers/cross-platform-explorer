@@ -1,0 +1,23 @@
+From: Alice Example <alice@example.com>
+To: Bob Example <bob@example.com>, carol@example.com
+Cc: dave@example.com
+Subject: =?utf-8?B?U2FtcGxlIENQRSBlbWFpbCDigJQgSMOpbGxv?=
+Date: Fri, 07 Aug 2026 09:30:00 +0000
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="CPE-BOUNDARY-1434"
+
+This is the multipart preamble and is ignored by mail readers.
+--CPE-BOUNDARY-1434
+Content-Type: text/plain; charset=utf-8
+Content-Transfer-Encoding: quoted-printable
+
+Hello from the Cross-Platform Explorer sample email.
+
+This body uses quoted-printable so accented text like Caf=C3=A9 round-trips.
+--CPE-BOUNDARY-1434
+Content-Type: text/plain; name="hello.txt"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="hello.txt"
+
+QXR0YWNoZWQgc2FtcGxlIGZpbGUgZm9yIENQRS0xNDM0Lgo=
+--CPE-BOUNDARY-1434--

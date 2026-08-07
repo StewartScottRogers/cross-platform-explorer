@@ -339,6 +339,21 @@ async dataBrowserQuery(path: string, sql: string, offset: number, limit: number)
 }
 },
 /**
+ * `.eml` email preview (CPE-1434, epic CPE-1433): read-only RFC 822/MIME viewer — headers + MIME parts
+ * + attachments + a sanitized plain-text body. Thin async dispatcher into `cpe_server::email_preview`;
+ * reads the file's raw bytes (capped by the same preview size guard the other whole-file info readers
+ * use) and hands them to the pure decoder, which never renders HTML, never loads remote resources, and
+ * never panics on malformed input.
+ */
+async emailPreview(path: string) : Promise<Result<EmailPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("email_preview", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * JWT preview decoder (CPE-1418, epic CPE-1417): read-only header/payload/claims viewer, never a
  * signature verifier. Thin async dispatcher into `cpe_server::jwt_preview`; reads the file as text
  * (capped by the same preview size guard the other whole-file info readers use) and hands it straight to
@@ -3135,6 +3150,23 @@ export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
  */
 export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean; unreadable: boolean }
 /**
+ * One attachment: filename + decoded size + content-type. A projection of the attachment [`MimePart`]s
+ * for the pill row the frontend renders.
+ */
+export type Attachment = { 
+/**
+ * The attachment's filename, or `"(unnamed)"` when the part carried none.
+ */
+filename: string; 
+/**
+ * Decoded byte length.
+ */
+size: number; 
+/**
+ * Lowercased MIME type.
+ */
+content_type: string }
+/**
  * The audio metadata columns a user can add to the details view — each maps to a friendly key
  * [`crate::media_meta_read::read_id3v2`] emits.
  */
@@ -3705,6 +3737,64 @@ export type DupGroup = { size: number; hash: string; paths: string[] }
  */
 export type DupResult = { groups: DupGroup[]; files_scanned: number; truncated: boolean }
 /**
+ * A structured `.eml` preview: the well-known headers, the MIME-part summary, the attachment list, and a
+ * sanitized plain-text body. Every field is best-effort — a malformed message still returns whatever
+ * could be parsed, with `error` describing what wasn't.
+ */
+export type EmailPreview = { 
+/**
+ * `From:` header value, encoded-word-decoded.
+ */
+from: string | null; 
+/**
+ * `To:` recipients, split on top-level commas and each encoded-word-decoded.
+ */
+to: string[]; 
+/**
+ * `Cc:` recipients.
+ */
+cc: string[]; 
+/**
+ * `Subject:` header value, encoded-word-decoded.
+ */
+subject: string | null; 
+/**
+ * The raw `Date:` header value (encoded-word-decoded), preserved verbatim for display.
+ */
+date: string | null; 
+/**
+ * The `Date:` header parsed and normalised to an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) via
+ * the shared [`unix_to_rfc3339`] helper, when it parsed as an RFC 2822 date; `None` otherwise.
+ */
+date_rfc3339: string | null; 
+/**
+ * The flattened MIME part tree (leaves only — multipart containers are walked, not listed).
+ */
+parts: MimePart[]; 
+/**
+ * The attachments (a projection of the attachment parts above).
+ */
+attachments: Attachment[]; 
+/**
+ * The sanitized plain-text body: the first `text/plain` part, or — if the message is HTML-only — the
+ * first `text/html` part reduced to text by [`strip_html`]. Never raw HTML, never a remote-resource
+ * reference. Capped at [`MAX_BODY_CHARS`].
+ */
+body: string; 
+/**
+ * `true` when `body` was derived from an HTML part (so the UI can show a "shown as text" note).
+ */
+body_is_html: boolean; 
+/**
+ * `true` when `body` was truncated at [`MAX_BODY_CHARS`].
+ */
+body_truncated: boolean; 
+/**
+ * Set when the input didn't look like an email at all (no headers) — the header card still renders
+ * whatever was found.
+ */
+error: string | null }
+/**
  * The result of an empty-folder cascade scan: the topmost cascade-empty directory paths, how
  * many directories were visited, and whether the walk cap was hit.
  */
@@ -4154,6 +4244,28 @@ group: string; key: string; value: string; editable: boolean }
  * formatting in TypeScript.
  */
 export type MetadataCell = { path: string; cell: CellValue; display: string }
+/**
+ * One leaf node of the MIME part tree, summarised for display: its content-type, an optional filename,
+ * the decoded byte size, and whether it was treated as an attachment (vs. an inline body candidate).
+ */
+export type MimePart = { 
+/**
+ * Lowercased MIME type, e.g. `"text/plain"`, `"image/png"`, `"application/pdf"`.
+ */
+content_type: string; 
+/**
+ * The part's filename (from `Content-Disposition: …; filename=` or `Content-Type: …; name=`),
+ * decoded through the encoded-word decoder, if any.
+ */
+filename: string | null; 
+/**
+ * Decoded byte length of the part's body (after undoing its transfer-encoding).
+ */
+size: number; 
+/**
+ * `true` if this part was classified as an attachment rather than a shown body.
+ */
+is_attachment: boolean }
 /**
  * One row of the downsampled minimap.
  */
