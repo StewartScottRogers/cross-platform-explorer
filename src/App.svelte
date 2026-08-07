@@ -456,9 +456,13 @@
   let columnWidths: number[] = settings.loadColumnWidths();
   /** Active metadata columns for the CURRENT folder (CPE-1146, epic CPE-707): id + width, in display
       order. Loaded/saved per-folder in `loadPath` below; empty (Home, or a folder with none saved) is
-      the default — the pane behaves exactly as before CPE-1146. Pane B (dual-pane) doesn't get its own
-      set today — out of scope, see the ticket's Notes. */
+      the default — the pane behaves exactly as before CPE-1146. */
   let activeMetaColumns: ActiveMetaColumn[] = [];
+  /** Pane B's own active metadata columns (CPE-1382 follow-up to CPE-1378), keyed by `paneBPath` — mirrors
+      `activeMetaColumns` above but derived from pane B's folder, not pane A's. Loaded/saved per-folder in
+      `navigateB` below. Without this, pane B displayed pane A's active columns regardless of its own
+      folder's saved config. */
+  let activeMetaColumnsB: ActiveMetaColumn[] = [];
   let columnPickerOpen = false;
   /** Active rule-based coloring rule set (CPE-776, epic CPE-709); empty ⇒ rows unstyled. */
   let colorRules: ColorRule[] = settings.loadColorRules();
@@ -1902,6 +1906,10 @@
     paneBPath = path;
     settings.savePaneBPath(path);
     selectedTagB = ""; // a tag filter is folder-scoped (CPE-639); mirrors pane A's loadPath reset
+    // Restore THIS folder's saved column set + widths (CPE-1382, follow-up to CPE-1378's shared-columns
+    // gap) — mirrors `loadPath`'s `activeMetaColumns` derivation for pane A, but keyed by `paneBPath`
+    // instead of `currentPath`, so pane B shows its own folder's active columns rather than pane A's.
+    activeMetaColumnsB = path === HOME ? [] : clampMetaWidths(settings.loadMetaColumnsForFolder(path));
     if (path === HOME) {
       entriesB = [];
       loadingB = false;
@@ -5324,7 +5332,15 @@
       on:eject={(e) => ejectDrive(e.detail.path, e.detail.name)}
       on:navigate={(e) => { if (archive) exitArchive(); navigate(e.detail); }}
       on:openFile={(e) => openRecent(e.detail)}
-      on:home={() => { if (archive) exitArchive(); navigate(HOME); }}
+      on:home={() => {
+        // CPE-1383: route Home to whichever pane is active — same `dualPane && activePane === 1` split
+        // `activePaneState`/the `filterTag` handler above use. Pane B has no archive-browse concept (see
+        // `archive`'s pane-A-only wiring on the left `<ExplorerPane>`), so `exitArchive` only applies to
+        // pane A's path; `navigateB(HOME)` already short-circuits correctly (CPE-1377).
+        if (dualPane && activePane === 1) { void navigateB(HOME); return; }
+        if (archive) exitArchive();
+        navigate(HOME);
+      }}
       on:repos={() => (showRepos = true)}
       on:board={() => (showBoard = true)}
       on:workbench={() => (showWorkbench = true)}
@@ -5466,8 +5482,8 @@
         bind:renamingPath={renamingPathB}
         renameValue={renameValueB}
         bind:columnWidths
-        {activeMetaColumns}
-        on:resizeMetaColumns={(e) => { activeMetaColumns = applyMetaColumnWidths(activeMetaColumns, e.detail); settings.saveMetaColumnsForFolder(currentPath, activeMetaColumns); }}
+        activeMetaColumns={activeMetaColumnsB}
+        on:resizeMetaColumns={(e) => { activeMetaColumnsB = applyMetaColumnWidths(activeMetaColumnsB, e.detail); settings.saveMetaColumnsForFolder(paneBPath, activeMetaColumnsB); }}
         on:openColumnPicker={() => (columnPickerOpen = true)}
         bind:selectedTag={selectedTagB}
         bind:draggedPaths
@@ -6231,7 +6247,10 @@
 
 {#if columnPickerOpen}
   <!-- Column picker (CPE-1146, epic CPE-707): every change (add/remove/reorder) is persisted per-folder
-       immediately, so there's nothing to "cancel" — the dialog just closes. -->
+       immediately, so there's nothing to "cancel" — the dialog just closes. Always edits pane A's
+       `activeMetaColumns`/`currentPath` regardless of which pane's header opened it (CPE-1382 only fixed
+       the READ side — pane B now DISPLAYS its own folder's columns via `activeMetaColumnsB` — the picker's
+       write routing by active pane is an unaddressed follow-up). -->
   <ColumnPickerDialog
     available={$metaColumnCatalog}
     active={activeMetaColumns}
