@@ -1884,7 +1884,7 @@
    *  listing to fetch. Skipping `loadListing` here avoids issuing a bogus `list_dir(" home")` backend
    *  call (Home's `<HomeView>` reads `places`/`pins`/`recents`/etc., never `entries`/`visible`, so that
    *  call's result would go unused anyway) and the dev-only perf-mark instrumentation that comes with it. */
-  async function navigateB(path: string) {
+  async function navigateB(path: string, useCache = true) {
     paneBPath = path;
     settings.savePaneBPath(path);
     selectedTagB = ""; // a tag filter is folder-scoped (CPE-639); mirrors pane A's loadPath reset
@@ -1893,7 +1893,7 @@
       loadingB = false;
       return;
     }
-    await explorerPaneB?.loadListing(path, true);
+    await explorerPaneB?.loadListing(path, useCache);
   }
 
   /** Open an entry in pane B: descend into a folder, or open a file with the OS default (CPE-677). */
@@ -2610,12 +2610,15 @@
     }
   }
 
-  async function newFolder(targetDir: string = currentPath) {
-    await createNewItem("folder", targetDir);
+  /** `inPaneB` (CPE-1377 review): every existing caller targets pane A, so it defaults false — only
+   *  `runAction`'s pane-routed "new-folder"/"new-folder-in" (and the file counterparts) pass true, for a
+   *  menu opened over pane B. */
+  async function newFolder(targetDir: string = currentPath, inPaneB = false) {
+    await createNewItem("folder", targetDir, undefined, inPaneB);
   }
 
-  async function newFile(targetDir: string = currentPath, spec?: NewFileType) {
-    await createNewItem("file", targetDir, spec);
+  async function newFile(targetDir: string = currentPath, spec?: NewFileType, inPaneB = false) {
+    await createNewItem("file", targetDir, spec, inPaneB);
   }
 
   /** Create a new folder / text file in `targetDir` and inline-rename it (CPE-1156).
@@ -2626,13 +2629,25 @@
    *  item, then navigate INTO the target folder so the user sees it and names it inline (via
    *  `pendingRenamePath`), matching Windows-Explorer intuition. The `(2)` auto-number dedups against the
    *  TARGET folder's real contents — the in-view `entries` when creating in place, or a fresh `listDir`
-   *  when creating inside another folder (its listing isn't loaded yet). */
-  async function createNewItem(kind: "folder" | "file", targetDir: string, spec?: NewFileType) {
+   *  when creating inside another folder (its listing isn't loaded yet).
+   *
+   *  `inPaneB` (CPE-1377 review): pane B's empty-area/folder-row context menu can now reach this too, so
+   *  every pane-A-only assumption below is mirrored for pane B — the "in place" check is against
+   *  `paneBPath` (not `currentPath`), the dedupe list is `entriesB` (not `entries`), the post-create
+   *  navigate-into-subfolder uses `navigateB` (with a forced fresh, non-cached load — same reasoning as
+   *  pane A's `loadPath(targetDir, false, false)`) instead of pushing pane A's tab history, the in-place
+   *  reload hits pane B's own `<ExplorerPane>` directly, and the inline rename is kicked off straight
+   *  into `renamingPathB` via `beginRename(entry, true)` rather than the pane-A-only `pendingRenamePath`
+   *  hook (which only `loadPath` — pane A's navigation function — ever consults). Pane B is always a
+   *  plain real folder in v1 (see `beginRename`'s own comment), so `blockedInArchive()` — which reads
+   *  pane-A-only archive state — only applies when targeting pane A. */
+  async function createNewItem(kind: "folder" | "file", targetDir: string, spec?: NewFileType, inPaneB = false) {
     // Guard the abstract Home landing (no real path) and read-only archives — but NOT real drive roots,
     // which are ordinary paths (`isHome` is only ever true for the Home landing itself).
-    if (targetDir === HOME || blockedInArchive()) return;
+    if (targetDir === HOME || (!inPaneB && blockedInArchive())) return;
 
-    const inSubfolder = targetDir !== currentPath;
+    const paneRoot = inPaneB ? paneBPath : currentPath;
+    const inSubfolder = targetDir !== paneRoot;
 
     // Names to dedupe against: the in-view listing when creating in place; a fresh listing of the target
     // folder when creating inside a folder we haven't opened (so "New folder (2)" is correct there).
@@ -2641,7 +2656,7 @@
       const res = await commands.listDir(targetDir);
       existing = res.status === "ok" ? res.data.map((e) => e.name) : [];
     } else {
-      existing = entries.map((e) => e.name);
+      existing = (inPaneB ? entriesB : entries).map((e) => e.name);
     }
 
     try {
@@ -2663,14 +2678,25 @@
           created = unwrap(await commands.createFile(targetDir, name));
         }
       }
-      pendingRenamePath = created; // select + inline-rename it once the target listing loads
-      if (inSubfolder) {
-        // Navigate INTO the target folder (adds to history like any navigation) with a FRESH load — a
-        // cached listing wouldn't contain the just-created item, so the rename wouldn't fire.
-        setHistory(visit(activeTab.history, targetDir));
-        await loadPath(targetDir, false, false);
+      if (inPaneB) {
+        // Fresh (non-cached) load either way — a cached listing wouldn't contain the just-created item.
+        if (inSubfolder) await navigateB(targetDir, false);
+        else await explorerPaneB?.loadListing(targetDir, false);
+        const i = visibleB.findIndex((e) => e.path === created);
+        if (i >= 0) {
+          selectionB = selectOnly(i);
+          beginRename(visibleB[i], true);
+        }
       } else {
-        await loadPath(currentPath);
+        pendingRenamePath = created; // select + inline-rename it once the target listing loads
+        if (inSubfolder) {
+          // Navigate INTO the target folder (adds to history like any navigation) with a FRESH load — a
+          // cached listing wouldn't contain the just-created item, so the rename wouldn't fire.
+          setHistory(visit(activeTab.history, targetDir));
+          await loadPath(targetDir, false, false);
+        } else {
+          await loadPath(currentPath);
+        }
       }
     } catch (e) {
       showNotice(String(e), true);
@@ -3622,13 +3648,13 @@
       const spec = ext ? NEW_FILE_TYPE_BY_EXT[ext] : undefined;
       if (spec && (verb === "new-file" || verb === "new-file-in" || verb === "drive-new-file" || verb === "home-new-file")) {
         if (verb === "new-file-in") {
-          if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path, spec);
+          if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path, spec, inPaneB);
         } else if (verb === "drive-new-file") {
           if (driveCtxPath) newFile(driveCtxPath, spec);
         } else if (verb === "home-new-file") {
           if (homeCtxIsDir && homeCtxPath) newFile(homeCtxPath, spec);
         } else {
-          newFile(currentPath, spec);
+          newFile(inPaneB ? (paneBPath === HOME ? currentPath : paneBPath) : currentPath, spec, inPaneB);
         }
         return;
       }
@@ -3678,15 +3704,20 @@
       case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
-      case "new-folder": newFolder(); break;
-      case "new-file": newFile(); break;
+      // CPE-1377 review: route the empty-area create to whichever pane the menu was opened over — the
+      // paneBPath===HOME guard mirrors "properties-folder"/"reveal" above (Home has no real path to
+      // create in; falls back to pane A's currentPath in that edge case, matching those siblings).
+      case "new-folder": newFolder(inPaneB ? (paneBPath === HOME ? currentPath : paneBPath) : currentPath, inPaneB); break;
+      case "new-file": newFile(inPaneB ? (paneBPath === HOME ? currentPath : paneBPath) : currentPath, undefined, inPaneB); break;
       // New Link… (CPE-1207) — empty-area menu + command palette only, always targets currentPath.
       case "new-link": newLinkDialogFor = currentPath; break;
       // Repair link… (CPE-1209) — offered only when ContextMenu's `linkBroken` gated it on.
       case "repair-link": if (selectedEntries.length === 1) repairLinkFor = selectedEntries[0]; break;
       // New ▸ from a folder right-click (CPE-1156) — create INSIDE the clicked folder (its own path).
-      case "new-folder-in": if (pane.selectedEntries[0]?.is_dir) newFolder(pane.selectedEntries[0].path); break;
-      case "new-file-in": if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path); break;
+      // Pane-routed (CPE-1377 review) — the clicked folder can be pane B's (its own on:rowContext), so
+      // the create + post-create inline rename must land there, not pane A.
+      case "new-folder-in": if (pane.selectedEntries[0]?.is_dir) newFolder(pane.selectedEntries[0].path, inPaneB); break;
+      case "new-file-in": if (pane.selectedEntries[0]?.is_dir) newFile(pane.selectedEntries[0].path, undefined, inPaneB); break;
       // Drive/disk menu (CPE-1158) — every action targets the drive ROOT (`driveCtxPath`), so it works
       // the same from a Home tile and a sidebar row. New reuses CPE-1156's create-in-target path.
       // "drive-open" navigates the pane the drive tile lives in (inPaneB from a pane-B Home tile; the
@@ -4095,7 +4126,11 @@
     const target = event.target as HTMLElement | null;
     // Never hijack keys while typing in an editor, the path bar, or search.
     if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return;
-    if (renamingPath) return;
+    // CPE-1377 review: guard BOTH panes' inline-rename editors, not just pane A's — the INPUT/TEXTAREA
+    // check above already blocks typed keystrokes reaching a focused editor, but this is the symmetric
+    // guard against global shortcuts (F5, Delete, …) firing while an editor is open-but-unfocused, which
+    // previously only worked for pane A.
+    if (renamingPath || renamingPathB) return;
     // CPE-1370 review (defense-in-depth): a confirm dialog (delete, etc.) owns the keyboard while open —
     // in particular Tab must NOT be able to flip `activePane` behind it, which would otherwise let a
     // confirm captured against one pane get confirmed against another (see `askDelete`'s snapshot for

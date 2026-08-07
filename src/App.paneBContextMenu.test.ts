@@ -52,6 +52,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) })
 
 let renameCalls: { path: string; args: Record<string, unknown> }[] = [];
 let deleteToTrashCalls: string[][] = [];
+let createDirCalls: { path: string; name: string }[] = [];
 
 beforeEach(() => {
   localStorage.clear();
@@ -59,6 +60,7 @@ beforeEach(() => {
   Element.prototype.scrollIntoView = vi.fn();
   renameCalls = [];
   deleteToTrashCalls = [];
+  createDirCalls = [];
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
     const listingFor = (path: unknown) => (path === PATH_B ? entriesB : entriesA);
@@ -84,6 +86,12 @@ beforeEach(() => {
         const paths = args.paths as string[];
         deleteToTrashCalls.push(paths);
         return paths.map((p) => ({ path: p, ok: true, error: "" }));
+      }
+      case "create_dir": {
+        const path = args.path as string;
+        const name = args.name as string;
+        createDirCalls.push({ path, name });
+        return `${path}\\${name}`;
       }
       default: return null;
     }
@@ -203,5 +211,26 @@ describe("App — pane B's context menu (CPE-1377)", () => {
 
     await waitFor(() => expect(deleteToTrashCalls.length).toBe(1));
     expect(deleteToTrashCalls[0]).toEqual([`${PATH_B}\\bravo.txt`]); // NOT alpha.txt
+  });
+
+  it("New ▸ Folder from pane B's EMPTY-AREA context menu creates inside pane B's folder, not pane A's (Reviewer follow-up)", async () => {
+    const { paneAWrap, paneBWrap } = await bootDualPane();
+    // Pane A stays the "active" pane throughout — the pre-fix bug: `newFolder()` always defaulted to
+    // `currentPath` (pane A), regardless of which pane's empty area was actually right-clicked.
+    await fireEvent.click(paneAWrap);
+    await fireEvent.click(screen.getByText("alpha.txt"));
+
+    // Right-click BLANK space inside pane B's populated row list (not a row itself, which has its own
+    // `stopPropagation`ing handler) — this is FileList's `emptyContext`/ExplorerPane's `paneContext`
+    // catch-all, both of which fire pane B's `on:contextEmpty` with `inPaneB: true`.
+    const paneBRows = paneBWrap.querySelector(".rows") as HTMLElement;
+    await fireEvent.contextMenu(paneBRows);
+
+    const menu = within(await screen.findByRole("menu"));
+    await fireEvent.click(menu.getByText("New")); // opens the New ▸ submenu
+    await fireEvent.click(menu.getByText("Folder"));
+
+    await waitFor(() => expect(createDirCalls.length).toBe(1));
+    expect(createDirCalls[0].path).toBe(PATH_B); // NOT PATH_A
   });
 });
