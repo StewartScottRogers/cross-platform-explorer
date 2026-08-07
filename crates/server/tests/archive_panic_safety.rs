@@ -27,8 +27,15 @@
 //!    unparseable root-directory record hung the whole listing thread. Fixed by `break`ing out of that
 //!    directory's entry loop instead (still visits other queued directories) — see
 //!    `iso_listing_does_not_hang_on_an_unparseable_directory_record` below.
-//! 2. **Upstream `sevenz-rust` 0.6.1 bug, NOT fixable from here — reported, not patched** — see
-//!    `sevenz_signature_header_offset_overflow_is_a_known_upstream_panic` below.
+//! 2. **Upstream `sevenz-rust` 0.6.1 bug, not fixable at the parser level — reported, not patched there.**
+//!    `archive.rs` DOES now defensively contain it (CPE-1415): every `sevenz-rust` call site is wrapped in
+//!    `catch_unwind` (`catch_sevenz_panic`), so a crafted `.7z` returns a clean `Err` instead of panicking
+//!    through `archive.rs`'s public functions (this was already contained one level further out too — every
+//!    call site runs inside a Tokio `spawn_blocking` task, whose boundary catches an uncaught panic). See
+//!    `sevenz_rust_upstream_signature_header_offset_overflow_still_panics` (calls `sevenz_rust::Archive::read`
+//!    directly, bypassing the wrapper, to keep pinning the raw upstream bug) and
+//!    `sevenz_signature_header_offset_overflow_is_caught_and_returns_err` (proves the wrapped public path)
+//!    below.
 
 mod common;
 use common::{assert_no_panic, run_battery};
@@ -651,9 +658,25 @@ fn craft_7z_signature_header(next_header_offset: u64, next_header_size: u64) -> 
     sig
 }
 
+// ---------------------------------------------------------------------------------------------
+// Upstream-tracking pins (CPE-1415): `archive.rs` now wraps every `sevenz-rust` call in
+// `catch_sevenz_panic` (`std::panic::catch_unwind`), so the two crafted-signature-header cases below no
+// longer panic THROUGH `archive.rs`'s public functions — they return a clean `Err` instead. That's the
+// defensive mitigation this ticket asked for: it turns the panic into a normal handled error right at the
+// `sevenz-rust` call site instead of relying on the outer Tokio `spawn_blocking` task boundary that
+// already contained it (per CPE-1411's finding, reproduced below).
+//
+// The two tests immediately below call `sevenz_rust::Archive::read` DIRECTLY — bypassing `archive.rs` and
+// its `catch_sevenz_panic` wrapper entirely — specifically so the "does upstream still have this bug"
+// signal isn't lost now that `archive.rs` catches it. If a future `sevenz-rust` upgrade fixes either
+// overflow, THAT test (not the `_is_caught_and_returns_err` ones further down) is the one that flips red —
+// the correct signal to come back, delete the `#[should_panic]`, and consider whether `catch_sevenz_panic`
+// is still worth keeping (harmless either way, so no urgency to remove it).
+// ---------------------------------------------------------------------------------------------
+
 #[test]
 #[should_panic(expected = "attempt to add with overflow")]
-fn sevenz_signature_header_offset_overflow_is_a_known_upstream_panic() {
+fn sevenz_rust_upstream_signature_header_offset_overflow_still_panics() {
     // ============================================================================================
     // REAL BUG FOUND (CPE-1411), upstream in `sevenz-rust` 0.6.1, NOT fixable from `archive.rs`:
     //
@@ -682,15 +705,16 @@ fn sevenz_signature_header_offset_overflow_is_a_known_upstream_panic() {
     // on the seek offset, and a real bound — against the actual reader length, not just `usize::MAX` — on
     // `next_header_size` before allocating). There is no small, correct guard `archive.rs` can add at its
     // call site: doing so would mean re-implementing `sevenz-rust`'s own signature-header parsing just to
-    // pre-validate it, which is not "small." Per CPE-1411's instructions this is being reported, not
-    // patched. `#[should_panic]` pins the current (bad) behavior precisely: if a future `sevenz-rust`
-    // upgrade fixes the overflow, this test starts failing (does not panic), which is the correct signal
-    // to come back, delete the `#[should_panic]`, and fold this case into the normal never-panics battery.
+    // pre-validate it, which is not "small." Per CPE-1411's instructions this was reported, not patched at
+    // the parser level — CPE-1415 instead added a `catch_unwind` net around every `archive.rs` call site
+    // (see the `_is_caught_and_returns_err` tests below), but the raw upstream bug pinned HERE is
+    // unchanged: this test calls `sevenz_rust::Archive::read` directly, with no `catch_unwind` in between.
     // ============================================================================================
     let sig = craft_7z_signature_header(u64::MAX - 5, 64);
     let f = write_temp(&sig, ".7z");
-    let path = f.path().to_str().unwrap().to_string();
-    read_archive_entries(&path).ok(); // panics (see above) — should_panic on the #[test] asserts this
+    let mut file = std::fs::File::open(f.path()).expect("failed to open crafted 7z fixture");
+    let len = file.metadata().expect("failed to stat crafted 7z fixture").len();
+    let _ = sevenz_rust::Archive::read(&mut file, len, &[]); // panics (see above)
 }
 
 // The other half of the finding above (asserted separately since `#[should_panic]` only pins ONE
@@ -698,14 +722,80 @@ fn sevenz_signature_header_offset_overflow_is_a_known_upstream_panic() {
 // the allocation-capacity path from the seek-overflow path. Rust's own `Vec` capacity-overflow guard
 // catches this before any real allocation is attempted, so — unlike the case above — this one is a
 // legitimate "never panics... no wait, it panics but it's OUR call, and it's a *safe*, catchable panic"
-// situation. It's still `#[should_panic]`, for the same "loudly tell us if upstream changes" reason.
+// situation. It's still `#[should_panic]`, for the same "loudly tell us if upstream changes" reason, and
+// — like the test above — calls `sevenz_rust::Archive::read` directly so it keeps pinning the raw upstream
+// behavior regardless of `archive.rs`'s `catch_sevenz_panic` wrapper.
 #[test]
 #[should_panic(expected = "capacity overflow")]
-fn sevenz_signature_header_size_overflow_is_a_known_upstream_panic() {
+fn sevenz_rust_upstream_signature_header_size_overflow_still_panics() {
+    let sig = craft_7z_signature_header(0, u64::MAX);
+    let f = write_temp(&sig, ".7z");
+    let mut file = std::fs::File::open(f.path()).expect("failed to open crafted 7z fixture");
+    let len = file.metadata().expect("failed to stat crafted 7z fixture").len();
+    let _ = sevenz_rust::Archive::read(&mut file, len, &[]); // panics (see above)
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1415 deliverable: the SAME crafted bytes, now proven to return a clean `Err` — not panic, not hang —
+// through `archive.rs`'s public listing AND extraction paths, thanks to `catch_sevenz_panic`. Run on the
+// small-stack timeout-guarded thread like the rest of this file's 7z batteries, so a regression that turns
+// the catch into a hang (rather than a clean return) still fails loudly instead of wedging the test binary.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn sevenz_signature_header_offset_overflow_is_caught_and_returns_err() {
+    let sig = craft_7z_signature_header(u64::MAX - 5, 64);
+    let f = write_temp(&sig, ".7z");
+    let path = f.path().to_str().unwrap().to_string();
+
+    let listing = run_with_timeout(Duration::from_secs(10), {
+        let path = path.clone();
+        move || read_archive_entries(&path)
+    });
+    match listing {
+        // `ArchiveEntry` has no `Debug` impl (it's a plain `Serialize` DTO), so report the entry count on
+        // an unexpected `Ok` rather than trying to `{:?}`-format the whole `Result`.
+        Some(Ok(entries)) => panic!(
+            "expected a clean Err (panic caught by catch_sevenz_panic), got Ok with {} entries",
+            entries.len()
+        ),
+        Some(Err(_)) => {}
+        None => panic!("read_archive_entries hung instead of returning a clean Err (CPE-1415 regression)"),
+    }
+
+    let extraction = run_with_timeout(Duration::from_secs(10), {
+        let path = path.clone();
+        move || extract_archive_entry_any(&path, "a.txt")
+    });
+    match extraction {
+        Some(r) => assert!(r.is_err(), "expected a clean Err (panic caught by catch_sevenz_panic), got {r:?}"),
+        None => panic!("extract_archive_entry_any hung instead of returning a clean Err (CPE-1415 regression)"),
+    }
+
+    let dest = fresh_dest_dir();
+    let dest_path = dest.path().to_str().unwrap().to_string();
+    let full_extract = run_with_timeout(Duration::from_secs(10), move || extract_archive(&path, &dest_path));
+    match full_extract {
+        Some(r) => assert!(r.is_err(), "expected a clean Err (panic caught by catch_sevenz_panic), got {r:?}"),
+        None => panic!("extract_archive hung instead of returning a clean Err (CPE-1415 regression)"),
+    }
+}
+
+#[test]
+fn sevenz_signature_header_size_overflow_is_caught_and_returns_err() {
     let sig = craft_7z_signature_header(0, u64::MAX);
     let f = write_temp(&sig, ".7z");
     let path = f.path().to_str().unwrap().to_string();
-    read_archive_entries(&path).ok();
+
+    let listing = run_with_timeout(Duration::from_secs(10), move || read_archive_entries(&path));
+    match listing {
+        Some(Ok(entries)) => panic!(
+            "expected a clean Err (panic caught by catch_sevenz_panic), got Ok with {} entries",
+            entries.len()
+        ),
+        Some(Err(_)) => {}
+        None => panic!("read_archive_entries hung instead of returning a clean Err (CPE-1415 regression)"),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
