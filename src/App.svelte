@@ -3227,7 +3227,16 @@
       showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
       return;
     }
-    const dest = folderUnderCursor(pos) || (isHome || archive || smartFolder || structuredSearch ? "" : currentPath);
+    // CPE-1368: an archive browse-view is read-only, but its folder rows still render `[data-drop-path]`
+    // with a SYNTHETIC in-zip path (e.g. "docs") — so `folderUnderCursor` returns that non-empty string and
+    // defeats the `archive ? ""` fallback below, letting an OS drop copy into a virtual path the backend
+    // resolves to some unexpected on-disk location. Guard it up front, exactly like Replay mode above (the
+    // internal-drag path is already blocked via `canDrag={!archive}`; this closes the OS drop-in hole).
+    if (archive) {
+      showNotice("This is a read-only view inside an archive — exit the archive to import files.", true);
+      return;
+    }
+    const dest = folderUnderCursor(pos) || (isHome || smartFolder || structuredSearch ? "" : currentPath);
     if (!dest) {
       showNotice($t("dnd.openFolderToImport"), true);
       return;
