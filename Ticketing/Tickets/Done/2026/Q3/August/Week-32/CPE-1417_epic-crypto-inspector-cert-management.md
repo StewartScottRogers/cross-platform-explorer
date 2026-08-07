@@ -2,7 +2,7 @@
 id: CPE-1417
 title: "EPIC: Crypto Inspector & Certificate Management (JWT + X.509)"
 type: Epic
-status: Backlog
+status: Done
 priority: High
 component: Full-stack
 tags: [big-design]
@@ -27,3 +27,6 @@ plus a committed `samples/crypto/` folder to exercise every operation.
 New deps (pure-Rust, no OpenSSL): `x509-parser` (decode), `rcgen` (create/sign). "Signing" = cert signing
 (self-sign + issue-from-CSR), NOT arbitrary file/code signing. The viewer NEVER displays private-key material
 (type/size only). Demo keys in samples are throwaway + clearly labelled.
+
+## Closed 2026-08-07
+All 8 children merged (CPE-1418 JWT decode, 1419 cert/CSR decode, 1420 create, 1421 sign/issue, 1422 preview views, 1423 dialogs, 1424 pane-aware menu, 1425 samples). Crypto Inspector & Certificate Management epic COMPLETE.
