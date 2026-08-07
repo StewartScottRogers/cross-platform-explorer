@@ -71,11 +71,45 @@ fn gzip_single_entry(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     Ok(vec![ArchiveEntry { name, size, is_dir: false }])
 }
 
+/// Sentinel `Err` message when a `sevenz-rust` call panics on crafted/malformed `.7z` bytes.
+const SEVENZ_PANIC_ERR: &str = "corrupt or unsupported 7z archive";
+
+/// Run a `sevenz-rust` call inside [`std::panic::catch_unwind`], converting a caught panic into a clean
+/// `Err(SEVENZ_PANIC_ERR)` instead of letting it keep unwinding (CPE-1415, defensive mitigation for
+/// CPE-1411's finding).
+///
+/// `sevenz-rust` 0.6.1 has a known, unfixed upstream bug: `Archive::init_archive` does a bare, unchecked
+/// `SIGNATURE_HEADER_SIZE + next_header_offset` (`u64 + u64`) add on bytes read straight out of the
+/// signature header, with no range check — a crafted `.7z` whose header claims a `next_header_offset` near
+/// `u64::MAX` panics ("attempt to add with overflow" in a debug build; see the two
+/// `sevenz_signature_header_*_overflow_is_a_known_upstream_panic` tests in
+/// `crates/server/tests/archive_panic_safety.rs` for the full writeup and a byte-exact repro). This was
+/// already CONTAINED before this function existed: every one of this module's `sevenz-rust` call sites
+/// runs inside a Tokio `spawn_blocking` task, and an uncaught panic in a blocking task is itself caught at
+/// the task boundary and surfaced as a `JoinError` → `Err` (no `panic = "abort"` override in this
+/// workspace), so a crafted `.7z` never crashed the process — at worst it failed one listing/extraction.
+/// This helper is belt-and-suspenders on top of that: it turns the panic into a normal `Err` right at the
+/// `sevenz-rust` call site instead of relying on the outer task boundary, which avoids unwinding all the
+/// way up through this module's own frames and gives a domain-appropriate error message instead of a
+/// generic `JoinError`.
+///
+/// `AssertUnwindSafe` is required because `f` typically closes over `&mut`/trait-object state (a
+/// found-flag, a progress emitter, a running byte/item tally) that isn't `UnwindSafe` by default — that's
+/// sound here because every caller propagates the `Err` immediately via `?` and never reads that captured
+/// state again after a panic is caught.
+///
+/// If a future `sevenz-rust` upgrade fixes the overflow, the `#[should_panic]` tests above start failing
+/// (they stop panicking) — that's the signal to revisit both those tests AND whether this wrapper is still
+/// worth keeping (it's cheap and harmless either way, so there's no urgency to remove it).
+fn catch_sevenz_panic<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| Err(SEVENZ_PANIC_ERR.to_string()))
+}
+
 /// List the entries of a 7-Zip archive via sevenz-rust (CPE-110).
 fn sevenz_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
     let len = file.metadata().map_err(|e| e.to_string())?.len();
-    let archive = sevenz_rust::Archive::read(&mut file, len, &[]).map_err(|e| e.to_string())?;
+    let archive = catch_sevenz_panic(|| sevenz_rust::Archive::read(&mut file, len, &[]).map_err(|e| e.to_string()))?;
     Ok(archive
         .files
         .iter()
@@ -243,18 +277,20 @@ fn extract_7z_entry(path: &str, inner: &str, out: &Path) -> Result<bool, String>
     // `decompress_file_with_extract_fn` needs an existing directory to build entry dest-paths against
     // even though our callback ignores that argument and writes straight to `out`.
     let scratch = out.parent().map(Path::to_path_buf).unwrap_or_else(std::env::temp_dir);
-    sevenz_rust::decompress_file_with_extract_fn(path, &scratch, |entry, reader, _dest| {
-        let name = entry.name();
-        if !found && entry_name_is_safe(name) && (name == inner || name == backslashed) {
-            let mut w = fs::File::create(out).map_err(sevenz_rust::Error::io)?;
-            std::io::copy(reader, &mut w).map_err(sevenz_rust::Error::io)?;
-            found = true;
-            Ok(false) // stop scanning the rest of this block; we have what we need
-        } else {
-            Ok(true) // keep scanning
-        }
-    })
-    .map_err(|e| e.to_string())?;
+    catch_sevenz_panic(|| {
+        sevenz_rust::decompress_file_with_extract_fn(path, &scratch, |entry, reader, _dest| {
+            let name = entry.name();
+            if !found && entry_name_is_safe(name) && (name == inner || name == backslashed) {
+                let mut w = fs::File::create(out).map_err(sevenz_rust::Error::io)?;
+                std::io::copy(reader, &mut w).map_err(sevenz_rust::Error::io)?;
+                found = true;
+                Ok(false) // stop scanning the rest of this block; we have what we need
+            } else {
+                Ok(true) // keep scanning
+            }
+        })
+        .map_err(|e| e.to_string())
+    })?;
     Ok(found)
 }
 
@@ -514,14 +550,16 @@ pub(crate) fn entry_name_is_safe(name: &str) -> bool {
 /// Extract a `.7z` into `dest` **safely**: `sevenz-rust` 0.6 doesn't check path traversal, so validate
 /// each entry with [`entry_name_is_safe`] and skip any that isn't a plain relative path (CPE-628).
 fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
-    sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
-        if entry_name_is_safe(entry.name()) {
-            sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
-        } else {
-            Ok(true) // skip the unsafe entry; keep extracting the rest
-        }
+    catch_sevenz_panic(|| {
+        sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
+            if entry_name_is_safe(entry.name()) {
+                sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
+            } else {
+                Ok(true) // skip the unsafe entry; keep extracting the rest
+            }
+        })
+        .map_err(|e| e.to_string())
     })
-    .map_err(|e| e.to_string())
 }
 
 /// Extract an archive into `dest`, which is created if missing (CPE-252). Dispatched by extension. Every
@@ -998,30 +1036,32 @@ fn extract_7z_stream(
     let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
     let mut report = ArchiveReport::default();
     emit(&prog);
-    sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, entry_dest| {
-        if cancel.load(Ordering::Relaxed) {
-            report.cancelled = true;
-            return Ok(false); // cooperative stop, not an error
-        }
-        let name = entry.name().to_string();
-        let size = entry.size();
-        let safe = entry_name_is_safe(&name);
-        prog.current = name.clone();
-        let outcome =
-            if safe { sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) } else { Ok(true) };
-        if outcome.is_ok() {
-            if safe {
-                prog.done_bytes += size;
-                prog.done_items += 1;
-                report.done += 1;
-            } else {
-                report.errors.push(format!("{name}: unsafe entry name, skipped"));
+    catch_sevenz_panic(|| {
+        sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, entry_dest| {
+            if cancel.load(Ordering::Relaxed) {
+                report.cancelled = true;
+                return Ok(false); // cooperative stop, not an error
             }
-            emit(&prog);
-        }
-        outcome
-    })
-    .map_err(|e| e.to_string())?;
+            let name = entry.name().to_string();
+            let size = entry.size();
+            let safe = entry_name_is_safe(&name);
+            prog.current = name.clone();
+            let outcome =
+                if safe { sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) } else { Ok(true) };
+            if outcome.is_ok() {
+                if safe {
+                    prog.done_bytes += size;
+                    prog.done_items += 1;
+                    report.done += 1;
+                } else {
+                    report.errors.push(format!("{name}: unsafe entry name, skipped"));
+                }
+                emit(&prog);
+            }
+            outcome
+        })
+        .map_err(|e| e.to_string())
+    })?;
     prog.current.clear();
     emit(&prog);
     Ok(report)
