@@ -384,6 +384,22 @@ async certCreate(params: CertCreateParams, certPath: string, keyPath: string) : 
 }
 },
 /**
+ * Certificate signing / issue-from-CSR (CPE-1421, epic CPE-1417): parse a PKCS#10 CSR and issue a leaf
+ * X.509 certificate for it, signed by an existing CA's certificate + private key. Thin async dispatcher
+ * into `cpe_server::cert_sign`; the pure issuance logic lives there, this only reads the CSR/CA-cert/
+ * CA-key PEM files from disk and writes the issued certificate PEM to `out_cert_path`. The CA private
+ * key is read only to sign — it is NEVER returned over IPC, logged, or echoed back: on success this
+ * returns only `()`, never key material, same as [`cert_create`].
+ */
+async certIssueFromCsr(csrPath: string, caCertPath: string, caKeyPath: string, validityDays: number, outCertPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("cert_issue_from_csr", { csrPath, caCertPath, caKeyPath, validityDays, outCertPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * 3D-model geometry/stats reader (CPE-1333, epic CPE-118): reads a binary/ASCII STL or Wavefront OBJ's
  * triangle/vertex counts + bounding box for the metadata-pane fallback the (blocked) interactive-viewer
  * epic's acceptance criteria call for. Thin async dispatcher into `cpe_server::model_3d`; capped by the

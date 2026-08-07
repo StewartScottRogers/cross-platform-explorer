@@ -78,8 +78,10 @@ const MAX_SAN_ENTRIES: usize = 200;
 
 /// Validity window cap (~10 years). Keeps `not_before`/`not_after` arithmetic comfortably inside
 /// `time::OffsetDateTime`'s representable range regardless of what a caller passes for `validity_days`
-/// (including `u32::MAX`), so the date math below can never overflow/panic.
-const MAX_VALIDITY_DAYS: u32 = 3650;
+/// (including `u32::MAX`), so the date math below can never overflow/panic. `pub(crate)` so
+/// [`crate::cert_sign`] (CPE-1421) can reuse the exact same clamp for issued (CA-signed) certificates
+/// instead of duplicating the constant.
+pub(crate) const MAX_VALIDITY_DAYS: u32 = 3650;
 
 /// Generate a fresh keypair and a self-signed X.509 certificate from `params`. Never panics — every
 /// failure (empty CN, zero validity, too many SANs, an unparsable IP SAN, or a keygen/signing failure)
