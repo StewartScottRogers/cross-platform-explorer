@@ -95,7 +95,7 @@
     {/if}
     <input class="db-ctl db-filter" placeholder="Filter this page…" bind:value={filter} spellcheck="false" aria-label="Filter rows" />
     <span class="db-page">
-      {#if page && page.rows.length > 0}rows {offset + 1}–{offset + page.rows.length}{#if page.total !== undefined} of {page.total}{/if}{/if}
+      {#if page && page.rows.length > 0}rows {offset + 1}–{offset + page.rows.length}{#if page.total !== undefined}{" of "}{page.total}{/if}{/if}
     </span>
     <button class="db-btn" on:click={prevPage} disabled={offset === 0 || loading}>‹ Prev</button>
     <button class="db-btn" on:click={nextPage} disabled={loading || (page ? page.rows.length < LIMIT : true)}>Next ›</button>

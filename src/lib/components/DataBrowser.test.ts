@@ -49,9 +49,9 @@ function rowsOf(n: number, offset: number): string[][] {
   return Array.from({ length: n }, (_, i) => [String(offset + i + 1), `person-${offset + i + 1}`]);
 }
 
-// The "rows X–Y of Z" readout is built from adjacent mustache expressions with no space before "of"
-// in the template, so Svelte emits it as "…Yof Z" (no space between the count and "of") — read the
-// `.db-page` span directly rather than hardcoding that whitespace quirk into a dozen literal strings.
+// The "rows X–Y of Z" readout spans adjacent mustache expressions — read the `.db-page` span
+// directly rather than duplicating the literal string in a dozen assertions (CPE-1397: fixed the
+// missing space before "of" that Svelte's whitespace trimming used to swallow).
 function pageRangeText(): string {
   return document.querySelector(".db-page")?.textContent ?? "";
 }
@@ -93,7 +93,7 @@ describe("DataBrowser (CPE-1392)", () => {
     // Column headers + row-range readout.
     expect(screen.getByText("id")).toBeTruthy();
     expect(screen.getByText("name")).toBeTruthy();
-    expect(pageRangeText()).toBe("rows 1–2of 2");
+    expect(pageRangeText()).toBe("rows 1–2 of 2");
   });
 
   it("switching the source picker reloads that table's page from offset 0", async () => {
@@ -125,7 +125,7 @@ describe("DataBrowser (CPE-1392)", () => {
     pages["users#100"] = { columns: COLS, rows: rowsOf(5, 100), total: 105 };
 
     render(DataBrowser, { entry: { path: "/data/app.db", extension: "db" } });
-    await waitFor(() => expect(pageRangeText()).toBe("rows 1–100of 105"));
+    await waitFor(() => expect(pageRangeText()).toBe("rows 1–100 of 105"));
 
     const prevBtn = screen.getByRole("button", { name: /Prev/ }) as HTMLButtonElement;
     const nextBtn = screen.getByRole("button", { name: /Next/ }) as HTMLButtonElement;
@@ -133,7 +133,7 @@ describe("DataBrowser (CPE-1392)", () => {
     expect(nextBtn.disabled).toBe(false);
 
     await fireEvent.click(nextBtn);
-    await waitFor(() => expect(pageRangeText()).toBe("rows 101–105of 105"));
+    await waitFor(() => expect(pageRangeText()).toBe("rows 101–105 of 105"));
     expect(invoke).toHaveBeenCalledWith("data_browser_page", {
       path: "/data/app.db",
       source: "users",
@@ -145,7 +145,7 @@ describe("DataBrowser (CPE-1392)", () => {
     expect(prevBtn.disabled).toBe(false);
 
     await fireEvent.click(prevBtn);
-    await waitFor(() => expect(pageRangeText()).toBe("rows 1–100of 105"));
+    await waitFor(() => expect(pageRangeText()).toBe("rows 1–100 of 105"));
     expect(invoke).toHaveBeenCalledWith("data_browser_page", {
       path: "/data/app.db",
       source: "users",

@@ -185,16 +185,14 @@ describe("ConflictDialog (CPE-496 / CPE-1391)", () => {
     expect((screen.getByText(/^Continue/).closest("button") as HTMLButtonElement).disabled).toBe(true);
   });
 
-  it("surfaces a load error in the status line when forge_conflict_state rejects", async () => {
+  it("surfaces a load error in the status line when forge_conflict_state rejects, without the contradictory empty-state panel (CPE-1396)", async () => {
     stateError = "not a git repository";
     render(ConflictDialog, { path: "/repo" });
 
     await waitFor(() => expect(screen.getByText("not a git repository")).toBeTruthy());
-    // NOTE (pinning shipped behavior, not asserting it's ideal): `operation`/`files` stay at their
-    // initial defaults ("none" / []) on a load failure, so the empty-state panel renders concurrently
-    // with the error in the status line — the user sees both "No conflicts — nothing to resolve." and
-    // the real error text at the same time. This looks like a pre-existing UX inconsistency, not a
-    // typed-call mis-wiring, so it's reported here rather than fixed (test-only ticket).
-    expect(screen.getByText("No conflicts — nothing to resolve.")).toBeTruthy();
+    // Fixed in CPE-1396: a load failure must not also render "No conflicts — nothing to resolve." —
+    // that empty-state panel is reserved for a SUCCESSFUL load that finds zero conflicts, so it must
+    // stay hidden while an error is showing.
+    expect(screen.queryByText("No conflicts — nothing to resolve.")).toBeNull();
   });
 });

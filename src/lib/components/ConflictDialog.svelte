@@ -24,12 +24,16 @@
   let error = "";
   let note = "";
   let showBase = false;
+  // CPE-1396: distinct from `error` so the "nothing to resolve" empty state only renders after a
+  // SUCCESSFUL load with zero conflicts — never alongside a load failure.
+  let loaded = false;
 
   async function loadState() {
     try {
       const s = await commands.forgeConflictState(path);
       operation = s.operation;
       files = s.files;
+      loaded = true;
       if (selected && !files.some((f) => f.path === selected)) { selected = null; versions = null; }
       if (!selected && files.length) await select(files[0].path);
     } catch (e) {
@@ -104,7 +108,7 @@
       <button class="x" title="Close" aria-label="Close" on:click={() => dispatch("close")}>×</button>
     </div>
 
-    {#if operation === "none" && files.length === 0}
+    {#if loaded && operation === "none" && files.length === 0}
       <div class="empty">No conflicts — nothing to resolve.</div>
     {:else}
       <div class="body">
