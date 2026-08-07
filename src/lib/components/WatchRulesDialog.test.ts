@@ -73,8 +73,12 @@ describe("WatchRulesDialog — Add-rule enablement (CPE-1400)", () => {
     expect(addRuleBtn().disabled).toBe(true);
   });
 
-  it("Add rule enables once both a name and a pending action exist", async () => {
+  it("Add rule enables once a name, a pending action, and a valid condition all exist", async () => {
     render(WatchRulesDialog, { rules: [] });
+    // kind defaults to "ext", which also needs a non-blank extension list to build a valid condition
+    // (CPE-1402) — the other two enablement tests above don't set one because they expect `disabled`
+    // to stay `true` regardless, but this one asserts `false` so all three inputs must be valid.
+    await fireEvent.input(screen.getByLabelText("Extensions"), { target: { value: "pdf" } });
     await fireEvent.input(ruleNameInput(), { target: { value: "Archive PDFs" } });
     await addPendingAction();
     expect(addRuleBtn().disabled).toBe(false);
@@ -88,61 +92,55 @@ describe("WatchRulesDialog — Add-rule enablement (CPE-1400)", () => {
   });
 });
 
-describe("WatchRulesDialog — the Add-rule button does not validate the condition (CPE-1400 finding)", () => {
-  // The `disabled` binding on data-testid="add-rule-btn" is `!ruleName.trim() || pending.length === 0`
-  // only — it does NOT re-check `buildCondition()`. So a name + a pending action is enough to enable
-  // the button even when the currently-selected condition kind is empty/NaN and would build to `null`.
-  // Clicking it in that state is a harmless no-op (addTheRule bails on `!cond`), but the button itself
-  // gives no visual signal that the click will do nothing. Documented here rather than "fixed" per the
-  // ticket's do-not-fix instruction.
-  it("clicking Add rule silently no-ops when the ext condition is empty, though the button is enabled", async () => {
+describe("WatchRulesDialog — the Add-rule button validates the condition (CPE-1402 fix)", () => {
+  // The `disabled` binding on data-testid="add-rule-btn" now also reflects a reactive `validCondition`
+  // (derived from `buildCondition()`), so the button stays DISABLED whenever the currently-selected
+  // condition kind's inputs are empty/NaN and would build to `null` — even with a valid name and a
+  // pending action. This replaces the CPE-1400 finding where the button stayed enabled and a click
+  // silently no-op'd with no visual signal.
+  it("Add rule stays disabled when the ext condition is empty, even with a name and a pending action", async () => {
     render(WatchRulesDialog, { rules: [] });
     await fireEvent.input(ruleNameInput(), { target: { value: "Archive PDFs" } });
     await addPendingAction();
     // kind defaults to "ext"; the Extensions field is left blank -> buildCondition() returns null.
-    expect(addRuleBtn().disabled).toBe(false);
-
-    await fireEvent.click(addRuleBtn());
-
-    expect(screen.queryByTestId("watch-rule-row")).toBeNull();
-    expect(screen.getByText("No rules yet.")).toBeTruthy();
+    expect(addRuleBtn().disabled).toBe(true);
   });
 
-  it("clicking Add rule silently no-ops when the size condition's min/max are both blank", async () => {
+  it("Add rule stays disabled when the size condition's min/max are both blank", async () => {
     render(WatchRulesDialog, { rules: [] });
     await fireEvent.change(kindSelect(), { target: { value: "size" } });
     await fireEvent.input(ruleNameInput(), { target: { value: "Big files" } });
     await addPendingAction();
 
-    await fireEvent.click(addRuleBtn());
-
-    expect(screen.queryByTestId("watch-rule-row")).toBeNull();
+    expect(addRuleBtn().disabled).toBe(true);
   });
 
-  it("clicking Add rule silently no-ops when a size bound is non-numeric (NaN guard)", async () => {
+  it("Add rule stays disabled when a size bound is non-numeric (NaN guard)", async () => {
     render(WatchRulesDialog, { rules: [] });
     await fireEvent.change(kindSelect(), { target: { value: "size" } });
     await fireEvent.input(screen.getByLabelText("Min bytes"), { target: { value: "not-a-number" } });
     await fireEvent.input(ruleNameInput(), { target: { value: "Big files" } });
     await addPendingAction();
 
-    await fireEvent.click(addRuleBtn());
-
-    expect(screen.queryByTestId("watch-rule-row")).toBeNull();
+    expect(addRuleBtn().disabled).toBe(true);
   });
 
-  it("clicking Add rule silently no-ops for olderThan when days is non-numeric or non-positive (NaN/empty guard)", async () => {
+  it("Add rule stays disabled for olderThan when days is non-numeric or non-positive (NaN/empty guard), and enables once days becomes valid", async () => {
     render(WatchRulesDialog, { rules: [] });
     await fireEvent.change(kindSelect(), { target: { value: "olderThan" } });
     await fireEvent.input(screen.getByLabelText("Days"), { target: { value: "abc" } });
     await fireEvent.input(ruleNameInput(), { target: { value: "Old files" } });
     await addPendingAction();
-    await fireEvent.click(addRuleBtn());
-    expect(screen.queryByTestId("watch-rule-row")).toBeNull();
+    expect(addRuleBtn().disabled).toBe(true);
 
     await fireEvent.input(screen.getByLabelText("Days"), { target: { value: "0" } }); // d > 0 required
-    await fireEvent.click(addRuleBtn());
-    expect(screen.queryByTestId("watch-rule-row")).toBeNull();
+    expect(addRuleBtn().disabled).toBe(true);
+
+    // Editing `days` alone (no further change to ruleName/pending) must re-enable the button — proof
+    // the reactive `validCondition` genuinely tracks the builder fields, not just an incidental re-eval
+    // triggered by some other prop changing.
+    await fireEvent.input(screen.getByLabelText("Days"), { target: { value: "5" } });
+    expect(addRuleBtn().disabled).toBe(false);
   });
 });
 

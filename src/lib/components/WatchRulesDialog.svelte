@@ -72,7 +72,17 @@
     Date.now(),
   );
 
-  function buildCondition(): Condition | null {
+  // The currently-selected condition builder's `Condition`, or `null` if the inputs don't yet produce
+  // a valid one (blank ext list, both size bounds blank, non-numeric size bound, older/newerThan with a
+  // non-numeric or non-positive day count). Recomputed reactively from the builder fields — CPE-1402:
+  // this replaces the old non-reactive `buildCondition()` helper (called only on click, so the Add-rule
+  // button couldn't reflect validity) with an equivalent `$:` block. The IIFE body reads the builder
+  // fields directly, which is what makes Svelte re-run it whenever any of them changes — a plain
+  // `buildCondition()` function call wouldn't be reactive since Svelte's dependency tracking only sees
+  // identifiers referenced directly in the reactive statement, not ones read inside a separately-defined
+  // function it calls. `condition` is used both to build the rule on click and (via `validCondition`) to
+  // gate the Add-rule button.
+  $: condition = ((): Condition | null => {
     switch (kind) {
       case "ext": {
         const parts = exts.split(",").map((s) => s.trim()).filter(Boolean);
@@ -94,7 +104,8 @@
       case "isDir":
         return { kind: "isDir", value: isDirValue };
     }
-  }
+  })();
+  $: validCondition = condition !== null;
 
   function buildAction(): Action | null {
     const v = actValue.trim();
@@ -115,9 +126,8 @@
   }
 
   function addTheRule() {
-    const cond = buildCondition();
-    if (!cond || !ruleName.trim() || pending.length === 0) return;
-    list = addRule(list, ruleName.trim(), cond, pending);
+    if (!condition || !ruleName.trim() || pending.length === 0) return;
+    list = addRule(list, ruleName.trim(), condition, pending);
     ruleName = ""; exts = glob = sizeMin = sizeMax = ""; pending = [];
   }
 
@@ -202,7 +212,7 @@
           {#each pending as a, i (i)}<span class="chip">{actSummary(a)}</span>{/each}
         </div>
       {/if}
-      <button class="btn primary" data-testid="add-rule-btn" disabled={!ruleName.trim() || pending.length === 0} on:click={addTheRule}>Add rule</button>
+      <button class="btn primary" data-testid="add-rule-btn" disabled={!ruleName.trim() || pending.length === 0 || !validCondition} on:click={addTheRule}>Add rule</button>
     </div>
 
     <div class="preview" data-testid="dry-run">
