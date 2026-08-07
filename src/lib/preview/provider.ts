@@ -30,6 +30,7 @@ export type PreviewKind =
   | "jwt"
   | "cert"
   | "hex"
+  | "folder"
   | "none";
 
 /** One entry inside an archive (mirrors the Rust `ArchiveEntry`). */
@@ -311,10 +312,26 @@ export const FALLBACK: PreviewProvider = {
 };
 
 /**
- * Pick the best preview provider for an entry. Never returns null: folders,
- * nothing selected, and unrecognised files all resolve to the metadata fallback.
+ * A highlighted DIRECTORY (CPE-1426): rendered as a one-level "peek" browser (`FolderBrowser.svelte`)
+ * instead of the metadata-only fallback — clicking a row in it drives the main pane's navigate + select,
+ * so a folder tree can be walked entirely from the preview pane (Miller-columns / macOS Finder
+ * column-view feel). Not part of the ordered `providers` list above (those all guard `!e.is_dir`) —
+ * `pickProvider` below routes directories here directly, before ever consulting that list.
+ */
+export const FOLDER: PreviewProvider = {
+  id: "folder",
+  label: "Folder",
+  kind: "folder",
+  editable: false,
+  canPreview: (e) => e.is_dir,
+};
+
+/**
+ * Pick the best preview provider for an entry. Never returns null: nothing selected and unrecognised
+ * files resolve to the metadata fallback; a directory resolves to the folder-peek browser (CPE-1426).
  */
 export function pickProvider(entry: DirEntry | null | undefined): PreviewProvider {
-  if (!entry || entry.is_dir) return FALLBACK;
+  if (!entry) return FALLBACK;
+  if (entry.is_dir) return FOLDER;
   return providers.find((p) => p.canPreview(entry)) ?? FALLBACK;
 }
