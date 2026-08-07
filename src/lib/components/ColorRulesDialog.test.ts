@@ -4,7 +4,7 @@
  * already unit-tested `colorRulesStore` (`addRule`/`updateRule`/`removeRule`/`moveRule`/`toggleRule`, see
  * `../colorRulesStore.test.ts`) plus a live-preview `change` dispatch on every edit. So this spec exercises
  * the WIRING: does each of the 6 condition-kind builders (ext/glob/size/olderThan/newerThan/isDir) turn
- * form input into the right `Condition` object via `buildCondition()`, does `summarize()` render the right
+ * form input into the right `Condition` object via the reactive `condition` block, does `summarize()` render the right
  * human text for each kind, does `change` fire live with the current working list on every edit (toggle,
  * recolor, relabel, reorder, delete, add), and do `save`/`cancel` fire with the right data. No
  * `@tauri-apps/api/core` mock needed — this component performs no I/O itself (same as WatchRulesDialog).
@@ -212,20 +212,18 @@ describe("ColorRulesDialog — the 6 condition-kind builders (CPE-1405)", () => 
   });
 });
 
-describe("ColorRulesDialog — Add-rule button is NOT gated on condition validity (potential mis-wire, cf. CPE-1402)", () => {
-  // Unlike WatchRulesDialog post-CPE-1402, `add-btn` here has no `disabled` binding at all — it is
-  // always clickable regardless of whether buildCondition() would return null. Clicking it with an
-  // invalid/empty condition silently no-ops: `add()` calls `buildCondition()`, sees `null`, and
-  // `return`s before mutating `list` or dispatching `change`. This mirrors the exact bug class CPE-1402
-  // fixed for WatchRulesDialog, but ColorRulesDialog was not covered by that fix. Reporting per the
-  // ticket instructions rather than fixing here.
-  it("Add stays enabled with an empty ext condition, and clicking it is a silent no-op", async () => {
+describe("ColorRulesDialog — Add-rule button is gated on condition validity (CPE-1407, mirrors CPE-1402)", () => {
+  // `add-btn` is now disabled whenever the current condition-builder inputs don't yet produce a valid
+  // `Condition` (mirrors the CPE-1402 fix already applied to WatchRulesDialog). The gate is driven by a
+  // reactive `$: condition = (...)()` block that reads the builder fields directly, so Svelte tracks it
+  // and the button's disabled state updates live as the user types — not just at click time.
+  it("Add is disabled with an empty ext condition; clicking a disabled button is a no-op", async () => {
     const { component } = render(ColorRulesDialog, { rules: [] });
     const change = vi.fn();
     component.$on("change", change);
 
-    // kind defaults to "ext"; Extensions field left blank -> buildCondition() returns null.
-    expect(addBtn().disabled).toBe(false); // no validity gate on the button at all
+    // kind defaults to "ext"; Extensions field left blank -> condition is null.
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
 
     expect(change).not.toHaveBeenCalled();
@@ -233,61 +231,76 @@ describe("ColorRulesDialog — Add-rule button is NOT gated on condition validit
     expect(screen.getByText("No rules yet — add one below.")).toBeTruthy();
   });
 
-  it("Add stays enabled with an empty glob pattern, and clicking it is a silent no-op", async () => {
+  it("Add is disabled with an empty glob pattern", async () => {
     const { component } = render(ColorRulesDialog, { rules: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.change(kindSelect(), { target: { value: "glob" } });
-    expect(addBtn().disabled).toBe(false);
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
 
     expect(change).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(0);
   });
 
-  it("Add stays enabled when both size bounds are blank, and clicking it is a silent no-op", async () => {
+  it("Add is disabled when both size bounds are blank", async () => {
     const { component } = render(ColorRulesDialog, { rules: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.change(kindSelect(), { target: { value: "size" } });
-    expect(addBtn().disabled).toBe(false);
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
 
     expect(change).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(0);
   });
 
-  it("Add stays enabled when a size bound is non-numeric (NaN guard), and clicking it is a silent no-op", async () => {
+  it("Add is disabled when a size bound is non-numeric (NaN guard)", async () => {
     const { component } = render(ColorRulesDialog, { rules: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.change(kindSelect(), { target: { value: "size" } });
     await fireEvent.input(screen.getByLabelText("Min bytes"), { target: { value: "not-a-number" } });
-    expect(addBtn().disabled).toBe(false);
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
 
     expect(change).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(0);
   });
 
-  it("Add stays enabled for olderThan with a zero/non-numeric day count, and clicking it is a silent no-op", async () => {
+  it("Add is disabled for olderThan with a zero/non-numeric day count", async () => {
     const { component } = render(ColorRulesDialog, { rules: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.change(kindSelect(), { target: { value: "olderThan" } });
     await fireEvent.input(screen.getByLabelText("Days"), { target: { value: "0" } });
-    expect(addBtn().disabled).toBe(false);
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
     expect(change).not.toHaveBeenCalled();
 
     await fireEvent.input(screen.getByLabelText("Days"), { target: { value: "abc" } });
+    expect(addBtn().disabled).toBe(true);
     await fireEvent.click(addBtn());
     expect(change).not.toHaveBeenCalled();
     expect(rows()).toHaveLength(0);
+  });
+
+  it("Add re-enables reactively once a valid condition is entered", async () => {
+    render(ColorRulesDialog, { rules: [] });
+
+    // kind defaults to "ext"; blank -> disabled.
+    expect(addBtn().disabled).toBe(true);
+
+    await fireEvent.input(screen.getByLabelText("Extensions"), { target: { value: "pdf" } });
+    expect(addBtn().disabled).toBe(false);
+
+    // Clearing it back out disables again.
+    await fireEvent.input(screen.getByLabelText("Extensions"), { target: { value: "" } });
+    expect(addBtn().disabled).toBe(true);
   });
 });
 

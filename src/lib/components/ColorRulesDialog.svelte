@@ -31,7 +31,17 @@
     dispatch("change", list);
   }
 
-  function buildCondition(): Condition | null {
+  // The currently-selected condition builder's `Condition`, or `null` if the inputs don't yet produce
+  // a valid one (blank ext list, both size bounds blank, non-numeric size bound, older/newerThan with a
+  // non-numeric or non-positive day count). Recomputed reactively from the builder fields — CPE-1407
+  // (mirrors CPE-1402's fix for WatchRulesDialog): this replaces the old non-reactive `buildCondition()`
+  // helper (called only on click, so the Add button couldn't reflect validity) with an equivalent `$:`
+  // block. The IIFE body reads the builder fields directly, which is what makes Svelte re-run it whenever
+  // any of them changes — a plain `buildCondition()` function call wouldn't be reactive since Svelte's
+  // dependency tracking only sees identifiers referenced directly in the reactive statement, not ones
+  // read inside a separately-defined function it calls. `condition` is used both to build the rule on
+  // click and (via `validCondition`) to gate the Add button.
+  $: condition = ((): Condition | null => {
     switch (kind) {
       case "ext": {
         const parts = exts.split(",").map((s) => s.trim()).filter(Boolean);
@@ -54,12 +64,12 @@
       case "isDir":
         return { kind: "isDir", value: isDirValue };
     }
-  }
+  })();
+  $: validCondition = condition !== null;
 
   function add() {
-    const cond = buildCondition();
-    if (!cond) return;
-    list = addRule(list, cond, { color: newColor, label: newLabel.trim() || undefined });
+    if (!condition) return;
+    list = addRule(list, condition, { color: newColor, label: newLabel.trim() || undefined });
     exts = glob = sizeMin = sizeMax = newLabel = "";
     preview();
   }
@@ -161,7 +171,7 @@
 
       <input type="color" bind:value={newColor} title="Colour" aria-label="New rule colour" />
       <input class="label-input" placeholder="label" bind:value={newLabel} aria-label="New rule label" />
-      <button class="btn" data-testid="add-btn" on:click={add}>Add</button>
+      <button class="btn" data-testid="add-btn" disabled={!validCondition} on:click={add}>Add</button>
     </div>
 
     <div class="actions">
@@ -224,6 +234,7 @@
     border: 1px solid var(--border-strong); border-radius: var(--radius);
     background: var(--surface-alt); color: var(--text);
   }
+  .btn:disabled { opacity: 0.4; }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover { background: var(--accent-hover); }
 </style>
