@@ -145,14 +145,24 @@ impl FileSystemProvider for WebdavProvider {
 
 /// The deepest element nesting `parse_multistatus` will hand to `roxmltree` before refusing the response.
 /// `roxmltree::Document::parse` — like most XML parsers — recurses per nesting level, so a PROPFIND
-/// response with only a few hundred levels of nesting (a payload of a few KB) is enough to blow a thread
-/// stack and crash the whole process with an **uncatchable** stack overflow. The exact crash depth is
-/// **stack-size-dependent**, not a universal constant: confirmed locally at ~300-500 levels on a 2MB
-/// stack, and as low as ~150 levels on a 256KB stack — so don't read 128 (or any single number here) as
-/// safe for every thread size, only as a value picked with a wide margin under the smallest threshold
-/// observed. A real WebDAV `multistatus` body is only ever a handful of levels deep
-/// (`multistatus > response > propstat > prop > ...`, ~5 levels), so even a small cap costs nothing for
-/// legitimate responses while leaving a large margin below any observed crash depth (CPE-1398).
+/// response with deep enough nesting is enough to blow a thread stack and crash the whole process with an
+/// **uncatchable** stack overflow. The exact crash depth is **both stack-size- and build-profile-dependent**,
+/// not a universal constant: confirmed locally at ~300-500 levels on a 2MB stack in a RELEASE build, and as
+/// low as ~150 levels on a 256KB stack in a release build — but a DEBUG build overflows far shallower than
+/// its release counterpart at the same stack size (debug recursion frames carry far less inlining/optimization,
+/// so each nesting level costs substantially more stack), so don't assume the release-build numbers above
+/// transfer to a `cargo build` without `--release`. 64 is sized with a wide margin under the smallest
+/// *release-build* threshold observed, and the app only ever runs this guard on the shipped release build's
+/// multi-MB Tokio `spawn_blocking` threads (not the default ~1MB/256KB-class thread some other contexts use),
+/// which gives extra headroom on top of that margin. A real WebDAV `multistatus` body is only ever a handful
+/// of levels deep (`multistatus > response > propstat > prop > ...`, ~5 levels), so even a small cap costs
+/// nothing for legitimate responses while leaving a large margin below any observed crash depth (CPE-1398).
+///
+/// This guard's pre-scan uses the `xmlparser` crate's lexer to approximate what `roxmltree` (which vendors
+/// its own, independently-forked lexer) will actually see; the two are separately-maintained forks of the
+/// same lineage and `xmlparser` itself is dormant, so they can drift. Re-verify the pre-scan's tag/quote/
+/// comment/CDATA/PI handling against `roxmltree`'s actual grammar on any `roxmltree` **major** version bump,
+/// in case its parsing rules (or its vendored lexer) diverge from what `xmlparser` still assumes here.
 const MAX_XML_NESTING_DEPTH: usize = 64;
 
 /// Cheap, non-recursive guard against maliciously (or accidentally) deep XML nesting, run before the
