@@ -19,6 +19,8 @@
   import type { Symbol as CodeSymbol, FoldRange, MinimapRow, ModelInfo } from "../bindings.gen";
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
+  import JwtPreview from "./JwtPreview.svelte";
+  import CertPreview from "./CertPreview.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -987,6 +989,10 @@
     <HexView path={entry.path} size={entry.size} />
   {:else if provider.kind === "data-grid" && entry}
     <DataBrowser {entry} />
+  {:else if provider.kind === "jwt" && entry}
+    <JwtPreview path={entry.path} />
+  {:else if provider.kind === "cert" && entry}
+    <CertPreview path={entry.path} />
   {:else if needsText && entry}
     {#if textState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>

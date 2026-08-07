@@ -27,6 +27,8 @@ export type PreviewKind =
   | "info"
   | "data-grid"
   | "font"
+  | "jwt"
+  | "cert"
   | "hex"
   | "none";
 
@@ -116,6 +118,22 @@ const HEIC_EXT = new Set(["heic", "heif", "hif"]);
 
 /** Font files rendered as a live specimen via the webview's FontFace API (CPE-117). */
 const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
+
+/**
+ * JWT / JWS tokens: decoded via the `jwt_preview` backend command (CPE-1418, epic CPE-1417) into
+ * header/claims/signature info and rendered by `JwtPreview.svelte` (CPE-1422). A read-only VIEWER —
+ * never a signature verifier.
+ */
+const JWT_EXT = new Set(["jwt", "jws"]);
+
+/**
+ * Certificate-family files: X.509 certificates (PEM or DER), PKCS#10 CSRs, standalone public keys, and
+ * private-key files — all auto-detected and decoded via the `cert_decode` backend command (CPE-1419,
+ * epic CPE-1417) and rendered by `CertPreview.svelte` (CPE-1422). Must precede the generic text provider
+ * below: pem/crt/cer/csr categorise as "code" text in `filetypes.ts` and would otherwise be claimed by
+ * it. A private-key file's key material is never read; the backend surfaces only its algorithm + size.
+ */
+const CERT_EXT = new Set(["pem", "crt", "cer", "der", "csr", "pub", "key"]);
 
 /**
  * Ordered by priority — the first match wins. Markdown is listed before text
@@ -225,6 +243,22 @@ export const providers: PreviewProvider[] = [
     kind: "font",
     editable: false,
     canPreview: (e) => !e.is_dir && FONT_EXT.has(e.extension),
+  },
+  // Must precede the generic text provider: .jwt/.jws have no CATEGORY_BY_EXT entry today (would
+  // otherwise fall through to text/hex), and .pem/.crt/.cer/.csr categorise as "code" text.
+  {
+    id: "jwt",
+    label: "JWT",
+    kind: "jwt",
+    editable: false,
+    canPreview: (e) => !e.is_dir && JWT_EXT.has(e.extension),
+  },
+  {
+    id: "cert",
+    label: "Certificate",
+    kind: "cert",
+    editable: false,
+    canPreview: (e) => !e.is_dir && CERT_EXT.has(e.extension),
   },
   {
     id: "data-grid",
