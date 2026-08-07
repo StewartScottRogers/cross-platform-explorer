@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, onDestroy } from "svelte";
   import type { DirEntry } from "../types";
-  import { pickProvider, type ArchiveEntry } from "../preview/provider";
+  import { pickProvider, mediaType, type ArchiveEntry } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
   import { highlightForFile, ensureLanguageForName, languageForName, splitHighlightedIntoLines } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
@@ -21,6 +21,7 @@
   import DataBrowser from "./DataBrowser.svelte";
   import JwtPreview from "./JwtPreview.svelte";
   import CertPreview from "./CertPreview.svelte";
+  import MediaPlayer from "./MediaPlayer.svelte";
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
@@ -53,6 +54,9 @@
   /** Structural-validity check for a PDF — resolves (page count, or null if unknown) when the file looks
    *  safe to hand to the WebView2 iframe, rejects on a malformed/empty PDF (a backend command in the app). */
   export let loadPdfValidity: (path: string) => Promise<number | null> = async () => null;
+  /** Open a file in the OS default handler — used by the media player's unsupported-codec fallback
+   *  (CPE-1429). Wired to the `open_external` command in the app; a no-op in tests. */
+  export let openExternal: (path: string) => Promise<void> | void = () => {};
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -923,12 +927,18 @@
     {:else}
       <img class="preview-img" src={dicomImgUrl} alt={entry.name} />
     {/if}
-  {:else if provider.kind === "audio" && entry}
-    <!-- svelte-ignore a11y-media-has-caption -->
-    <audio class="preview-media" controls src={assetUrl(entry.path)}></audio>
-  {:else if provider.kind === "video" && entry}
-    <!-- svelte-ignore a11y-media-has-caption -->
-    <video class="preview-media" controls src={assetUrl(entry.path)}></video>
+  {:else if provider.kind === "media" && entry}
+    <!-- Temporal media (CPE-1429, epic CPE-720): a native <audio>/<video> element fed by the asset
+         protocol behind a custom themed transport, with an open-externally fallback on an unsupported
+         codec. `{#key}` remounts the player per file so its transport state never leaks across clips. -->
+    {#key entry.path}
+      <MediaPlayer
+        src={assetUrl(entry.path)}
+        type={mediaType(entry)}
+        name={entry.name}
+        openExternal={() => openExternal(entry.path)}
+      />
+    {/key}
   {:else if provider.kind === "pdf" && entry}
     {#if pdfState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>
@@ -1129,10 +1139,6 @@
     max-width: 100%;
     max-height: 100%;
     object-fit: contain;
-    margin: auto;
-  }
-  .preview-media {
-    width: 100%;
     margin: auto;
   }
   .preview-pdf {

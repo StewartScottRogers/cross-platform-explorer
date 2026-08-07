@@ -67,22 +67,28 @@ describe("PreviewPane", () => {
     await waitFor(() => expect(screen.getByText(/Can't preview/i)).toBeTruthy());
   });
 
-  it("renders an <audio> element for an audio entry", () => {
+  it("renders the media player with an <audio> element for an audio entry (CPE-1429)", () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "song.mp3", path: "C:\\d\\song.mp3", extension: "mp3" }),
       assetUrl: (p: string) => `asset://${p}`,
     });
-    const audio = container.querySelector("audio.preview-media");
+    const audio = container.querySelector("audio.mp-media");
     expect(audio).toBeTruthy();
     expect(audio!.getAttribute("src")).toBe("asset://C:\\d\\song.mp3");
+    // The custom transport replaces the raw browser controls — no `controls` attribute.
+    expect(audio!.hasAttribute("controls")).toBe(false);
+    expect(container.querySelector('[data-testid="mp-transport"]')).toBeTruthy();
   });
 
-  it("renders a <video> element for a video entry", () => {
+  it("renders the media player with a <video> element for a video entry (CPE-1429)", () => {
     const { container } = render(PreviewPane, {
       entry: entry({ name: "clip.mp4", path: "C:\\d\\clip.mp4", extension: "mp4" }),
       assetUrl: (p: string) => `asset://${p}`,
     });
-    expect(container.querySelector("video.preview-media")).toBeTruthy();
+    const video = container.querySelector("video.mp-media");
+    expect(video).toBeTruthy();
+    expect(video!.getAttribute("src")).toBe("asset://C:\\d\\clip.mp4");
+    expect(container.querySelector('[data-testid="mp-transport"]')).toBeTruthy();
   });
 
   it("renders an <iframe> for a pdf entry once the validity check passes (CPE-1357)", async () => {

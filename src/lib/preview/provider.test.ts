@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pickProvider } from "./provider";
+import { pickProvider, mediaType } from "./provider";
 import type { DirEntry } from "../types";
 
 const entry = (over: Partial<DirEntry>): DirEntry => ({
@@ -31,9 +31,9 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.css", extension: "css" })).kind).toBe("text");
   });
 
-  it("picks media and pdf providers by category (CPE-059 phase 3)", () => {
-    expect(pickProvider(entry({ name: "a.mp3", extension: "mp3" })).kind).toBe("audio");
-    expect(pickProvider(entry({ name: "a.mp4", extension: "mp4" })).kind).toBe("video");
+  it("picks the media provider for audio/video and pdf by category (CPE-059/1429)", () => {
+    expect(pickProvider(entry({ name: "a.mp3", extension: "mp3" })).kind).toBe("media");
+    expect(pickProvider(entry({ name: "a.mp4", extension: "mp4" })).kind).toBe("media");
     expect(pickProvider(entry({ name: "a.pdf", extension: "pdf" })).kind).toBe("pdf");
   });
 
@@ -75,11 +75,26 @@ describe("pickProvider", () => {
     }
   });
 
-  it("plays WAV/FLAC audio and MKV/MOV video via the media providers (CPE-104/105/107/108)", () => {
-    expect(pickProvider(entry({ name: "a.wav", extension: "wav" })).kind).toBe("audio");
-    expect(pickProvider(entry({ name: "a.flac", extension: "flac" })).kind).toBe("audio");
-    expect(pickProvider(entry({ name: "a.mkv", extension: "mkv" })).kind).toBe("video");
-    expect(pickProvider(entry({ name: "a.mov", extension: "mov" })).kind).toBe("video");
+  it("plays WAV/FLAC audio and MKV/MOV video via the media provider (CPE-104/105/107/108/1429)", () => {
+    for (const ext of ["wav", "flac", "mkv", "mov"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("media");
+    }
+  });
+
+  it("routes the media provider ahead of the generic text/hex handlers (CPE-1429)", () => {
+    // Every listed audio/video extension resolves to `media`, not text or the hex last-resort.
+    const audio = ["mp3", "wav", "ogg", "flac", "m4a", "aac", "opus"];
+    const video = ["mp4", "webm", "mov"];
+    for (const ext of [...audio, ...video]) {
+      expect(pickProvider(entry({ name: `clip.${ext}`, extension: ext })).kind).toBe("media");
+    }
+  });
+
+  it("routes .ogg to audio and .mp4 to video via mediaType (CPE-1429)", () => {
+    expect(mediaType(entry({ name: "a.ogg", extension: "ogg" }))).toBe("audio");
+    expect(mediaType(entry({ name: "a.mp3", extension: "mp3" }))).toBe("audio");
+    expect(mediaType(entry({ name: "a.mp4", extension: "mp4" }))).toBe("video");
+    expect(mediaType(entry({ name: "a.mov", extension: "mov" }))).toBe("video");
   });
 
   it("previews HTML and Jupyter notebooks as editable source (CPE-078/114)", () => {
