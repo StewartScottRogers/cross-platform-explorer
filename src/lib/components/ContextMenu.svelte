@@ -37,10 +37,16 @@
   export let archiveSafetyEligible = false;
   /** True when Open-in-Terminal applies (a real folder, not Home/archive) (CPE-253). */
   export let canTerminal = false;
+  /** True when "Copy to…"/"Move to…" apply (CPE-355, CPE-1384): a real writable location for either
+   *  pane — pane A's `!isHome && !archive`, or pane B's `paneBPath !== HOME` (pane B is always a plain
+   *  real folder in v1). Deliberately its own prop, not `canTerminal` — `canTerminal` also gates
+   *  terminal/console/compress rows that stay pane-A-only, but copy/move-to-folder is now pane-routed. */
+  export let copyMoveEligible = false;
   /** Extension (no dot) to offer "Select all .ext"; empty hides the row (CPE-258). */
   export let sameTypeExt = "";
   /** True when the selection contains at least one image file (of 2+ selected) — enables "Batch media…"
-   *  (CPE-1093). The dialog itself pre-filters any non-image files out of the eligible set. */
+   *  (CPE-1093, pane-routed by CPE-1384). The dialog itself pre-filters any non-image files out of the
+   *  eligible set. */
   export let mediaEligible = false;
   /** Current view mode — the empty-area View ▸ submenu checkmarks it (CPE-1153). Single source of
    *  truth: the same `view` state the toolbar/CommandBar drive; selecting here dispatches `view:<mode>`. */
@@ -225,7 +231,7 @@
       <Icon name="paste" size={15} /> {$t('ctx.copyAsPath')}
       <span class="hint">Ctrl+Shift+C</span>
     </button>
-    {#if canTerminal}
+    {#if copyMoveEligible}
       <button class="row" role="menuitem" on:click={() => run("copy-to")}>
         <Icon name="copy" size={15} /> {$t('ctx.copyToFolder')}
       </button>

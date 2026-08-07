@@ -676,9 +676,15 @@
   >();
   let propsFor: DirEntry[] | null = null;
   let studioFor: DirEntry[] | null = null;
-  let batchRenameFor: DirEntry[] | null = null;
-  /** Eligible (image-only) entries for the Batch-Media dialog (CPE-1093), or null when closed. */
-  let batchMediaFor: DirEntry[] | null = null;
+  /** CPE-1384: which pane + folder a batch-rename dialog targets, SNAPSHOT at open time (mirroring
+   *  `ConfirmTarget`/`snapshotConfirmTarget`, CPE-1370) — the dialog stays open while the user edits
+   *  names, and the active pane must not be able to change underneath it and have `applyBatchRename`
+   *  silently rename the OTHER pane's files. Null when closed. */
+  let batchRenameFor: { entries: DirEntry[]; inPaneB: boolean; dir: string } | null = null;
+  /** Eligible (image-only) entries for the Batch-Media dialog (CPE-1093), or null when closed. `inPaneB`
+   *  (CPE-1384) is snapshot at open time the same way, so the post-apply refresh always targets the pane
+   *  the dialog was actually opened for, even if the active pane changes while it's open. */
+  let batchMediaFor: { entries: DirEntry[]; inPaneB: boolean } | null = null;
   /** The entry whose tags/label are being edited (CPE-637), or null when the editor is closed. */
   let tagEditorFor: DirEntry[] | null = null;
 
@@ -1134,11 +1140,11 @@
    *  pane the paste targeted — carried through to `resolveCopyConflict` so the eventual copy still lands
    *  wherever the paste was actually invoked, even though the dialog itself has no pane concept. */
   let pendingCopy: { sources: string[]; count: number; inPaneB: boolean } | null = null;
-  /** CPE-1380: transfer ids for an in-flight clipboard-PASTE copy that targeted pane B — set by
-   *  `startCopyWithPolicy(sources, policy, true)`, consumed by the shared `transfer://done` listener
-   *  below so it refreshes pane B (not pane A) once that specific transfer finishes. Every other copy
-   *  source (copy-to-folder, drag-drop, Home copy, quick actions) never adds an id here and keeps
-   *  refreshing pane A exactly as before this ticket. */
+  /** CPE-1380 (extended by CPE-1384): transfer ids for an in-flight COPY that targeted pane B — set by
+   *  `startCopyWithPolicy(sources, policy, true)` (clipboard paste) and `copyMoveToFolder(false, true)`
+   *  ("Copy to…"), consumed by the shared `transfer://done` listener below so it refreshes pane B (not
+   *  pane A) once that specific transfer finishes. Every other copy source (drag-drop, Home copy, quick
+   *  actions, a pane-A "Copy to…") never adds an id here and keeps refreshing pane A exactly as before. */
   const pasteCopyPaneB = new Set<number>();
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
   // teardown for its activity listener. Watching turns on only while the explorer is inside a
@@ -2477,18 +2483,26 @@
     }
   }
 
-  /** Open the batch-rename dialog for the current multi-selection (CPE-255). */
-  function beginBatchRename() {
-    if (blockedInArchive() || selectedEntries.length < 2) return;
-    batchRenameFor = selectedEntries;
+  /** Open the batch-rename dialog for the current multi-selection (CPE-255). `inPaneB` (CPE-1384): a
+   *  context-menu invocation targets whichever pane the menu was opened OVER (`runAction`'s `inPaneB`
+   *  local) — the source folder + selection are SNAPSHOT into `batchRenameFor` right now (see its own
+   *  doc comment), never re-derived from live state once the dialog is open. `blockedInArchive()` is a
+   *  pane-A-only concept (archive/smartFolder/Replay), so it only gates a pane-A batch rename. */
+  function beginBatchRename(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length < 2) return;
+    batchRenameFor = { entries: pane.selectedEntries, inPaneB, dir: inPaneB ? paneBPath : currentPath };
   }
 
-  /** Apply a batch rename: one move_exact within the current folder, pushed as a
-      single undoable step (CPE-255). */
+  /** Apply a batch rename: one move_exact within the SNAPSHOT folder `beginBatchRename` captured, pushed
+   *  as a single undoable step (CPE-255) — `target` (not live `currentPath`/`activePane`) is what's
+   *  replayed here, so a pane switch while the dialog was open can't retarget the rename (CPE-1384,
+   *  mirrors `doDelete`'s snapshot replay). */
   async function applyBatchRename(items: RenameItem[]) {
+    const target = batchRenameFor;
     batchRenameFor = null;
-    if (items.length === 0) return;
-    const dir = currentPath;
+    if (!target || items.length === 0) return;
+    const { dir, inPaneB } = target;
     const pairs: [string, string][] = items.map((it) => [
       joinPath(dir, it.from),
       joinPath(dir, it.to),
@@ -2507,7 +2521,8 @@
           label: `Rename ${moves.length} item${moves.length === 1 ? "" : "s"}`,
         });
       }
-      await loadPath(currentPath);
+      if (inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
+      else await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -2515,24 +2530,29 @@
 
   /** Open the batch-media dialog for the current multi-selection (CPE-1093): pre-filters out any
    *  non-image/unsupported-extension files (reusing the same `isImage` check the thumbnailer and
-   *  Quick-look use) rather than sending them to the backend and having every op fail per-file. */
-  function beginBatchMedia() {
-    if (blockedInArchive() || selectedEntries.length < 2) return;
-    const { eligible, skipped } = partitionEligible(selectedEntries);
+   *  Quick-look use) rather than sending them to the backend and having every op fail per-file. `inPaneB`
+   *  (CPE-1384): a context-menu invocation targets whichever pane the menu was opened OVER (`runAction`'s
+   *  `inPaneB` local) — snapshot into `batchMediaFor` (see its own doc comment) so a later pane switch
+   *  can't retarget the refresh. `blockedInArchive()` is a pane-A-only concept, so it only gates pane A. */
+  function beginBatchMedia(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length < 2) return;
+    const { eligible, skipped } = partitionEligible(pane.selectedEntries);
     if (eligible.length < 2) {
       showNotice("Not enough image files in the selection for batch media.", true);
       return;
     }
     if (skipped > 0) {
-      showNotice(`${skipped} of ${selectedEntries.length} files aren't images and will be skipped.`);
+      showNotice(`${skipped} of ${pane.selectedEntries.length} files aren't images and will be skipped.`);
     }
-    batchMediaFor = eligible;
+    batchMediaFor = { entries: eligible, inPaneB };
   }
 
   /** Apply a completed batch-media run (CPE-1093): the dialog itself streams the execute + shows its own
    *  progress (per BUSY-CURSOR.md), so by the time this fires the job has already finished — report the
-   *  outcome, refresh the listing, and close. */
+   *  outcome, refresh the pane `beginBatchMedia` snapshot targeted (CPE-1384), and close. */
   async function applyBatchMedia(report: BatchReport) {
+    const target = batchMediaFor;
     batchMediaFor = null;
     const failed = report.skipped.length;
     if (failed === 0) {
@@ -2545,7 +2565,8 @@
         report.written === 0,
       );
     }
-    await loadPath(currentPath);
+    if (target?.inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
+    else await loadPath(currentPath);
   }
 
   /** `inPaneB` (CPE-1377): mirrors `beginRename`'s parameter — reads/clears the right pane's
@@ -2790,18 +2811,26 @@
   }
 
   /** Copy or move the selection into a folder chosen from the native picker (CPE-355) —
-      no cut/navigate/paste dance. A move leaves the current folder, so it reloads and is
-      undoable; a copy only reloads when the destination is the folder in view. */
-  async function copyMoveToFolder(move: boolean) {
-    if (isHome || archive || selectedEntries.length === 0) return;
-    const sources = selectedEntries.map((e) => e.path);
+      no cut/navigate/paste dance. A move leaves the source folder, so it reloads and is
+      undoable; a copy only reloads when the destination is a pane's own folder in view.
+   *  `inPaneB` (CPE-1384): a context-menu invocation targets whichever pane the menu was opened OVER
+   *  (`runAction`'s `inPaneB` local). The source selection + its folder are captured into `pane`/
+   *  `sources`/`srcDir` BEFORE the native picker opens (mirroring `snapshotConfirmTarget`, CPE-1370) so
+   *  a MOVE — destructive: it deletes the source — can never retarget onto the other pane if the active
+   *  pane changes while the (OS-modal) picker is up. Pane B is always a plain real folder in v1, so its
+   *  "no real destination" case is `paneBPath === HOME` (mirrors `isHome` for pane A). */
+  async function copyMoveToFolder(move: boolean, inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((inPaneB ? paneBPath === HOME : (isHome || archive)) || pane.selectedEntries.length === 0) return;
+    const sources = pane.selectedEntries.map((e) => e.path);
+    const srcDir = inPaneB ? paneBPath : currentPath;
     const n = sources.length;
     let dest: string | string[] | null;
     try {
       dest = await openFolderDialog({
         directory: true,
         multiple: false,
-        defaultPath: currentPath,
+        defaultPath: srcDir,
         title: `${move ? "Move" : "Copy"} ${n} item${n === 1 ? "" : "s"} to…`,
       });
     } catch {
@@ -2810,10 +2839,14 @@
     if (!dest || typeof dest !== "string") return; // cancelled
 
     // COPY → the transfer engine (CPE-625): shows the operations panel; the transfer://done listener
-    // refreshes + reports. keep-both preserves auto-rename. (Copies aren't undoable.)
+    // refreshes + reports. keep-both preserves auto-rename. (Copies aren't undoable.) Tagging the id in
+    // `pasteCopyPaneB` (same mechanism `startCopyWithPolicy` uses for a pane-B clipboard paste, CPE-1380)
+    // makes the shared listener refresh pane B once the queued copy finishes, instead of always
+    // refreshing pane A regardless of which pane's "Copy to…" started it.
     if (!move) {
       try {
-        await startTransfer(sources, dest, "copy", "keepboth");
+        const id = await startTransfer(sources, dest, "copy", "keepboth");
+        if (inPaneB) pasteCopyPaneB.add(id);
       } catch (e) {
         showNotice(String(e), true);
       }
@@ -2836,7 +2869,9 @@
         });
         retagMoves(moves); // tags follow the moved files (CPE-657)
       }
-      await loadPath(currentPath);
+      // Refresh whichever pane(s) show the source folder (CPE-1371's both-can-match reasoning) — not
+      // just the pane the op started from, since pane A/B can mirror the same folder.
+      await refreshDropSourcePane(sources);
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -3103,15 +3138,23 @@
     showNotice(wasFav ? `Removed "${entry.name}" from Favorites.` : `Added "${entry.name}" to Favorites.`);
   }
 
-  /** Duplicate the selection in place — copy it into the folder it lives in.
-      Not undoable, for the same reason a copy-paste isn't (see doPaste). */
-  async function doDuplicate() {
-    if (isHome || blockedInArchive() || selectedEntries.length === 0) return;
-    const sources = selectedEntries.map((e) => e.path);
+  /** Duplicate the selection in place — copy it into the folder it lives in. Not undoable, for the
+   *  same reason a copy-paste isn't (see doPaste). `inPaneB` (CPE-1384): a context-menu invocation
+   *  targets whichever pane the menu was opened OVER (`runAction`'s `inPaneB` local); Ctrl+D passes the
+   *  live active pane, same routing `doCopy`/`doCut`/`doPaste`'s keyboard path already uses (CPE-1380).
+   *  Pane B is always a plain real folder in v1, so its "no real destination" case is `paneBPath ===
+   *  HOME` (mirrors `isHome` for pane A); `blockedInArchive()` (archive/smartFolder/Replay) is a
+   *  pane-A-only concept and only gates a pane-A duplicate. */
+  async function doDuplicate(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((inPaneB ? paneBPath === HOME : (isHome || blockedInArchive())) || pane.selectedEntries.length === 0) return;
+    const sources = pane.selectedEntries.map((e) => e.path);
+    const dir = inPaneB ? paneBPath : currentPath;
     try {
-      const results = await commands.copyEntries(sources, currentPath);
+      const results = await commands.copyEntries(sources, dir);
       reportResults(results, "Duplicated");
-      await loadPath(currentPath);
+      if (inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
+      else await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -3727,17 +3770,19 @@
       case "execute": executeSelected(); break;
       case "execute-admin": executeAsAdmin(); break;
       case "open-new-tab": if (pane.selectedEntries[0]) openInNewTab(pane.selectedEntries[0]); break;
-      // Cut/copy/paste route via `inPaneB` (CPE-1380: a context-menu invocation targets whichever pane
-      // the menu was opened OVER, same as every other pane-routed case in this switch). Duplicate/
-      // copy-to/move-to stay pane-A-only here — that's CPE-1384, out of this ticket's scope.
+      // Cut/copy/paste/duplicate/batch-rename/batch-media/copy-to/move-to all route via `inPaneB`
+      // (CPE-1380 for cut/copy/paste; CPE-1384 for the rest) — a context-menu invocation targets
+      // whichever pane the menu was opened OVER, same as every other pane-routed case in this switch.
       case "cut": doCut(inPaneB); break;
       case "copy": doCopy(inPaneB); break;
       case "paste": doPaste(inPaneB); break;
-      case "duplicate": doDuplicate(); break;
-      // Archive/vault/media-batch ops are pane-A-only concepts in v1 — pane B is always a plain real
-      // folder (see `beginRename`'s comment), and `<ContextMenu>`'s `compressible`/`extractable`/
-      // `archiveSafetyEligible`/`comparable`/`mediaEligible`/`shreddable`/`vaultable`/`canTerminal` props
-      // are already forced off for a pane-B-opened menu below, so these rows simply don't show there.
+      case "duplicate": doDuplicate(inPaneB); break;
+      // Archive/vault ops stay pane-A-only concepts in v1 — pane B is always a plain real folder (see
+      // `beginRename`'s comment), and `<ContextMenu>`'s `compressible`/`extractable`/
+      // `archiveSafetyEligible`/`comparable`/`shreddable`/`vaultable`/`canTerminal` props are already
+      // forced off for a pane-B-opened menu below, so these rows simply don't show there (CPE-1384: left
+      // as a follow-up — they queue through the global `pendingArchiveOps`/transfer-done machinery, which
+      // isn't pane-routed yet).
       case "compare": compareFiles(); break;
       case "compress": doCompress(); break;
       case "compress-targz": doCompressAs(".tar.gz"); break;
@@ -3753,12 +3798,12 @@
       case "pin": togglePinSelected(pane.selectedEntries); break;
       case "favorite": toggleFavoriteSelected(pane.selectedEntries); break;
       case "open-in-console": openSelectionInConsole(); break;
-      case "copy-to": copyMoveToFolder(false); break;
-      case "move-to": copyMoveToFolder(true); break;
+      case "copy-to": copyMoveToFolder(false, inPaneB); break;
+      case "move-to": copyMoveToFolder(true, inPaneB); break;
       case "open-folder-in-console": if (!isHome && !archive) openAiConsole({ cwd: currentPath }); break;
       case "rename": if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0], inPaneB); break;
-      case "batch-rename": beginBatchRename(); break;
-      case "batch-media": beginBatchMedia(); break;
+      case "batch-rename": beginBatchRename(inPaneB); break;
+      case "batch-media": beginBatchMedia(inPaneB); break;
       case "delete": askDelete(false, inPaneB); break;
       case "shred": askShred(); break;
       case "vault-create": askVaultCreate(); break;
@@ -4252,7 +4297,7 @@
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(inPaneB); return; }
-    if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(); return; }
+    if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
 
     if (event.altKey && event.key === "ArrowLeft") { event.preventDefault(); goBack(); return; }
@@ -4935,12 +4980,13 @@
         Promise.resolve(pending.onSuccess()).catch(() => {});
         return;
       }
-      // CPE-1380: a clipboard-paste copy that targeted pane B is tagged in `pasteCopyPaneB` (by
-      // `startCopyWithPolicy`) — refresh pane B for it, PLUS pane A too when pane A happens to mirror the
-      // same folder (both-can-match, same reasoning as `refreshDropSourcePane`/`refreshPasteAffectedPanes`
-      // — otherwise pane A would miss the newly-copied item if both panes show the same folder). Every
-      // other copy source (copy-to-folder, drag-drop, Home copy, quick actions) never adds an id here, so
-      // this falls through to the pre-existing pane-A-only refresh, unchanged.
+      // CPE-1380/CPE-1384: a clipboard-paste copy OR a "Copy to…" that targeted pane B is tagged in
+      // `pasteCopyPaneB` (by `startCopyWithPolicy` / `copyMoveToFolder`) — refresh pane B for it, PLUS
+      // pane A too when pane A happens to mirror the same folder (both-can-match, same reasoning as
+      // `refreshDropSourcePane`/`refreshPasteAffectedPanes` — otherwise pane A would miss the newly-copied
+      // item if both panes show the same folder). Every other copy source (a pane-A "Copy to…",
+      // drag-drop, Home copy, quick actions) never adds an id here, so this falls through to the
+      // pre-existing pane-A-only refresh, unchanged.
       if (pasteCopyPaneB.delete(r.id)) {
         if (paneBPath && normalizePath(paneBPath) === normalizePath(currentPath)) loadPath(currentPath).catch(() => {});
         explorerPaneB?.loadListing(paneBPath, false).catch(() => {});
@@ -5599,8 +5645,9 @@
     archiveSafetyEligible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && isArchiveSafetyEligible(ctxPane.selectedEntries[0])}
     compressible={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1}
     comparable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 2 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
-    mediaEligible={!ctxInPaneB && ctxPane.selectedEntries.length > 1 && ctxPane.selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
+    mediaEligible={ctxPane.selectedEntries.length > 1 && ctxPane.selectedEntries.some((e) => !e.is_dir && canBatchTransform(e.name))}
     canTerminal={!ctxInPaneB && !isHome && !archive}
+    copyMoveEligible={ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)}
     sameTypeExt={ctxPane.selectedEntries.length === 1 && !ctxPane.selectedEntries[0].is_dir ? ctxPane.selectedEntries[0].extension : ""}
     shreddable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length >= 1 && ctxPane.selectedEntries.every((e) => !e.is_dir)}
     vaultable={!ctxInPaneB && !isHome && !archive && ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
@@ -5733,7 +5780,7 @@
 
 {#if batchRenameFor}
   <BatchRenameDialog
-    names={batchRenameFor.map((e) => e.name)}
+    names={batchRenameFor.entries.map((e) => e.name)}
     on:apply={(e) => applyBatchRename(e.detail)}
     on:cancel={() => (batchRenameFor = null)}
   />
@@ -5741,7 +5788,7 @@
 
 {#if batchMediaFor}
   <BatchMediaDialog
-    paths={batchMediaFor.map((e) => e.path)}
+    paths={batchMediaFor.entries.map((e) => e.path)}
     on:apply={(e) => applyBatchMedia(e.detail.report)}
     on:cancel={() => (batchMediaFor = null)}
   />
