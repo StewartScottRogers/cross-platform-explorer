@@ -1764,6 +1764,13 @@
 
     smartFolder = null; // navigating to a real folder exits any open smart folder (CPE-667)
     structuredSearch = null; // ...or a saved structured search (CPE-1229)
+    // ...or an open archive browse-view (CPE-1366). loadPath is real-filesystem navigation, so it must
+    // exit the archive here — the single chokepoint that covers Back/Forward and every tab operation
+    // (which call loadPath directly), not just the manual nav paths that guard with exitArchive(). Without
+    // this, `archive` stranded while currentPath moved to a real folder (in-archive contents bleeding into
+    // an unrelated tab / Back leaving you "inside" a zip at Home). enterArchive + in-archive navigation
+    // never call loadPath, so this can't clear an archive we're legitimately entering/browsing.
+    archive = null;
 
     if (!keepSelection) {
       selection = emptySelection();
