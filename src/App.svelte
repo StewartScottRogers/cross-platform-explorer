@@ -3019,9 +3019,31 @@
         });
         retagMoves(moves); // tags follow the moved files (CPE-657)
       }
+      // CPE-1385 review (Reviewer + UAT): `moveEntries` resolves with one `OpResult` PER source, index-
+      // aligned with `sources` (same correlation `moves` above already relies on) — a partial failure
+      // (permission denied / locked file / one item on a dropped network share) must not silently drop
+      // that item from the clipboard just because its SIBLINGS moved. Re-stage only the paths that did
+      // NOT move as a fresh cut set, so a retry paste only re-attempts what actually failed — the
+      // already-moved paths are correctly gone for good. `clipEmpty` guards against clobbering: if the
+      // user cut something else (or copied) during this await, the clipboard is no longer empty and must
+      // be left alone rather than overwritten with this call's stale, now-irrelevant leftovers.
+      // CPE-1385 review (Reviewer + UAT): `moveEntries` resolves with one `OpResult` PER source, index-
+      // aligned with `sources` (same correlation `moves` above already relies on) — a partial failure
+      // (permission denied / locked file / one item on a dropped network share) must not silently drop
+      // that item from the clipboard just because its SIBLINGS moved. Re-stage only the paths that did
+      // NOT move as a fresh cut set, so a retry paste only re-attempts what actually failed — the
+      // already-moved paths are correctly gone for good. `clipEmpty` guards against clobbering: if the
+      // user cut something else (or copied) during this await, the clipboard is no longer empty and must
+      // be left alone rather than overwritten with this call's stale, now-irrelevant leftovers.
+      const unmoved = sources.filter((_, i) => !results[i]?.ok);
+      if (unmoved.length > 0 && clipEmpty(clipboard)) clipboard = stage(unmoved, "cut");
       await refreshPasteAffectedPanes(sources, inPaneB);
     } catch (e) {
       showNotice(String(e), true);
+      // CPE-1385 review: the call itself rejected (IPC/backend error) rather than resolving with
+      // per-item results — nothing was moved at all, so restore the FULL cut set (same `clipEmpty` guard
+      // as above) rather than leaving the user's selection silently gone and forcing a re-cut.
+      if (clipEmpty(clipboard)) clipboard = stage(sources, "cut");
     }
   }
 

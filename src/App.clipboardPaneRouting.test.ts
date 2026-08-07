@@ -391,4 +391,60 @@ describe("App — doPaste is re-entrancy-safe against a double-fire cut/move (CP
       policy: "keepboth",
     });
   });
+
+  it("a FAILED move restores the cut clipboard (not just clears it) so a retry Ctrl+V re-attempts the same move, and shows the error notice", async () => {
+    saveDualPane(false);
+    render(App);
+    const driveButtons = await screen.findAllByText("Local Disk (C:)");
+    await fireEvent.click(driveButtons[0]);
+    await waitFor(() => expect(screen.getByText("alpha.txt")).toBeTruthy());
+
+    await fireEvent.click(screen.getByText("alpha.txt"));
+    await fireEvent.keyDown(window, { key: "x", ctrlKey: true }); // cut
+
+    await fireEvent.dblClick(screen.getByText("destInA"));
+    await waitFor(() => expect(screen.queryByText("alpha.txt")).toBeNull());
+
+    // move_entries REJECTS every call in this test (e.g. permission denied / locked file) — the whole-
+    // call-rejection case, where `moveEntries` never resolves with per-item results at all.
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      const listingFor = (path: unknown) => disks[path as string] ?? [];
+      switch (cmd) {
+        case "special_folders": return [];
+        case "list_drives": return drives;
+        case "home_dir": return "C:\\Users\\t";
+        case "can_restore_from_trash": return true;
+        case "list_dir": return listingFor(args.path);
+        case "list_dir_stream": {
+          const ch = args.onEntry as { onmessage: (b: unknown) => void };
+          const data = listingFor(args.path);
+          ch.onmessage(data);
+          return data.length;
+        }
+        case "parent_dir": return null;
+        case "read_file_text": return "";
+        case "move_entries": {
+          const paths = args.paths as string[];
+          const dest = args.dest as string;
+          moveEntriesCalls.push({ paths, dest });
+          throw new Error("permission denied");
+        }
+        default: return null;
+      }
+    });
+
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    // (a) the error notice shows.
+    await waitFor(() => expect(screen.getByText((c) => c.includes("permission denied"))).toBeTruthy());
+    expect(moveEntriesCalls.length).toBe(1);
+
+    // (b) the clipboard is INTACT afterward — a subsequent Ctrl+V retries the SAME move rather than
+    // silently no-op'ing. Pre-fix (clear-only, no restore), the clipboard stayed empty after the failure,
+    // so this second paste's `clipEmpty(clipboard)` guard would have short-circuited it and
+    // `moveEntriesCalls.length` would have stayed at 1.
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+    await waitFor(() => expect(moveEntriesCalls.length).toBe(2));
+    expect(moveEntriesCalls[1]).toEqual({ paths: [`${PATH_A}\\alpha.txt`], dest: DEST_IN_A });
+  });
 });
