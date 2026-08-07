@@ -18,6 +18,13 @@ ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
 roxmltree = "0.20"
 # Basic-auth header encoding.
 base64 = "0.22"
+# The non-recursive streaming tokenizer roxmltree itself used to be built on (CPE-1398): used ONLY for a
+# cheap pre-parse element-nesting-depth guard ahead of roxmltree::Document::parse, which recurses per
+# nesting level and can stack-overflow the process on hostile deeply-nested input. A hand-rolled byte scan
+# for this was tried first and had a quote-unaware evasion bug (an unescaped `>` inside an attribute value
+# could hide a real nesting level) — the tokenizer correctly handles quotes/comments/CDATA/PIs, closing
+# that whole class of evasion, so it's worth the extra small dependency.
+xmlparser = "0.13.6"
 
 [dev-dependencies]
 # A tiny sync HTTP server for the in-process WebDAV test fixture (no Docker; runs on every CI OS).
