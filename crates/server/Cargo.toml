@@ -126,7 +126,15 @@ oid-registry = "0.7"
 # PEM encoding respectively. Not feature-gated (small, no native/system-lib cost), same reasoning as
 # `x509-parser` above. Proven working (same version) by the throwaway CPE-1425 samples generator
 # (see `samples/crypto/README.md`) before being adopted here as a real dependency.
-rcgen = { version = "0.14", features = ["crypto", "pem"] }
+# `x509-parser` (CPE-1421): turns on `rcgen::CertificateSigningRequestParams::from_pem`/`from_der` and
+# `rcgen::Issuer::from_ca_cert_pem`/`from_ca_cert_der` — parsing an incoming PKCS#10 CSR and loading an
+# existing CA certificate as a signing `Issuer`, exactly what `cert_sign::cert_issue_from_csr` needs.
+# rcgen's own `x509-parser` feature pins a newer `x509-parser` (^0.17) than the `x509-parser = "0.16"`
+# direct dependency above (pinned for `cert_decode`, CPE-1419); Cargo resolves both as separate crate
+# instances in the dependency graph, which is a normal, safe outcome (no shared types cross the
+# boundary — rcgen only uses its copy internally to parse the CSR/CA-cert PEM, cert_sign never touches
+# x509-parser types directly). Bumping the direct dependency to 0.17 to unify them is out of scope here.
+rcgen = { version = "0.14", features = ["crypto", "pem", "x509-parser"] }
 # Pure-Rust RSA key generation (CPE-1420) — rcgen's default `ring` backend can *sign* with an RSA key
 # but cannot *generate* one (RSA keygen needs the `aws_lc_rs` backend, which needs cmake/nasm); the `rsa`
 # crate fills exactly that gap so RSA-2048/4096 key creation stays pure-Rust with no native build
@@ -208,3 +216,12 @@ dicom-thumb = ["dep:dicom-object", "dep:dicom-pixeldata", "dep:dicom-core", "dep
 tempfile = "3"
 # Author a real .xlsx in the spreadsheet-preview test (write side; calamine reads).
 rust_xlsxwriter = "0.79"
+# Test-only: the `x509-parser` "verify" feature (CPE-1421) adds `X509Certificate::verify_signature`,
+# backed by `ring`. Declared here (not on the plain `x509-parser = "0.16"` dependency above) so the
+# `ring` signature-verification stack is compiled only for `cargo test`, never in a shipped build — the
+# same "test-only dev-dep feature" pattern the ticket calls for. Cargo unifies this with the normal
+# `x509-parser` dependency (same 0.16 requirement) when building the test target, so
+# `cert_sign`'s round-trip test can cryptographically verify an issued leaf certificate's signature
+# against its issuing CA's public key — proving the cert isn't just well-formed DER but was actually
+# signed by that CA, which `cert_decode`'s read-only parser deliberately never checks.
+x509-parser = { version = "0.16", features = ["verify"] }

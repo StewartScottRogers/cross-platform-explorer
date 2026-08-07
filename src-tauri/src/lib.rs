@@ -982,6 +982,33 @@ async fn cert_create(
     .map_err(|e| e.to_string())?
 }
 
+/// Certificate signing / issue-from-CSR (CPE-1421, epic CPE-1417): parse a PKCS#10 CSR and issue a leaf
+/// X.509 certificate for it, signed by an existing CA's certificate + private key. Thin async dispatcher
+/// into `cpe_server::cert_sign`; the pure issuance logic lives there, this only reads the CSR/CA-cert/
+/// CA-key PEM files from disk and writes the issued certificate PEM to `out_cert_path`. The CA private
+/// key is read only to sign — it is NEVER returned over IPC, logged, or echoed back: on success this
+/// returns only `()`, never key material, same as [`cert_create`].
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn cert_issue_from_csr(
+    csr_path: String,
+    ca_cert_path: String,
+    ca_key_path: String,
+    validity_days: u32,
+    out_cert_path: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let csr_pem = fs::read_to_string(&csr_path).map_err(|e| e.to_string())?;
+        let ca_cert_pem = fs::read_to_string(&ca_cert_path).map_err(|e| e.to_string())?;
+        let ca_key_pem = fs::read_to_string(&ca_key_path).map_err(|e| e.to_string())?;
+        let issued_pem =
+            cpe_server::cert_sign::cert_issue_from_csr(&csr_pem, &ca_cert_pem, &ca_key_pem, validity_days)?;
+        fs::write(&out_cert_path, &issued_pem).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Write a private-key PEM to `path` and tighten its permissions where the OS supports it: POSIX chmod
 /// 0600 (owner read/write only) on Unix, right after writing. Windows inherits the parent directory's
 /// ACL — narrowing that needs a Windows-specific ACL call this dispatcher doesn't attempt, the same
@@ -10108,6 +10135,7 @@ pub fn run() {
             jwt_preview,
             cert_decode,
             cert_create,
+            cert_issue_from_csr,
             read_model_info,
             read_image_data_url,
             read_raw_preview_data_url,
@@ -10926,6 +10954,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         jwt_preview,
         cert_decode,
         cert_create,
+        cert_issue_from_csr,
         read_model_info,
         read_image_data_url,
         read_raw_preview_data_url,

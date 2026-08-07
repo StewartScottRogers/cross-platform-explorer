@@ -405,6 +405,10 @@ pub mod cert_decode;
 /// (CPE-1420, epic CPE-1417).
 pub mod cert_create;
 
+/// Certificate signing — issue a leaf certificate from a PKCS#10 CSR, signed by a CA cert + key, via
+/// `rcgen` (CPE-1421, epic CPE-1417).
+pub mod cert_sign;
+
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 
