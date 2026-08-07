@@ -92,6 +92,12 @@
   /** The navigation-pane path currently hovered as a drop target, or "" for none. */
   let dropPath = "";
 
+  // CPE-1372: best-effort same-volume signal for the currently-hovered drop target (e.g. dragging
+  // onto a different drive in the Drives section), mirrors FileList.svelte's own cache — re-fetched
+  // only when the hovered destination changes, and reset whenever the hover moves off it.
+  let hoverVolumeDest = "";
+  let hoverSameVolume: boolean | null = null;
+
   /** Normalise separators so parent/child checks work on both platforms. */
   const norm = (p: string) => p.replace(/\\/g, "/").replace(/\/+$/, "");
 
@@ -104,10 +110,36 @@
     return isValidDrop(draggedPaths, dest);
   }
 
+  // CPE-1372: `draggedPaths` is bound from the file list, so it goes back to empty the moment a
+  // drag ends there (drop, cancel, or dragend) — piggyback on that to clear the cached signal below
+  // rather than needing our own dragend listener.
+  $: if (draggedPaths.length === 0) {
+    hoverVolumeDest = "";
+    hoverSameVolume = null;
+  }
+
   function onDragOver(e: DragEvent, dest: string) {
     if (!validTarget(dest)) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = hoverEffect(e);
+    // Same best-effort same-volume check as FileList.svelte's onDragOver: fetched once per distinct
+    // hovered destination, never per dragover tick.
+    if (dest !== hoverVolumeDest) {
+      hoverVolumeDest = dest;
+      hoverSameVolume = null;
+      if (draggedPaths.length > 0) {
+        commands.sameVolume(draggedPaths[0], dest).then(
+          (same) => {
+            if (hoverVolumeDest === dest) hoverSameVolume = same;
+          },
+          () => {
+            if (hoverVolumeDest === dest) hoverSameVolume = false;
+          },
+        );
+      }
+    }
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = hoverEffect({ ctrlKey: e.ctrlKey, shiftKey: e.shiftKey }, hoverSameVolume);
+    }
     dropPath = dest;
   }
 

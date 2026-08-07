@@ -32,11 +32,22 @@ describe("dnd shared model (CPE-669)", () => {
     });
   });
 
-  describe("hoverEffect", () => {
-    it("is modifier-driven and defaults to move", () => {
-      expect(hoverEffect({ ctrlKey: true, shiftKey: false })).toBe("copy");
-      expect(hoverEffect({ ctrlKey: false, shiftKey: true })).toBe("move");
-      expect(hoverEffect({ ctrlKey: false, shiftKey: false })).toBe("move");
+  describe("hoverEffect (CPE-1372: cursor must match resolveEffect's actual drop decision)", () => {
+    it("Ctrl forces copy, Shift forces move, regardless of volume", () => {
+      expect(hoverEffect({ ctrlKey: true, shiftKey: false }, true)).toBe("copy");
+      expect(hoverEffect({ ctrlKey: true, shiftKey: false }, false)).toBe("copy");
+      expect(hoverEffect({ ctrlKey: false, shiftKey: true }, true)).toBe("move");
+      expect(hoverEffect({ ctrlKey: false, shiftKey: true }, false)).toBe("move");
+    });
+    it("no modifier + same-volume shows move (e.g. C: to C:)", () => {
+      expect(hoverEffect({ ctrlKey: false, shiftKey: false }, true)).toBe("move");
+    });
+    it("no modifier + cross-volume shows copy, matching the actual copy drop (e.g. C: to D:)", () => {
+      expect(hoverEffect({ ctrlKey: false, shiftKey: false }, false)).toBe("copy");
+    });
+    it("unknown volume (no hover-time signal) defaults to move — the pre-CPE-1372 behaviour, not a regression to always-copy", () => {
+      expect(hoverEffect({ ctrlKey: false, shiftKey: false }, null)).toBe("move");
+      expect(hoverEffect({ ctrlKey: false, shiftKey: false })).toBe("move"); // sameVolume omitted entirely
     });
   });
 });
