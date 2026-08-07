@@ -203,6 +203,14 @@
 
   let dropIndex = -1;
 
+  // CPE-1372: best-effort same-volume signal for the currently-hovered drop target, so the hover
+  // cursor can show "copy" for a cross-volume drop instead of always defaulting to "move" (the
+  // authoritative decision is still made at drop, in App.svelte's dropInto). Re-fetched only when
+  // the hovered destination changes (not on every dragover tick) — keyed by dest so a stale result
+  // from a different row is never applied. Reset whenever a drag ends.
+  let hoverVolumeDest = "";
+  let hoverSameVolume: boolean | null = null;
+
   // Double-click vs drag (CPE-236): in a webview the second press of a double-
   // click, with a hair of movement, can start a native drag and eat the "open".
   // Suppress dragging briefly when a press lands right after another on the same
@@ -310,6 +318,8 @@
   function onDragEnd() {
     draggedPaths = [];
     dropIndex = -1;
+    hoverVolumeDest = "";
+    hoverSameVolume = null;
   }
 
   /** A themed drag image showing the item count for a multi-selection drag (CPE-669). Appended to the
@@ -336,7 +346,27 @@
   function onDragOver(e: DragEvent, i: number) {
     if (!validTarget(i)) return;
     e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = hoverEffect(e);
+    const dest = entries[i].path;
+    // CPE-1372: kick off the same-volume check once per distinct hovered destination (never per
+    // dragover tick) so the cursor can catch up to a cross-volume target; mirrors dropInto's own
+    // best-effort check (App.svelte) and the same fail-safe `.catch(() => false)`.
+    if (dest !== hoverVolumeDest) {
+      hoverVolumeDest = dest;
+      hoverSameVolume = null;
+      if (draggedPaths.length > 0) {
+        commands.sameVolume(draggedPaths[0], dest).then(
+          (same) => {
+            if (hoverVolumeDest === dest) hoverSameVolume = same;
+          },
+          () => {
+            if (hoverVolumeDest === dest) hoverSameVolume = false;
+          },
+        );
+      }
+    }
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = hoverEffect({ ctrlKey: e.ctrlKey, shiftKey: e.shiftKey }, hoverSameVolume);
+    }
     dropIndex = i;
   }
 

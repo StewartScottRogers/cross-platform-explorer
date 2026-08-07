@@ -50,12 +50,17 @@ export function resolveEffect(mods: DragMods, sameVolume: boolean | null): "copy
 }
 
 /**
- * The cursor effect to show while hovering a target, before the async same-volume check has run:
- * modifier-driven, defaulting to move (most drops stay on one drive). The authoritative decision is
- * made at drop via {@link resolveEffect}. Pure.
+ * The cursor effect to show while hovering a target (CPE-1372): same modifier precedence as
+ * {@link resolveEffect} (Ctrl forces copy, Shift forces move), and once `sameVolume` is confirmed
+ * `false` (cross-volume) it shows "copy" too, so the hover cursor matches what drop will actually
+ * do instead of always claiming "move". `sameVolume` is a best-effort signal a caller can thread
+ * through from an async same-volume check (see {@link resolveEffect}'s doc); pass `null` (the
+ * default) when no signal is available yet. Unlike `resolveEffect`, an unknown/`null` signal here
+ * still resolves to "move" — the common case, and the pre-CPE-1372 default — rather than "copy", so
+ * a caller with no hover-time signal doesn't regress every same-volume drag to a "copy" cursor. Pure.
  */
-export function hoverEffect(mods: DragMods): "copy" | "move" {
+export function hoverEffect(mods: DragMods, sameVolume: boolean | null = null): "copy" | "move" {
   if (mods.ctrlKey) return "copy";
   if (mods.shiftKey) return "move";
-  return "move";
+  return sameVolume === false ? "copy" : "move";
 }
