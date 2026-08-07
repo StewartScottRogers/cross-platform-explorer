@@ -72,6 +72,12 @@ Beyond the metadata baseline, the tree also carries substantial non-metadata fix
 `database/mini.sqlite` (users/products/orders tables + an `order_summary` view, dozens of rows),
 `other/tiny.wasm` (a module exporting `add`/`fib`), and `fonts/mini.ttf` (a full printable-ASCII glyph set).
 
+Since **CPE-1425**, `crypto/` adds JWT + certificate fixtures for the Crypto epic (CPE-1417): 4 JWTs
+(valid/expired/`alg:none`/rich multi-shape claims), a self-signed RSA-2048 + EC-P256 cert pair, a
+leaf+intermediate+root chain, a DER-encoded cert, an expired cert, a PKCS#10 CSR, and a standalone
+public key — see [`crypto/README.md`](crypto/README.md) for the full file-by-file breakdown, the
+"DEMO ONLY" private key, and the exact regeneration commands.
+
 The automated guard lives in `crates/server/tests/sample_fixtures.rs`, which reads each file through the
 shipped codecs/parsers (ID3/Vorbis/EXIF/PDF/MP4 metadata **plus** zip+rar listing, sqlite summary, wasm
 disassembly, font glyph-sheet render, and tiff→png transcode) and asserts the values above.
