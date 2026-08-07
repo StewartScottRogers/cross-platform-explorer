@@ -2119,6 +2119,30 @@
     }
   }
 
+  /** A row was clicked in the preview pane's FOLDER PEEK (CPE-1426, `FolderBrowser.svelte`'s `pick`
+   *  event): descend exactly one level into `parent` (the folder currently highlighted/peeked) with
+   *  `entry` pre-selected, so the preview then re-points at `entry`'s own preview (its own peek, if
+   *  `entry` is itself a folder — the same click handler fires again next time, so this is how the
+   *  whole tree gets walked one click at a time). Reuses the exact `pendingSelectPath` + `navigate()`
+   *  mechanism `revealFileInApp` already uses for search-hit reveals — not a forked nav path, per the
+   *  ticket. Back/Forward/breadcrumb/sidebar all update as a normal navigation because `navigate()` is
+   *  the real one. */
+  async function onFolderPeekPick(e: CustomEvent<{ parent: string; entry: DirEntry }>) {
+    pendingSelectPath = e.detail.entry.path;
+    await navigate(e.detail.parent);
+  }
+
+  /** A FILE row was double-clicked in the folder peek (`FolderBrowser.svelte`'s `open` event — never
+   *  fired for a subfolder row, see its own doc comment). Lands the main pane on `parent` with the file
+   *  selected first (so the selection/preview are consistent even if the open itself fails or the file
+   *  needs a picker), then hands it to the normal open flow (`open()` — external app / archive-enter /
+   *  vault-unlock, whichever applies), exactly like double-clicking that same file in the main list. */
+  async function onFolderPeekOpen(e: CustomEvent<{ parent: string; entry: DirEntry }>) {
+    pendingSelectPath = e.detail.entry.path;
+    await navigate(e.detail.parent);
+    await open(e.detail.entry);
+  }
+
   // ---- Encrypted vaults (CPE-1249, epic CPE-738) ------------------------------------------------
   // Activating a `.cpevault` file (double-click / Enter) confirms it's a real vault, prompts for the
   // passphrase, decrypts it into a private session dir, and navigates INTO that dir so the tree is
@@ -5735,6 +5759,8 @@
           loadHeicImageData={loadHeicImageData}
           loadPdfValidity={loadPdfValidity}
           saveText={savePreviewText}
+          on:pick={onFolderPeekPick}
+          on:open={onFolderPeekOpen}
         >
           <DetailsPane selected={selectedEntries.length ? selectedEntries : (homePreview ? [homePreview] : [])} {folderName} {itemCount} {folderIcon} />
         </PreviewPane>

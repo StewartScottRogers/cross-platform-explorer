@@ -22,7 +22,8 @@ export type Section =
   | "terminal"
   | "vaults"
   | "file-health"
-  | "crypto-preview";
+  | "crypto-preview"
+  | "folder-preview";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -63,6 +64,13 @@ const SECTION_DOC: Record<Section, string> = {
   // switch into (it's whichever decoded panel the preview pane shows for a .jwt/.pem/etc. file), but it
   // still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
   "crypto-preview": "26-crypto-preview",
+  // CPE-1426: the preview pane's folder-peek browser (`FolderBrowser.svelte`) — selecting a folder in
+  // the main list shows its contents one level down in the preview pane, and clicking a subfolder
+  // there drives the main pane's navigate + select so a tree can be walked from the preview pane alone.
+  // Like crypto-preview/file-health/vaults above, not a sidebar view you switch into (it's just what the
+  // preview pane shows for a highlighted directory), but it still earns its own doc page + registry
+  // entry per [[maintain-in-app-docs-library]].
+  "folder-preview": "27-folder-preview",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

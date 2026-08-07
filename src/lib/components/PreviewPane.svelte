@@ -21,6 +21,7 @@
   import DataBrowser from "./DataBrowser.svelte";
   import JwtPreview from "./JwtPreview.svelte";
   import CertPreview from "./CertPreview.svelte";
+  import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
@@ -993,6 +994,10 @@
     <JwtPreview path={entry.path} />
   {:else if provider.kind === "cert" && entry}
     <CertPreview path={entry.path} />
+  {:else if provider.kind === "folder" && entry}
+    <!-- Folder peek (CPE-1426): browsable one-level-down listing; row clicks bubble up to the app via
+         Svelte's bare `on:` forwarding (this component has no other listeners to conflict with). -->
+    <FolderBrowser path={entry.path} on:pick on:open />
   {:else if needsText && entry}
     {#if textState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>

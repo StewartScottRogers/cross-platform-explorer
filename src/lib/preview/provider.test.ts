@@ -166,8 +166,13 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.png", extension: "png" })).kind).toBe("image");
   });
 
-  it("falls back to metadata for folders and nothing selected", () => {
-    expect(pickProvider(entry({ name: "dir", is_dir: true, extension: "" })).kind).toBe("none");
+  it("routes a directory to the folder-peek browser, not the metadata fallback (CPE-1426)", () => {
+    const p = pickProvider(entry({ name: "dir", is_dir: true, extension: "" }));
+    expect(p.kind).toBe("folder");
+    expect(p.editable).toBe(false);
+  });
+
+  it("falls back to metadata only when nothing is selected", () => {
     expect(pickProvider(null).kind).toBe("none");
     expect(pickProvider(undefined).kind).toBe("none");
   });
