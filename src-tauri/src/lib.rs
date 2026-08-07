@@ -423,6 +423,16 @@ fn is_self_or_descendant(src: &Path, dest: &Path) -> bool {
     }
 }
 
+/// True if `a` and `b` refer to the SAME on-disk path — canonicalised so `.`/`..`/separator/symlink
+/// differences don't fool it, with a literal-compare fallback when a path can't be canonicalised (e.g. it
+/// doesn't exist yet). Used to refuse a copy/paste whose target resolves to its own source (CPE-1375).
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => a == b,
+    }
+}
+
 /// Pick a non-colliding name in `dir`, Explorer-style:
 /// "report.txt" -> "report - Copy.txt" -> "report - Copy (2).txt".
 /// We never overwrite an existing file — silent overwrite is data loss.
@@ -2189,7 +2199,23 @@ fn run_transfer(
             report.errors.push(format!("{name}: can't transfer a folder into itself"));
             continue;
         }
-        let target = match resolve_conflict(&dest_dir.join(name), policy) {
+        let base_target = dest_dir.join(name);
+        // CPE-1375 — CRITICAL data-loss guard, Overwrite ONLY: pasting a copy into the source's OWN parent
+        // makes the computed target the source path itself. Under `Overwrite`, `resolve_conflict` would
+        // `remove_file`/`remove_dir_all` the source BEFORE copying from it — permanently destroying the
+        // original (a whole folder tree for a directory), and the copy from the now-missing source fails.
+        // Overwriting an item with itself is a no-op, so skip it. Scoped to Overwrite deliberately: `Skip`
+        // already no-ops via `resolve_conflict` returning `None`, and `Keepboth` MUST fall through here so
+        // it reaches `unique_target` and produces the in-place duplicate ("a - Copy.txt") — the whole point
+        // of copy→paste-in-the-same-folder. (Move+Overwrite onto self is likewise covered.)
+        if policy == ConflictPolicy::Overwrite && same_path(&base_target, src) {
+            report.skipped += 1;
+            prog.done_bytes += sb;
+            prog.done_items += sf;
+            emit(&prog);
+            continue;
+        }
+        let target = match resolve_conflict(&base_target, policy) {
             Some(t) => t,
             None => {
                 report.skipped += 1;
@@ -12839,6 +12865,43 @@ overlay / overlay rw,relatime 0 0
         let r = run_transfer(3, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
         assert_eq!(r.transferred, 1);
         assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"NEW");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn run_transfer_skips_a_copy_onto_itself_instead_of_destroying_it() {
+        // CPE-1375 (CRITICAL): pasting a copy into the source's OWN folder makes the target path equal the
+        // source. With policy Overwrite, resolve_conflict used to remove_file/remove_dir_all the source
+        // BEFORE copying from it — permanent, unrecoverable data loss (a whole tree for a directory). It
+        // must now be a no-op skip that leaves the original intact.
+        let d = scratch("xfer_self");
+        fs::write(d.join("a.txt"), b"KEEP").unwrap();
+        fs::create_dir_all(d.join("sub")).unwrap();
+        fs::write(d.join("sub/inner.txt"), b"KEEPDIR").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        // File pasted into its own folder with the destructive Overwrite policy — must skip, not delete.
+        let r = run_transfer(1, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        assert_eq!(r.skipped, 1, "copy onto itself must be skipped");
+        assert_eq!(r.transferred, 0);
+        assert_eq!(r.failed, 0);
+        assert!(d.join("a.txt").exists(), "the source file must survive a copy-onto-itself");
+        assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"KEEP");
+
+        // Folder pasted into its own parent with Overwrite — the whole tree must survive (remove_dir_all
+        // would otherwise have nuked it).
+        let r = run_transfer(2, &[d.join("sub")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        assert_eq!(r.skipped, 1);
+        assert!(d.join("sub/inner.txt").exists(), "the source folder tree must survive");
+        assert_eq!(fs::read(d.join("sub/inner.txt")).unwrap(), b"KEEPDIR");
+
+        // The guard is scoped to Overwrite: copy→paste-in-the-same-folder with KEEPBOTH must still produce
+        // the in-place duplicate (it falls through to unique_target), not be swallowed by the self-guard.
+        let r = run_transfer(3, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        assert_eq!(r.transferred, 1, "keep-both in-place duplicate must still copy");
+        assert_eq!(r.skipped, 0);
+        assert!(d.join("a - Copy.txt").exists(), "in-place duplicate should be created");
+        assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"KEEP", "the original must remain untouched");
         let _ = fs::remove_dir_all(&d);
     }
 

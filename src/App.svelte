@@ -862,7 +862,7 @@
     { id: "file.rename", group: $t("palette.groupFile"), label: $t("palette.rename"), shortcut: "F2", run: renameSelected, enabled: oneSelected },
     { id: "file.duplicate", group: $t("palette.groupFile"), label: $t("palette.duplicate"), shortcut: "Ctrl+D", run: doDuplicate, enabled: hasSelection },
     { id: "file.delete", group: $t("palette.groupFile"), label: $t("palette.delete"), keywords: "recycle bin trash remove", shortcut: "Delete", run: () => doDelete(false), enabled: hasSelection },
-    { id: "file.deletePermanent", group: $t("palette.groupFile"), label: $t("palette.deletePermanent"), keywords: "remove", shortcut: "Shift+Delete", run: () => doDelete(true), enabled: hasSelection },
+    { id: "file.deletePermanent", group: $t("palette.groupFile"), label: $t("palette.deletePermanent"), keywords: "remove", shortcut: "Shift+Delete", run: () => askDelete(true), enabled: hasSelection },
     { id: "file.selectAll", group: $t("palette.groupFile"), label: $t("palette.selectAll"), shortcut: "Ctrl+A", run: selectAllVisible, enabled: inFolder },
     { id: "file.properties", group: $t("palette.groupFile"), label: $t("palette.properties"), shortcut: "Alt+Enter", run: openProperties, enabled: hasSelection },
     { id: "file.metadataStudio", group: $t("palette.groupFile"), label: $t("studio.menu"), run: openMetadataStudio, enabled: hasSelection },
