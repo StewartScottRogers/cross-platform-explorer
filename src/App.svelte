@@ -1776,6 +1776,10 @@
       selection = emptySelection();
       search = "";
       selectedTag = ""; // a tag filter is folder-scoped; leaving the folder clears it (CPE-639)
+      fileFilter = "all"; // ...as is the file-type filter (CPE-1367): it's transient view state (not a
+      // persisted preference like sort/view), so like `search`/`selectedTag` it must clear on real
+      // navigation — otherwise a filter set in one tab/folder bleeds into every other tab (the CPE-1366
+      // class of leak: a top-level view-var loadPath forgot to reset).
     }
     error = "";
 
