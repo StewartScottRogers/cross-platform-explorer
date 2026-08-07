@@ -19,6 +19,19 @@
 //! *declared* intrinsic size (from `width`/`height`/`viewBox`) is clamped before any canvas is
 //! allocated, so a crafted `viewBox="0 0 999999999 999999999"` can't force a multi-gigabyte pixmap.
 //! `usvg` itself also caps the parsed element count (1,000,000) as a second, independent guard.
+//!
+//! Stack-overflow guard (CPE-1413, mirrors `cpe_webdav`'s `MAX_XML_NESTING_DEPTH`/`xml_nesting_too_deep`
+//! fix for CPE-1398 — the exact same underlying vulnerability class): `usvg::Tree::from_data` parses the
+//! raw SVG text into a DOM via `roxmltree::Document::parse` *before* usvg's own element-count/`use`-depth
+//! caps ever run, and — like most XML parsers — `roxmltree` recurses per nesting level with **no depth
+//! limit of its own**, so a crafted `<g><g><g>...` a few thousand deep is enough to blow a thread stack
+//! and crash the whole process with an **uncatchable** stack overflow, confirmed empirically here exactly
+//! as it was for webdav's PROPFIND parsing. [`xml_nesting_too_deep`] is the same non-recursive,
+//! quote/comment/CDATA/PI/DOCTYPE-aware byte scan run before the bytes are ever handed to `usvg`, capped
+//! at [`MAX_SVG_NESTING_DEPTH`]. Written by hand instead of reusing webdav's `xmlparser`-crate scanner
+//! because `rasterize_svg` takes raw `&[u8]` (not `&str`), so this version needs no UTF-8 boundary
+//! handling at all — a further reason to keep it a self-contained byte scan rather than adding a new
+//! dependency for it.
 
 use image::{DynamicImage, RgbaImage};
 
@@ -26,10 +39,141 @@ use image::{DynamicImage, RgbaImage};
 /// clamped to this before we ever allocate a canvas. Real SVG artwork is never this big.
 const MAX_SVG_DIMENSION: u32 = 20_000;
 
+/// The deepest element nesting [`xml_nesting_too_deep`] will allow before `rasterize_svg` refuses the
+/// document outright (CPE-1413). Mirrors `cpe_webdav::MAX_XML_NESTING_DEPTH`'s reasoning and value: the
+/// exact crash depth is stack-size- and build-profile-dependent (confirmed here at well under 500 levels
+/// on a 256KB debug-build thread stack — the same small-stack probe CPE-1398's fix was validated
+/// against), so 64 is sized with a wide margin under any observed crash depth while a real hand-authored
+/// or tool-exported SVG's group nesting is essentially always under a few dozen levels, so this costs
+/// nothing for legitimate artwork.
+const MAX_SVG_NESTING_DEPTH: usize = 64;
+
+/// Cheap, non-recursive guard against maliciously (or accidentally) deep XML nesting, run before the
+/// document is handed to `usvg`/`roxmltree` (see the module doc comment and [`MAX_SVG_NESTING_DEPTH`]).
+///
+/// Walks `bytes` once, tracking only a `depth: usize` counter — never the real call stack — so this
+/// itself can't stack-overflow no matter how deep or malformed the input is. Quote-aware when scanning
+/// for a tag's closing `>` (an attribute value containing a literal `>`, e.g. `<a b="/>">`, is legal XML
+/// and must not be misread as the tag's own close — this is the exact scan-evasion bug class a first
+/// version of webdav's equivalent guard fell to in its CPE-1398 follow-up) and skips comments, CDATA
+/// sections, processing instructions, and `<!DOCTYPE ...>` declarations (none of which nest as elements)
+/// without counting them toward depth.
+fn xml_nesting_too_deep(bytes: &[u8], max_depth: usize) -> bool {
+    fn find(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
+        if from > bytes.len() {
+            return None;
+        }
+        bytes[from..].windows(needle.len()).position(|w| w == needle).map(|p| from + p)
+    }
+    fn starts_with(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
+        bytes.len() >= i + needle.len() && &bytes[i..i + needle.len()] == needle
+    }
+
+    let n = bytes.len();
+    let mut i = 0usize;
+    let mut depth: usize = 0;
+    while i < n {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        if starts_with(bytes, i, b"<!--") {
+            // Comment: skip to "-->" without counting anything inside it.
+            match find(bytes, i + 4, b"-->") {
+                Some(end) => i = end + 3,
+                None => break, // unterminated — let usvg's real parser report the error
+            }
+            continue;
+        }
+        if starts_with(bytes, i, b"<![CDATA[") {
+            match find(bytes, i + 9, b"]]>") {
+                Some(end) => i = end + 3,
+                None => break,
+            }
+            continue;
+        }
+        if starts_with(bytes, i, b"<?") {
+            // Processing instruction / XML declaration.
+            match find(bytes, i + 2, b"?>") {
+                Some(end) => i = end + 2,
+                None => break,
+            }
+            continue;
+        }
+        if i + 1 < n && bytes[i + 1] == b'!' {
+            // `<!DOCTYPE ...>` (or similar): not an element, so it never affects depth. Honor a nested
+            // `[...]` internal subset and quoted values so an embedded '>' inside either doesn't end the
+            // declaration early.
+            let mut j = i + 2;
+            let mut bracket_depth: i32 = 0;
+            let mut quote: Option<u8> = None;
+            while j < n {
+                let c = bytes[j];
+                if let Some(q) = quote {
+                    if c == q {
+                        quote = None;
+                    }
+                } else if c == b'"' || c == b'\'' {
+                    quote = Some(c);
+                } else if c == b'[' {
+                    bracket_depth += 1;
+                } else if c == b']' {
+                    bracket_depth -= 1;
+                } else if c == b'>' && bracket_depth <= 0 {
+                    break;
+                }
+                j += 1;
+            }
+            if j >= n {
+                break;
+            }
+            i = j + 1;
+            continue;
+        }
+
+        // A real start/end/empty-element tag: scan to the first UNQUOTED '>'.
+        let is_end_tag = i + 1 < n && bytes[i + 1] == b'/';
+        let mut j = i + 1;
+        let mut quote: Option<u8> = None;
+        while j < n {
+            let c = bytes[j];
+            if let Some(q) = quote {
+                if c == q {
+                    quote = None;
+                }
+            } else if c == b'"' || c == b'\'' {
+                quote = Some(c);
+            } else if c == b'>' {
+                break;
+            }
+            j += 1;
+        }
+        if j >= n {
+            break; // unterminated tag — let usvg's real parser report the error
+        }
+        let self_closing = j > i + 1 && bytes[j - 1] == b'/';
+        if is_end_tag {
+            depth = depth.saturating_sub(1);
+        } else if !self_closing {
+            depth += 1;
+            if depth > max_depth {
+                return true;
+            }
+        }
+        i = j + 1;
+    }
+    false
+}
+
 /// Rasterize `bytes` (the contents of an `.svg` file) to an RGBA image whose longest edge is at most
 /// `max_edge` pixels, preserving the document's aspect ratio. Never panics: a malformed document, an
-/// implausible declared size, or a render-target allocation failure all return `Err`.
+/// implausible declared size, an implausibly deep element nesting, or a render-target allocation failure
+/// all return `Err`.
 pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String> {
+    if xml_nesting_too_deep(bytes, MAX_SVG_NESTING_DEPTH) {
+        return Err("SVG element nesting too deep".to_string());
+    }
+
     let opt = resvg::usvg::Options::default();
     let tree = resvg::usvg::Tree::from_data(bytes, &opt).map_err(|e| e.to_string())?;
 
@@ -125,5 +269,81 @@ mod tests {
         // max_edge=0 must clamp to at least 1px rather than dividing by zero / allocating a 0x0 pixmap.
         let img = rasterize_svg(&square_svg(10, 10), 0).unwrap();
         assert_eq!((img.width(), img.height()), (1, 1));
+    }
+
+    /// An SVG whose `<g>` nesting is `depth` levels deep (CPE-1413's stack-overflow probe).
+    fn deeply_nested_svg(depth: usize) -> Vec<u8> {
+        let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        s.push_str(&"<g>".repeat(depth));
+        s.push_str(r##"<rect width="10" height="10" fill="#f00"/>"##);
+        s.push_str(&"</g>".repeat(depth));
+        s.push_str("</svg>");
+        s.into_bytes()
+    }
+
+    #[test]
+    fn xml_nesting_guard_rejects_deep_nesting_and_allows_shallow_real_artwork() {
+        assert!(xml_nesting_too_deep(&deeply_nested_svg(4000), MAX_SVG_NESTING_DEPTH));
+        assert!(!xml_nesting_too_deep(&square_svg(10, 10), MAX_SVG_NESTING_DEPTH));
+        // A realistic, moderately-nested illustration (well under the cap) must not be rejected.
+        assert!(!xml_nesting_too_deep(&deeply_nested_svg(20), MAX_SVG_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn xml_nesting_guard_is_quote_aware_and_not_fooled_by_a_literal_gt_in_an_attribute_value() {
+        // `<a b="/>">` is legal XML whose attribute value contains the literal bytes `/>` — a
+        // quote-UNaware scan could misread that embedded '>' as the tag's own close and wrongly treat
+        // the tag as self-closing, silently under-counting depth (the exact CPE-1398 follow-up bypass
+        // class). Confirm this guard is not fooled: it must still recognize deep nesting built from this
+        // shape as too deep.
+        let n = 4000;
+        let bypass_shape = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">{}{}</svg>",
+            "<a b=\"/>\">".repeat(n),
+            "</a>".repeat(n)
+        );
+        assert!(xml_nesting_too_deep(bypass_shape.as_bytes(), MAX_SVG_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn xml_nesting_guard_ignores_comments_cdata_and_processing_instructions() {
+        // A literal '>' inside a comment/CDATA/PI must not be misread as closing a tag, and none of
+        // these constructs should themselves count toward depth.
+        let doc = concat!(
+            "<?xml version=\"1.0\"?>",
+            "<svg xmlns=\"http://www.w3.org/2000/svg\">",
+            "<!-- a comment with a lone > inside -->",
+            "<![CDATA[ some > data ]]>",
+            "<rect width=\"1\" height=\"1\"/>",
+            "</svg>",
+        );
+        assert!(!xml_nesting_too_deep(doc.as_bytes(), MAX_SVG_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn xml_nesting_guard_handles_truncated_and_malformed_input_without_panicking() {
+        // Unterminated comment/CDATA/PI/DOCTYPE/tag, and various truncation points — none of these must
+        // panic or loop forever; the real usvg parse is left to report the actual error.
+        for doc in [
+            "<",
+            "<!",
+            "<!-",
+            "<!--unterminated comment",
+            "<![CDATA[unterminated",
+            "<?xml unterminated",
+            "<!DOCTYPE unterminated",
+            "<svg><g><g><g>",
+            "",
+        ] {
+            xml_nesting_too_deep(doc.as_bytes(), MAX_SVG_NESTING_DEPTH);
+        }
+    }
+
+    #[test]
+    fn rasterize_svg_rejects_deeply_nested_groups_gracefully() {
+        // Post-CPE-1413-fix: this must return a graceful Err, not panic (and, per the accompanying
+        // integration test, not stack-overflow even on a small thread stack).
+        let err = rasterize_svg(&deeply_nested_svg(4000), 32);
+        assert!(err.is_err(), "implausibly deep SVG group nesting must be rejected, not risk a stack overflow");
     }
 }
