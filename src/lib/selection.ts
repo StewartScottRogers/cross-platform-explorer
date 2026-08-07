@@ -167,6 +167,30 @@ export function pickActivePane<T>(
   return dualPane && activePane === 1 ? paneB : paneA;
 }
 
+/** A confirm-gated action's target, frozen at the moment the confirm dialog opens. */
+export interface ConfirmTarget {
+  /** Which pane the paths below came from — must be replayed as-is, never re-derived, once captured. */
+  inPaneB: boolean;
+  paths: string[];
+}
+
+/**
+ * Snapshot which pane + paths a confirm-gated destructive action (Delete, …) targets, at the moment
+ * the confirmation is asked for — CPE-1370 review (data-loss fix): a confirm dialog can stay open for
+ * an arbitrary amount of time, during which `activePane` can change (e.g. Tab), so the code that
+ * actually performs the action must NOT re-derive its target from live state once the dialog is up —
+ * it would silently act on whatever pane happens to be active when the user clicks "confirm", not the
+ * one they were shown and agreed to. Pure + returns a fresh array (`.map`, not the source reference) so
+ * the result can't be mutated out from under the caller by a later change to `selectedEntries` either.
+ * Unit-testable in isolation, mirroring `pickActivePane`.
+ */
+export function snapshotConfirmTarget(
+  inPaneB: boolean,
+  selectedEntries: { path: string }[],
+): ConfirmTarget {
+  return { inPaneB, paths: selectedEntries.map((e) => e.path) };
+}
+
 /**
  * Remap a selection after the listing changes (sort, filter, refresh). Indices
  * are meaningless across a re-order, so we re-derive them from the paths that

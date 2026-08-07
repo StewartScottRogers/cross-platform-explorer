@@ -163,7 +163,7 @@
   import {
     emptySelection, click as selClick, selectOnly, selectAll, moveLead,
     selectedIndices, selectedCount, remapByPath, invertSelection, selectIndices,
-    pickActivePane, type Selection,
+    pickActivePane, snapshotConfirmTarget, type Selection, type ConfirmTarget,
   } from "./lib/selection";
   import { arrowDelta, pageDelta } from "./lib/gridnav";
   import {
@@ -886,7 +886,7 @@
     { id: "file.copyName", group: $t("palette.groupFile"), label: $t("palette.copyName"), run: doCopyName, enabled: hasSelection },
     { id: "file.rename", group: $t("palette.groupFile"), label: $t("palette.rename"), shortcut: "F2", run: renameSelected, enabled: oneSelected },
     { id: "file.duplicate", group: $t("palette.groupFile"), label: $t("palette.duplicate"), shortcut: "Ctrl+D", run: doDuplicate, enabled: hasSelection },
-    { id: "file.delete", group: $t("palette.groupFile"), label: $t("palette.delete"), keywords: "recycle bin trash remove", shortcut: "Delete", run: () => doDelete(false), enabled: hasSelection },
+    { id: "file.delete", group: $t("palette.groupFile"), label: $t("palette.delete"), keywords: "recycle bin trash remove", shortcut: "Delete", run: () => askDelete(false), enabled: hasSelection },
     { id: "file.deletePermanent", group: $t("palette.groupFile"), label: $t("palette.deletePermanent"), keywords: "remove", shortcut: "Shift+Delete", run: () => askDelete(true), enabled: hasSelection },
     { id: "file.selectAll", group: $t("palette.groupFile"), label: $t("palette.selectAll"), shortcut: "Ctrl+A", run: selectAllVisible, enabled: inFolder },
     { id: "file.properties", group: $t("palette.groupFile"), label: $t("palette.properties"), shortcut: "Alt+Enter", run: openProperties, enabled: hasSelection },
@@ -2403,8 +2403,12 @@
     }
   }
 
-  function beginRename(entry: DirEntry) {
-    if (blockedInArchive()) return;
+  /** `inPaneB` (CPE-1370 review): pane B is always a plain real folder in v1 — never an archive/smart
+   *  folder/saved search/Replay reconstruction, all of which are pane-A-only virtual views — so
+   *  `blockedInArchive()` (which reads pane-A-only state) must only gate a pane-A rename. Every caller
+   *  except the F2 keyboard path (which can target either pane) targets pane A, so it defaults false. */
+  function beginRename(entry: DirEntry, inPaneB = false) {
+    if (!inPaneB && blockedInArchive()) return;
     renamingPath = entry.path;
     renameValue = entry.name;
   }
@@ -3336,36 +3340,46 @@
   }
 
   function askDelete(permanent: boolean) {
-    // CPE-1370: the Delete key (and Shift+Delete) must act on whichever pane is focused. `archive` /
-    // `smartFolder` / `structuredSearch` / Replay mode are all pane-A-only virtual views (pane B —
+    // CPE-1370 review (data-loss fix): SNAPSHOT the target pane + paths right now via
+    // `snapshotConfirmTarget` — the confirm dialog stays open for an arbitrary amount of time, during
+    // which `activePane` can still change underneath it (Tab still reaches `handleKeydown` while
+    // `confirm` is showing). Without the snapshot, a user could select pane A's files, Shift+Delete, see
+    // pane A's files in the confirm message, Tab to pane B, click "Delete permanently" — and PERMANENTLY
+    // delete pane B's files, which were never shown or confirmed. `target` is threaded through the
+    // `onYes` closure into `doDelete` below, which must NOT re-derive it from live state.
+    // `archive`/`smartFolder`/`structuredSearch`/Replay mode are all pane-A-only virtual views (pane B —
     // when it's the active pane — always shows a plain real folder), so `blockedInArchive()` only
     // applies when we're actually targeting pane A.
     const inPaneB = dualPane && activePane === 1;
     const pane = activePaneState();
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
+    const target = snapshotConfirmTarget(inPaneB, pane.selectedEntries);
     const n = pane.selectedEntries.length;
     const what = n === 1 ? `"${pane.selectedEntries[0].name}"` : `${n} items`;
 
     if (!permanent) {
-      // Recycle bin is recoverable, so no modal — just do it and say so.
-      doDelete(false);
+      // Recycle bin is recoverable, so no modal — just do it and say so. (Nothing can change `pane`
+      // between here and `doDelete` since this path is fully synchronous — no `await` in between — but
+      // it still goes through the same snapshot for a single, consistent code path.)
+      doDelete(false, target);
       return;
     }
     confirm = {
       title: "Delete permanently?",
       message: `${what} will be permanently deleted. This cannot be undone and does not go to the Recycle Bin.`,
       label: "Delete permanently",
-      onYes: () => doDelete(true),
+      onYes: () => doDelete(true, target),
     };
   }
 
-  async function doDelete(permanent: boolean) {
+  /** `target` is the snapshot `askDelete` captured at confirm-open time (or immediately, for the
+   *  non-permanent no-modal path) via `snapshotConfirmTarget` — deliberately a parameter, NOT
+   *  re-derived from live `activePane`/selection state here, so a pane switch that happens while a
+   *  confirm dialog was open can never retarget an already-confirmed delete onto a different pane's
+   *  files (CPE-1370 review). */
+  async function doDelete(permanent: boolean, target: ConfirmTarget) {
     confirm = null;
-    // CPE-1370: re-derive the target pane the same way `askDelete` did, so a delete confirmed via the
-    // dialog (a tick later) still lands on the pane the user actually meant.
-    const inPaneB = dualPane && activePane === 1;
-    const pane = activePaneState();
-    const paths = pane.selectedEntries.map((e) => e.path);
+    const { inPaneB, paths } = target;
     if (paths.length === 0) return;
     try {
       const results = permanent
@@ -3938,6 +3952,12 @@
     // Never hijack keys while typing in an editor, the path bar, or search.
     if (target && ["INPUT", "TEXTAREA"].includes(target.tagName)) return;
     if (renamingPath) return;
+    // CPE-1370 review (defense-in-depth): a confirm dialog (delete, etc.) owns the keyboard while open —
+    // in particular Tab must NOT be able to flip `activePane` behind it, which would otherwise let a
+    // confirm captured against one pane get confirmed against another (see `askDelete`'s snapshot for
+    // the primary fix). `ConfirmDialog` only wires its OWN `<svelte:window>` listener for Escape; every
+    // other key (including Tab) would otherwise still reach this handler underneath the modal.
+    if (confirm) return;
 
     // Quick-look owns the keyboard while open (CPE-645).
     if (quickLook) {
@@ -3952,6 +3972,7 @@
     // with pane B focused, pane A otherwise. Computed once up front so every case below reads/writes
     // the same pane consistently.
     const pane = activePaneState();
+    const inPaneB = dualPane && activePane === 1;
     // Dual-pane (CPE-677): plain Tab switches the active pane. Single-pane (dualPane off) leaves Tab's
     // default focus traversal untouched.
     if (dualPane && !ctrl && !event.altKey && event.key === "Tab") {
@@ -4029,14 +4050,16 @@
       case "F5": event.preventDefault(); refresh(); break;
       case "F2":
         event.preventDefault();
-        if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0]);
+        if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0], inPaneB);
         break;
       case "Delete":
         event.preventDefault();
         askDelete(event.shiftKey); // Shift+Del = permanent, and is confirmed
         break;
       case "Escape":
-        selection = emptySelection();
+        // CPE-1370 review: route through the active pane like every other case here, so Escape clears
+        // pane B's selection when it's the one focused instead of always hard-clearing pane A's.
+        pane.setSelection(emptySelection());
         ctx = null;
         break;
       case "ArrowDown":

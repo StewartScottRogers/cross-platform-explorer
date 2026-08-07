@@ -12,6 +12,7 @@ import {
   selectIndices,
   invertSelection,
   pickActivePane,
+  snapshotConfirmTarget,
 } from "./selection";
 import { pageDelta } from "./gridnav";
 
@@ -189,6 +190,51 @@ describe("selection", () => {
       const selB = selectOnly(7);
       expect(pickActivePane(true, 1, selA, selB)).toBe(selB);
       expect(pickActivePane(true, 0, selA, selB)).toBe(selA);
+    });
+  });
+
+  // ---- CPE-1370 review: a confirm-gated action's target is frozen at confirm-open time, so a later
+  // ---- pane switch (while the dialog is open) can't retarget an already-confirmed delete (data loss).
+
+  describe("snapshotConfirmTarget (CPE-1370 review — delete-target snapshot)", () => {
+    it("captures inPaneB and the paths of the given entries", () => {
+      const entries = [{ path: "/b/one.txt" }, { path: "/b/two.txt" }];
+      const target = snapshotConfirmTarget(true, entries);
+      expect(target).toEqual({ inPaneB: true, paths: ["/b/one.txt", "/b/two.txt"] });
+    });
+
+    it("captures pane A the same way", () => {
+      const target = snapshotConfirmTarget(false, [{ path: "/a/one.txt" }]);
+      expect(target).toEqual({ inPaneB: false, paths: ["/a/one.txt"] });
+    });
+
+    it("empty selection snapshots to an empty paths array", () => {
+      expect(snapshotConfirmTarget(true, [])).toEqual({ inPaneB: true, paths: [] });
+    });
+
+    // The actual data-loss bug: a confirm dialog stays open while `activePane` can still change
+    // underneath it. Prove the snapshot is immune to that by mutating the SOURCE data the caller would
+    // naturally still be holding a reference to, after the snapshot was taken — the snapshot must not
+    // observe it (it copies the paths array, not the pane's live `selectedEntries` reference).
+    it("is a frozen copy — mutating the source entries afterward doesn't change the snapshot", () => {
+      const liveSelectedEntries = [{ path: "/b/bravo.txt" }];
+      const target = snapshotConfirmTarget(true, liveSelectedEntries);
+
+      // Simulate "activePane flipped and pane A's selection is now what `selectedEntries` points at" —
+      // i.e. exactly what would happen between askDelete capturing pane B and a user Tab-ing to pane A
+      // before clicking "confirm", if doDelete were (wrongly) reading live state instead of `target`.
+      liveSelectedEntries.push({ path: "/b/should-not-appear.txt" });
+      liveSelectedEntries[0].path = "/a/alpha.txt"; // even an in-place mutation of the first entry
+
+      expect(target).toEqual({ inPaneB: true, paths: ["/b/bravo.txt"] });
+    });
+
+    it("two snapshots from the same pane don't alias each other's paths array", () => {
+      const entries = [{ path: "/b/bravo.txt" }];
+      const t1 = snapshotConfirmTarget(true, entries);
+      const t2 = snapshotConfirmTarget(true, entries);
+      t1.paths.push("/b/mutated-in-t1.txt");
+      expect(t2.paths).toEqual(["/b/bravo.txt"]); // t2 unaffected by mutating t1's array
     });
   });
 
