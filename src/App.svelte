@@ -587,12 +587,19 @@
   /** Full-screen quick-look of images (Space), or null (CPE-645). */
   let quickLook: { images: { path: string; name: string }[]; index: number } | null = null;
 
-  /** Open quick-look on the selected image, seeding the folder's images. Returns false if not applicable. */
-  function openQuickLook(): boolean {
-    if (isHome || archive || selectedEntries.length !== 1) return false;
-    const sel = selectedEntries[0];
+  /** Open quick-look on the selected image, seeding the folder's images. Returns false if not applicable.
+   *  `inPaneB` (CPE-1432): Space is a global keyboard shortcut, so `handleKeydown` passes the live active
+   *  pane (the same `dualPane && activePane === 1` flag it already computes for the other pane-aware keys)
+   *  through `paneStateFor`, mirroring `askVaultCreate`/`askCertCreate`. `archive`/`isHome` are pane-A-only
+   *  concepts (pane B is always a plain real folder), so pane B's "no folder" guard is `paneBPath === HOME`
+   *  instead — default `inPaneB = false` keeps single-pane and pane-A-active behavior byte-for-byte
+   *  unchanged. */
+  function openQuickLook(inPaneB = false): boolean {
+    const pane = paneStateFor(inPaneB);
+    if ((inPaneB ? paneBPath === HOME : (isHome || archive)) || pane.selectedEntries.length !== 1) return false;
+    const sel = pane.selectedEntries[0];
     if (sel.is_dir || !isImage(sel.name)) return false;
-    const images = visible.filter((e) => !e.is_dir && isImage(e.name)).map((e) => ({ path: e.path, name: e.name }));
+    const images = pane.visible.filter((e) => !e.is_dir && isImage(e.name)).map((e) => ({ path: e.path, name: e.name }));
     const index = images.findIndex((im) => im.path === sel.path);
     if (index < 0) return false;
     quickLook = { images, index };
@@ -614,10 +621,14 @@
   } | null = null;
 
   /** Open the media quick-look on the selected media file, seeding the folder's media playlist. Returns
-   *  false if not applicable (not a single media selection), so Space can fall through to its other uses. */
-  function openMediaQuickLook(): boolean {
-    if (isHome || archive || selectedEntries.length !== 1) return false;
-    const playlist = buildMediaPlaylist(visible, selectedEntries[0].path);
+   *  false if not applicable (not a single media selection), so Space can fall through to its other uses.
+   *  `inPaneB` (CPE-1432): same active-pane routing as `openQuickLook` above — pane B's selection + its
+   *  own listing feed `buildMediaPlaylist` when pane B is active, so the folder-stepping (◄/►) also stays
+   *  within pane B's folder. */
+  function openMediaQuickLook(inPaneB = false): boolean {
+    const pane = paneStateFor(inPaneB);
+    if ((inPaneB ? paneBPath === HOME : (isHome || archive)) || pane.selectedEntries.length !== 1) return false;
+    const playlist = buildMediaPlaylist(pane.visible, pane.selectedEntries[0].path);
     if (!playlist) return false; // selection isn't a media file
     mediaQuickLook = { playlist, render: 0 };
     return true;
@@ -4604,7 +4615,7 @@
     if (dualPane && ctrl && !event.altKey && event.key.toLowerCase() === "u") { event.preventDefault(); void swapPanes(); return; }
     // Space quick-looks the selected image (CPE-645) or media file (CPE-1430) — image lightbox first,
     // then the full-screen media player; both are guarded to their own file kinds so they never collide.
-    if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && (openQuickLook() || openMediaQuickLook())) { event.preventDefault(); return; }
+    if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && (openQuickLook(inPaneB) || openMediaQuickLook(inPaneB))) { event.preventDefault(); return; }
 
     if (ctrl && event.key.toLowerCase() === "l") { event.preventDefault(); editingPath = true; return; }
     if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
