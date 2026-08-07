@@ -2,7 +2,7 @@
 id: CPE-720
 title: "EPIC: Audio & video player pane"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -40,6 +40,12 @@ folder of clips) is a basic expectation for a general explorer.
 2026-07-23 (dayshift) — **Activated.** First slice: **CPE-943** — `playlist::Playlist`: ordered tracks + a
 cursor with repeat (off/one/all) + seeded-shuffle navigation. Remaining: the audio/video decode + transport
 UI and format support.
+
+2026-08-07 (CLI, user-present) — **Re-activated.** User: "start the next epic" with the app running for live
+verification. Decomposed the remaining DoD (playback + transport + quick-look) just-in-time:
+- **CPE-1429** — audio/video playback + transport in the preview pane (core). Build first.
+- **CPE-1430** — full-screen quick-look player + folder stepping (reuses CPE-943 Playlist + 1429 transport).
+- **CPE-1431** — waveform/keyframe scrub strip (DEFERRED; heavier extraction+caching).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Actual audio/video decode + transport UI + quick-look unbuilt (only playlist model).
