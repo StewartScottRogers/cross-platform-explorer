@@ -19,6 +19,9 @@
   export let name = "";
   /** Open the file in the OS default handler — wired to the open-externally command by the parent. */
   export let openExternal: () => void = () => {};
+  /** Start playing as soon as the source loads. Used by the full-screen quick-look (CPE-1430) so a
+   *  stepped-to clip autoplays; stays off in the preview pane so selecting a file never blasts audio. */
+  export let autoplay = false;
 
   let mediaEl: HTMLMediaElement | undefined;
   let state = mt.initialMediaState();
@@ -29,7 +32,9 @@
   $: if (src !== lastSrc) {
     lastSrc = src;
     errored = false;
-    state = mt.initialMediaState();
+    // Autoplay (CPE-1430) is expressed through the pure controller (`mt.play`) so the transport UI still
+    // reflects intent immediately; `syncPlay` then drives the element (guarded for jsdom).
+    state = autoplay ? mt.play(mt.initialMediaState()) : mt.initialMediaState();
   }
 
   // ---- state → element (imperative sync). Guarded for jsdom, where play()/pause() are unimplemented

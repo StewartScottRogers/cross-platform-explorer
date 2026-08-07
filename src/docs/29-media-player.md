@@ -33,6 +33,29 @@ The pane shows its own themed controls instead of the raw browser bar:
 
 The controls wrap onto a second row in a narrow pane rather than clipping.
 
+## Full-screen quick-look
+
+Press **Space** with an audio or video file selected to open it in a full-screen player, front and
+centre over the window — handy for actually watching a clip rather than glancing at it in the side
+pane. Press **Space** again, or **Esc**, or click the dimmed area outside the player, to close and
+return to the file list.
+
+### Stepping through a folder
+
+Once the player is open, the **←** and **→** arrow keys (or the on-screen previous/next buttons) move
+to the previous and next media file **in the same folder** — the folder's audio and video files, in the
+order they're listed. The stepped-to clip starts playing automatically.
+
+Two controls at the bottom shape that order:
+
+- **Repeat** — click to cycle **off → all → one**. *Off* stops at the first and last file; *all* wraps
+  around from the end back to the start (and vice-versa); *one* stays on the current file.
+- **Shuffle** — toggle a randomised walk through the folder's media; toggling it back off restores the
+  listed order, keeping whatever file is playing.
+
+The same themed transport (play/pause, scrub, volume, speed, loop) described above sits inside the
+full-screen player, so nothing about the controls changes — only the size.
+
 ## When a file won't play
 
 If the codec or container isn't supported, the pane shows a short message and an **Open externally**

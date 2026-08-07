@@ -175,6 +175,8 @@
   import { detectContexts, type FolderAction } from "./lib/folderContext";
   import { isExecutable, iconFor, sameTypeIndices, isImage } from "./lib/filetypes";
   import QuickLook from "./lib/components/QuickLook.svelte";
+  import MediaQuickLook from "./lib/components/MediaQuickLook.svelte";
+  import { buildMediaPlaylist, mediaQuickLookAction } from "./lib/mediaQuickLook";
   import * as settings from "./lib/settings";
   import type { ColorRule } from "./lib/colorRules";
   import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
@@ -600,6 +602,43 @@
     if (!quickLook) return;
     const n = quickLook.images.length;
     quickLook = { ...quickLook, index: (quickLook.index + delta + n) % n };
+  }
+
+  /** Full-screen quick-look media player (Space over an audio/video file), or null (CPE-1430, epic
+   *  CPE-720). Navigation is driven by the pure `Playlist` mirror (repeat off/one/all + shuffle); the
+   *  `render` counter forces a re-read of the mutable playlist's current track/position after every step
+   *  or mode change (the class mutates in place, so a bump is what re-renders the overlay). */
+  let mediaQuickLook: {
+    playlist: ReturnType<typeof buildMediaPlaylist>;
+    render: number;
+  } | null = null;
+
+  /** Open the media quick-look on the selected media file, seeding the folder's media playlist. Returns
+   *  false if not applicable (not a single media selection), so Space can fall through to its other uses. */
+  function openMediaQuickLook(): boolean {
+    if (isHome || archive || selectedEntries.length !== 1) return false;
+    const playlist = buildMediaPlaylist(visible, selectedEntries[0].path);
+    if (!playlist) return false; // selection isn't a media file
+    mediaQuickLook = { playlist, render: 0 };
+    return true;
+  }
+  /** Step to the previous/next folder media item, honouring the playlist's repeat + shuffle. */
+  function mediaQuickLookStep(delta: number) {
+    if (!mediaQuickLook) return;
+    if (delta > 0) mediaQuickLook.playlist!.next();
+    else mediaQuickLook.playlist!.prev();
+    mediaQuickLook = { ...mediaQuickLook, render: mediaQuickLook.render + 1 };
+  }
+  function mediaQuickLookRepeat() {
+    if (!mediaQuickLook) return;
+    mediaQuickLook.playlist!.cycleRepeat();
+    mediaQuickLook = { ...mediaQuickLook, render: mediaQuickLook.render + 1 };
+  }
+  function mediaQuickLookShuffle() {
+    if (!mediaQuickLook) return;
+    const pl = mediaQuickLook.playlist!;
+    pl.setShuffle(!pl.isShuffled, Date.now());
+    mediaQuickLook = { ...mediaQuickLook, render: mediaQuickLook.render + 1 };
   }
   let editingPath = false;
 
@@ -4537,6 +4576,14 @@
       else if (event.key === "ArrowLeft") { event.preventDefault(); quickLookMove(-1); }
       return;
     }
+    // The media quick-look owns the keyboard while open (CPE-1430): Space/Esc close, ←/→ step the folder.
+    if (mediaQuickLook) {
+      const action = mediaQuickLookAction(event);
+      if (action === "close") { event.preventDefault(); mediaQuickLook = null; }
+      else if (action === "next") { event.preventDefault(); mediaQuickLookStep(1); }
+      else if (action === "prev") { event.preventDefault(); mediaQuickLookStep(-1); }
+      return;
+    }
 
     const ctrl = event.ctrlKey || event.metaKey;
     // CPE-1370: the pane keyboard nav/destructive keys below act on — pane B only in dual-pane mode
@@ -4555,8 +4602,9 @@
     if (dualPane && !ctrl && !event.altKey && event.key === "F5") { event.preventDefault(); void commanderCopy(); return; }
     if (dualPane && !ctrl && !event.altKey && event.key === "F6") { event.preventDefault(); void commanderMove(); return; }
     if (dualPane && ctrl && !event.altKey && event.key.toLowerCase() === "u") { event.preventDefault(); void swapPanes(); return; }
-    // Space quick-looks the selected image (CPE-645).
-    if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && openQuickLook()) { event.preventDefault(); return; }
+    // Space quick-looks the selected image (CPE-645) or media file (CPE-1430) — image lightbox first,
+    // then the full-screen media player; both are guarded to their own file kinds so they never collide.
+    if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && (openQuickLook() || openMediaQuickLook())) { event.preventDefault(); return; }
 
     if (ctrl && event.key.toLowerCase() === "l") { event.preventDefault(); editingPath = true; return; }
     if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
@@ -6301,6 +6349,27 @@
     on:next={() => quickLookMove(1)}
     on:close={() => (quickLook = null)}
   />
+{/if}
+
+{#if mediaQuickLook && mediaQuickLook.playlist}
+  {@const pl = mediaQuickLook.playlist}
+  {@const cur = pl.current()}
+  {#if cur}
+    <MediaQuickLook
+      track={cur}
+      position={pl.position}
+      count={pl.length}
+      repeat={pl.repeat}
+      shuffled={pl.isShuffled}
+      assetUrl={convertFileSrc}
+      openExternal={async (p) => { unwrap(await commands.openExternal(p)); }}
+      on:prev={() => mediaQuickLookStep(-1)}
+      on:next={() => mediaQuickLookStep(1)}
+      on:cycleRepeat={mediaQuickLookRepeat}
+      on:toggleShuffle={mediaQuickLookShuffle}
+      on:close={() => (mediaQuickLook = null)}
+    />
+  {/if}
 {/if}
 
 {#if pendingCopy}
