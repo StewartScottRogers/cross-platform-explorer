@@ -393,6 +393,14 @@ pub mod data_preview;
 /// data-grid (CPE-847, epic CPE-721).
 pub mod data_browser;
 
+/// JWT preview decoder — read-only header/payload/claims viewer, no signature verification
+/// (CPE-1418, epic CPE-1417).
+pub mod jwt_preview;
+
+/// Certificate/CSR/public-key decoder — read-only X.509 viewer, no verification
+/// (CPE-1419, epic CPE-1417).
+pub mod cert_decode;
+
 /// Image thumbnails — downscaled PNG generation + mtime-keyed disk cache (CPE-642/644).
 pub mod thumbnail;
 
