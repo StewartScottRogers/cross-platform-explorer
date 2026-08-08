@@ -190,12 +190,34 @@
 //! ([`xml_nesting_too_deep`] on the caller's thread, then [`reference_chain_too_deep`] and the real `usvg`
 //! parse/render inside [`rasterize_svg_on_a_guaranteed_stack`]) now runs on those already-decompressed
 //! plain-XML bytes (closing the nesting-guard-bypass half): a gzipped deeply-nested document can no longer
-//! sail past [`xml_nesting_too_deep`] by looking like opaque binary. Since the bytes handed onward past
-//! this point never carry the gzip magic anymore, `usvg::Tree::from_data`'s own internal
-//! `decompress_svgz` call never fires a SECOND, unbounded decompression of the same input.
-//! [`reference_chain_too_deep`]'s own (now normally unreachable in the `rasterize_svg` path, since its
-//! input is pre-decompressed) gzip branch is also switched from the uncapped `usvg::decompress_svgz` to
-//! [`decompress_svgz_bounded`], purely as defense-in-depth for any future direct caller of that function.
+//! sail past [`xml_nesting_too_deep`] by looking like opaque binary. [`reference_chain_too_deep`]'s own
+//! (now normally unreachable in the `rasterize_svg` path, since its input is pre-decompressed) gzip
+//! branch is also switched from the uncapped `usvg::decompress_svgz` to [`decompress_svgz_bounded`],
+//! purely as defense-in-depth for any future direct caller of that function.
+//!
+//! **CPE-1445 attempt 2 — a DOUBLY-gzipped `.svg` bypassed attempt 1's whole premise:** an independent
+//! adversarial re-audit found that attempt 1's single bounded decompress does not, by itself, guarantee
+//! "the bytes handed onward are plain XML" — for a `.svg` that is gzip-of-gzip (two compression layers
+//! stacked), one bounded decompress peels only the OUTER layer, and the result still starts with `1F 8B`
+//! (the untouched INNER gzip stream). Attempt 1's own doc comment claimed `usvg::Tree::from_data`'s
+//! internal `decompress_svgz` "never fires a second time" past this point — true for single-gzip input,
+//! **false** for double (or triple, or N-fold) gzip: those still-magic'd bytes flow straight through to
+//! `usvg::Tree::from_data`, which re-detects `1F 8B` and decompresses the inner layer itself, with **no
+//! cap of its own** — reopening BOTH CPE-1445 sub-bugs one layer down. Confirmed reproducers: a
+//! doubly-gzipped 4000-deep `<g>` nesting document overflows the 256KB small-stack probe (the inner layer
+//! never passes through [`xml_nesting_too_deep`] on real XML, since that guard only ever sees attempt 1's
+//! single already-decompressed-but-still-gzip-magic'd bytes); a doubly-gzipped gzip bomb lets `usvg`'s
+//! internal decompression inflate the untouched inner layer without limit.
+//!
+//! A legitimate SVGZ file is always exactly one gzip layer — that's what every SVG authoring/export tool
+//! and the SVGZ format itself produces — so nested gzip has no legitimate use case to preserve. Rather
+//! than looping the bounded decompress across layers (which only relocates "how many layers is too many"
+//! to a new, equally arbitrary cap), [`rasterize_svg`] rejects outright: after the one bounded decompress,
+//! if the result STILL starts with `1F 8B`, that's an immediate graceful `Err`, never handed onward. A
+//! second, defense-in-depth check sits at the actual boundary into `usvg::Tree::from_data` inside
+//! [`rasterize_svg_on_a_guaranteed_stack`] — a bytes-still-gzip-magic'd assertion that also returns a
+//! graceful `Err` — so the invariant "usvg never receives gzip-magic'd bytes" is enforced at BOTH the
+//! point it's established and the point it's relied upon, not just the former.
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -777,11 +799,16 @@ fn chain_edges<'a>(
 /// to do more than `O(max_depth)` work before rejecting it.
 fn reference_chain_too_deep(bytes: &[u8], max_depth: usize, max_cost: usize) -> bool {
     // In the `rasterize_svg` path this branch is normally unreachable: `rasterize_svg` already
-    // gzip-decompresses SVGZ input once, bounded, before this function ever runs (CPE-1445 — see the
-    // module doc comment), so `bytes` here has already lost its `1F 8B` magic. Kept as defense-in-depth
-    // for any future direct caller, using the SAME bounded decompressor `rasterize_svg` uses (rather than
-    // `usvg`'s own uncapped `decompress_svgz`) so this function can never itself become an unbounded-
-    // decompression path even if called with raw (still-compressed) SVGZ bytes directly.
+    // gzip-decompresses SVGZ input once, bounded, before this function ever runs, AND (CPE-1445 attempt 2)
+    // rejects outright if that single decompress still leaves the `1F 8B` magic (a doubly-gzipped
+    // payload) — so `bytes` here can never carry the gzip magic on that path, single- or multi-layer
+    // alike. Kept as defense-in-depth for any future direct caller, using the SAME bounded decompressor
+    // `rasterize_svg` uses (rather than `usvg`'s own uncapped `decompress_svgz`) so this function can
+    // never itself become an unbounded-decompression path — and if handed a DOUBLY-gzipped stream
+    // directly, the one decompress here still leaves the result gzip-magic'd, which fails the subsequent
+    // UTF-8 check below (gzip's binary bytes are essentially never valid UTF-8) and returns `false`
+    // gracefully; this function never hands anything to `usvg`, so unlike `rasterize_svg` it has no
+    // OOM/overflow exposure from that residual case, only a (harmless) missed pre-scan rejection.
     let decompressed;
     let text: &str = if bytes.starts_with(&[0x1f, 0x8b]) {
         decompressed = match decompress_svgz_bounded(bytes) {
@@ -965,7 +992,23 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
     // longer sees the gzip magic and so never re-decompresses) operate on the same bounded, plain-XML
     // bytes exactly once.
     let bytes: Vec<u8> = if bytes.starts_with(&[0x1f, 0x8b]) {
-        decompress_svgz_bounded(bytes)?
+        let decompressed = decompress_svgz_bounded(bytes)?;
+        // CPE-1445 attempt 2 (adversarial re-audit): a DOUBLY-gzipped `.svg` (gzip of a gzip of an SVG)
+        // decompresses ONE layer here and still starts with `1F 8B` — the inner gzip stream. A single
+        // bounded decompress does not, on its own, establish "the bytes handed onward are plain XML";
+        // without this check those still-compressed bytes would flow to `usvg::Tree::from_data` below,
+        // which re-detects the magic and decompresses the inner layer itself, UNBOUNDED — reopening both
+        // CPE-1445 sub-bugs one gzip layer down (a doubly-gzipped deep-nesting payload would reach
+        // `usvg`/`roxmltree` without ever passing through `xml_nesting_too_deep` on real XML, and a
+        // doubly-gzipped bomb would let the inner layer's uncapped `read_to_end` run past this cap). A
+        // legitimate SVGZ file is always exactly ONE gzip layer (that's what every SVG authoring/export
+        // tool and the SVGZ format itself produce), so nested gzip has no legitimate use here — reject it
+        // outright rather than looping the bounded decompress across layers, which would only move the
+        // "how many layers is too many" question to a new, equally-arbitrary cap.
+        if decompressed.starts_with(&[0x1f, 0x8b]) {
+            return Err("nested (double-gzipped) SVG rejected".to_string());
+        }
+        decompressed
     } else {
         bytes.to_vec()
     };
@@ -1016,6 +1059,22 @@ fn rasterize_svg_on_a_guaranteed_stack(bytes: Vec<u8>, max_edge: u32) -> Result<
     let render = move || -> Result<DynamicImage, String> {
         if reference_chain_too_deep(&bytes, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST) {
             return Err("SVG reference chain too deep".to_string());
+        }
+
+        // Defense-in-depth (CPE-1445 attempt 2): `bytes` here must NEVER carry the gzip magic — by this
+        // point `rasterize_svg` has already decompressed any single gzip layer (bounded) and rejected a
+        // still-gzip-magic'd result outright (a doubly-gzipped payload). This is a graceful-`Err` belt
+        // enforcing that invariant right at the boundary into `usvg`, so a future change upstream in this
+        // function (or a new caller of `rasterize_svg_on_a_guaranteed_stack`) can't silently reintroduce
+        // "usvg re-decompresses an unbounded inner gzip layer" even by accident — `usvg::Tree::from_data`
+        // itself has no size cap on ITS OWN internal `decompress_svgz` fallback, so it must never be
+        // handed bytes it could interpret as gzip.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            return Err(
+                "internal invariant violation: gzip-magic bytes reached the usvg parse boundary \
+                 (should have been rejected earlier in rasterize_svg)"
+                    .to_string(),
+            );
         }
 
         let opt = resvg::usvg::Options::default();
@@ -1584,5 +1643,32 @@ mod tests {
         let gz = gzip_bytes(&square_svg(100, 40));
         let img = rasterize_svg(&gz, 32).expect("a legitimate small SVGZ file must still render");
         assert_eq!(img.width(), 32, "longest edge scaled to max_edge, same as the uncompressed case");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1445 attempt 2: DOUBLY (or N-fold) gzipped `.svg` input. A single bounded decompress alone
+    // doesn't guarantee "no gzip magic reaches usvg" — see `tests/thumb_svg_panic_safety.rs` for the
+    // small-stack/gzip-bomb-scale regression tests; these are the fast unit-level checks that the
+    // outright-reject guard fires exactly on multi-layer input and not on single-layer or plain input.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn rasterize_svg_rejects_a_doubly_gzipped_svg_even_when_the_inner_document_is_tiny_and_legit() {
+        // Not a deep-nesting/bomb payload at all — just proves the double-gzip REJECTION itself fires
+        // regardless of what's inside the inner layer, since nested gzip has no legitimate SVGZ use case.
+        let once = gzip_bytes(&square_svg(10, 10));
+        let twice = gzip_bytes(&once);
+        assert!(twice.starts_with(&[0x1f, 0x8b]), "outer layer must itself be valid gzip");
+        let err = rasterize_svg(&twice, 32);
+        assert!(err.is_err(), "a doubly-gzipped SVG must be rejected outright, even with a tiny legit inner document");
+    }
+
+    #[test]
+    fn rasterize_svg_single_gzip_still_renders_after_the_double_gzip_guard() {
+        // Regression: the new "reject if still gzip-magic'd after one decompress" check must not
+        // over-reject ordinary single-layer SVGZ input.
+        let once = gzip_bytes(&square_svg(10, 10));
+        let img = rasterize_svg(&once, 32).expect("single-layer SVGZ must still render after the double-gzip guard");
+        assert!(img.width() > 0 && img.height() > 0);
     }
 }

@@ -807,3 +807,85 @@ fn rasterize_svg_renders_a_legit_small_gzipped_svg_fine() {
     let result = rasterize_svg(&bytes, 32);
     assert!(result.is_ok(), "a legitimate small gzipped SVG (SVGZ) must still render: {result:?}");
 }
+
+#[test]
+fn rasterize_svg_renders_a_plain_uncompressed_svg_fine_after_the_gzip_fixes() {
+    // Regression: neither the single- nor double-gzip guards should touch ordinary, never-compressed
+    // `.svg` input at all (it never starts with the `1F 8B` magic).
+    let bytes = minimal_svg();
+    let result = rasterize_svg(&bytes, 32);
+    assert!(result.is_ok(), "a plain uncompressed SVG must still render fine: {result:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1445 attempt 2: an independent adversarial re-audit of the fix above found that a single bounded
+// decompress does not, by itself, guarantee "the bytes usvg receives are never gzip-magic'd" — a
+// DOUBLY (or N-fold) gzipped `.svg` peels only the outer layer via `decompress_svgz_bounded`, and the
+// result still starts with `1F 8B` (the untouched inner gzip stream). Before this fix, those
+// still-compressed bytes flowed straight into `usvg::Tree::from_data`, which re-detects the magic and
+// decompresses the inner layer itself with NO cap of its own — reopening both the nesting-guard-bypass
+// and the decompression-OOM sub-bugs one gzip layer down. `rasterize_svg` now rejects outright the
+// moment a decompress still leaves the gzip magic in place (a legitimate SVGZ is always exactly one
+// gzip layer), with a second defense-in-depth check right at the `usvg::Tree::from_data` boundary.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_doubly_gzipped_deeply_nested_svg_on_a_small_stack() {
+    // The exact CPE-1445-attempt-2 reproducer: gzip(gzip(deeply_nested_svg(4000))). Before this fix, the
+    // outer bounded decompress peeled one layer, found the result still gzip-magic'd, and (with no
+    // reject) handed it straight to `usvg::Tree::from_data`, which decompressed the inner layer itself —
+    // unbounded — and fed 4000-deep `<g>` nesting to `roxmltree`/usvg's conversion pass on the 16MiB
+    // render thread, overflowing it (STATUS_STACK_OVERFLOW, uncatchable, crashes the whole process). Must
+    // now be a graceful `Err`.
+    let bytes = gzip_bytes(&gzip_bytes(&deeply_nested_svg(4000)));
+    assert!(bytes.starts_with(&[0x1f, 0x8b]), "outer layer must itself be valid gzip");
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(
+        result.is_err(),
+        "a doubly-gzipped implausibly-deep SVG must be rejected, not risk a stack overflow"
+    );
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_triply_gzipped_deeply_nested_svg_on_a_small_stack() {
+    // N-fold gzip (N=3) must be rejected the same way as N=2 — the guard checks the magic after ONE
+    // decompress and rejects unconditionally, so it doesn't matter how many further layers remain.
+    let bytes = gzip_bytes(&gzip_bytes(&gzip_bytes(&deeply_nested_svg(4000))));
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "a triply-gzipped implausibly-deep SVG must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_rejects_a_doubly_gzipped_bomb_without_unbounded_inner_decompression() {
+    // The CPE-1445-attempt-2 OOM reproducer: gzip(gzip_bomb(200MiB)). The OUTER bounded decompress alone
+    // only bounds the outer layer's output size — before this fix, that output (the still-compressed
+    // 200MiB-logical inner gzip stream) sailed through to `usvg::Tree::from_data`, which decompressed the
+    // FULL inner layer unbounded (confirmed by the coordinator's re-audit: peak ~270MiB for a <1MB file).
+    // Must now be a graceful `Err`, never attempting the inner inflation at all.
+    let logical_size = 200 * 1024 * 1024;
+    let inner_bomb = gzip_bomb(logical_size);
+    let bytes = gzip_bytes(&inner_bomb);
+    assert!(
+        bytes.len() < logical_size / 1000,
+        "fixture should compress by at least 1000x end-to-end to be a real bomb-ish case, got {} bytes \
+         for a {} logical payload",
+        bytes.len(),
+        logical_size
+    );
+    let result = rasterize_svg(&bytes, 32);
+    assert!(
+        result.is_err(),
+        "a doubly-gzipped stream whose inner layer would decompress past the cap must be rejected, not OOM"
+    );
+}
+
+#[test]
+fn rasterize_svg_renders_a_legit_single_gzip_svgz_fine_after_the_double_gzip_guard() {
+    // The "isn't just rejecting everything" check for attempt 2: ordinary single-layer SVGZ input (the
+    // only shape a real SVG authoring/export tool ever produces) must still render normally — the new
+    // still-gzip-magic'd-after-one-decompress reject must fire on multi-layer input only, never on a
+    // single legitimate layer.
+    let bytes = gzip_bytes(&minimal_svg());
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_ok(), "a legitimate single-layer SVGZ file must still render: {result:?}");
+}
