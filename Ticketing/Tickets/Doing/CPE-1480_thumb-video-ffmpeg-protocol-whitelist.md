@@ -2,7 +2,7 @@
 id: CPE-1480
 title: "Harden thumb_video ffmpeg invocation with -protocol_whitelist (same SSRF/protocol-injection gap fixed in CPE-1478)"
 type: Bug
-status: Backlog
+status: Doing
 priority: Medium
 component: Backend
 tags: [ready, security]
