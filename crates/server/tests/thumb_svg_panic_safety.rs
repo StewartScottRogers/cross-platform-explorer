@@ -25,18 +25,29 @@
 //!   (`thumb_svg::xml_nesting_too_deep`/`MAX_SVG_NESTING_DEPTH`), rejecting implausibly deep nesting
 //!   before the bytes ever reach `usvg`/`roxmltree`. [`rasterize_svg_never_stack_overflows_on_deep_nesting_on_a_small_stack`]
 //!   below is the regression test for the fix.
-//! - **A mutual `<use>` reference cycle (two `<symbol>`s referencing each other) is ALSO a real,
+//! - **A mutual `<use>` reference cycle (two `<symbol>`s referencing each other) was ALSO a real,
 //!   confirmed stack-overflow DoS on a small stack** — usvg only special-cases *direct* self-reference and
 //!   one-hop parent/sibling back-references; anything requiring 2+ hops of `xlink:href` indirection falls
 //!   through to usvg's own `depth > 1024` recursion cap, and that recursion's *own* per-level stack cost is
-//!   high enough to overflow a 256KB thread stack well before reaching 1024. **NOT fixed here** — this is
-//!   left as a documented, reproducible, currently-`#[ignore]`d finding
-//!   ([`rasterize_svg_use_mutual_reference_cycle_crashes_on_a_small_stack_known_issue`]) rather than a
-//!   rushed hand-rolled fix, per the ticket's "report it, don't force a risky fix" escalation path.
-//!   Confirmed empirically safe (graceful `Err`, no crash) on a 2MB thread stack — the default Tokio
-//!   `spawn_blocking` stack size this app's real callers actually use — even in a slower debug build, so
-//!   this app's current production risk is low, but it still violates this codebase's small-stack safety
-//!   bar (the same bar CPE-1398 was held to) and deserves a real fix in a follow-up ticket.
+//!   high enough to overflow a 256KB thread stack well before reaching 1024. Left unfixed for a while as a
+//!   documented, reproducible, `#[ignore]`d finding (tracked as CPE-1414, still Deferred as its own
+//!   ticket) rather than a rushed hand-rolled fix, per the ticket's "report it, don't force a risky fix"
+//!   escalation path. **Now incidentally fixed** by CPE-1437's `<use>`-reference-chain-depth guard
+//!   (`thumb_svg::use_reference_chain_too_deep`): that guard's non-recursive DFS treats a revisited node
+//!   still `InProgress` on the walk as a cycle (an unbounded chain by construction) and rejects it exactly
+//!   like a too-deep chain, so this reproducer is un-`#[ignore]`d below
+//!   ([`rasterize_svg_use_mutual_reference_cycle_is_now_rejected_gracefully`]) and now asserts a graceful
+//!   `Err`, not just "didn't crash". CPE-1414 itself remains open as a ticket (its own scope — a *pure*
+//!   cycle guard — was never separately shipped as code), but the crash it originally reported no longer
+//!   reproduces.
+//! - **A flat, ACYCLIC chain of `<use>` elements each referencing the previous (`#u1` <- `#u2` <- ... <-
+//!   `#u500`) is ALSO a real, confirmed stack-overflow DoS on a small stack** (CPE-1437) — it passes BOTH
+//!   the deep-nesting guard above (siblings are only ~1 deep in the raw XML) and would not be flagged by a
+//!   cycle-only guard (it's genuinely acyclic), yet `usvg` still resolves it via one recursive clone per
+//!   link, so resolution depth scales with chain length. **Fixed**: `thumb_svg::use_reference_chain_too_deep`
+//!   bounds this reference-chain depth with its own non-recursive graph walk, run before `usvg` ever sees
+//!   the bytes. [`rasterize_svg_never_stack_overflows_on_a_deep_acyclic_use_chain_on_a_small_stack`] below
+//!   is the regression test for the fix.
 
 mod common;
 use common::{assert_no_panic, run_battery};
@@ -56,6 +67,20 @@ fn deeply_nested_svg(depth: usize) -> Vec<u8> {
     s.push_str(&"<g>".repeat(depth));
     s.push_str(r##"<rect width="10" height="10" fill="#f00"/>"##);
     s.push_str(&"</g>".repeat(depth));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// A flat, ACYCLIC chain of `n` `<use>` elements each referencing the previous (`#u1` <- `#u2` <- ... <-
+/// `#u{n}`) — the CPE-1437 stack-overflow probe. Only ~1 level deep in the raw XML (all siblings), so it
+/// passes the deep-nesting guard above untouched; `usvg` still resolves each hop by recursively cloning
+/// the referenced content, so resolution depth scales with `n`.
+fn flat_use_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<rect id="u0" width="10" height="10" fill="#f00"/>"##);
+    for i in 1..=n {
+        s.push_str(&format!(r##"<use id="u{i}" href="#u{prev}"/>"##, prev = i - 1));
+    }
     s.push_str("</svg>");
     s.into_bytes()
 }
@@ -185,22 +210,16 @@ fn rasterize_svg_never_stack_overflows_on_a_use_self_reference_on_a_small_stack(
 }
 
 #[test]
-#[ignore = "CPE-1413 known issue, NOT fixed: a mutual `<use>` reference cycle (two <symbol>s each \
-            referencing the other via xlink:href) reliably stack-overflows and crashes the whole test \
-            process on a 256KB thread stack — usvg only guards direct self-reference and one-hop \
-            parent/sibling back-references, so a 2-hop cycle falls through to its `depth > 1024` \
-            recursion cap, whose own per-level stack cost is too high for a small stack. Confirmed SAFE \
-            (graceful Err, no crash) on a 2MB stack — this app's actual Tokio `spawn_blocking` default —  \
-            even in a debug build, so real-world production risk is low, but this still violates the \
-            small-stack safety bar CPE-1398 was held to and was reported rather than shipped with a \
-            rushed fix. Run explicitly with `cargo test -- --ignored \
-            rasterize_svg_use_mutual_reference_cycle_crashes_on_a_small_stack_known_issue` to reproduce \
-            the crash; expect the whole test PROCESS to abort with a stack-overflow error, not a normal \
-            test failure. A real fix needs either a non-recursive `<use>`/`xlink:href` reference-cycle \
-            pre-scan (mirrors this file's own `xml_nesting_too_deep`, but graph-shaped rather than \
-            depth-shaped) or running the parse on a guaranteed-sufficiently-large dedicated stack; either \
-            deserves its own reviewed ticket rather than landing inside this panic-safety battery."]
-fn rasterize_svg_use_mutual_reference_cycle_crashes_on_a_small_stack_known_issue() {
+fn rasterize_svg_use_mutual_reference_cycle_is_now_rejected_gracefully() {
+    // Formerly a known, `#[ignore]`d issue (CPE-1414): this mutual `<symbol>` reference cycle (two
+    // <symbol>s each referencing the other via xlink:href) reliably stack-overflowed and crashed the
+    // whole test process on a 256KB thread stack — usvg only guards direct self-reference and one-hop
+    // parent/sibling back-references, so a 2-hop cycle fell through to its `depth > 1024` recursion cap,
+    // whose own per-level stack cost was too high for a small stack. Now caught by CPE-1437's
+    // `use_reference_chain_too_deep` guard: its non-recursive DFS treats a node revisited while still
+    // `InProgress` on the current walk as a cycle (an unbounded chain by construction) and rejects it up
+    // front, before `usvg` ever sees the bytes — so this must now come back as a graceful `Err`, not just
+    // "didn't crash".
     let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
         <symbol id="a"><use xlink:href="#b"/></symbol>
         <symbol id="b"><use xlink:href="#a"/></symbol>
@@ -208,5 +227,29 @@ fn rasterize_svg_use_mutual_reference_cycle_crashes_on_a_small_stack_known_issue
     </svg>"##
         .to_vec();
     let result = run_on_small_stack(move || rasterize_svg(&svg, 32));
-    let _ = result;
+    assert!(result.is_err(), "a mutual <use>/<symbol> reference cycle must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_deep_acyclic_use_chain_on_a_small_stack() {
+    // CPE-1437's core finding + fix: a flat, ACYCLIC chain of ~500 `<use>` elements each referencing the
+    // previous passes the deep-nesting guard untouched (siblings, ~1 level deep in the raw XML) and isn't
+    // a reference cycle either, yet before the fix this reliably crashed the whole process with an
+    // uncatchable stack overflow on a 256KB stack (usvg resolves each hop via recursive cloning, so
+    // resolution depth scales with chain length). `rasterize_svg`'s new `use_reference_chain_too_deep`
+    // pre-scan now rejects a chain this deep before it ever reaches `usvg`/`roxmltree`'s own resolution,
+    // so this must come back as a graceful `Err`.
+    let bytes = flat_use_chain_svg(500);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "an implausibly deep <use> reference chain must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_renders_a_shallow_use_chain_fine_on_a_small_stack() {
+    // The chain-depth cap must not over-reject realistic, shallow `<use>` indirection (a handful of hops
+    // is normal for icon-sprite-sheet-style SVGs) — confirmed here on the same small-stack probe used by
+    // the adversarial cases above, so this doubles as a "the guard isn't just rejecting everything" check.
+    let bytes = flat_use_chain_svg(3);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_ok(), "a shallow, legitimate <use> chain must still render: {result:?}");
 }

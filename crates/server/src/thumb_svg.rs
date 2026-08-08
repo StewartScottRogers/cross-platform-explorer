@@ -32,8 +32,32 @@
 //! because `rasterize_svg` takes raw `&[u8]` (not `&str`), so this version needs no UTF-8 boundary
 //! handling at all — a further reason to keep it a self-contained byte scan rather than adding a new
 //! dependency for it.
+//!
+//! `<use>` reference-chain guard (CPE-1437, closes the small-stack bar CPE-1414 left open): a **flat,
+//! acyclic** sibling chain of `<use>` elements each referencing the previous (`#u1` <- `#u2` <- ... <-
+//! `#u500`) is only ~1 level deep in the raw XML, so it sails straight through [`xml_nesting_too_deep`]
+//! untouched — yet `usvg` resolves each `<use>` by *recursively cloning* the referenced content, so
+//! resolution stack depth scales with chain length, and a long enough chain overflows a small thread stack
+//! exactly like deep literal nesting does. A prior investigation (CPE-1414, still parked/deferred — see
+//! `Ticketing/Tickets/Deferred/CPE-1414_svg-use-reference-cycle-dos.md`) attempted a *cycle-only* guard for
+//! a related `<use>`/`<symbol>` mutual-reference DoS and burned three attempts, each defeated by an
+//! adversarial reviewer finding a small-stack-overflow bypass in the hand-rolled href-resolution: an
+//! entity-encoded `href` (`&#35;b`), an internal-subset DTD entity (`<!ENTITY r "#b">`), and — most
+//! subtly — checking plain `href` before `xlink:href` when `usvg`'s own `resolve_href` checks
+//! `xlink:href` FIRST. None of those three attempts ever actually landed in this file (CPE-1414 is still
+//! Deferred with no shipped code), so [`use_reference_chain_too_deep`] below is a fresh, non-recursive
+//! reference-graph walk built from scratch, but it deliberately reuses CPE-1414's hard-won, adversarially-
+//! validated approach to href resolution — SVGZ-decompress + parse with `usvg`'s own exact
+//! `roxmltree::ParsingOptions{allow_dtd: true, ..}`, then resolve `xlink:href` before `href` — so it can't
+//! be defeated by any of those three same bypass shapes. Because the walk tracks each node's longest
+//! reference-chain depth in the same DFS pass that also detects a revisited (`InProgress`) node as a
+//! cycle, it incidentally also closes CPE-1414's mutual-`<symbol>` cycle finding (see the doc comment on
+//! [`use_reference_chain_too_deep`] and the now-un-`#[ignore]`d regression test in
+//! `tests/thumb_svg_panic_safety.rs`) — CPE-1414 itself is left Deferred/untouched as a ticket (out of
+//! this ticket's scope to close), but the underlying crash it reported no longer reproduces.
 
 use image::{DynamicImage, RgbaImage};
+use std::collections::HashMap;
 
 /// Same spirit as `thumb_source::MAX_IMAGE_DIMENSION` — an SVG's *declared* intrinsic size is
 /// clamped to this before we ever allocate a canvas. Real SVG artwork is never this big.
@@ -165,13 +189,273 @@ fn xml_nesting_too_deep(bytes: &[u8], max_depth: usize) -> bool {
     false
 }
 
+/// `roxmltree`'s two lifetime parameters (`'a`: the borrow of the parsed `Document`/`Node`s, `'input`:
+/// the borrow of the source text) always coincide in this module's own usage below — the guard parses
+/// `text` and walks the resulting tree entirely within one function, never separately reborrowing either
+/// — so this alias collapses them to a single lifetime purely for readability.
+type XmlNode<'a> = resvg::usvg::roxmltree::Node<'a, 'a>;
+
+/// Namespace URI for `xlink:href`. Matters because `usvg`'s own attribute resolution (`resolve_href` in
+/// usvg-0.45.1's `parser/svgtree/parse.rs`) checks the **`xlink:href`-namespaced attribute FIRST**, and
+/// only falls back to the un-namespaced `href` if that one is absent. This exact precedence is one of the
+/// three bypass classes the CPE-1414 investigation found in earlier (never-shipped) guard attempts: a
+/// guard that checked `href` before `xlink:href`, or matched by local attribute name only, could disagree
+/// with `usvg` about which target an element with *both* attributes present actually resolves to (e.g.
+/// `<use href="#leaf" xlink:href="#other"/>` — the guard would see `#leaf`, `usvg` resolves `#other`).
+/// [`resolve_use_href`] reuses this exact order to close that class here too.
+const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
+
+/// The deepest `<use>` **reference chain** ([`use_reference_chain_too_deep`]'s walk: `<use>` A -> target
+/// B -> (if B is itself a `<use>`, or contains one) target C -> ...) allowed before `rasterize_svg`
+/// refuses the document outright (CPE-1437). `usvg` resolves each hop by *recursively cloning* the
+/// referenced content, so resolved-tree recursion depth scales with chain length; unlike
+/// [`MAX_SVG_NESTING_DEPTH`] (literal XML nesting), a flat sibling chain of `<use>` elements each
+/// referencing the previous is only ~1 level deep in the raw XML, so it passes that guard untouched while
+/// still driving `usvg` — and, on this codebase's 256KB small-stack test probe, the whole process — to the
+/// same recursion depth as if it *were* nested that deep.
+///
+/// 128 is sized the same way [`MAX_SVG_NESTING_DEPTH`] (64) was: a real hand-authored or tool-exported
+/// SVG's `<use>` indirection is essentially always 1-3 hops (icon-sprite sheets referencing a single base
+/// shape are the deepest realistic case, rarely past single digits), so 128 costs nothing for legitimate
+/// artwork; it's comfortably below the ~500-hop chain CPE-1437 confirmed reliably `STATUS_STACK_OVERFLOW`s
+/// a 256KB debug-build thread stack (the same wide margin [`MAX_SVG_NESTING_DEPTH`]'s 64 keeps under its
+/// own ~500-level empirical crash depth); and it's comfortably below `usvg`'s own internal recursion cap
+/// of 1024, which is sized for `usvg`'s *own* DoS protection on a normal-sized stack, not for this
+/// codebase's small-stack safety bar.
+const MAX_USE_CHAIN_DEPTH: usize = 128;
+
+/// Mirrors `svgtypes::IRI::from_str`'s exact fragment grammar by hand (`usvg`'s `resolve_href` parses a
+/// resolved `href`/`xlink:href` value with `svgtypes::IRI::from_str`, and the CPE-1414 investigation
+/// found that any hand-rolled stand-in that doesn't match this precisely is an evasion vector — e.g.
+/// silently accepting or guessing at a malformed value `usvg` would actually reject). `svgtypes` is only a
+/// *transitive* dependency here (pulled in by `usvg` internally; not re-exported), and this crate's
+/// no-new-dependencies guardrail rules out adding it just to call one ~20-line parser, so this
+/// reimplements the grammar byte-for-byte instead (see svgtypes 0.15.3's `funciri.rs`
+/// `IRI::from_str`/`Stream::parse_iri`, the reference this mirrors): skip leading XML whitespace
+/// (space/tab/CR/LF), require a literal `#`, take bytes up to (not including) the first literal space
+/// (`0x20`) byte or end-of-string as the fragment id (must be non-empty), then allow only further XML
+/// whitespace before the end. Anything else — including a value with no leading `#` at all, e.g. a full
+/// external URL — is a parse failure and returns `None`, exactly like `IRI::from_str`, never guessing a
+/// partial id out of a bypass-shaped value.
+fn parse_iri_fragment(text: &str) -> Option<&str> {
+    fn is_xml_space(b: u8) -> bool {
+        matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+    }
+    let bytes = text.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() && is_xml_space(bytes[i]) {
+        i += 1;
+    }
+    if bytes.get(i) != Some(&b'#') {
+        return None;
+    }
+    i += 1;
+    let start = i;
+    while i < bytes.len() && bytes[i] != b' ' {
+        i += 1;
+    }
+    if i == start {
+        return None; // empty fragment, e.g. a bare "#"
+    }
+    let id_end = i;
+    while i < bytes.len() && is_xml_space(bytes[i]) {
+        i += 1;
+    }
+    if i != bytes.len() {
+        return None; // trailing non-space garbage after the fragment
+    }
+    // These byte offsets only ever land on ASCII delimiters ('#', ' ', or XML whitespace), which are
+    // always valid UTF-8 char boundaries, so this slice can't panic on a multi-byte boundary.
+    Some(&text[start..id_end])
+}
+
+/// Resolves a node's link-target fragment id exactly the way `usvg`'s own `resolve_href` does:
+/// `xlink:href` FIRST, falling back to plain `href` only if that's absent (see [`XLINK_NS`]'s doc comment
+/// for why this precedence specifically matters), then parses the value with [`parse_iri_fragment`]
+/// (mirroring `svgtypes::IRI::from_str`).
+fn resolve_use_href<'a>(node: XmlNode<'a>) -> Option<&'a str> {
+    let link_value = node.attribute((XLINK_NS, "href")).or_else(|| node.attribute("href"))?;
+    parse_iri_fragment(link_value)
+}
+
+/// The `<use>` elements a resolution of `target` will encounter next. If `target` is itself a `<use>`
+/// element, resolving it continues directly to *its own* target — a single further hop, the flat-chain
+/// shape CPE-1437 reported. Otherwise `target` is a container (`<symbol>`, `<g>`, plain shape, ...), and
+/// rendering its content walks into every `<use>` anywhere in its subtree (at any nesting depth) — each of
+/// those is a further hop too. This dual rule is also what lets the same walk catch the CPE-1414 mutual-
+/// `<symbol>`-cycle shape (`<symbol id="a">` containing a `<use>` to `#b`, `<symbol id="b">` containing a
+/// `<use>` back to `#a`): the edge from the `id="a"` target to the `<use href="#b">` nested inside it is
+/// exactly the kind of hop this returns, so the walk sees `a -> b -> a` as a real cycle even though
+/// neither `<use>` element directly names the other.
+fn use_targets_reached_via(target: XmlNode<'_>) -> Vec<XmlNode<'_>> {
+    if target.has_tag_name("use") {
+        vec![target]
+    } else {
+        target.descendants().filter(|n| n.has_tag_name("use")).collect()
+    }
+}
+
+/// The `<use>` hops directly reachable from resolving `use_node`'s own href (see
+/// [`use_targets_reached_via`]). A direct self-reference (`use_node`'s target resolves back to itself) is
+/// treated as *no* hop at all, matching `usvg`'s own explicit `link == node` self-reference guard (it
+/// silently skips rendering rather than recursing) — reusing that same real-world-harmless special case
+/// here avoids over-rejecting the (contrived but legal, and already covered by its own small-stack
+/// regression test below) `<use href="#self">` idiom as if it were a reference cycle.
+fn use_chain_edges<'a>(use_node: XmlNode<'a>, id_map: &HashMap<&'a str, XmlNode<'a>>) -> Vec<XmlNode<'a>> {
+    let Some(frag) = resolve_use_href(use_node) else {
+        return Vec::new();
+    };
+    let Some(target) = id_map.get(frag).copied() else {
+        return Vec::new();
+    };
+    if target == use_node {
+        return Vec::new();
+    }
+    use_targets_reached_via(target)
+}
+
+/// Cheap(ish), non-recursive guard against a maliciously (or accidentally) deep `<use>` reference chain
+/// (CPE-1437), run before the document is handed to `usvg`/`resvg::render`. See the module doc comment for
+/// the full backstory; in short this complements [`xml_nesting_too_deep`] (CPE-1413), which only bounds
+/// *literal* XML nesting and is blind to a flat sibling `<use>` chain.
+///
+/// Mirrors `usvg`'s own preprocessing byte-for-byte before parsing — the CPE-1414 investigation's root
+/// finding was that three separate prior guard attempts were each bypassed by hand-rolling this
+/// preprocessing step slightly differently than `usvg` itself does: SVGZ gzip-decompresses first via
+/// `usvg`'s own public `decompress_svgz` (not a reimplementation, so it can't drift), then parses with the
+/// exact same `roxmltree::ParsingOptions { allow_dtd: true, .. }` that `usvg::Tree::from_str` uses — so a
+/// DTD internal-subset entity (`<!ENTITY r "#b">` + `href="&r;"`) expands here exactly as `usvg` will
+/// expand it, and a numeric-entity-encoded `href` (`&#35;b`) decodes to the same `#b` `usvg` sees, closing
+/// both of the entity-based bypass classes CPE-1414 found. [`resolve_use_href`] then mirrors `usvg`'s
+/// exact `xlink:href`-before-`href` attribute precedence (the third bypass class), so this walk can't be
+/// fooled by any of the three shapes that defeated those earlier attempts.
+///
+/// Deliberately does **not** pre-filter on whether the raw bytes contain a `"use"` substring before paying
+/// for the full parse: that kind of fast path is itself a potential bypass (an entity/DTD-obfuscated
+/// `<use>`-equivalent might not contain the literal substring pre-decode), and this is a low-frequency,
+/// security-sensitive code path (thumbnail generation, not a hot per-frame loop) where correctness is
+/// worth more than shaving a parse.
+///
+/// Walks the reference graph with an explicit heap-allocated stack (never the real call stack, so this
+/// scan itself can't overflow no matter how deep or cyclic the input is), doing an iterative post-order DFS
+/// from every `<use>` element in the document, memoizing each node's resolved chain depth so no node is
+/// ever walked twice. A **cycle** (revisiting a node that's still `InProgress` on the current path — this
+/// is what also catches the CPE-1414 mutual-`<symbol>` reference cycle, since that's an unbounded chain by
+/// construction) is treated as exceeding the cap immediately: either way `usvg` would recurse without
+/// bound (a true cycle) or well past this codebase's small-stack safety margin (a merely very long chain),
+/// so both are rejected identically here rather than trying to special-case "genuinely infinite" vs. "just
+/// very deep". Also bails out the moment the *currently open* DFS path alone exceeds `max_depth` (before
+/// exploring any further), so a single pathological chain can't force this scan to do more than
+/// `O(max_depth)` work before rejecting it.
+fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
+    let decompressed;
+    let text: &str = if bytes.starts_with(&[0x1f, 0x8b]) {
+        decompressed = match resvg::usvg::decompress_svgz(bytes) {
+            Ok(d) => d,
+            Err(_) => return false, // malformed gzip: usvg's real parse will report this itself
+        };
+        match std::str::from_utf8(&decompressed) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    } else {
+        match std::str::from_utf8(bytes) {
+            Ok(s) => s,
+            Err(_) => return false,
+        }
+    };
+
+    let xml_opt = resvg::usvg::roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let doc = match resvg::usvg::roxmltree::Document::parse_with_options(text, xml_opt) {
+        Ok(d) => d,
+        Err(_) => return false, // malformed XML: usvg's real parse will report this itself
+    };
+
+    // id -> first element with that id, mirroring usvg's own id_map build exactly (first occurrence in
+    // document order wins; `HashMap::entry(..).or_insert(..)` only inserts when the key is absent).
+    let mut id_map: HashMap<&str, XmlNode> = HashMap::new();
+    for node in doc.descendants() {
+        if let Some(id) = node.attribute("id") {
+            id_map.entry(id).or_insert(node);
+        }
+    }
+
+    let use_nodes: Vec<_> = doc.descendants().filter(|n| n.has_tag_name("use")).collect();
+    if use_nodes.is_empty() {
+        return false;
+    }
+
+    enum VisitState {
+        InProgress,
+        Done(usize),
+    }
+    let mut state: HashMap<XmlNode, VisitState> = HashMap::new();
+
+    for &start in &use_nodes {
+        if state.contains_key(&start) {
+            continue; // already resolved as part of an earlier start node's walk
+        }
+
+        // Explicit heap-allocated stack, non-recursive DFS: each frame is (node, its outgoing edges,
+        // index of the next edge to explore).
+        let mut stack: Vec<(XmlNode, Vec<XmlNode>, usize)> = Vec::new();
+        state.insert(start, VisitState::InProgress);
+        stack.push((start, use_chain_edges(start, &id_map), 0));
+
+        while !stack.is_empty() {
+            let top = stack.len() - 1;
+            let idx = stack[top].2;
+            if idx < stack[top].1.len() {
+                let next = stack[top].1[idx];
+                stack[top].2 += 1;
+                match state.get(&next) {
+                    Some(VisitState::Done(_)) => {} // already resolved; used when this frame unwinds
+                    Some(VisitState::InProgress) => return true, // cycle -> unbounded chain -> reject
+                    None => {
+                        state.insert(next, VisitState::InProgress);
+                        let edges = use_chain_edges(next, &id_map);
+                        stack.push((next, edges, 0));
+                        if stack.len() > max_depth {
+                            // The currently-open DFS path is already longer than the cap. Whatever depth
+                            // the deepest node on it ends up with (computed on unwind below) can only be
+                            // >= this path length, so this can reject right now without exploring further.
+                            return true;
+                        }
+                    }
+                }
+            } else {
+                // All of `node`'s edges are resolved (`Done`) — compute and memoize its own chain depth.
+                let (node, edges, _) = stack.pop().unwrap();
+                let max_child_depth = edges
+                    .iter()
+                    .map(|e| match state.get(e) {
+                        Some(VisitState::Done(d)) => *d,
+                        _ => 0,
+                    })
+                    .max()
+                    .unwrap_or(0);
+                let depth = 1 + max_child_depth;
+                if depth > max_depth {
+                    return true;
+                }
+                state.insert(node, VisitState::Done(depth));
+            }
+        }
+    }
+
+    false
+}
+
 /// Rasterize `bytes` (the contents of an `.svg` file) to an RGBA image whose longest edge is at most
 /// `max_edge` pixels, preserving the document's aspect ratio. Never panics: a malformed document, an
-/// implausible declared size, an implausibly deep element nesting, or a render-target allocation failure
-/// all return `Err`.
+/// implausible declared size, an implausibly deep element nesting or `<use>` reference chain, or a
+/// render-target allocation failure all return `Err`.
 pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String> {
     if xml_nesting_too_deep(bytes, MAX_SVG_NESTING_DEPTH) {
         return Err("SVG element nesting too deep".to_string());
+    }
+    if use_reference_chain_too_deep(bytes, MAX_USE_CHAIN_DEPTH) {
+        return Err("SVG <use> reference chain too deep".to_string());
     }
 
     let opt = resvg::usvg::Options::default();
@@ -345,5 +629,161 @@ mod tests {
         // integration test, not stack-overflow even on a small thread stack).
         let err = rasterize_svg(&deeply_nested_svg(4000), 32);
         assert!(err.is_err(), "implausibly deep SVG group nesting must be rejected, not risk a stack overflow");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1437: `<use>` reference-chain depth guard.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn iri_fragment_parses_a_plain_fragment() {
+        assert_eq!(parse_iri_fragment("#id"), Some("id"));
+        assert_eq!(parse_iri_fragment("   #id   "), Some("id"));
+        assert_eq!(parse_iri_fragment("#1"), Some("1"));
+    }
+
+    #[test]
+    fn iri_fragment_rejects_non_fragment_and_malformed_values() {
+        assert_eq!(parse_iri_fragment("no-hash-here"), None, "no leading '#' at all");
+        assert_eq!(parse_iri_fragment("https://example.com/x.svg#id"), None, "external URL, not a bare fragment");
+        assert_eq!(parse_iri_fragment("#"), None, "empty fragment");
+        assert_eq!(parse_iri_fragment("# id"), None, "space immediately after '#'");
+        assert_eq!(parse_iri_fragment("#id trailing garbage"), None, "trailing non-space data");
+    }
+
+    /// An SVG with a `<use>` element having BOTH a plain `href` and an `xlink:href`, pointing at two
+    /// different targets — the exact CPE-1414 bypass-3 shape (a guard that checked local-name `href`
+    /// before namespaced `xlink:href`, source-order rather than namespace-priority, would read the wrong
+    /// target). `resolve_use_href` must resolve to the `xlink:href` target, matching usvg's own
+    /// `resolve_href` precedence exactly.
+    #[test]
+    fn resolve_use_href_prefers_xlink_href_over_plain_href_matching_usvg_precedence() {
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <rect id="leaf" width="1" height="1"/>
+            <rect id="other" width="1" height="1"/>
+            <use id="u" href="#leaf" xlink:href="#other"/>
+        </svg>"##;
+        let opt = resvg::usvg::roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+        let doc = resvg::usvg::roxmltree::Document::parse_with_options(
+            std::str::from_utf8(svg).unwrap(),
+            opt,
+        )
+        .unwrap();
+        let use_node = doc.descendants().find(|n| n.has_tag_name("use")).unwrap();
+        assert_eq!(resolve_use_href(use_node), Some("other"), "xlink:href must win over plain href");
+    }
+
+    /// A flat, ACYCLIC chain of `<use>` elements each referencing the previous — the CPE-1437 reproducer
+    /// shape (`#u1` <- `#u2` <- ... <- `#u{n}`), triggered from a single outer `<use>` that starts the
+    /// chain.
+    fn flat_use_chain_svg(n: usize) -> Vec<u8> {
+        let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        s.push_str(r##"<rect id="u0" width="10" height="10" fill="#f00"/>"##);
+        for i in 1..=n {
+            s.push_str(&format!(r##"<use id="u{i}" href="#u{prev}"/>"##, prev = i - 1));
+        }
+        s.push_str("</svg>");
+        s.into_bytes()
+    }
+
+    #[test]
+    fn use_chain_guard_rejects_a_deep_flat_chain_and_allows_a_shallow_one() {
+        // CPE-1437's exact finding: ~500 links passes both CPE-1413's nesting guard (siblings, depth ~1)
+        // and would not be flagged as a reference cycle (it's acyclic) — must still be rejected as a
+        // too-deep reference chain.
+        assert!(use_reference_chain_too_deep(&flat_use_chain_svg(500), MAX_USE_CHAIN_DEPTH));
+        // A realistic sprite-sheet-style chain (a couple of hops) must not be rejected.
+        assert!(!use_reference_chain_too_deep(&flat_use_chain_svg(3), MAX_USE_CHAIN_DEPTH));
+        assert!(!use_reference_chain_too_deep(&square_svg(10, 10), MAX_USE_CHAIN_DEPTH), "no <use> at all");
+    }
+
+    #[test]
+    fn use_chain_guard_rejects_the_cpe_1414_mutual_symbol_cycle() {
+        // Two <symbol>s each referencing the other via a nested <use>, plus an outer trigger <use> — the
+        // exact reproducer from the (still-Deferred) CPE-1414 investigation. This is acyclic in neither
+        // the literal XML nesting (each <symbol> is shallow) nor a naive "does this <use> point at
+        // another <use>" check (each <use> points at a <symbol>), but IS a real reference cycle once
+        // <symbol>-to-nested-<use> containment edges are followed — the walk must catch it.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="#b"/></symbol>
+            <symbol id="b"><use xlink:href="#a"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        assert!(use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH));
+    }
+
+    #[test]
+    fn use_chain_guard_allows_a_direct_self_reference() {
+        // `<use href="#self">` — usvg treats this as a harmless no-op (link == node), not a cycle; the
+        // guard must not over-reject this common-enough idiom.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+            <use id="self" href="#self"/>
+        </svg>"##;
+        assert!(!use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH));
+    }
+
+    #[test]
+    fn use_chain_guard_resolves_a_numeric_entity_encoded_href_matching_usvg_decoding() {
+        // CPE-1414 bypass class 1: a hand-rolled byte-scan guard that doesn't decode XML character
+        // references would read the raw text "&#35;u0" (no leading literal '#') and see no edge at all,
+        // while usvg/roxmltree decode it to "#u0" and DO resolve it — a guard that silently under-counts
+        // here is exactly the kind of guard CPE-1414's three attempts kept falling to. Since this guard
+        // parses via roxmltree (which performs the same entity decoding usvg relies on), it must see this
+        // edge too: confirmed here by showing a cap of 0 (which any real resolved edge must exceed) DOES
+        // flag it, proving the edge wasn't silently dropped.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <rect id="u0" width="10" height="10" fill="#f00"/>
+            <use id="u1" xlink:href="&#35;u0"/>
+        </svg>"##;
+        assert!(!use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH), "a single resolved hop is well under the real cap");
+        assert!(
+            use_reference_chain_too_deep(svg, 0),
+            "entity-encoded href must resolve to a real edge, not be silently dropped"
+        );
+    }
+
+    #[test]
+    fn use_chain_guard_resolves_dtd_entity_hrefs_into_a_real_chain_matching_usvg_decoding() {
+        // CPE-1414 bypass class 2: same idea as the numeric-entity case above, but for an internal-subset
+        // DTD entity (`<!ENTITY rN "#u...">` + `href="&rN;"`) — a guard parsed WITHOUT `allow_dtd: true`
+        // (or one that doesn't expand entities in attribute values at all) would see these hrefs as inert
+        // and never build the chain. Build a real N-hop chain entirely out of per-link DTD entities and
+        // confirm it's caught as too deep, exactly like the literal `flat_use_chain_svg` case above.
+        let n = 200;
+        let mut doctype = String::from("<!DOCTYPE svg [");
+        for i in 1..=n {
+            doctype.push_str(&format!("<!ENTITY r{i} \"#u{prev}\">", prev = i - 1));
+        }
+        doctype.push_str("]>");
+        let mut s = doctype;
+        s.push_str(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        s.push_str(r##"<rect id="u0" width="10" height="10" fill="#f00"/>"##);
+        for i in 1..=n {
+            s.push_str(&format!(r##"<use id="u{i}" href="&r{i};"/>"##));
+        }
+        s.push_str("</svg>");
+        assert!(
+            use_reference_chain_too_deep(s.as_bytes(), MAX_USE_CHAIN_DEPTH),
+            "a DTD-entity-built chain must resolve its edges and be caught as too deep, just like a literal one"
+        );
+    }
+
+    #[test]
+    fn rasterize_svg_rejects_a_deep_flat_use_chain_gracefully() {
+        let err = rasterize_svg(&flat_use_chain_svg(500), 32);
+        assert!(err.is_err(), "an implausibly deep <use> reference chain must be rejected, not risk a stack overflow");
+    }
+
+    #[test]
+    fn rasterize_svg_renders_a_legitimate_svg_with_a_couple_of_uses_fine() {
+        // A couple of <use>s referencing a single base shape — the realistic "icon sprite sheet" shape —
+        // must still render normally; the chain-depth cap must not over-reject legitimate artwork.
+        let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10">
+            <rect id="base" width="10" height="10" fill="#ff0000"/>
+            <use href="#base" x="0"/>
+            <use href="#base" x="10"/>
+        </svg>"##;
+        let img = rasterize_svg(svg, 32).unwrap();
+        assert!(img.width() > 0 && img.height() > 0);
     }
 }
