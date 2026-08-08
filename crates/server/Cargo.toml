@@ -45,7 +45,7 @@ serde_bencode = "0.2"
 # Structured-data previews (CPE-088/089/090/091). rusqlite bundles SQLite (no system lib); calamine and
 # parquet are pure-Rust (parquet with default features off to avoid pulling arrow/compression stacks).
 rusqlite = { version = "0.32", features = ["bundled"] }
-calamine = "0.26"
+calamine = "0.36"
 parquet = { version = "53", default-features = false }
 # Image decode/thumbnail + transcode + EXIF metadata (CPE-642/644/099/101/659). All pure-Rust, no
 # system libs: image (decoders), psd (PSD composite), kamadak-exif (EXIF), base64 (data-URL encoding).
