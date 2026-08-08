@@ -888,6 +888,13 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
         "sqlite" | "sqlite3" | "db" => cpe_server::data_preview::sqlite_info(&path),
         "xlsx" | "xlsm" | "ods" => cpe_server::data_preview::spreadsheet_info(&path),
         "parquet" => cpe_server::data_preview::parquet_info(&path),
+        // Single-file compression formats (CPE-1439): no decoder is wired in (unlike gzip via flate2),
+        // so there's no entry list to browse — a friendly "compressed file" summary beats a raw hex dump.
+        "xz" => cpe_server::binary_preview::compressed_file_info(&path, "XZ"),
+        "bz2" => cpe_server::binary_preview::compressed_file_info(&path, "BZip2"),
+        "zst" => cpe_server::binary_preview::compressed_file_info(&path, "Zstandard"),
+        "lz" => cpe_server::binary_preview::compressed_file_info(&path, "Lzip"),
+        "lzma" => cpe_server::binary_preview::compressed_file_info(&path, "LZMA"),
         // generic binary (.bin/.dat) and anything else routed here: hex dump
         _ => cpe_server::binary_preview::hex_dump(&path, 64 * 1024),
     }
@@ -12495,6 +12502,29 @@ overlay / overlay rw,relatime 0 0
         // .bin -> hex dump path
         let out = read_preview_info_impl(f.to_string_lossy().to_string()).unwrap();
         assert!(out.contains("01 02 03"));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn read_preview_info_dispatches_single_file_compression_formats_to_compressed_info() {
+        // CPE-1439: xz/bz2/zst/lz/lzma have no decoder wired in, so they must land on the "compressed
+        // file" info summary (format + size), never the generic hex-dump arm.
+        let d = scratch("dispatch_compressed");
+        for (ext, label) in [
+            ("xz", "XZ"),
+            ("bz2", "BZip2"),
+            ("zst", "Zstandard"),
+            ("lz", "Lzip"),
+            ("lzma", "LZMA"),
+        ] {
+            let f = d.join(format!("thing.{ext}"));
+            fs::write(&f, [0u8; 8]).unwrap();
+            let out = read_preview_info_impl(f.to_string_lossy().to_string()).unwrap();
+            assert!(out.contains(&format!("{label}-compressed file")), "{ext}: {out}");
+            assert!(out.contains("8 bytes"), "{ext}: {out}");
+            // Must NOT be a hex dump (no offset column).
+            assert!(!out.contains("00000000"), "{ext} should not hex-dump: {out}");
+        }
         let _ = fs::remove_dir_all(&d);
     }
 
