@@ -41,13 +41,38 @@
 //!   cycle guard — was never separately shipped as code), but the crash it originally reported no longer
 //!   reproduces.
 //! - **A flat, ACYCLIC chain of `<use>` elements each referencing the previous (`#u1` <- `#u2` <- ... <-
-//!   `#u500`) is ALSO a real, confirmed stack-overflow DoS on a small stack** (CPE-1437) — it passes BOTH
-//!   the deep-nesting guard above (siblings are only ~1 deep in the raw XML) and would not be flagged by a
-//!   cycle-only guard (it's genuinely acyclic), yet `usvg` still resolves it via one recursive clone per
-//!   link, so resolution depth scales with chain length. **Fixed**: `thumb_svg::use_reference_chain_too_deep`
+//!   `#u500`) is ALSO a real, confirmed stack-overflow DoS on a small stack** (CPE-1437 attempt 1) — it
+//!   passes BOTH the deep-nesting guard above (siblings are only ~1 deep in the raw XML) and would not be
+//!   flagged by a cycle-only guard (it's genuinely acyclic), yet `usvg` still resolves it via one recursive
+//!   clone per link, so resolution depth scales with chain length. `thumb_svg::use_reference_chain_too_deep`
 //!   bounds this reference-chain depth with its own non-recursive graph walk, run before `usvg` ever sees
 //!   the bytes. [`rasterize_svg_never_stack_overflows_on_a_deep_acyclic_use_chain_on_a_small_stack`] below
-//!   is the regression test for the fix.
+//!   is the regression test.
+//! - **CPE-1437 attempt 2 — an independent adversarial audit found a THIRD bypass, a composition one**:
+//!   `usvg`'s real native recursion cost is `[<use>-hop count] x [each hop's target's own internal
+//!   <g>-nesting depth]`, and neither `xml_nesting_too_deep` nor `use_reference_chain_too_deep` alone
+//!   bounds that product — a payload well under BOTH caps individually (e.g. 10 containers each `<g>`-
+//!   nested 20 deep, chained by 11 `<use>` hops; or a single `<use>` into one 40-deep `<g>` container)
+//!   still overflowed the 256KB probe. The same audit also surfaced a **pre-existing CPE-1413 hole**: plain
+//!   `<g>` nesting with no `<use>` at all overflowed the probe around depth ~35, during `usvg`'s tree-
+//!   *conversion* pass — a separate, heavier recursive pass than the raw XML parse CPE-1413's nesting guard
+//!   was originally profiled against — which is UNDER that guard's existing cap of 64. Two independent
+//!   depth-prediction guards (CPE-1414's attempts, then CPE-1437 attempt 1) had now each been defeated by a
+//!   dimension their model of "what makes usvg recurse" didn't cover, so attempt 2 **retires
+//!   depth-prediction as the safety bar entirely**: `rasterize_svg` now does its actual `usvg`
+//!   parse/convert/render on a dedicated thread with a 16MiB stack
+//!   (`thumb_svg::RASTERIZE_STACK_SIZE`/`rasterize_svg_on_a_guaranteed_stack`), sized to comfortably outlast
+//!   `usvg`'s own hard 1024-level recursion cap regardless of how that depth is distributed across nesting,
+//!   `<use>` hops, or any composition of the two — closing this bypass class *and* the CPE-1413 hole at
+//!   once without modeling `usvg`'s internals at all. The existing guards are kept as cheap fast-reject
+//!   checks (see [`rasterize_svg_use_mutual_reference_cycle_is_now_rejected_gracefully`] and
+//!   [`rasterize_svg_never_stack_overflows_on_a_deep_acyclic_use_chain_on_a_small_stack`], both still
+//!   rejected via the fast pre-scan) but are no longer relied on as the stack-overflow bar — the new
+//!   [`rasterize_svg_never_stack_overflows_on_a_composed_chain_of_nested_use_containers_on_a_small_stack`],
+//!   [`rasterize_svg_never_stack_overflows_on_a_single_deeply_nested_use_target_on_a_small_stack`], and
+//!   [`rasterize_svg_never_stack_overflows_on_plain_nesting_under_the_cap_on_a_small_stack`] below are the
+//!   regression tests for the auditor's exact payloads, all of which now render successfully (`Ok`) rather
+//!   than merely failing gracefully, since they're legitimately within `usvg`'s own bounds.
 
 mod common;
 use common::{assert_no_panic, run_battery};
@@ -81,6 +106,36 @@ fn flat_use_chain_svg(n: usize) -> Vec<u8> {
     for i in 1..=n {
         s.push_str(&format!(r##"<use id="u{i}" href="#u{prev}"/>"##, prev = i - 1));
     }
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// The CPE-1437-attempt-2 auditor's "composition" probe: `n_containers` containers, each internally
+/// `<g>`-nested `nesting_per` levels deep, chained by `<use>` — container `i`'s sole content is a `<use>`
+/// referencing container `i-1` (wrapped in `nesting_per` levels of `<g>`), except container 0, which just
+/// wraps a plain shape. A final outer `<use>` references the last container. Each container's own literal
+/// nesting individually passes `xml_nesting_too_deep` (well under `MAX_SVG_NESTING_DEPTH`=64), and the
+/// chain-hop count individually passes `use_reference_chain_too_deep` (well under `MAX_USE_CHAIN_DEPTH`=128)
+/// — but `usvg`'s real native recursion cost is roughly their PRODUCT, and neither guard alone bounds that.
+/// `composed_use_chain_with_nested_containers_svg(10, 20)` and `(1, 40)` are the two concrete reproducers
+/// the adversarial audit confirmed overflow a 256KB stack under CPE-1437 attempt 1.
+fn composed_use_chain_with_nested_containers_svg(n_containers: usize, nesting_per: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    // Container 0: a plain shape, wrapped `nesting_per` <g> deep — the base of the chain, no <use> inside.
+    s.push_str(r#"<g id="c0">"#);
+    s.push_str(&"<g>".repeat(nesting_per));
+    s.push_str(r##"<rect width="10" height="10" fill="#f00"/>"##);
+    s.push_str(&"</g>".repeat(nesting_per));
+    s.push_str("</g>");
+    for i in 1..n_containers {
+        s.push_str(&format!(r#"<g id="c{i}">"#));
+        s.push_str(&"<g>".repeat(nesting_per));
+        s.push_str(&format!(r##"<use href="#c{prev}"/>"##, prev = i - 1));
+        s.push_str(&"</g>".repeat(nesting_per));
+        s.push_str("</g>");
+    }
+    // Outer trigger: references the last container, starting the whole resolution chain.
+    s.push_str(&format!(r##"<use href="#c{last}"/>"##, last = n_containers - 1));
     s.push_str("</svg>");
     s.into_bytes()
 }
@@ -252,4 +307,82 @@ fn rasterize_svg_renders_a_shallow_use_chain_fine_on_a_small_stack() {
     let bytes = flat_use_chain_svg(3);
     let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
     assert!(result.is_ok(), "a shallow, legitimate <use> chain must still render: {result:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1437 attempt 2: the composition bypass + the pre-existing CPE-1413 conversion-depth hole, both
+// closed by `rasterize_svg` now doing its real work on a dedicated large-stack thread rather than relying
+// on depth-prediction guards. Each of these payloads passes BOTH `xml_nesting_too_deep` and
+// `use_reference_chain_too_deep` untouched, yet reliably crashed the 256KB probe before this fix.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_composed_chain_of_nested_use_containers_on_a_small_stack() {
+    // The auditor's core "composition" finding: usvg's real native recursion cost is [<use>-hop count] x
+    // [each hop's target's own internal <g>-nesting depth] — not either dimension alone. This payload (10
+    // containers, each <g>-nested 20 deep, chained by <use> hops — ~11 hops / ~22 max local nesting) passes
+    // both existing fast-reject guards individually, yet reliably overflowed the 256KB probe under CPE-1437
+    // attempt 1 (a depth-prediction guard that didn't bound the product). Fixed for real in attempt 2:
+    // `rasterize_svg` now does its actual work on a dedicated large-stack thread, so this composed payload
+    // must now render successfully rather than merely fail gracefully — it's a legitimate shape well within
+    // `usvg`'s own 1024-level cap.
+    let bytes = composed_use_chain_with_nested_containers_svg(10, 20);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(
+        result.is_ok(),
+        "a composed use-chain-through-nested-containers payload must render, not overflow: {result:?}"
+    );
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_single_deeply_nested_use_target_on_a_small_stack() {
+    // The single-hop variant of the same composition bug: ONE <use> pointing at a single 40-deep <g>
+    // container (1 hop / ~42 max local nesting) — trivially passes both existing caps, but the target's
+    // own literal nesting alone (well under the 64 nesting cap) still overflowed the 256KB probe during
+    // usvg's tree-conversion pass under attempt 1. Confirms the guaranteed-large-stack fix isn't just
+    // masking the multi-container case above.
+    let bytes = composed_use_chain_with_nested_containers_svg(1, 40);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_ok(), "a single <use> into a deeply-nested container must render, not overflow: {result:?}");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_plain_nesting_under_the_cap_on_a_small_stack() {
+    // The pre-existing CPE-1413 hole the audit surfaced: plain <g> nesting with NO <use> at all overflowed
+    // the 256KB probe around depth ~35 during usvg's tree-*conversion* pass (a separate, heavier recursive
+    // pass than the raw XML parse `xml_nesting_too_deep` was originally profiled against) — UNDER that
+    // guard's existing cap of 64, so this shape sailed through untouched and still crashed. The
+    // guaranteed-large-stack fix makes this a non-issue regardless of where usvg's real crash threshold for
+    // any given internal recursive pass sits, present or future.
+    let bytes = deeply_nested_svg(35);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_ok(), "35 levels of plain <g> nesting (under the existing cap) must render, not overflow: {result:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Legitimate SVGs, confirmed to still render fine on the small-stack probe now that `rasterize_svg`
+// provides its own large stack rather than depending on the caller's.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn rasterize_svg_renders_a_symbol_sprite_sheet_fine_on_a_small_stack() {
+    // A realistic "icon sprite sheet": one <symbol> definition referenced by several <use>s.
+    let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="30" height="10">
+        <symbol id="icon" viewBox="0 0 10 10"><rect width="10" height="10" fill="#f00"/></symbol>
+        <use href="#icon" x="0" width="10" height="10"/>
+        <use href="#icon" x="10" width="10" height="10"/>
+        <use href="#icon" x="20" width="10" height="10"/>
+    </svg>"##
+        .to_vec();
+    let result = run_on_small_stack(move || rasterize_svg(&svg, 32));
+    assert!(result.is_ok(), "a legitimate icon sprite sheet must render: {result:?}");
+}
+
+#[test]
+fn rasterize_svg_renders_an_eight_deep_grouped_illustration_fine_on_a_small_stack() {
+    // A realistic, moderately-grouped illustration (layers/groups nested a handful of levels, well under
+    // any cap and well under the ~35-level conversion-pass crash threshold the audit found).
+    let bytes = deeply_nested_svg(8);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_ok(), "a realistic 8-deep grouped illustration must render: {result:?}");
 }

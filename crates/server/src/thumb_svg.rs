@@ -55,6 +55,51 @@
 //! [`use_reference_chain_too_deep`] and the now-un-`#[ignore]`d regression test in
 //! `tests/thumb_svg_panic_safety.rs`) — CPE-1414 itself is left Deferred/untouched as a ticket (out of
 //! this ticket's scope to close), but the underlying crash it reported no longer reproduces.
+//!
+//! **CPE-1437 attempt 2 — depth-prediction retired as the safety bar, a guaranteed-large stack adopted
+//! instead:** an independent adversarial security audit of attempt 1 (above) found a third bypass, this
+//! time a *composition* one: `usvg`'s real native recursion cost is [`<use>`-hop count] × [each hop's
+//! target's own internal `<g>`-nesting depth] — not either dimension alone. [`use_reference_chain_too_deep`]
+//! only counted hops (treating a `<use>` pointing at a deeply-`<g>`-nested container as "1 hop"), and
+//! [`xml_nesting_too_deep`] only counts a single document's own max literal nesting (which resets between
+//! unrelated siblings) — so neither bounds the product, and the auditor built concrete payloads well under
+//! *both* caps (≤128 hops, ≤64 nesting) that still overflowed the 256KB probe (e.g. 10 containers each
+//! `<g>`-nested 20 deep, chained by 11 `<use>` hops; or a single `<use>` into one 40-deep `<g>` container).
+//! The audit also surfaced a **pre-existing CPE-1413 hole**, unrelated to `<use>` at all: plain `<g>`
+//! nesting with *no* `<use>` anywhere overflowed the 256KB probe around depth ~35 during `usvg`'s tree-
+//! *conversion* pass (building its own scene-tree from the parsed XML DOM — a separate, heavier recursive
+//! pass than the raw `roxmltree` parse CPE-1413 originally profiled), which is **under** CPE-1413's
+//! existing cap of 64 — so a legitimately-shaped, cap-passing document could already overflow the probe
+//! before CPE-1437 was ever touched.
+//!
+//! Two independent depth-prediction guards (CPE-1414's three cycle-guard attempts, then this file's own
+//! CPE-1437 attempt 1) have now each been defeated by an adversarial reviewer finding a dimension of
+//! `usvg`'s real recursion cost the guard's model didn't account for. Extending either guard with a third
+//! dimension (nesting × hops, or worse) only invites a fourth bypass — modeling a large, evolving C-like
+//! library's exact internal recursion shape from the outside is inherently brittle. So attempt 2 adopts
+//! the ticket's own alternative fix direction as the **primary, durable** guarantee instead:
+//! [`rasterize_svg`] now does the actual `usvg` parse/convert/`resvg` render on a dedicated thread with a
+//! stack ([`RASTERIZE_STACK_SIZE`], 16MiB) sized to comfortably outlast `usvg`'s own hard recursion cap
+//! (1024 levels) under any plausible per-level stack cost — see [`rasterize_svg_on_a_guaranteed_stack`].
+//! Since `usvg` itself always enforces that 1024-level cap (returning its own `Err` past it) regardless of
+//! how the depth got distributed across nesting/hops/composition, giving it enough real stack to always
+//! *reach* that cap gracefully closes every variant of this bug class at once, present and future, without
+//! predicting anything about the input shape. [`xml_nesting_too_deep`] and [`use_reference_chain_too_deep`]
+//! are kept as cheap fast-reject checks (genuinely pathological input still shouldn't pay for a 16MiB
+//! thread spawn and a near-1024-level `usvg` walk) but are explicitly no longer relied on as the
+//! stack-overflow safety bar — see [`rasterize_svg`]'s doc comment.
+//!
+//! **A subtlety this fix's own verification caught:** [`use_reference_chain_too_deep`] is *not* the same
+//! kind of "cheap, provably non-recursive" check [`xml_nesting_too_deep`] is — to mirror `usvg`'s exact
+//! entity/DTD decoding (see that function's own doc comment) it calls the REAL, recursive
+//! `roxmltree::Document::parse_with_options`, the identical parser class CPE-1413 originally found recurses
+//! per XML nesting level with no cap of its own. An early version of this attempt left that call on the
+//! *caller's* thread (reasoning it ran "before" the big-stack spawn, so it'd only ever see shallow input
+//! that already passed `xml_nesting_too_deep`'s 64-level cap) — but a small-stack diagnostic during
+//! verification showed a BARE `roxmltree` parse of a document only ~42 levels deep (comfortably under that
+//! 64-level cap) already overflows a 256KB stack by itself. So `use_reference_chain_too_deep` now runs
+//! *inside* [`rasterize_svg_on_a_guaranteed_stack`]'s closure, on the same guaranteed stack as the render —
+//! only [`xml_nesting_too_deep`]'s genuinely flat byte-scan loop is safe to run on the caller's own thread.
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -446,50 +491,127 @@ fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
     false
 }
 
+/// The stack size [`rasterize_svg_on_a_guaranteed_stack`] gives the dedicated thread that does the real
+/// `usvg` parse/convert/render work (CPE-1437 attempt 2). 16MiB, chosen the way the coordinator's fix
+/// direction specified: usvg's own hard recursion cap is 1024 levels regardless of caller stack size, and
+/// this codebase's own 256KB small-stack panic-safety probe empirically overflowed well under 500 levels
+/// (in some shapes — see the module doc comment — under 40). Even pessimistically assuming most of that
+/// 256KB is fixed thread overhead rather than available for recursion (say only ~150KB of it usable),
+/// that puts the real per-level stack cost at a few KB; 16MiB is 64x that probe's total size, giving
+/// several thousand levels of headroom — comfortably past usvg's own 1024 cap under any reasonable
+/// per-level cost estimate. Empirically confirmed safe against every adversarial payload in
+/// `tests/thumb_svg_panic_safety.rs` (composition-of-hops-and-nesting, plain deep nesting, the mutual
+/// `<symbol>` cycle, and the flat 500-hop chain).
+const RASTERIZE_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 /// Rasterize `bytes` (the contents of an `.svg` file) to an RGBA image whose longest edge is at most
-/// `max_edge` pixels, preserving the document's aspect ratio. Never panics: a malformed document, an
-/// implausible declared size, an implausibly deep element nesting or `<use>` reference chain, or a
-/// render-target allocation failure all return `Err`.
+/// `max_edge` pixels, preserving the document's aspect ratio. Never panics — and, critically, never
+/// **stack-overflows the calling thread**, which is a stronger guarantee than "never panics" since a
+/// stack overflow is uncatchable and aborts the whole process regardless of `catch_unwind`: see
+/// [`rasterize_svg_on_a_guaranteed_stack`] for how. A malformed document, an implausible declared size, or
+/// a render-target allocation failure all return `Err`.
+///
+/// [`xml_nesting_too_deep`] and [`use_reference_chain_too_deep`] still run first as cheap, non-recursive
+/// fast-reject checks — genuinely useful defense-in-depth against obviously pathological input (an
+/// absurdly deep document or an absurdly long/cyclic `<use>` chain costs real CPU/memory even with a big
+/// enough stack to survive it) — but per CPE-1437 attempt 2 they are **no longer the stack-overflow safety
+/// bar**. See the module doc comment for why: two separate depth-prediction guards (CPE-1414's cycle
+/// guard attempts and this file's own CPE-1437 attempt 1) were each defeated by an adversarial reviewer
+/// finding an input shape the guard's model of "what makes usvg recurse deeply" didn't account for, most
+/// recently a payload that composes `<use>`-hop count *with* each hop's target's internal `<g>`-nesting
+/// depth — neither guard alone bounds that product, and it turned out usvg's tree-*conversion* pass (as
+/// opposed to the raw XML parse CPE-1413 originally profiled) has a real crash threshold on a 256KB stack
+/// low enough that even literal nesting alone, comfortably under CPE-1413's existing cap of 64, can
+/// overflow it. Trying to extend either guard with a third dimension only invites a fourth bypass; the
+/// durable fix is to stop predicting and just guarantee enough real stack.
 pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String> {
+    // Only the pure byte-scan guard runs on the CALLER's own thread — it's provably non-recursive (a flat
+    // loop with an integer counter, see its own doc comment), so it can't overflow any stack regardless of
+    // input depth, and rejecting an obviously-pathological document this cheaply avoids paying for a
+    // dedicated large-stack thread spawn at all in the common "somebody sent garbage" case.
     if xml_nesting_too_deep(bytes, MAX_SVG_NESTING_DEPTH) {
         return Err("SVG element nesting too deep".to_string());
     }
-    if use_reference_chain_too_deep(bytes, MAX_USE_CHAIN_DEPTH) {
-        return Err("SVG <use> reference chain too deep".to_string());
+
+    // Everything else — including `use_reference_chain_too_deep` — runs inside the guaranteed-large-stack
+    // thread below. This is deliberate, not an oversight: `use_reference_chain_too_deep` itself calls the
+    // REAL `roxmltree::Document::parse_with_options` (needed to mirror `usvg`'s own entity/DTD decoding —
+    // see that function's doc comment), which is exactly the same per-nesting-level-recursive parser
+    // `xml_nesting_too_deep` exists to keep away from a small caller stack in the first place. A CPE-1437
+    // attempt 2 diagnostic (see the module doc comment) confirmed a BARE `roxmltree` parse of a document
+    // only ~42 levels deep — comfortably under `xml_nesting_too_deep`'s own 64-level cap — already
+    // overflows a 256KB stack by itself, so leaving that parse on the caller's thread would have silently
+    // reintroduced the exact bug class this whole attempt exists to close.
+    rasterize_svg_on_a_guaranteed_stack(bytes.to_vec(), max_edge)
+}
+
+/// Does the actual `<use>`-chain check *and* the `usvg` parse + convert + `resvg` render on a **dedicated
+/// thread** with [`RASTERIZE_STACK_SIZE`] of stack, regardless of the calling thread's own stack size
+/// (which, in production, is already the Tokio `spawn_blocking` default of 2MiB — plenty on its own, but
+/// this function no longer wants to depend on that; a caller on a smaller stack, like this crate's own
+/// small-stack panic-safety probe, must be just as safe). `rasterize_svg` now **owns** its stack
+/// requirement instead of inheriting the caller's, so no input `usvg` itself is willing to accept — it has
+/// its own hard cap of 1024 recursion levels and 1,000,000 elements — can overflow it, no matter how that
+/// recursion cost is distributed across literal nesting, `<use>` hops, or (per CPE-1437 attempt 2's
+/// finding) any composition of the two. This closes the composition bypass *and* the pre-existing
+/// CPE-1413 conversion-depth hole at once, without needing to model `usvg`'s internals at all.
+///
+/// [`use_reference_chain_too_deep`] runs FIRST inside this closure (still cheap relative to a full render,
+/// and still valuable as defense-in-depth against a pathologically long/cyclic `<use>` chain), but now on
+/// this function's own guaranteed stack rather than the caller's — see [`rasterize_svg`]'s doc comment for
+/// why that placement specifically matters.
+///
+/// A panic inside the closure (e.g. an allocation failure surfaced as a panic rather than an `Err`) is
+/// caught via the thread's own unwind boundary and turned into a graceful `Err` through `JoinHandle::join`
+/// — only a genuine stack *overflow* is uncatchable, and that's exactly the failure mode this function
+/// exists to make unreachable. Failing to spawn the thread at all (OS resource exhaustion) is itself just
+/// another `Err`, never a panic.
+fn rasterize_svg_on_a_guaranteed_stack(bytes: Vec<u8>, max_edge: u32) -> Result<DynamicImage, String> {
+    let render = move || -> Result<DynamicImage, String> {
+        if use_reference_chain_too_deep(&bytes, MAX_USE_CHAIN_DEPTH) {
+            return Err("SVG <use> reference chain too deep".to_string());
+        }
+
+        let opt = resvg::usvg::Options::default();
+        let tree = resvg::usvg::Tree::from_data(&bytes, &opt).map_err(|e| e.to_string())?;
+
+        let size = tree.size();
+        let (src_w, src_h) = (size.width(), size.height());
+        if src_w > MAX_SVG_DIMENSION as f32 || src_h > MAX_SVG_DIMENSION as f32 {
+            return Err(format!(
+                "SVG intrinsic size {src_w}x{src_h} exceeds the {MAX_SVG_DIMENSION}px bomb-guard limit"
+            ));
+        }
+
+        let edge = max_edge.max(1) as f32;
+        let scale = (edge / src_w).min(edge / src_h);
+        let out_w = (src_w * scale).round().max(1.0) as u32;
+        let out_h = (src_h * scale).round().max(1.0) as u32;
+        if out_w > MAX_SVG_DIMENSION || out_h > MAX_SVG_DIMENSION {
+            return Err("SVG scaled render target exceeds the bomb-guard limit".to_string());
+        }
+
+        let mut pixmap = resvg::tiny_skia::Pixmap::new(out_w, out_h)
+            .ok_or("could not allocate an SVG render target")?;
+        let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
+        resvg::render(&tree, transform, &mut pixmap.as_mut());
+
+        // tiny-skia stores premultiplied alpha; `image`/PNG expect straight alpha, so demultiply per pixel.
+        let mut raw = Vec::with_capacity(pixmap.pixels().len() * 4);
+        for px in pixmap.pixels() {
+            let c = px.demultiply();
+            raw.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
+        }
+        let rgba = RgbaImage::from_raw(out_w, out_h, raw).ok_or("SVG render buffer size mismatch")?;
+        Ok(DynamicImage::ImageRgba8(rgba))
+    };
+
+    match std::thread::Builder::new().stack_size(RASTERIZE_STACK_SIZE).spawn(render) {
+        Ok(handle) => handle
+            .join()
+            .unwrap_or_else(|_| Err("SVG rasterization thread panicked".to_string())),
+        Err(e) => Err(format!("failed to spawn the SVG rasterization thread: {e}")),
     }
-
-    let opt = resvg::usvg::Options::default();
-    let tree = resvg::usvg::Tree::from_data(bytes, &opt).map_err(|e| e.to_string())?;
-
-    let size = tree.size();
-    let (src_w, src_h) = (size.width(), size.height());
-    if src_w > MAX_SVG_DIMENSION as f32 || src_h > MAX_SVG_DIMENSION as f32 {
-        return Err(format!(
-            "SVG intrinsic size {src_w}x{src_h} exceeds the {MAX_SVG_DIMENSION}px bomb-guard limit"
-        ));
-    }
-
-    let edge = max_edge.max(1) as f32;
-    let scale = (edge / src_w).min(edge / src_h);
-    let out_w = (src_w * scale).round().max(1.0) as u32;
-    let out_h = (src_h * scale).round().max(1.0) as u32;
-    if out_w > MAX_SVG_DIMENSION || out_h > MAX_SVG_DIMENSION {
-        return Err("SVG scaled render target exceeds the bomb-guard limit".to_string());
-    }
-
-    let mut pixmap =
-        resvg::tiny_skia::Pixmap::new(out_w, out_h).ok_or("could not allocate an SVG render target")?;
-    let transform = resvg::tiny_skia::Transform::from_scale(scale, scale);
-    resvg::render(&tree, transform, &mut pixmap.as_mut());
-
-    // tiny-skia stores premultiplied alpha; `image`/PNG expect straight alpha, so demultiply per pixel.
-    let mut raw = Vec::with_capacity(pixmap.pixels().len() * 4);
-    for px in pixmap.pixels() {
-        let c = px.demultiply();
-        raw.extend_from_slice(&[c.red(), c.green(), c.blue(), c.alpha()]);
-    }
-    let rgba = RgbaImage::from_raw(out_w, out_h, raw).ok_or("SVG render buffer size mismatch")?;
-    Ok(DynamicImage::ImageRgba8(rgba))
 }
 
 #[cfg(test)]
@@ -695,6 +817,20 @@ mod tests {
         // A realistic sprite-sheet-style chain (a couple of hops) must not be rejected.
         assert!(!use_reference_chain_too_deep(&flat_use_chain_svg(3), MAX_USE_CHAIN_DEPTH));
         assert!(!use_reference_chain_too_deep(&square_svg(10, 10), MAX_USE_CHAIN_DEPTH), "no <use> at all");
+    }
+
+    #[test]
+    fn use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected() {
+        // A chain of exactly MAX_USE_CHAIN_DEPTH links resolves to chain depth == the cap, which the
+        // guard's own `depth > max_depth` check must allow; one link more must tip it over.
+        assert!(
+            !use_reference_chain_too_deep(&flat_use_chain_svg(MAX_USE_CHAIN_DEPTH), MAX_USE_CHAIN_DEPTH),
+            "a chain exactly at the cap must be allowed"
+        );
+        assert!(
+            use_reference_chain_too_deep(&flat_use_chain_svg(MAX_USE_CHAIN_DEPTH + 1), MAX_USE_CHAIN_DEPTH),
+            "one link past the cap must be rejected"
+        );
     }
 
     #[test]

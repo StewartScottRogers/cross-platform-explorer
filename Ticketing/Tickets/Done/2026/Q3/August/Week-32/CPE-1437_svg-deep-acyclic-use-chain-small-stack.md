@@ -115,3 +115,78 @@ narrower scope ("bound the `<use>` reference-chain depth"); flagged here for who
 - No `Cargo.toml`/`Cargo.lock` changes — no new dependency; `resvg::usvg::roxmltree` (usvg's own public
   re-export) and `resvg::usvg::decompress_svgz` (usvg's own public fn) cover everything needed, so the crate's
   no-new-deps guardrail holds.
+
+## Work Log — attempt 2 (2026-08-07, same worktree/branch `cpe-1437-svg-use-chain-depth`, PR #709)
+An independent adversarial security audit of attempt 1 (above) found a real, reproducible THIRD bypass —
+confirmed with actual `STATUS_STACK_OVERFLOW` crashes on the 256KB probe — and it changed the whole approach.
+
+**The bypass:** `usvg`'s real native recursion cost is the COMPOSITION of `<use>`-hop count AND each hop's
+target's own internal `<g>`-nesting depth, not either dimension alone. Attempt 1's `use_reference_chain_too_deep`
+only counted hops; `xml_nesting_too_deep` only bounds a single document's own max literal nesting. Neither
+bounds the product. The auditor's concrete reproducers (all confirmed to crash under attempt 1, all passing
+BOTH existing caps individually): 10 containers each `<g>`-nested 20 deep chained by 11 `<use>` hops; a single
+`<use>` into one 40-deep `<g>` container; and — a pre-existing CPE-1413 hole, unrelated to `<use>` at all —
+plain `<g>` nesting alone crashing the probe around depth ~35, during `usvg`'s tree-*conversion* pass (separate
+from, and apparently cheaper-per-level than, the raw XML *parse* pass CPE-1413's original nesting-guard sizing
+was profiled against), which is UNDER that guard's existing 64-level cap.
+
+**Why depth-prediction was abandoned as the primary defense:** CPE-1414 (three attempts) and this ticket's own
+attempt 1 had now EACH been independently defeated by an adversarial reviewer finding a dimension of `usvg`'s
+real recursion cost the guard's model didn't cover. Extending either guard with a third dimension (nesting ×
+hops) only invites a fourth bypass — trying to model a large, evolving C-like library's exact internal
+recursion shape from the outside is inherently brittle. So attempt 2 adopts the ticket's own always-available
+alternative fix direction as the PRIMARY, durable guarantee: **run the actual `usvg` work on a thread with a
+guaranteed-large stack**, so `usvg`'s own hard recursion cap (1024 levels — which it always enforces regardless
+of how the depth is distributed) is reached gracefully instead of ever being reachable by an under-provisioned
+caller stack.
+
+**The fix (`crates/server/src/thumb_svg.rs`):**
+- `rasterize_svg` now only runs `xml_nesting_too_deep` (a genuinely non-recursive flat byte-scan, provably
+  stack-safe at any input depth) on the caller's own thread as a cheap first-pass reject, then hands off to
+  `rasterize_svg_on_a_guaranteed_stack(bytes.to_vec(), max_edge)`.
+- `rasterize_svg_on_a_guaranteed_stack` spawns a dedicated thread via
+  `std::thread::Builder::new().stack_size(RASTERIZE_STACK_SIZE).spawn(...)` and does EVERYTHING else inside
+  that closure — including `use_reference_chain_too_deep` (kept as fast defense-in-depth against a
+  pathologically long/cyclic chain — cheaper to reject than to fully parse+render — but no longer relied on as
+  the stack-overflow bar), the real `usvg::Tree::from_data` parse, and the `resvg::render` call. The result
+  (or a graceful `Err` if the closure panics) crosses back via `JoinHandle::join`; a failed thread spawn is
+  also just an `Err`, never a panic. **Stack size: 16MiB** (`RASTERIZE_STACK_SIZE`), chosen because it's ~64x
+  the 256KB probe that empirically overflows well under usvg's own 1024-level cap, giving several thousand
+  levels of headroom under any plausible per-level cost estimate — and now empirically confirmed (see test
+  results below) safe against every payload the audit found, plus the pre-existing plain-nesting hole.
+- **A subtlety the verification itself caught and is now documented in the module doc comment:**
+  `use_reference_chain_too_deep` is NOT "cheap and provably non-recursive" the way `xml_nesting_too_deep` is —
+  to mirror `usvg`'s exact entity/DTD decoding it calls the REAL, recursive
+  `roxmltree::Document::parse_with_options`, the identical parser class CPE-1413 originally found recurses per
+  XML nesting level with no cap of its own. A first pass at this fix left that call on the CALLER's thread
+  (reasoning it only ever saw input already passed by the 64-level nesting cap) — a targeted small-stack
+  diagnostic during verification proved that wrong: a BARE `roxmltree` parse of a document only ~42 levels
+  deep (well under that 64-level cap) already overflows a 256KB stack by itself. Moving
+  `use_reference_chain_too_deep`'s call inside the guaranteed-stack closure (as described above) closed this
+  immediately — confirmed by rerunning the exact diagnostic and the full battery afterward.
+
+**Test results (Windows, debug build, this worktree, after the fix):**
+- `crates/server/tests/thumb_svg_panic_safety.rs`: **13 passed, 0 failed, 0 ignored** (both `--test-threads=1`
+  sequential and default-parallel runs) — includes all three of the auditor's exact payloads
+  (`rasterize_svg_never_stack_overflows_on_a_composed_chain_of_nested_use_containers_on_a_small_stack`,
+  `..._on_a_single_deeply_nested_use_target_on_a_small_stack`,
+  `..._on_plain_nesting_under_the_cap_on_a_small_stack` — all now assert `Ok`, i.e. render successfully rather
+  than merely fail gracefully, since they're legitimate shapes well within `usvg`'s own bounds), the existing
+  cycle/deep-chain/self-reference cases (still `Err` via the fast pre-scan), and two new legit-SVG confirmations
+  (`rasterize_svg_renders_a_symbol_sprite_sheet_fine_on_a_small_stack`,
+  `..._an_eight_deep_grouped_illustration_fine_on_a_small_stack`).
+- `crates/server` lib tests: **1708 passed, 0 failed** (+1 for the new
+  `use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected` boundary test: a chain of
+  exactly `MAX_USE_CHAIN_DEPTH`=128 links is allowed, 129 is rejected).
+- Full `cargo test --manifest-path crates/server/Cargo.toml` (default features): all suites green.
+- Full `cargo test --manifest-path crates/server/Cargo.toml --features index`: 1751 lib tests + all
+  integration suites green (matches CI's `index`-feature test run).
+- `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets -- -D warnings`: clean.
+- `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets --features index -- -D warnings`: clean.
+- No `Cargo.toml`/`Cargo.lock` changes in this attempt either — still zero new dependencies.
+- No leftover scratch attack-test file (`tests/zz_sec_audit_attack.rs` was never present in this worktree).
+
+**Cross-references:** CPE-1413 (the original literal-nesting guard, whose sizing this attempt found a small-
+stack conversion-pass hole in — now moot since the guaranteed-stack fix covers it regardless) and CPE-1414
+(the still-Deferred cycle-guard ticket, whose reproducer remains covered by `use_reference_chain_too_deep`'s
+fast-reject AND, as a second independent layer, by this attempt's guaranteed stack).
