@@ -554,6 +554,25 @@ async readPdfValidity(path: string) : Promise<Result<number | null, string>> {
 }
 },
 /**
+ * Downsampled audio-waveform peak array — exactly `buckets` `(min, max)` sample pairs in ascending time
+ * order regardless of the source file's length (CPE-1478, epic CPE-720): the first concrete backend
+ * deliverable of the audio/video player pane's waveform strip (CPE-1431), landed backend-first ahead of
+ * its GUI consumer per the established pattern for this epic. Thin `spawn_blocking` dispatcher into
+ * `cpe_server::media_waveform::extract_waveform_peaks`, which shells out to the same bundled `ffmpeg`
+ * subprocess `thumbnail`'s video-frame path uses (never linked in-process) and bounds the PCM read to a
+ * fixed byte cap so a long or crafted audio file can't OOM the process — see that module's doc for the
+ * full design. `Err` on a missing ffmpeg binary, a non-zero ffmpeg exit, or a nonexistent/empty/
+ * undecodable input.
+ */
+async audioWaveformPeaks(path: string, buckets: number) : Promise<Result<([number, number])[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("audio_waveform_peaks", { path, buckets }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in

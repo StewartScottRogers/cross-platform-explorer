@@ -190,6 +190,12 @@ pdf-thumb = ["dep:pdfium-render"]
 # compiles zero video code (the "small when off" rule). Turn on with `--features video-thumb`;
 # ship-enablement (bundling the ffmpeg binary as a release resource) is CPE-1258.
 video-thumb = []
+# Opt-in audio-waveform peak extraction by shelling out to the same bundled `ffmpeg` executable
+# `video-thumb` uses (CPE-1478, epic CPE-720) — never linked in-process, so no `dep:` here either (this
+# feature adds ZERO Cargo dependencies; `cargo tree` is unchanged with it on). OFF by default so the
+# plain build compiles zero waveform code (the "small when off" rule, mirrored from `video-thumb`).
+# Turn on with `--features waveform`; ship-enablement mirrors `video-thumb`'s CPE-1258 bundling.
+waveform = []
 # Opt-in real HTTP embedder for content search (CPE-1273, epic CPE-976). OFF by default so the lean
 # default build compiles zero HTTP code / pulls in no `ureq`/TLS stack (the "small when off" rule,
 # mirrored from `index`/`pdf-thumb` above). The `http_embedder` module always compiles (its pure

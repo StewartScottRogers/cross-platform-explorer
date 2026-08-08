@@ -20,21 +20,16 @@
 //! before that `fs::read` — because a video can be many gigabytes. This module always operates on the
 //! file `Path` directly; ffmpeg reads it itself as a subprocess.
 //!
-//! **ffmpeg resolution:** the injected native-dep dir ([`set_native_dep_dir`]) is tried first, then a
-//! bundled copy sitting next to the running executable, then a bare `ffmpeg` resolved via `PATH` as
-//! the dev fallback (mirrors `thumb_pdf::resolve_bindings`'s resolution order). If none are present,
-//! spawning the process itself fails with a normal `Err` — never a panic — and the caller's existing
-//! contract (no thumbnail -> generic type icon) takes over.
-//!
-//! **Why "next to the executable" alone isn't enough (CPE-1258 fix):** Tauri's `bundle.resources`
-//! (where ship-time packaging stages ffmpeg) land in a *different* directory than the running
-//! executable on 2 of the 3 shipped platforms — macOS (`AppName.app/Contents/MacOS/<exe>` vs
-//! `AppName.app/Contents/Resources/`) and Linux (`usr/bin/<exe>` vs `usr/lib/<exe>/`); only Windows
-//! NSIS stages resources next to the exe. This crate is Tauri-free and can't call
-//! `app.path().resource_dir()` itself, so the app adapter resolves it and calls
-//! [`set_native_dep_dir`] once at startup (mirroring how the sidecar host resolves `resource_dir()`
-//! for its own bundled binaries in `src-tauri/src/lib.rs`) — tried before the `current_exe().parent()`
-//! guess.
+//! **ffmpeg resolution + scratch-dir plumbing now lives in [`crate::ffmpeg_util`]** (CPE-1478 extraction):
+//! [`crate::ffmpeg_util::resolve_ffmpeg_bin`] tries the injected native-dep dir first, then a bundled
+//! copy sitting next to the running executable, then a bare `ffmpeg` resolved via `PATH` as the dev
+//! fallback (mirrors `thumb_pdf::resolve_bindings`'s resolution order). If none are present, spawning
+//! the process itself fails with a normal `Err` — never a panic — and the caller's existing contract (no
+//! thumbnail -> generic type icon) takes over. See that module's doc for the full CPE-1258
+//! ("next to the executable" isn't enough on macOS/Linux) and CPE-1261 (exclusive scratch dir, CWE-377)
+//! rationale — this module is now just ffmpeg_util's first caller, with `media_waveform` (CPE-1478) as
+//! the second, sharing one `NATIVE_DEP_DIR` injection so the app only wires the bundled ffmpeg's
+//! resource dir in once for both.
 //!
 //! **Frame selection:** seeks ~1s into the clip first (`-ss 1`) to skip a likely black lead-in frame;
 //! very short or unusual clips where that offset yields no frame fall back to `-ss 0` (the very first
@@ -60,13 +55,12 @@
 //! never upscales, and lands the longest edge at exactly `max_edge` regardless of orientation.
 
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use image::DynamicImage;
+
+use crate::ffmpeg_util::{create_scratch_dir, resolve_ffmpeg_bin};
 
 /// Extensions this module claims in [`crate::thumb_source::decode_thumb_image`]'s dispatch. Kept here
 /// (rather than duplicated in `thumb_source`) so the two stay in lockstep by construction. Matched
@@ -93,7 +87,7 @@ fn extract_frame_with_ffmpeg(path: &Path, max_edge: u32, ffmpeg: &Path) -> Resul
     // Exclusively-created scratch dir (CPE-1261, CWE-377 hardening) — see the module doc's "Output
     // path + cleanup" note. If we can't even get a fresh directory, bail out cleanly; there's nothing
     // to clean up yet.
-    let scratch_dir = create_scratch_dir()?;
+    let scratch_dir = create_scratch_dir("thumbvideo")?;
     let tmp = scratch_dir.join("frame.png");
 
     // Seek ~1s in first (skips a likely black lead-in frame); fall back to the very first frame if
@@ -162,103 +156,6 @@ fn run_ffmpeg_frame(ffmpeg: &Path, input: &Path, out: &Path, offset_secs: &str, 
     Ok(())
 }
 
-/// The bundle-resource directory injected by the (Tauri-aware) app adapter — see the module doc's
-/// "CPE-1258 fix" note. `None` until [`set_native_dep_dir`] is called (dev builds / not yet wired),
-/// in which case resolution falls through to the `current_exe().parent()` / `PATH` guesses unchanged.
-static NATIVE_DEP_DIR: OnceLock<PathBuf> = OnceLock::new();
-
-/// Sets the directory the bundled `ffmpeg` executable was staged into, so [`resolve_ffmpeg_bin`] can
-/// find it there first — call once at app startup with `app.path().resource_dir()` (or wherever the
-/// `bundle.resources` ffmpeg entry actually lands). This crate is Tauri-free and can't resolve that
-/// path itself, hence the injection seam (mirrors `thumb_pdf::set_native_dep_dir`). Unlike pdfium,
-/// ffmpeg is resolved fresh on every call rather than cached, so — unlike the pdfium setter — there's
-/// no "must be called before first use" ordering requirement here; still, call it once at startup.
-/// A second call is a silent no-op.
-pub fn set_native_dep_dir(dir: PathBuf) {
-    let _ = NATIVE_DEP_DIR.set(dir);
-}
-
-/// Resolves the ffmpeg binary, trying each candidate path in order (see the module doc's resolution-
-/// order note), then finally a bare `ffmpeg` resolved via `PATH` as the last-resort dev fallback.
-/// Never fails outright — an unresolvable PATH fallback simply fails later at spawn time with a normal
-/// `Err`.
-fn resolve_ffmpeg_bin() -> PathBuf {
-    let exe_name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-
-    // (1) The injected native-dep dir — the CPE-1258 fix, and the ONLY correct location on
-    // macOS/Linux once the app adapter has set it (real installs).
-    if let Some(dir) = NATIVE_DEP_DIR.get() {
-        let bundled = dir.join(exe_name);
-        if bundled.exists() {
-            return bundled;
-        }
-    }
-    // (2) Next to the running executable — already correct on Windows; a dev-build fallback
-    // everywhere else (e.g. `cargo run` with a hand-copied binary).
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let bundled = dir.join(exe_name);
-            if bundled.exists() {
-                return bundled;
-            }
-        }
-    }
-    // (3) Bare `ffmpeg`/`ffmpeg.exe` resolved via PATH — the dev fallback (e.g. a system ffmpeg
-    // install, or CI's package-manager install for the real-render tests).
-    PathBuf::from(exe_name)
-}
-
-/// Creates a fresh, **exclusively-owned** scratch directory under the OS temp dir for one
-/// [`extract_frame`] invocation, and returns its path (the PNG is written inside it by the caller).
-///
-/// Security rationale (CPE-1261, CWE-377): the previous approach built a unique-but-*predictable*
-/// filename (`temp_dir()/cpe-thumbvideo-{pid}-{nanos}-{counter}.png`) and let ffmpeg write straight to
-/// it with `-y`. On a shared, world-writable `/tmp` an attacker who guessed (or brute-forced) that name
-/// ahead of time could pre-plant a symlink there; `-y` truncates-in-place and follows symlinks, so
-/// ffmpeg would clobber whatever the symlink pointed at. `std::fs::create_dir` closes that window
-/// atomically: it fails with `AlreadyExists` if *anything* — file, directory, or symlink — already sits
-/// at that path, so a successful return means this call, and only this call, owns a brand-new directory
-/// nothing could have been pre-planted inside (it didn't exist a moment ago). Writing ffmpeg's output
-/// *inside* that directory (rather than trying to harden the filename itself) means the exclusivity
-/// guarantee covers the PNG too, with no dependency on high-entropy randomness or a new crate.
-///
-/// Concurrency: the pid+nanos+monotonic-counter name is already effectively unique per call (the same
-/// scheme the old single-file path used, which the original CPE-1257 ticket already accepted as
-/// collision-free for concurrent `spawn_blocking` thumbnail requests), so `create_dir` is expected to
-/// succeed on the first attempt. The bounded retry below is belt-and-suspenders for the vanishingly
-/// unlikely case of a name collision (or a stale directory left behind by a prior crash reusing the
-/// same nanosecond+counter, which cannot really happen given the counter is process-lifetime
-/// monotonic) — it is not required for correctness, since each attempt still gets its own atomically-
-/// exclusive name.
-///
-/// Never panics: after `MAX_ATTEMPTS` failed creates, returns `Err` rather than looping forever or
-/// falling back to a non-exclusive path.
-fn create_scratch_dir() -> Result<PathBuf, String> {
-    const MAX_ATTEMPTS: u32 = 8;
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let mut last_err: Option<std::io::Error> = None;
-    for _ in 0..MAX_ATTEMPTS {
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let ts = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("cpe-thumbvideo-{}-{ts}-{n}", std::process::id()));
-
-        match fs::create_dir(&dir) {
-            Ok(()) => {
-                #[cfg(test)]
-                record_scratch_dir_for_test(dir.clone());
-                return Ok(dir);
-            }
-            Err(e) => last_err = Some(e),
-        }
-    }
-
-    Err(format!(
-        "failed to create an exclusive scratch dir under the OS temp dir after {MAX_ATTEMPTS} attempts: {}",
-        last_err.map(|e| e.to_string()).unwrap_or_else(|| "unknown error".to_string())
-    ))
-}
-
 /// Downscales `img` so its longest edge is at most `max_edge` pixels, preserving aspect ratio and
 /// **never upscaling** past the source's own size. ffmpeg's own `-vf scale` already does most of the
 /// work, but only caps *width* (see `run_ffmpeg_frame`'s comment), so a portrait (taller-than-wide)
@@ -276,40 +173,12 @@ fn downscale_to_max_edge(img: DynamicImage, max_edge: u32) -> DynamicImage {
     img.resize(out_w, out_h, image::imageops::FilterType::Lanczos3)
 }
 
-// Test-only side channel: the most recent scratch dir `create_scratch_dir` created **on the calling
-// thread**. Thread-local (not a shared global) because cargo test runs each `#[test]` fn on its own
-// thread by default, so this lets a leak-check test that calls `extract_frame`/`extract_frame_with_ffmpeg`
-// (which don't return the scratch dir path themselves) recover exactly which directory to check, without
-// racing other tests that concurrently create their own scratch dirs.
-#[cfg(test)]
-thread_local! {
-    static LAST_SCRATCH_DIR: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn record_scratch_dir_for_test(dir: PathBuf) {
-    LAST_SCRATCH_DIR.with(|c| *c.borrow_mut() = Some(dir));
-}
-
-#[cfg(test)]
-fn last_scratch_dir_for_test() -> Option<PathBuf> {
-    LAST_SCRATCH_DIR.with(|c| c.borrow().clone())
-}
-
-/// True if ffmpeg is resolvable and actually runs in this environment (`ffmpeg -version` succeeds).
-/// Used to gate the real-render test so it SKIPS (not fails) on a runner without ffmpeg. Test-only.
-#[cfg(test)]
-fn ffmpeg_available() -> bool {
-    Command::new(resolve_ffmpeg_bin())
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffmpeg_util::{ffmpeg_available, last_scratch_dir_for_test};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
 
     fn scratch(tag: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -449,36 +318,11 @@ mod tests {
     }
 
     // --- CPE-1261: exclusive scratch-dir hardening (CWE-377) ---------------------------------------
-
-    /// Unconditional (no ffmpeg needed): each concurrent [`create_scratch_dir`] call must succeed and
-    /// get a distinct, exclusively-owned directory — nobody can observe or race another call's path.
-    /// This is the "concurrent calls don't collide" guarantee the ticket asks to confirm: it's true by
-    /// construction (`std::fs::create_dir` on a fresh pid+nanos+counter name fails atomically on any
-    /// collision), and this test exercises that under real concurrent threads rather than just asserting
-    /// the rationale in a comment.
-    #[test]
-    fn create_scratch_dir_never_collides_across_concurrent_calls() {
-        use std::thread;
-
-        let handles: Vec<_> = (0..16)
-            .map(|_| thread::spawn(create_scratch_dir))
-            .collect();
-
-        let mut dirs: Vec<PathBuf> = handles
-            .into_iter()
-            .map(|h| h.join().expect("thread must not panic").expect("scratch dir creation must succeed"))
-            .collect();
-
-        let total = dirs.len();
-        dirs.sort();
-        dirs.dedup();
-        assert_eq!(dirs.len(), total, "every concurrent call must get a distinct, non-colliding scratch dir");
-
-        for d in &dirs {
-            assert!(d.is_dir(), "each returned path must actually be a created directory: {}", d.display());
-            let _ = fs::remove_dir_all(d);
-        }
-    }
+    // The "concurrent calls to create_scratch_dir never collide" guarantee is now tested once, directly
+    // against the shared implementation, in `crate::ffmpeg_util`'s own test module (CPE-1478
+    // extraction) — no need to re-prove it per caller here. The tests below stay in this module because
+    // they exercise `extract_frame`'s *integration* with the scratch dir (created-then-cleaned-up around
+    // a real ffmpeg spawn), which `ffmpeg_util`'s tests don't cover.
 
     /// Unconditional: pointing `extract_frame_with_ffmpeg` at a bogus ffmpeg binary still creates the
     /// scratch dir first (before the doomed spawn), and the error path must remove it — no leaked temp

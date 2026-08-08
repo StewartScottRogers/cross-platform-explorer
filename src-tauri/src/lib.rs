@@ -1199,6 +1199,25 @@ async fn read_pdf_validity(path: String) -> Result<Option<u32>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Downsampled audio-waveform peak array — exactly `buckets` `(min, max)` sample pairs in ascending time
+/// order regardless of the source file's length (CPE-1478, epic CPE-720): the first concrete backend
+/// deliverable of the audio/video player pane's waveform strip (CPE-1431), landed backend-first ahead of
+/// its GUI consumer per the established pattern for this epic. Thin `spawn_blocking` dispatcher into
+/// `cpe_server::media_waveform::extract_waveform_peaks`, which shells out to the same bundled `ffmpeg`
+/// subprocess `thumbnail`'s video-frame path uses (never linked in-process) and bounds the PCM read to a
+/// fixed byte cap so a long or crafted audio file can't OOM the process — see that module's doc for the
+/// full design. `Err` on a missing ffmpeg binary, a non-zero ffmpeg exit, or a nonexistent/empty/
+/// undecodable input.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn audio_waveform_peaks(path: String, buckets: usize) -> Result<Vec<(f32, f32)>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::media_waveform::extract_waveform_peaks(Path::new(&path), buckets)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
 /// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
 /// glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
@@ -6720,16 +6739,17 @@ fn reap_orphan_session_daemons_on_startup(app: &tauri::AppHandle) {
 ///
 /// Must run before the first thumbnail request reaches `cpe_server::thumb_pdf` (its pdfium binding is
 /// resolved lazily and cached on first use — a later call would be too late); called from `setup()`,
-/// so that's guaranteed. `thumb_video` re-resolves on every call, so it has no such ordering
-/// requirement, but is wired the same way for symmetry. Best-effort: if `resource_dir()` can't be
-/// resolved (shouldn't happen on a real bundled build — only a theoretical dev-environment gap), both
-/// extractors simply keep falling back to their `current_exe().parent()` / PATH guesses, unchanged
-/// from before this fix.
+/// so that's guaranteed. The shared `ffmpeg_util` resolver (CPE-1478 extraction; both `thumb_video` and
+/// `media_waveform` use it) re-resolves on every call, so it has no such ordering requirement, but is
+/// wired the same way for symmetry — one injection covers ffmpeg for both callers. Best-effort: if
+/// `resource_dir()` can't be resolved (shouldn't happen on a real bundled build — only a theoretical
+/// dev-environment gap), both extractors simply keep falling back to their `current_exe().parent()` /
+/// PATH guesses, unchanged from before this fix.
 fn init_thumbnail_native_dep_dir(app: &tauri::AppHandle) {
     use tauri::Manager;
     if let Ok(resource) = app.path().resource_dir() {
         cpe_server::thumb_pdf::set_native_dep_dir(resource.clone());
-        cpe_server::thumb_video::set_native_dep_dir(resource);
+        cpe_server::ffmpeg_util::set_native_dep_dir(resource);
     }
 }
 
@@ -10219,6 +10239,7 @@ pub fn run() {
             read_dicom_tags,
             read_heic_preview_data_url,
             read_pdf_validity,
+            audio_waveform_peaks,
             thumbnail,
             thumbnails_stream,
             cancel_thumbnails_stream,
@@ -11041,6 +11062,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_dicom_tags,
         read_heic_preview_data_url,
         read_pdf_validity,
+        audio_waveform_peaks,
         thumbnail,
         thumbnails_stream,
         cancel_thumbnails_stream,
