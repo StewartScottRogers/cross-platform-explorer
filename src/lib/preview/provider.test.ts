@@ -225,4 +225,24 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.qqq", extension: "qqq" })).kind).toBe("hex");
     expect(pickProvider(entry({ name: "noext", extension: "" })).kind).toBe("hex");
   });
+
+  it("routes single-file compression formats to the info provider, not archive/hex (CPE-1439)", () => {
+    // xz/bz2/zst/lz/lzma are categorised "archive" in filetypes.ts but have no decoder wired in
+    // (unlike gzip via flate2) and no entry list to browse. They must land on the read-only "compressed
+    // file" info summary — never the archive lister (which would error) and never the raw hex fallback.
+    for (const ext of ["xz", "bz2", "zst", "lz", "lzma"]) {
+      const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
+      expect(p.kind).toBe("info");
+      expect(p.editable).toBe(false);
+    }
+  });
+
+  it("leaves dmg/cab on the hex fallback — no container reader is wired in (won't-fix, CPE-1439)", () => {
+    // Apple disk images and MS cabinet files need a real container reader that doesn't exist in this
+    // codebase; building one is out of scope. They keep falling through to the last-resort hex view
+    // rather than being routed to a lister/info path that doesn't actually understand them.
+    for (const ext of ["dmg", "cab"]) {
+      expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("hex");
+    }
+  });
 });

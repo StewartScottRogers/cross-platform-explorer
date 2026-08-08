@@ -38,6 +38,24 @@ pub fn hex_dump(path: &str, max: usize) -> Result<String, String> {
     Ok(out)
 }
 
+/// Report on a single-file compression format (xz/bz2/zst/lz/lzma) without decompressing it (CPE-1439).
+/// Unlike gzip (`flate2`, already a dep, used by [`crate::archive::gzip_single_entry`] for the analogous
+/// `.gz` case), this crate has no xz/bzip2/zstd decoder wired in — adding one is out of scope here (no new
+/// deps) — so there is no entry list or decompressed size to report. Routing these to the archive lister
+/// would just be a parse error against the wrong container format (only `.tar.xz`/`.tar.bz2`/`.tar.zst`
+/// have an inner directory to browse, and this crate can't peel the compression wrapper off those either).
+/// This is the graceful middle ground: identify the format and report the compressed size, which reads
+/// better than a raw hex dump of compressed bytes for something the pane otherwise can't say anything about.
+pub fn compressed_file_info(path: &str, format: &str) -> Result<String, String> {
+    let meta = fs::metadata(path).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "{format}-compressed file\nCompressed size: {} bytes\n\n\
+This is a single-file compression format, not a browsable archive — there is no directory of \
+entries to list. Open it with an external tool (or via a shell) to decompress and inspect its contents.",
+        meta.len()
+    ))
+}
+
 /// Summary of a Windows PE image (EXE/DLL) via goblin (CPE-216).
 pub fn pe_info(path: &str) -> Result<String, String> {
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
@@ -226,5 +244,22 @@ mod tests {
         let out = hex_dump(&d.join("e.bin").to_string_lossy(), 1024).unwrap();
         assert!(out.is_empty(), "no rows, no truncation notice for a 0-byte file: {out:?}");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compressed_file_info_reports_format_and_size_without_decoding() {
+        let d = scratch("compressed");
+        let f = d.join("a.xz");
+        fs::write(&f, [0u8; 42]).unwrap();
+        let out = compressed_file_info(&f.to_string_lossy(), "XZ").unwrap();
+        assert!(out.contains("XZ-compressed file"), "{out}");
+        assert!(out.contains("42 bytes"), "{out}");
+        assert!(out.contains("not a browsable archive"), "{out}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn compressed_file_info_errors_on_a_missing_file() {
+        assert!(compressed_file_info("Z:/does/not/exist.zst", "Zstandard").is_err());
     }
 }
