@@ -1202,14 +1202,18 @@ async fn read_pdf_validity(path: String) -> Result<Option<u32>, String> {
 /// A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
 /// an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
 /// glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
-/// `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. Bounded by the
-/// preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on an unsupported
-/// or malformed source, so the frontend falls back to an icon.
+/// `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. The raster/PSD/SVG/
+/// font source-file size cap lives INSIDE `cpe_server::thumb_source::decode_thumb_image` (CPE-1447/
+/// CPE-1449), not here — it used to be an `ensure_previewable_size` call at this call site, but that
+/// gated video extensions too, which `decode_thumb_image` dispatches early to ffmpeg (streams the file,
+/// never reads it whole); the cap now sits AFTER that video dispatch, in the one place that actually
+/// does the unbounded `fs::read`, so video thumbnails are never wrongly refused for being "too large".
+/// Errors (rather than hangs) on an unsupported or malformed source, so the frontend falls back to an
+/// icon.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn thumbnail(app: tauri::AppHandle, path: String, max_edge: u32) -> Result<String, String> {
     use base64::Engine;
-    ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
     let png = match server_ctx::TauriCtx::new(&app).app_cache_dir() {
         Ok(dir) => cpe_server::thumbnail::thumbnail_cached(&dir.join("thumbnails"), Path::new(&path), max_edge)?,
         Err(_) => cpe_server::thumbnail::make_thumbnail_png(Path::new(&path), max_edge)?, // no cache dir
@@ -1248,10 +1252,16 @@ impl Drop for ThumbStreamCancelGuard {
 /// Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
 /// dispatch path — `cpe_server::thumb_pipeline::run_thumb_batch` owns the whole enqueue/drain/compute
 /// loop, this command is just the thin Tauri wiring: resolve the on-disk cache dir, hand it the
-/// `thumbnail_cached` decoder as `compute`, and forward each streamed `ThumbResult` over `on_thumb` as it
-/// lands (STREAMING.md). `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the
-/// frontend's visible window moves on before this batch finishes draining. Async + `spawn_blocking` — the
-/// decode work is real file + CPU work and must never run on the UI thread.
+/// `thumbnail_cached`/`make_thumbnail_png` decoder as `compute`, and forward each streamed `ThumbResult`
+/// over `on_thumb` as it lands (STREAMING.md). The 128 MiB source-file size cap that keeps a huge raster
+/// image from being `fs::read` in full lives inside `cpe_server::thumb_source::decode_thumb_image`
+/// itself (CPE-1447/CPE-1449) — this command doesn't gate anything extra, so it can't drift from the
+/// single `thumbnail` command's behavior the way the old lib.rs-side gate did. An oversized source
+/// returns `Err` from `decode_thumb_image`, which `run_thumb_batch` already turns into `data_url: None`
+/// — the existing decode-failure fallback the frontend renders as the type icon. `stream_id` registers a
+/// cancel flag `cancel_thumbnails_stream` can trip when the frontend's visible window moves on before
+/// this batch finishes draining. Async + `spawn_blocking` — the decode work is real file + CPU work and
+/// must never run on the UI thread.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn thumbnails_stream(
@@ -13253,6 +13263,52 @@ overlay / overlay rw,relatime 0 0
         assert!(ensure_previewable_size(&p, 5000).is_ok(), "2000 < 5000 is fine");
         // A missing file is the reader's problem, not this guard's.
         assert!(ensure_previewable_size(&d.join("nope").to_string_lossy(), 1000).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// End-to-end through the real streaming pipeline (`run_thumb_batch`) using the EXACT `compute`
+    /// closure shape production `thumbnails_stream` uses (`thumbnail_cached`/`make_thumbnail_png`
+    /// directly — no lib.rs-side gate anymore, CPE-1447 -> CPE-1449): an oversize raster file in the
+    /// same batch as a normal one must be skipped — `data_url: None`, the existing "decode failed"
+    /// fallback the frontend already renders as the type icon — while the normal file still comes back
+    /// with a thumbnail. The size gate itself now lives inside
+    /// `cpe_server::thumb_source::decode_thumb_image` (see that module's tests for the video-bypass
+    /// case); this test only proves it's actually reached through the real streaming pipeline. The
+    /// oversize fixture is a sparse file (`File::set_len`, no bytes actually written) so the test stays
+    /// fast despite exceeding the real 128 MiB cap.
+    #[test]
+    fn thumbnails_stream_pipeline_skips_oversize_and_thumbnails_normal_in_the_same_batch() {
+        use cpe_server::thumb_pipeline::{run_thumb_batch, ThumbCacheStore, ThumbRequest};
+        use cpe_server::thumb_queue::Priority;
+        use std::sync::Mutex as StdMutex;
+
+        let d = scratch("thumbgate_batch");
+        let big = d.join("huge.png");
+        {
+            let f = fs::File::create(&big).unwrap();
+            f.set_len(129 * 1024 * 1024).unwrap(); // > 128 MiB cap; sparse, no real bytes written
+        }
+        let small = d.join("small.png");
+        image::RgbImage::from_pixel(4, 4, image::Rgb([1u8, 2, 3])).save(&small).unwrap();
+
+        let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
+        let requests = vec![
+            ThumbRequest { path: big.to_string_lossy().into(), target_px: 16, priority: Priority::Visible },
+            ThumbRequest { path: small.to_string_lossy().into(), target_px: 16, priority: Priority::Visible },
+        ];
+        let mut results = Vec::new();
+        run_thumb_batch(
+            &requests,
+            &store,
+            cpe_server::thumbnail::make_thumbnail_png,
+            || false,
+            |r| results.push(r),
+        );
+
+        let big_result = results.iter().find(|r| r.path == big.to_string_lossy()).unwrap();
+        assert!(big_result.data_url.is_none(), "oversize file must be skipped -> icon fallback, not read");
+        let small_result = results.iter().find(|r| r.path == small.to_string_lossy()).unwrap();
+        assert!(small_result.data_url.is_some(), "normal-size file in the same batch still thumbnails");
         let _ = fs::remove_dir_all(&d);
     }
 

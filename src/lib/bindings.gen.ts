@@ -557,9 +557,14 @@ async readPdfValidity(path: string) : Promise<Result<number | null, string>> {
  * A PNG thumbnail of an image file as a `data:` URL the `<img>` tag can show (CPE-642), served from
  * an mtime-keyed on-disk cache (CPE-644). Also covers `.svg` (rasterized) and `.ttf`/`.otf`/`.woff`
  * glyph-sheet specimens (CPE-1236) — the format dispatch lives entirely in
- * `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. Bounded by the
- * preview size cap so a huge image can't exhaust memory. Errors (rather than hangs) on an unsupported
- * or malformed source, so the frontend falls back to an icon.
+ * `cpe_server::thumb_source`, so this stays a thin one-line-per-branch delegate. The raster/PSD/SVG/
+ * font source-file size cap lives INSIDE `cpe_server::thumb_source::decode_thumb_image` (CPE-1447/
+ * CPE-1449), not here — it used to be an `ensure_previewable_size` call at this call site, but that
+ * gated video extensions too, which `decode_thumb_image` dispatches early to ffmpeg (streams the file,
+ * never reads it whole); the cap now sits AFTER that video dispatch, in the one place that actually
+ * does the unbounded `fs::read`, so video thumbnails are never wrongly refused for being "too large".
+ * Errors (rather than hangs) on an unsupported or malformed source, so the frontend falls back to an
+ * icon.
  */
 async thumbnail(path: string, maxEdge: number) : Promise<Result<string, string>> {
     try {
@@ -575,10 +580,16 @@ async thumbnail(path: string, maxEdge: number) : Promise<Result<string, string>>
  * Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
  * dispatch path — `cpe_server::thumb_pipeline::run_thumb_batch` owns the whole enqueue/drain/compute
  * loop, this command is just the thin Tauri wiring: resolve the on-disk cache dir, hand it the
- * `thumbnail_cached` decoder as `compute`, and forward each streamed `ThumbResult` over `on_thumb` as it
- * lands (STREAMING.md). `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the
- * frontend's visible window moves on before this batch finishes draining. Async + `spawn_blocking` — the
- * decode work is real file + CPU work and must never run on the UI thread.
+ * `thumbnail_cached`/`make_thumbnail_png` decoder as `compute`, and forward each streamed `ThumbResult`
+ * over `on_thumb` as it lands (STREAMING.md). The 128 MiB source-file size cap that keeps a huge raster
+ * image from being `fs::read` in full lives inside `cpe_server::thumb_source::decode_thumb_image`
+ * itself (CPE-1447/CPE-1449) — this command doesn't gate anything extra, so it can't drift from the
+ * single `thumbnail` command's behavior the way the old lib.rs-side gate did. An oversized source
+ * returns `Err` from `decode_thumb_image`, which `run_thumb_batch` already turns into `data_url: None`
+ * — the existing decode-failure fallback the frontend renders as the type icon. `stream_id` registers a
+ * cancel flag `cancel_thumbnails_stream` can trip when the frontend's visible window moves on before
+ * this batch finishes draining. Async + `spawn_blocking` — the decode work is real file + CPU work and
+ * must never run on the UI thread.
  */
 async thumbnailsStream(requests: ThumbRequest[], streamId: number, onThumb: TAURI_CHANNEL<ThumbResult>) : Promise<Result<number, string>> {
     try {
