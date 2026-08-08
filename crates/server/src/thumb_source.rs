@@ -11,6 +11,19 @@
 //! everything else decodes via the `image` crate with a bounded `image::Limits` so a crafted
 //! decompression-bomb file fails fast with an `Err` rather than attempting an unbounded allocation.
 //!
+//! **Source-file size cap (CPE-1447/CPE-1449):** the raster/PSD/SVG/font/PDF branches all read the
+//! WHOLE file into memory via the `std::fs::read` below before doing anything else, so a huge file with
+//! a matching extension (e.g. a 6 GB all-zeros `.png`) would otherwise OOM the process on nothing more
+//! than being scrolled into view. [`MAX_SOURCE_FILE_BYTES`] guards exactly that read, checked via a
+//! cheap `fs::metadata` call placed AFTER the video early-return above — video is deliberately exempt:
+//! `thumb_video::extract_frame` shells out to ffmpeg against the path directly and never reads the file
+//! into memory itself, so gating it here would only produce false "too large" refusals for legitimately
+//! large video files (CPE-1449) while doing nothing to bound memory (nothing here reads video bytes to
+//! bound in the first place). This single call site is shared by both the single-thumbnail command and
+//! the streaming batch (both funnel through [`decode_thumb_image`]), so the two can't drift out of sync
+//! the way they did before CPE-1447 (the gate used to live in the Tauri app layer, applied unconditionally
+//! before dispatch, which is exactly what caused CPE-1449's video-over-block regression).
+//!
 //! Returns the source's raw bytes alongside the decoded image so the caller can read EXIF and apply
 //! [`crate::thumb_orient::orient_for_display`] — decoding happens exactly once either way. SVG/font
 //! sources carry no EXIF, so that step is a no-op for them; they're already rendered at ~`max_edge`
@@ -34,6 +47,13 @@ use image::{DynamicImage, ImageReader, Limits};
 /// buffer's total byte size.
 const MAX_IMAGE_DIMENSION: u32 = 20_000; // 20k×20k is already a huge poster print
 const MAX_ALLOC_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB decode budget — generous for any real image
+
+/// Cap on the SOURCE file's on-disk byte size for every non-video `decode_thumb_image` branch, all of
+/// which `fs::read` the whole file before decoding (CPE-1447/CPE-1449). Same 128 MiB value the app
+/// layer's `PREVIEW_INFO_MAX_BYTES` uses for other whole-file preview readers — generous for any real
+/// image/PSD/SVG/font/PDF, since those are normally small, but bounds a crafted or accidental giant file
+/// with a matching extension. Deliberately NOT applied to the video branch (see the module doc).
+const MAX_SOURCE_FILE_BYTES: u64 = 128 * 1024 * 1024;
 
 fn bounded_limits() -> Limits {
     let mut limits = Limits::default();
@@ -78,6 +98,19 @@ pub fn decode_thumb_image(path: &Path, max_edge: u32) -> Result<(DynamicImage, V
     if crate::thumb_video::VIDEO_EXTENSIONS.contains(&ext.as_str()) {
         let img = crate::thumb_video::extract_frame(path, max_edge)?;
         return Ok((img, Vec::new()));
+    }
+
+    // Size-gate every remaining branch's upcoming `fs::read` (CPE-1447/CPE-1449) — placed AFTER the
+    // video early-return above so a large video is never refused for being "too large" (it was already
+    // routed to ffmpeg, which never reads the file into memory here in the first place). A missing/
+    // unreadable path is left for the `fs::read` below to report, matching its existing error shape.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_SOURCE_FILE_BYTES {
+            return Err(format!(
+                "File is too large to preview ({} bytes; limit {MAX_SOURCE_FILE_BYTES}).",
+                meta.len()
+            ));
+        }
     }
 
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
@@ -265,6 +298,54 @@ mod tests {
         std::fs::write(&f, bomb_png()).unwrap();
         let err = decode_thumb_image(&f, 64);
         assert!(err.is_err(), "a huge-declared-dimension PNG must be rejected via image::Limits");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1447: a raster source file over `MAX_SOURCE_FILE_BYTES` must be refused before the
+    /// unconditional `fs::read` a few lines below the gate — this is the actual OOM fix (a 6 GB
+    /// all-zeros `.png` scrolled into view). The fixture is a SPARSE file (`File::set_len`, no bytes
+    /// actually written to disk) so the test stays fast despite exceeding the real 128 MiB cap; the gate
+    /// checks `fs::metadata().len()` only, so a sparse file exercises it identically to a real one.
+    #[test]
+    fn decode_thumb_image_rejects_an_oversize_raster_source_before_reading_it() {
+        let d = scratch("oversize_raster");
+        let f = d.join("huge.png");
+        {
+            let file = std::fs::File::create(&f).unwrap();
+            file.set_len(MAX_SOURCE_FILE_BYTES + 1).unwrap();
+        }
+        let err = decode_thumb_image(&f, 64).unwrap_err();
+        assert!(err.contains("too large"), "must be refused by the size gate, got: {err}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1449 regression pin: a video extension must NOT be refused by the size gate even when the
+    /// file is far over `MAX_SOURCE_FILE_BYTES` — the video branch is dispatched EARLY (before the gate
+    /// is even reached) straight to ffmpeg, which streams the file rather than reading it whole, so
+    /// there is nothing for a source-size cap to usefully bound there. Gated on `video-thumb` since the
+    /// video dispatch arm only exists with that feature on. Doesn't require a real/parseable video or
+    /// even ffmpeg being installed: whatever error comes back (missing ffmpeg, undecodable garbage,
+    /// whatever) must NOT be this module's "too large" message, which is the only way this test could
+    /// fail — proving the gate was never reached for a video extension.
+    #[cfg(feature = "video-thumb")]
+    #[test]
+    fn decode_thumb_image_does_not_size_gate_a_video_extension() {
+        let d = scratch("oversize_video");
+        let f = d.join("huge.mp4");
+        {
+            let file = std::fs::File::create(&f).unwrap();
+            file.set_len(MAX_SOURCE_FILE_BYTES + 1).unwrap();
+        }
+        let result = decode_thumb_image(&f, 64);
+        if let Err(e) = result {
+            assert!(
+                !e.contains("too large"),
+                "a video extension must never be refused by the source-size gate, got: {e}"
+            );
+        }
+        // An Ok result (a real ffmpeg happened to be available and somehow produced a frame from a
+        // sparse/garbage file) is also fine — the only failure mode this test guards against is the
+        // size-gate message specifically.
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -32,55 +32,87 @@ XS / one closure in lib.rs — disjoint from the SVG (thumb_svg.rs) and doc_text
 
 ## Work Log (2026-08-07)
 
-**Where the gate landed.** `src-tauri/src/lib.rs`: added a private `thumb_compute(path, edge,
-cache_dir, cap)` helper right after `thumbnails_stream`. It calls the same `ensure_previewable_size`
-helper the single `thumbnail` command already uses, THEN dispatches to `thumbnail_cached` (with a
-cache dir) or `make_thumbnail_png` (without one) — the identical order the single `thumbnail` command
-uses at `~:1212` (gate first, decode/cache second). `thumbnails_stream`'s `compute` closure passed to
-`cpe_server::thumb_pipeline::run_thumb_batch` now reads
-`|path, edge| thumb_compute(path, edge, cache_dir.as_deref(), PREVIEW_INFO_MAX_BYTES)` instead of
-going straight to `thumbnail_cached`/`make_thumbnail_png`.
+### Attempt 1 (superseded)
+Landed the gate in `src-tauri/src/lib.rs` (a `thumb_compute` helper calling the app layer's existing
+`ensure_previewable_size(path, PREVIEW_INFO_MAX_BYTES)` before dispatch) and mirrored the same call in
+the single `thumbnail` command. Independent review on PR #711 caught a real regression: that gate ran
+BEFORE `decode_thumb_image`'s extension dispatch, so it fired for VIDEO extensions too — but the video
+branch (`thumb_video::extract_frame`, shelling out to ffmpeg) never reads the file into memory in the
+first place, and videos routinely exceed 128 MiB. The unconditional gate therefore blocked legitimate
+video thumbnails in the grid, a regression from pre-PR behavior (the streaming path had no gate at all
+before this ticket, so videos thumbnailed fine). None of attempt 1's three tests used a video extension,
+so it slipped through. This is exactly the gap ticket **CPE-1449** ("large video files get no frame
+thumbnail") had independently identified against the single `thumbnail` command's pre-existing instance
+of the same bug.
 
-**Constant used.** `PREVIEW_INFO_MAX_BYTES` (128 MiB) — the exact same constant the single `thumbnail`
-command passes to `ensure_previewable_size`, so both paths now refuse at the same size. `thumb_compute`
-takes `cap` as a parameter (rather than hard-coding the constant) purely so unit tests can use a tiny
-budget instead of allocating a real 128 MiB+ fixture file; production code always calls it with
-`PREVIEW_INFO_MAX_BYTES`.
+### Attempt 2 (shipped) — gate moved into `cpe-server`, subsumes CPE-1449
+**Where the gate now lives.** `crates/server/src/thumb_source.rs`, inside `decode_thumb_image` itself,
+placed immediately AFTER the `#[cfg(feature = "video-thumb")]` video early-return and BEFORE the
+`std::fs::read(path)` that follows it. A new module-private constant, `MAX_SOURCE_FILE_BYTES: u64 = 128
+* 1024 * 1024`, matches the value the app-layer `PREVIEW_INFO_MAX_BYTES` uses (same 128 MiB budget, kept
+as a documented local copy since `cpe-server` is Tauri-free and can't reference the app crate's
+private const). The check is a plain `fs::metadata(path).len() > MAX_SOURCE_FILE_BYTES` — no bytes
+read — mirroring `ensure_previewable_size`'s exact semantics (a stat error is left for the `fs::read`
+below to report, not treated as a gate failure).
 
-**How an oversize file is skipped.** `ensure_previewable_size` returns `Err` for a file over the cap
-via a plain `fs::metadata` size check — no bytes are read. That `Err` propagates out of `thumb_compute`
-through `run_thumb_batch`'s existing `Err(_) => None` arm (`crates/server/src/thumb_pipeline.rs:206`),
-which is the exact same code path a decode failure already takes. The frontend already renders
-`data_url: None` as the type-icon fallback, so no new error-handling branch was needed — the batch
-keeps draining the rest of its queue and the stream's shape/contract is unchanged (per STREAMING.md).
+**How video bypasses it.** `decode_thumb_image` dispatches `VIDEO_EXTENSIONS` (mp4/mov/mkv/webm/avi/
+m4v/mpg/mpeg/wmv/flv) to `thumb_video::extract_frame` and `return`s EARLY, before the new gate is even
+reached — the gate sits textually and logically after that return, so a video file's code path never
+executes it regardless of file size. Non-video (raster/PSD/SVG/font/PDF) extensions all still fall
+through to the unconditional `fs::read` a few lines down, so they're gated exactly as before.
 
-**Root cause confirmed.** Read through the full path: `thumbnails_stream` → `run_thumb_batch` →
-(previously) `thumbnail_cached`/`make_thumbnail_png` → `thumb_source::decode_thumb_image`, which does
-an unconditional `std::fs::read(path)` at `crates/server/src/thumb_source.rs:83` for every non-video
-extension, with no size check anywhere upstream of it. The `image::Limits` bomb-guard in that same file
-only bounds *declared pixel dimensions* after the bytes are already in memory — it does nothing for a
-file that's simply huge on disk (all-zeros 6 GB `.png`, say). Confirmed the single `thumbnail` command
-(`~:1210-1212`) already had the `ensure_previewable_size` gate the streaming path lacked.
+**Both entry points fixed.** `decode_thumb_image` is the ONE shared call site both `thumbnail_cached`/
+`make_thumbnail_png` funnel through, and both the single `thumbnail` command and the streaming
+`thumbnails_stream` batch call those — so gating inside `decode_thumb_image` fixes both automatically
+and by construction, with no way for the two paths to drift again. Removed the now-redundant
+`ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?` call from the single `thumbnail` command
+(`src-tauri/src/lib.rs:~1210`) and deleted the `thumb_compute` wrapper + its call site in
+`thumbnails_stream`, reverting that closure to call `thumbnail_cached`/`make_thumbnail_png` directly —
+there is no lib.rs-side gate left at all; `ensure_previewable_size`/`PREVIEW_INFO_MAX_BYTES` themselves
+are untouched and still used by the many *other* preview readers (PE/wasm/torrent/cert/etc.) that have
+nothing to do with thumbnails.
 
-**Tests added** (`src-tauri/src/lib.rs`, all passing):
-- `thumb_compute_rejects_an_oversize_file_before_reading_it` — a 4 KiB file against a 1000-byte cap is
-  refused with a "too large" error.
-- `thumb_compute_still_thumbnails_a_normal_size_file` — a small real PNG under `PREVIEW_INFO_MAX_BYTES`
-  still decodes fine (no regression for the common case).
-- `thumbnails_stream_pipeline_skips_oversize_and_thumbnails_normal_in_the_same_batch` — drives the real
-  `cpe_server::thumb_pipeline::run_thumb_batch` (the exact function `thumbnails_stream` calls) with a
-  two-request batch: the oversize file comes back `data_url: None` (icon fallback), the normal-size
-  file in the *same* batch still comes back with a thumbnail — proves the gate doesn't collaterally
-  break the rest of a batch.
+**CPE-1449 resolved by this fix.** Because the gate now sits after the video dispatch for BOTH entry
+points, the single `thumbnail` command's pre-existing video-over-block (CPE-1449's actual complaint,
+filed against `~:1212` before this PR even existed) is fixed for free, not just the streaming
+regression attempt 1 introduced. `Ticketing/Tickets/Backlog/CPE-1449_video-thumb-overblocked-by-size-gate.md`
+moved to Done alongside this ticket, noting it as subsumed by this PR.
 
-**Verification run:**
+**Tests:**
+- `crates/server/src/thumb_source.rs::decode_thumb_image_rejects_an_oversize_raster_source_before_reading_it`
+  — a sparse (`File::set_len`, no real bytes written) `.png` one byte over `MAX_SOURCE_FILE_BYTES` is
+  refused with a "too large" error — the actual CPE-1447 OOM fix, now proven at the real 128 MiB cap
+  (attempt 1's version used a tiny cap parameter that no longer exists).
+- `crates/server/src/thumb_source.rs::decode_thumb_image_does_not_size_gate_a_video_extension`
+  (`#[cfg(feature = "video-thumb")]`) — a sparse `.mp4` far over the cap must NOT be rejected with the
+  size-gate's "too large" message (whatever OTHER error comes back — missing ffmpeg, undecodable
+  content — is fine; only the size-gate message specifically would fail this test), proving the video
+  branch never reaches the gate. This is the CPE-1449 regression pin.
+- `src-tauri/src/lib.rs::thumbnails_stream_pipeline_skips_oversize_and_thumbnails_normal_in_the_same_batch`
+  (kept, updated) — drives the real `cpe_server::thumb_pipeline::run_thumb_batch` with the production
+  closure shape (`thumbnail_cached`/`make_thumbnail_png` directly, no lib.rs wrapper): a sparse
+  >128 MiB `.png` in the same batch as a normal small `.png` comes back `data_url: None` while the
+  normal file still thumbnails.
+- Removed attempt 1's `thumb_compute_rejects_an_oversize_file_before_reading_it` and
+  `thumb_compute_still_thumbnails_a_normal_size_file` (the function they tested no longer exists;
+  superseded by the two `thumb_source` tests above, which test the real gate location).
+
+**Verification run (attempt 2):**
 - `cargo build` (src-tauri) — clean.
-- `cargo clippy --all-targets -- -D warnings` (src-tauri, default features) — clean.
-- `cargo test` (src-tauri) — 137 passed, 0 failed (includes the 3 new tests).
-- `cargo clippy --all-targets -- -D warnings` (crates/server, default features) — clean (module
-  untouched; ran to confirm no collateral breakage).
-- `cargo test thumb` (crates/server) — 62 passed, 0 failed (module untouched; unaffected).
-- No `specta::Type` struct touched (`thumb_compute` is a plain private fn, not exposed to the frontend
-  contract) — no bindings regen needed.
+- `cargo clippy --all-targets -- -D warnings` (src-tauri, default features) — clean (one redundant-
+  closure lint fixed along the way: `cpe_server::thumbnail::make_thumbnail_png` passed directly instead
+  of wrapped in a closure).
+- `cargo clippy --all-targets --features specta-bindings -- -D warnings` (src-tauri) — clean.
+- `cargo test` (src-tauri) — 135 passed, 0 failed (137 minus the 2 removed `thumb_compute` tests).
+- `cargo clippy --all-targets -- -D warnings` (crates/server, default features) — clean.
+- `cargo clippy --all-targets --features index -- -D warnings` (crates/server) — clean.
+- `cargo clippy --all-targets --features pdf-thumb,video-thumb,dicom-thumb -- -D warnings`
+  (crates/server) — clean.
+- `cargo test` (crates/server, default features) — 1702 passed, 0 failed, 1 ignored (pre-existing,
+  unrelated).
+- `cargo test --features pdf-thumb,video-thumb,dicom-thumb thumb_source` (crates/server) — 9 passed, 0
+  failed, including the new video-bypass regression pin.
+- No `specta::Type` struct touched anywhere in either attempt — no bindings regen needed.
 
-**PR:** #711 (branch `cpe-1447-thumbnails-stream-size-gate`).
+**PR:** #711 (branch `cpe-1447-thumbnails-stream-size-gate`), attempt 2 pushed as follow-up commits on
+the same branch/PR per the reviewer's request.
