@@ -105,6 +105,7 @@ mod common;
 use common::{assert_no_panic, run_battery};
 
 use cpe_server::thumb_svg::rasterize_svg;
+use std::io::Write;
 
 /// A minimal-but-real SVG document — used as the shared battery's "magic" so `truncated_*`/
 /// `magic_then_*` cases walk `rasterize_svg` into its actual XML-parsing/rendering logic rather than
@@ -714,4 +715,95 @@ fn rasterize_svg_renders_legit_multi_level_mask_pattern_marker_within_the_cap_on
             "a legitimate multi-level '{name}' composition within the cap must render: {result:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1445: SVGZ (gzip-compressed .svg). `xml_nesting_too_deep` is a pure byte scan with no gzip
+// awareness — handed the RAW (still-compressed) bytes of a gzipped SVG, it sees no '<' tags at all and
+// silently reports "not too deep" regardless of what the document actually decompresses to (a guard
+// BYPASS, not merely a miss), and gzip decompression itself (both `usvg`'s own internal
+// `decompress_svgz` and, before this fix, `reference_chain_too_deep`'s own call to it) had no size cap,
+// letting a tiny crafted stream force a huge allocation. `rasterize_svg` now decompresses SVGZ input
+// once, bounded, up front, before any guard runs — see `thumb_svg::decompress_svgz_bounded` and the
+// module doc comment's "CPE-1445" section.
+// ---------------------------------------------------------------------------------------------
+
+/// Gzip-compresses `content` with a real `flate2::write::GzEncoder` — the same construction
+/// `archive_panic_safety.rs`'s `build_valid_gz` uses. `flate2` is already a normal dependency of
+/// `cpe-server` (used throughout `archive.rs`/`thumb_font.rs`/`thumb_svg.rs` itself), so it's directly
+/// available to this integration test too; no new dependency.
+fn gzip_bytes(content: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+    enc.write_all(content).unwrap();
+    enc.finish().unwrap();
+    out
+}
+
+/// Builds a gzip stream that DECOMPRESSES to `logical_size` bytes of zeros — the classic "gzip bomb"
+/// shape (highly compressible content, so a tiny compressed stream claims/produces a huge decompressed
+/// size) — without ever holding `logical_size` bytes in memory at once: the encoder is fed a small fixed
+/// chunk of zeros repeatedly rather than one giant buffer, mirroring
+/// `archive_panic_safety.rs`'s streamed-fixture style for the same reason (building the fixture itself
+/// must stay cheap even when `logical_size` is chosen well past any cap this test wants to prove is
+/// enforced).
+fn gzip_bomb(logical_size: usize) -> Vec<u8> {
+    const CHUNK: usize = 1024 * 1024;
+    let zeros = vec![0u8; CHUNK];
+    let mut out = Vec::new();
+    let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+    let mut written = 0usize;
+    while written < logical_size {
+        let take = CHUNK.min(logical_size - written);
+        enc.write_all(&zeros[..take]).unwrap();
+        written += take;
+    }
+    enc.finish().unwrap();
+    out
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_gzipped_deeply_nested_svg_on_a_small_stack() {
+    // CPE-1445's core finding: the exact same 4000-deep `<g>` nesting
+    // `rasterize_svg_never_stack_overflows_on_deep_nesting_on_a_small_stack` (above) proves is rejected
+    // for a PLAIN `.svg` must be rejected here too when the bytes are gzip-compressed (an SVGZ file) —
+    // before this fix, `xml_nesting_too_deep` saw only opaque compressed bytes (no '<' tags) and silently
+    // let this straight through to `usvg`/`roxmltree` on the small probe stack.
+    let bytes = gzip_bytes(&deeply_nested_svg(4000));
+    assert!(bytes.starts_with(&[0x1f, 0x8b]), "fixture must actually be gzip-compressed (SVGZ)");
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "a gzipped implausibly-deep SVG must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_rejects_a_gzip_bomb_without_unbounded_decompression() {
+    // CPE-1445's second finding: gzip decompression itself was uncapped, so a tiny compressed stream that
+    // decompresses to a huge size would make `rasterize_svg` try to allocate that much before any other
+    // guard got a chance to run. Built here as a stream that decompresses to 200 MiB of zeros —
+    // comfortably over the 32 MiB `MAX_DECOMPRESSED_SVG_BYTES` cap — while the COMPRESSED fixture itself
+    // stays tiny (>1000x compression ratio), proving the CAP is what stops the inflation, not incidental
+    // slowness: this must return promptly with a graceful `Err`, never attempt to materialize the full
+    // 200 MiB (let alone a true multi-GB bomb, which this deliberately does not attempt to reproduce in
+    // CI — the bounded `.take()` in `decompress_svgz_bounded` means the cap is provably size-independent
+    // of how large the stream's true logical payload is).
+    let logical_size = 200 * 1024 * 1024;
+    let bytes = gzip_bomb(logical_size);
+    assert!(
+        bytes.len() < logical_size / 1000,
+        "fixture should compress by at least 1000x to be a real bomb-ish case, got {} bytes for a {} \
+         logical payload",
+        bytes.len(),
+        logical_size
+    );
+    let result = rasterize_svg(&bytes, 32);
+    assert!(result.is_err(), "a gzip stream that would decompress past the cap must be rejected, not OOM");
+}
+
+#[test]
+fn rasterize_svg_renders_a_legit_small_gzipped_svg_fine() {
+    // A real, small SVGZ file (well under every cap) must still rasterize normally — the fix must not
+    // over-reject legitimate gzip-compressed SVG input.
+    let bytes = gzip_bytes(&minimal_svg());
+    let result = rasterize_svg(&bytes, 32);
+    assert!(result.is_ok(), "a legitimate small gzipped SVG (SVGZ) must still render: {result:?}");
 }
