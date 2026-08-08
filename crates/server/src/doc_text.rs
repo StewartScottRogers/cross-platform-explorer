@@ -89,11 +89,21 @@ const MAX_DECOMPRESSED_PART_BYTES: u64 = 8 * 1024 * 1024;
 /// mid-codepoint (or genuinely non-UTF-8 bytes) degrades to replacement characters instead of an
 /// `Err` — this is the one place that actually stops the deflate-bomb OOM (CPE-1446); every entry read
 /// in this module goes through it instead of a raw `read_to_string`/`read_to_end`.
+///
+/// Reads one byte *past* the cap (`cap + 1`) rather than stopping exactly at the cap (CPE-1448): with
+/// an exact `take(cap)`, a genuine entry whose real size is precisely `MAX_DECOMPRESSED_PART_BYTES`
+/// reads exactly `cap` bytes and is indistinguishable from a bomb that got cut off there — both hit
+/// `buf.len() == cap`. Reading the extra byte disambiguates them (only an entry with *more* than `cap`
+/// bytes ever fills it), and the buffer is truncated back to `cap` before returning, so memory stays
+/// bounded at `cap + 1` bytes — one byte of headroom, not an unbounded read.
 fn read_entry_capped<R: Read>(entry: R) -> Result<(String, bool), String> {
-    let mut limited = entry.take(MAX_DECOMPRESSED_PART_BYTES);
+    let mut limited = entry.take(MAX_DECOMPRESSED_PART_BYTES + 1);
     let mut buf: Vec<u8> = Vec::new();
     limited.read_to_end(&mut buf).map_err(|e| e.to_string())?;
-    let truncated = buf.len() as u64 >= MAX_DECOMPRESSED_PART_BYTES;
+    let truncated = buf.len() as u64 > MAX_DECOMPRESSED_PART_BYTES;
+    if truncated {
+        buf.truncate(MAX_DECOMPRESSED_PART_BYTES as usize);
+    }
     Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
 }
 
@@ -107,31 +117,33 @@ fn mark_truncated(mut text: String, truncated: bool) -> String {
 }
 
 /// Read one entry of a zip as UTF-8 text, capped at [`MAX_DECOMPRESSED_PART_BYTES`] (CPE-1446).
-fn zip_read_text(path: &str, entry_name: &str) -> Result<String, String> {
+/// Returns the RAW (unstripped) text plus whether the cap was hit — callers must run
+/// [`strip_markup_to_text`] first and only then [`mark_truncated`] (CPE-1448): marking before stripping
+/// lets the naive `<`/`>` tag scanner treat a cap that lands mid-tag as an unclosed tag stretching to
+/// end-of-string, silently eating the just-appended marker along with everything after it.
+fn zip_read_text(path: &str, entry_name: &str) -> Result<(String, bool), String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let entry = zip.by_name(entry_name).map_err(|e| format!("{entry_name}: {e}"))?;
-    let (text, truncated) = read_entry_capped(entry)?;
-    Ok(mark_truncated(text, truncated))
+    read_entry_capped(entry)
 }
 
-/// Extract the body text of a DOCX (word/document.xml) (CPE-071).
+/// Extract the body text of a DOCX (word/document.xml) (CPE-071). Marked AFTER stripping (CPE-1448):
+/// see [`zip_read_text`].
 pub fn docx_text(path: &str) -> Result<String, String> {
-    let xml = zip_read_text(path, "word/document.xml")?;
-    Ok(strip_markup_to_text(&xml, &["w:p"]))
+    let (xml, truncated) = zip_read_text(path, "word/document.xml")?;
+    Ok(mark_truncated(strip_markup_to_text(&xml, &["w:p"]), truncated))
 }
 
 /// Read one entry of a zip as UTF-8 text if present, or `Ok(None)` if the archive simply doesn't have
 /// that part (a normal, non-error shape some documents legitimately lack — e.g. an all-numeric XLSX
 /// workbook has no `sharedStrings.xml` at all). A file that isn't a valid zip at all is still `Err`.
-fn zip_read_text_optional(path: &str, entry_name: &str) -> Result<Option<String>, String> {
+/// Returns the RAW (unstripped) text plus whether the cap was hit, same reasoning as [`zip_read_text`].
+fn zip_read_text_optional(path: &str, entry_name: &str) -> Result<Option<(String, bool)>, String> {
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let result = match zip.by_name(entry_name) {
-        Ok(entry) => {
-            let (text, truncated) = read_entry_capped(entry)?;
-            Ok(Some(mark_truncated(text, truncated)))
-        }
+        Ok(entry) => read_entry_capped(entry).map(Some),
         Err(_) => Ok(None),
     };
     result
@@ -144,8 +156,10 @@ fn zip_read_text_optional(path: &str, entry_name: &str) -> Result<Option<String>
 /// strings (e.g. an all-numeric sheet) is a normal, valid `Ok("")`, not an error — only an unreadable /
 /// non-ZIP file is `Err`.
 pub fn xlsx_text(path: &str) -> Result<String, String> {
-    let xml = zip_read_text_optional(path, "xl/sharedStrings.xml")?;
-    Ok(xml.map(|x| strip_markup_to_text(&x, &["si"])).unwrap_or_default())
+    let part = zip_read_text_optional(path, "xl/sharedStrings.xml")?;
+    Ok(part
+        .map(|(xml, truncated)| mark_truncated(strip_markup_to_text(&xml, &["si"]), truncated))
+        .unwrap_or_default())
 }
 
 /// Extract slide text from a PPTX presentation's `ppt/slides/slideN.xml` parts (CPE-1274), concatenated
@@ -185,10 +199,11 @@ pub fn pptx_text(path: &str) -> Result<String, String> {
     Ok(out)
 }
 
-/// Extract the body text of an ODT (content.xml) (CPE-072).
+/// Extract the body text of an ODT (content.xml) (CPE-072). Marked AFTER stripping (CPE-1448): see
+/// [`zip_read_text`].
 pub fn odt_text(path: &str) -> Result<String, String> {
-    let xml = zip_read_text(path, "content.xml")?;
-    Ok(strip_markup_to_text(&xml, &["text:p", "text:h"]))
+    let (xml, truncated) = zip_read_text(path, "content.xml")?;
+    Ok(mark_truncated(strip_markup_to_text(&xml, &["text:p", "text:h"]), truncated))
 }
 
 /// Extract readable text from an EPUB's content documents in name order, capped so a whole book can't
@@ -431,6 +446,89 @@ mod tests {
             text.len()
         );
         assert!(text.contains("(truncated)"), "truncation marker present for a capped entry: len={}", text.len());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1448 regression: when the 8 MiB cap lands *inside* an unclosed tag, `strip_markup_to_text`'s
+    /// naive `<`/`>` scanner stays "in a tag" through end-of-string. Before the fix, `mark_truncated`
+    /// ran on the raw XML BEFORE stripping, so the just-appended "(truncated)" marker sat inside that
+    /// same unclosed-tag run and got silently stripped away with it — a truncated preview with no
+    /// visible cue. The fix marks AFTER stripping, so the marker can never land inside markup.
+    #[test]
+    fn docx_text_shows_truncation_marker_even_when_the_cap_lands_mid_tag() {
+        let d = scratch("docx-midtag");
+        let f = d.join("midtag.docx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("word/document.xml", opts).unwrap();
+
+            const CAP: usize = 8 * 1024 * 1024;
+            let mut xml = String::with_capacity(CAP + 4096);
+            xml.push_str("<w:document><w:body><w:p><w:r><w:t>");
+            while xml.len() < CAP - 2000 {
+                xml.push_str("VISIBLE ");
+            }
+            // Open a tag with a long unterminated attribute value (no '>' anywhere in it) that starts
+            // just before the cap and runs well past it, so the cap boundary lands strictly inside the
+            // unclosed tag — exactly the shape that ate the marker pre-fix.
+            xml.push_str("</w:t></w:r></w:p><w:p><w:r><w:t attr=\"");
+            xml.push_str(&"z".repeat(4000));
+            xml.push_str("\">tail text that must never appear</w:t></w:r></w:p></w:body></w:document>");
+
+            zip.write_all(xml.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let text = docx_text(&f.to_string_lossy()).unwrap();
+        assert!(text.contains("VISIBLE"), "content before the cut is preserved: len={}", text.len());
+        assert!(
+            text.contains("(truncated)"),
+            "truncation marker must survive stripping even when the cap lands mid-tag: {text:?}"
+        );
+        assert!(
+            !text.contains("tail text that must never appear"),
+            "content past the cap must not appear: {text:?}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1448 regression: an entry whose real (uncompressed) size is EXACTLY
+    /// `MAX_DECOMPRESSED_PART_BYTES` must NOT be flagged as truncated — nothing was actually cut. The
+    /// pre-fix `take(cap)` + `buf.len() >= cap` check couldn't tell "read exactly cap bytes because
+    /// that's the whole entry" apart from "read exactly cap bytes because the cap cut it off", so a
+    /// legitimate cap-sized document always got a spurious "(truncated)" marker.
+    #[test]
+    fn docx_text_does_not_falsely_mark_an_exactly_cap_sized_entry_as_truncated() {
+        let d = scratch("docx-exact-cap");
+        let f = d.join("exact.docx");
+        const CAP: usize = 8 * 1024 * 1024;
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("word/document.xml", opts).unwrap();
+
+            let prefix = b"<w:document><w:body><w:p><w:r><w:t>";
+            let suffix = b"</w:t></w:r></w:p></w:body></w:document>";
+            let mut xml: Vec<u8> = Vec::with_capacity(CAP);
+            xml.extend_from_slice(prefix);
+            let fill_len = CAP - prefix.len() - suffix.len();
+            xml.extend(std::iter::repeat(b'A').take(fill_len));
+            xml.extend_from_slice(suffix);
+            assert_eq!(xml.len(), CAP, "fixture must be exactly the cap size");
+
+            zip.write_all(&xml).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let text = docx_text(&f.to_string_lossy()).unwrap();
+        assert!(
+            !text.contains("(truncated)"),
+            "an entry of exactly the cap size must not be falsely marked truncated: len={}",
+            text.len()
+        );
         let _ = fs::remove_dir_all(&d);
     }
 
