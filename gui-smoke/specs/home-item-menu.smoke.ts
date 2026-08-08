@@ -132,7 +132,18 @@ describe("CPE-1162 — Home Recent/Favorites/Folders row right-click menu opens 
   it("the Home Folders tab shows at least one recorded folder row (from --open=<tmpDir>)", async () => {
     await goHome();
     await clickPill(/Folders/);
-    const row = await pointOfFirstRow();
+    // CPE-1481: poll rather than a single synchronous read right after the pill click's fixed 150ms
+    // pause — a `--open=<tmpDir>` launch always records the folder into the MRU well before this spec
+    // runs, but under slow Linux/Xvfb CI a render tick could still separate the pill's `tab` state
+    // flipping from the `{#if tab === "folders"}` list actually painting its rows.
+    let row: Point | null = null;
+    await browser.waitUntil(
+      async () => {
+        row = await pointOfFirstRow();
+        return row !== null;
+      },
+      { timeout: 10_000, timeoutMsg: "Home Folders tab should list the folder opened via --open=<tmpDir>" },
+    );
     // eslint-disable-next-line no-console
     console.log(`[CPE-1162] first Folders row: ${JSON.stringify(row)}`);
     expect(row, "Home Folders tab should list the folder opened via --open=<tmpDir>").to.not.equal(null);

@@ -185,7 +185,22 @@ describe("CPE-1159 — drive right-click menu opens and STAYS open (stopPropagat
 
   it("Home shows at least one drive tile to right-click", async () => {
     await goHome();
-    const tile = await pointOfDriveTile();
+    // CPE-1481: `goHome()` only waits for the outer `.qa-grid`/`.home` container to exist, not for its
+    // `{#each cards}` child tiles to have actually painted — `drives` is always populated before this
+    // point (`list_drives` always returns >=1 root, even the non-Windows single-"/"-root branch), but
+    // under slow Linux/Xvfb CI a render tick could still separate "container mounted" from "tiles
+    // painted". Poll briefly instead of a single synchronous read right after the container appears.
+    let tile: { point: Point; path: string } | null = null;
+    await browser.waitUntil(
+      async () => {
+        tile = await pointOfDriveTile();
+        return tile !== null;
+      },
+      {
+        timeout: 10_000,
+        timeoutMsg: "Home landing should show at least one drive tile (a .qa-card with a drive-root path)",
+      },
+    );
     // eslint-disable-next-line no-console
     console.log(`[CPE-1159] Home drive tile: ${JSON.stringify(tile)}`);
     expect(tile, "Home landing should show at least one drive tile (a .qa-card with a drive-root path)").to.not.equal(null);

@@ -57,3 +57,45 @@ slow spec can't eat the budget, and/or shard the suite across matrix jobs (revis
 ## Notes
 Filed from the CPE-1479 workshift. This is the "restore the Visual Critic/UAT substrate to GREEN" work; CPE-1479
 was the necessary first half (mouse). Epic CPE-810. Coordinate with the concurrent workshifts_* process.
+
+## Work Log — Round 1 (2026-08-08, QA-infra Worker)
+
+**Status: left in Doing.** This round is a high-confidence read-based triage + batch of harness fixes, not a
+confirmed-green run — gui-smoke CI (ubuntu, tauri-driver + xvfb) is the only place that can actually verify these,
+and several of the 8 are documented hypotheses rather than proven fixes. Expect a follow-up round once the
+Foreman's CI loop reports back.
+
+### 1. Timeout changes
+- `.github/workflows/gui-smoke.yml`: `timeout-minutes: 20` → `35` on **both** the `gui-smoke` (windows) and
+  `gui-smoke-linux` (ubuntu) jobs. Simplest lever to let a full ~39-spec run complete instead of being cut off at
+  ~17, per the ticket's suggested order.
+- `gui-smoke/wdio.conf.ts` `mochaOpts.timeout`: already `90_000` (90s/test) before this round — checked, not
+  duplicated. That's generous per-test headroom well under the new 35-min job cap, so one hung spec still fails
+  fast instead of eating the whole job. No change needed.
+
+### 2. Per-spec triage (the 8 revealed failures)
+
+| Spec (failing assertion) | Likely cause | Action |
+|---|---|---|
+| `context-menu.smoke.ts:46` — empty-folder row absent | The spec's `before` hook never waited for the initial `--open=<tmpDir>` navigation to render (only confirmed the state file exists) — every sibling spec that scans `.row`s first gates on `[aria-current="page"]`; this one didn't. A still-loading ~27-entry root listing reads as "row absent" instead of "not rendered yet". | **Fixed**: added the same crumb-ready gate, and turned the one-shot row scan into a `browser.waitUntil` poll (15s) instead of a single synchronous pass. |
+| `drive-menu.smoke.ts:191` — no drive tile on Home | Backend `list_drives_impl` (src-tauri/src/lib.rs) is unconditional on non-Windows — it always pushes exactly one `{name:"File System", path:"/"}` entry, and there's a Rust unit test (`list_drives_returns_at_least_one_root`) pinning that. So the tile can't be genuinely *absent*; `goHome()` only waits for the outer `.qa-grid`/`.home` container to exist, not for the `{#each cards}` child tiles to have painted. | **Fixed (best-effort)**: wrapped the tile lookup in a `browser.waitUntil` poll (10s) instead of one synchronous read right after the container appears. **Uncertain** — if this doesn't clear it, the next round needs an actual Linux CI DOM dump (Home's rendered HTML) to see what's really there. |
+| `home-item-menu.smoke.ts:132` — Folders tab row absent (CPE-1162) | Same class as drive-menu: `recordRecentFolder(tmpDir)` runs synchronously in `onMount` well before any spec runs, so the MRU should already contain it; `pointOfFirstRow()` was read once, synchronously, right after a fixed 150ms pause following the pill click. | **Fixed (best-effort)**: poll (10s) instead of one-shot read. **Uncertain** — if the true cause is MRU eviction/dedup or a path-normalization mismatch rather than a render race, this won't clear it; flagging for the next round to add direct logging of `recentFolders` state if it recurs. |
+| `link-badge.smoke.ts:107` — broken-link badge never gains `.broken` | **Root-caused with evidence already in this codebase**: `transfer-panel.smoke.ts`'s own `danger-badge` test independently diagnosed the *identical* wait on a copy of this same assertion and documented that neither `LinkBadge.svelte`'s IntersectionObserver nor a CDP/Actions-driven hover reliably reaches its `on:mouseenter={load}` through this harness's shim — only a direct `dispatchEvent(new MouseEvent("mouseenter"))` deterministically kicks the lazy `linkStatus` fetch. `link-badge.smoke.ts` itself never had that stimulus, plus its target row can sit below the fold among ~27 root fixtures. Backend `link_status` (crates/server/src/links.rs) is correct and unit-tested — not an app bug. | **Fixed**: added `scrollIntoView` + the same `dispatchEvent("mouseenter")` kick already proven in transfer-panel.smoke.ts, to both the intact- and broken-link tests (the intact-link test's old assertion was also checking the pre-fetch default state, which passes vacuously — now it forces + waits for the real result too). |
+| `archive-browse.smoke.ts` / `archive-password.smoke.ts:116` — item context menu doesn't open on a row | Neither spec's `pointOfRow` scrolled the target row into view before computing its `getBoundingClientRect()` point — the one thing every *other* row/point lookup in this suite that got the CPE-1253 fix already does. With ~27 root fixtures, and archive-password right-clicking two different rows across two tests (archive row, then marker row), a stale scroll offset from the first click is a plausible reason the second right-click's computed point misses the real element (CDP/W3C-Actions hit-tests the exact viewport point, not "wherever a human would expect the row"). | **Fixed (best-effort)**: added the same scroll-then-rect pattern to both specs' `pointOfRow`. **Uncertain** — this is the least-confident fix of the batch; if it doesn't clear it, the next round should check whether WebKitWebDriver's Actions API reliably synthesizes a native `contextmenu` from a `pointerDown/pointerUp(button:2)` pair at all (a known category of WebKitGTK WebDriver gap) — `mouse.ts`'s `rightClick` fallback may need its own fix, not just the harness's row-finding. |
+| `macro-in-menu.smoke.ts` / `macro-param-prompt.smoke.ts` — Run-macro submenu / param prompt don't appear | **Root-caused**: both specs' `pointOfRowNamed`/`pointByText` used WebdriverIO's own `getLocation()`/`getSize()` ("get element rect") instead of `getBoundingClientRect()` inside `browser.execute()` — the one primitive `rightClick`'s CDP/W3C-Actions viewport-space coordinates are documented (mouse.ts) to match, and the pattern every *other* row/point lookup in this suite uses. They also never scrolled the target into view. Either gap alone can produce a point the driver's real hit-test doesn't land on — no `contextmenu` fires, `.ctx` never appears. | **Fixed**: converted both helpers in both specs to scroll-then-`getBoundingClientRect` via `element.execute`, matching the rest of the suite. This is the single highest-confidence fix in this round — it's the only genuinely inconsistent code path found (every sibling spec already uses the correct primitive). |
+
+### 3. Verification done this round
+- `cd gui-smoke && npm run typecheck` — **passes clean**.
+- `cd gui-smoke && npm run test:unit` — **21/21 pass**.
+- gui-smoke's own suite (`npm test`) requires tauri-driver + a native driver + (on Linux) xvfb — cannot run
+  locally on this Windows box; CI is the only verification surface, as the ticket anticipated.
+
+### 4. Honest expectation
+`macro-in-menu`/`macro-param-prompt` and `link-badge` are backed by strong, specific evidence (a proven-working
+fix already documented elsewhere in this repo, or a clear inconsistency against the suite's own established
+pattern) — reasonably confident those clear on the next run. `context-menu` is a real, clear gap (missing
+readiness gate) — confident. `drive-menu`, `home-item-menu`, and `archive-browse`/`archive-password` are
+best-effort robustness fixes against a plausible-but-unconfirmed race/scroll theory — plan for at least one more
+round after seeing the actual CI log, especially for `archive-browse`/`archive-password` where a WebKitWebDriver
+Actions-API right-click limitation is a real possibility that would need a `mouse.ts` fix, not a spec fix. No app
+`src/` bugs found — `list_drives_impl` and `link_status` were both read and are correct + already unit-tested.

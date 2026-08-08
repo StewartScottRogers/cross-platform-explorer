@@ -37,7 +37,11 @@ jobs:
     runs-on: windows-latest
     # CPE-1266: hard cap so a hung WebView2 WebDriver session (CPE-1048 flakiness) dies in minutes
     # instead of running to GitHub's 6-hour max and holding a concurrency slot the whole time.
-    timeout-minutes: 20
+    # CPE-1481: raised 20 -> 35. CPE-1479's mouse-CDP fix made specs actually RUN (instead of dying
+    # instantly on the first click), so the suite now needs real wall-clock time to finish all ~39
+    # specs — the 20-min cap was cutting the ubuntu leg off after only ~17, which hid the true
+    # pass/fail set. 35 min gives headroom for a full run without approaching GitHub's 6-hour max.
+    timeout-minutes: 35
     # CPE-1048 (Option E — non-blocking): the WebView2 `DevToolsActivePort` startup crash on stock
     # `windows-latest` did NOT clear even with `--no-sandbox`/`--disable-gpu` (the canonical fix), so this
     # job is kept NON-BLOCKING: it still builds + runs the smoke suite (a real diagnostic that a human can
@@ -119,7 +123,9 @@ jobs:
     runs-on: ubuntu-latest
     # CPE-1266: hard cap so a hung WebKitGTK-under-Xvfb WebDriver session dies in minutes instead of
     # holding a concurrency slot for hours.
-    timeout-minutes: 20
+    # CPE-1481: raised 20 -> 35, same rationale as the windows leg above — the CPE-1479 mouse fix
+    # made specs actually run, and 20 min was cutting this leg off at ~17 of ~39 specs.
+    timeout-minutes: 35
     # Non-blocking, same posture as the Windows leg above (CPE-1048): this is a NEW CI leg with no
     # track record yet, and WebKitGTK-under-Xvfb has its own class of headless-CI flakiness (GPU-less
     # compositing crashes, first-run cold-start jitter) distinct from — but analogous to — the
