@@ -2,12 +2,34 @@
 id: CPE-1414
 title: "Security: SVG mutual <use>/<symbol> reference cycle can stack-overflow (low real risk; small-stack DoS)"
 type: Bug
-status: Deferred
+status: Done
 priority: Low
 component: Backend
 tags: [deferred-internal]
 epic: CPE-718
 created: 2026-08-07
+closed: 2026-08-08
+resolution: superseded-in-practice
+---
+
+## CLOSED 2026-08-08 (workshift) — SUPERSEDED-IN-PRACTICE by CPE-1437
+This ticket's full technical scope is shipped and verified in `crates/server/src/thumb_svg.rs` under
+CPE-1437's unified non-recursive reference-graph walk — there is nothing left to build. Verified on current
+`main` (commit `e2c09122`): `cargo test --lib thumb_svg` → **35 passed, 0 failed, 0 ignored**, including the
+four tests that pin *exactly* this ticket's crash + all three bypass classes the parked PR #700 draft chased:
+- `use_chain_guard_rejects_the_cpe_1414_mutual_symbol_cycle` — the mutual `<symbol>`/`<use>` cycle reproducer,
+  now asserting a graceful `Err` (no longer `#[ignore]`d).
+- `resolve_use_href_prefers_xlink_href_over_plain_href_matching_usvg_precedence` — bypass 3 (xlink-first),
+  via `resolve_use_href` = `node.attribute((XLINK_NS,"href")).or_else(|| node.attribute("href"))`.
+- `use_chain_guard_resolves_a_numeric_entity_encoded_href_matching_usvg_decoding` — bypass 1.
+- `use_chain_guard_resolves_dtd_entity_hrefs_into_a_real_chain_matching_usvg_decoding` — bypass 2 (the walk
+  parses with usvg's exact `roxmltree::ParsingOptions { allow_dtd: true, .. }`).
+
+The parked **PR #700 draft** (its hand-rolled cycle detector never landed) was **closed as superseded** and its
+branch `worktree-agent-cpe1414` deleted. Closing here rather than leaving Deferred: the crash is provably
+guarded and pinned by live (un-ignored) regression tests, so keeping it open would misrepresent real,
+verifiable outstanding work as remaining. Historical investigation notes retained below.
+
 ---
 
 ## PARKED 2026-08-07 (workshift circuit-breaker: 3 attempts, each failed adversarial re-review)
