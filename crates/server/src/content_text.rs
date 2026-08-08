@@ -26,6 +26,18 @@ use std::path::Path;
 /// file's index+embed cost bounded.
 const MAX_EXTRACTED_CHARS: usize = 4 * 1024 * 1024;
 
+/// Truncation cue appended by [`cap`] when IT is the thing doing the cutting, matching the
+/// "… (truncated)" idiom [`crate::doc_text`] already uses for its own (larger, 8 MiB) inner cap.
+///
+/// [`crate::doc_text`]'s docx/xlsx/pptx extractors already append this same marker when THEIR cap
+/// (8 MiB of raw document bytes, comfortably more text than 4M chars for real documents) is hit. But
+/// this module's 4M-char cap is independent and can be reached first — e.g. a heavily-repeated-text PDF,
+/// or simply a document whose extracted text happens to exceed 4M chars well under 8 MiB of source
+/// bytes — in which case [`cap`] cuts the string *before* reaching any marker doc_text may have
+/// appended, silently dropping it (CPE-1448). [`cap`] always re-appends its own cue when it actually
+/// truncates, so the search path never shows a silently-cut document with no visible cue.
+const TRUNCATION_MARKER: &str = "\n… (truncated)";
+
 /// True if a byte slice looks binary (contains a NUL in the sniffed prefix) — the same heuristic
 /// `content_search`/(the former) `content_index` have long used to skip files not worth reading as
 /// text. Only consulted on the plain-text/unknown-extension fallback branch of [`content_text_of`]:
@@ -39,12 +51,23 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// Truncate `s` to at most [`MAX_EXTRACTED_CHARS`] chars — always on a char boundary (`String`'s
 /// `Chars` iterator never yields a partial code point), so this can never panic or produce invalid
 /// UTF-8, unlike a raw byte-index slice.
+///
+/// When it actually cuts, it reserves room for and appends [`TRUNCATION_MARKER`] (CPE-1448) so the cut
+/// is always visible — whether or not the input already carried its own inner-cap marker (e.g. from
+/// [`crate::doc_text`]'s 8 MiB cap): if this cap lands before that marker, its own text is dropped along
+/// with the rest of the tail and this cap's marker takes over as the visible cue; if this cap doesn't
+/// bite at all, an existing inner marker (if any) simply passes through unchanged. The result is always
+/// at most [`MAX_EXTRACTED_CHARS`] chars, so this can't push the output back over the cap it enforces.
 fn cap(s: String) -> String {
-    if s.chars().count() > MAX_EXTRACTED_CHARS {
-        s.chars().take(MAX_EXTRACTED_CHARS).collect()
-    } else {
-        s
+    let char_count = s.chars().count();
+    if char_count <= MAX_EXTRACTED_CHARS {
+        return s;
     }
+    let marker_chars = TRUNCATION_MARKER.chars().count();
+    let keep = MAX_EXTRACTED_CHARS.saturating_sub(marker_chars);
+    let mut truncated: String = s.chars().take(keep).collect();
+    truncated.push_str(TRUNCATION_MARKER);
+    truncated
 }
 
 /// pdfium page-text extraction, feature-gated behind `pdf-thumb` exactly like [`crate::thumb_pdf`]
@@ -279,6 +302,56 @@ mod tests {
         let long = "x".repeat(MAX_EXTRACTED_CHARS + 500);
         let capped = cap(long);
         assert_eq!(capped.chars().count(), MAX_EXTRACTED_CHARS);
+        assert!(capped.contains("(truncated)"), "cap() must leave a visible cue when it cuts: {capped:?}");
+    }
+
+    #[test]
+    fn size_cap_leaves_short_text_untouched_with_no_marker() {
+        let short = "the quick brown fox".to_string();
+        let capped = cap(short.clone());
+        assert_eq!(capped, short, "text under the cap passes through unchanged, no marker added");
+    }
+
+    /// CPE-1448 regression: this module's own 4M-char [`MAX_EXTRACTED_CHARS`] outer cap runs on top of
+    /// [`crate::doc_text`]'s 8 MiB inner cap. Since [`crate::doc_text`]'s cap is on RAW (pre-strip) bytes
+    /// and its "(truncated)" marker sits right at the end of the ~8M-char stripped result, this module's
+    /// 4M-char cap cuts well before reaching it — dropping doc_text's marker along with the rest of the
+    /// tail. Before the fix, that left a silently truncated document with no visible cue at all on the
+    /// content-search path. Build a docx whose single `<w:t>` run is a multi-tens-of-MiB deflate bomb (so
+    /// almost all of the 8 MiB doc_text reads passes straight through stripping as plain text, comfortably
+    /// exceeding this module's 4M-char cap) and confirm the text handed to content search still carries a
+    /// truncation cue.
+    #[test]
+    fn content_search_path_preserves_a_truncation_cue_through_both_caps() {
+        let d = scratch("docx-both-caps");
+        let f = d.join("bomb.docx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("word/document.xml", opts).unwrap();
+            // A single open <w:t> run of highly-compressible 'A' bytes (classic zip-bomb shape, same
+            // idiom as doc_text's own bomb fixtures): 64 MiB decompressed, 8x doc_text's 8 MiB inner cap,
+            // so the entry read stops well inside this one text run — none of it is inside markup, so
+            // (almost) the whole ~8 MiB doc_text reads survives stripping as plain chars, well over this
+            // module's 4M-char outer cap too.
+            zip.write_all(b"<w:document><w:body><w:p><w:r><w:t>").unwrap();
+            let chunk = vec![b'A'; 1024 * 1024];
+            for _ in 0..64 {
+                zip.write_all(&chunk).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        let bytes = fs::read(&f).unwrap();
+        let text = content_text_of(&f, &bytes).unwrap();
+        assert!(text.chars().count() <= MAX_EXTRACTED_CHARS, "outer cap still bounds the output");
+        assert!(
+            text.contains("(truncated)"),
+            "a truncation cue must survive both the inner and outer caps: len={}",
+            text.chars().count()
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
