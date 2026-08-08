@@ -125,8 +125,25 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 | `/ticketing-organize` | Reorganise `Done/` when it grows large |
 | `/ticketing-setup` | (Re)bootstrap the ticket system |
 | `/skills-organise` | Manage the slash commands as named feature sets |
+| `/workshifts` | Run `/workshift` in repeated batches under a named loop policy — see the family below |
 | `/run` | Publish the latest release (if draft), then install and launch it |
 | `/remove` | Uninstall the application from this machine |
+
+### The `workshifts_*` family
+
+`/workshift` is the work engine. The **`workshifts_*` skills are loop policies layered over it** — they
+differ only in how batches are sized, persisted, paced, and recovered. One shared primitive,
+`run_workshift_batch(batch_size)`, and one standard: [docs/design/WORKSHIFTS.md](docs/design/WORKSHIFTS.md).
+
+`/workshifts <mode>` is the everyday entry point (16 modes). The individual skills —
+`/workshifts_checkpoint`, `_log`, `_rotate`, `_until`, `_parallel`, `_gpu`, `_vr_dashboard`,
+`_rotating_logs`, `_remote_checkpoint`, `_autonomous`, `_autorecover`, `_throttled`, `_randomized`,
+`_weighted`, `_scheduled`, `_priority_queue` — can also be called directly. `/workshifts_supervisor`
+dispatches 8 of them at defaults only; `/workshifts_god` takes every parameter in one signature.
+
+Two to know before using: `/workshifts_until` is the **only finite** one (all others roll until stopped),
+and `/workshifts_remote_checkpoint` is the only one that **sends data off this machine** — it is gated on
+explicit confirmation and its default `sync_url` is a placeholder.
 
 ### Trigger words: "Run" and "Remove"
 
