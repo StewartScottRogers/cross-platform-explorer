@@ -44,15 +44,14 @@
 //! builds the `<use>` reference graph (edge `S -> T` whenever a `<use href="#T">` appears anywhere inside
 //! the subtree of an id'd element `S`, the exact "cloning `S` re-clones `T`" relation usvg would recurse
 //! on) and rejects the document iff that graph contains a cycle, detected with an explicit-stack (never
-//! call-stack) three-colour DFS. It is deliberately narrow — it only follows `<use>` `href`/`xlink:href`
-//! edges, so a legitimate SVG that reuses `<use>`/`<symbol>` heavily but *acyclically* (even a deep
-//! reference chain) is never rejected — only an actual cycle is. Like the depth guard it shares the same
-//! quote/comment/CDATA/PI/DOCTYPE-aware byte scan, so an embedded `>` inside an attribute value (the
-//! `<a b="/>">` scan-evasion class that bit webdav's first CPE-1398 fix) can't smuggle a hidden edge past
-//! it. It also XML-decodes character/entity references in `id`/`href` values before interning them (an
-//! href written `&#35;b` or an id written `&#97;`), because roxmltree decodes them before usvg resolves
-//! the reference — so the guard's graph is keyed on the same decoded strings usvg matches, not raw source
-//! bytes (the second confirmed CPE-1414 review bypass).
+//! call-stack) three-colour DFS. It is deliberately narrow — it only follows `<use>` references, so a
+//! legitimate SVG that reuses `<use>`/`<symbol>` heavily but *acyclically* (even a deep reference chain)
+//! is never rejected — only an actual cycle is. Crucially, the graph's strings are sourced from the **same
+//! `roxmltree` parse usvg itself uses** (mirroring usvg's SVGZ-decompress + UTF-8 preprocessing and its
+//! `allow_dtd: true` parsing option), so the guard resolves numeric char refs, predefined entities, and
+//! internal-subset DTD entities *identically* to usvg — closing the whole class of "the guard modelled a
+//! different decoded string than usvg resolves" bypasses (`&#35;b`, `<!ENTITY r "#b">`) that successive
+//! hand-rolled byte scans kept losing to. See [`svg_use_reference_cycle`].
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -188,305 +187,105 @@ fn xml_nesting_too_deep(bytes: &[u8], max_depth: usize) -> bool {
 }
 
 /// Non-recursive guard against a `<use>`/`<symbol>` **reference cycle**, run before the document is
-/// handed to `usvg` (see the module doc comment). `usvg` resolves a `<use href="#T">` by cloning `T`'s
-/// subtree, recursing into any `<use>` that clone contains; a 2+-hop mutual cycle overflows a small stack
-/// because usvg only special-cases a direct self-reference. Returns `true` iff the reference graph has a
-/// cycle.
+/// handed to `usvg` (see the module doc comment). `usvg` resolves a `<use href="#T">` by recursively
+/// cloning `T`'s subtree; a 2+-hop mutual cycle overflows a small stack because usvg only special-cases a
+/// direct self-reference. Returns `true` iff the reference graph has a cycle (or the document can't be
+/// safely inspected — see below), so `rasterize_svg` rejects it before usvg ever recurses.
 ///
-/// Builds the graph in a single quote/comment/CDATA/PI/DOCTYPE-aware pass (the exact same scan skeleton as
-/// [`xml_nesting_too_deep`], so a literal `>` inside an attribute value can't smuggle an edge past it):
-/// tracks the stack of currently-open id'd elements and, for each `<use href="#T">`, records an edge from
-/// every id'd ancestor **and** the `<use>`'s own id (if any) to `T` — precisely the "cloning that ancestor
-/// re-clones `T`" relation usvg recurses on. Only `<use>` `href`/`xlink:href` references become edges, so
-/// acyclic reuse of `<use>`/`<symbol>` — however heavy or deep — never trips it. The cycle test itself is an
-/// explicit-stack three-colour DFS ([`graph_has_cycle`]), so this guard, like the depth guard, can never
-/// stack-overflow no matter how adversarial the input.
+/// **Sourced from `roxmltree`, exactly like usvg.** Earlier hand-rolled byte scans kept losing to the same
+/// class of bug — the guard modelling a *different* decoded string than usvg resolves (numeric char refs
+/// `&#35;`, then internal-subset DTD entities `<!ENTITY r "#b">`). This version instead mirrors
+/// `usvg::Tree::from_data`'s own preprocessing (gzip-decompress an SVGZ payload, require UTF-8) and parses
+/// with the very same parser+options usvg uses — `roxmltree::Document::parse_with_options(.., allow_dtd:
+/// true)` — then extracts the `<use>` reference graph from that parsed tree. Because roxmltree resolves
+/// numeric refs, the predefined entities, **and** internal-subset DTD entities identically for both, the
+/// graph is keyed on the exact strings usvg matches, closing the whole "guard sees a different string"
+/// divergence class in one move (`roxmltree` is already usvg's transitive XML parser — no new dependency
+/// surface; it's pinned to the same version usvg resolves).
+///
+/// For each element carrying an `id`, and each `<use>` (any namespace) with an `href`/`xlink:href` of the
+/// form `#T`, records an edge from every id'd ancestor **and** the `<use>`'s own id (its own node is the
+/// first entry `Node::ancestors()` yields) to `T` — precisely the "cloning that ancestor re-clones `T`"
+/// relation usvg recurses on. Only `<use>` references become edges, so acyclic reuse of `<use>`/`<symbol>`
+/// — however heavy — never trips it. The cycle test itself is an explicit-stack three-colour DFS
+/// ([`graph_has_cycle`]), never the call stack.
+///
+/// **Failure is safe:** if the SVGZ decompress, the UTF-8 check, or the roxmltree parse fails, usvg's
+/// *identical* parse would fail too, so the guard falls through (`false`) and lets usvg report the real
+/// error — the only path that reaches usvg's dangerous `<use>` recursion is one where the parse *succeeds*,
+/// and on that path this guard has already seen the same tree and rejected any real cycle. As a final
+/// belt-and-braces measure the depth guard is re-run here on the *decompressed* bytes (an SVGZ payload's
+/// nesting is invisible to `rasterize_svg`'s pre-scan of the still-compressed bytes), so this guard's own
+/// `roxmltree` parse can never be walked into a deep-nesting overflow either.
 fn svg_use_reference_cycle(bytes: &[u8]) -> bool {
-    fn find(bytes: &[u8], from: usize, needle: &[u8]) -> Option<usize> {
-        if from > bytes.len() {
-            return None;
-        }
-        bytes[from..].windows(needle.len()).position(|w| w == needle).map(|p| from + p)
-    }
-    fn starts_with(bytes: &[u8], i: usize, needle: &[u8]) -> bool {
-        bytes.len() >= i + needle.len() && &bytes[i..i + needle.len()] == needle
-    }
-    /// The local name of an attribute/element name (the part after the last `:`), so `xlink:href`
-    /// matches `href` and a namespaced `svg:use` matches `use`.
-    fn local_name(name: &[u8]) -> &[u8] {
-        match name.iter().rposition(|&c| c == b':') {
-            Some(p) => &name[p + 1..],
-            None => name,
-        }
-    }
-
-    /// Decode the XML character/entity references roxmltree resolves in an attribute value *before*
-    /// usvg matches an `id`/`href` — so the graph is built on the same decoded strings usvg sees, not
-    /// the raw source bytes. Without this an href written `&#35;b` (numeric `#`) or an id written
-    /// `&#97;` (`a`) is invisible to a raw-byte scan yet forms a real cycle once usvg decodes it (the
-    /// confirmed CPE-1414 review bypass). Handles numeric char refs `&#NN;` / `&#xNN;` and the five
-    /// predefined named entities; any unrecognized/malformed `&…` is left literal (never panics), which
-    /// only ever *adds* an entity nobody references, never hides one.
-    fn decode_xml_entities(raw: &[u8]) -> Vec<u8> {
-        if !raw.contains(&b'&') {
-            return raw.to_vec(); // fast path: nothing to decode
-        }
-        let n = raw.len();
-        let mut out = Vec::with_capacity(n);
-        let mut i = 0usize;
-        while i < n {
-            if raw[i] != b'&' {
-                out.push(raw[i]);
-                i += 1;
-                continue;
-            }
-            if let Some(semi) = raw[i + 1..].iter().position(|&c| c == b';').map(|p| i + 1 + p) {
-                let ent = &raw[i + 1..semi];
-                let decoded: Option<Vec<u8>> = if ent.first() == Some(&b'#') {
-                    let (radix, digits) = if matches!(ent.get(1), Some(b'x') | Some(b'X')) {
-                        (16u32, &ent[2..])
-                    } else {
-                        (10u32, &ent[1..])
-                    };
-                    if !digits.is_empty() && digits.iter().all(|&c| (c as char).is_digit(radix)) {
-                        std::str::from_utf8(digits)
-                            .ok()
-                            .and_then(|s| u32::from_str_radix(s, radix).ok())
-                            .and_then(char::from_u32)
-                            .map(|ch| ch.encode_utf8(&mut [0u8; 4]).as_bytes().to_vec())
-                    } else {
-                        None
-                    }
-                } else {
-                    match ent {
-                        b"amp" => Some(vec![b'&']),
-                        b"lt" => Some(vec![b'<']),
-                        b"gt" => Some(vec![b'>']),
-                        b"quot" => Some(vec![b'"']),
-                        b"apos" => Some(vec![b'\'']),
-                        _ => None,
-                    }
-                };
-                if let Some(bytes) = decoded {
-                    out.extend_from_slice(&bytes);
-                    i = semi + 1;
-                    continue;
-                }
-            }
-            // Not a recognized entity — emit '&' literally and keep scanning.
-            out.push(b'&');
-            i += 1;
-        }
-        out
-    }
-
-    // A tiny quote-aware attribute tokenizer over a tag's inner bytes (everything between `<` and the
-    // matching unquoted `>`, minus any trailing `/`). Returns the element's local name, its `id`
-    // attribute value, and — for `<use>` elements — the local id its `href`/`xlink:href` points at
-    // (`#target`; non-`#` / external refs are ignored). Values are read only from inside their quotes,
-    // so a `>` inside a value is never mistaken for a tag boundary.
-    fn parse_tag(inner: &[u8]) -> (Vec<u8>, Option<Vec<u8>>, Option<Vec<u8>>) {
-        let n = inner.len();
-        let mut i = 0usize;
-        let skip_ws = |i: &mut usize| {
-            while *i < n && inner[*i].is_ascii_whitespace() {
-                *i += 1;
-            }
-        };
-        skip_ws(&mut i);
-        let name_start = i;
-        while i < n && !inner[i].is_ascii_whitespace() && inner[i] != b'/' {
-            i += 1;
-        }
-        let name = inner[name_start..i].to_vec();
-        let is_use = local_name(&name) == b"use";
-
-        let mut id: Option<Vec<u8>> = None;
-        let mut href: Option<Vec<u8>> = None;
-        loop {
-            skip_ws(&mut i);
-            if i >= n || inner[i] == b'/' {
-                break;
-            }
-            let attr_start = i;
-            while i < n && inner[i] != b'=' && !inner[i].is_ascii_whitespace() && inner[i] != b'/' {
-                i += 1;
-            }
-            let attr_name = &inner[attr_start..i];
-            skip_ws(&mut i);
-            if i >= n || inner[i] != b'=' {
-                // Valueless / malformed attribute — no value to read, keep scanning.
-                if attr_name.is_empty() {
-                    i += 1; // guarantee forward progress on a stray char
-                }
-                continue;
-            }
-            i += 1; // consume '='
-            skip_ws(&mut i);
-            let value: Vec<u8> = if i < n && (inner[i] == b'"' || inner[i] == b'\'') {
-                let q = inner[i];
-                i += 1;
-                let vstart = i;
-                while i < n && inner[i] != q {
-                    i += 1;
-                }
-                let v = inner[vstart..i].to_vec();
-                if i < n {
-                    i += 1; // consume closing quote
-                }
-                v
-            } else {
-                // Unquoted (malformed) value — read up to the next whitespace.
-                let vstart = i;
-                while i < n && !inner[i].is_ascii_whitespace() && inner[i] != b'/' {
-                    i += 1;
-                }
-                inner[vstart..i].to_vec()
-            };
-            let local = local_name(attr_name);
-            if local == b"id" && id.is_none() {
-                // Decode entities so an entity-encoded id (`&#97;` = `a`) interns to the same node key
-                // usvg resolves an href against.
-                id = Some(decode_xml_entities(&value));
-            }
-            if is_use && local == b"href" && href.is_none() {
-                // Decode entities FIRST (an href written `&#35;b` / `&#x23;b` decodes to `#b`), then trim
-                // and strip the leading `#`, matching how roxmltree/usvg see the reference.
-                let decoded = decode_xml_entities(&value);
-                let mut lo = 0usize;
-                let mut hi = decoded.len();
-                while lo < hi && decoded[lo].is_ascii_whitespace() {
-                    lo += 1;
-                }
-                while hi > lo && decoded[hi - 1].is_ascii_whitespace() {
-                    hi -= 1;
-                }
-                if let Some(target) = decoded[lo..hi].strip_prefix(b"#") {
-                    if !target.is_empty() {
-                        href = Some(target.to_vec());
-                    }
-                }
-            }
-        }
-        (name, id, href)
-    }
-
-    // Intern ids to small node indices; build an adjacency list of the reference graph.
-    let mut ids: HashMap<Vec<u8>, usize> = HashMap::new();
-    let mut adj: Vec<Vec<usize>> = Vec::new();
-    let intern = |ids: &mut HashMap<Vec<u8>, usize>, adj: &mut Vec<Vec<usize>>, key: &[u8]| -> usize {
+    fn intern<'a>(ids: &mut HashMap<&'a str, usize>, adj: &mut Vec<Vec<usize>>, key: &'a str) -> usize {
         if let Some(&idx) = ids.get(key) {
-            idx
-        } else {
-            let idx = adj.len();
-            ids.insert(key.to_vec(), idx);
-            adj.push(Vec::new());
-            idx
+            return idx;
         }
+        let idx = adj.len();
+        ids.insert(key, idx);
+        adj.push(Vec::new());
+        idx
+    }
+
+    // Mirror `usvg::Tree::from_data`: an SVGZ (gzip) payload is decompressed first (some `.svg` files are
+    // actually gzipped, and usvg handles them, so a cycle hidden inside one must be inspected here too).
+    let decompressed;
+    let data: &[u8] = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let mut decoder = flate2::read::GzDecoder::new(bytes);
+        let mut buf = Vec::new();
+        if std::io::Read::read_to_end(&mut decoder, &mut buf).is_err() {
+            return false; // usvg's own `decompress_svgz` fails identically -> let it report the error
+        }
+        decompressed = buf;
+        &decompressed
+    } else {
+        bytes
     };
 
-    // Stack of currently-open elements: `Some(node)` for an element carrying an `id`, `None` otherwise.
-    // The id'd ancestors of a `<use>` are the `Some` entries on this stack.
-    let mut stack: Vec<Option<usize>> = Vec::new();
+    // `roxmltree` recurses per nesting level, so guard this guard's own parse against a deep-nesting
+    // overflow the same way `rasterize_svg` guards usvg's. Needed here for the SVGZ path (where
+    // `rasterize_svg`'s pre-scan ran on the still-compressed bytes); redundant-but-cheap otherwise.
+    if xml_nesting_too_deep(data, MAX_SVG_NESTING_DEPTH) {
+        return true;
+    }
 
-    let n = bytes.len();
-    let mut i = 0usize;
-    while i < n {
-        if bytes[i] != b'<' {
-            i += 1;
-            continue;
-        }
-        if starts_with(bytes, i, b"<!--") {
-            match find(bytes, i + 4, b"-->") {
-                Some(end) => i = end + 3,
-                None => break,
-            }
-            continue;
-        }
-        if starts_with(bytes, i, b"<![CDATA[") {
-            match find(bytes, i + 9, b"]]>") {
-                Some(end) => i = end + 3,
-                None => break,
-            }
-            continue;
-        }
-        if starts_with(bytes, i, b"<?") {
-            match find(bytes, i + 2, b"?>") {
-                Some(end) => i = end + 2,
-                None => break,
-            }
-            continue;
-        }
-        if i + 1 < n && bytes[i + 1] == b'!' {
-            // `<!DOCTYPE ...>` — same bracket/quote-aware skip as the depth guard.
-            let mut j = i + 2;
-            let mut bracket_depth: i32 = 0;
-            let mut quote: Option<u8> = None;
-            while j < n {
-                let c = bytes[j];
-                if let Some(q) = quote {
-                    if c == q {
-                        quote = None;
-                    }
-                } else if c == b'"' || c == b'\'' {
-                    quote = Some(c);
-                } else if c == b'[' {
-                    bracket_depth += 1;
-                } else if c == b']' {
-                    bracket_depth -= 1;
-                } else if c == b'>' && bracket_depth <= 0 {
-                    break;
-                }
-                j += 1;
-            }
-            if j >= n {
-                break;
-            }
-            i = j + 1;
-            continue;
-        }
+    let text = match std::str::from_utf8(data) {
+        Ok(t) => t,
+        Err(_) => return false, // usvg's `from_utf8` fails identically (NotAnUtf8Str) -> let it report
+    };
+    // The SAME parser + option usvg uses (`allow_dtd: true` is what makes roxmltree expand internal-subset
+    // DTD entities — the exact resolution the last review's bypass relied on).
+    let xml_opt = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
+    let doc = match roxmltree::Document::parse_with_options(text, xml_opt) {
+        Ok(d) => d,
+        Err(_) => return false, // usvg's identical parse fails too (incl. roxmltree's entity-bomb limit)
+    };
 
-        // A real start/end/empty-element tag: find the first UNQUOTED '>' (quote-aware).
-        let is_end_tag = i + 1 < n && bytes[i + 1] == b'/';
-        let mut j = i + 1;
-        let mut quote: Option<u8> = None;
-        while j < n {
-            let c = bytes[j];
-            if let Some(q) = quote {
-                if c == q {
-                    quote = None;
-                }
-            } else if c == b'"' || c == b'\'' {
-                quote = Some(c);
-            } else if c == b'>' {
-                break;
-            }
-            j += 1;
+    // Build the `<use>` reference graph from the parsed tree. roxmltree's `attribute()`/`value()` return
+    // already entity/DTD-decoded strings, so `strip_prefix('#')` on them matches what usvg resolves.
+    let mut ids: HashMap<&str, usize> = HashMap::new();
+    let mut adj: Vec<Vec<usize>> = Vec::new();
+    for node in doc.descendants() {
+        if !node.is_element() || node.tag_name().name() != "use" {
+            continue;
         }
-        if j >= n {
-            break; // unterminated tag — let usvg's real parser report the error
-        }
-        let self_closing = j > i + 1 && bytes[j - 1] == b'/';
-
-        if is_end_tag {
-            stack.pop();
-        } else {
-            // Tag inner bytes: after '<' up to (but excluding) '>' and any trailing '/'.
-            let inner_end = if self_closing { j - 1 } else { j };
-            let (_name, id, href) = parse_tag(&bytes[i + 1..inner_end]);
-            let own_node = id.as_ref().map(|k| intern(&mut ids, &mut adj, k));
-            if let Some(target) = href {
-                let target_node = intern(&mut ids, &mut adj, &target);
-                // Edge from every id'd ancestor — and this element's own id — to the referenced target.
-                for src in stack.iter().flatten().copied().chain(own_node) {
-                    adj[src].push(target_node);
-                }
-            }
-            if !self_closing {
-                stack.push(own_node);
+        // The `href`/`xlink:href` attribute, whatever its namespace prefix, by local name.
+        let Some(href) = node.attributes().find(|a| a.name() == "href").map(|a| a.value()) else {
+            continue;
+        };
+        let Some(target_id) = href.trim().strip_prefix('#').filter(|s| !s.is_empty()) else {
+            continue; // external / non-fragment ref: usvg can't recurse a cycle through it
+        };
+        let target = intern(&mut ids, &mut adj, target_id);
+        // Edge from every id'd ancestor — INCLUDING this `<use>`'s own id, since `ancestors()` yields the
+        // node itself first — to the referenced target.
+        for anc in node.ancestors() {
+            if let Some(src_id) = anc.attribute("id") {
+                let src = intern(&mut ids, &mut adj, src_id);
+                adj[src].push(target);
             }
         }
-        i = j + 1;
     }
 
     graph_has_cycle(&adj)
@@ -817,6 +616,31 @@ mod tests {
             <use xlink:href="#a"/>
         </svg>"##;
         assert!(svg_use_reference_cycle(entity_id), "an entity-encoded id must not dodge the cycle guard");
+    }
+
+    #[test]
+    fn use_cycle_guard_flags_an_internal_subset_dtd_entity_cycle() {
+        // The second confirmed CPE-1414 review bypass: hrefs written as internal-subset DTD entities
+        // (`<!ENTITY r "#b">` -> `&r;` = `#b`). A hand-rolled decoder can't know these custom entities, but
+        // roxmltree (with `allow_dtd: true`, exactly as usvg parses) expands them, so sourcing the graph
+        // from roxmltree matches usvg and the a<->b cycle is seen.
+        let dtd = br##"<?xml version="1.0"?>
+        <!DOCTYPE svg [<!ENTITY r "#b"><!ENTITY q "#a">]>
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&r;"/></symbol>
+            <symbol id="b"><use xlink:href="&q;"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##;
+        assert!(svg_use_reference_cycle(dtd), "an internal-subset DTD-entity <use> cycle must be flagged");
+    }
+
+    #[test]
+    fn use_cycle_guard_falls_through_on_unparseable_input() {
+        // If roxmltree can't parse it, usvg's identical parse fails too, so the guard reports "no cycle"
+        // and lets usvg surface the real error — it must not panic or spuriously flag a cycle.
+        assert!(!svg_use_reference_cycle(b"<svg><this is not valid xml"));
+        assert!(!svg_use_reference_cycle(&[0xff, 0xfe, 0x00, 0x3c])); // not UTF-8
+        assert!(!svg_use_reference_cycle(b""));
     }
 
     #[test]

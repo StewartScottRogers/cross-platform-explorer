@@ -31,12 +31,17 @@
 //!   through to usvg's own `depth > 1024` recursion cap, and that recursion's *own* per-level stack cost is
 //!   high enough to overflow a 256KB thread stack well before reaching 1024. **Fixed** (CPE-1414):
 //!   `rasterize_svg` now runs a second non-recursive pre-scan, `thumb_svg::svg_use_reference_cycle`, that
-//!   builds the `<use>` reference graph in one quote/comment/CDATA/PI/DOCTYPE-aware byte pass and rejects
-//!   the document iff that graph has a cycle, detected with an explicit-stack (never call-stack) DFS —
-//!   before the bytes ever reach usvg. It follows only `<use>` `href` edges, so heavy *acyclic* reuse of
-//!   `<use>`/`<symbol>` (however deep) still renders.
+//!   builds the `<use>` reference graph from **the same `roxmltree` parse usvg uses** (mirroring usvg's
+//!   SVGZ-decompress + UTF-8 preprocessing and its `allow_dtd: true` option) and rejects the document iff
+//!   that graph has a cycle, detected with an explicit-stack (never call-stack) DFS — before the bytes ever
+//!   reach usvg's recursive `<use>` resolution. Sourcing the strings from roxmltree means the guard resolves
+//!   numeric char refs, predefined entities, and internal-subset DTD entities *identically* to usvg, so the
+//!   two adversarial-review bypasses of the same class — `xlink:href="&#35;b"` and a DTD `<!ENTITY r "#b">`,
+//!   each of which a hand-rolled byte scan modelled as a *different* string than usvg resolved — are closed
+//!   (see the entity/DTD small-stack probe below). It follows only `<use>` references, so heavy *acyclic*
+//!   reuse of `<use>`/`<symbol>` (however deep) still renders.
 //!   [`rasterize_svg_never_stack_overflows_on_a_use_mutual_reference_cycle_on_a_small_stack`] (and the
-//!   3-hop variant) are the small-stack regression tests for the fix;
+//!   3-hop + entity/DTD variants) are the small-stack regression tests for the fix;
 //!   [`rasterize_svg_renders_a_deep_acyclic_use_chain_on_a_normal_stack`] is the false-positive guard.
 //!   The cycle was also confirmed empirically safe (graceful `Err`, no crash) on the 2MB thread stack this
 //!   app's real Tokio `spawn_blocking` callers use even before this fix, so production risk was always low —
@@ -224,10 +229,11 @@ fn rasterize_svg_never_stack_overflows_on_a_three_hop_use_cycle_on_a_small_stack
 
 #[test]
 fn rasterize_svg_never_stack_overflows_on_an_entity_encoded_use_cycle_on_a_small_stack() {
-    // The confirmed CPE-1414 review bypass: an href written as a numeric/hex char ref (`&#35;`/`&#x23;`
-    // = `#`) decodes to `#b`/`#a` under roxmltree BEFORE usvg resolves it, forming the same a<->b cycle a
-    // raw-byte scan would miss (it sees a leading `&`, not `#`). The guard now XML-decodes id/href values
-    // first, so both encodings must degrade to a graceful `Err` with no stack overflow on a 256KB stack.
+    // The two confirmed CPE-1414 review bypasses of the same class — an href indirected through an entity
+    // so a raw-byte scan sees a leading `&`, not `#`, yet roxmltree (and thus usvg) resolves it to `#b`/`#a`
+    // and expands the a<->b cycle: (1) numeric char ref `&#35;`, (2) hex `&#x23;`, and (3) an
+    // internal-subset DTD entity `<!ENTITY r "#b">`. The guard now sources its graph from the same
+    // roxmltree parse usvg uses, so all three must degrade to a graceful `Err` with no overflow on 256KB.
     for variant in [
         &br##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
             <symbol id="a"><use xlink:href="&#35;b"/></symbol>
@@ -239,10 +245,17 @@ fn rasterize_svg_never_stack_overflows_on_an_entity_encoded_use_cycle_on_a_small
             <symbol id="b"><use xlink:href="&#x23;a"/></symbol>
             <use xlink:href="#a"/>
         </svg>"##[..],
+        &br##"<?xml version="1.0"?>
+        <!DOCTYPE svg [<!ENTITY r "#b"><!ENTITY q "#a">]>
+        <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">
+            <symbol id="a"><use xlink:href="&r;"/></symbol>
+            <symbol id="b"><use xlink:href="&q;"/></symbol>
+            <use xlink:href="#a"/>
+        </svg>"##[..],
     ] {
         let svg = variant.to_vec();
         let result = run_on_small_stack(move || rasterize_svg(&svg, 32));
-        assert!(result.is_err(), "an entity-encoded <use> reference cycle must be rejected, not risk a stack overflow");
+        assert!(result.is_err(), "an entity/DTD-encoded <use> reference cycle must be rejected, not risk a stack overflow");
     }
 }
 

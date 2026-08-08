@@ -742,6 +742,7 @@ dependencies = [
  "rayon",
  "rcgen",
  "resvg",
+ "roxmltree",
  "rsa",
  "rusqlite",
  "rust_xlsxwriter",

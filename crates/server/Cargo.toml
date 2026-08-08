@@ -66,6 +66,15 @@ plist = "1"
 # support the thumbnail use case doesn't need.
 resvg = { version = "0.45.1", default-features = false, features = ["text"] }
 ab_glyph = "0.2.32"
+# SVG `<use>`/`<symbol>` reference-cycle guard (CPE-1414, epic CPE-718). NOT a new supply-chain surface:
+# `roxmltree` is already compiled as a transitive dependency — it's the exact XML DOM parser `usvg`
+# (above) parses `.svg` bytes with, pinned here to the SAME version `usvg 0.45.1` resolves
+# (`cargo tree -i roxmltree` → v0.20.0, single instance, no duplicate). `thumb_svg::svg_use_reference_cycle`
+# extracts the `<use>` reference graph from a `roxmltree::Document` so the guard is keyed on the exact same
+# entity/DTD-decoded attribute strings usvg resolves — closing the whole "guard models a different string
+# than usvg" divergence class (numeric/named/internal-subset-DTD entities) that hand-rolled byte decoding
+# kept losing to. Flagged for the Dependency Steward: promotes an existing transitive dep to a direct one.
+roxmltree = "=0.20.0"
 # Encrypted-vaults crypto core (CPE-1247, epic CPE-738): the `age` crate in **passphrase mode** — scrypt
 # KDF + ChaCha20-Poly1305 streaming AEAD, pure-Rust, audited. This is the approved crypto dependency; the
 # module MUST NOT hand-roll AEAD/KDF/nonces. Pinned to an exact version (the passphrase entry points moved
