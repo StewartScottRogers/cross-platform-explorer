@@ -2,7 +2,7 @@
 id: CPE-1485
 title: "Binary architecture detection (ELF/PE/Mach-O CPU arch) — extend the file-type detector"
 type: Feature
-status: Backlog
+status: Doing
 priority: Low
 component: Backend
 tags: [ready]
