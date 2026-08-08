@@ -25,7 +25,8 @@ export type Section =
   | "crypto-preview"
   | "folder-preview"
   | "cert-management"
-  | "media-player";
+  | "media-player"
+  | "structured-previews";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -85,6 +86,11 @@ const SECTION_DOC: Record<Section, string> = {
   // shows for a selected media file), but it still earns its own doc page + registry entry per
   // [[maintain-in-app-docs-library]].
   "media-player": "29-media-player",
+  // CPE-1434 (epic CPE-1433): the structured-preview cards (the `.eml` email viewer this slice; more
+  // formats in later children). Like crypto-preview/media-player above, not a sidebar view you switch
+  // into (it's whichever decoded panel the preview pane shows for a supported file), but it still earns
+  // its own doc page + registry entry per [[maintain-in-app-docs-library]].
+  "structured-previews": "30-structured-previews",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

@@ -197,6 +197,29 @@ fn ttf_renders_a_specimen_with_ink() {
     assert!(has_ink, "the full-ASCII font must paint real glyph ink for the 'Aa' specimen");
 }
 
+/// The sample `.eml` opens through the shipped email decoder (CPE-1434): encoded-word subject decoded,
+/// recipients split, quoted-printable body decoded, and the base64 attachment listed with its real size.
+#[test]
+fn eml_parses_headers_attachment_and_body() {
+    use cpe_server::email_preview::email_preview;
+    let p = email_preview(&sample("mail/sample.eml"));
+    assert_eq!(p.from.as_deref(), Some("Alice Example <alice@example.com>"));
+    assert_eq!(p.to, vec!["Bob Example <bob@example.com>", "carol@example.com"]);
+    assert_eq!(p.cc, vec!["dave@example.com"]);
+    // Encoded-word (=?utf-8?B?…?=) subject decoded to its Unicode text.
+    assert_eq!(p.subject.as_deref(), Some("Sample CPE email — Héllo"));
+    // Date humanized via the shared unix_to_rfc3339 helper.
+    assert_eq!(p.date_rfc3339.as_deref(), Some("2026-08-07T09:30:00Z"));
+    // Quoted-printable body decoded (Caf=C3=A9 → Café).
+    assert!(p.body.contains("Café"), "QP body decoded: {:?}", p.body);
+    assert!(!p.body_is_html);
+    // One base64 attachment, decoded to its real byte length ("Attached sample file for CPE-1434.\n").
+    assert_eq!(p.attachments.len(), 1);
+    assert_eq!(p.attachments[0].filename, "hello.txt");
+    assert_eq!(p.attachments[0].size, b"Attached sample file for CPE-1434.\n".len());
+    assert!(p.error.is_none());
+}
+
 /// The TIFF decodes and transcodes to a PNG data URL (decoded-image preview path).
 #[test]
 fn tiff_transcodes_to_png_data_url() {

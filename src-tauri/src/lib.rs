@@ -943,6 +943,23 @@ async fn jwt_preview(path: String) -> Result<cpe_server::jwt_preview::JwtPreview
     .map_err(|e| e.to_string())?
 }
 
+/// `.eml` email preview (CPE-1434, epic CPE-1433): read-only RFC 822/MIME viewer — headers + MIME parts
+/// + attachments + a sanitized plain-text body. Thin async dispatcher into `cpe_server::email_preview`;
+/// reads the file's raw bytes (capped by the same preview size guard the other whole-file info readers
+/// use) and hands them to the pure decoder, which never renders HTML, never loads remote resources, and
+/// never panics on malformed input.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn email_preview(path: String) -> Result<cpe_server::email_preview::EmailPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(cpe_server::email_preview::email_preview(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Certificate/CSR/public-key decoder (CPE-1419, epic CPE-1417): read-only X.509 viewer, never a
 /// verifier. Thin async dispatcher into `cpe_server::cert_decode`; reads the file's raw bytes (capped by
 /// the same preview size guard the other whole-file info readers use) and hands them to the pure decoder,
@@ -10135,6 +10152,7 @@ pub fn run() {
             data_browser_sources,
             data_browser_page,
             data_browser_query,
+            email_preview,
             jwt_preview,
             cert_decode,
             cert_create,
@@ -10954,6 +10972,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_sources,
         data_browser_page,
         data_browser_query,
+        email_preview,
         jwt_preview,
         cert_decode,
         cert_create,

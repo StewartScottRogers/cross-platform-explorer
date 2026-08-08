@@ -6,6 +6,7 @@
 import { unwrap } from "../invoke";
 import { commands } from "../bindings.gen"; // typed client (CPE-964)
 import type { ArchiveEntry } from "./provider";
+import type { EmailPreview } from "../bindings.gen";
 
 /** Cap on how much of a text file the preview will load. */
 export const PREVIEW_MAX_BYTES = 256 * 1024;
@@ -18,6 +19,12 @@ export const loadArchiveEntries = (path: string): Promise<ArchiveEntry[]> =>
 
 export const loadPreviewInfo = (path: string): Promise<string> =>
   commands.readPreviewInfo(path).then(unwrap);
+
+/** Structured `.eml` email preview (CPE-1434, epic CPE-1433): headers + MIME parts + attachments + a
+ *  sanitized plain-text body. `EmailPreview.svelte` fetches its own data self-contained (like JwtPreview);
+ *  this loader mirrors the other preview loaders so the torn-off FloatPreview window can reuse it. */
+export const loadEmailPreview = (path: string): Promise<EmailPreview> =>
+  commands.emailPreview(path).then(unwrap);
 
 export const loadImageData = (path: string): Promise<string> =>
   commands.readImageDataUrl(path).then(unwrap);

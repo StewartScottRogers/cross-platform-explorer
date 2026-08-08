@@ -286,6 +286,14 @@
     <rect x="3" y="4" width="18" height="16" rx="2" />
     <path d="M7 10l3 3-3 3" />
     <path d="M13 16h4" />
+  {:else if name === "mail"}
+    <!-- Envelope (CPE-1434, epic CPE-1433): the .eml email-preview banner glyph. Monochrome via
+         currentColor like the other ui glyphs. -->
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <path d="M4 7l8 6 8-6" />
+  {:else if name === "paperclip"}
+    <!-- Paperclip (CPE-1434): the attachment-pill glyph. -->
+    <path d="M20 11.5l-8.5 8.5a4.5 4.5 0 0 1-6.4-6.4l8.5-8.5a3 3 0 0 1 4.3 4.3l-8.5 8.5a1.5 1.5 0 0 1-2.2-2.2l7.8-7.8" />
   {/if}
 </svg>
 
