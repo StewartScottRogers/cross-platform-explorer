@@ -618,6 +618,37 @@ mod tests {
         spawn_server_with(None)
     }
 
+    /// Like [`spawn_server`] but also returns the server's on-disk root, so a test can seed extra
+    /// (possibly hostile-named) files into it before listing. Accepts any password. Seeds the same
+    /// `readme.txt` + `sub/nested.txt` as the other spawners. (Unix-only: its sole user is the
+    /// backslash-name filter test, which needs a filename that isn't creatable on Windows.)
+    #[cfg(unix)]
+    fn spawn_server_returning_root() -> (SocketAddr, KeyFields, PathBuf) {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
+        let pub_fields = openssh_fields(key.public_key());
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("cpe-sftp-srvroot-{}-{}", std::process::id(), n));
+        std::fs::create_dir_all(root.join(DIR_NAME)).unwrap();
+        std::fs::write(root.join(FILE_NAME), FILE_BODY).unwrap();
+        std::fs::write(root.join(DIR_NAME).join("nested.txt"), b"deep").unwrap();
+
+        let root_ret = root.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+            rt.block_on(async move {
+                let config = Arc::new(russh::server::Config { keys: vec![key], ..Default::default() });
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let _ = TestServer { root, accept_pubkey: None }.run_on_socket(config, &listener).await;
+            });
+        });
+        (addr, pub_fields, root_ret)
+    }
+
     /// A `known_hosts` list trusting `(key_type, key_b64)` at `127.0.0.1:port`.
     fn known_for(port: u16, key: &KeyFields) -> Vec<KnownHost> {
         parse_known_hosts(&format!("{} {} {}", host_token("127.0.0.1", port), key.0, key.1))
@@ -863,5 +894,28 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("invalid private key"), "got: {err}");
+    }
+
+    /// CPE-1461 source-side defense: `list` must drop a READDIR entry whose server-supplied filename is a
+    /// traversal/separator/drive name (via `cpe_server::transfer::is_safe_name`), so it can never reach
+    /// the local-write sink in `download_tree`. Gated to Unix: a filename containing a literal backslash
+    /// isn't creatable on Windows, and the filter itself is platform-independent.
+    #[cfg(unix)]
+    #[test]
+    fn list_filters_out_a_path_traversal_readdir_name() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        // Seed a hostile-named regular file directly on the server root (a filename russh-sftp would
+        // forward verbatim). A backslash-bearing name is `is_safe_name`-unsafe and Unix-creatable.
+        std::fs::write(root.join(r"evil\..\..\escape"), b"pwn").unwrap();
+
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+        let names: Vec<String> = provider.list("/").expect("list").into_iter().map(|e| e.name).collect();
+
+        assert!(!names.iter().any(|n| n.contains('\\')), "hostile backslash name leaked through: {names:?}");
+        // The legitimate entries still come through (no over-rejection).
+        assert!(names.contains(&FILE_NAME.to_string()), "legit file was dropped: {names:?}");
+        assert!(names.contains(&DIR_NAME.to_string()), "legit dir was dropped: {names:?}");
     }
 }

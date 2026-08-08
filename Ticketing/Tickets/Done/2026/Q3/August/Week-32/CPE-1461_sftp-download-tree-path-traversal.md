@@ -93,3 +93,42 @@ surfaces as an error. Closes the future-SSRF foothold flagged in the audit.
 webdav +1 traversal-href test (12 total pass, incl. the existing download round-trip = no over-rejection);
 sftp 14 pass (incl. download round-trip). Build + `clippy --all-targets -D warnings` clean for all three
 crates. Public API unchanged (`walk`/`download_tree`/`WalkEntry` signatures identical).
+
+## Work Log — attempt 2 (2026-08-08, post-review; PR #717 got SEC PASS, this addresses 4 flagged defects)
+The adversarial auditor confirmed the HIGH remote-traversal→arbitrary-write vector is genuinely closed
+(SEC PASS). The reviewer + auditor flagged 4 issues in the belt-and-suspenders symlink guard; all fixed on
+the same branch, primary fix untouched:
+
+1. **Guard validated AFTER mutating (must-fix).** The old code did `create_dir_all(dir_to_make)` and THEN
+   canonicalize-checked, so a pre-existing symlinked dir inside `local_dir` (planted out-of-band) would be
+   *followed* by the mkdir before the check ran — an inert empty dir could escape (no attacker content,
+   but the docstring lied). Fixed by validating BEFORE any mutation: new `fn existing_ancestor(path)`
+   (walks up via `symlink_metadata`, so a symlink is found without being followed) finds the longest
+   already-existing ancestor of the target; it is canonicalized and asserted `starts_with(canonical_root)`
+   *before* `create_dir_all` runs. The portion then created is brand-new (no symlinks) under a
+   verified-contained real dir. Fail-closed (skip + notice) on a dangling/unresolvable ancestor. Uses the
+   reviewer's insight that `walk` emits+creates a dir entry before any of its children, so the parent is
+   always already present.
+2. **Leaf symlink followed on write (fold-in).** The parent was checked but `std::fs::write(local, …)`
+   would still follow a pre-existing *symlinked leaf file* out of the root. Fixed: before writing, if
+   `symlink_metadata(local).file_type().is_symlink()`, skip the entry (fail-closed, surfaced notice).
+3. **`is_safe_name` too permissive (belt-and-suspenders).** Now also rejects any leaf containing `:`
+   (Windows NTFS ADS / drive selector — `x:y`, `..::$DATA`, `file:$DATA`) or beginning with `..`
+   (`..stream`, `..:$DATA`). `:` is meaningless on Unix and dangerous on Windows, so fail closed. (Reserved
+   device names CON/NUL/… left as lower-priority — the verbatim-`\\?\` canonicalize at the sink already
+   contains them; noted here as a deliberate skip.)
+4. **No dedicated SFTP filter test (reviewer minor).** Added `list_filters_out_a_path_traversal_readdir_name`
+   (`#[cfg(unix)]`): seeds a backslash-bearing hostile filename on the server root and asserts `sftp::list`
+   drops it while the legit `readme.txt`/`sub` survive.
+
+New tests: `download_tree_does_not_create_a_child_through_a_preexisting_symlinked_dir` (defect 1) and
+`download_tree_does_not_follow_a_preexisting_symlinked_leaf_on_write` (defect 2), both `#[cfg(unix)]`
+(creating a symlink on Windows needs admin/dev-mode; the ordering fix itself is cross-platform — the
+Windows dev box can't run these, the 3-OS CI matrix's Linux/macOS legs do); `is_safe_name` bad-list
+extended with `x:y`/`..:stream`/`..::$DATA`/`..evil`/`C:` (defect 3); the sftp filter test (defect 4).
+
+Re-verified SYNCHRONOUSLY on Windows: `cargo build` + `cargo clippy --all-targets -D warnings` (cpe-server
+default AND `--features index`; webdav + sftp — neither has an `index` feature) all clean; `cargo test` —
+server transfer 10 pass (2 unix-only symlink tests compiled out here, run on CI), webdav 12, sftp 14. All
+prior tests (sentinel-never-escapes battery, legit-tree download, walk caps) still green. Primary fix
+(`guarded_join` / source `is_safe_name` / walk caps / `redirects(0)`) unchanged.

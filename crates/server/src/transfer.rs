@@ -49,6 +49,13 @@ pub fn is_safe_name(name: &str) -> bool {
     if name.contains('/') || name.contains('\\') || name.contains('\0') {
         return false;
     }
+    // Reject a Windows NTFS alternate-data-stream / drive selector anywhere in the leaf (`x:y`,
+    // `..::$DATA`, `file:stream`) — a `:` in a name is meaningless on Unix and dangerous on Windows,
+    // so fail closed. Also reject a leaf that *begins* with `..` (`..stream`, `..:$DATA`), which the
+    // single-component check below would otherwise accept as `Normal` (CPE-1461 hardening).
+    if name.contains(':') || name.starts_with("..") {
+        return false;
+    }
     // Exactly one normal component: rejects a bare drive (`C:`), a root, or any prefix, which
     // `Path::components` classifies as non-`Normal`.
     let mut comps = Path::new(name).components();
@@ -89,6 +96,22 @@ pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+/// The longest ancestor of `path` (inclusive) that currently exists on disk as *some* node — file,
+/// directory, or symlink — using `symlink_metadata` so a symlink is detected without being followed.
+/// Returns `None` only if nothing up the chain (not even a root) resolves. Used to canonicalize-and-verify
+/// the real, already-existing portion of a to-be-created path BEFORE creating anything, so a pre-existing
+/// symlink pointing outside the download root is caught before any `mkdir` follows it (CPE-1461).
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.symlink_metadata().is_ok() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 /// Join a directory + child name. An empty `dir` (the provider root) yields the bare name — so a
@@ -161,8 +184,12 @@ pub fn walk(
 ///   UNC path, a `\`-separated segment) can never write outside `local_dir`. An entry that would escape is
 ///   **skipped with a surfaced notice** (skip-on-error — one hostile entry does not fail the whole
 ///   transfer), and its parent directories are NOT created.
-/// - The download root is canonicalized once up front, and each write's on-disk parent is verified to
-///   canonicalize back under it (a defense against a pre-existing symlink inside `local_dir`).
+/// - The download root is canonicalized once up front. **Before** creating any directory, the longest
+///   already-existing ancestor of the target is canonicalized and verified to still live under the root,
+///   so a pre-existing symlink inside `local_dir` pointing outward is caught *before* any `mkdir` can
+///   follow it. A file whose leaf path is itself a pre-existing symlink is skipped (never followed on
+///   write). Both are defenses against a symlink planted by some other channel — the remote can't create
+///   one, but defense-in-depth is the point.
 pub fn download_tree(
     provider: &dyn FileSystemProvider,
     remote_root: &str,
@@ -189,26 +216,38 @@ pub fn download_tree(
             eprintln!("transfer: skipped unsafe entry name from remote (path traversal): {}", entry.path);
             return;
         };
-        // The directory to materialize + verify: the entry itself if a dir, else the file's parent.
+        // The directory to materialize: the entry itself if a dir, else the file's parent.
         let dir_to_make: &Path = if entry.is_dir { local.as_path() } else { local.parent().unwrap_or(&canonical_root) };
+
+        // VALIDATE BEFORE MUTATING (CPE-1461 defect fix): canonicalize the longest *already-existing*
+        // ancestor of the target and confirm it is still under the root, so `create_dir_all` can never
+        // follow a pre-existing symlink out of the root before the check runs. The portion we then create
+        // is brand-new (no symlinks), rooted at a verified-contained real directory. Fail closed on a
+        // dangling/unresolvable ancestor (skip the entry with a surfaced notice).
+        match existing_ancestor(dir_to_make).as_deref().map(std::fs::canonicalize) {
+            Some(Ok(c)) if c.starts_with(&canonical_root) => {}
+            Some(Ok(_)) => {
+                eprintln!("transfer: skipped entry escaping the download root (symlinked dir?): {}", entry.path);
+                return;
+            }
+            _ => {
+                eprintln!("transfer: skipped entry with an unresolvable parent under the root: {}", entry.path);
+                return;
+            }
+        }
         if let Err(e) = std::fs::create_dir_all(dir_to_make) {
             hard_err = Some(format!("{}: {e}", dir_to_make.display()));
             return;
         }
-        // Belt-and-suspenders: the materialized directory must canonicalize back under the root (guards
-        // against a symlink that was already present inside `local_dir`).
-        match std::fs::canonicalize(dir_to_make) {
-            Ok(c) if c.starts_with(&canonical_root) => {}
-            Ok(_) => {
-                eprintln!("transfer: skipped entry escaping the download root (symlink?): {}", entry.path);
-                return;
-            }
-            Err(e) => {
-                hard_err = Some(format!("{}: {e}", dir_to_make.display()));
-                return;
-            }
-        }
         if !entry.is_dir {
+            // A pre-existing leaf that is itself a symlink must NOT be followed on write (it could point
+            // outside the root). Skip it — fail closed (CPE-1461 leaf-symlink defect fix).
+            if let Ok(md) = std::fs::symlink_metadata(&local) {
+                if md.file_type().is_symlink() {
+                    eprintln!("transfer: skipped entry whose local path is a pre-existing symlink: {}", entry.path);
+                    return;
+                }
+            }
             match provider.read(&entry.path) {
                 Ok(data) => match std::fs::write(&local, data) {
                     Ok(()) => files += 1,
@@ -374,7 +413,11 @@ mod tests {
         for good in ["readme.txt", "my file (1).txt", "résumé.pdf", ".hidden"] {
             assert!(is_safe_name(good), "{good:?} should be safe");
         }
-        for bad in ["", ".", "..", "a/b", r"a\b", "/etc", r"\x", "a\0b", r"C:\x", "sub/"] {
+        for bad in [
+            "", ".", "..", "a/b", r"a\b", "/etc", r"\x", "a\0b", r"C:\x", "sub/",
+            // Windows ADS / drive-selector + `..`-prefixed leaves (CPE-1461 hardening):
+            "x:y", "..:stream", "..::$DATA", "file:$DATA", "..evil", "C:",
+        ] {
             assert!(!is_safe_name(bad), "{bad:?} should be unsafe");
         }
     }
@@ -468,6 +511,124 @@ mod tests {
         assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
         assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    // Symlink-escape defenses (CPE-1461 review follow-up). Gated to Unix: creating a symlink on Windows
+    // needs admin/developer-mode, and the fix (validate-before-mutate + no-follow leaf) is cross-platform
+    // — these tests just need a real symlink to exercise it.
+
+    /// A provider that reports one directory `d` (holding a file `d/inner.txt`), so `download_tree` will
+    /// want to `mkdir local_dir/d` and then write into it.
+    struct DirThenFile;
+    impl FileSystemProvider for DirThenFile {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok(vec![ProviderEntry { name: "d".into(), is_dir: true, size: 0 }])
+            } else if path == "d" {
+                Ok(vec![ProviderEntry { name: "inner.txt".into(), is_dir: false, size: 3 }])
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"pwn".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_tree_does_not_create_a_child_through_a_preexisting_symlinked_dir() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("cpe-symdir-root-{pid}"));
+        let evil = std::env::temp_dir().join(format!("cpe-symdir-evil-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&evil);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        // Plant `root/d` as a symlink to the outside `evil` directory (as some other channel might).
+        symlink(&evil, root.join("d")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        // Must NOT error the whole transfer, and must NOT create anything inside `evil`.
+        let _ = download_tree(&DirThenFile, "", &root, &cancel).expect("must skip, not fail");
+        assert!(
+            std::fs::read_dir(&evil).unwrap().next().is_none(),
+            "a child was created outside the root by following a symlinked directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&evil);
+    }
+
+    /// A provider that reports a single top-level file `target.txt`.
+    struct OneFile;
+    impl FileSystemProvider for OneFile {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok(vec![ProviderEntry { name: "target.txt".into(), is_dir: false, size: 3 }])
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"pwn".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_tree_does_not_follow_a_preexisting_symlinked_leaf_on_write() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("cpe-symleaf-root-{pid}"));
+        let outside = std::env::temp_dir().join(format!("cpe-symleaf-outside-{pid}.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"original").unwrap();
+        // Plant `root/target.txt` as a symlink to the outside file.
+        symlink(&outside, root.join("target.txt")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
+        assert_eq!(n, 0, "the symlinked leaf must be skipped, not written");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"original",
+            "the write followed a symlink and clobbered a file outside the root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
     }
 
     /// A provider that advertises an infinitely deep tree: every `list` returns one fresh child directory.
