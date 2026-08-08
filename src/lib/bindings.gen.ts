@@ -354,6 +354,36 @@ async emailPreview(path: string) : Promise<Result<EmailPreview, string>> {
 }
 },
 /**
+ * `.ics` iCalendar preview (CPE-1435, epic CPE-1433): read-only RFC 5545 viewer — VEVENT/VTODO/VJOURNAL
+ * components decoded into summary/when/where/who + a readable recurrence summary. Thin async dispatcher
+ * into `cpe_server::ical_preview`; reads the file's raw bytes (capped by the same preview size guard the
+ * other whole-file info readers use) and hands them to the pure decoder, which never panics on malformed
+ * input.
+ */
+async icalPreview(path: string) : Promise<Result<IcalPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ical_preview", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * `.vcf` vCard preview (CPE-1436, epic CPE-1433): read-only contact-card viewer — FN/N/ORG/TITLE/TEL/
+ * EMAIL/ADR/URL/BDAY decoded, with PHOTO reported presence-only (its bytes are never returned over IPC).
+ * Thin async dispatcher into `cpe_server::vcard_preview`; reads the file's raw bytes (capped by the same
+ * preview size guard the other whole-file info readers use) and hands them to the pure decoder, which
+ * never panics on malformed input.
+ */
+async vcardPreview(path: string) : Promise<Result<VcardPreview, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("vcard_preview", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * JWT preview decoder (CPE-1418, epic CPE-1417): read-only header/payload/claims viewer, never a
  * signature verifier. Thin async dispatcher into `cpe_server::jwt_preview`; reads the file as text
  * (capped by the same preview size guard the other whole-file info readers use) and hands it straight to
@@ -3955,6 +3985,91 @@ scheme: string;
  */
 url: string; admitted: boolean }
 /**
+ * One decoded calendar component (`VEVENT` / `VTODO` / `VJOURNAL`), summarised for display. Every field
+ * is best-effort — a component missing a property simply leaves it `None`/empty.
+ */
+export type IcalEvent = { 
+/**
+ * The component kind: `"VEVENT"`, `"VTODO"`, or `"VJOURNAL"`.
+ */
+component: string; 
+/**
+ * `SUMMARY` — the event title, text-unescaped.
+ */
+summary: string | null; 
+/**
+ * `DTSTART`, humanised to `YYYY-MM-DD` (all-day) or `YYYY-MM-DDTHH:MM:SS[Z]` (date-time), with the
+ * originating `TZID` appended when the value is a floating local time carrying one.
+ */
+dtstart: string | null; 
+/**
+ * The raw `DTSTART` value exactly as it appeared (e.g. `20260807T093000Z`), for reference.
+ */
+dtstart_raw: string | null; 
+/**
+ * `DTEND` (for `VEVENT`) or `DUE` (for `VTODO`), humanised like [`IcalEvent::dtstart`].
+ */
+dtend: string | null; 
+/**
+ * `true` when the start was an all-day `DATE` value (`VALUE=DATE` or an 8-digit date with no time).
+ */
+all_day: boolean; 
+/**
+ * `LOCATION`, text-unescaped.
+ */
+location: string | null; 
+/**
+ * `DESCRIPTION`, text-unescaped.
+ */
+description: string | null; 
+/**
+ * `ORGANIZER`, resolved to its `CN` display name if present, else the bare address (`mailto:` stripped).
+ */
+organizer: string | null; 
+/**
+ * `ATTENDEE` list, each resolved to its `CN` display name if present, else the bare address.
+ */
+attendees: string[]; 
+/**
+ * `STATUS` (e.g. `CONFIRMED` / `TENTATIVE` / `CANCELLED`), verbatim.
+ */
+status: string | null; 
+/**
+ * A readable one-line summary of `RRULE` (e.g. "Weekly on Mon, Wed, 10 times"), or the raw rule text
+ * when it couldn't be summarised.
+ */
+recurrence: string | null; 
+/**
+ * The raw `RRULE` value exactly as it appeared, for reference.
+ */
+rrule_raw: string | null; 
+/**
+ * `UID`, verbatim — a stable identifier some clients show.
+ */
+uid: string | null }
+/**
+ * A structured `.ics` preview: the calendar-level metadata plus the decoded components. A malformed
+ * calendar still returns whatever could be parsed, with `error` describing what wasn't.
+ */
+export type IcalPreview = { 
+/**
+ * A human-readable calendar name — `X-WR-CALNAME` if present, else the `PRODID` that wrote the file.
+ */
+calendar_name: string | null; 
+/**
+ * `METHOD` (e.g. `REQUEST` / `PUBLISH` / `CANCEL`) — set on scheduling messages (invitations).
+ */
+method: string | null; 
+/**
+ * The decoded components, in file order.
+ */
+events: IcalEvent[]; 
+/**
+ * Set when the input didn't look like an iCalendar file, or carried no `VEVENT`/`VTODO`/`VJOURNAL`
+ * component — the (possibly empty) calendar card still renders whatever was found.
+ */
+error: string | null }
+/**
  * Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
  * non-image / EXIF-less file yields an all-`None` struct rather than an error.
  */
@@ -4921,6 +5036,105 @@ unlocked: boolean;
  * A passphrase for this vault is saved in the OS keychain.
  */
 has_stored_passphrase: boolean }
+/**
+ * One postal address, flattened to a single readable line plus its (lower-cased) `TYPE` labels.
+ */
+export type VcardAddress = { 
+/**
+ * The address components (street, locality, region, postal code, country) joined with `, `.
+ */
+label: string; 
+/**
+ * Lower-cased `TYPE` labels, in declaration order.
+ */
+types: string[] }
+/**
+ * One email address with its (lower-cased) `TYPE` labels.
+ */
+export type VcardEmail = { 
+/**
+ * The email address, verbatim.
+ */
+address: string; 
+/**
+ * Lower-cased `TYPE` labels, in declaration order.
+ */
+types: string[] }
+/**
+ * One decoded contact (`VCARD` block). Every field is best-effort — a card missing a property leaves it
+ * `None`/empty.
+ */
+export type VcardEntry = { 
+/**
+ * `FN` — the formatted display name.
+ */
+formatted_name: string | null; 
+/**
+ * `N` — the structured name assembled into a readable order (prefix given additional family suffix).
+ */
+name: string | null; 
+/**
+ * `ORG` — organisation (the `;`-separated units joined with `, `).
+ */
+org: string | null; 
+/**
+ * `TITLE` — job title.
+ */
+title: string | null; 
+/**
+ * `TEL` list.
+ */
+phones: VcardPhone[]; 
+/**
+ * `EMAIL` list.
+ */
+emails: VcardEmail[]; 
+/**
+ * `ADR` list.
+ */
+addresses: VcardAddress[]; 
+/**
+ * `URL` list.
+ */
+urls: string[]; 
+/**
+ * `BDAY` — birthday, verbatim (dates come in several vCard forms; shown as-is).
+ */
+birthday: string | null; 
+/**
+ * `true` when the card carried a `PHOTO` property (whose bytes are deliberately never returned).
+ */
+has_photo: boolean; 
+/**
+ * The `PHOTO` value's encoded byte length (base64 text or a URI), for a "photo present (~N)" note.
+ * `0` when there is no photo.
+ */
+photo_size: number }
+/**
+ * One telephone number with its (lower-cased) `TYPE` labels (e.g. `["work", "cell"]`).
+ */
+export type VcardPhone = { 
+/**
+ * The dialling number, verbatim.
+ */
+number: string; 
+/**
+ * Lower-cased `TYPE` labels, in declaration order.
+ */
+types: string[] }
+/**
+ * A structured `.vcf` preview: the decoded contacts. A malformed file still returns whatever could be
+ * parsed, with `error` describing what wasn't.
+ */
+export type VcardPreview = { 
+/**
+ * The decoded contacts, in file order.
+ */
+cards: VcardEntry[]; 
+/**
+ * Set when the input carried no `VCARD` block — the (empty) list still renders with this note.
+ */
+error: string | null }
 /**
  * The video-tag columns a user can add to the details view — each maps to a friendly key
  * [`crate::video_meta_read::read_mp4`] emits.

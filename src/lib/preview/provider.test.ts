@@ -148,6 +148,26 @@ describe("pickProvider", () => {
     expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).kind).toBe("text");
   });
 
+  it("routes .ics to the calendar provider, before the generic text provider (CPE-1435)", () => {
+    for (const ext of ["ics", "ical"]) {
+      const p = pickProvider(entry({ name: `invite.${ext}`, extension: ext }));
+      expect(p.kind).toBe("calendar");
+      expect(p.editable).toBe(false);
+    }
+    // sanity: an ordinary text file still uses the text provider, not calendar.
+    expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).kind).toBe("text");
+  });
+
+  it("routes .vcf to the vcard provider, before the generic text provider (CPE-1436)", () => {
+    for (const ext of ["vcf", "vcard"]) {
+      const p = pickProvider(entry({ name: `contact.${ext}`, extension: ext }));
+      expect(p.kind).toBe("vcard");
+      expect(p.editable).toBe(false);
+    }
+    // sanity: an ordinary text file still uses the text provider, not vcard.
+    expect(pickProvider(entry({ name: "a.txt", extension: "txt" })).kind).toBe("text");
+  });
+
   it("previews fonts via the font provider (CPE-117)", () => {
     for (const ext of ["ttf", "otf", "woff", "woff2"]) {
       expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("font");

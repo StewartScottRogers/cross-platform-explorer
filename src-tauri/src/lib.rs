@@ -960,6 +960,40 @@ async fn email_preview(path: String) -> Result<cpe_server::email_preview::EmailP
     .map_err(|e| e.to_string())?
 }
 
+/// `.ics` iCalendar preview (CPE-1435, epic CPE-1433): read-only RFC 5545 viewer — VEVENT/VTODO/VJOURNAL
+/// components decoded into summary/when/where/who + a readable recurrence summary. Thin async dispatcher
+/// into `cpe_server::ical_preview`; reads the file's raw bytes (capped by the same preview size guard the
+/// other whole-file info readers use) and hands them to the pure decoder, which never panics on malformed
+/// input.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn ical_preview(path: String) -> Result<cpe_server::ical_preview::IcalPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(cpe_server::ical_preview::ical_preview(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// `.vcf` vCard preview (CPE-1436, epic CPE-1433): read-only contact-card viewer — FN/N/ORG/TITLE/TEL/
+/// EMAIL/ADR/URL/BDAY decoded, with PHOTO reported presence-only (its bytes are never returned over IPC).
+/// Thin async dispatcher into `cpe_server::vcard_preview`; reads the file's raw bytes (capped by the same
+/// preview size guard the other whole-file info readers use) and hands them to the pure decoder, which
+/// never panics on malformed input.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn vcard_preview(path: String) -> Result<cpe_server::vcard_preview::VcardPreview, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        let bytes = fs::read(&path).map_err(|e| e.to_string())?;
+        Ok(cpe_server::vcard_preview::vcard_preview(&bytes))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Certificate/CSR/public-key decoder (CPE-1419, epic CPE-1417): read-only X.509 viewer, never a
 /// verifier. Thin async dispatcher into `cpe_server::cert_decode`; reads the file's raw bytes (capped by
 /// the same preview size guard the other whole-file info readers use) and hands them to the pure decoder,
@@ -10153,6 +10187,8 @@ pub fn run() {
             data_browser_page,
             data_browser_query,
             email_preview,
+            ical_preview,
+            vcard_preview,
             jwt_preview,
             cert_decode,
             cert_create,
@@ -10973,6 +11009,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         data_browser_page,
         data_browser_query,
         email_preview,
+        ical_preview,
+        vcard_preview,
         jwt_preview,
         cert_decode,
         cert_create,

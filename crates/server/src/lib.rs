@@ -397,6 +397,14 @@ pub mod data_browser;
 /// sanitized plain-text body (never raw HTML, never remote resources) (CPE-1434, epic CPE-1433).
 pub mod email_preview;
 
+/// `.ics` iCalendar preview — read-only RFC 5545 viewer: VEVENT/VTODO/VJOURNAL components decoded into
+/// summary/when/where/who + a readable recurrence summary (CPE-1435, epic CPE-1433).
+pub mod ical_preview;
+
+/// `.vcf` vCard preview — read-only contact-card viewer: FN/N/ORG/TITLE/TEL/EMAIL/ADR/URL/BDAY decoded,
+/// with PHOTO reported presence-only (never the bytes over IPC) (CPE-1436, epic CPE-1433).
+pub mod vcard_preview;
+
 /// JWT preview decoder — read-only header/payload/claims viewer, no signature verification
 /// (CPE-1418, epic CPE-1417).
 pub mod jwt_preview;

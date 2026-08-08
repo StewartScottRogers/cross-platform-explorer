@@ -294,6 +294,26 @@
   {:else if name === "paperclip"}
     <!-- Paperclip (CPE-1434): the attachment-pill glyph. -->
     <path d="M20 11.5l-8.5 8.5a4.5 4.5 0 0 1-6.4-6.4l8.5-8.5a3 3 0 0 1 4.3 4.3l-8.5 8.5a1.5 1.5 0 0 1-2.2-2.2l7.8-7.8" />
+  {:else if name === "calendar"}
+    <!-- Calendar (CPE-1435): the .ics event-preview banner + when glyph. -->
+    <rect x="3" y="4" width="18" height="17" rx="2" />
+    <path d="M3 9h18M8 2v4M16 2v4" />
+  {:else if name === "contact"}
+    <!-- Contact card (CPE-1436): the .vcf contact-preview banner glyph. -->
+    <rect x="3" y="5" width="18" height="14" rx="2" />
+    <circle cx="8.5" cy="11" r="2" />
+    <path d="M5.5 16a3 3 0 0 1 6 0M14 9.5h4M14 13h4" />
+  {:else if name === "phone"}
+    <!-- Phone (CPE-1436): the TEL row glyph. -->
+    <path d="M5 3h3l1.5 5-2 1.5a11 11 0 0 0 5 5l1.5-2 5 1.5v3a2 2 0 0 1-2.2 2A17 17 0 0 1 3 5.2 2 2 0 0 1 5 3z" />
+  {:else if name === "location"}
+    <!-- Location pin (CPE-1435/1436): the LOCATION / ADR row glyph. -->
+    <path d="M12 21s7-6.2 7-11a7 7 0 0 0-14 0c0 4.8 7 11 7 11z" />
+    <circle cx="12" cy="10" r="2.5" />
+  {:else if name === "globe"}
+    <!-- Globe (CPE-1436): the URL row glyph. -->
+    <circle cx="12" cy="12" r="9" />
+    <path d="M3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18" />
   {/if}
 </svg>
 

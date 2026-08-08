@@ -22,6 +22,8 @@
   import JwtPreview from "./JwtPreview.svelte";
   import CertPreview from "./CertPreview.svelte";
   import EmailPreview from "./EmailPreview.svelte";
+  import IcalPreview from "./IcalPreview.svelte";
+  import VcardPreview from "./VcardPreview.svelte";
   import MediaPlayer from "./MediaPlayer.svelte";
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
@@ -1003,6 +1005,10 @@
     <DataBrowser {entry} />
   {:else if provider.kind === "email" && entry}
     <EmailPreview path={entry.path} />
+  {:else if provider.kind === "calendar" && entry}
+    <IcalPreview path={entry.path} />
+  {:else if provider.kind === "vcard" && entry}
+    <VcardPreview path={entry.path} />
   {:else if provider.kind === "jwt" && entry}
     <JwtPreview path={entry.path} />
   {:else if provider.kind === "cert" && entry}

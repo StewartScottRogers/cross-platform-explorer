@@ -36,6 +36,8 @@ use common::{assert_no_panic, run_battery};
 use cpe_server::archive_format::{detect_format, ArchiveFormat};
 use cpe_server::cert_decode::cert_decode;
 use cpe_server::email_preview::email_preview;
+use cpe_server::ical_preview::ical_preview;
+use cpe_server::vcard_preview::vcard_preview;
 use cpe_server::column_extract::{extract_column, read_audio_tags, MetaColumn};
 use cpe_server::doc_column::doc_pages_cell;
 use cpe_server::jwt_preview::jwt_preview;
@@ -688,6 +690,38 @@ fn email_preview_never_panics() {
         let r = email_preview(b);
         if b.is_empty() {
             assert!(r.error.is_some(), "email_preview(empty) must report an error, not panic");
+        }
+    });
+}
+
+#[test]
+fn ical_preview_never_panics() {
+    // A real VCALENDAR with a folded line, a UTC DTSTART, a quoted CN attendee, an RRULE, and a nested
+    // VALARM as "magic" — walks the unfold + content-line split + date reformat + RRULE summary + nested-
+    // component skip paths under truncation/corruption, not just the no-BEGIN early-out. `ical_preview`
+    // takes `&[u8]` directly (it lossily decodes internally), so the battery's raw bytes go straight in.
+    let magic = b"BEGIN:VCALENDAR\r\nPRODID:-//CPE//EN\r\nBEGIN:VEVENT\r\nSUMMARY:Sync\r\nDTSTART;VALUE=DATE:20260807\r\nDTEND:20260807T100000Z\r\nATTENDEE;CN=\"Doe, John\":mailto:john@example.com\r\nRRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10\r\nBEGIN:VALARM\r\nTRIGGER:-PT15M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n".to_vec();
+    let header_len = magic.len();
+    run_battery("ical_preview::ical_preview", &magic, header_len, |b| {
+        let r = ical_preview(b);
+        if b.is_empty() {
+            assert!(r.error.is_some(), "ical_preview(empty) must report an error, not panic");
+        }
+    });
+}
+
+#[test]
+fn vcard_preview_never_panics() {
+    // A real vCard with a structured N/ADR, multiple TEL/EMAIL with TYPE params, a folded line, and a
+    // presence-only PHOTO as "magic" — walks the unfold + content-line split + structured-value split +
+    // TYPE collection paths under truncation/corruption, not just the no-BEGIN early-out. `vcard_preview`
+    // takes `&[u8]` directly (it lossily decodes internally), so the battery's raw bytes go straight in.
+    let magic = b"BEGIN:VCARD\r\nVERSION:3.0\r\nFN:Alice Example\r\nN:Example;Alice;;Dr.;PhD\r\nORG:Acme;Research\r\nTEL;TYPE=WORK,VOICE:+1-555-0100\r\nEMAIL;TYPE=HOME:alice@example.com\r\nADR;TYPE=WORK:;;123 Main St\\, Suite 4;Springfield;IL;62704;USA\r\nPHOTO;ENCODING=b:/9j/4AAQSkZJRg==\r\nEND:VCARD\r\n".to_vec();
+    let header_len = magic.len();
+    run_battery("vcard_preview::vcard_preview", &magic, header_len, |b| {
+        let r = vcard_preview(b);
+        if b.is_empty() {
+            assert!(r.error.is_some(), "vcard_preview(empty) must report an error, not panic");
         }
     });
 }
