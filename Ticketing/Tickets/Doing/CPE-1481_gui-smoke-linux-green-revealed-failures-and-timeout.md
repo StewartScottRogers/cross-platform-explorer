@@ -152,3 +152,71 @@ round to keep the change focused on the harness fix.
   but round 1 already added `scrollIntoView` to those specs; (b) `home-item-menu`/`drive-menu`/`macro-*`
   also need the row/tile to actually be seeded/painted, a separate axis the synthetic event can't fix if
   content is genuinely absent — round 1's polling fixes cover the render-race version of that.
+
+## Work Log — Round 3 (2026-08-08, QA-infra Worker)
+
+**Status: still in Doing (CI-only verification).** Round 2 landed the mouse fix: ubuntu leg went 15 → **34
+passing**, suite finished in 33m45s (no timeout). Exactly the 2 seeded-content specs round 2 pre-flagged
+(residual risk b) still fail (ubuntu job 93150012584). Root-caused both from the CI probe logs.
+
+### Failure 1 — `drive-menu.smoke.ts` (right-clicking a Home DRIVE TILE)
+Not "no tile" (round 1 fixed that) and not literally "self-close". The real failure:
+`AssertionError: [home-tile /] drive menu must not show the on-item quick-action row: expected true to
+equal false` — i.e. the menu that ended up open was the **item** menu (has `.quickrow`), not the drive
+menu. (The earlier "Open in Terminal"/"Copy as path" expects passed only because BOTH the item and drive
+variants share those labels — `$t('ctx.openInTerminal')`/`$t('ctx.copyAsPath')`; `hasQuickrow` is the true
+discriminator.) The probe showed churn: `present:false→true(641)→false(651)→true(718)`, ending on an item
+menu — while the SIDEBAR-row path of the *same* `assertDriveMenuStaysOpen` helper passed cleanly (drive
+menu, no quickrow).
+
+**Root cause = a native/synthetic DOUBLE-fire specific to the `<button>` drive tile.** WebKitWebDriver's
+Actions `button:2` press emits NO `contextmenu` on plain elements (round 2's finding — why the synthetic
+was needed) but DOES emit one on interactive `<button>`s like the Home drive tile. So round 2's "real press
++ supplemental synthetic" became two stimuli on the tile: native opens the drive menu (641), a follow-on
+closes it (651), our synthetic reopens it (718) racing the re-render and landing on the wrong menu. The
+sidebar drive row is a `<div>` (no native `contextmenu`), so there it was synthetic-only → clean → passed.
+This is diagnosis (i) from the Foreman's note (synthetic double-firing with a native one), not (ii)/(iii)
+— the tile handler DOES `stopPropagation` (HomeView.svelte:147) and `elementFromPoint` resolves the tile.
+
+**Fix (`gui-smoke/lib/mouse.ts`, Actions fallback of `rightClick` only): drop the real `button:2` press.**
+Now the fallback does a pointer move (for `:hover`) then dispatches exactly ONE hit-tested synthetic
+`contextmenu` — a single deterministic event for buttons and non-buttons alike, no double-fire. Safe
+because the app derives selection from the `contextmenu` event's index/target and position from its
+`clientX/clientY` (`App.svelte onRowContext`/`onDriveContext`), never from a preceding mousedown — verified
+by reading those handlers. The 4 right-click specs that passed in round 2 (context-menu / archive-password /
+macro-in-menu / macro-param-prompt) were all plain-element/blank-pane targets where the real press already
+emitted no native `contextmenu`, so synthetic-only is behaviourally identical for them → no regression. CDP
+fast-path (Windows) untouched.
+
+### Failure 2 — `home-item-menu.smoke.ts` (Home Folders tab empty)
+`Error: Home Folders tab should list the folder opened via --open=<tmpDir>`. Confirmed a **startup timing
+race, not a platform gap**: the file's SECOND test does the same `clickPill(/Folders/)` + `pointOfFirstRow`
+and reliably finds a row (it reached the menu probe) — so `recentFolders` DOES populate, just late. Traced
+the app path: `--open` → `navigate` → `loadPath` → `explorerPane.loadListing` (streams the ~27-entry
+tmpDir) → only after it settles does `recordRecentFolder` write the MRU (App.svelte:1983, gated on
+`applied` + `!error`; `loadListing` returns false only when superseded, which can't happen for the single
+startup navigation). Under Xvfb CI that streaming settle + MRU write lands after the first test's poll
+window; the later test sees it because it runs seconds afterward.
+
+**Fix (`gui-smoke/specs/home-item-menu.smoke.ts`): deterministic seed.** Added `seedFoldersMru()` — before
+the first assertion, navigate INTO the seeded `CPE-1154-empty-folder` subfolder via the UI (row-scan +
+`doubleClick`, the primitive context-menu.smoke.ts proves reliable) and await its `.empty-state` render.
+That is a real, awaited navigation whose `recordRecentFolder` completes with the listing, guaranteeing the
+Folders MRU is non-empty when read — no dependence on the slow `--open` background timing. Prefer this real
+fix over gating (no Linux skip needed). No app `src/` change; the app behaviour is correct, only the
+harness raced it.
+
+### Timeout
+No change this round — 45 min already carried a full 34-pass run in 33m45s.
+
+### Verification
+- `cd gui-smoke && npm run typecheck` — clean.
+- `cd gui-smoke && npm run test:unit` — 21/21 pass.
+- gui-smoke needs tauri-driver + WebKitWebDriver + xvfb → CI (ubuntu) verifies; Foreman runs it.
+- Confidence: **drive-menu high** — removing the real press eliminates the only source of a second stimulus
+  on the tile, making it deterministic (and the 4 round-2 passers are unaffected since they never got a
+  native `contextmenu`). **home-item-menu high** — the seed no longer races the startup MRU write; it drives
+  the real navigation→MRU→Folders-tab path deterministically. Residual risk: if WebKit ALSO fails to emit a
+  usable event for the awaited `doubleClick` navigation in `seedFoldersMru`, the seed's `.empty-state` wait
+  would time out — but `doubleClick` there is WebdriverIO's element command (not our Actions mouse) and
+  context-menu.smoke.ts uses the identical call and passes.
