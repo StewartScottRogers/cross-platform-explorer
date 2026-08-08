@@ -459,6 +459,21 @@ pub mod thumb_pdf;
 #[cfg(feature = "video-thumb")]
 pub mod thumb_video;
 
+/// Shared bundled-`ffmpeg`-subprocess plumbing — resolve the binary, create an exclusive scratch dir,
+/// and (test-only) probe availability — factored out of `thumb_video` (CPE-1478) so a second
+/// ffmpeg-shelling module doesn't copy-paste it. Gated behind EITHER caller's feature so the plain
+/// build still compiles zero ffmpeg-adjacent code when neither is on.
+#[cfg(any(feature = "video-thumb", feature = "waveform"))]
+pub mod ffmpeg_util;
+
+/// Audio-waveform peak extraction by shelling out to the same bundled `ffmpeg` executable `thumb_video`
+/// uses (CPE-1478, epic CPE-720): decode mono PCM and downsample it into a fixed bucket count of
+/// (min, max) pairs for a future scrub-bar waveform. Feature-gated OFF by default (`waveform`) so the
+/// plain build compiles zero waveform code; adds no Cargo dependency even when on (subprocess, never
+/// linked, mirrors `video-thumb`).
+#[cfg(feature = "waveform")]
+pub mod media_waveform;
+
 /// Image preview — TIFF/PSD → PNG data-URL transcode + dimensions/EXIF metadata (CPE-099/101/659).
 pub mod image_preview;
 

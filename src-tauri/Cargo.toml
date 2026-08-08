@@ -55,7 +55,10 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], 
 # for the shipped build — it stays OFF in `cpe-server`'s own default build; enabling it here is what
 # actually ships the code (pulls in the pure-Rust `dicom-object`/`dicom-pixeldata` crates, no native
 # codec toolchain required — see `crates/server/Cargo.toml`).
-cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "http-embedder", "copilot", "dicom-thumb"] }
+# `waveform` (CPE-1478, epic CPE-720) turns on audio-waveform peak extraction for the shipped build —
+# shells out to the SAME bundled ffmpeg `video-thumb` already provisions (CPE-1258), so it adds no new
+# native dependency to bundle/ship; enabling it here is what actually exposes the command.
+cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "waveform", "http-embedder", "copilot", "dicom-thumb"] }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);
