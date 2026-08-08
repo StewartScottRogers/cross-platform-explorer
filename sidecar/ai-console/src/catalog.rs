@@ -12,7 +12,7 @@
 //! sidecar-local. The trusted keys are supplied by the caller (never hardcoded here); how they are
 //! distributed is a part-2 decision.
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 
 /// Verify a detached ed25519 `signature_hex` over `bytes` against any of `trusted_keys` (hex).
 /// Returns false on any malformed input or if no trusted key matches — fail-closed, so an
@@ -26,7 +26,9 @@ pub fn verify_manifest(bytes: &[u8], signature_hex: &str, trusted_keys: &[String
         let Ok(pk_bytes) = hex::decode(pk.trim()) else { return false };
         let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else { return false };
         let Ok(key) = VerifyingKey::from_bytes(&pk_arr) else { return false };
-        key.verify(bytes, &sig).is_ok()
+        // `verify_strict` rejects non-canonical/malleable/small-order signatures — same
+        // hardening as the host's trust engine (CPE-1473).
+        key.verify_strict(bytes, &sig).is_ok()
     })
 }
 

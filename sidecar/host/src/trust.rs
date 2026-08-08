@@ -15,7 +15,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 /// The trust status of a manifest.
@@ -47,7 +47,9 @@ pub fn verify_signature(msg: &[u8], signature_hex: &str, pubkey_hex: &str) -> bo
     let Ok(sig_arr): Result<[u8; 64], _> = sig_bytes.try_into() else { return false };
     let sig = Signature::from_bytes(&sig_arr);
 
-    key.verify(msg, &sig).is_ok()
+    // `verify_strict` (not `verify`) rejects non-canonical/malleable and small-order
+    // signatures — defense-in-depth for the app's most important security surface (CPE-1473).
+    key.verify_strict(msg, &sig).is_ok()
 }
 
 /// Where a manifest came from, for display.

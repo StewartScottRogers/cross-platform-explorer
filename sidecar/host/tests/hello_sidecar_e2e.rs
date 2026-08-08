@@ -193,7 +193,7 @@ fn hello_exercises_all_four_capabilities_over_a_real_process() {
     let mut conn = spawn_process(&hello_bin(), &[]).expect("spawn hello_sidecar");
 
     // Handshake, consenting to (and thus granting) all four capabilities.
-    let outcome = { let _tok = conn.launch_token().to_string(); handshake(&mut conn, CONTRACT_VERSION, &all_caps(), Some(&_tok)) }.expect("handshake");
+    let outcome = { let _tok = conn.launch_token().to_string(); handshake(&mut conn, CONTRACT_VERSION, &all_caps(), "hello", Some(&_tok)) }.expect("handshake");
     assert_eq!(outcome.sidecar_id, "hello");
     assert_eq!(outcome.granted, all_caps(), "all four capabilities granted");
 
@@ -339,7 +339,7 @@ fn hello_exits_zero_on_clean_shutdown() {
 
     let mut conn = RawChild::spawn(&hello_bin());
     // RawChild spawns without issuing a token, so the sidecar echoes none → pass None.
-    let outcome = handshake(&mut conn, CONTRACT_VERSION, &all_caps(), None).expect("handshake");
+    let outcome = handshake(&mut conn, CONTRACT_VERSION, &all_caps(), "hello", None).expect("handshake");
     assert_eq!(outcome.granted, all_caps());
 
     let deadline = Instant::now() + Duration::from_secs(20);
