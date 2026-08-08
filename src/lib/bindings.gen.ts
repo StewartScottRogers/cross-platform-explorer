@@ -3922,7 +3922,13 @@ file_type: string | null;
  * A human warning when the content doesn't match the extension (a disguised file); `None` when it
  * matches, the type is unknown, or there is no extension.
  */
-type_mismatch: string | null }
+type_mismatch: string | null; 
+/**
+ * Detected CPU architecture for an ELF/PE/Mach-O binary (CPE-1485), e.g. `"x86-64 (64-bit,
+ * little-endian)"` or, for a Mach-O universal binary, `"Universal: x86-64 + ARM64"`; `None` when
+ * `file_type` isn't a recognised binary format, or its header doesn't parse.
+ */
+architecture: string | null }
 /**
  * One concrete file operation. A **closed, whitelisted** set — the only vocabulary a plan (and therefore
  * the NL translator that emits one) may use, so there is no free-form/shell escape hatch by construction.
