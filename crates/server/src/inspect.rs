@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use crate::bin_arch::{self, ArchInfo, Bitness, Endian};
 use crate::file_type::{detect_type, mismatch};
 use crate::text_encoding::{detect_encoding, detect_line_endings, EncodingGuess, LineEnding};
 
@@ -25,6 +26,10 @@ pub struct FileInspection {
     /// A human warning when the content doesn't match the extension (a disguised file); `None` when it
     /// matches, the type is unknown, or there is no extension.
     pub type_mismatch: Option<String>,
+    /// Detected CPU architecture for an ELF/PE/Mach-O binary (CPE-1485), e.g. `"x86-64 (64-bit,
+    /// little-endian)"` or, for a Mach-O universal binary, `"Universal: x86-64 + ARM64"`; `None` when
+    /// `file_type` isn't a recognised binary format, or its header doesn't parse.
+    pub architecture: Option<String>,
 }
 
 /// Inspect a file from its `name` (for the extension) + its leading `bytes`.
@@ -38,8 +43,47 @@ pub fn inspect_bytes(name: &str, bytes: &[u8]) -> FileInspection {
     let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
     let type_mismatch = mismatch(bytes, ext)
         .map(|m| format!("Looks like {} but the extension is .{}", m.detected.label(), m.actual_ext));
+    let architecture = bin_arch::detect_arch(bytes).map(|a| architecture_label(&a));
 
-    FileInspection { encoding: enc.label().to_string(), line_endings, file_type, type_mismatch }
+    FileInspection { encoding: enc.label().to_string(), line_endings, file_type, type_mismatch, architecture }
+}
+
+/// Render a detected [`bin_arch::BinaryArch`] as a single display-ready label.
+fn architecture_label(arch: &bin_arch::BinaryArch) -> String {
+    match arch {
+        bin_arch::BinaryArch::Single(info) => arch_info_label(info),
+        bin_arch::BinaryArch::Fat(slices) => {
+            if slices.is_empty() {
+                "Universal binary (no architecture slices)".to_string()
+            } else {
+                let list: Vec<&str> = slices.iter().map(|s| s.arch.label()).collect();
+                format!("Universal: {}", list.join(" + "))
+            }
+        }
+    }
+}
+
+/// Render one [`ArchInfo`] as `"<arch>"` or, when bitness/endianness are known, `"<arch> (64-bit,
+/// little-endian)"`.
+fn arch_info_label(info: &ArchInfo) -> String {
+    let mut extras = Vec::new();
+    if let Some(b) = info.bitness {
+        extras.push(match b {
+            Bitness::Bit32 => "32-bit",
+            Bitness::Bit64 => "64-bit",
+        });
+    }
+    if let Some(e) = info.endian {
+        extras.push(match e {
+            Endian::Little => "little-endian",
+            Endian::Big => "big-endian",
+        });
+    }
+    if extras.is_empty() {
+        info.arch.label().to_string()
+    } else {
+        format!("{} ({})", info.arch.label(), extras.join(", "))
+    }
 }
 
 /// A human line-ending label from a decoded string, or `None` when the text has no line breaks.
@@ -108,5 +152,50 @@ mod tests {
         assert_eq!(i.encoding, EncodingGuess::Empty.label());
         assert!(i.line_endings.is_none());
         assert!(i.file_type.is_none());
+        assert!(i.architecture.is_none());
+    }
+
+    // ---- architecture (CPE-1485) ----
+
+    #[test]
+    fn reports_architecture_for_an_x86_64_elf_binary() {
+        let mut bytes = vec![0x7F, 0x45, 0x4C, 0x46, 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        bytes.extend_from_slice(&[0, 0]); // e_type, irrelevant
+        bytes.extend_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: EM_X86_64
+        let i = inspect_bytes("myapp", &bytes);
+        assert_eq!(i.file_type.as_deref(), Some("ELF executable"));
+        assert_eq!(i.architecture.as_deref(), Some("x86-64 (64-bit, little-endian)"));
+    }
+
+    #[test]
+    fn reports_architecture_for_a_pe_binary_with_no_bitness_or_endian_suffix() {
+        let pe_offset: u32 = 0x40;
+        let mut bytes = vec![0u8; pe_offset as usize + 6];
+        bytes[0] = 0x4D;
+        bytes[1] = 0x5A;
+        bytes[0x3C..0x40].copy_from_slice(&pe_offset.to_le_bytes());
+        bytes[pe_offset as usize..pe_offset as usize + 4].copy_from_slice(b"PE\0\0");
+        bytes[pe_offset as usize + 4..pe_offset as usize + 6].copy_from_slice(&0x8664u16.to_le_bytes());
+        let i = inspect_bytes("app.exe", &bytes);
+        assert_eq!(i.file_type.as_deref(), Some("Windows executable/library"));
+        assert_eq!(i.architecture.as_deref(), Some("x86-64"));
+    }
+
+    #[test]
+    fn reports_architecture_slices_for_a_fat_macho_binary() {
+        let mut bytes = vec![0xCA, 0xFE, 0xBA, 0xBE];
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        for cputype in [7u32 | 0x0100_0000, 12u32 | 0x0100_0000] {
+            bytes.extend_from_slice(&cputype.to_be_bytes());
+            bytes.extend_from_slice(&[0u8; 16]); // cpusubtype, offset, size, align
+        }
+        let i = inspect_bytes("universal", &bytes);
+        assert_eq!(i.architecture.as_deref(), Some("Universal: x86-64 + ARM64"));
+    }
+
+    #[test]
+    fn architecture_is_none_for_non_binary_content() {
+        let i = inspect_bytes("notes.txt", b"line one\nline two\n");
+        assert!(i.architecture.is_none());
     }
 }

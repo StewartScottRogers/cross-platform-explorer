@@ -707,6 +707,13 @@ pub mod minimap;
 /// dependencies.
 pub mod file_type;
 
+/// Binary CPU-architecture detection (CPE-1485, epic CPE-1000): for a detected ELF, PE, or Mach-O
+/// header, parses the small fixed header fields that carry the target CPU architecture (plus
+/// bitness/endianness where the format encodes them) into a normalized [`bin_arch::Arch`] — and,
+/// for a Mach-O fat/universal binary, lists every contained architecture slice. Pure over a byte
+/// slice; no I/O, no new dependencies; mirrors [`file_type`]'s bounded-read, never-panics style.
+pub mod bin_arch;
+
 /// Disguised-file (extension-mismatch) **tree sweep** (CPE-1285, epic CPE-1000). Walks a real directory
 /// tree (skip-unreadable), reads a capped ~64-byte header per regular file, and calls
 /// [`file_type::mismatch`] to flag every file whose sniffed content disagrees with its claimed extension
