@@ -97,7 +97,6 @@ fn apply_proposals(dir: &str, proposals: &[MoveProposal]) -> Vec<OpResult> {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// A minimal in-memory `ServerCtx` for tests: everything lives under one scratch dir, no events.
     struct TestCtx {
@@ -119,12 +118,17 @@ mod tests {
         }
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-organize-apply-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    /// A fresh, uniquely-named per-test scratch dir (CPE-1450). Backed by [`tempfile::TempDir`] rather
+    /// than a hand-rolled `(pid, atomic counter)` name: that older scheme was unique only *within one
+    /// test-binary run* — under full-suite parallelism the process is short-lived and the crate never
+    /// deleted its scratch dirs, so a later `cargo test` invocation whose OS reused the same pid could
+    /// revisit a stale, non-empty leftover directory from an earlier run of the exact same test (e.g. a
+    /// `Documents/b.pdf` left behind from a prior pass would make this test's "the pdf move must
+    /// succeed" assertion fail against pre-existing state). `tempfile::TempDir` names each dir with a
+    /// random, collision-resistant suffix (no pid/counter dependence) and removes it on `Drop`, so
+    /// nothing is ever left behind to collide with a future run.
+    fn scratch(tag: &str) -> tempfile::TempDir {
+        tempfile::Builder::new().prefix(&format!("cpe-organize-apply-{tag}-")).tempdir().unwrap()
     }
 
     fn ctx_for(root: &std::path::Path) -> TestCtx {
@@ -134,43 +138,45 @@ mod tests {
     #[test]
     fn organize_plan_maps_a_listed_dir_for_each_rule() {
         let dir = scratch("plan");
-        fs::write(dir.join("photo.png"), b"x").unwrap();
-        fs::write(dir.join("report.pdf"), b"xx").unwrap();
-        fs::create_dir_all(dir.join("subdir")).unwrap(); // directories are never proposed
+        fs::write(dir.path().join("photo.png"), b"x").unwrap();
+        fs::write(dir.path().join("report.pdf"), b"xx").unwrap();
+        fs::create_dir_all(dir.path().join("subdir")).unwrap(); // directories are never proposed
 
-        let by_kind = organize_plan(&dir.to_string_lossy(), OrganizeRule::ByKind).unwrap();
+        let by_kind = organize_plan(&dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
         let mut names: Vec<&str> = by_kind.iter().map(|p| p.name.as_str()).collect();
         names.sort();
         assert_eq!(names, vec!["photo.png", "report.pdf"]);
         assert!(by_kind.iter().any(|p| p.name == "photo.png" && p.target_subdir == "Images"));
         assert!(by_kind.iter().any(|p| p.name == "report.pdf" && p.target_subdir == "Documents"));
 
-        let by_ext = organize_plan(&dir.to_string_lossy(), OrganizeRule::ByExtension).unwrap();
+        let by_ext = organize_plan(&dir.path().to_string_lossy(), OrganizeRule::ByExtension).unwrap();
         assert!(by_ext.iter().any(|p| p.name == "photo.png" && p.target_subdir == "PNG"));
 
-        let by_size = organize_plan(&dir.to_string_lossy(), OrganizeRule::BySizeBucket).unwrap();
+        let by_size = organize_plan(&dir.path().to_string_lossy(), OrganizeRule::BySizeBucket).unwrap();
         assert!(by_size.iter().all(|p| p.target_subdir == "Tiny"));
     }
 
     #[test]
     fn organize_plan_on_a_missing_dir_is_an_error() {
-        let dir = scratch("missing").join("does-not-exist");
-        assert!(organize_plan(&dir.to_string_lossy(), OrganizeRule::ByKind).is_err());
+        // The scratch dir itself is dropped (and removed) at the end of this statement, which is fine —
+        // `does-not-exist` was never created either way, so the path is missing regardless.
+        let missing = scratch("missing").path().join("does-not-exist");
+        assert!(organize_plan(&missing.to_string_lossy(), OrganizeRule::ByKind).is_err());
     }
 
     #[test]
     fn organize_plan_empty_dir_yields_no_proposals() {
         let dir = scratch("empty");
-        let plan = organize_plan(&dir.to_string_lossy(), OrganizeRule::ByKind).unwrap();
+        let plan = organize_plan(&dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
         assert!(plan.is_empty());
     }
 
     #[test]
     fn organize_clutter_flags_zero_byte_files() {
         let dir = scratch("clutter");
-        fs::write(dir.join("empty.log"), b"").unwrap();
-        fs::write(dir.join("keep.rs"), b"fn main() {}").unwrap();
-        let findings = organize_clutter(&dir.to_string_lossy()).unwrap();
+        fs::write(dir.path().join("empty.log"), b"").unwrap();
+        fs::write(dir.path().join("keep.rs"), b"fn main() {}").unwrap();
+        let findings = organize_clutter(&dir.path().to_string_lossy()).unwrap();
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].name, "empty.log");
     }
@@ -178,55 +184,56 @@ mod tests {
     #[test]
     fn organize_apply_checkpoints_first_then_moves_into_target_subdirs() {
         let dir = scratch("apply");
-        fs::write(dir.join("photo.png"), b"pixels").unwrap();
-        fs::write(dir.join("report.pdf"), b"paperwork").unwrap();
-        let ctx = ctx_for(&dir);
+        fs::write(dir.path().join("photo.png"), b"pixels").unwrap();
+        fs::write(dir.path().join("report.pdf"), b"paperwork").unwrap();
+        let ctx = ctx_for(dir.path());
 
-        let outcome = organize_apply(&ctx, &dir.to_string_lossy(), OrganizeRule::ByKind).unwrap();
+        let outcome = organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
 
         // A checkpoint was captured before anything moved.
         assert!(!outcome.checkpoint.checkpoint.manifest_id.is_empty());
-        let checkpoints = crate::checkpoint_store::checkpoint_list(&ctx, &dir.to_string_lossy()).unwrap();
+        let checkpoints =
+            crate::checkpoint_store::checkpoint_list(&ctx, &dir.path().to_string_lossy()).unwrap();
         assert_eq!(checkpoints.len(), 1);
         assert_eq!(checkpoints[0].manifest_id, outcome.checkpoint.checkpoint.manifest_id);
 
         // Both files actually moved into their target subfolders.
         assert_eq!(outcome.results.len(), 2);
         assert!(outcome.results.iter().all(|r| r.ok), "{:?}", outcome.results);
-        assert!(dir.join("Images/photo.png").exists());
-        assert!(dir.join("Documents/report.pdf").exists());
-        assert!(!dir.join("photo.png").exists());
-        assert!(!dir.join("report.pdf").exists());
+        assert!(dir.path().join("Images/photo.png").exists());
+        assert!(dir.path().join("Documents/report.pdf").exists());
+        assert!(!dir.path().join("photo.png").exists());
+        assert!(!dir.path().join("report.pdf").exists());
 
         // The checkpoint really can restore the pre-organize layout.
         let revert = crate::checkpoint_store::checkpoint_revert(
             &ctx,
-            &dir.to_string_lossy(),
+            &dir.path().to_string_lossy(),
             &outcome.checkpoint.checkpoint.manifest_id,
         )
         .unwrap();
         assert!(revert.applied > 0, "{:?}", revert);
-        assert!(dir.join("photo.png").exists());
-        assert!(dir.join("report.pdf").exists());
+        assert!(dir.path().join("photo.png").exists());
+        assert!(dir.path().join("report.pdf").exists());
     }
 
     #[test]
     fn organize_apply_skips_on_name_collision_without_failing_the_rest() {
         let dir = scratch("collision");
-        fs::write(dir.join("a.png"), b"1").unwrap();
-        fs::write(dir.join("b.pdf"), b"2").unwrap();
+        fs::write(dir.path().join("a.png"), b"1").unwrap();
+        fs::write(dir.path().join("b.pdf"), b"2").unwrap();
         // Pre-create a colliding target so the png move must fail while the pdf move still succeeds.
-        fs::create_dir_all(dir.join("Images")).unwrap();
-        fs::write(dir.join("Images/a.png"), b"already here").unwrap();
-        let ctx = ctx_for(&dir);
+        fs::create_dir_all(dir.path().join("Images")).unwrap();
+        fs::write(dir.path().join("Images/a.png"), b"already here").unwrap();
+        let ctx = ctx_for(dir.path());
 
-        let outcome = organize_apply(&ctx, &dir.to_string_lossy(), OrganizeRule::ByKind).unwrap();
+        let outcome = organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
 
         let png_result = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
         assert!(!png_result.ok);
         let pdf_result = outcome.results.iter().find(|r| r.path.ends_with("b.pdf")).unwrap();
         assert!(pdf_result.ok);
         // The un-moved file is still where it started.
-        assert!(dir.join("a.png").exists());
+        assert!(dir.path().join("a.png").exists());
     }
 }
