@@ -72,8 +72,32 @@ describe("CPE-1208 — headless GUI smoke: the link badge + broken-target state"
       { timeout: 15_000, timeoutMsg: `expected a row for "${LINK_GOOD_NAME}"` },
     );
 
+    // CPE-1481: LinkBadge.svelte lazily fetches `linkStatus` only once its badge nears the viewport
+    // (an IntersectionObserver with a 150px rootMargin — see that component's header comment). With
+    // ~27 fixtures at tmpDir root, this row can render below the fold on the harness's test window,
+    // so the observer never fires and the badge never even calls the backend. Scroll it into view
+    // first (same convention drive-menu.smoke.ts/home-item-menu.smoke.ts/vault.smoke.ts already use)
+    // so the fetch is actually kicked off before we assert on its resolved state.
+    await goodRow!.scrollIntoView({ block: "center" });
+    await browser.pause(150);
+
     const badge = await goodRow!.$('[data-testid="link-badge"]');
     await badge.waitForExist({ timeout: 5_000, timeoutMsg: "expected the intact symlink row to show a link badge" });
+    // CPE-1481: same belt-and-braces stimulus as the broken-link test below (see its comment for the
+    // full transfer-panel.smoke.ts-diagnosed rationale) — without it this assertion is checking the
+    // pre-fetch DEFAULT state (`broken` defaults to `false` before `status` resolves), which trivially
+    // passes whether or not the real `linkStatus` round trip ever ran. Forcing the fetch makes this a
+    // genuine check of the resolved, non-broken state.
+    await badge.execute((el) => {
+      el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, cancelable: false }));
+    });
+    await browser.waitUntil(
+      async () => {
+        // linkStatus for an intact target resolves fast; poll briefly rather than asserting instantly.
+        return (await badge.getAttribute("class")) !== null;
+      },
+      { timeout: 5_000, timeoutMsg: "expected the link badge's class to be readable after the forced fetch" },
+    );
     const cls = (await badge.getAttribute("class")) ?? "";
     expect(cls).to.not.include("broken");
   });
@@ -96,7 +120,24 @@ describe("CPE-1208 — headless GUI smoke: the link badge + broken-target state"
       { timeout: 15_000, timeoutMsg: `expected a row for "${LINK_BROKEN_NAME}"` },
     );
 
+    // CPE-1481: same lazy-fetch reasoning as the intact-symlink test above — scroll the row into
+    // view so the IntersectionObserver actually kicks off the `linkStatus` fetch this assertion polls
+    // for below.
+    await brokenRow!.scrollIntoView({ block: "center" });
+    await browser.pause(150);
+
     const badge = await brokenRow!.$('[data-testid="link-badge"]');
+    // CPE-1481: belt-and-braces beyond the scrollIntoView above — transfer-panel.smoke.ts already
+    // diagnosed this EXACT wait (its own copy of this same assertion, guarding the danger-badge panel)
+    // flaking because neither the IntersectionObserver NOR a synthesised hover reliably reaches
+    // LinkBadge.svelte's `on:mouseenter={load}` through this harness's CDP/Actions shim; what
+    // deterministically unblocks it there is a direct `dispatchEvent(new MouseEvent("mouseenter"))` on
+    // the badge (see transfer-panel.smoke.ts's `danger-badge` test for the full diagnosis). Firing the
+    // same stimulus here is a no-op if the observer already loaded it (LinkBadge.svelte's `load()` is
+    // idempotent via its own `started` guard) and a real fix if it didn't.
+    await badge.execute((el) => {
+      el.dispatchEvent(new MouseEvent("mouseenter", { bubbles: false, cancelable: false }));
+    });
     // The broken state only lands once the lazy `link_status` fetch resolves — poll the class rather
     // than asserting immediately after existence.
     await browser.waitUntil(

@@ -47,27 +47,42 @@ async function openViaPalette(query: string, labelSubstring: string): Promise<vo
   await row!.click();
 }
 
-/** Viewport-space centre of the first `.row` under `.rows` whose HTML includes `name`, or `null`. */
+/** Viewport-space centre of the first `.row` under `.rows` whose HTML includes `name`, or `null`.
+ *  CPE-1481: scrolls the match into view first, then reads its rect via `getBoundingClientRect()`
+ *  inside `browser.execute` — the same viewport-space primitive every other row/point lookup in this
+ *  suite uses (archive-browse.smoke.ts's `pointOfRow`, drive-menu.smoke.ts, home-item-menu.smoke.ts).
+ *  This helper previously used WebdriverIO's own `getLocation()`/`getSize()` (the WebDriver "get
+ *  element rect" command), which is a different code path than `getBoundingClientRect` and — unlike
+ *  every sibling helper — never scrolled an out-of-view row into the viewport first; either gap could
+ *  produce a point `rightClick`'s CDP/W3C-Actions viewport-space coordinates don't actually hit. */
 async function pointOfRowNamed(name: string): Promise<Point | null> {
   const rows = $$(".rows .row");
   for await (const row of rows) {
     if ((await row.getHTML({ includeSelectorTag: false })).includes(name)) {
-      const loc = await row.getLocation();
-      const size = await row.getSize();
-      return { x: Math.round(loc.x + Math.min(60, size.width / 2)), y: Math.round(loc.y + size.height / 2) };
+      await row.scrollIntoView({ block: "center" });
+      await browser.pause(150);
+      return row.execute((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return { x: Math.round(r.left + Math.min(60, r.width / 2)), y: Math.round(r.top + r.height / 2) };
+      }) as Promise<Point>;
     }
   }
   return null;
 }
 
-/** Viewport-space centre of the FIRST element matching `selector` whose HTML includes `text`. */
+/** Viewport-space centre of the FIRST element matching `selector` whose HTML includes `text`. Same
+ *  CPE-1481 rationale as {@link pointOfRowNamed} above: scroll-then-`getBoundingClientRect`, matching
+ *  the rest of the suite instead of `getLocation()`/`getSize()`. */
 async function pointByText(selector: string, text: string): Promise<Point | null> {
   const els = $$(selector);
   for await (const el of els) {
     if ((await el.getHTML({ includeSelectorTag: false })).includes(text)) {
-      const loc = await el.getLocation();
-      const size = await el.getSize();
-      return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+      await el.scrollIntoView({ block: "center" });
+      await browser.pause(150);
+      return el.execute((node) => {
+        const r = (node as HTMLElement).getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      }) as Promise<Point>;
     }
   }
   return null;

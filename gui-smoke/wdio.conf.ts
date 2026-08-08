@@ -1002,6 +1002,9 @@ export const config: WebdriverIO.Config = {
   reporters: ["spec"],
   mochaOpts: {
     ui: "bdd",
+    // CPE-1481: already generous (90s per `it`, well under the 35-min job cap raised by this same
+    // ticket) — one slow/hung test fails on its own instead of eating the whole job's budget.
+    // Checked, not duplicated: this was already the value here before CPE-1481, no change needed.
     timeout: 90_000,
   },
 

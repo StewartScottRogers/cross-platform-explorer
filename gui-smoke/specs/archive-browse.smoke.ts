@@ -30,8 +30,18 @@ const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 const ARCHIVE_TARGZ_NAME = "CPE-1181-archive.tar.gz";
 const ARCHIVE_TARGZ_INNER_NAME = "CPE-1181-note.txt";
 
-/** Viewport-space centre of the FIRST `.rows .row` whose text content includes `name` (or `null`). */
+/** Viewport-space centre of the FIRST `.rows .row` whose text content includes `name` (or `null`).
+ *  CPE-1481: scrolls the match into view first — with ~27 fixtures at tmpDir root a target row can
+ *  render below the fold of the harness's test window, and a `getBoundingClientRect()` point outside
+ *  `window.innerHeight` fails a real hit-test (CDP/W3C-Actions click lands on nothing), the same
+ *  root cause CPE-1253 diagnosed for home-item-menu.smoke.ts's row lookup. */
 async function pointOfRow(name: string): Promise<Point | null> {
+  await browser.execute((n) => {
+    const rows = Array.from(document.querySelectorAll(".rows .row"));
+    const row = rows.find((r) => (r.textContent || "").includes(n));
+    row?.scrollIntoView({ block: "center" });
+  }, name);
+  await browser.pause(150);
   return browser.execute((n) => {
     const rows = Array.from(document.querySelectorAll(".rows .row"));
     const row = rows.find((r) => (r.textContent || "").includes(n));

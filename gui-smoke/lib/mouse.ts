@@ -171,6 +171,65 @@ function moveStep(p: Point): PointerStep {
   return { type: "pointerMove", duration: 0, origin: "viewport", x: p.x, y: p.y };
 }
 
+// --- CPE-1481: WebKitWebDriver Actions-fallback `contextmenu` gap -------------------------------
+// The W3C Actions API (`performActions`) on WebKitWebDriver (Linux/wry) DOES deliver a real
+// `pointerdown`/`mousedown` + `pointerup`/`mouseup` for `button: 2`, but — unlike CDP on Chromium —
+// it does NOT synthesise the DOM `contextmenu` event that a secondary-button press produces on a real
+// pointer. (Chromium's `Input.dispatchMouseEvent` right-press emits `contextmenu`; WebKitGTK's
+// WebDriver input path emits the button events but not the platform context-menu signal that would
+// dispatch `contextmenu`.) So on Linux CI the app's `on:contextmenu` handlers never ran and NO menu
+// opened — every right-click spec (context-menu / drive-menu / home-item-menu / macro-in-menu /
+// macro-param-prompt / archive-password) failed with "expected the ... menu (.ctx) to open", even
+// though the button press itself succeeded. See PR #724's ubuntu run (CPE-1481 round 1).
+//
+// FIX: after the real `button:2` press, dispatch a HIT-TESTED synthetic `contextmenu` at the exact
+// viewport pixel. Crucially this is NOT the CPE-1154 anti-pattern (a synthetic event fired at a
+// hand-picked node, which bypasses hit-testing): we resolve the target with `document.elementFromPoint`
+// at the true pixel, so occlusion/z-order still decides which element receives it — the same element a
+// real right-click would hit. We only supplement when the real press did NOT already open a menu, so a
+// future WebKit that starts synthesising `contextmenu` natively won't fire a duplicate into the app's
+// CPE-1160 open-then-close guard.
+//
+// This only runs on the Actions fallback (Linux/WebKit CI + attended macOS/Linux). The Windows CDP
+// fast-path is untouched — it emits a genuine native `contextmenu` and needs no supplement.
+const CTX_MENU_SELECTOR = ".ctx"; // this app's single context-menu root (ContextMenu.svelte)
+
+/** True if a context menu is currently open (so we don't double-dispatch a synthetic one). */
+async function contextMenuOpen(): Promise<boolean> {
+  return browser.execute((sel) => !!document.querySelector(sel), CTX_MENU_SELECTOR) as Promise<boolean>;
+}
+
+/**
+ * Dispatch a faithful, HIT-TESTED synthetic `contextmenu` at a viewport pixel: resolve the topmost
+ * element there via `elementFromPoint` (real occlusion), then fire a bubbling, cancelable
+ * `contextmenu` MouseEvent carrying that pixel as `clientX/clientY` and `button:2` — exactly what the
+ * app's `on:contextmenu` handlers read to open + position the menu. No-ops if the point resolves to
+ * nothing (off-screen / outside the content area). Used ONLY to backfill the event WebKitWebDriver's
+ * Actions API omits; never on the CDP path.
+ */
+async function dispatchSyntheticContextMenu(p: Point): Promise<void> {
+  await browser.execute(
+    (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return;
+      el.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          button: 2,
+          buttons: 2,
+          clientX: x,
+          clientY: y,
+        }),
+      );
+    },
+    p.x,
+    p.y,
+  );
+}
+
 /** The CSS-pixel bitmask CDP wants in `buttons` while a button is held (mousePressed/last mouseMoved). */
 function buttonsMask(button: CdpButton): number {
   switch (button) {
@@ -276,6 +335,9 @@ export async function rightClick(target: string | Point): Promise<void> {
     { type: "pointerDown", button: w3cButton("right") },
     { type: "pointerUp", button: w3cButton("right") },
   ]);
+  // CPE-1481: WebKitWebDriver's Actions API doesn't synthesise `contextmenu` from the button:2 press,
+  // so backfill a hit-tested one at the same pixel — but only if the press didn't already open a menu.
+  if (!(await contextMenuOpen())) await dispatchSyntheticContextMenu(p);
 }
 
 /** A faithful double-click: two press/release pairs, the second carrying clickCount 2 (CDP). On the

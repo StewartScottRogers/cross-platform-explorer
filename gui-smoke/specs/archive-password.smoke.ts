@@ -37,8 +37,19 @@ const CREATED_ZIP_NAME = "CPE-1045-marker.zip";
 const CORRECT_PASSWORD = "cpe-1182-smoke-pw";
 const WRONG_PASSWORD = "definitely-not-it";
 
-/** Viewport-space centre of the FIRST `.rows .row` whose HTML includes `name` (or `null`). */
+/** Viewport-space centre of the FIRST `.rows .row` whose HTML includes `name` (or `null`).
+ *  CPE-1481: scrolls the match into view first — see archive-browse.smoke.ts's identical `pointOfRow`
+ *  for the full rationale (CPE-1253's below-the-fold hit-test failure). This spec right-clicks TWO
+ *  different rows across two tests (the archive row, then — after that row's own scroll position —
+ *  the marker row), so a stale scroll offset left over from the first is exactly the kind of gap this
+ *  guards against. */
 async function pointOfRow(name: string): Promise<Point | null> {
+  await browser.execute((n) => {
+    const rows = Array.from(document.querySelectorAll(".rows .row"));
+    const row = rows.find((r) => (r.innerHTML || "").includes(n));
+    row?.scrollIntoView({ block: "center" });
+  }, name);
+  await browser.pause(150);
   return browser.execute((n) => {
     const rows = Array.from(document.querySelectorAll(".rows .row"));
     const row = rows.find((r) => (r.innerHTML || "").includes(n));
