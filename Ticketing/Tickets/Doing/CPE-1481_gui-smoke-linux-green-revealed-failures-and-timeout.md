@@ -220,3 +220,45 @@ No change this round — 45 min already carried a full 34-pass run in 33m45s.
   usable event for the awaited `doubleClick` navigation in `seedFoldersMru`, the seed's `.empty-state` wait
   would time out — but `doubleClick` there is WebdriverIO's element command (not our Actions mouse) and
   context-menu.smoke.ts uses the identical call and passes.
+
+## Work Log — Round 4 (2026-08-08, QA-infra Worker)
+
+**Status: still in Doing (CI-only verification).** Round 3 landed home-item-menu + the drive-tile
+double-fire fix: ubuntu leg went to **35 passing, 1 failing** — only `drive-menu.smoke.ts`, and now at its
+FIRST gate: `Error: Home landing should show at least one drive tile (a .qa-card with a drive-root path)`
+(the round-3 stay-open fix works; this is a different, earlier assertion). The 4 previously-passing
+right-click specs and home-item-menu all stayed green (no regression from the synthetic-only mouse change).
+
+### Root cause = a startup RACE, not a platform gap
+This exact assertion PASSED in round 2 and FAILED in round 3, and round 3 changed only `mouse.ts` +
+`home-item-menu.smoke.ts` — nothing touching drive-tile seeding. So the Home-landing drive-tile
+enumeration is intermittently not-yet-painted when the spec checks. Traced it:
+- The tile is a `.qa-card` derived from HomeView's `cards = [...places, ...drives, ...pinned]`; the drive
+  tile comes from App's `drives` (HomeView.svelte).
+- App sets `drives` from `commands.listDrives()` — but inside a `Promise.all` of FOUR startup commands
+  (`specialFolders` / `listDrives` / `homeDir` / `canRestoreFromTrash`, App.svelte:5419-5426), so `drives`
+  is assigned only when the SLOWEST of the four resolves. On a cold WebKitGTK-under-Xvfb instance those
+  first IPC round-trips can exceed the spec's old **10s** tile poll → the drive `.qa-card` hasn't painted
+  yet → `pointOfDriveTile()` returns null → gate fails. Pure timing variance around the 10s edge (hence
+  pass-in-round-2 / fail-in-round-3).
+- It is NOT a platform gap: `list_drives_impl` (src-tauri/src/lib.rs:5608) unconditionally returns the
+  single `{name:"File System", path:"/"}` root on non-Windows with NO filesystem I/O, and the Rust unit
+  test `list_drives_returns_at_least_one_root` pins it. The tile CANNOT be genuinely absent on Linux; it
+  only paints late. So no Linux gate is warranted — strengthen the wait (Foreman's option 2).
+
+### The fix — `gui-smoke/specs/drive-menu.smoke.ts` (spec-only)
+Added `waitForDriveTile()`: polls `pointOfDriveTile()` with a generous **30s** bounded timeout (well under
+the 90s per-test `mochaOpts.timeout`; goHome's 15s + 30s = 45s worst case). Used it in BOTH drive-tile
+tests — the first gate (was a 10s poll) and the second "opens the drive menu" test (was a bare synchronous
+read that would flake identically once `drives` lagged). Deterministic: the tile is guaranteed to appear
+once the bounded `Promise.all` resolves, and 30s dwarfs four trivial invokes even on a slow box. No app
+change, no CDP-path change, no gate. The sidebar-drive-row path (a `<div>`, no native contextmenu) was
+already reliable.
+
+### Verification
+- `cd gui-smoke && npm run typecheck` — clean.
+- `cd gui-smoke && npm run test:unit` — 21/21 pass.
+- gui-smoke needs tauri-driver + WebKitWebDriver + xvfb → CI (ubuntu) verifies; Foreman runs it.
+- Confidence: **high** — the failure is a bounded startup race with a deterministic end state (a `/` root
+  that always enumerates), and 30s is a large margin over the observed lag. Expected result: drive-menu
+  green → **36/39 ubuntu specs pass** (the full set that runs), leg fully green.

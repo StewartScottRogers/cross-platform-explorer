@@ -146,6 +146,32 @@ async function goHome(): Promise<void> {
   });
 }
 
+/** Poll for the Home drive tile with a generous, bounded timeout, returning it once present.
+ *  ROOT CAUSE of the round-3 flake (CPE-1481): the tile is derived from App's `drives`, which is set
+ *  from `commands.listDrives()` — but that invoke runs inside a `Promise.all` of FOUR startup commands
+ *  (`specialFolders` / `listDrives` / `homeDir` / `canRestoreFromTrash`), so `drives` isn't assigned
+ *  until the SLOWEST of the four resolves. On a cold WebKitGTK-under-Xvfb instance those first IPC
+ *  round-trips can exceed the old 10s poll — this same assertion PASSED in round 2 and FAILED in round 3
+ *  with no drive-seeding change, i.e. pure CI timing variance around the 10s edge. The enumeration itself
+ *  can NOT be empty on Linux: `list_drives_impl` (src-tauri/src/lib.rs) unconditionally returns the single
+ *  `"/"` root on non-Windows (no I/O), pinned by the `list_drives_returns_at_least_one_root` unit test. So
+ *  it's purely a race — a generous bounded wait (well under the 90s per-test cap) makes it deterministic
+ *  without gating anything Linux-specific. */
+async function waitForDriveTile(): Promise<{ point: Point; path: string }> {
+  let tile: { point: Point; path: string } | null = null;
+  await browser.waitUntil(
+    async () => {
+      tile = await pointOfDriveTile();
+      return tile !== null;
+    },
+    {
+      timeout: 30_000,
+      timeoutMsg: "Home landing should show at least one drive tile (a .qa-card with a drive-root path)",
+    },
+  );
+  return tile!;
+}
+
 /** Right-click `point`, then assert the DRIVE menu opens AND STAYS open (the CPE-1159 contract).
  *  `where` is only for readable failure messages. */
 async function assertDriveMenuStaysOpen(point: Point, where: string): Promise<void> {
@@ -185,22 +211,10 @@ describe("CPE-1159 — drive right-click menu opens and STAYS open (stopPropagat
 
   it("Home shows at least one drive tile to right-click", async () => {
     await goHome();
-    // CPE-1481: `goHome()` only waits for the outer `.qa-grid`/`.home` container to exist, not for its
-    // `{#each cards}` child tiles to have actually painted — `drives` is always populated before this
-    // point (`list_drives` always returns >=1 root, even the non-Windows single-"/"-root branch), but
-    // under slow Linux/Xvfb CI a render tick could still separate "container mounted" from "tiles
-    // painted". Poll briefly instead of a single synchronous read right after the container appears.
-    let tile: { point: Point; path: string } | null = null;
-    await browser.waitUntil(
-      async () => {
-        tile = await pointOfDriveTile();
-        return tile !== null;
-      },
-      {
-        timeout: 10_000,
-        timeoutMsg: "Home landing should show at least one drive tile (a .qa-card with a drive-root path)",
-      },
-    );
+    // CPE-1481 round 4: poll with a generous bounded timeout (see waitForDriveTile) — the tile is set
+    // from a startup `Promise.all` whose slowest member can land after the old 10s poll on a cold Xvfb
+    // instance (round-3 flake). The tile can't be genuinely absent on Linux.
+    const tile = await waitForDriveTile();
     // eslint-disable-next-line no-console
     console.log(`[CPE-1159] Home drive tile: ${JSON.stringify(tile)}`);
     expect(tile, "Home landing should show at least one drive tile (a .qa-card with a drive-root path)").to.not.equal(null);
@@ -208,9 +222,10 @@ describe("CPE-1159 — drive right-click menu opens and STAYS open (stopPropagat
 
   it("right-clicking a Home DRIVE TILE opens the drive menu and it stays open (does not self-close)", async () => {
     await goHome();
-    const tile = await pointOfDriveTile();
-    expect(tile, "drive tile on Home").to.not.equal(null);
-    await assertDriveMenuStaysOpen(tile!.point, `home-tile ${tile!.path}`);
+    // CPE-1481 round 4: same generous poll as the gate above (was a bare synchronous read, which would
+    // flake identically if `drives` hadn't settled yet).
+    const tile = await waitForDriveTile();
+    await assertDriveMenuStaysOpen(tile.point, `home-tile ${tile.path}`);
     await snap("drive-menu");
   });
 
