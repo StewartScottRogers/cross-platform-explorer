@@ -61,6 +61,14 @@ fn read_bounded_line(r: &mut impl BufRead, buf: &mut Vec<u8>, cap: usize) -> Res
             return Ok(buf.len()); // EOF: whatever's buffered is the final (possibly empty) line.
         }
         if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            // CPE-1475: the cap applies here too. Without this check, a line that has already
+            // accumulated close to `cap` bytes across prior no-newline chunks could still absorb
+            // an entire further `fill_buf` chunk (up to the BufReader's internal buffer size, not
+            // bounded by `cap`) as long as a `\n` appears somewhere in it, overshooting the cap by
+            // up to one chunk.
+            if buf.len() + pos > cap {
+                return Err(format!("frame too large: line exceeds the {cap}-byte cap"));
+            }
             buf.extend_from_slice(&available[..pos]);
             r.consume(pos + 1);
             return Ok(buf.len());
@@ -605,5 +613,37 @@ mod tests {
         let err = read_bounded_line(&mut cursor, &mut buf, MAX_LINE_BYTES).unwrap_err();
         assert!(err.contains("frame too large"));
         assert!(buf.len() <= MAX_LINE_BYTES);
+    }
+
+    #[test]
+    fn bounded_reader_accepts_a_newline_landing_exactly_on_the_cap() {
+        // Boundary check for the CPE-1475 fix: `buf.len() + pos == cap` must still succeed (the
+        // fix only rejects strictly *past* the cap), so a line whose length lands exactly on the
+        // cap keeps working.
+        let mut cursor = std::io::Cursor::new(b"0123456789\n".to_vec());
+        let mut buf = Vec::new();
+        let n = read_bounded_line(&mut cursor, &mut buf, 10).unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(&buf, b"0123456789");
+    }
+
+    #[test]
+    fn bounded_reader_caps_a_newline_that_arrives_in_a_later_chunk_past_the_cap() {
+        // CPE-1475: reproduce the overshoot. `buf` accumulates to just under `cap` across several
+        // no-newline `fill_buf` chunks (forced small via a low-capacity `BufReader`, mirroring the
+        // real ~8 KiB `BufReader` chunking around the child's stdout), then the next chunk carries
+        // a `\n` a few bytes further in — past the cap. Before the fix, the newline branch ran
+        // unconditionally and returned `Ok` with `buf` past `cap`; the fix must reject it via the
+        // same "frame too large" path the no-newline branch already uses, leaving `buf` untouched
+        // (still <= cap).
+        const CAP: usize = 1000;
+        let mut data = vec![b'x'; CAP - 1]; // accumulates to `cap - 1` with no newline anywhere.
+        data.extend_from_slice(b"abcde\n"); // next chunk: newline at offset 5, past the cap.
+        data.extend_from_slice(&[b'y'; 50]); // padding after the newline, must never be read.
+        let mut reader = BufReader::with_capacity(100, std::io::Cursor::new(data));
+        let mut buf = Vec::new();
+        let err = read_bounded_line(&mut reader, &mut buf, CAP).unwrap_err();
+        assert!(err.contains("frame too large"), "expected cap error, got: {err}");
+        assert!(buf.len() <= CAP, "must not buffer past the cap, got {} bytes", buf.len());
     }
 }

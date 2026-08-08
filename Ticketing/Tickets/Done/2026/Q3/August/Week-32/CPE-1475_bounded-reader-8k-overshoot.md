@@ -2,7 +2,7 @@
 id: CPE-1475
 title: "read_bounded_line can overshoot the cap by ~1 BufReader chunk (~8 KiB) when a newline immediately follows the cap"
 type: Bug
-status: Backlog
+status: Done
 priority: Low
 component: Backend
 tags: [ready, security]
@@ -30,3 +30,16 @@ that reaches `cap-1` then delivers a chunk containing a newline past the cap →
 Also informational (no ticket needed): the switch from `BufRead::lines()` to manual `from_utf8_lossy` means invalid
 UTF-8 on a line is now a soft per-message decode failure instead of a hard connection-killing read error — arguably
 more graceful. Epic CPE-862.
+
+## Work Log
+- 2026-08-08: Applied the cap to the newline branch of `read_bounded_line`
+  (`sidecar/host/src/supervisor.rs`): when a `\n` is found at `pos`, only append `available[..pos]`
+  if `buf.len() + pos <= cap`; otherwise return the same "frame too large" `Err` the no-newline
+  branch already used. No change to `MAX_LINE_BYTES` or the public API. Added
+  `bounded_reader_caps_a_newline_that_arrives_in_a_later_chunk_past_the_cap` (reproduces the
+  overshoot via a low-capacity `BufReader` forcing small chunks — accumulates to `cap - 1` with no
+  newline, then a later chunk carries `\n` past the cap; asserts the `Err` and `buf.len() <= cap`)
+  and `bounded_reader_accepts_a_newline_landing_exactly_on_the_cap` (boundary check: `buf.len() +
+  pos == cap` still succeeds). All prior bounded-reader tests remain green. `cargo build`, `cargo
+  clippy --all-targets -- -D warnings`, and `cargo test` all pass in `sidecar/host` (104 lib tests
+  + all integration tests green).
