@@ -82,11 +82,26 @@ fn extract_waveform_peaks_with_ffmpeg(
 ) -> Result<Vec<(f32, f32)>, String> {
     let buckets = buckets.max(1);
 
+    // Defense-in-depth on this IPC-reachable subprocess boundary (CPE-1478 review): reject anything that
+    // isn't an existing regular local file BEFORE we hand the string to ffmpeg. Without this, a `path` of
+    // `http://…` / `concat:…` / `subfile:…` is a valid ffmpeg *protocol* input, not a filename — ffmpeg
+    // would happily open it (a blind SSRF to internal hosts / cloud-metadata, or arbitrary-file read). The
+    // `-protocol_whitelist file,pipe` below is the load-bearing guard at the ffmpeg layer; this is the
+    // cheaper first line that also yields a clearer error for a genuinely-missing file.
+    if !std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+        return Err(format!("not a readable regular file: {}", path.display()));
+    }
+
     let mut child: Child = Command::new(ffmpeg)
         .arg("-nostdin") // never let ffmpeg read our stdin (there isn't one) or block waiting on it
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
+        // Restrict ffmpeg to the file+pipe protocols so a crafted `path` can't make it reach the network
+        // (`http:`/`tcp:` → SSRF) or read via a non-file protocol (`concat:`/`subfile:`/`data:`). `file`
+        // covers the local input; `pipe` is needed for the `pipe:1` output below.
+        .arg("-protocol_whitelist")
+        .arg("file,pipe")
         .arg("-i")
         .arg(path)
         .arg("-vn") // audio only — don't waste effort decoding a video stream, if any
@@ -116,8 +131,16 @@ fn extract_waveform_peaks_with_ffmpeg(
     });
 
     // CRITICAL bounded read (CPE-1478) — see the module doc. Never `Command::output()`.
-    let (pcm, truncated) = read_capped(stdout, MAX_PCM_BYTES)
-        .map_err(|e| format!("failed to read ffmpeg's PCM output: {e}"))?;
+    let (pcm, truncated) = match read_capped(stdout, MAX_PCM_BYTES) {
+        Ok(v) => v,
+        Err(e) => {
+            // Don't leak the child on a stdout I/O error: `Child`'s drop neither kills nor reaps it, so
+            // without this it could be orphaned/zombied. Kill+reap before propagating.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("failed to read ffmpeg's PCM output: {e}"));
+        }
+    };
 
     // If the cap was hit, ffmpeg may still be trying to write more PCM into a pipe nobody is reading
     // from any more and would otherwise block forever — kill it rather than waiting for a natural exit.
@@ -372,6 +395,22 @@ mod tests {
     fn extract_waveform_peaks_rejects_a_nonexistent_input_path_without_panicking() {
         let err = extract_waveform_peaks(Path::new("Z:/definitely/does/not/exist/nope.mp3"), 10);
         assert!(err.is_err(), "a nonexistent input file must be rejected, not panic");
+    }
+
+    /// Security (CPE-1478 review): an ffmpeg *protocol* string that isn't a local file — e.g. an `http://`
+    /// URL (blind SSRF to internal hosts / cloud-metadata) or `concat:` / `subfile:` (arbitrary read) —
+    /// must be rejected, never handed to ffmpeg as input. The pre-spawn `is_file` guard rejects it here
+    /// before ffmpeg runs; `-protocol_whitelist file,pipe` is the belt-and-braces guard at the ffmpeg layer.
+    #[test]
+    fn extract_waveform_peaks_rejects_a_non_file_protocol_string_without_reaching_the_network() {
+        for evil in [
+            "http://169.254.169.254/latest/meta-data/",
+            "concat:/etc/passwd",
+            "subfile:,start,0,end,64,,:/etc/passwd",
+        ] {
+            let err = extract_waveform_peaks(Path::new(evil), 10);
+            assert!(err.is_err(), "a non-file protocol input ({evil}) must be rejected, not opened");
+        }
     }
 
     /// A 0-byte file must fail cleanly rather than panic.
