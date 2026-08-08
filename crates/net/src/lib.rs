@@ -495,6 +495,45 @@ mod tests {
         assert!(out.items[0]["path"].as_str().unwrap().ends_with("a.txt"));
     }
 
+    /// CPE-1453: a server that streams `StreamItem`s forever (never sending `StreamEnd`) must not
+    /// be able to grow the client's `items` Vec without bound. `count_stream` with a huge `n` plays
+    /// the hostile/misbehaving server; `call_stream_capped` lets the test use a tiny item cap
+    /// instead of actually streaming a million real items, while exercising the exact same
+    /// accumulate-then-check code path `call_stream` uses in production.
+    #[test]
+    fn a_stream_exceeding_the_item_cap_errors_instead_of_accumulating_unbounded() {
+        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let err = client
+            .call_stream_capped("count_stream", serde_json::json!({ "n": 1_000_000 }), 5, u64::MAX)
+            .expect_err("a stream past the item cap must error, not accumulate forever");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("exceeded client-side limits"), "unexpected message: {}", err.message);
+    }
+
+    /// Same as above but the *aggregate byte* cap trips first — proving the byte budget is
+    /// enforced independently of the item-count cap (a server sending fewer, larger items).
+    #[test]
+    fn a_stream_exceeding_the_byte_cap_errors_instead_of_accumulating_unbounded() {
+        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let err = client
+            .call_stream_capped("count_stream", serde_json::json!({ "n": 1_000_000 }), usize::MAX, 32)
+            .expect_err("a stream past the byte cap must error, not accumulate forever");
+        assert_eq!(err.code, ErrorCode::Internal);
+        assert!(err.message.contains("exceeded client-side limits"), "unexpected message: {}", err.message);
+    }
+
+    /// A stream that fits comfortably under both caps must still complete normally — the caps
+    /// only bite a runaway/hostile peer, never a legitimate small stream.
+    #[test]
+    fn a_stream_under_the_caps_completes_normally() {
+        let mut client = Client::connect(start_streaming_server(SecurityChain::local())).unwrap();
+        let out = client
+            .call_stream_capped("count_stream", serde_json::json!({ "n": 3 }), 5, u64::MAX)
+            .expect("a stream under the caps must complete");
+        assert_eq!(out.items.len(), 3);
+        assert_eq!(out.result, serde_json::json!({ "count": 3 }));
+    }
+
     #[test]
     fn a_streaming_call_is_security_guarded_over_the_wire() {
         // The same stream method under a default-deny boundary yields no items — the denial arrives as

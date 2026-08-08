@@ -19,6 +19,25 @@ use cpe_contract::{
 
 use crate::wire::{read_envelope, write_envelope};
 
+/// Hard ceiling on the *number* of `StreamItem`s a single [`Client::call_stream`] call will
+/// accumulate (CPE-1453). `read_envelope` already caps each *frame* at 16 MiB (CPE-1416's
+/// `MAX_ENVELOPE_BYTES`), but nothing capped the *count* of frames: a hostile or buggy server
+/// that never sends `StreamEnd` could otherwise grow `items` forever and OOM the client. The
+/// builtin streaming producers (`list_dir_stream`/`name_search_stream`/`content_search_stream`)
+/// realistically top out in the low hundreds of thousands of entries even for very large trees
+/// (c.f. `cpe_server::archive_safety_scan::MAX_ENTRIES` = 200_000 as this codebase's working
+/// definition of "a lot of real entries"), so this is a generous ceiling that only bites a
+/// runaway/hostile peer, not a legitimate large listing.
+const MAX_STREAM_ITEMS: usize = 1_000_000;
+
+/// Aggregate ceiling (CPE-1453) on the *serialized* bytes of all `StreamItem`s accumulated by one
+/// `call_stream`, independent of [`MAX_STREAM_ITEMS`] above — a peer sending fewer but larger
+/// items couldn't be capped by the count alone. 256 MiB is 16x CPE-1416's single-frame cap and
+/// matches the decode budget already used elsewhere in this codebase
+/// (`cpe_server::batch_transform::MAX_ALLOC_BYTES`) as the project's working definition of
+/// "generous but bounded". Whichever cap is hit first ends the stream with an error.
+const MAX_STREAM_BYTES: u64 = 256 * 1024 * 1024;
+
 /// Why a [`Client::connect`] could not establish a session.
 #[derive(Debug)]
 pub enum ConnectError {
@@ -167,6 +186,18 @@ impl Client {
         method: impl Into<String>,
         params: serde_json::Value,
     ) -> Result<StreamOutcome, ContractError> {
+        self.call_stream_capped(method, params, MAX_STREAM_ITEMS, MAX_STREAM_BYTES)
+    }
+
+    /// The guts of [`call_stream`](Client::call_stream), parameterized on the caps so tests can
+    /// exercise the boundary with tiny limits instead of streaming a million real items.
+    pub(crate) fn call_stream_capped(
+        &mut self,
+        method: impl Into<String>,
+        params: serde_json::Value,
+        max_items: usize,
+        max_bytes: u64,
+    ) -> Result<StreamOutcome, ContractError> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -174,10 +205,30 @@ impl Client {
         write_envelope(&mut self.writer, &req).map_err(transport_err)?;
 
         let mut items = Vec::new();
+        let mut total_bytes: u64 = 0;
         loop {
             match read_envelope(&mut self.reader).map_err(transport_err)? {
                 Some(env) => match env.message {
-                    Message::StreamItem(v) => items.push(v),
+                    Message::StreamItem(v) => {
+                        // CPE-1453: a hostile/buggy server can stream StreamItems forever without ever
+                        // sending StreamEnd. Cap both the count and the aggregate serialized size before
+                        // accepting the item, so `items` can never outgrow either budget.
+                        let item_bytes = serde_json::to_vec(&v).map(|b| b.len() as u64).unwrap_or(0);
+                        if items.len() >= max_items || total_bytes.saturating_add(item_bytes) > max_bytes {
+                            return Err(ContractError::new(
+                                ErrorCode::Internal,
+                                format!(
+                                    "stream exceeded client-side limits ({} items / {total_bytes} bytes \
+                                     accumulated; caps are {max_items} items / {max_bytes} bytes) with no \
+                                     StreamEnd yet — aborting rather than accumulating without bound",
+                                    items.len()
+                                ),
+                                false,
+                            ));
+                        }
+                        total_bytes += item_bytes;
+                        items.push(v);
+                    }
                     Message::StreamEnd { result } => return Ok(StreamOutcome { items, result }),
                     // A Response mid-stream is an error (security denial or handler failure).
                     Message::Response(resp) => {

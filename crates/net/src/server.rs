@@ -82,14 +82,53 @@ impl<R: Read, W: Write> EnvelopeIo for WsIo<R, W> {
     }
 }
 
+/// Hard ceiling on the *aggregate* bytes read while parsing one WebSocket upgrade request's
+/// headers (CPE-1454). Mirrors CPE-1416's `wire::MAX_ENVELOPE_BYTES` cap, applied here because
+/// the original loop called `reader.read_line` with no bound at all: a client that sends `GET `
+/// then keeps streaming bytes with no blank line to end the headers could grow the (unbounded)
+/// line buffer forever, exhausting server memory. A real WS upgrade request is a handful of short
+/// header lines (well under 1 KiB); 64 KiB is generous headroom for any legitimate client.
+const MAX_WS_HEADER_BYTES: u64 = 64 * 1024;
+
 /// Read the WebSocket upgrade request's headers and return the `Sec-WebSocket-Key` (empty if absent).
 /// The request line was already peeked; this consumes through the blank line that ends the headers.
 fn read_ws_key(reader: &mut impl BufRead) -> io::Result<String> {
+    read_ws_key_capped(reader, MAX_WS_HEADER_BYTES)
+}
+
+/// The guts of [`read_ws_key`], parameterized on the cap so tests can exercise the boundary with a
+/// small `max_bytes` instead of streaming [`MAX_WS_HEADER_BYTES`] worth of scratch data.
+///
+/// The budget is aggregate across *every* header line, not just one: each iteration hands
+/// `reader` a fresh [`Read::take`] limited to whatever remains of `max_bytes`, so a peer that
+/// sends many complete-but-never-ending header lines is capped exactly like one that sends a
+/// single line with no terminator (CPE-1416's `read_envelope_capped` uses the same `.take()`
+/// pattern for a single frame; here it's re-applied per remaining budget across a loop).
+fn read_ws_key_capped(reader: &mut impl BufRead, max_bytes: u64) -> io::Result<String> {
     let mut key = String::new();
+    let mut total: u64 = 0;
     loop {
+        if total >= max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("websocket upgrade headers exceed max size of {max_bytes} bytes"),
+            ));
+        }
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
-            break;
+        let mut limited = reader.take(max_bytes - total);
+        let n = limited.read_line(&mut line)?;
+        total += n as u64;
+        if n == 0 {
+            break; // clean EOF: peer closed before finishing the headers
+        }
+        if limited.limit() == 0 && !line.ends_with('\n') {
+            // Consumed the remaining budget without finding this line's terminator: either a
+            // malicious/buggy peer withholding the blank line, or a single header line far past
+            // anything real. Bail rather than reading further.
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("websocket upgrade headers exceed max size of {max_bytes} bytes"),
+            ));
         }
         let trimmed = line.trim_end();
         if trimmed.is_empty() {
@@ -408,5 +447,81 @@ impl ServerRuntime {
             Ok(()) => self.dispatcher.dispatch(self.ctx.as_ref(), req),
             Err(e) => Response { result: Err(e) },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::BufReader;
+
+    #[test]
+    fn reads_a_normal_upgrade_request_and_finds_the_key() {
+        let req = b"Host: x\r\nUpgrade: websocket\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+                     Sec-WebSocket-Version: 13\r\n\r\n";
+        let mut reader = BufReader::new(&req[..]);
+        let key = read_ws_key(&mut reader).unwrap();
+        assert_eq!(key, "dGhlIHNhbXBsZSBub25jZQ==");
+    }
+
+    #[test]
+    fn missing_key_header_yields_an_empty_key_not_an_error() {
+        let req = b"Host: x\r\nUpgrade: websocket\r\n\r\n";
+        let mut reader = BufReader::new(&req[..]);
+        assert_eq!(read_ws_key(&mut reader).unwrap(), "");
+    }
+
+    /// CPE-1454: a peer that streams bytes but never sends the blank line ending the headers (nor
+    /// even a single `\n`) must not grow the header buffer without limit. `std::io::repeat` is a
+    /// genuinely infinite byte source — if the cap in `read_ws_key` didn't work, this would hang
+    /// (and OOM) instead of failing fast, so its mere termination is as much the assertion as the
+    /// `Err` itself.
+    #[test]
+    fn unbounded_peer_with_no_header_terminator_errors_promptly_at_the_cap() {
+        let mut reader = BufReader::new(std::io::repeat(b'x'));
+        let err = read_ws_key(&mut reader).expect_err("unbounded header stream must error");
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceed max size"), "unexpected error: {err}");
+    }
+
+    /// Same shape as the test above but against a small cap, so the assertion covers the exact
+    /// byte where the cap kicks in without streaming `MAX_WS_HEADER_BYTES` worth of scratch data.
+    #[test]
+    fn reader_with_no_terminator_errors_right_at_a_small_cap() {
+        let mut reader = BufReader::new(std::io::repeat(b'x'));
+        let err = read_ws_key_capped(&mut reader, 64).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    /// A peer that never sends one absurdly long line, but instead sends many short, complete,
+    /// legitimate-looking header lines that together exceed the budget — and still never sends
+    /// the blank line ending the headers. The *aggregate* cap (not just a per-line cap) must catch
+    /// this, proving the budget is shared across the whole loop rather than reset each line.
+    #[test]
+    fn many_short_lines_that_never_terminate_still_hit_the_aggregate_cap() {
+        let line = "X-Pad: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n"; // ~74 bytes
+        let body = line.repeat(2000); // ~148 KiB, well past a 1 KiB cap, never followed by a blank line
+        let mut reader = BufReader::new(body.as_bytes());
+        let err = read_ws_key_capped(&mut reader, 1024).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("exceed max size"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn headers_exactly_at_the_cap_still_round_trip() {
+        let req = b"Sec-WebSocket-Key: abc123==\r\n\r\n";
+        let cap = req.len() as u64; // exactly enough for these headers
+        let mut reader = BufReader::new(&req[..]);
+        let key = read_ws_key_capped(&mut reader, cap).unwrap();
+        assert_eq!(key, "abc123==");
+    }
+
+    #[test]
+    fn headers_one_byte_over_the_cap_errors() {
+        let req = b"Sec-WebSocket-Key: abc123==\r\n\r\n";
+        let cap = (req.len() - 1) as u64; // one byte short of the full headers
+        let mut reader = BufReader::new(&req[..]);
+        let err = read_ws_key_capped(&mut reader, cap).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 }
