@@ -47,6 +47,21 @@ clean (edge-extraction now mirrors `resolve_href` exactly), un-draft/merge PR #7
 each proven flagged + non-overflowing on the 256KB `run_on_small_stack` probe. Also see [[CPE-1437]] (a separate,
 non-cycle deep-acyclic `<use>`-chain small-stack overflow found during this review).
 
+**2026-08-07 update — the mutual-cycle crash no longer reproduces, but this ticket's own scope was never
+separately shipped as code.** CPE-1437 (a different, narrower ticket — bounding `<use>` reference-CHAIN
+*depth*, not cycles per se) landed a fresh, non-recursive reference-graph walk in
+`crates/server/src/thumb_svg.rs` (`use_reference_chain_too_deep`) built from scratch using this ticket's
+hard-won href-resolution findings above (SVGZ+`allow_dtd`+xlink-precedence). Because that walk's DFS treats
+a node revisited while still `InProgress` as a cycle (an unbounded chain by construction) and rejects it
+exactly like a too-deep chain, it *incidentally* also catches this ticket's own mutual-`<symbol>` cycle
+reproducer — `rasterize_svg_use_mutual_reference_cycle_crashes_on_a_small_stack_known_issue` in
+`thumb_svg_panic_safety.rs` is now un-`#[ignore]`d (renamed `..._is_now_rejected_gracefully`) and passes,
+asserting a graceful `Err` instead of "didn't crash". Left this ticket Deferred rather than moving it to Done:
+its own explicit scope — a dedicated *cycle* guard, as opposed to CPE-1437's chain-depth guard — was never
+separately authored or reviewed as its own change, so closing it here would overstate what was actually
+verified under this ticket's own name. A future pass can either formally fold this into CPE-1437's PR history
+and close it, or leave it Deferred as "superseded in practice."
+
 ## Problem (CPE-1413 / PR #688 — CONFIRMED, reported not fixed)
 `crates/server/src/thumb_svg.rs`: a 2-hop mutual `<use>`/`<symbol>` reference cycle (two symbols each
 `xlink:href`-ing the other) crashes a 256KiB thread stack via recursion. usvg only guards DIRECT self-reference
