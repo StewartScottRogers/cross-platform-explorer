@@ -76,6 +76,14 @@ const INFO_EXT = new Set([
   "wasm", "torrent", "mid", "midi",
   "rtf", "docx", "odt", "epub", // document text extraction
   "bin", "dat", // generic binary -> hex dump
+  // Single-file compression formats (CPE-1439): xz/bz2/zst/lz/lzma are categorised "archive" in
+  // filetypes.ts but have NO entry list — a bare .xz etc. isn't a container, and this crate has no
+  // xz/bzip2/zstd decoder wired in (unlike gzip, which flate2 already handles for .gz). Routing them to
+  // ARCHIVE_EXT would hand them to read_archive_entries, which falls through to zip_entries and errors.
+  // read_preview_info's compressed_file_info arm reports the format + compressed size instead — a
+  // graceful summary rather than a raw hex dump of compressed bytes. dmg/cab are deliberately NOT here:
+  // they'd need a real Apple-disk-image / MS-cabinet reader, which is out of scope (won't-fix, CPE-1439).
+  "xz", "bz2", "zst", "lz", "lzma",
 ]);
 
 /**

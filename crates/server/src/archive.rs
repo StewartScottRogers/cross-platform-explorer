@@ -177,6 +177,13 @@ fn iso_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 /// family (zip/jar/apk/…), TAR, gzip-compressed TAR (.tar.gz/.tgz), single-file gzip (.gz), 7-Zip, ISO,
 /// RAR (listing only — see [`crate::rar`]; there is no extractor for it, so it's never routed to
 /// `extract_archive*`/`pack_*`).
+///
+/// Deliberately NOT dispatched here (CPE-1439): xz/bz2/zst/lz/lzma single-file compression — this crate
+/// has no xz/bzip2/zstd decoder (only `flate2` for gzip), so there's no way to peel the wrapper off even a
+/// `.tar.xz`-style inner tar without adding a new dependency, and a bare single-file blob has no entry
+/// list at all. dmg (Apple disk image) / cab (MS cabinet) — no container reader exists for either. The
+/// frontend (`provider.ts`'s `ARCHIVE_EXT`) never routes any of these seven extensions here; if it ever
+/// did, they'd fall into the `else` branch below and fail as a bad zip.
 pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
     let lower = path.to_lowercase();
     if lower.ends_with(".tar") {
