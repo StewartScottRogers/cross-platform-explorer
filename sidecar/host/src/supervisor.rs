@@ -61,6 +61,13 @@ fn read_bounded_line(r: &mut impl BufRead, buf: &mut Vec<u8>, cap: usize) -> Res
             return Ok(buf.len()); // EOF: whatever's buffered is the final (possibly empty) line.
         }
         if let Some(pos) = available.iter().position(|&b| b == b'\n') {
+            // The cap applies to this branch too (CPE-1475). Without the check, a line that has already
+            // accumulated up to `cap - 1` bytes across earlier newline-free chunks would append this whole
+            // pre-newline slice unconditionally, so the real worst case was `cap` + one BufReader chunk
+            // (~8 KiB) rather than exactly `cap`.
+            if buf.len() + pos > cap {
+                return Err(format!("frame too large: line exceeds the {cap}-byte cap"));
+            }
             buf.extend_from_slice(&available[..pos]);
             r.consume(pos + 1);
             return Ok(buf.len());
@@ -593,6 +600,65 @@ mod tests {
         // The next read is a clean EOF.
         buf.clear();
         assert_eq!(read_bounded_line(&mut cursor, &mut buf, 1024).unwrap(), 0);
+    }
+
+    /// A `BufRead` that hands out fixed-size chunks, the way `BufReader` fills from a pipe. A `Cursor`
+    /// returns everything in one `fill_buf` and so never exercises the cross-chunk path.
+    struct ChunkReader {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+    }
+
+    impl std::io::Read for ChunkReader {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.fill_buf()?.len().min(out.len());
+            out[..n].copy_from_slice(&self.data[self.pos..self.pos + n]);
+            self.consume(n);
+            Ok(n)
+        }
+    }
+
+    impl BufRead for ChunkReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            let end = (self.pos + self.chunk).min(self.data.len());
+            Ok(&self.data[self.pos..end])
+        }
+        fn consume(&mut self, n: usize) {
+            self.pos = (self.pos + n).min(self.data.len());
+        }
+    }
+
+    #[test]
+    fn bounded_reader_applies_the_cap_to_the_newline_branch_too() {
+        // CPE-1475: a line that accumulates to just under the cap across newline-free chunks, then gets a
+        // chunk whose newline sits *past* the cap. The newline branch used to append its whole pre-newline
+        // slice without checking, so the buffer could overshoot by up to one BufReader chunk (~8 KiB).
+        //
+        // 68 bytes of payload then a newline, fed in 10-byte chunks against a 64-byte cap: the buffer
+        // reaches 60, and the chunk covering bytes 60..69 contains the newline at offset 8 — i.e. a 68-byte
+        // line against a 64-byte cap.
+        let mut data = vec![b'x'; 68];
+        data.extend_from_slice(b"\ntail");
+        let mut reader = ChunkReader { data, pos: 0, chunk: 10 };
+        let mut buf = Vec::new();
+
+        let err = read_bounded_line(&mut reader, &mut buf, 64).unwrap_err();
+        assert!(err.contains("frame too large"), "got {err}");
+        assert!(buf.len() <= 64, "must not overshoot the cap, got {} bytes", buf.len());
+    }
+
+    #[test]
+    fn bounded_reader_still_accepts_a_line_that_ends_exactly_at_the_cap() {
+        // The boundary the fix must not break: a line of exactly `cap` bytes is legal.
+        let mut data = vec![b'y'; 64];
+        data.push(b'\n');
+        let mut reader = ChunkReader { data, pos: 0, chunk: 10 };
+        let mut buf = Vec::new();
+
+        let n = read_bounded_line(&mut reader, &mut buf, 64).unwrap();
+        assert_eq!(n, 64);
+        assert_eq!(buf.len(), 64);
     }
 
     #[test]
