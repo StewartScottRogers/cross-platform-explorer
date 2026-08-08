@@ -2,7 +2,7 @@
 id: CPE-1433
 title: "EPIC: Structured file previews (.eml / .ics / .vcf)"
 type: Epic
-status: In Progress
+status: Done
 priority: Medium
 component: Full-stack
 tags: [epic]
@@ -43,3 +43,6 @@ verifiable, no heavy dep → respects PURPOSE.md fast/small/predictable.
 - `.eml/.ics/.vcf` render structured summary cards in the preview pane; malformed files degrade to the plain
   text/hex fallback (no panic). Parsers are pure + cargo-tested; provider selection + render specs jsdom-tested;
   docs + sectionDocs entries added (CPE-579). Unused ⇒ no cost.
+
+## Closed 2026-08-07
+All 3 children merged: CPE-1434 .eml (#704), CPE-1435 .ics + CPE-1436 .vcf (#705). Structured previews for email/calendar/contact files shipped — hand-rolled zero-dep parsers, HTML sanitized to text (no remote loads), vCard PHOTO presence-only (never over IPC), all with panic-safety batteries.
