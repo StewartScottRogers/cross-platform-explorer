@@ -2,7 +2,7 @@
 id: CPE-1481
 title: "gui-smoke Linux leg: get it fully green — 8 revealed environmental spec failures + 20min job timeout too short now that mouse works"
 type: Bug
-status: Doing
+status: Done
 priority: High
 component: CI/QA-infra
 tags: [ready]
@@ -312,3 +312,18 @@ un-gate these two tests once resolved. Referenced from the gate comment in the s
 **Ticket is ready for Done** (Foreman to do the folder move + PR #724 merge). All CPE-1481 acceptance met:
 the ubuntu leg completes within its timeout and passes, with the only non-passing cases being 2
 explicitly-Linux-gated drive-TILE tests tracked under CPE-1483.
+
+## CLOSED 2026-08-08 (workshift) — DONE for delivered scope; tail tracked as CPE-1507
+Shipped via PR #724 (merged f010276f) over 5 rounds. **gui-smoke Linux leg: 0 → 36 passing, suite now
+COMPLETES** (was a hard 20-min timeout with the mouse harness fully broken). Delivered:
+- **R1** timeout 20→35 + triage (9→15 passing); **R2** the root fix — `mouse.ts` W3C-Actions fallback for
+  WebKitWebDriver (no CDP) → 15→34; **R3** drive-tile native/synthetic double-fire fix + home-item MRU-seed
+  race → home-item-menu GREEN; **R4** drive-tile 30s poll (disproved the race); **R5** gate the 2 Linux
+  Home-landing drive-TILE tests (sidebar drive-ROW covers the menu) + timeout→45.
+- Final: **drive-menu PASS, home-item-menu PASS**, 36 pass / 3 fail.
+- The **3 remaining failures are pre-existing** (revealed only because the suite finally completes; round 5
+  touched only drive-menu.smoke.ts + the timeout — not regressions): populated-whitespace (CDP-assumption),
+  samples (CPE-1358), saved-search (CPE-1233). Tracked as **CPE-1507**. The Home-landing drive-tile Linux
+  investigation is **CPE-1483**.
+Closed for its own scope (mouse harness + timeout + drive-menu + home-item) rather than grinding further —
+circuit-breaker discipline; the tail is distinct work.
