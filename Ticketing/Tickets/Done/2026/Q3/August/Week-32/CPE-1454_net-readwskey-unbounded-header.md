@@ -65,5 +65,5 @@ bounding a peer that never sends the terminating blank line.
 - `cargo test` (crates/net) — 37 passed, 0 failed, finished in 0.17s (includes the 6 new tests above and
   CPE-1453's 3 new tests).
 
-**PR:** branch `cpe-1453-1454-net-dos-caps`, batched with CPE-1453 (same crate, `client.rs`) — one PR
-covering both tickets per the epic's DoS-hardening sweep.
+**PR:** #716 (branch `cpe-1453-1454-net-dos-caps`), batched with CPE-1453 (same crate, `client.rs`) —
+one PR covering both tickets per the epic's DoS-hardening sweep.

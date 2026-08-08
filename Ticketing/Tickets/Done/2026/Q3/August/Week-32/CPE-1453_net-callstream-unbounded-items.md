@@ -67,4 +67,4 @@ real items):
   of its own, so this is the only build config) — clean.
 - `cargo test` (crates/net) — 37 passed, 0 failed, finished in 0.17s.
 
-**PR:** branch `cpe-1453-1454-net-dos-caps`, batched with CPE-1454 (same crate, `server.rs`).
+**PR:** #716 (branch `cpe-1453-1454-net-dos-caps`), batched with CPE-1454 (same crate, `server.rs`).
