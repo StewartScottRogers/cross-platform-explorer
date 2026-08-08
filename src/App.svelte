@@ -75,6 +75,7 @@
   import ArchiveSafetyDialog from "./lib/components/ArchiveSafetyDialog.svelte";
   import CreateCertDialog from "./lib/components/CreateCertDialog.svelte";
   import SignCertDialog from "./lib/components/SignCertDialog.svelte";
+  import InspectCryptoDialog from "./lib/components/InspectCryptoDialog.svelte";
   import {
     vaults,
     unlockVault,
@@ -716,6 +717,12 @@
    *  as CA…"); both "" when opened from the command palette. `dir` mirrors `certCreateFor.dir` — the
    *  refresh target once a certificate is issued. */
   let certSignFor: { dir: string; inPaneB: boolean; csrPath: string; caCertPath: string } | null = null;
+  /** Path + viewer kind for an open `InspectCryptoDialog` (CPE-1438, epic CPE-1417), or null when
+   *  closed. Only used in DUAL-PANE mode, where the inline preview slot is occupied by pane B so the
+   *  "Inspect" / "Inspect JWT" action can't fall through to the preview pane the way single-pane does —
+   *  the overlay reuses JwtPreview/CertPreview to decode the file anyway. `path` is snapshot from the
+   *  clicked pane's selection; `kind` picks the viewer. */
+  let cryptoInspectFor: { path: string; kind: "jwt" | "cert" } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -2409,9 +2416,23 @@
   }
 
   /** "Inspect" / "Inspect JWT" (CPE-1424): the row is already selected — right-clicking selects first
-   *  (`onRowContext`) — and the preview pane auto-decodes a cert/CSR/JWT file on selection (CPE-1422), so
-   *  this only needs to make sure the Preview tab (not Details) is what's showing. */
-  function inspectCryptoFile() {
+   *  (`onRowContext`).
+   *
+   *  SINGLE-PANE: the preview pane auto-decodes a cert/CSR/JWT file on selection (CPE-1422), so this only
+   *  needs to make sure the Preview tab (not Details) is what's showing — unchanged behavior.
+   *
+   *  DUAL-PANE (CPE-1438): that inline preview slot is occupied by pane B's ExplorerPane, so flipping the
+   *  flags did NOTHING — a silent no-op. Instead open the decode in an overlay (`InspectCryptoDialog`)
+   *  that reuses the same JwtPreview/CertPreview viewers, the "a modal works in dual-pane" pattern the
+   *  Create/Sign cert dialogs already use. `inPaneB` (CPE-1377 pattern): inspect the file from whichever
+   *  pane the menu was opened OVER, not the live active pane. */
+  function inspectCryptoFile(inPaneB = false) {
+    if (dualPane) {
+      const entry = paneStateFor(inPaneB).selectedEntries[0];
+      if (!entry) return;
+      cryptoInspectFor = { path: entry.path, kind: isJwtFile(entry) ? "jwt" : "cert" };
+      return;
+    }
     showDetails = true;
     settings.saveShowDetails(true);
     showPreview = true;
@@ -4141,8 +4162,8 @@
       case "cert-create-here": askCertCreate(inPaneB); break;
       case "cert-issue-from-csr": if (pane.selectedEntries[0]) askCertSign(inPaneB, { csrPath: pane.selectedEntries[0].path }); break;
       case "cert-sign-as-ca": if (pane.selectedEntries[0]) askCertSign(inPaneB, { caCertPath: pane.selectedEntries[0].path }); break;
-      case "cert-inspect": inspectCryptoFile(); break;
-      case "jwt-inspect": inspectCryptoFile(); break;
+      case "cert-inspect": inspectCryptoFile(inPaneB); break;
+      case "jwt-inspect": inspectCryptoFile(inPaneB); break;
       case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
@@ -6099,6 +6120,14 @@
     on:created={(e) => onCertSigned(e.detail)}
     on:error={(e) => showNotice(e.detail, true)}
     on:close={() => (certSignFor = null)}
+  />
+{/if}
+
+{#if cryptoInspectFor}
+  <InspectCryptoDialog
+    path={cryptoInspectFor.path}
+    kind={cryptoInspectFor.kind}
+    on:close={() => (cryptoInspectFor = null)}
   />
 {/if}
 
