@@ -2,7 +2,7 @@
 id: CPE-1481
 title: "gui-smoke Linux leg: get it fully green — 8 revealed environmental spec failures + 20min job timeout too short now that mouse works"
 type: Bug
-status: Backlog
+status: Doing
 priority: High
 component: CI/QA-infra
 tags: [ready]
