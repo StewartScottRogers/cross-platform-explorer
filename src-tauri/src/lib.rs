@@ -1248,10 +1248,13 @@ impl Drop for ThumbStreamCancelGuard {
 /// Visible > Prefetch > Background scheduling) and `thumb_cache` (CPE-939, dual-budget LRU) into a real
 /// dispatch path — `cpe_server::thumb_pipeline::run_thumb_batch` owns the whole enqueue/drain/compute
 /// loop, this command is just the thin Tauri wiring: resolve the on-disk cache dir, hand it the
-/// `thumbnail_cached` decoder as `compute`, and forward each streamed `ThumbResult` over `on_thumb` as it
-/// lands (STREAMING.md). `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the
-/// frontend's visible window moves on before this batch finishes draining. Async + `spawn_blocking` — the
-/// decode work is real file + CPU work and must never run on the UI thread.
+/// `thumbnail_cached` decoder as `compute` — via `thumb_compute`, which applies the same
+/// `ensure_previewable_size`/`PREVIEW_INFO_MAX_BYTES` gate the single `thumbnail` command applies, so an
+/// oversized source file is skipped (icon fallback) here too instead of being `fs::read` in full
+/// (CPE-1447) — and forward each streamed `ThumbResult` over `on_thumb` as it lands (STREAMING.md).
+/// `stream_id` registers a cancel flag `cancel_thumbnails_stream` can trip when the frontend's visible
+/// window moves on before this batch finishes draining. Async + `spawn_blocking` — the decode work is
+/// real file + CPU work and must never run on the UI thread.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn thumbnails_stream(
@@ -1275,10 +1278,7 @@ async fn thumbnails_stream(
         let n = cpe_server::thumb_pipeline::run_thumb_batch(
             &requests,
             service.store(),
-            |path, edge| match &cache_dir {
-                Some(dir) => cpe_server::thumbnail::thumbnail_cached(dir, path, edge),
-                None => cpe_server::thumbnail::make_thumbnail_png(path, edge),
-            },
+            |path, edge| thumb_compute(path, edge, cache_dir.as_deref(), PREVIEW_INFO_MAX_BYTES),
             || cancel.load(Ordering::Relaxed),
             |result| {
                 let _ = on_thumb.send(result);
@@ -1290,6 +1290,28 @@ async fn thumbnails_stream(
     .map_err(|e| e.to_string())?;
 
     Ok(emitted)
+}
+
+/// Gate + dispatch for one thumbnail compute, shared by `thumbnails_stream`'s `compute` closure
+/// (CPE-1447). Before this fix, the streaming batch went straight to `thumbnail_cached`/
+/// `make_thumbnail_png` → `thumb_source::decode_thumb_image`'s unconditional `fs::read(path)` with no
+/// size check at all, while the single `thumbnail` command a few lines up (~:1212) already applies
+/// `ensure_previewable_size` first — the grid uses the streaming path, so that gate was effectively
+/// bypassed for the common case (a huge file with an image extension scrolled into view could OOM).
+/// This applies the *same* `ensure_previewable_size` check, with the *same* `PREVIEW_INFO_MAX_BYTES`
+/// cap, in the same position (before either the on-disk cache lookup or the decode), so both paths are
+/// consistent. `cap` is a parameter (rather than hard-coding the constant) purely so tests can use a
+/// tiny budget instead of allocating a real 128 MiB+ fixture file.
+///
+/// A file over `cap` returns `Err`, which `run_thumb_batch` already turns into `data_url: None` —
+/// exactly the existing "decode failed" fallback, so the frontend shows the type icon. No new
+/// error-handling path; this only adds a check ahead of the existing one.
+fn thumb_compute(path: &Path, edge: u32, cache_dir: Option<&Path>, cap: u64) -> Result<Vec<u8>, String> {
+    ensure_previewable_size(&path.to_string_lossy(), cap)?;
+    match cache_dir {
+        Some(dir) => cpe_server::thumbnail::thumbnail_cached(dir, path, edge),
+        None => cpe_server::thumbnail::make_thumbnail_png(path, edge),
+    }
 }
 
 /// Cancel an in-flight `thumbnails_stream` batch (CPE-1237) — the frontend calls this with the previous
@@ -13253,6 +13275,72 @@ overlay / overlay rw,relatime 0 0
         assert!(ensure_previewable_size(&p, 5000).is_ok(), "2000 < 5000 is fine");
         // A missing file is the reader's problem, not this guard's.
         assert!(ensure_previewable_size(&d.join("nope").to_string_lossy(), 1000).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1447: `thumb_compute` (the closure `thumbnails_stream` hands to `run_thumb_batch` as
+    /// `compute`) must apply the same size gate the single `thumbnail` command applies, BEFORE either
+    /// path would `fs::read` the source file. Uses a tiny `cap` rather than a real 128 MiB fixture — the
+    /// gate itself (`ensure_previewable_size`) is already covered at full scale by the test above; this
+    /// proves it's actually wired into the streaming compute path, not just present in the single-file
+    /// command 40 lines away (that was the whole bug).
+    #[test]
+    fn thumb_compute_rejects_an_oversize_file_before_reading_it() {
+        let d = scratch("thumbgate_oversize");
+        let big = d.join("huge.png"); // image extension, but content is irrelevant — the gate must
+        fs::write(&big, vec![0u8; 4096]).unwrap(); // trip on size alone, before any decode is attempted.
+        let err = thumb_compute(&big, 32, None, 1000).unwrap_err();
+        assert!(err.contains("too large"), "must be refused by the size gate, got: {err}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The companion case: a file under the cap is unaffected by the new gate and still thumbnails.
+    #[test]
+    fn thumb_compute_still_thumbnails_a_normal_size_file() {
+        let d = scratch("thumbgate_normal");
+        let small = d.join("small.png");
+        image::RgbImage::from_pixel(4, 4, image::Rgb([9u8, 8, 7])).save(&small).unwrap();
+        let png = thumb_compute(&small, 16, None, PREVIEW_INFO_MAX_BYTES).expect("under the cap -> decodes fine");
+        assert!(!png.is_empty());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// End-to-end through the real streaming pipeline (`run_thumb_batch`, exactly as `thumbnails_stream`
+    /// drives it): an oversize file in the same batch as a normal one must be skipped — `data_url: None`,
+    /// the existing "decode failed" fallback the frontend already renders as the type icon — while the
+    /// normal file still comes back with a thumbnail. This is the regression CPE-1447 fixes: previously
+    /// `thumb_compute`'s equivalent had no size check at all, so the oversize path here would have gone
+    /// straight to `fs::read`.
+    #[test]
+    fn thumbnails_stream_pipeline_skips_oversize_and_thumbnails_normal_in_the_same_batch() {
+        use cpe_server::thumb_pipeline::{run_thumb_batch, ThumbCacheStore, ThumbRequest};
+        use cpe_server::thumb_queue::Priority;
+        use std::sync::Mutex as StdMutex;
+
+        let d = scratch("thumbgate_batch");
+        let big = d.join("huge.png");
+        fs::write(&big, vec![0u8; 4096]).unwrap();
+        let small = d.join("small.png");
+        image::RgbImage::from_pixel(4, 4, image::Rgb([1u8, 2, 3])).save(&small).unwrap();
+
+        let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
+        let requests = vec![
+            ThumbRequest { path: big.to_string_lossy().into(), target_px: 16, priority: Priority::Visible },
+            ThumbRequest { path: small.to_string_lossy().into(), target_px: 16, priority: Priority::Visible },
+        ];
+        let mut results = Vec::new();
+        run_thumb_batch(
+            &requests,
+            &store,
+            |path, edge| thumb_compute(path, edge, None, 1000),
+            || false,
+            |r| results.push(r),
+        );
+
+        let big_result = results.iter().find(|r| r.path == big.to_string_lossy()).unwrap();
+        assert!(big_result.data_url.is_none(), "oversize file must be skipped -> icon fallback, not read");
+        let small_result = results.iter().find(|r| r.path == small.to_string_lossy()).unwrap();
+        assert!(small_result.data_url.is_some(), "normal-size file in the same batch still thumbnails");
         let _ = fs::remove_dir_all(&d);
     }
 
