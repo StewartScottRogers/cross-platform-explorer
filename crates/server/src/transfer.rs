@@ -8,7 +8,7 @@
 //! promptly.
 
 use crate::provider::FileSystemProvider;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// One entry yielded by [`walk`].
@@ -19,6 +19,99 @@ pub struct WalkEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+}
+
+/// Maximum directory depth [`walk`] will descend into (CPE-1462). A hostile server can advertise an
+/// infinitely deep tree — one fresh child directory per `readdir` — which would grow the DFS stack (and,
+/// for [`download_tree`], the accumulated work) without bound. A legitimate remote tree is only ever a few
+/// dozen levels deep, so 100 sits far above anything real while firmly bounding recursion. Reaching it
+/// stops descent into *deeper* directories (surfaced as a stderr notice) rather than failing the whole
+/// transfer, matching the repo's skip-on-error ethos for enumeration.
+pub const MAX_WALK_DEPTH: usize = 100;
+
+/// Maximum total entries [`walk`] will visit (CPE-1462). A hostile server can advertise millions of
+/// entries — by breadth (one directory with millions of children) or depth — to exhaust memory/time on an
+/// unattended transfer. Hundreds of thousands comfortably covers any legitimate large tree; exceeding it
+/// aborts the walk with a surfaced error, because a bounded, failed transfer is vastly preferable to an
+/// OOM or an indefinite hang.
+pub const MAX_WALK_ENTRIES: usize = 500_000;
+
+/// Whether a provider-supplied entry **name** is a safe single path segment (CPE-1461, source-side
+/// defense). A name is a leaf, never a path: it must be non-empty, not `.`/`..`, contain neither a `/`
+/// nor `\` separator nor a NUL, and be a single *normal* path component (rejecting a bare drive like
+/// `C:`, a root, or any other prefix). Remote providers (SFTP `READDIR` filenames, WebDAV `href`
+/// segments) call this to drop a hostile name at the SOURCE, before it can ever reach the local-write
+/// sink in [`download_tree`]. A directory entry with an unsafe name is skipped entirely.
+pub fn is_safe_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." {
+        return false;
+    }
+    if name.contains('/') || name.contains('\\') || name.contains('\0') {
+        return false;
+    }
+    // Reject a Windows NTFS alternate-data-stream / drive selector anywhere in the leaf (`x:y`,
+    // `..::$DATA`, `file:stream`) — a `:` in a name is meaningless on Unix and dangerous on Windows,
+    // so fail closed. Also reject a leaf that *begins* with `..` (`..stream`, `..:$DATA`), which the
+    // single-component check below would otherwise accept as `Normal` (CPE-1461 hardening).
+    if name.contains(':') || name.starts_with("..") {
+        return false;
+    }
+    // Exactly one normal component: rejects a bare drive (`C:`), a root, or any prefix, which
+    // `Path::components` classifies as non-`Normal`.
+    let mut comps = Path::new(name).components();
+    matches!((comps.next(), comps.next()), (Some(Component::Normal(_)), None))
+}
+
+/// Join an untrusted, provider-supplied relative path `rel` onto `base`, guaranteeing the result stays
+/// inside `base` (CPE-1461, sink-side defense). The path is rebuilt segment-by-segment — splitting on
+/// BOTH `/` and `\` so a Windows-style separator is neutralized on every OS — keeping only plain `Normal`
+/// components. Any `..` segment, or any segment that is itself a root/drive/UNC prefix, makes the whole
+/// entry unsafe and yields `None` (the caller skips it, and must NOT create parent directories for it).
+/// Because only `Normal` segments are ever appended to `base`, the returned path is always lexically
+/// contained in `base`. Callers additionally verify the on-disk parent canonicalizes back under `base`,
+/// as a defense against a pre-existing symlink inside the download root.
+pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
+    let mut out = base.to_path_buf();
+    let mut pushed = false;
+    for seg in rel.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            return None; // parent-dir escape
+        }
+        // Each surviving segment must itself be a single normal component (rejects `C:` / rooted segments
+        // on the platforms where they parse as prefixes/roots).
+        let mut comps = Path::new(seg).components();
+        match (comps.next(), comps.next()) {
+            (Some(Component::Normal(s)), None) => {
+                out.push(s);
+                pushed = true;
+            }
+            _ => return None,
+        }
+    }
+    if pushed {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// The longest ancestor of `path` (inclusive) that currently exists on disk as *some* node — file,
+/// directory, or symlink — using `symlink_metadata` so a symlink is detected without being followed.
+/// Returns `None` only if nothing up the chain (not even a root) resolves. Used to canonicalize-and-verify
+/// the real, already-existing portion of a to-be-created path BEFORE creating anything, so a pre-existing
+/// symlink pointing outside the download root is caught before any `mkdir` follows it (CPE-1461).
+fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p.symlink_metadata().is_ok() {
+            return Some(p.to_path_buf());
+        }
+        cur = p.parent();
+    }
+    None
 }
 
 /// Join a directory + child name. An empty `dir` (the provider root) yields the bare name — so a
@@ -34,15 +127,22 @@ fn join(dir: &str, name: &str) -> String {
 /// Recursively walk the tree under `root` (depth-first), invoking `on_entry` for every file and directory.
 /// `cancel` is checked before each directory listing and each entry. A directory that can't be listed is
 /// skipped rather than aborting the walk. Returns the number of entries visited.
+///
+/// Bounded against a hostile/runaway server (CPE-1462): descent stops at [`MAX_WALK_DEPTH`] (a surfaced
+/// notice, the rest of the walk continues) and the whole walk aborts with an `Err` past
+/// [`MAX_WALK_ENTRIES`] total entries. (`ProviderEntry` carries no symlink signal, so a symlink loop
+/// advertised by the server as an ordinary directory is bounded by these same caps rather than by
+/// real-path tracking.)
 pub fn walk(
     provider: &dyn FileSystemProvider,
     root: &str,
     cancel: &AtomicBool,
     mut on_entry: impl FnMut(WalkEntry),
 ) -> Result<usize, String> {
-    let mut stack = vec![root.to_string()];
+    // Each stack item carries its depth so descent past MAX_WALK_DEPTH can be capped (CPE-1462).
+    let mut stack = vec![(root.to_string(), 0usize)];
     let mut visited = 0usize;
-    while let Some(dir) = stack.pop() {
+    while let Some((dir, depth)) = stack.pop() {
         if cancel.load(Ordering::Relaxed) {
             break;
         }
@@ -53,10 +153,21 @@ pub fn walk(
             }
             let path = join(&dir, &entry.name);
             visited += 1;
+            if visited > MAX_WALK_ENTRIES {
+                return Err(format!(
+                    "transfer: aborted — tree exceeds the {MAX_WALK_ENTRIES}-entry safety cap \
+                     (possible hostile or runaway remote server)"
+                ));
+            }
             let is_dir = entry.is_dir;
             on_entry(WalkEntry { path: path.clone(), name: entry.name, is_dir, size: entry.size });
             if is_dir {
-                stack.push(path);
+                if depth < MAX_WALK_DEPTH {
+                    stack.push((path, depth + 1));
+                } else {
+                    // Bound infinite depth: don't descend further, but keep the rest of the walk going.
+                    eprintln!("transfer: not descending past depth {MAX_WALK_DEPTH} at {path} (depth safety cap)");
+                }
             }
         }
     }
@@ -65,6 +176,20 @@ pub fn walk(
 
 /// Download the tree under `remote_root` into `local_dir`, recreating the directory structure. Returns the
 /// number of files written. Cancellable.
+///
+/// Hardened against a hostile remote server (CPE-1461/CPE-1462):
+/// - Each entry is **streamed straight to disk as it is walked** rather than collecting the whole tree
+///   into a `Vec` first, so accumulation is bounded even for an enormous remote tree.
+/// - Every server-named path is run through [`guarded_join`] so a traversal name (`..`, an absolute/drive/
+///   UNC path, a `\`-separated segment) can never write outside `local_dir`. An entry that would escape is
+///   **skipped with a surfaced notice** (skip-on-error — one hostile entry does not fail the whole
+///   transfer), and its parent directories are NOT created.
+/// - The download root is canonicalized once up front. **Before** creating any directory, the longest
+///   already-existing ancestor of the target is canonicalized and verified to still live under the root,
+///   so a pre-existing symlink inside `local_dir` pointing outward is caught *before* any `mkdir` can
+///   follow it. A file whose leaf path is itself a pre-existing symlink is skipped (never followed on
+///   write). Both are defenses against a symlink planted by some other channel — the remote can't create
+///   one, but defense-in-depth is the point.
 pub fn download_tree(
     provider: &dyn FileSystemProvider,
     remote_root: &str,
@@ -72,27 +197,69 @@ pub fn download_tree(
     cancel: &AtomicBool,
 ) -> Result<usize, String> {
     let base = remote_root.trim_end_matches('/').to_string();
-    let mut entries = Vec::new();
-    walk(provider, remote_root, cancel, |e| entries.push(e))?;
-
     std::fs::create_dir_all(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
+    // Canonicalize the download root ONCE; every written path is verified to stay under this.
+    let canonical_root =
+        std::fs::canonicalize(local_dir).map_err(|e| format!("{}: {e}", local_dir.display()))?;
+
     let mut files = 0usize;
-    for entry in &entries {
-        if cancel.load(Ordering::Relaxed) {
-            break;
+    // A callback can't use `?`; capture the first hard I/O error and stop doing work once it's set.
+    let mut hard_err: Option<String> = None;
+
+    walk(provider, remote_root, cancel, |entry| {
+        if hard_err.is_some() {
+            return;
         }
         let rel = entry.path.strip_prefix(&base).unwrap_or(&entry.path).trim_start_matches('/');
-        let local = local_dir.join(rel);
-        if entry.is_dir {
-            std::fs::create_dir_all(&local).map_err(|e| format!("{}: {e}", local.display()))?;
-        } else {
-            if let Some(parent) = local.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        // Reject/skip any entry whose server-supplied path would escape the download root.
+        let Some(local) = guarded_join(&canonical_root, rel) else {
+            eprintln!("transfer: skipped unsafe entry name from remote (path traversal): {}", entry.path);
+            return;
+        };
+        // The directory to materialize: the entry itself if a dir, else the file's parent.
+        let dir_to_make: &Path = if entry.is_dir { local.as_path() } else { local.parent().unwrap_or(&canonical_root) };
+
+        // VALIDATE BEFORE MUTATING (CPE-1461 defect fix): canonicalize the longest *already-existing*
+        // ancestor of the target and confirm it is still under the root, so `create_dir_all` can never
+        // follow a pre-existing symlink out of the root before the check runs. The portion we then create
+        // is brand-new (no symlinks), rooted at a verified-contained real directory. Fail closed on a
+        // dangling/unresolvable ancestor (skip the entry with a surfaced notice).
+        match existing_ancestor(dir_to_make).as_deref().map(std::fs::canonicalize) {
+            Some(Ok(c)) if c.starts_with(&canonical_root) => {}
+            Some(Ok(_)) => {
+                eprintln!("transfer: skipped entry escaping the download root (symlinked dir?): {}", entry.path);
+                return;
             }
-            let data = provider.read(&entry.path)?;
-            std::fs::write(&local, data).map_err(|e| format!("{}: {e}", local.display()))?;
-            files += 1;
+            _ => {
+                eprintln!("transfer: skipped entry with an unresolvable parent under the root: {}", entry.path);
+                return;
+            }
         }
+        if let Err(e) = std::fs::create_dir_all(dir_to_make) {
+            hard_err = Some(format!("{}: {e}", dir_to_make.display()));
+            return;
+        }
+        if !entry.is_dir {
+            // A pre-existing leaf that is itself a symlink must NOT be followed on write (it could point
+            // outside the root). Skip it — fail closed (CPE-1461 leaf-symlink defect fix).
+            if let Ok(md) = std::fs::symlink_metadata(&local) {
+                if md.file_type().is_symlink() {
+                    eprintln!("transfer: skipped entry whose local path is a pre-existing symlink: {}", entry.path);
+                    return;
+                }
+            }
+            match provider.read(&entry.path) {
+                Ok(data) => match std::fs::write(&local, data) {
+                    Ok(()) => files += 1,
+                    Err(e) => hard_err = Some(format!("{}: {e}", local.display())),
+                },
+                Err(e) => hard_err = Some(e),
+            }
+        }
+    })?;
+
+    if let Some(e) = hard_err {
+        return Err(e);
     }
     Ok(files)
 }
@@ -139,7 +306,7 @@ pub fn upload_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::FakeProvider;
+    use crate::provider::{FakeProvider, ProviderEntry};
 
     /// A `FakeProvider` seeded with `a.txt` + `sub/b.txt` (an empty `""` root, no leading slash).
     fn seeded() -> FakeProvider {
@@ -203,5 +370,341 @@ mod tests {
         assert_eq!(fs.read("dest/x.txt").unwrap(), b"ex");
         assert_eq!(fs.read("dest/inner/y.txt").unwrap(), b"why");
         let _ = std::fs::remove_dir_all(&src);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1461 (path traversal) + CPE-1462 (unbounded walk/accumulation DoS) hardening battery.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The canonical set of hostile entry names a remote server could return (the ticket's list). Every
+    /// one must be neutralized: either rejected outright, or contained strictly inside the download root.
+    const TRAVERSAL_INPUTS: &[&str] = &[
+        "../../../../../home/x/.bashrc",                                                              // unix relative escape
+        r"C:\Users\x\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup\evil.bat",          // windows drive-absolute
+        r"\\host\share\x",                                                                             // UNC
+        r"\x",                                                                                         // rooted
+        r"x\..\..\y",                                                                                  // backslash-separated `..`
+        "a/../../b",                                                                                   // mixed `..`
+        "%2e%2e",                                                                                      // percent-encoded (literal at the sink)
+    ];
+
+    #[test]
+    fn guarded_join_never_escapes_the_base() {
+        let base = std::env::temp_dir().join("cpe-gj-base-dir");
+        // The security invariant: for EVERY hostile input, the join is either rejected or stays under base.
+        for inp in TRAVERSAL_INPUTS {
+            if let Some(p) = guarded_join(&base, inp) {
+                assert!(p.starts_with(&base), "guarded_join({inp:?}) escaped base: {p:?}");
+            }
+        }
+        // The clearly-escaping ones must be rejected outright on EVERY platform (we split on `\` too, so a
+        // backslash-separated `..` is caught even on Unix, where `\` is otherwise a legal filename char).
+        assert!(guarded_join(&base, "../../../../../home/x/.bashrc").is_none());
+        assert!(guarded_join(&base, "a/../../b").is_none());
+        assert!(guarded_join(&base, r"x\..\..\y").is_none());
+        assert!(guarded_join(&base, "..").is_none());
+        // A legit nested path is preserved exactly (no over-rejection).
+        let ok = guarded_join(&base, "normal/nested/file.txt").expect("legit nested must join");
+        assert_eq!(ok, base.join("normal").join("nested").join("file.txt"));
+    }
+
+    #[test]
+    fn is_safe_name_accepts_leaves_and_rejects_paths() {
+        for good in ["readme.txt", "my file (1).txt", "résumé.pdf", ".hidden"] {
+            assert!(is_safe_name(good), "{good:?} should be safe");
+        }
+        for bad in [
+            "", ".", "..", "a/b", r"a\b", "/etc", r"\x", "a\0b", r"C:\x", "sub/",
+            // Windows ADS / drive-selector + `..`-prefixed leaves (CPE-1461 hardening):
+            "x:y", "..:stream", "..::$DATA", "file:$DATA", "..evil", "C:",
+        ] {
+            assert!(!is_safe_name(bad), "{bad:?} should be unsafe");
+        }
+    }
+
+    /// A provider whose root listing returns exactly the hostile names it was handed (as regular files),
+    /// and nothing for any other directory — so `download_tree` tries to write each name straight into the
+    /// download root. `read` returns a payload that would be the planted file's contents.
+    struct HostileNames {
+        names: Vec<String>,
+    }
+    impl FileSystemProvider for HostileNames {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok(self.names.iter().map(|n| ProviderEntry { name: n.clone(), is_dir: false, size: 3 }).collect())
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn read(&self, _path: &str) -> Result<Vec<u8>, String> {
+            Ok(b"pwn".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[test]
+    fn download_tree_neutralizes_every_traversal_input() {
+        let base = std::env::temp_dir().join(format!("cpe-xfer-trav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Sentinel targets that MUST NOT be created outside the download root.
+        let parent = base.parent().unwrap().to_path_buf();
+        let sentinel_up = parent.join("cpe-PWNED-marker.txt");
+        let _ = std::fs::remove_file(&sentinel_up);
+
+        // Hostile names: the full traversal set, plus concrete single-level escapes aimed at a sentinel.
+        let mut names: Vec<String> = TRAVERSAL_INPUTS.iter().map(|s| s.to_string()).collect();
+        names.push("../cpe-PWNED-marker.txt".into());
+        names.push(r"..\cpe-PWNED-marker.txt".into());
+        names.push("sub/../../cpe-PWNED-marker.txt".into());
+
+        let provider = HostileNames { names };
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&provider, "", &base, &cancel).expect("hostile transfer must not error, just skip");
+
+        // The escaping sentinel must not exist anywhere outside the root.
+        assert!(!sentinel_up.exists(), "path traversal escaped the download root: {sentinel_up:?}");
+
+        // Whatever WAS written (a contained input like `%2e%2e`, or a UNC/drive path contained on Unix)
+        // must live strictly inside the download root — nothing escaped.
+        let mut stack = vec![base.clone()];
+        let mut written = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                assert!(p.starts_with(&base), "a written path escaped the root: {p:?}");
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    written += 1;
+                }
+            }
+        }
+        assert_eq!(written, n, "reported file count must match what actually landed under the root");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&sentinel_up);
+    }
+
+    #[test]
+    fn download_tree_still_downloads_a_legit_nested_tree() {
+        // Regression guard: the hardening must not over-reject an ordinary tree.
+        let fs = seeded();
+        let out = std::env::temp_dir().join(format!("cpe-xfer-legit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let cancel = AtomicBool::new(false);
+        let files = download_tree(&fs, "", &out, &cancel).unwrap();
+        assert_eq!(files, 2);
+        assert_eq!(std::fs::read(out.join("a.txt")).unwrap(), b"alpha");
+        assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    // Symlink-escape defenses (CPE-1461 review follow-up). Gated to Unix: creating a symlink on Windows
+    // needs admin/developer-mode, and the fix (validate-before-mutate + no-follow leaf) is cross-platform
+    // — these tests just need a real symlink to exercise it.
+
+    /// A provider that reports one directory `d` (holding a file `d/inner.txt`), so `download_tree` will
+    /// want to `mkdir local_dir/d` and then write into it.
+    struct DirThenFile;
+    impl FileSystemProvider for DirThenFile {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok(vec![ProviderEntry { name: "d".into(), is_dir: true, size: 0 }])
+            } else if path == "d" {
+                Ok(vec![ProviderEntry { name: "inner.txt".into(), is_dir: false, size: 3 }])
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"pwn".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_tree_does_not_create_a_child_through_a_preexisting_symlinked_dir() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("cpe-symdir-root-{pid}"));
+        let evil = std::env::temp_dir().join(format!("cpe-symdir-evil-{pid}"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&evil);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&evil).unwrap();
+        // Plant `root/d` as a symlink to the outside `evil` directory (as some other channel might).
+        symlink(&evil, root.join("d")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        // Must NOT error the whole transfer, and must NOT create anything inside `evil`.
+        let _ = download_tree(&DirThenFile, "", &root, &cancel).expect("must skip, not fail");
+        assert!(
+            std::fs::read_dir(&evil).unwrap().next().is_none(),
+            "a child was created outside the root by following a symlinked directory"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&evil);
+    }
+
+    /// A provider that reports a single top-level file `target.txt`.
+    struct OneFile;
+    impl FileSystemProvider for OneFile {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok(vec![ProviderEntry { name: "target.txt".into(), is_dir: false, size: 3 }])
+            } else {
+                Ok(vec![])
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"pwn".to_vec())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn download_tree_does_not_follow_a_preexisting_symlinked_leaf_on_write() {
+        use std::os::unix::fs::symlink;
+        let pid = std::process::id();
+        let root = std::env::temp_dir().join(format!("cpe-symleaf-root-{pid}"));
+        let outside = std::env::temp_dir().join(format!("cpe-symleaf-outside-{pid}.txt"));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"original").unwrap();
+        // Plant `root/target.txt` as a symlink to the outside file.
+        symlink(&outside, root.join("target.txt")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&OneFile, "", &root, &cancel).expect("must skip, not fail");
+        assert_eq!(n, 0, "the symlinked leaf must be skipped, not written");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"original",
+            "the write followed a symlink and clobbered a file outside the root"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_file(&outside);
+    }
+
+    /// A provider that advertises an infinitely deep tree: every `list` returns one fresh child directory.
+    struct InfiniteDepth;
+    impl FileSystemProvider for InfiniteDepth {
+        fn list(&self, _path: &str) -> Result<Vec<ProviderEntry>, String> {
+            Ok(vec![ProviderEntry { name: "a".into(), is_dir: true, size: 0 }])
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[test]
+    fn walk_depth_cap_terminates_an_infinitely_deep_tree() {
+        let p = InfiniteDepth;
+        let cancel = AtomicBool::new(false);
+        let mut count = 0usize;
+        // Without the depth cap this never returns; with it, it must terminate quickly and bounded.
+        let visited = walk(&p, "", &cancel, |_| count += 1).unwrap();
+        assert_eq!(visited, count);
+        assert!(visited <= MAX_WALK_DEPTH + 1, "depth cap must bound the walk; got {visited}");
+    }
+
+    /// A provider that advertises a tree far larger than the entry cap: 1000 subdirs, each with 1000
+    /// files (~1,001,000 entries), so the total-entries cap fires. Per-call listings stay small (1000
+    /// entries), so the test's own memory is modest.
+    struct HugeTree;
+    impl FileSystemProvider for HugeTree {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            if path.is_empty() {
+                Ok((0..1000).map(|i| ProviderEntry { name: format!("d{i}"), is_dir: true, size: 0 }).collect())
+            } else {
+                Ok((0..1000).map(|i| ProviderEntry { name: format!("f{i}"), is_dir: false, size: 1 }).collect())
+            }
+        }
+        fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+        fn stat(&self, _: &str) -> Result<ProviderEntry, String> {
+            Err("unsupported".into())
+        }
+        fn write(&mut self, _: &str, _: &[u8]) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn mkdir(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn delete(&mut self, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+        fn rename(&mut self, _: &str, _: &str) -> Result<(), String> {
+            Err("unsupported".into())
+        }
+    }
+
+    #[test]
+    fn walk_entry_cap_aborts_a_huge_tree() {
+        let p = HugeTree;
+        let cancel = AtomicBool::new(false);
+        let err = walk(&p, "", &cancel, |_| {}).unwrap_err();
+        assert!(err.contains("safety cap"), "expected a safety-cap abort, got: {err}");
     }
 }
