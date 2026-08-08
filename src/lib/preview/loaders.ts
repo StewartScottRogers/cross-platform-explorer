@@ -6,7 +6,7 @@
 import { unwrap } from "../invoke";
 import { commands } from "../bindings.gen"; // typed client (CPE-964)
 import type { ArchiveEntry } from "./provider";
-import type { EmailPreview } from "../bindings.gen";
+import type { EmailPreview, IcalPreview, VcardPreview } from "../bindings.gen";
 
 /** Cap on how much of a text file the preview will load. */
 export const PREVIEW_MAX_BYTES = 256 * 1024;
@@ -25,6 +25,17 @@ export const loadPreviewInfo = (path: string): Promise<string> =>
  *  this loader mirrors the other preview loaders so the torn-off FloatPreview window can reuse it. */
 export const loadEmailPreview = (path: string): Promise<EmailPreview> =>
   commands.emailPreview(path).then(unwrap);
+
+/** Structured `.ics` iCalendar preview (CPE-1435, epic CPE-1433): VEVENT/VTODO/VJOURNAL event cards.
+ *  `IcalPreview.svelte` fetches its own data self-contained; this loader mirrors the other preview
+ *  loaders so the torn-off FloatPreview window can reuse it. */
+export const loadIcalPreview = (path: string): Promise<IcalPreview> =>
+  commands.icalPreview(path).then(unwrap);
+
+/** Structured `.vcf` vCard preview (CPE-1436, epic CPE-1433): contact cards. A card's PHOTO is reported
+ *  presence-only — the image bytes are never returned over IPC. Mirrors the other preview loaders. */
+export const loadVcardPreview = (path: string): Promise<VcardPreview> =>
+  commands.vcardPreview(path).then(unwrap);
 
 export const loadImageData = (path: string): Promise<string> =>
   commands.readImageDataUrl(path).then(unwrap);

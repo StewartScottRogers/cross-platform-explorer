@@ -27,6 +27,8 @@ export type PreviewKind =
   | "data-grid"
   | "font"
   | "email"
+  | "calendar"
+  | "vcard"
   | "jwt"
   | "cert"
   | "hex"
@@ -146,6 +148,24 @@ const CERT_EXT = new Set(["pem", "crt", "cer", "der", "csr", "pub", "key"]);
 const EMAIL_EXT = new Set(["eml"]);
 
 /**
+ * `.ics` iCalendar files (RFC 5545): decoded via the `ical_preview` backend command (CPE-1435, epic
+ * CPE-1433) into VEVENT/VTODO/VJOURNAL event cards (summary + when/where/who + recurrence) and rendered by
+ * `IcalPreview.svelte`. A read-only VIEWER. Must precede the generic text provider: `.ics` categorises as
+ * "text" in `filetypes.ts` and would otherwise be claimed by it and shown as raw source instead of the
+ * structured event cards.
+ */
+const CALENDAR_EXT = new Set(["ics", "ical", "ifb", "icalendar"]);
+
+/**
+ * `.vcf` vCard files (2.1/3.0/4.0): decoded via the `vcard_preview` backend command (CPE-1436, epic
+ * CPE-1433) into contact cards (name/org/title + phones/emails/addresses/URLs) and rendered by
+ * `VcardPreview.svelte`. A read-only VIEWER; a card's PHOTO is reported presence-only, never fetched over
+ * IPC. Must precede the generic text provider: `.vcf` categorises as "text" and would otherwise be shown
+ * as raw source instead of the structured contact card.
+ */
+const VCARD_EXT = new Set(["vcf", "vcard"]);
+
+/**
  * Ordered by priority — the first match wins. Markdown is listed before text
  * because a `.md` file's category is "text"; without the ordering, text would
  * claim it first.
@@ -261,6 +281,24 @@ export const providers: PreviewProvider[] = [
     kind: "email",
     editable: false,
     canPreview: (e) => !e.is_dir && EMAIL_EXT.has(e.extension),
+  },
+  // Must precede the generic text provider: .ics categorises as "text" and would otherwise be shown as
+  // raw source instead of the structured event cards (CPE-1435, epic CPE-1433).
+  {
+    id: "calendar",
+    label: "Calendar",
+    kind: "calendar",
+    editable: false,
+    canPreview: (e) => !e.is_dir && CALENDAR_EXT.has(e.extension),
+  },
+  // Must precede the generic text provider: .vcf categorises as "text" and would otherwise be shown as
+  // raw source instead of the structured contact card (CPE-1436, epic CPE-1433).
+  {
+    id: "vcard",
+    label: "Contact",
+    kind: "vcard",
+    editable: false,
+    canPreview: (e) => !e.is_dir && VCARD_EXT.has(e.extension),
   },
   // Must precede the generic text provider: .jwt/.jws have no CATEGORY_BY_EXT entry today (would
   // otherwise fall through to text/hex), and .pem/.crt/.cer/.csr categorise as "code" text.

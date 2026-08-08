@@ -1,0 +1,34 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Cross-Platform Explorer//Sample Calendar//EN
+METHOD:REQUEST
+X-WR-CALNAME:CPE Sample Calendar
+BEGIN:VEVENT
+UID:cpe-1435-sample@example.com
+SUMMARY:Weekly team sync
+DTSTART:20260810T150000Z
+DTEND:20260810T153000Z
+LOCATION:Room 42\, Building B
+DESCRIPTION:Recurring weekly sync for the Cross-Platform Explorer team. This
+  description is folded across two physical lines to exercise RFC 5545 line
+  unfolding.
+ORGANIZER;CN=Alice Example:mailto:alice@example.com
+ATTENDEE;CN=Bob Example;ROLE=REQ-PARTICIPANT:mailto:bob@example.com
+ATTENDEE;CN=Carol Example:mailto:carol@example.com
+ATTENDEE:mailto:dave@example.com
+STATUS:CONFIRMED
+RRULE:FREQ=WEEKLY;BYDAY=MO;COUNT=12
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:Reminder
+TRIGGER:-PT15M
+END:VALARM
+END:VEVENT
+BEGIN:VEVENT
+UID:cpe-1435-holiday@example.com
+SUMMARY:Company holiday
+DTSTART;VALUE=DATE:20261225
+DTEND;VALUE=DATE:20261226
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
