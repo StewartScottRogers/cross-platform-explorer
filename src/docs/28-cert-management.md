@@ -52,9 +52,11 @@ chosen path and the listing refreshes to show it.
 ## Inspecting from the menu
 
 Right-clicking a cert/CSR file also offers **Inspect**, and a `.jwt`/`.jws` file offers **Inspect
-JWT** — both just bring the preview pane's decoded view forward (see
-[JWT & Certificate Preview](26-crypto-preview)); right-clicking already selects the row, so the decoder
-has already run by the time the menu opens.
+JWT** — both show the same decoded view described in [JWT & Certificate Preview](26-crypto-preview);
+right-clicking already selects the row, so the decoder has already run by the time the menu opens. In
+single-pane mode this brings the preview pane's decoded view forward. In dual-pane (commander) mode the
+right pane occupies the preview slot, so **Inspect** opens the decode in a centered overlay instead —
+Esc or clicking outside closes it — and works the same from either pane.
 
 ## Works from either pane
 
