@@ -34,15 +34,31 @@ describe("CPE-1154 — headless GUI smoke: real right-click never leaks the nati
   // HTML for the folder name — the reliable primitive under wry's classic-WebDriver webview, per the
   // note in open-dir.smoke.ts; the text-based `$('=name')` locator is not reliable here).
   it("navigates into the empty folder and renders the empty state", async () => {
-    const rows = $$(".row");
+    // CPE-1481: wait for the initial `--open=<tmpDir>` navigation to have actually rendered before
+    // scanning for the seeded folder's row — archive-browse.smoke.ts/archive-password.smoke.ts/
+    // link-badge.smoke.ts/macro-in-menu.smoke.ts all gate their first assertion on this same
+    // `[aria-current="page"]` crumb; this spec was missing it, so a still-loading listing (this
+    // spec's own `before` hook does nothing but confirm the state file exists) could read as "no row"
+    // rather than "not rendered yet".
+    const crumb = await $('[aria-current="page"]');
+    await crumb.waitForExist({ timeout: 30_000 });
+
+    // CPE-1481: poll rather than a single scan — the crumb existing only proves navigation STARTED,
+    // not that the (potentially large, ~27-entry) root listing has finished painting every row yet.
     let folderRow: WebdriverIO.Element | undefined;
-    for await (const row of rows) {
-      const html = await row.getHTML({ includeSelectorTag: false });
-      if (html.includes(EMPTY_DIR_NAME)) {
-        folderRow = row;
-        break;
-      }
-    }
+    await browser.waitUntil(
+      async () => {
+        for (const row of await $$(".row")) {
+          const html = await row.getHTML({ includeSelectorTag: false });
+          if (html.includes(EMPTY_DIR_NAME)) {
+            folderRow = row;
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: 15_000, timeoutMsg: `expected a row for the seeded empty folder "${EMPTY_DIR_NAME}"` },
+    );
     expect(folderRow, `expected a row for the seeded empty folder "${EMPTY_DIR_NAME}"`).to.not.equal(undefined);
 
     await folderRow!.doubleClick();

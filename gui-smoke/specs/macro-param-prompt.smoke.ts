@@ -45,13 +45,22 @@ async function openViaPalette(query: string, labelSubstring: string): Promise<vo
   await row!.click();
 }
 
+// CPE-1481: scroll-then-`getBoundingClientRect` via `element.execute`, matching pointOfRowNamed's
+// sibling in macro-in-menu.smoke.ts and the rest of the suite (archive-browse.smoke.ts's `pointOfRow`,
+// drive-menu.smoke.ts, home-item-menu.smoke.ts) — this previously used `getLocation()`/`getSize()`
+// (WebDriver's own "get element rect"), a different code path than the viewport-space
+// `getBoundingClientRect()` `rightClick`'s CDP/W3C-Actions coordinates are documented against, and
+// never scrolled an out-of-view row into the viewport first.
 async function pointOfRowNamed(name: string): Promise<Point | null> {
   const rows = $$(".rows .row");
   for await (const row of rows) {
     if ((await row.getHTML({ includeSelectorTag: false })).includes(name)) {
-      const loc = await row.getLocation();
-      const size = await row.getSize();
-      return { x: Math.round(loc.x + Math.min(60, size.width / 2)), y: Math.round(loc.y + size.height / 2) };
+      await row.scrollIntoView({ block: "center" });
+      await browser.pause(150);
+      return row.execute((el) => {
+        const r = (el as HTMLElement).getBoundingClientRect();
+        return { x: Math.round(r.left + Math.min(60, r.width / 2)), y: Math.round(r.top + r.height / 2) };
+      }) as Promise<Point>;
     }
   }
   return null;
@@ -61,9 +70,12 @@ async function pointByText(selector: string, text: string): Promise<Point | null
   const els = $$(selector);
   for await (const el of els) {
     if ((await el.getHTML({ includeSelectorTag: false })).includes(text)) {
-      const loc = await el.getLocation();
-      const size = await el.getSize();
-      return { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + size.height / 2) };
+      await el.scrollIntoView({ block: "center" });
+      await browser.pause(150);
+      return el.execute((node) => {
+        const r = (node as HTMLElement).getBoundingClientRect();
+        return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+      }) as Promise<Point>;
     }
   }
   return null;

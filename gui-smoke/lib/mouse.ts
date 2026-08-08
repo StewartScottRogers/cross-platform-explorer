@@ -171,6 +171,69 @@ function moveStep(p: Point): PointerStep {
   return { type: "pointerMove", duration: 0, origin: "viewport", x: p.x, y: p.y };
 }
 
+// --- CPE-1481: WebKitWebDriver Actions-fallback right-click -------------------------------------
+// On WebKitWebDriver (Linux/wry) the W3C Actions API delivers `pointerdown`/`mousedown` +
+// `pointerup`/`mouseup` for `button: 2`, but — unlike CDP on Chromium — it is INCONSISTENT about
+// synthesising the DOM `contextmenu` event a secondary-button press produces:
+//   • On plain elements (file-row `<div>`s, blank pane) it emits NO `contextmenu` at all, so the
+//     app's `on:contextmenu` handlers never ran and no menu opened (round 1: every right-click spec
+//     failed "expected the … menu (.ctx) to open").
+//   • On INTERACTIVE `<button>` elements (the Home drive TILE) it DOES emit a native `contextmenu`.
+// Round 2 supplemented the real press with a synthetic `contextmenu`; that fixed the plain-element
+// specs but turned the button case into a DOUBLE stimulus — native event opens the drive menu, a
+// follow-on event closes it, our synthetic reopens it racing the re-render — which the drive-tile
+// spec caught as open→close→reopen ending on the WRONG (item) menu (PR #724 round-2 ubuntu run).
+//
+// FIX (round 3): on the Actions fallback, do NOT perform a real `button:2` press at all — only a
+// pointer move (for `:hover`) — then dispatch ONE HIT-TESTED synthetic `contextmenu` at the exact
+// viewport pixel. That makes right-click a single deterministic event for buttons and non-buttons
+// alike (no native/synthetic double-fire). It is NOT the CPE-1154 anti-pattern (a synthetic event at
+// a hand-picked node that skips hit-testing): `document.elementFromPoint` resolves the true topmost
+// element at the pixel, so occlusion/z-order still decides the target — the element a real
+// right-click would hit. The app needs no real mousedown here: its row/tile handlers derive selection
+// from the `contextmenu` event's index/target and position from its `clientX/clientY`
+// (App.svelte `onRowContext`/`onDriveContext`), never from a preceding mousedown.
+//
+// This only runs on the Actions fallback (Linux/WebKit CI + attended macOS/Linux). The Windows CDP
+// fast-path is untouched — it emits a genuine native `contextmenu` through the real input pipeline.
+const CTX_MENU_SELECTOR = ".ctx"; // this app's single context-menu root (ContextMenu.svelte)
+
+/** True if a context menu is currently open (so we don't double-dispatch a synthetic one). */
+async function contextMenuOpen(): Promise<boolean> {
+  return browser.execute((sel) => !!document.querySelector(sel), CTX_MENU_SELECTOR) as Promise<boolean>;
+}
+
+/**
+ * Dispatch a faithful, HIT-TESTED synthetic `contextmenu` at a viewport pixel: resolve the topmost
+ * element there via `elementFromPoint` (real occlusion), then fire a bubbling, cancelable
+ * `contextmenu` MouseEvent carrying that pixel as `clientX/clientY` and `button:2` — exactly what the
+ * app's `on:contextmenu` handlers read to open + position the menu. No-ops if the point resolves to
+ * nothing (off-screen / outside the content area). Used ONLY to backfill the event WebKitWebDriver's
+ * Actions API omits; never on the CDP path.
+ */
+async function dispatchSyntheticContextMenu(p: Point): Promise<void> {
+  await browser.execute(
+    (x, y) => {
+      const el = document.elementFromPoint(x, y);
+      if (!el) return;
+      el.dispatchEvent(
+        new MouseEvent("contextmenu", {
+          bubbles: true,
+          cancelable: true,
+          composed: true,
+          view: window,
+          button: 2,
+          buttons: 2,
+          clientX: x,
+          clientY: y,
+        }),
+      );
+    },
+    p.x,
+    p.y,
+  );
+}
+
 /** The CSS-pixel bitmask CDP wants in `buttons` while a button is held (mousePressed/last mouseMoved). */
 function buttonsMask(button: CdpButton): number {
   switch (button) {
@@ -271,11 +334,13 @@ export async function rightClick(target: string | Point): Promise<void> {
     await mouseEvent("mouseReleased", p, "right", 1, 0);
     return;
   }
-  await performPointer([
-    moveStep(p),
-    { type: "pointerDown", button: w3cButton("right") },
-    { type: "pointerUp", button: w3cButton("right") },
-  ]);
+  // CPE-1481 round 3: move for `:hover` but do NOT perform a real button:2 press — WebKit's Actions
+  // API emits a native `contextmenu` for interactive `<button>`s (drive tile) that would double-fire
+  // against the synthetic below. Dispatch ONE hit-tested synthetic `contextmenu` instead (the guard
+  // is belt-and-braces against a menu that a prior gesture left open — dismissMenu should have cleared
+  // it). See the block comment above `dispatchSyntheticContextMenu` for the full rationale.
+  await performPointer([moveStep(p)]);
+  if (!(await contextMenuOpen())) await dispatchSyntheticContextMenu(p);
 }
 
 /** A faithful double-click: two press/release pairs, the second carrying clickCount 2 (CDP). On the

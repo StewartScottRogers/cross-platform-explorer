@@ -19,12 +19,16 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { $, browser } from "@wdio/globals";
+import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
 import { rightClick, click, type Point } from "../lib/mouse.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
+// Seeded by wdio.conf.ts#onPrepare into the opened tmpDir (kept as a literal to match this suite's
+// convention of duplicating the seeded name rather than importing across the runner boundary —
+// context-menu.smoke.ts does the same).
+const EMPTY_DIR_NAME = "CPE-1154-empty-folder";
 
 /** Viewport-space centre of the breadcrumb `.crumb` button whose text === `name` (or `null`). */
 async function pointOfCrumb(name: string): Promise<Point | null> {
@@ -119,6 +123,41 @@ async function dismissMenu(): Promise<void> {
   }
 }
 
+/** CPE-1481 round 3 — deterministically put a folder in the Home "Folders" MRU, instead of racing the
+ *  slow startup `--open=<tmpDir>` background record. Root cause of the round-2 Linux failure: `--open`'s
+ *  `recordRecentFolder` (App.svelte `loadPath`) fires only AFTER the streaming tmpDir listing fully
+ *  settles; under Xvfb CI that write can land after this spec's first-test poll window — the file's
+ *  SECOND test reliably saw the row precisely because it ran later, once the write had landed. So rather
+ *  than depend on that timing, navigate INTO the seeded empty subfolder through the UI: a real, AWAITED
+ *  navigation whose `recordRecentFolder` completes synchronously with the listing (the folder shows its
+ *  `.empty-state`), guaranteeing the Folders tab is non-empty when we read it. Uses the same
+ *  row-scan + `doubleClick` primitive context-menu.smoke.ts already proves reliable under wry. */
+async function seedFoldersMru(): Promise<void> {
+  const crumb = await $('[aria-current="page"]');
+  await crumb.waitForExist({ timeout: 30_000 });
+  let folderRow: WebdriverIO.Element | undefined;
+  await browser.waitUntil(
+    async () => {
+      for (const row of await $$(".row")) {
+        const html = await row.getHTML({ includeSelectorTag: false });
+        if (html.includes(EMPTY_DIR_NAME)) {
+          folderRow = row;
+          return true;
+        }
+      }
+      return false;
+    },
+    { timeout: 20_000, timeoutMsg: `expected a row for the seeded folder "${EMPTY_DIR_NAME}" to navigate into` },
+  );
+  await folderRow!.doubleClick();
+  // The awaited navigation lands when the (empty) folder renders its centred `.empty-state` box — at
+  // which point `recordRecentFolder` has run, so the Folders MRU now holds this folder.
+  await $(".empty-state").waitForExist({
+    timeout: 15_000,
+    timeoutMsg: "the seeded empty folder did not open (needed to record a Folders-MRU entry)",
+  });
+}
+
 describe("CPE-1162 — Home Recent/Favorites/Folders row right-click menu opens and STAYS open", () => {
   before(() => {
     JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")); // confirm the harness seeded state
@@ -130,9 +169,23 @@ describe("CPE-1162 — Home Recent/Favorites/Folders row right-click menu opens 
   });
 
   it("the Home Folders tab shows at least one recorded folder row (from --open=<tmpDir>)", async () => {
+    // CPE-1481 round 3: deterministically ensure the Folders MRU has an entry before reading it —
+    // don't race the slow startup --open background record (see seedFoldersMru).
+    await seedFoldersMru();
     await goHome();
     await clickPill(/Folders/);
-    const row = await pointOfFirstRow();
+    // CPE-1481: poll rather than a single synchronous read right after the pill click's fixed 150ms
+    // pause — a `--open=<tmpDir>` launch always records the folder into the MRU well before this spec
+    // runs, but under slow Linux/Xvfb CI a render tick could still separate the pill's `tab` state
+    // flipping from the `{#if tab === "folders"}` list actually painting its rows.
+    let row: Point | null = null;
+    await browser.waitUntil(
+      async () => {
+        row = await pointOfFirstRow();
+        return row !== null;
+      },
+      { timeout: 10_000, timeoutMsg: "Home Folders tab should list the folder opened via --open=<tmpDir>" },
+    );
     // eslint-disable-next-line no-console
     console.log(`[CPE-1162] first Folders row: ${JSON.stringify(row)}`);
     expect(row, "Home Folders tab should list the folder opened via --open=<tmpDir>").to.not.equal(null);
