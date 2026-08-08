@@ -284,6 +284,11 @@ impl FileSystemProvider for SftpProvider {
         self.rt.block_on(async {
             let dir = self.sftp.read_dir(path).await.map_err(|e| format!("{path}: {e}"))?;
             Ok(dir
+                // Source-side path-traversal defense (CPE-1461): the READDIR filename is server-supplied
+                // and russh-sftp only strips exact `.`/`..`. Drop any name that isn't a safe single
+                // segment (contains `/`/`\`, is `.`/`..`, or carries a drive/root prefix) so it can never
+                // reach the local-write sink in `transfer::download_tree`.
+                .filter(|entry| cpe_server::transfer::is_safe_name(&entry.file_name()))
                 .map(|entry| {
                     let is_dir = entry.file_type().is_dir();
                     ProviderEntry {

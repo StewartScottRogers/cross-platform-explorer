@@ -2,7 +2,7 @@
 id: CPE-1461
 title: "Path traversal / arbitrary local file write in transfer::download_tree from a hostile remote server (SFTP entry names)"
 type: Bug
-status: Backlog
+status: Done
 priority: High
 component: Backend
 tags: [ready, security]
@@ -52,3 +52,44 @@ locally. Add tests for `..`, absolute `/etc/...`, Windows `C:\...`, UNC `\\host\
 
 ## Effort / blast radius
 S–M / one guard helper in transfer.rs + tests. Serialize with CPE-1462 (same file/function). Epic CPE-616.
+
+## Work Log (2026-08-08, Done — PR with CPE-1462 on branch `cpe-1461-1462-remote-traversal-dos`)
+Fixed at BOTH the shared sink and each source, defense-in-depth.
+
+**Sink — `crates/server/src/transfer.rs`.** Added `pub fn guarded_join(base, rel) -> Option<PathBuf>`: it
+rebuilds the path segment-by-segment, splitting on BOTH `/` and `\` (so a Windows-style separator is
+neutralized on every OS, incl. Linux CI where `\` is otherwise a legal filename byte), keeping ONLY
+`Component::Normal` segments; any `..` → `None`, any segment that parses as a root/drive/UNC prefix →
+`None`. Because only `Normal` segments are ever pushed onto `base`, the result is always lexically
+contained — proven by the `guarded_join_never_escapes_the_base` test over the whole malicious-input list.
+`download_tree` now uses it for every write AND every mkdir; an entry that would escape is SKIPPED with a
+surfaced `eprintln!` notice (skip-on-error — one hostile entry never fails the whole transfer) and its
+parent dirs are NOT created. Belt-and-suspenders: `local_dir` is canonicalized once up front and each
+materialized dir is verified to canonicalize back under it (guards a pre-existing symlink inside the root).
+
+**How each malicious input is neutralized (sink):** `../../../../../home/x/.bashrc` → `..` segment →
+skipped. `C:\Users\…\Startup\evil.bat` → on Windows the `C:` segment is a `Prefix` (non-`Normal`) →
+skipped; on Unix it's contained as a literal `C:` dir INSIDE the root (still no escape). `\\host\share\x`
+(UNC) and `\x` (rooted) → split on `\` → contained under the root as normal segments (no escape). `x\..\..\y`
+→ split on `\` yields `..` → skipped on every OS. `a/../../b` → `..` → skipped. `%2e%2e` reaches the sink
+only as a literal leaf name → written safely inside the root (the decode-to-`..` happens at the WebDAV
+source, below).
+
+**Source (defense-in-depth).** Added `pub fn is_safe_name(name)` in `transfer.rs` (rejects empty/`.`/`..`,
+any `/`/`\`/NUL, and any non-single-`Normal`-component like a bare drive). Wired it into
+`crates/sftp/src/lib.rs` `list` (filters the READDIR filename) and `crates/webdav/src/lib.rs`
+`parse_multistatus` (skips the whole entry when the derived name is unsafe — this is where `%2e%2e` →
+`..` and `…/C:\…` are dropped, verified by `parse_multistatus_skips_path_traversal_hrefs`).
+
+**Redirect policy (watch-item).** Small change, so done: `WebdavProvider::connect` now builds the agent
+with `ureq::AgentBuilder::new().redirects(0).build()` instead of the default `ureq::agent()` (which
+follows up to 5 redirects). A `3xx` toward `file://`/an attacker host is no longer auto-followed — it
+surfaces as an error. Closes the future-SSRF foothold flagged in the audit.
+
+**Tests (all green, `cargo test`):** server transfer module +6 (`guarded_join_never_escapes_the_base`,
+`is_safe_name_accepts_leaves_and_rejects_paths`, `download_tree_neutralizes_every_traversal_input` via a
+`HostileNames` provider asserting a sentinel file is never created outside the root,
+`download_tree_still_downloads_a_legit_nested_tree` = no over-rejection, plus the CPE-1462 cap tests);
+webdav +1 traversal-href test (12 total pass, incl. the existing download round-trip = no over-rejection);
+sftp 14 pass (incl. download round-trip). Build + `clippy --all-targets -D warnings` clean for all three
+crates. Public API unchanged (`walk`/`download_tree`/`WalkEntry` signatures identical).

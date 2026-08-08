@@ -54,7 +54,12 @@ impl WebdavProvider {
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{pass}"));
             format!("Basic {token}")
         });
-        WebdavProvider { agent: ureq::agent(), base_url: config.base_url.clone(), auth_header }
+        // Pin an explicit no-redirect policy (CPE-1461 watch-item): the default agent follows up to 5
+        // redirects, so a future change (or a hostile server today) could bounce a request via a `3xx`
+        // toward `file://` or an attacker-controlled host — an SSRF/exfiltration foothold. Refusing to
+        // auto-follow surfaces the `3xx` as an error instead; a WebDAV share never needs redirects.
+        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        WebdavProvider { agent, base_url: config.base_url.clone(), auth_header }
     }
 
     /// The absolute URL for a provider path (`/`-rooted).
@@ -226,6 +231,13 @@ fn parse_multistatus(xml: &str, skip_path: Option<&str>) -> Result<Vec<ProviderE
         let name = norm.rsplit('/').next().unwrap_or("").to_string();
         if name.is_empty() {
             continue; // the collection root with no skip target — nothing to name
+        }
+        // Source-side path-traversal defense (CPE-1461): the name is derived from the server's `<d:href>`
+        // (after percent-decoding), so a hostile href like `/%2e%2e` or `/C:\...\evil` decodes to a name
+        // that is `..` / carries a separator or drive prefix. Treat the name as a single opaque segment
+        // and skip the whole entry if it isn't one, before it can reach the local-write sink.
+        if !cpe_server::transfer::is_safe_name(&name) {
+            continue;
         }
         let is_dir = resp.descendants().any(|n| n.tag_name().name() == "collection");
         let size = resp
@@ -675,6 +687,25 @@ mod tests {
                  not return gracefully (Ok/Err) but unwound: {msg}"
             );
         }
+    }
+
+    #[test]
+    fn parse_multistatus_skips_path_traversal_hrefs() {
+        // CPE-1461 source-side defense: a hostile PROPFIND response whose href decodes to a traversal
+        // name (`..` via `%2e%2e`, a Windows drive path, a backslash-separated escape) must be dropped —
+        // never surfaced as a provider entry that could reach the local-write sink. A legit sibling in
+        // the same response still parses, proving no over-rejection.
+        // `%2e%2e` decodes to a leaf name of `..`; a backslash-bearing segment carries a Windows drive.
+        // Both are the *last* href segment (the only part used as the name), so both must be dropped.
+        let xml = multistatus_wrap(
+            "<d:response><d:href>/dir/%2e%2e</d:href></d:response>\
+             <d:response><d:href>/dir/C:\\Windows\\evil.bat</d:href></d:response>\
+             <d:response><d:href>/dir/good.txt</d:href><d:propstat><d:prop>\
+             <d:getcontentlength>7</d:getcontentlength></d:prop></d:propstat></d:response>",
+        );
+        let entries = parse_multistatus(&xml, None).expect("well-formed");
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["good.txt"], "only the safe sibling should survive; got {names:?}");
     }
 
     #[test]
