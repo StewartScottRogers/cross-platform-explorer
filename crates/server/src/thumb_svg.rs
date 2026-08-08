@@ -89,7 +89,7 @@
 //! thread spawn and a near-1024-level `usvg` walk) but are explicitly no longer relied on as the
 //! stack-overflow safety bar — see [`rasterize_svg`]'s doc comment.
 //!
-//! **A subtlety this fix's own verification caught:** [`use_reference_chain_too_deep`] is *not* the same
+//! **A subtlety this fix's own verification caught:** [`reference_chain_too_deep`] is *not* the same
 //! kind of "cheap, provably non-recursive" check [`xml_nesting_too_deep`] is — to mirror `usvg`'s exact
 //! entity/DTD decoding (see that function's own doc comment) it calls the REAL, recursive
 //! `roxmltree::Document::parse_with_options`, the identical parser class CPE-1413 originally found recurses
@@ -97,9 +97,62 @@
 //! *caller's* thread (reasoning it ran "before" the big-stack spawn, so it'd only ever see shallow input
 //! that already passed `xml_nesting_too_deep`'s 64-level cap) — but a small-stack diagnostic during
 //! verification showed a BARE `roxmltree` parse of a document only ~42 levels deep (comfortably under that
-//! 64-level cap) already overflows a 256KB stack by itself. So `use_reference_chain_too_deep` now runs
+//! 64-level cap) already overflows a 256KB stack by itself. So `reference_chain_too_deep` now runs
 //! *inside* [`rasterize_svg_on_a_guaranteed_stack`]'s closure, on the same guaranteed stack as the render —
 //! only [`xml_nesting_too_deep`]'s genuinely flat byte-scan loop is safe to run on the caller's own thread.
+//!
+//! **CPE-1437 attempt 3 — the 16MiB stack (attempt 2) closes the `<use>`/nesting composition class, since
+//! that's bounded by `usvg`'s own 1024-level recursion cap either way, but it does NOT close everything:**
+//! an independent adversarial audit found `usvg` has SEVERAL OTHER reference-resolution recursions that are
+//! bounded only by total element count (~1,000,000), not by the 1024 cap — so a long enough ACYCLIC chain
+//! of them overflows even a large guaranteed stack, and "no fixed stack size closes it: a longer chain
+//! always exists." Confirmed by reading `usvg-0.45.1`'s own source (`parser/clippath.rs`, `parser/mask.rs`,
+//! `parser/paint_server.rs`, `parser/marker.rs`, `parser/filter.rs`) and empirically reproduced:
+//! - `clippath::convert` self-recursively calls `convert(link, ...)` when a `<clipPath clip-path="url(#…)">`
+//!   itself has a `clip-path`. **Reproducer: a chain of `N` clipPaths, `Ok` at N=7000, `STATUS_STACK_OVERFLOW`
+//!   at N=8000 even through the 16MiB thread** (~686KB SVG).
+//! - `mask::convert` does the identical self-recursion for `<mask mask="url(#…)">`. **Overflows by N=5000**
+//!   (~413KB SVG).
+//! - `paint_server::convert_pattern` converts a `<pattern>`'s content via the SAME general
+//!   `converter::convert_children` used for every other element's children — so a shape *inside* a pattern
+//!   that itself has `fill="url(#anotherPattern)"` recurses back into `convert_pattern` via ordinary mutual
+//!   recursion through the converter, not a dedicated self-call, but the effect (and the missing depth cap)
+//!   is identical.
+//! - `marker::convert` converts a `<marker>`'s content the same way (`converter::convert_children`), so a
+//!   path inside a marker with its own `marker-start="url(#anotherMarker)"` recurses the same way.
+//! - `filter::convert`/`convert_url` don't chain filter-to-filter directly, but a `<filter>` can contain a
+//!   `<feImage href="#element">` referencing an ARBITRARY element via `converter::convert_element` — so a
+//!   `<filter>` → `<feImage href>` an element with its OWN `filter="url(#anotherFilter)"` → that filter's own
+//!   `feImage` → ... chain recurses through the exact same converter mutual recursion.
+//! - `usvg`'s only defense against any of these (`fix_recursive_links` / the various `link == node`
+//!   self-reference checks in each `convert()`) breaks a **direct 1-hop cycle**, not a long **acyclic**
+//!   chain — the identical gap CPE-1414's cycle-only guard had for `<use>`, just never fixed for these five
+//!   reference types. **This DoS already existed on `main` before CPE-1437 ever started** (a 2MB prod stack
+//!   overflows at an even shorter chain than the 256KB probe does) — CPE-1437 didn't introduce it, but
+//!   closing the small-stack bar means closing this too.
+//!
+//! Since no stack size can bound an unbounded-by-`usvg`-itself chain, [`reference_chain_too_deep`] (renamed
+//! from `use_reference_chain_too_deep`) is generalized to walk ALL SIX of these reference-resolution edge
+//! types in one unified graph — `<use>`/`<feImage>` `href`, plus `clip-path`/`mask`/`filter`/
+//! `marker-start`/`marker-mid`/`marker-end`/`fill`/`stroke` `url(#id)` references — under one combined depth
+//! cap ([`MAX_REFERENCE_CHAIN_DEPTH`], renamed from `MAX_USE_CHAIN_DEPTH`, value unchanged at 128). See
+//! [`direct_reference_targets`] and [`hops_from_target`] for how each edge type is resolved (reusing
+//! [`resolve_use_href`] for the bare-IRI `href` cases and a new [`find_func_iri_ids`] — mirroring
+//! `svgtypes::FuncIRI::from_str`'s grammar the same way [`parse_iri_fragment`] mirrors `IRI::from_str` — for
+//! the `url(#id)` cases). The 16MiB guaranteed stack from attempt 2 is kept as defense-in-depth for whatever
+//! remains bounded by `usvg`'s own 1024 cap (the `<use>`/nesting composition class).
+//!
+//! **Residual risk, reported rather than silently left closed:** `filter::convert`'s `feImage`→arbitrary-
+//! element indirection is bounded by this walk (a `<filter>` element's `feImage` children are scanned as
+//! part of [`hops_from_target`], the same way a container's nested `<use>`s already were), and so is
+//! `pattern`/`marker` content via the same "scan target's entire subtree for further reference-bearing
+//! nodes" rule. This was verified against reproducers built in the same shape as the confirmed clipPath/mask
+//! ones (see `tests/thumb_svg_panic_safety.rs`). What this pre-scan does **NOT** attempt to bound: a
+//! *combined* attack that interleaves several of these reference types with independent literal `<g>`
+//! nesting inside each hop (the same composition-of-dimensions concern noted for attempt 2, now with six
+//! dimensions instead of two) — no adversarial reproducer for that composed shape has been found or
+//! confirmed against this codebase, but it hasn't been proven safe either, so it's flagged here rather than
+//! silently assumed closed.
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -250,24 +303,32 @@ type XmlNode<'a> = resvg::usvg::roxmltree::Node<'a, 'a>;
 /// [`resolve_use_href`] reuses this exact order to close that class here too.
 const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 
-/// The deepest `<use>` **reference chain** ([`use_reference_chain_too_deep`]'s walk: `<use>` A -> target
-/// B -> (if B is itself a `<use>`, or contains one) target C -> ...) allowed before `rasterize_svg`
-/// refuses the document outright (CPE-1437). `usvg` resolves each hop by *recursively cloning* the
-/// referenced content, so resolved-tree recursion depth scales with chain length; unlike
-/// [`MAX_SVG_NESTING_DEPTH`] (literal XML nesting), a flat sibling chain of `<use>` elements each
-/// referencing the previous is only ~1 level deep in the raw XML, so it passes that guard untouched while
-/// still driving `usvg` — and, on this codebase's 256KB small-stack test probe, the whole process — to the
-/// same recursion depth as if it *were* nested that deep.
+/// The deepest **combined reference chain** ([`reference_chain_too_deep`]'s walk, over ALL SIX edge types —
+/// `<use>`/`<feImage>` `href` plus `clip-path`/`mask`/`filter`/`marker-*`/`fill`/`stroke` `url(#id)` — see
+/// the module doc comment's "attempt 3" section) allowed before `rasterize_svg` refuses the document
+/// outright (CPE-1437). `usvg` resolves each hop by *recursion* (cloning for `<use>`, mutual recursion
+/// through the general converter for the other five), so resolution stack depth scales with chain length;
+/// unlike [`MAX_SVG_NESTING_DEPTH`] (literal XML nesting), a flat sibling chain of reference elements each
+/// pointing at the previous is only ~1 level deep in the raw XML, so it passes that guard untouched while
+/// still driving `usvg`'s real resolution — and, on this codebase's 256KB small-stack test probe, the whole
+/// process — to the same recursion depth as if it *were* nested that deep.
 ///
-/// 128 is sized the same way [`MAX_SVG_NESTING_DEPTH`] (64) was: a real hand-authored or tool-exported
-/// SVG's `<use>` indirection is essentially always 1-3 hops (icon-sprite sheets referencing a single base
-/// shape are the deepest realistic case, rarely past single digits), so 128 costs nothing for legitimate
-/// artwork; it's comfortably below the ~500-hop chain CPE-1437 confirmed reliably `STATUS_STACK_OVERFLOW`s
-/// a 256KB debug-build thread stack (the same wide margin [`MAX_SVG_NESTING_DEPTH`]'s 64 keeps under its
-/// own ~500-level empirical crash depth); and it's comfortably below `usvg`'s own internal recursion cap
-/// of 1024, which is sized for `usvg`'s *own* DoS protection on a normal-sized stack, not for this
-/// codebase's small-stack safety bar.
-const MAX_USE_CHAIN_DEPTH: usize = 128;
+/// One unified cap over the union of all six edge types (rather than a separate cap per type) is
+/// deliberate: it's simpler to reason about and test, and a mixed chain (e.g. a `<use>` into a `<clipPath>`
+/// into a `<mask>`) shouldn't get MORE budget just because it changes reference type partway through — the
+/// real recursion cost that matters is the total hop count, not which attribute each hop used.
+///
+/// 128 is unchanged from CPE-1437 attempt 1's `<use>`-only cap (sized the same way
+/// [`MAX_SVG_NESTING_DEPTH`]'s 64 was): a real hand-authored or tool-exported SVG's reference indirection —
+/// `<use>` hops, clip-path/mask layering, pattern/marker nesting — is essentially always 1-3 hops (icon
+/// sprite sheets and a couple of layered effects are the deepest realistic case, rarely past single digits),
+/// so 128 costs nothing for legitimate artwork. It's now checked against attempt 3's audit findings too:
+/// ~40-60x below the empirical clipPath (N=8000) and mask (N=5000) `STATUS_STACK_OVERFLOW` floors — which,
+/// per the module doc comment, aren't bounded by `usvg`'s own 1024 cap at all, so this pre-scan is the ONLY
+/// thing standing between those floors and the caller — and still comfortably below `usvg`'s internal
+/// `<use>`-resolution recursion cap of 1024, which is sized for `usvg`'s *own* DoS protection on a
+/// normal-sized stack, not for this codebase's small-stack safety bar.
+const MAX_REFERENCE_CHAIN_DEPTH: usize = 128;
 
 /// Mirrors `svgtypes::IRI::from_str`'s exact fragment grammar by hand (`usvg`'s `resolve_href` parses a
 /// resolved `href`/`xlink:href` value with `svgtypes::IRI::from_str`, and the CPE-1414 investigation
@@ -323,46 +384,165 @@ fn resolve_use_href<'a>(node: XmlNode<'a>) -> Option<&'a str> {
     parse_iri_fragment(link_value)
 }
 
-/// The `<use>` elements a resolution of `target` will encounter next. If `target` is itself a `<use>`
-/// element, resolving it continues directly to *its own* target — a single further hop, the flat-chain
-/// shape CPE-1437 reported. Otherwise `target` is a container (`<symbol>`, `<g>`, plain shape, ...), and
-/// rendering its content walks into every `<use>` anywhere in its subtree (at any nesting depth) — each of
-/// those is a further hop too. This dual rule is also what lets the same walk catch the CPE-1414 mutual-
-/// `<symbol>`-cycle shape (`<symbol id="a">` containing a `<use>` to `#b`, `<symbol id="b">` containing a
-/// `<use>` back to `#a`): the edge from the `id="a"` target to the `<use href="#b">` nested inside it is
-/// exactly the kind of hop this returns, so the walk sees `a -> b -> a` as a real cycle even though
-/// neither `<use>` element directly names the other.
-fn use_targets_reached_via(target: XmlNode<'_>) -> Vec<XmlNode<'_>> {
-    if target.has_tag_name("use") {
-        vec![target]
-    } else {
-        target.descendants().filter(|n| n.has_tag_name("use")).collect()
+/// Attributes whose value is a `url(#id)` reference into another element (as opposed to `<use>`'s bare-IRI
+/// `href`/`xlink:href` — see [`resolve_use_href`]), enumerated from reading `usvg-0.45.1`'s own converter
+/// source (`parser/clippath.rs`, `parser/mask.rs`, `parser/filter.rs`, `parser/paint_server.rs`,
+/// `parser/marker.rs` — see the module doc comment's "attempt 3" section for what each one recurses into
+/// and why none of them is bounded by `usvg`'s 1024-level `<use>`-resolution cap). `fill`/`stroke` only
+/// matter when their `url(#id)` target is a `<pattern>` (a plain color or gradient reference is a
+/// self-contained leaf either way — see [`hops_from_target`]), but including them unconditionally here is
+/// harmless: a resolved id that turns out not to be pattern-shaped just becomes a dead end in the graph.
+const FUNC_IRI_ATTRS: &[&str] =
+    &["clip-path", "mask", "filter", "marker-start", "marker-mid", "marker-end", "fill", "stroke"];
+
+/// Finds every `url(#id)`-shaped reference anywhere in `value`, mirroring `svgtypes::FuncIRI::from_str`'s
+/// grammar (`url(` + optional whitespace + optional matching quote + `#id` + optional whitespace + `)`) by
+/// hand for the same no-new-dependency reason [`parse_iri_fragment`] mirrors `IRI::from_str` (see that
+/// function's doc comment). Deliberately more permissive than `FuncIRI::from_str`'s exact single-value
+/// grammar in two ways: it scans for a match ANYWHERE in `value` rather than requiring the whole value to
+/// be exactly one reference (needed because `filter` can legally hold a LIST of space-separated filter
+/// functions and `url(...)` references, e.g. `filter="blur(2) url(#f1) url(#f2)"`), and it's lenient about
+/// quote-pairing. Being more permissive only makes this guard MORE conservative, never less: extra
+/// surrounding text that would make `usvg` reject the whole attribute can at worst add an extra graph edge
+/// here, never silently drop a real one.
+///
+/// Purely iterative (a single scan with a small bounded lookahead per `url(` occurrence) — never recurses —
+/// so a value packed with many `url(` tokens (valid ids or not) can't overflow any stack or make this scan
+/// itself do unbounded work.
+fn find_func_iri_ids(value: &str) -> Vec<&str> {
+    const LOOKAHEAD: usize = 4096;
+    let bytes = value.as_bytes();
+    let mut ids = Vec::new();
+    let mut pos = 0usize;
+    while pos + 4 <= bytes.len() {
+        if &bytes[pos..pos + 4] != b"url(" {
+            pos += 1;
+            continue;
+        }
+        let paren = pos + 4;
+        let limit = bytes.len().min(paren + LOOKAHEAD);
+        let mut i = paren;
+        while i < limit && bytes[i] != b'#' && bytes[i] != b')' {
+            i += 1;
+        }
+        if i < limit && bytes[i] == b'#' {
+            let id_start = i + 1;
+            let mut j = id_start;
+            while j < bytes.len() && !matches!(bytes[j], b')' | b' ' | b'\'' | b'"') {
+                j += 1;
+            }
+            if j > id_start {
+                // `id_start`/`j` only ever land on ASCII delimiters, so this slice is always a valid UTF-8
+                // char boundary (same reasoning as `parse_iri_fragment`'s own slicing).
+                ids.push(&value[id_start..j]);
+            }
+            pos = j.max(paren + 1);
+        } else {
+            pos = paren;
+        }
     }
+    ids
 }
 
-/// The `<use>` hops directly reachable from resolving `use_node`'s own href (see
-/// [`use_targets_reached_via`]). A direct self-reference (`use_node`'s target resolves back to itself) is
-/// treated as *no* hop at all, matching `usvg`'s own explicit `link == node` self-reference guard (it
-/// silently skips rendering rather than recursing) — reusing that same real-world-harmless special case
-/// here avoids over-rejecting the (contrived but legal, and already covered by its own small-stack
-/// regression test below) `<use href="#self">` idiom as if it were a reference cycle.
-fn use_chain_edges<'a>(use_node: XmlNode<'a>, id_map: &HashMap<&'a str, XmlNode<'a>>) -> Vec<XmlNode<'a>> {
-    let Some(frag) = resolve_use_href(use_node) else {
-        return Vec::new();
-    };
-    let Some(target) = id_map.get(frag).copied() else {
-        return Vec::new();
-    };
-    if target == use_node {
-        return Vec::new();
+/// The reference-graph edges directly on `node` itself: `<use>`/`<feImage>`'s bare-IRI `href` (resolved via
+/// [`resolve_use_href`], reusing the exact `xlink:href`-before-`href` precedence CPE-1414 validated), plus
+/// every `url(#id)` found in any of [`FUNC_IRI_ATTRS`]'s attributes (resolved via [`find_func_iri_ids`]).
+/// An id that doesn't resolve to any element in `id_map` contributes no edge — matching `usvg`, which
+/// treats an unresolvable reference as absent rather than guessing.
+fn direct_reference_targets<'a>(node: XmlNode<'a>, id_map: &HashMap<&'a str, XmlNode<'a>>) -> Vec<XmlNode<'a>> {
+    let mut targets = Vec::new();
+
+    if node.has_tag_name("use") || node.has_tag_name("feImage") {
+        if let Some(frag) = resolve_use_href(node) {
+            if let Some(&t) = id_map.get(frag) {
+                targets.push(t);
+            }
+        }
     }
-    use_targets_reached_via(target)
+
+    for &attr in FUNC_IRI_ATTRS {
+        if let Some(value) = node.attribute(attr) {
+            for id in find_func_iri_ids(value) {
+                if let Some(&t) = id_map.get(id) {
+                    targets.push(t);
+                }
+            }
+        }
+    }
+
+    targets
 }
 
-/// Cheap(ish), non-recursive guard against a maliciously (or accidentally) deep `<use>` reference chain
-/// (CPE-1437), run before the document is handed to `usvg`/`resvg::render`. See the module doc comment for
-/// the full backstory; in short this complements [`xml_nesting_too_deep`] (CPE-1413), which only bounds
-/// *literal* XML nesting and is blind to a flat sibling `<use>` chain.
+/// The reference-BEARING nodes a resolution of `target` will encounter next — i.e. the nodes themselves,
+/// each with its OWN resolution still deferred to when the DFS visits it (via [`chain_edges`] again), NOT
+/// their already-resolved targets. This distinction matters: returning an already-resolved target here
+/// would silently skip a hop (double-advancing the chain two links at once instead of one), which is
+/// exactly the subtle bug an earlier version of this generalization had — caught by the boundary test
+/// (`use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected` in this module's tests)
+/// quietly passing a 129-link chain that should have been rejected, because each level was silently
+/// advancing by 2 links instead of 1.
+///
+/// `usvg` converts `target`'s ENTIRE subtree when resolving a reference to it (cloning it for `<use>`;
+/// walking its children in place for `<clipPath>`/`<mask>`/`<pattern>`/`<marker>`/`<filter>` content), so
+/// this scans every node in `target`'s subtree (via `target.descendants()`, which — per `roxmltree`'s own
+/// docs — includes `target` itself first) and keeps any node that is ITSELF reference-bearing (has at
+/// least one of its own [`direct_reference_targets`]) as a further hop, unresolved. This single rule
+/// generalizes CPE-1437 attempt 1's `<use>`-only "container -> nested `<use>` descendants" logic (which
+/// caught the CPE-1414 mutual-`<symbol>` cycle even though neither `<use>` named the other directly:
+/// `target.descendants().filter(|n| n.has_tag_name("use"))`, i.e. exactly this same "find reference-bearing
+/// nodes, don't resolve them yet" shape) to ALL six reference types at once: a `<clipPath id="a">`
+/// containing another `<clipPath id="b">`'s `clip-path` reference, a `<pattern>` whose content fills a
+/// shape with another pattern, a `<filter>` whose `feImage` references an element with its own `filter=`,
+/// and so on are all found the same way — including `target` itself being reference-bearing (e.g. `target`
+/// is itself a `<use>`, or a `<clipPath>` that itself has `clip-path=`), which is why the scan doesn't skip
+/// `target` in its own subtree.
+///
+/// `target_cache` memoizes this per TARGET node (not per DFS-visited node — see [`reference_chain_too_deep`]
+/// for that separate, path-based memoization) so that many different trigger nodes independently referencing
+/// the SAME target (a common, entirely legitimate pattern — e.g. many shapes sharing one `fill="url(#p)"`)
+/// don't each re-scan that target's whole subtree from scratch; without this, a document with many
+/// independent references into one large shared target would make this pre-scan itself do quadratic work.
+fn hops_from_target<'a>(
+    target: XmlNode<'a>,
+    id_map: &HashMap<&'a str, XmlNode<'a>>,
+    target_cache: &mut HashMap<XmlNode<'a>, Vec<XmlNode<'a>>>,
+) -> Vec<XmlNode<'a>> {
+    if let Some(cached) = target_cache.get(&target) {
+        return cached.clone();
+    }
+    let hops: Vec<_> = target
+        .descendants()
+        .filter(|&n| !direct_reference_targets(n, id_map).is_empty())
+        .collect();
+    target_cache.insert(target, hops.clone());
+    hops
+}
+
+/// The full set of reference-chain hops directly reachable from `node` (see [`direct_reference_targets`]
+/// for `node`'s own direct targets, then [`hops_from_target`] for what resolving each of those targets
+/// leads to next). A direct self-reference (one of `node`'s targets resolves back to `node` itself) is
+/// excluded before expanding further — matching `usvg`'s own explicit `link == node` self-reference guards
+/// in `clippath::convert`/`mask::convert`/`use_node.rs` (all silently skip rendering rather than recursing)
+/// — so this doesn't over-reject the harmless `<use href="#self">`/`<clipPath id="a" clip-path="url(#a)">`
+/// idiom as if it were a reference cycle.
+fn chain_edges<'a>(
+    node: XmlNode<'a>,
+    id_map: &HashMap<&'a str, XmlNode<'a>>,
+    target_cache: &mut HashMap<XmlNode<'a>, Vec<XmlNode<'a>>>,
+) -> Vec<XmlNode<'a>> {
+    direct_reference_targets(node, id_map)
+        .into_iter()
+        .filter(|&target| target != node)
+        .flat_map(|target| hops_from_target(target, id_map, target_cache))
+        .collect()
+}
+
+/// Cheap(ish), non-recursive guard against a maliciously (or accidentally) deep reference chain of ANY of
+/// the six kinds enumerated in the module doc comment's "attempt 3" section (`<use>`, `clip-path`, `mask`,
+/// `filter`+`feImage`, `fill`/`stroke`-referenced `pattern`, `marker-*`), run before the document is handed
+/// to `usvg`/`resvg::render`. See the module doc comment for the full backstory; in short this complements
+/// [`xml_nesting_too_deep`] (CPE-1413), which only bounds *literal* XML nesting and is blind to a flat
+/// sibling reference chain of any of these six shapes.
 ///
 /// Mirrors `usvg`'s own preprocessing byte-for-byte before parsing — the CPE-1414 investigation's root
 /// finding was that three separate prior guard attempts were each bypassed by hand-rolling this
@@ -375,24 +555,25 @@ fn use_chain_edges<'a>(use_node: XmlNode<'a>, id_map: &HashMap<&'a str, XmlNode<
 /// exact `xlink:href`-before-`href` attribute precedence (the third bypass class), so this walk can't be
 /// fooled by any of the three shapes that defeated those earlier attempts.
 ///
-/// Deliberately does **not** pre-filter on whether the raw bytes contain a `"use"` substring before paying
-/// for the full parse: that kind of fast path is itself a potential bypass (an entity/DTD-obfuscated
-/// `<use>`-equivalent might not contain the literal substring pre-decode), and this is a low-frequency,
+/// Deliberately does **not** pre-filter on whether the raw bytes contain any particular substring before
+/// paying for the full parse: that kind of fast path is itself a potential bypass (an entity/DTD-obfuscated
+/// reference might not contain the literal substring pre-decode), and this is a low-frequency,
 /// security-sensitive code path (thumbnail generation, not a hot per-frame loop) where correctness is
 /// worth more than shaving a parse.
 ///
 /// Walks the reference graph with an explicit heap-allocated stack (never the real call stack, so this
 /// scan itself can't overflow no matter how deep or cyclic the input is), doing an iterative post-order DFS
-/// from every `<use>` element in the document, memoizing each node's resolved chain depth so no node is
-/// ever walked twice. A **cycle** (revisiting a node that's still `InProgress` on the current path — this
-/// is what also catches the CPE-1414 mutual-`<symbol>` reference cycle, since that's an unbounded chain by
-/// construction) is treated as exceeding the cap immediately: either way `usvg` would recurse without
-/// bound (a true cycle) or well past this codebase's small-stack safety margin (a merely very long chain),
-/// so both are rejected identically here rather than trying to special-case "genuinely infinite" vs. "just
-/// very deep". Also bails out the moment the *currently open* DFS path alone exceeds `max_depth` (before
-/// exploring any further), so a single pathological chain can't force this scan to do more than
-/// `O(max_depth)` work before rejecting it.
-fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
+/// from every reference-bearing element in the document (any node [`direct_reference_targets`] resolves at
+/// least one edge for — not just `<use>` anymore, since CPE-1437 attempt 3), memoizing each node's resolved
+/// chain depth so no node is ever walked twice. A **cycle** (revisiting a node that's still `InProgress` on
+/// the current path — this is what also catches the CPE-1414 mutual-`<symbol>` reference cycle, since
+/// that's an unbounded chain by construction) is treated as exceeding the cap immediately: either way
+/// `usvg` would recurse without bound (a true cycle) or well past this codebase's small-stack safety margin
+/// (a merely very long chain), so both are rejected identically here rather than trying to special-case
+/// "genuinely infinite" vs. "just very deep". Also bails out the moment the *currently open* DFS path alone
+/// exceeds `max_depth` (before exploring any further), so a single pathological chain can't force this scan
+/// to do more than `O(max_depth)` work before rejecting it.
+fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
     let decompressed;
     let text: &str = if bytes.starts_with(&[0x1f, 0x8b]) {
         decompressed = match resvg::usvg::decompress_svgz(bytes) {
@@ -425,8 +606,12 @@ fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
         }
     }
 
-    let use_nodes: Vec<_> = doc.descendants().filter(|n| n.has_tag_name("use")).collect();
-    if use_nodes.is_empty() {
+    let mut target_cache: HashMap<XmlNode, Vec<XmlNode>> = HashMap::new();
+    let trigger_nodes: Vec<_> = doc
+        .descendants()
+        .filter(|&n| !direct_reference_targets(n, &id_map).is_empty())
+        .collect();
+    if trigger_nodes.is_empty() {
         return false;
     }
 
@@ -436,7 +621,7 @@ fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
     }
     let mut state: HashMap<XmlNode, VisitState> = HashMap::new();
 
-    for &start in &use_nodes {
+    for &start in &trigger_nodes {
         if state.contains_key(&start) {
             continue; // already resolved as part of an earlier start node's walk
         }
@@ -445,7 +630,7 @@ fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
         // index of the next edge to explore).
         let mut stack: Vec<(XmlNode, Vec<XmlNode>, usize)> = Vec::new();
         state.insert(start, VisitState::InProgress);
-        stack.push((start, use_chain_edges(start, &id_map), 0));
+        stack.push((start, chain_edges(start, &id_map, &mut target_cache), 0));
 
         while !stack.is_empty() {
             let top = stack.len() - 1;
@@ -458,7 +643,7 @@ fn use_reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
                     Some(VisitState::InProgress) => return true, // cycle -> unbounded chain -> reject
                     None => {
                         state.insert(next, VisitState::InProgress);
-                        let edges = use_chain_edges(next, &id_map);
+                        let edges = chain_edges(next, &id_map, &mut target_cache);
                         stack.push((next, edges, 0));
                         if stack.len() > max_depth {
                             // The currently-open DFS path is already longer than the cap. Whatever depth
@@ -511,19 +696,25 @@ const RASTERIZE_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// [`rasterize_svg_on_a_guaranteed_stack`] for how. A malformed document, an implausible declared size, or
 /// a render-target allocation failure all return `Err`.
 ///
-/// [`xml_nesting_too_deep`] and [`use_reference_chain_too_deep`] still run first as cheap, non-recursive
+/// [`xml_nesting_too_deep`] and [`reference_chain_too_deep`] still run first as cheap, non-recursive
 /// fast-reject checks — genuinely useful defense-in-depth against obviously pathological input (an
-/// absurdly deep document or an absurdly long/cyclic `<use>` chain costs real CPU/memory even with a big
-/// enough stack to survive it) — but per CPE-1437 attempt 2 they are **no longer the stack-overflow safety
-/// bar**. See the module doc comment for why: two separate depth-prediction guards (CPE-1414's cycle
-/// guard attempts and this file's own CPE-1437 attempt 1) were each defeated by an adversarial reviewer
-/// finding an input shape the guard's model of "what makes usvg recurse deeply" didn't account for, most
-/// recently a payload that composes `<use>`-hop count *with* each hop's target's internal `<g>`-nesting
-/// depth — neither guard alone bounds that product, and it turned out usvg's tree-*conversion* pass (as
-/// opposed to the raw XML parse CPE-1413 originally profiled) has a real crash threshold on a 256KB stack
-/// low enough that even literal nesting alone, comfortably under CPE-1413's existing cap of 64, can
-/// overflow it. Trying to extend either guard with a third dimension only invites a fourth bypass; the
-/// durable fix is to stop predicting and just guarantee enough real stack.
+/// absurdly deep document or an absurdly long/cyclic reference chain costs real CPU/memory even with a
+/// big enough stack to survive it) — but per CPE-1437 attempts 2 and 3 they are **not sufficient as the
+/// stack-overflow safety bar on their own**. See the module doc comment for the full story:
+/// - Attempt 2: two depth-prediction guards (CPE-1414's cycle-guard attempts, then this file's own
+///   CPE-1437 attempt 1) were each defeated by an adversarial reviewer finding an input shape the guard's
+///   model didn't account for (a payload composing `<use>`-hop count with each hop's target's internal
+///   `<g>`-nesting depth, and a pre-existing CPE-1413 hole where even plain nesting under its own cap
+///   overflowed `usvg`'s tree-*conversion* pass). Trying to extend a depth-prediction guard with a third
+///   dimension only invites a fourth bypass, so [`rasterize_svg_on_a_guaranteed_stack`]'s dedicated
+///   large-stack thread became the primary defense for anything `usvg` itself caps at 1024 levels.
+/// - Attempt 3: a large stack alone does NOT close everything — `usvg` has several OTHER
+///   reference-resolution recursions (`clip-path`, `mask`, `filter`+`feImage`, `pattern`-via-`fill`/
+///   `stroke`, `marker-*`) bounded only by total element count (~1,000,000), not by that 1024 cap, so an
+///   acyclic chain of them overflows even a 16MiB stack (confirmed reproducers at N=5000-8000). No stack
+///   size closes an input-unbounded recursion — so [`reference_chain_too_deep`] (generalized from
+///   `<use>`-only to all six reference types) is back to being load-bearing for THOSE six, while the
+///   guaranteed stack remains the defense for the `<use>`/nesting composition class attempt 2 fixed.
 pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String> {
     // Only the pure byte-scan guard runs on the CALLER's own thread — it's provably non-recursive (a flat
     // loop with an integer counter, see its own doc comment), so it can't overflow any stack regardless of
@@ -533,8 +724,8 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
         return Err("SVG element nesting too deep".to_string());
     }
 
-    // Everything else — including `use_reference_chain_too_deep` — runs inside the guaranteed-large-stack
-    // thread below. This is deliberate, not an oversight: `use_reference_chain_too_deep` itself calls the
+    // Everything else — including `reference_chain_too_deep` — runs inside the guaranteed-large-stack
+    // thread below. This is deliberate, not an oversight: `reference_chain_too_deep` itself calls the
     // REAL `roxmltree::Document::parse_with_options` (needed to mirror `usvg`'s own entity/DTD decoding —
     // see that function's doc comment), which is exactly the same per-nesting-level-recursive parser
     // `xml_nesting_too_deep` exists to keep away from a small caller stack in the first place. A CPE-1437
@@ -545,21 +736,22 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
     rasterize_svg_on_a_guaranteed_stack(bytes.to_vec(), max_edge)
 }
 
-/// Does the actual `<use>`-chain check *and* the `usvg` parse + convert + `resvg` render on a **dedicated
-/// thread** with [`RASTERIZE_STACK_SIZE`] of stack, regardless of the calling thread's own stack size
-/// (which, in production, is already the Tokio `spawn_blocking` default of 2MiB — plenty on its own, but
-/// this function no longer wants to depend on that; a caller on a smaller stack, like this crate's own
-/// small-stack panic-safety probe, must be just as safe). `rasterize_svg` now **owns** its stack
-/// requirement instead of inheriting the caller's, so no input `usvg` itself is willing to accept — it has
-/// its own hard cap of 1024 recursion levels and 1,000,000 elements — can overflow it, no matter how that
-/// recursion cost is distributed across literal nesting, `<use>` hops, or (per CPE-1437 attempt 2's
-/// finding) any composition of the two. This closes the composition bypass *and* the pre-existing
-/// CPE-1413 conversion-depth hole at once, without needing to model `usvg`'s internals at all.
+/// Does the actual reference-chain check *and* the `usvg` parse + convert + `resvg` render on a
+/// **dedicated thread** with [`RASTERIZE_STACK_SIZE`] of stack, regardless of the calling thread's own
+/// stack size (which, in production, is already the Tokio `spawn_blocking` default of 2MiB — plenty on
+/// its own, but this function no longer wants to depend on that; a caller on a smaller stack, like this
+/// crate's own small-stack panic-safety probe, must be just as safe). `rasterize_svg` now **owns** its
+/// stack requirement instead of inheriting the caller's, so no `<use>`/nesting-composition input `usvg`
+/// itself is willing to accept — bounded by its own hard cap of 1024 `<use>`-resolution recursion levels
+/// — can overflow it (CPE-1437 attempt 2). This does NOT, on its own, bound the five other
+/// reference-resolution recursions attempt 3 found (see the module doc comment) — those are only
+/// input-count-limited by `usvg`, not depth-limited, so [`reference_chain_too_deep`] below is what closes
+/// them, on this same guaranteed stack.
 ///
-/// [`use_reference_chain_too_deep`] runs FIRST inside this closure (still cheap relative to a full render,
-/// and still valuable as defense-in-depth against a pathologically long/cyclic `<use>` chain), but now on
-/// this function's own guaranteed stack rather than the caller's — see [`rasterize_svg`]'s doc comment for
-/// why that placement specifically matters.
+/// [`reference_chain_too_deep`] runs FIRST inside this closure (still cheap relative to a full render, and
+/// still valuable as defense-in-depth against a pathologically long/cyclic reference chain of any of the
+/// six kinds it now covers), but now on this function's own guaranteed stack rather than the caller's —
+/// see [`rasterize_svg`]'s doc comment for why that placement specifically matters.
 ///
 /// A panic inside the closure (e.g. an allocation failure surfaced as a panic rather than an `Err`) is
 /// caught via the thread's own unwind boundary and turned into a graceful `Err` through `JoinHandle::join`
@@ -568,8 +760,8 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
 /// another `Err`, never a panic.
 fn rasterize_svg_on_a_guaranteed_stack(bytes: Vec<u8>, max_edge: u32) -> Result<DynamicImage, String> {
     let render = move || -> Result<DynamicImage, String> {
-        if use_reference_chain_too_deep(&bytes, MAX_USE_CHAIN_DEPTH) {
-            return Err("SVG <use> reference chain too deep".to_string());
+        if reference_chain_too_deep(&bytes, MAX_REFERENCE_CHAIN_DEPTH) {
+            return Err("SVG reference chain too deep".to_string());
         }
 
         let opt = resvg::usvg::Options::default();
@@ -813,22 +1005,22 @@ mod tests {
         // CPE-1437's exact finding: ~500 links passes both CPE-1413's nesting guard (siblings, depth ~1)
         // and would not be flagged as a reference cycle (it's acyclic) — must still be rejected as a
         // too-deep reference chain.
-        assert!(use_reference_chain_too_deep(&flat_use_chain_svg(500), MAX_USE_CHAIN_DEPTH));
+        assert!(reference_chain_too_deep(&flat_use_chain_svg(500), MAX_REFERENCE_CHAIN_DEPTH));
         // A realistic sprite-sheet-style chain (a couple of hops) must not be rejected.
-        assert!(!use_reference_chain_too_deep(&flat_use_chain_svg(3), MAX_USE_CHAIN_DEPTH));
-        assert!(!use_reference_chain_too_deep(&square_svg(10, 10), MAX_USE_CHAIN_DEPTH), "no <use> at all");
+        assert!(!reference_chain_too_deep(&flat_use_chain_svg(3), MAX_REFERENCE_CHAIN_DEPTH));
+        assert!(!reference_chain_too_deep(&square_svg(10, 10), MAX_REFERENCE_CHAIN_DEPTH), "no <use> at all");
     }
 
     #[test]
     fn use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected() {
-        // A chain of exactly MAX_USE_CHAIN_DEPTH links resolves to chain depth == the cap, which the
+        // A chain of exactly MAX_REFERENCE_CHAIN_DEPTH links resolves to chain depth == the cap, which the
         // guard's own `depth > max_depth` check must allow; one link more must tip it over.
         assert!(
-            !use_reference_chain_too_deep(&flat_use_chain_svg(MAX_USE_CHAIN_DEPTH), MAX_USE_CHAIN_DEPTH),
+            !reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH), MAX_REFERENCE_CHAIN_DEPTH),
             "a chain exactly at the cap must be allowed"
         );
         assert!(
-            use_reference_chain_too_deep(&flat_use_chain_svg(MAX_USE_CHAIN_DEPTH + 1), MAX_USE_CHAIN_DEPTH),
+            reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH + 1), MAX_REFERENCE_CHAIN_DEPTH),
             "one link past the cap must be rejected"
         );
     }
@@ -845,7 +1037,7 @@ mod tests {
             <symbol id="b"><use xlink:href="#a"/></symbol>
             <use xlink:href="#a"/>
         </svg>"##;
-        assert!(use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH));
+        assert!(reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH));
     }
 
     #[test]
@@ -855,7 +1047,7 @@ mod tests {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
             <use id="self" href="#self"/>
         </svg>"##;
-        assert!(!use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH));
+        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH));
     }
 
     #[test]
@@ -871,9 +1063,9 @@ mod tests {
             <rect id="u0" width="10" height="10" fill="#f00"/>
             <use id="u1" xlink:href="&#35;u0"/>
         </svg>"##;
-        assert!(!use_reference_chain_too_deep(svg, MAX_USE_CHAIN_DEPTH), "a single resolved hop is well under the real cap");
+        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH), "a single resolved hop is well under the real cap");
         assert!(
-            use_reference_chain_too_deep(svg, 0),
+            reference_chain_too_deep(svg, 0),
             "entity-encoded href must resolve to a real edge, not be silently dropped"
         );
     }
@@ -899,7 +1091,7 @@ mod tests {
         }
         s.push_str("</svg>");
         assert!(
-            use_reference_chain_too_deep(s.as_bytes(), MAX_USE_CHAIN_DEPTH),
+            reference_chain_too_deep(s.as_bytes(), MAX_REFERENCE_CHAIN_DEPTH),
             "a DTD-entity-built chain must resolve its edges and be caught as too deep, just like a literal one"
         );
     }

@@ -73,6 +73,33 @@
 //!   [`rasterize_svg_never_stack_overflows_on_plain_nesting_under_the_cap_on_a_small_stack`] below are the
 //!   regression tests for the auditor's exact payloads, all of which now render successfully (`Ok`) rather
 //!   than merely failing gracefully, since they're legitimately within `usvg`'s own bounds.
+//! - **CPE-1437 attempt 3 — a large stack does NOT close everything: `usvg` has other reference-resolution
+//!   recursions bounded only by total element count (~1,000,000), not by its 1024-level `<use>` cap.** A
+//!   THIRD independent adversarial audit found `clippath::convert` and `mask::convert` (in `usvg`'s own
+//!   source) self-recursively call themselves when a `<clipPath clip-path="url(#…)">`/`<mask
+//!   mask="url(#…)">` itself has the same attribute, with NO depth cap at all (only a 1-hop self-reference
+//!   guard, the same gap CPE-1414 had for `<use>`, just never fixed for these). **Confirmed reproducers: a
+//!   clipPath chain overflows even the 16MiB thread at N=8000 (Ok at N=7000); a mask chain overflows by
+//!   N=5000.** The same architectural gap extends to `pattern` (content converted via the same general
+//!   `converter::convert_children` every other element uses, so a pattern-filled shape inside another
+//!   pattern's content recurses back in via ordinary mutual recursion, not a dedicated self-call), `marker`
+//!   (same mechanism for `marker-start`/`marker-mid`/`marker-end`), and `filter` (a `<filter>` can contain a
+//!   `<feImage href="#element">` referencing an arbitrary element, which can have its own
+//!   `filter="url(#anotherFilter)"`, chaining indirectly through the converter). **This DoS already existed
+//!   on `main` before CPE-1437 — a 2MB production stack overflows at an even shorter chain than the 256KB
+//!   probe does** — CPE-1437 didn't introduce it, but closing the small-stack bar means closing it too.
+//!   Since no stack size can bound an `usvg`-element-count-scaled (rather than `usvg`-1024-cap-bounded)
+//!   recursion, [`thumb_svg::reference_chain_too_deep`] (generalized from `<use>`-only, renamed from
+//!   `use_reference_chain_too_deep`) now walks all SIX reference types — `<use>`/`<feImage>` `href`, plus
+//!   `clip-path`/`mask`/`filter`/`marker-*`/`fill`/`stroke` `url(#id)` — under one unified
+//!   `MAX_REFERENCE_CHAIN_DEPTH`=128 cap (renamed from `MAX_USE_CHAIN_DEPTH`, value unchanged).
+//!   [`rasterize_svg_never_stack_overflows_on_a_clippath_chain_on_a_small_stack`],
+//!   [`rasterize_svg_never_stack_overflows_on_a_mask_chain_on_a_small_stack`],
+//!   [`rasterize_svg_never_stack_overflows_on_a_pattern_chain_on_a_small_stack`],
+//!   [`rasterize_svg_never_stack_overflows_on_a_marker_chain_on_a_small_stack`], and
+//!   [`rasterize_svg_never_stack_overflows_on_a_filter_feimage_chain_on_a_small_stack`] below are the
+//!   regression tests (each at N well above its empirical crash floor), alongside a legit single-level
+//!   positive case for each of the five newly-bounded types.
 
 mod common;
 use common::{assert_no_panic, run_battery};
@@ -136,6 +163,100 @@ fn composed_use_chain_with_nested_containers_svg(n_containers: usize, nesting_pe
     }
     // Outer trigger: references the last container, starting the whole resolution chain.
     s.push_str(&format!(r##"<use href="#c{last}"/>"##, last = n_containers - 1));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// A flat, ACYCLIC chain of `n` `<clipPath>` elements each `clip-path`-ing the previous — the CPE-1437
+/// attempt-3 auditor's `clippath::convert` self-recursion reproducer. `usvg`'s `clippath::convert` (in
+/// `parser/clippath.rs`) recurses `convert(link, ...)` when a `<clipPath>` itself has a `clip-path`, with
+/// NO depth cap (only a direct-self-reference guard) — confirmed to overflow even a 16MiB stack at N=8000
+/// (Ok at N=7000).
+fn clip_path_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<clipPath id="cp0"><rect width="10" height="10"/></clipPath>"##);
+    for i in 1..=n {
+        s.push_str(&format!(
+            r##"<clipPath id="cp{i}" clip-path="url(#cp{prev})"><rect width="10" height="10"/></clipPath>"##,
+            prev = i - 1
+        ));
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" clip-path="url(#cp{n})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// The `<mask>` analogue of [`clip_path_chain_svg`] — `mask::convert` has the identical self-recursion
+/// shape for `<mask mask="url(#…)">`. Confirmed to overflow even a 16MiB stack by N=5000.
+fn mask_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<mask id="m0"><rect width="10" height="10" fill="#fff"/></mask>"##);
+    for i in 1..=n {
+        s.push_str(&format!(
+            r##"<mask id="m{i}" mask="url(#m{prev})"><rect width="10" height="10" fill="#fff"/></mask>"##,
+            prev = i - 1
+        ));
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" mask="url(#m{n})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// A flat, ACYCLIC chain of `n` `<pattern>` elements, each filling its content shape with the previous
+/// pattern via `fill="url(#…)"` — `paint_server::convert_pattern` converts a pattern's content through the
+/// SAME general `converter::convert_children` every other element's children go through, so a
+/// pattern-filled shape inside another pattern's content recurses back into `convert_pattern` via ordinary
+/// converter mutual recursion, with no depth cap either.
+fn pattern_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<pattern id="p0" width="1" height="1"><rect width="1" height="1" fill="#f00"/></pattern>"##);
+    for i in 1..=n {
+        s.push_str(&format!(
+            r##"<pattern id="p{i}" width="1" height="1"><rect width="1" height="1" fill="url(#p{prev})"/></pattern>"##,
+            prev = i - 1
+        ));
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" fill="url(#p{n})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// A flat, ACYCLIC chain of `n` `<marker>` elements, each drawing a path inside its content that itself
+/// `marker-start`s the previous marker — `marker::convert` converts a marker's content through the same
+/// general `converter::convert_children` as pattern content, with the same missing depth cap.
+fn marker_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<marker id="mk0" markerWidth="2" markerHeight="2"><rect width="1" height="1"/></marker>"##);
+    for i in 1..=n {
+        s.push_str(&format!(
+            r##"<marker id="mk{i}" markerWidth="2" markerHeight="2"><path d="M0,0 L1,1" marker-start="url(#mk{prev})"/></marker>"##,
+            prev = i - 1
+        ));
+    }
+    s.push_str(&format!(r##"<path d="M0,0 L10,10" marker-start="url(#mk{n})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// A flat, ACYCLIC chain of `n` alternating `<filter>`/`<g>` pairs: each `<filter fK>` contains a
+/// `<feImage href="#g{K-1}">` (referencing an ARBITRARY element, per SVG's `feImage`), and each `<g gK
+/// filter="url(#fK)">` wraps a shape. `filter::convert` doesn't chain filter-to-filter directly, but
+/// `feImage`'s `href` resolves via `converter::convert_element` — the same general entry point used
+/// everywhere — so an element referenced by `feImage` that itself has `filter=` recurses back through the
+/// converter into `filter::convert` again, indirectly chaining just as deep.
+fn filter_feimage_chain_svg(n: usize) -> Vec<u8> {
+    let mut s = String::from(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="10" height="10">"#,
+    );
+    s.push_str(r##"<filter id="f0"><feFlood flood-color="#f00"/></filter>"##);
+    s.push_str(r##"<g id="g0" filter="url(#f0)"><rect width="1" height="1" fill="#f00"/></g>"##);
+    for i in 1..=n {
+        s.push_str(&format!(r##"<filter id="f{i}"><feImage href="#g{prev}"/></filter>"##, prev = i - 1));
+        s.push_str(&format!(
+            r##"<g id="g{i}" filter="url(#f{i})"><rect width="1" height="1" fill="#f00"/></g>"##
+        ));
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" filter="url(#f{n})"/>"##));
     s.push_str("</svg>");
     s.into_bytes()
 }
@@ -385,4 +506,79 @@ fn rasterize_svg_renders_an_eight_deep_grouped_illustration_fine_on_a_small_stac
     let bytes = deeply_nested_svg(8);
     let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
     assert!(result.is_ok(), "a realistic 8-deep grouped illustration must render: {result:?}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1437 attempt 3: `usvg` reference-resolution recursions bounded only by total element count
+// (~1,000,000), NOT by its 1024-level `<use>` cap — so no stack size closes them, only bounding the
+// INPUT does. Each of these is confirmed (per the module doc comment) to overflow even the 16MiB
+// guaranteed-stack thread at a large-but-plausible N; `reference_chain_too_deep`'s generalized walk must
+// now reject all of them gracefully well before that, while a legitimate single-level use of each still
+// renders fine.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_clippath_chain_on_a_small_stack() {
+    // Confirmed reproducer: Ok at N=7000, STATUS_STACK_OVERFLOW at N=8000 even through the 16MiB thread
+    // (usvg's `clippath::convert` self-recurses with no depth cap). N=8000 here, well above that floor.
+    let bytes = clip_path_chain_svg(8000);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "an implausibly deep clipPath chain must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_mask_chain_on_a_small_stack() {
+    // Confirmed reproducer: overflows even the 16MiB thread by N=5000 (usvg's `mask::convert` has the
+    // identical unbounded self-recursion as clipPath). N=8000 here, comfortably above that floor.
+    let bytes = mask_chain_svg(8000);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "an implausibly deep mask chain must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_pattern_chain_on_a_small_stack() {
+    // `pattern` content converts through the same general converter as everything else, so a
+    // pattern-inside-a-pattern chain has the same unbounded-recursion shape as clipPath/mask.
+    let bytes = pattern_chain_svg(8000);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "an implausibly deep pattern chain must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_marker_chain_on_a_small_stack() {
+    // Same reasoning as pattern, for `marker` content and `marker-start`.
+    let bytes = marker_chain_svg(8000);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "an implausibly deep marker chain must be rejected, not risk a stack overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_filter_feimage_chain_on_a_small_stack() {
+    // The indirect filter<->feImage<->element<->filter chain — bounded the same way via
+    // `direct_reference_targets`' `<feImage>` handling and `hops_from_target` scanning a `<filter>`'s own
+    // subtree for its `feImage` children.
+    let bytes = filter_feimage_chain_svg(8000);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(
+        result.is_err(),
+        "an implausibly deep filter/feImage reference chain must be rejected, not risk a stack overflow"
+    );
+}
+
+#[test]
+fn rasterize_svg_renders_a_legit_single_level_clip_path_mask_pattern_marker_filter_fine_on_a_small_stack() {
+    // The chain-depth cap must not over-reject ordinary, single-level use of each of the five newly-bounded
+    // reference types — this is the "isn't just rejecting everything" check for attempt 3, mirroring
+    // `rasterize_svg_renders_a_shallow_use_chain_fine_on_a_small_stack` above.
+    let cases: [(&str, Vec<u8>); 5] = [
+        ("clip_path", clip_path_chain_svg(1)),
+        ("mask", mask_chain_svg(1)),
+        ("pattern", pattern_chain_svg(1)),
+        ("marker", marker_chain_svg(1)),
+        ("filter_feimage", filter_feimage_chain_svg(1)),
+    ];
+    for (name, bytes) in cases {
+        let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+        assert!(result.is_ok(), "a legitimate single-level '{name}' reference must still render: {result:?}");
+    }
 }

@@ -190,3 +190,122 @@ caller stack.
 stack conversion-pass hole in — now moot since the guaranteed-stack fix covers it regardless) and CPE-1414
 (the still-Deferred cycle-guard ticket, whose reproducer remains covered by `use_reference_chain_too_deep`'s
 fast-reject AND, as a second independent layer, by this attempt's guaranteed stack).
+
+## Work Log — attempt 3 (2026-08-07, same worktree/branch `cpe-1437-svg-use-chain-depth`, PR #709) — LAST ATTEMPT before parking
+A third independent adversarial audit found a real bypass of attempt 2's 16MiB guaranteed-stack fix — this
+one overflows even THROUGH the large-stack thread, because it isn't bounded by anything `usvg` itself caps.
+
+**The bypass:** `usvg` has SEVERAL reference-resolution recursions that are bounded only by total element
+count (~1,000,000), NOT by the 1024-level cap the `<use>`/nesting composition class (attempt 2) relies on.
+Confirmed by reading `usvg-0.45.1`'s own source directly (not just inferring from behavior):
+- `clippath::convert` (`parser/clippath.rs` line ~57) self-recursively calls `convert(link, ...)` when a
+  `<clipPath clip-path="url(#…)">` itself has a `clip-path`, with only a direct-self-reference guard
+  (`link == node`), no depth cap.
+- `mask::convert` (`parser/mask.rs`) has the byte-for-byte identical self-recursion shape for `<mask
+  mask="url(#…)">`.
+- `paint_server::convert_pattern` (`parser/paint_server.rs`) converts a `<pattern>`'s content via the SAME
+  general `converter::convert_children` every other element's children go through — so a pattern-filled
+  shape nested inside another pattern's content recurses back into `convert_pattern` through ordinary
+  converter mutual recursion (not a dedicated self-call, but the same missing-depth-cap effect).
+- `marker::convert` (`parser/marker.rs`) converts a `<marker>`'s content the identical way, so a
+  `marker-start`-referencing path nested inside another marker's content has the same shape.
+- `filter::convert`/`convert_url` (`parser/filter.rs`) don't chain filter-to-filter directly, but a
+  `<filter>` can hold a `<feImage href="#element">` referencing an ARBITRARY element via
+  `converter::convert_element` (the general entry point) — so an element with its OWN `filter="url(#…)"`
+  reached via `feImage` recurses back through the converter into `filter::convert` again, indirectly
+  chaining just as deep.
+- `usvg`'s only defense against any of these (the various `link == node` self-reference checks) breaks a
+  direct 1-hop cycle, not a long ACYCLIC chain — the identical gap CPE-1414 had for `<use>`, just never
+  fixed for these five reference types.
+- **This DoS already existed on `main` before CPE-1437 ever started** — a 2MB production stack overflows at
+  an even shorter chain than the 256KB probe does. CPE-1437 didn't introduce it; closing the small-stack bar
+  means closing this too.
+
+Concrete reproducers, confirmed to overflow even the 16MiB guaranteed-stack thread: a clipPath chain (`Ok`
+at N=7000, `STATUS_STACK_OVERFLOW` at N=8000, ~686KB SVG) and a mask chain (overflows by N=5000, ~413KB
+SVG). Pattern/marker/filter share the identical architectural gap (verified via source reading, not
+separately crash-reproduced pre-fix, given the time-boxed nature of this last attempt) and are bounded by
+the same generalized guard below.
+
+**Why no stack size can fix this:** unlike the `<use>`/nesting composition class (bounded by `usvg`'s own
+1024-level recursion cap, so a big-enough stack always lets `usvg` reach that cap gracefully), these five
+reference types are bounded only by `usvg`'s ~1,000,000-element cap — a longer chain always exists that
+fits under 1M elements yet overflows any fixed stack. The INPUT must be bounded, not the stack.
+
+**The fix:** generalized the existing non-recursive reference-graph pre-scan (previously `<use>`-only) to
+walk ALL SIX reference types in one unified graph, under one unified cap:
+- `direct_reference_targets` (new): resolves `<use>`/`<feImage>`'s bare-IRI `href` (reusing
+  `resolve_use_href`'s existing `xlink:href`-before-`href` precedence unchanged) PLUS every `url(#id)` found
+  in `clip-path`/`mask`/`filter`/`marker-start`/`marker-mid`/`marker-end`/`fill`/`stroke` (via new
+  `find_func_iri_ids`, mirroring `svgtypes::FuncIRI::from_str`'s grammar by hand the same way
+  `parse_iri_fragment` mirrors `IRI::from_str` — no new dependency). `filter` can legally hold a LIST of
+  `url(...)` references (`filter="blur(2) url(#f1) url(#f2)"`), so `find_func_iri_ids` scans for every
+  occurrence in the value rather than requiring the whole value to be exactly one reference — deliberately
+  MORE permissive than `usvg`'s own single-value grammar, which only makes this guard more conservative,
+  never less.
+- `hops_from_target` (rewritten from CPE-1437 attempt 1's `use_targets_reached_via`): scans `target`'s
+  entire subtree (`target.descendants()`, which includes `target` itself) for any node that is ITSELF
+  reference-bearing, keeping that NODE (not its resolved target) as a deferred further hop. **A subtle bug
+  caught by this attempt's own boundary test**: an earlier draft used `flat_map(direct_reference_targets)`
+  here (resolving each found node's reference immediately) instead of `filter(...).collect()` (keeping the
+  node itself) — that silently double-advanced the chain two links per DFS level instead of one, so a
+  129-link chain measured as depth ~65 and sailed under the 128 cap.
+  `use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected` caught this immediately
+  (129 stopped being rejected) — fixed by reverting to the `filter`-and-defer-resolution shape, matching
+  attempt 1's original `<use>`-only logic exactly, just generalized to all six reference types.
+- `hops_from_target` also memoizes per TARGET node (`target_cache: HashMap<Node, Vec<Node>>`) — added
+  proactively (not forced by a crash) because many independent triggers can legally share one target (e.g.
+  many shapes filled with the same `url(#pattern)`), and without caching that would make this pre-scan's
+  own CPU cost quadratic in the number of independent references into one large shared target.
+- `reference_chain_too_deep` (renamed from `use_reference_chain_too_deep`): trigger nodes are now every
+  element with a non-empty `direct_reference_targets` (not just `<use>` elements) — same DFS/cycle-detection/
+  memoization/early-bail machinery as attempt 1, unchanged.
+- **Unified cap: `MAX_REFERENCE_CHAIN_DEPTH = 128`** (renamed from `MAX_USE_CHAIN_DEPTH`, value unchanged —
+  one cap over the union of all six edge types, not a per-type cap, so a mixed chain crossing reference
+  types doesn't get extra budget just by changing type partway through). 128 is ~40-60x below the empirical
+  clipPath (N=8000) and mask (N=5000) overflow floors — the tightest constraint now, since those aren't
+  bounded by `usvg`'s 1024 cap at all — and still comfortably below that 1024 cap and realistic-SVG-friendly
+  (real reference indirection of any of these six kinds is essentially always 1-3 hops).
+- The 16MiB guaranteed-stack thread (attempt 2) is KEPT as defense-in-depth for the `<use>`/nesting
+  composition class it already closes; `reference_chain_too_deep` now runs inside it (unchanged placement
+  from attempt 2, still necessary since it does a real recursive `roxmltree` parse).
+
+**Residual risk, reported per the coordinator's explicit ask rather than silently left closed:** this
+pre-scan does NOT attempt to bound a COMBINED attack interleaving several of these six reference types with
+independent literal `<g>` nesting inside each hop (the same composition-of-dimensions concern attempt 2
+found for `<use>`+nesting, now with six dimensions instead of two). No adversarial reproducer for that
+composed shape has been found or confirmed against this codebase in the three attempts so far, but it also
+hasn't been proven safe — flagged explicitly in the module doc comment (`crates/server/src/thumb_svg.rs`)
+for whoever next touches this guard, rather than assumed closed.
+
+**Tests added (`crates/server/tests/thumb_svg_panic_safety.rs`):** five new payload generators
+(`clip_path_chain_svg`, `mask_chain_svg`, `pattern_chain_svg`, `marker_chain_svg`,
+`filter_feimage_chain_svg`, each built in the identical alternating-chain shape as the coordinator's
+clipPath/mask reproducers) and six new tests: one small-stack rejection test per reference type at N=8000
+(`rasterize_svg_never_stack_overflows_on_a_{clippath,mask,pattern,marker,filter_feimage}_chain_on_a_small_stack`,
+all assert `Err`) plus one combined positive test
+(`rasterize_svg_renders_a_legit_single_level_clip_path_mask_pattern_marker_filter_fine_on_a_small_stack`,
+asserts `Ok` for a single legitimate use of each of the five). Also added one unit test in `thumb_svg.rs`
+(`use_chain_guard_boundary_exactly_at_the_cap_is_allowed_one_more_is_rejected`) that caught the
+double-hop bug described above.
+
+**Test results (Windows, debug build, this worktree, after the fix):**
+- `crates/server/tests/thumb_svg_panic_safety.rs`: **19 passed, 0 failed, 0 ignored** (both
+  `--test-threads=1` sequential, ~1.4s, and default-parallel, ~1.0s) — includes all six new attempt-3 tests
+  plus all 13 tests from attempts 1/2 still green.
+- `crates/server` lib tests: **1708 passed, 0 failed** (unit-test count unchanged from attempt 2's count —
+  the boundary test already existed from attempt 2 and now correctly exercises the fixed logic).
+- Full `cargo test --manifest-path crates/server/Cargo.toml` (default features): all suites green.
+- Full `cargo test --manifest-path crates/server/Cargo.toml --features index`: 1751 lib tests + all
+  integration suites green.
+- `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets -- -D warnings`: clean.
+- `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets --features index -- -D warnings`:
+  clean.
+- No `Cargo.toml`/`Cargo.lock` changes — still zero new dependencies (all six reference types resolved via
+  hand-mirrored grammars + `roxmltree`/`resvg::usvg` APIs already in use).
+- No leftover scratch attack-test file.
+
+**Cross-references (updated):** CPE-1413 (the literal-nesting guard; this attempt's audit reconfirmed its
+sizing has a small-stack conversion-pass gap, now moot under the guaranteed-stack fix) and CPE-1414 (still
+Deferred; its cycle reproducer remains covered by `reference_chain_too_deep`'s cycle detection AND the
+guaranteed stack, unchanged from attempt 2).
