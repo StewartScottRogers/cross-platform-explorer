@@ -1142,3 +1142,31 @@ Tuned defaults / lessons:
   the USER: attended GUI punch-list, macOS (no tauri-driver path), signing cert (CPE-002), live agent session
   (CPE-1098), 3D viewer (CPE-118), real-network E2E (CPE-819/820). Only headless left = low-value CPE-1414/1437
   SVG hardening. See Library [[structured-preview-runway-2026-08-07]].
+
+## Shift 2026-08-07→08 (CLI, "run 12 workshifts in batches") — 8 PRs merged, SVG stack-overflow DoS class CLOSED, well confirmed dry
+Pivoted off the (still-dry) feature well into security hardening — a real, high-yield vein. Shipped 8 PRs / 9 tickets:
+- CPE-1439 archive-ext preview routing (#708) — xz/bz2/zst/lz/lzma → "compressed file" info preview, dmg/cab won't-fix.
+- **SVG stack-overflow DoS class CLOSED** — CPE-1437 (parked after 3-attempt breaker) re-scoped into **CPE-1444** (#712,
+  combined hops×nesting product bound + 16MiB guaranteed stack) + **CPE-1445** (#713, bounded SVGZ decompress + reject
+  double-gzip). Adversarial audit found a NEW adjacent vector on EACH of 5 attempts (use-composition → clip/mask chains →
+  hops×nesting product → double-gzip) before it held.
+- CPE-1446 (#710) office/ebook zip-entry deflate-bomb OOM cap (8MiB `.take`); CPE-1447+1449 (#711) thumbnail size-gate moved
+  into decode_thumb_image after the video early-dispatch (fixes image OOM AND a video-thumb over-block in one place);
+  CPE-1448 (#714) truncation-marker visibility; CPE-1450 (#715) flaky organize_apply test → tempfile::TempDir.
+Metrics: 8 merged, **0 escaped defects**. Adversarial security auditor found 5 real SVG vectors + a researcher sweep found
+3 real resource-exhaustion bugs — ALL pre-merge.
+
+Tuned defaults / lessons:
+- **Adversarial opus Sec-Auditor is decisive on SVG/parser diffs** — sonnet reviewers APPROVED every time while the opus
+  auditor found a real bypass 4×. On any untrusted-parser diff, gate on an opus auditor that TRIES to overflow it, not just
+  a code review. Reject-nested-input beats predict-recursion (a fixed stack can't bound an input-scaled hops×nesting
+  recursion; bound the INPUT).
+- **usvg has recursions NOT bounded by its 1024 cap** (clipPath/mask/pattern/marker converter recursion, gzip decompress) —
+  a raw-byte guard is defeated by a compressed wrapper; a per-vector pre-scan is whack-a-mole (durable answer = process
+  isolation, filed nowhere yet since the bound holds).
+- **Resource-exhaustion is a DISTINCT sweep from panic-safety** — the panic sweep hunted malformed-byte crashes; well-formed
+  pathological inputs (zip/gzip bombs, deep nesting) were a separate, productive vein. Library: [[resource-exhaustion-dos-sweep-2026-08-07]].
+- **Editing a #[tauri::command] DOC COMMENT drifts bindings.gen.ts** (CPE-1447) — regenerate or the Linux drift guard fails.
+- FRONTIER: headless FEATURE well dry (re-confirmed) AND the security vein now substantially tapped (font/net/doc readers
+  checked clean). Backlog EMPTY. Next increment needs the USER — attended GUI verify of the 8 merged PRs, macOS, signing
+  cert, live agent session, or a fresh feature direction.
