@@ -22,7 +22,7 @@ fn ai_console_full_flow() {
         [Capability::Context, Capability::Secrets, Capability::Storage, Capability::Events]
             .into_iter()
             .collect();
-    let outcome = handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token));
+    let outcome = handshake(&mut conn, CONTRACT_VERSION, &consented, "ai-console", Some(&token));
     eprintln!("handshake = {outcome:?}");
     let _outcome = outcome.expect("handshake failed");
 

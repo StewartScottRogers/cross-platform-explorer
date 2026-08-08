@@ -8840,7 +8840,8 @@ fn sidecar_start_ai_console(
             let mut conn = spawn_process_with_env(&bin, &[], &cat_env)
                 .map_err(|e| state.fail(format!("spawn failed: {e}")))?;
             let token = conn.launch_token().to_string();
-            handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+            // "ai-console" is the id the host spawned — the Hello must echo it back (CPE-1472).
+            handshake(&mut conn, CONTRACT_VERSION, &consented, "ai-console", Some(&token))
                 .map_err(|e| state.fail(format!("handshake failed: {e:?}")))?;
             Ok::<_, String>(conn)
         },
@@ -8951,7 +8952,8 @@ fn sidecar_start_agent_board(app: tauri::AppHandle, root: Option<String>) -> Res
         |_attempt| {
             let mut conn = spawn_process_with_env(&bin, &[], &env).map_err(|e| format!("spawn failed: {e}"))?;
             let token = conn.launch_token().to_string();
-            handshake(&mut conn, CONTRACT_VERSION, &consented, Some(&token))
+            // "agent-board" is the id the host spawned — the Hello must echo it back (CPE-1472).
+            handshake(&mut conn, CONTRACT_VERSION, &consented, "agent-board", Some(&token))
                 .map_err(|e| format!("handshake failed: {e:?}"))?;
             Ok::<_, String>(conn)
         },

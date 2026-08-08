@@ -19,7 +19,7 @@
 
 use std::path::Path;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::model_catalog::{normalize_models, Model};
@@ -134,7 +134,9 @@ pub fn verify_snapshot(snapshot: &ModelSnapshot, signature_hex: &str, trusted_ke
         let Ok(pk_bytes) = hex::decode(pk.trim()) else { return false };
         let Ok(pk_arr): Result<[u8; 32], _> = pk_bytes.try_into() else { return false };
         let Ok(key) = VerifyingKey::from_bytes(&pk_arr) else { return false };
-        key.verify(&bytes, &sig).is_ok()
+        // `verify_strict` rejects non-canonical/malleable/small-order signatures — same
+        // hardening as the host's trust engine (CPE-1473).
+        key.verify_strict(&bytes, &sig).is_ok()
     })
 }
 
