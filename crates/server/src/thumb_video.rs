@@ -29,7 +29,10 @@
 //! ("next to the executable" isn't enough on macOS/Linux) and CPE-1261 (exclusive scratch dir, CWE-377)
 //! rationale — this module is now just ffmpeg_util's first caller, with `media_waveform` (CPE-1478) as
 //! the second, sharing one `NATIVE_DEP_DIR` injection so the app only wires the bundled ffmpeg's
-//! resource dir in once for both.
+//! resource dir in once for both. Since CPE-1480 the two also share `ffmpeg_util`'s
+//! `reject_unsafe_ffmpeg_input` pre-spawn guard + `-protocol_whitelist file,pipe` (the SSRF/protocol-
+//! injection hardening `media_waveform` got first under CPE-1478) so there's one hardened input path,
+//! not two independently-maintained copies.
 //!
 //! **Frame selection:** seeks ~1s into the clip first (`-ss 1`) to skip a likely black lead-in frame;
 //! very short or unusual clips where that offset yields no frame fall back to `-ss 0` (the very first
@@ -60,7 +63,9 @@ use std::process::Command;
 
 use image::DynamicImage;
 
-use crate::ffmpeg_util::{create_scratch_dir, resolve_ffmpeg_bin};
+use crate::ffmpeg_util::{
+    create_scratch_dir, reject_unsafe_ffmpeg_input, resolve_ffmpeg_bin, FFMPEG_PROTOCOL_WHITELIST,
+};
 
 /// Extensions this module claims in [`crate::thumb_source::decode_thumb_image`]'s dispatch. Kept here
 /// (rather than duplicated in `thumb_source`) so the two stay in lockstep by construction. Matched
@@ -84,6 +89,15 @@ pub fn extract_frame(path: &Path, max_edge: u32) -> Result<DynamicImage, String>
 /// the current executable's directory.
 fn extract_frame_with_ffmpeg(path: &Path, max_edge: u32, ffmpeg: &Path) -> Result<DynamicImage, String> {
     let edge = max_edge.max(1);
+
+    // Defense-in-depth on this IPC-reachable subprocess boundary (CPE-1480, mirroring CPE-1478's
+    // `media_waveform` hardening): reject anything that isn't an existing regular local file BEFORE we
+    // hand the string to ffmpeg. See `reject_unsafe_ffmpeg_input`'s doc for the full rationale.
+    // `-protocol_whitelist` on the spawned command below is the load-bearing guard at the ffmpeg layer;
+    // this is the cheaper first line that also yields a clearer error and skips creating a scratch dir
+    // for a request that's doomed anyway.
+    reject_unsafe_ffmpeg_input(path)?;
+
     // Exclusively-created scratch dir (CPE-1261, CWE-377 hardening) — see the module doc's "Output
     // path + cleanup" note. If we can't even get a fresh directory, bail out cleanly; there's nothing
     // to clean up yet.
@@ -131,6 +145,12 @@ fn run_ffmpeg_frame(ffmpeg: &Path, input: &Path, out: &Path, offset_secs: &str, 
         .arg("-y")
         .arg("-ss")
         .arg(offset_secs)
+        // Restrict ffmpeg to the file+pipe protocols so a crafted `input` can't make it reach the
+        // network (`http:`/`tcp:` → SSRF) or read via a non-file protocol (`concat:`/`subfile:`/`data:`)
+        // — belt-and-braces alongside the pre-spawn `reject_unsafe_ffmpeg_input` check in
+        // `extract_frame_with_ffmpeg` above (CPE-1480, mirrors `media_waveform`'s CPE-1478 hardening).
+        .arg("-protocol_whitelist")
+        .arg(FFMPEG_PROTOCOL_WHITELIST)
         .arg("-i")
         .arg(input)
         .arg("-frames:v")
@@ -224,6 +244,23 @@ mod tests {
     fn extract_frame_rejects_a_nonexistent_input_path_without_panicking() {
         let err = extract_frame(Path::new("Z:/definitely/does/not/exist/nope.mp4"), 64);
         assert!(err.is_err(), "a nonexistent input file must be rejected, not panic");
+    }
+
+    /// Security (CPE-1480, mirrors `media_waveform`'s CPE-1478 test): an ffmpeg *protocol* string that
+    /// isn't a local file — e.g. an `http://` URL (blind SSRF to internal hosts / cloud-metadata) or
+    /// `concat:`/`subfile:` (arbitrary local-file read) — must be rejected, never handed to ffmpeg as
+    /// input. The pre-spawn `reject_unsafe_ffmpeg_input` guard rejects it here before ffmpeg runs, and
+    /// this must hold with NO ffmpeg install needed (the guard fires before any spawn is attempted).
+    #[test]
+    fn extract_frame_rejects_a_non_file_protocol_string_without_reaching_the_network() {
+        for evil in [
+            "http://169.254.169.254/latest/meta-data/",
+            "concat:/etc/passwd",
+            "subfile:,start,0,end,64,,:/etc/passwd",
+        ] {
+            let err = extract_frame(Path::new(evil), 64);
+            assert!(err.is_err(), "a non-file protocol input ({evil}) must be rejected, not opened");
+        }
     }
 
     /// Real-render smoke test, gated on ffmpeg actually being resolvable+runnable in this environment.
