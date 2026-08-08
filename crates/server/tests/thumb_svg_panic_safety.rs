@@ -261,6 +261,74 @@ fn filter_feimage_chain_svg(n: usize) -> Vec<u8> {
     s.into_bytes()
 }
 
+/// CPE-1444's MULTIPLICATIVE (hops × per-hop nesting) probe for `<mask>`: a chain of `hops` masks where
+/// mask `m{i}`'s `mask="url(#m{i-1})"` reference sits at the BOTTOM of `nest` nested `<g>` levels, triggered
+/// by an outer `<rect mask="url(#m{hops})">`. The reference-bearing inner shape is SELF-CLOSING, so total
+/// literal nesting is `svg`+`mask`+`nest` — exactly 64 at `nest`=62, which PASSES `xml_nesting_too_deep`'s
+/// cap — and the hop count `hops` passes `MAX_REFERENCE_CHAIN_DEPTH`=128 for `hops`≤128, yet `usvg` descends
+/// each hop's `nest` `<g>` levels ON-STACK during mask resolution, so its real recursion cost is ≈ `hops ×
+/// nest`. `mask_nested(127, 62)` (≈7874 frames) overflows even the 16MiB render thread on release, and the
+/// debug floor is lower still (≈127×35 ≈ 4500) — the exact vector CPE-1444's combined-cost cap closes.
+fn mask_nested(hops: usize, nest: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<mask id="m0"><rect width="10" height="10" fill="#fff"/></mask>"##);
+    for i in 1..=hops {
+        s.push_str(&format!(r#"<mask id="m{i}">"#));
+        s.push_str(&"<g>".repeat(nest));
+        s.push_str(&format!(
+            r##"<rect width="10" height="10" fill="#fff" mask="url(#m{prev})"/>"##,
+            prev = i - 1
+        ));
+        s.push_str(&"</g>".repeat(nest));
+        s.push_str("</mask>");
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" mask="url(#m{hops})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// The `<pattern>` analogue of [`mask_nested`] — each hop's `fill="url(#p{i-1})"` (a pattern reference,
+/// multiplicative) sits at the bottom of `nest` nested `<g>` levels. `pattern` content converts through the
+/// same general converter that descends nesting on-stack, so it has the identical `hops × nest` cost.
+fn pattern_nested(hops: usize, nest: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<pattern id="p0" width="1" height="1"><rect width="1" height="1" fill="#f00"/></pattern>"##);
+    for i in 1..=hops {
+        s.push_str(&format!(r#"<pattern id="p{i}" width="1" height="1">"#));
+        s.push_str(&"<g>".repeat(nest));
+        s.push_str(&format!(
+            r##"<rect width="1" height="1" fill="url(#p{prev})"/>"##,
+            prev = i - 1
+        ));
+        s.push_str(&"</g>".repeat(nest));
+        s.push_str("</pattern>");
+    }
+    s.push_str(&format!(r##"<rect width="10" height="10" fill="url(#p{hops})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
+/// The `<marker>` analogue of [`mask_nested`] — each hop's `marker-start="url(#mk{i-1})"` sits at the bottom
+/// of `nest` nested `<g>` levels. `marker` content converts through the same general converter, same
+/// `hops × nest` cost.
+fn marker_nested(hops: usize, nest: usize) -> Vec<u8> {
+    let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+    s.push_str(r##"<marker id="mk0" markerWidth="2" markerHeight="2"><rect width="1" height="1"/></marker>"##);
+    for i in 1..=hops {
+        s.push_str(&format!(r#"<marker id="mk{i}" markerWidth="2" markerHeight="2">"#));
+        s.push_str(&"<g>".repeat(nest));
+        s.push_str(&format!(
+            r##"<path d="M0,0 L1,1" marker-start="url(#mk{prev})"/>"##,
+            prev = i - 1
+        ));
+        s.push_str(&"</g>".repeat(nest));
+        s.push_str("</marker>");
+    }
+    s.push_str(&format!(r##"<path d="M0,0 L10,10" marker-start="url(#mk{hops})"/>"##));
+    s.push_str("</svg>");
+    s.into_bytes()
+}
+
 // ---------------------------------------------------------------------------------------------
 // Generic hostile-bytes battery (empty/truncated/garbage/overflowing-length-field/... — see
 // `tests/common/mod.rs`), reused unmodified from `parser_panic_safety.rs`/
@@ -580,5 +648,70 @@ fn rasterize_svg_renders_a_legit_single_level_clip_path_mask_pattern_marker_filt
     for (name, bytes) in cases {
         let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
         assert!(result.is_ok(), "a legitimate single-level '{name}' reference must still render: {result:?}");
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1444: the MULTIPLICATIVE composition vector attempt 3 flagged but left open. For `mask`/`pattern`/
+// `marker` (and `filter`/`feImage`), usvg descends each hop's OWN literal `<g>` nesting on-stack while the
+// reference-chain recursion frame is still live, so real recursion cost ≈ hops × nesting. Each of these
+// reproducers passes BOTH the hop cap (127 < 128) and the per-document nesting cap (== 64) yet drives usvg
+// to ≈7874 frames (release floor; debug floor ≈4500) — overflowing even the 16MiB render thread. The
+// combined-cost cap (MAX_REFERENCE_COMBINED_COST) now rejects them well before that, while a legit
+// multi-level mask/pattern/marker still renders.
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_nested_mask_composition_on_a_small_stack() {
+    // 127 mask hops × 62-deep <g> per hop ≈ 7874 frames — overflows the 16MiB thread on release and the
+    // ~4500-frame debug floor CI builds against. Must be a graceful Err via the combined-cost cap.
+    let bytes = mask_nested(127, 62);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "a nested (hops × nesting) mask composition must be rejected, not overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_nested_pattern_composition_on_a_small_stack() {
+    let bytes = pattern_nested(127, 62);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "a nested (hops × nesting) pattern composition must be rejected, not overflow");
+}
+
+#[test]
+fn rasterize_svg_never_stack_overflows_on_a_nested_marker_composition_on_a_small_stack() {
+    let bytes = marker_nested(127, 62);
+    let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+    assert!(result.is_err(), "a nested (hops × nesting) marker composition must be rejected, not overflow");
+}
+
+#[test]
+fn rasterize_svg_combined_cost_boundary_just_under_renders_just_over_is_rejected() {
+    // Per-hop cost is `nest`+2 = 64 at nest=62, so the 2048 cap is reached at exactly 32 hops (allowed) and
+    // exceeded at 33 (rejected). The just-under case (32×64 = 2048 frames, well under the ~4500 debug
+    // overflow floor) must actually RENDER; the just-over case must be a graceful Err.
+    let under = mask_nested(32, 62);
+    let under_result = run_on_small_stack(move || rasterize_svg(&under, 32));
+    assert!(under_result.is_ok(), "a chain exactly at the combined-cost cap must still render: {under_result:?}");
+
+    let over = mask_nested(33, 62);
+    let over_result = run_on_small_stack(move || rasterize_svg(&over, 32));
+    assert!(over_result.is_err(), "one hop past the combined-cost cap must be rejected, not risk an overflow");
+}
+
+#[test]
+fn rasterize_svg_renders_legit_multi_level_mask_pattern_marker_within_the_cap_on_a_small_stack() {
+    // The "isn't just rejecting everything" check for CPE-1444: a realistic layered-effect SVG — a handful
+    // of mask/pattern/marker hops, a few groups deep — is far under the product cap and must render.
+    let cases: [(&str, Vec<u8>); 3] = [
+        ("mask", mask_nested(4, 8)),
+        ("pattern", pattern_nested(4, 8)),
+        ("marker", marker_nested(4, 8)),
+    ];
+    for (name, bytes) in cases {
+        let result = run_on_small_stack(move || rasterize_svg(&bytes, 32));
+        assert!(
+            result.is_ok(),
+            "a legitimate multi-level '{name}' composition within the cap must render: {result:?}"
+        );
     }
 }

@@ -142,17 +142,32 @@
 //! the `url(#id)` cases). The 16MiB guaranteed stack from attempt 2 is kept as defense-in-depth for whatever
 //! remains bounded by `usvg`'s own 1024 cap (the `<use>`/nesting composition class).
 //!
-//! **Residual risk, reported rather than silently left closed:** `filter::convert`'s `feImage`→arbitrary-
-//! element indirection is bounded by this walk (a `<filter>` element's `feImage` children are scanned as
-//! part of [`hops_from_target`], the same way a container's nested `<use>`s already were), and so is
-//! `pattern`/`marker` content via the same "scan target's entire subtree for further reference-bearing
-//! nodes" rule. This was verified against reproducers built in the same shape as the confirmed clipPath/mask
-//! ones (see `tests/thumb_svg_panic_safety.rs`). What this pre-scan does **NOT** attempt to bound: a
-//! *combined* attack that interleaves several of these reference types with independent literal `<g>`
-//! nesting inside each hop (the same composition-of-dimensions concern noted for attempt 2, now with six
-//! dimensions instead of two) — no adversarial reproducer for that composed shape has been found or
-//! confirmed against this codebase, but it hasn't been proven safe either, so it's flagged here rather than
-//! silently assumed closed.
+//! **CPE-1437 attempt 3's residual risk — now CLOSED by CPE-1444:** attempt 3 flagged, but did not close,
+//! a *combined* attack interleaving these reference types with independent literal `<g>` nesting inside each
+//! hop. That gap was real and exploitable: for the MULTIPLICATIVE reference types (`mask`, `filter`/
+//! `feImage`, `fill`/`stroke`-referenced `pattern`, `marker-*`), `usvg` descends each hop target's own
+//! literal `<g>`/element nesting *while the reference-chain recursion frame is still on the stack*, so its
+//! real native recursion depth is neither the hop count alone (bounded by [`MAX_REFERENCE_CHAIN_DEPTH`]=128)
+//! nor a single document's own nesting alone (bounded by [`MAX_SVG_NESTING_DEPTH`]=64) but roughly their
+//! **product**. Concrete reproducers `mask_nested(127, 62)` / `pattern_nested(127, 62)` /
+//! `marker_nested(127, 62)` — a chain of 127 hops where each hop's `url(#…)` sits at the bottom of 62 nested
+//! `<g>` levels — pass BOTH independent caps (127 < 128 hops, each document's literal nesting == 64) yet
+//! drive `usvg` to ≈127×64 ≈ 7874 stack frames, overflowing even the [`RASTERIZE_STACK_SIZE`] 16MiB thread
+//! (`STATUS_STACK_OVERFLOW`); in a debug build the per-frame cost is higher, dropping the floor to
+//! ≈127×35 ≈ 4500 frames (CI builds debug, so the guarded envelope overflowed there outright).
+//!
+//! **CPE-1444 adds the missing SECOND dimension to [`reference_chain_too_deep`]'s walk:** alongside the hop
+//! depth, the same DFS now accumulates a **combined (product) cost** — `Σ over the chain of each
+//! multiplicative hop target's own [`subtree_nesting_depth`]` — and rejects past [`MAX_REFERENCE_COMBINED_COST`]
+//! (2048, sized well under both the ~7874 release and ~4500 debug overflow floors, and ~34x above any
+//! legitimate few-hops-×-shallow-nesting artwork — see that constant's doc comment). `clip-path` stays
+//! ADDITIVE (usvg resolves a clip chain separately from group descent, so its cost is the hop count alone —
+//! it keeps only the [`MAX_REFERENCE_CHAIN_DEPTH`] cap) and `<use>` stays additive/node-capped (bounded by
+//! usvg's ~1,000,000-node / 1024-`<use>`-depth caps and the 16MiB stack — the composition class attempt 2
+//! closed); `filter`/`feImage` are treated as multiplicative because a `feImage href` resolves an arbitrary
+//! element via the same general converter that descends its subtree on-stack, exactly like `mask`. See
+//! [`func_iri_attr_is_multiplicative`], [`chain_edges`], and the nested-composition regression tests in
+//! `tests/thumb_svg_panic_safety.rs`.
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
@@ -293,6 +308,16 @@ fn xml_nesting_too_deep(bytes: &[u8], max_depth: usize) -> bool {
 /// — so this alias collapses them to a single lifetime purely for readability.
 type XmlNode<'a> = resvg::usvg::roxmltree::Node<'a, 'a>;
 
+/// One outgoing reference-chain edge from a node: the hop it leads to, paired with the **per-hop cost**
+/// taking that hop adds to the combined (product) cost (CPE-1444) — the target subtree's own nesting depth
+/// for a multiplicative reference, `0` for an additive one. See [`chain_edges`].
+type ChainEdge<'a> = (XmlNode<'a>, usize);
+
+/// One frame of [`reference_chain_too_deep`]'s explicit-stack DFS: the node being visited, its outgoing
+/// [`ChainEdge`]s, and the index of the next edge to explore. Factored into a `type` alias to keep the
+/// walk's stack declaration readable (and to satisfy `clippy::type_complexity`).
+type DfsFrame<'a> = (XmlNode<'a>, Vec<ChainEdge<'a>>, usize);
+
 /// Namespace URI for `xlink:href`. Matters because `usvg`'s own attribute resolution (`resolve_href` in
 /// usvg-0.45.1's `parser/svgtree/parse.rs`) checks the **`xlink:href`-namespaced attribute FIRST**, and
 /// only falls back to the un-namespaced `href` if that one is absent. This exact precedence is one of the
@@ -329,6 +354,34 @@ const XLINK_NS: &str = "http://www.w3.org/1999/xlink";
 /// `<use>`-resolution recursion cap of 1024, which is sized for `usvg`'s *own* DoS protection on a
 /// normal-sized stack, not for this codebase's small-stack safety bar.
 const MAX_REFERENCE_CHAIN_DEPTH: usize = 128;
+
+/// The deepest **combined (product) cost** [`reference_chain_too_deep`] allows before rejecting the
+/// document (CPE-1444 — the second dimension the hop-only [`MAX_REFERENCE_CHAIN_DEPTH`] cap was blind to,
+/// closing the last parked CPE-1437 vector). See the module doc comment's "attempt 4 / CPE-1444" section:
+/// for the MULTIPLICATIVE reference types (`mask`, `filter`/`feImage`, `fill`/`stroke`-referenced
+/// `pattern`, `marker-*`), `usvg` descends each hop target's OWN literal `<g>`/element nesting *while the
+/// reference-chain recursion is still on the stack*, so its real native recursion depth is not the hop
+/// count alone (bounded by [`MAX_REFERENCE_CHAIN_DEPTH`]) nor a single document's own nesting alone
+/// (bounded by [`MAX_SVG_NESTING_DEPTH`]) but roughly their **product** — `Σ over the chain of each
+/// multiplicative hop target's max nesting depth`. A chain of 127 mask/pattern/marker hops where each hop's
+/// `url(#…)` sits at the bottom of 62 nested `<g>` levels passes BOTH independent caps (127 < 128 hops,
+/// each document ≤ 64 nesting) yet drives `usvg` to ≈127×64 ≈ 8100 stack frames — enough to overflow even
+/// the [`RASTERIZE_STACK_SIZE`] 16MiB thread (a release-build `STATUS_STACK_OVERFLOW` floor empirically
+/// ≈7874 frames; in a debug build — which CI runs — the per-frame cost is higher, so the floor drops to
+/// ≈127×35 ≈ 4500 frames). [`reference_chain_too_deep`] therefore accumulates this product cost along the
+/// chain (a SECOND dimension added to the same DFS that tracks hop depth) and rejects past this cap.
+///
+/// 2048 is chosen to sit comfortably UNDER both empirical overflow floors — ≈2.2x below the ~4500 debug
+/// floor and ≈3.8x below the ~7874 release floor, so genuinely dangerous input is rejected with wide
+/// margin on the profile CI actually builds — while sitting FAR ABOVE any legitimate artwork: a real
+/// hand-authored or tool-exported SVG's reference indirection is 1–3 hops and its per-hop group nesting a
+/// handful of levels, so even a generous "5 hops × 12-deep groups" illustration costs ~60, ~34x under this
+/// cap. `clip-path` is deliberately EXCLUDED from this product (it stays additive — `usvg` resolves a clip
+/// chain separately from group descent, so its cost is the hop count alone, still bounded by
+/// [`MAX_REFERENCE_CHAIN_DEPTH`]), and `<use>` cloning is likewise excluded (bounded by `usvg`'s own
+/// ~1,000,000-node / 1024-`<use>`-depth caps and the 16MiB stack — the composition class CPE-1437 attempt 2
+/// already closed). Both still count toward the hop cap, they just add nothing to the product cost.
+const MAX_REFERENCE_COMBINED_COST: usize = 2048;
 
 /// Mirrors `svgtypes::IRI::from_str`'s exact fragment grammar by hand (`usvg`'s `resolve_href` parses a
 /// resolved `href`/`xlink:href` value with `svgtypes::IRI::from_str`, and the CPE-1414 investigation
@@ -395,6 +448,52 @@ fn resolve_use_href<'a>(node: XmlNode<'a>) -> Option<&'a str> {
 const FUNC_IRI_ATTRS: &[&str] =
     &["clip-path", "mask", "filter", "marker-start", "marker-mid", "marker-end", "fill", "stroke"];
 
+/// Whether a [`FUNC_IRI_ATTRS`] reference is **multiplicative** — i.e. resolving it makes `usvg` descend
+/// the target's own literal `<g>`/element nesting *on the same call stack* as the reference-chain recursion
+/// (CPE-1444 — see [`MAX_REFERENCE_COMBINED_COST`] and the module doc comment's "attempt 4" section). Every
+/// func-IRI attr here is multiplicative EXCEPT `clip-path`: `usvg` resolves a clip chain separately from
+/// group descent (`clippath::convert` recurses clip-to-clip, but does NOT descend each clip's inner group
+/// nesting while that clip-chain frame is live), so clip cost is the hop count alone — additive, bounded by
+/// [`MAX_REFERENCE_CHAIN_DEPTH`], contributing nothing to the product cost. `mask`/`filter`/`marker-*` and
+/// `fill`/`stroke` (when they reference a `<pattern>`) all convert their target's content through the same
+/// general `converter::convert_children` used for ordinary element children, descending that content's full
+/// nesting on-stack — so they ARE multiplicative.
+fn func_iri_attr_is_multiplicative(attr: &str) -> bool {
+    attr != "clip-path"
+}
+
+/// The maximum literal element-nesting depth within `target`'s own subtree (`target` itself = depth 1),
+/// memoized in `cache`. This is the depth `usvg` descends *on-stack* when it converts `target`'s subtree
+/// while resolving a MULTIPLICATIVE reference to it (see [`func_iri_attr_is_multiplicative`] and
+/// [`MAX_REFERENCE_COMBINED_COST`]) — the per-hop cost accumulated along the reference chain. Using the
+/// subtree's MAX nesting (rather than the exact depth of the particular reference-bearing descendant a hop
+/// lands on) is a deliberate over-approximation: it can only ever make this guard MORE conservative, never
+/// less, and it's cheap to compute and cache once per target.
+///
+/// Walks the subtree with an explicit heap-allocated stack — never the real call stack — so it can't
+/// itself overflow no matter how the subtree is shaped. (In practice the whole document already passed
+/// [`xml_nesting_too_deep`]'s 64-level literal-nesting cap before this runs, so every subtree depth here is
+/// ≤ 64; the explicit-stack walk is defensive belt-and-braces regardless.)
+fn subtree_nesting_depth<'a>(target: XmlNode<'a>, cache: &mut HashMap<XmlNode<'a>, usize>) -> usize {
+    if let Some(&d) = cache.get(&target) {
+        return d;
+    }
+    let mut max_depth = 0usize;
+    let mut stack: Vec<(XmlNode<'a>, usize)> = vec![(target, 1)];
+    while let Some((node, d)) = stack.pop() {
+        if d > max_depth {
+            max_depth = d;
+        }
+        for child in node.children() {
+            if child.is_element() {
+                stack.push((child, d + 1));
+            }
+        }
+    }
+    cache.insert(target, max_depth);
+    max_depth
+}
+
 /// Finds every `url(#id)`-shaped reference anywhere in `value`, mirroring `svgtypes::FuncIRI::from_str`'s
 /// grammar (`url(` + optional whitespace + optional matching quote + `#id` + optional whitespace + `)`) by
 /// hand for the same no-new-dependency reason [`parse_iri_fragment`] mirrors `IRI::from_str` (see that
@@ -449,13 +548,23 @@ fn find_func_iri_ids(value: &str) -> Vec<&str> {
 /// every `url(#id)` found in any of [`FUNC_IRI_ATTRS`]'s attributes (resolved via [`find_func_iri_ids`]).
 /// An id that doesn't resolve to any element in `id_map` contributes no edge — matching `usvg`, which
 /// treats an unresolvable reference as absent rather than guessing.
-fn direct_reference_targets<'a>(node: XmlNode<'a>, id_map: &HashMap<&'a str, XmlNode<'a>>) -> Vec<XmlNode<'a>> {
+///
+/// Each returned target carries a `bool` = whether that reference is **multiplicative** (CPE-1444 — its
+/// resolution descends the target's own nesting on-stack, so it contributes a per-hop nesting cost to
+/// [`MAX_REFERENCE_COMBINED_COST`]; see [`func_iri_attr_is_multiplicative`]). `<use>`'s bare-IRI `href` is
+/// additive (bounded by `usvg`'s node/`<use>`-depth caps + the 16MiB stack), but `<feImage>`'s `href`
+/// resolves an ARBITRARY element via the same general converter that descends its subtree on-stack — so
+/// `feImage` is multiplicative even though it shares `<use>`'s `href` resolution.
+fn direct_reference_targets<'a>(
+    node: XmlNode<'a>,
+    id_map: &HashMap<&'a str, XmlNode<'a>>,
+) -> Vec<(XmlNode<'a>, bool)> {
     let mut targets = Vec::new();
 
     if node.has_tag_name("use") || node.has_tag_name("feImage") {
         if let Some(frag) = resolve_use_href(node) {
             if let Some(&t) = id_map.get(frag) {
-                targets.push(t);
+                targets.push((t, node.has_tag_name("feImage")));
             }
         }
     }
@@ -464,7 +573,7 @@ fn direct_reference_targets<'a>(node: XmlNode<'a>, id_map: &HashMap<&'a str, Xml
         if let Some(value) = node.attribute(attr) {
             for id in find_func_iri_ids(value) {
                 if let Some(&t) = id_map.get(id) {
-                    targets.push(t);
+                    targets.push((t, func_iri_attr_is_multiplicative(attr)));
                 }
             }
         }
@@ -525,16 +634,29 @@ fn hops_from_target<'a>(
 /// in `clippath::convert`/`mask::convert`/`use_node.rs` (all silently skip rendering rather than recursing)
 /// — so this doesn't over-reject the harmless `<use href="#self">`/`<clipPath id="a" clip-path="url(#a)">`
 /// idiom as if it were a reference cycle.
+///
+/// Each edge carries the **per-hop cost** taking it adds to the reference chain's product cost (CPE-1444):
+/// the target subtree's own [`subtree_nesting_depth`] for a MULTIPLICATIVE reference (`usvg` descends that
+/// nesting on-stack while the chain recursion is live), or `0` for an additive one (`clip-path`, `<use>`).
+/// All hops discovered inside one target share that target's cost, since resolving the reference descends
+/// that one target's subtree once. [`reference_chain_too_deep`] accumulates these along the chain.
 fn chain_edges<'a>(
     node: XmlNode<'a>,
     id_map: &HashMap<&'a str, XmlNode<'a>>,
     target_cache: &mut HashMap<XmlNode<'a>, Vec<XmlNode<'a>>>,
-) -> Vec<XmlNode<'a>> {
-    direct_reference_targets(node, id_map)
-        .into_iter()
-        .filter(|&target| target != node)
-        .flat_map(|target| hops_from_target(target, id_map, target_cache))
-        .collect()
+    nesting_cache: &mut HashMap<XmlNode<'a>, usize>,
+) -> Vec<ChainEdge<'a>> {
+    let mut edges = Vec::new();
+    for (target, multiplicative) in direct_reference_targets(node, id_map) {
+        if target == node {
+            continue;
+        }
+        let cost = if multiplicative { subtree_nesting_depth(target, nesting_cache) } else { 0 };
+        for hop in hops_from_target(target, id_map, target_cache) {
+            edges.push((hop, cost));
+        }
+    }
+    edges
 }
 
 /// Cheap(ish), non-recursive guard against a maliciously (or accidentally) deep reference chain of ANY of
@@ -573,7 +695,7 @@ fn chain_edges<'a>(
 /// "genuinely infinite" vs. "just very deep". Also bails out the moment the *currently open* DFS path alone
 /// exceeds `max_depth` (before exploring any further), so a single pathological chain can't force this scan
 /// to do more than `O(max_depth)` work before rejecting it.
-fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
+fn reference_chain_too_deep(bytes: &[u8], max_depth: usize, max_cost: usize) -> bool {
     let decompressed;
     let text: &str = if bytes.starts_with(&[0x1f, 0x8b]) {
         decompressed = match resvg::usvg::decompress_svgz(bytes) {
@@ -607,6 +729,7 @@ fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
     }
 
     let mut target_cache: HashMap<XmlNode, Vec<XmlNode>> = HashMap::new();
+    let mut nesting_cache: HashMap<XmlNode, usize> = HashMap::new();
     let trigger_nodes: Vec<_> = doc
         .descendants()
         .filter(|&n| !direct_reference_targets(n, &id_map).is_empty())
@@ -615,9 +738,15 @@ fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
         return false;
     }
 
+    // Each resolved node memoizes BOTH dimensions of the worst (most expensive) chain starting at it:
+    // `depth` = hop count (bounded by `max_depth`, CPE-1437), and `cost` = accumulated multiplicative
+    // per-hop nesting = `Σ over the chain of each multiplicative hop target's own nesting depth` (bounded
+    // by `max_cost`, CPE-1444). Both are path-independent properties of the node's outgoing subgraph, so
+    // memoizing per node (a node reachable by many chains keeps its worst value) is correct — see
+    // [`MAX_REFERENCE_COMBINED_COST`].
     enum VisitState {
         InProgress,
-        Done(usize),
+        Done { depth: usize, cost: usize },
     }
     let mut state: HashMap<XmlNode, VisitState> = HashMap::new();
 
@@ -626,49 +755,62 @@ fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
             continue; // already resolved as part of an earlier start node's walk
         }
 
-        // Explicit heap-allocated stack, non-recursive DFS: each frame is (node, its outgoing edges,
-        // index of the next edge to explore).
-        let mut stack: Vec<(XmlNode, Vec<XmlNode>, usize)> = Vec::new();
+        // Explicit heap-allocated stack, non-recursive DFS: each frame is (node, its outgoing (edge,
+        // per-hop cost) pairs, index of the next edge to explore).
+        let mut stack: Vec<DfsFrame> = Vec::new();
         state.insert(start, VisitState::InProgress);
-        stack.push((start, chain_edges(start, &id_map, &mut target_cache), 0));
+        stack.push((start, chain_edges(start, &id_map, &mut target_cache, &mut nesting_cache), 0));
 
         while !stack.is_empty() {
             let top = stack.len() - 1;
             let idx = stack[top].2;
             if idx < stack[top].1.len() {
-                let next = stack[top].1[idx];
+                let (next, _edge_cost) = stack[top].1[idx];
                 stack[top].2 += 1;
                 match state.get(&next) {
-                    Some(VisitState::Done(_)) => {} // already resolved; used when this frame unwinds
+                    Some(VisitState::Done { .. }) => {} // already resolved; used when this frame unwinds
                     Some(VisitState::InProgress) => return true, // cycle -> unbounded chain -> reject
                     None => {
                         state.insert(next, VisitState::InProgress);
-                        let edges = chain_edges(next, &id_map, &mut target_cache);
+                        let edges = chain_edges(next, &id_map, &mut target_cache, &mut nesting_cache);
                         stack.push((next, edges, 0));
                         if stack.len() > max_depth {
-                            // The currently-open DFS path is already longer than the cap. Whatever depth
-                            // the deepest node on it ends up with (computed on unwind below) can only be
-                            // >= this path length, so this can reject right now without exploring further.
+                            // The currently-open DFS path is already longer than the hop cap. Whatever
+                            // depth the deepest node on it ends up with (computed on unwind below) can only
+                            // be >= this path length, so this can reject right now without exploring
+                            // further. (The `cost` dimension can't early-reject this cheaply — per-hop cost
+                            // varies — but since every hop cost is bounded by `MAX_SVG_NESTING_DEPTH` and
+                            // the open path is bounded here by `max_depth`, the post-order cost check below
+                            // still fires within O(max_depth) work.)
                             return true;
                         }
                     }
                 }
             } else {
-                // All of `node`'s edges are resolved (`Done`) — compute and memoize its own chain depth.
+                // All of `node`'s edges are resolved (`Done`) — compute and memoize BOTH its own chain
+                // depth (1 + deepest child) and its own worst accumulated cost (max over edges of
+                // `this edge's per-hop cost + that child's own accumulated cost`).
                 let (node, edges, _) = stack.pop().unwrap();
-                let max_child_depth = edges
-                    .iter()
-                    .map(|e| match state.get(e) {
-                        Some(VisitState::Done(d)) => *d,
-                        _ => 0,
-                    })
-                    .max()
-                    .unwrap_or(0);
+                let mut max_child_depth = 0usize;
+                let mut max_path_cost = 0usize;
+                for &(child, edge_cost) in &edges {
+                    let (child_depth, child_cost) = match state.get(&child) {
+                        Some(VisitState::Done { depth, cost }) => (*depth, *cost),
+                        _ => (0, 0),
+                    };
+                    if child_depth > max_child_depth {
+                        max_child_depth = child_depth;
+                    }
+                    let path_cost = edge_cost.saturating_add(child_cost);
+                    if path_cost > max_path_cost {
+                        max_path_cost = path_cost;
+                    }
+                }
                 let depth = 1 + max_child_depth;
-                if depth > max_depth {
+                if depth > max_depth || max_path_cost > max_cost {
                     return true;
                 }
-                state.insert(node, VisitState::Done(depth));
+                state.insert(node, VisitState::Done { depth, cost: max_path_cost });
             }
         }
     }
@@ -682,11 +824,21 @@ fn reference_chain_too_deep(bytes: &[u8], max_depth: usize) -> bool {
 /// this codebase's own 256KB small-stack panic-safety probe empirically overflowed well under 500 levels
 /// (in some shapes — see the module doc comment — under 40). Even pessimistically assuming most of that
 /// 256KB is fixed thread overhead rather than available for recursion (say only ~150KB of it usable),
-/// that puts the real per-level stack cost at a few KB; 16MiB is 64x that probe's total size, giving
-/// several thousand levels of headroom — comfortably past usvg's own 1024 cap under any reasonable
-/// per-level cost estimate. Empirically confirmed safe against every adversarial payload in
-/// `tests/thumb_svg_panic_safety.rs` (composition-of-hops-and-nesting, plain deep nesting, the mutual
-/// `<symbol>` cycle, and the flat 500-hop chain).
+/// that puts the real per-level stack cost at a few KB; 16MiB is 64x that probe's total size. That is
+/// enough headroom for the ONE class this stack is responsible for — the `<use>`/nesting *composition*
+/// class, whose depth `usvg` itself hard-caps at 1024 `<use>`-resolution levels regardless of caller stack
+/// size — but it is explicitly **NOT** "several thousand levels comfortably past everything": CPE-1437
+/// attempt 3 empirically found `usvg`'s `clip-path`/`mask`/`filter`/`pattern`/`marker` reference recursions
+/// are bounded only by total element count (~1,000,000), not by that 1024 cap, so a long enough acyclic
+/// chain of them overflows even this 16MiB stack (confirmed floors N≈5000–8000), and CPE-1444 found the
+/// MULTIPLICATIVE subset (`mask`/`filter`/`pattern`/`marker`) overflows it at a mere ≈7874 frames
+/// (≈127 hops × 62 nesting). Those are the province of [`reference_chain_too_deep`]'s hop cap
+/// ([`MAX_REFERENCE_CHAIN_DEPTH`]) and combined-cost cap ([`MAX_REFERENCE_COMBINED_COST`]), NOT of this
+/// stack — `clip-path` is additive/hop-capped and `<use>` is node-capped, while `mask`/`filter`/`pattern`/
+/// `marker` need the product bound. This stack is empirically confirmed safe against every payload in
+/// `tests/thumb_svg_panic_safety.rs` that is legitimately within `usvg`'s own bounds
+/// (composition-of-hops-and-nesting, plain deep nesting, the mutual `<symbol>` cycle, and shallow chains);
+/// the input-unbounded chains are rejected by the pre-scan before they ever reach this thread.
 const RASTERIZE_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 /// Rasterize `bytes` (the contents of an `.svg` file) to an RGBA image whose longest edge is at most
@@ -760,7 +912,7 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
 /// another `Err`, never a panic.
 fn rasterize_svg_on_a_guaranteed_stack(bytes: Vec<u8>, max_edge: u32) -> Result<DynamicImage, String> {
     let render = move || -> Result<DynamicImage, String> {
-        if reference_chain_too_deep(&bytes, MAX_REFERENCE_CHAIN_DEPTH) {
+        if reference_chain_too_deep(&bytes, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST) {
             return Err("SVG reference chain too deep".to_string());
         }
 
@@ -1005,10 +1157,10 @@ mod tests {
         // CPE-1437's exact finding: ~500 links passes both CPE-1413's nesting guard (siblings, depth ~1)
         // and would not be flagged as a reference cycle (it's acyclic) — must still be rejected as a
         // too-deep reference chain.
-        assert!(reference_chain_too_deep(&flat_use_chain_svg(500), MAX_REFERENCE_CHAIN_DEPTH));
+        assert!(reference_chain_too_deep(&flat_use_chain_svg(500), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST));
         // A realistic sprite-sheet-style chain (a couple of hops) must not be rejected.
-        assert!(!reference_chain_too_deep(&flat_use_chain_svg(3), MAX_REFERENCE_CHAIN_DEPTH));
-        assert!(!reference_chain_too_deep(&square_svg(10, 10), MAX_REFERENCE_CHAIN_DEPTH), "no <use> at all");
+        assert!(!reference_chain_too_deep(&flat_use_chain_svg(3), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST));
+        assert!(!reference_chain_too_deep(&square_svg(10, 10), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST), "no <use> at all");
     }
 
     #[test]
@@ -1016,11 +1168,11 @@ mod tests {
         // A chain of exactly MAX_REFERENCE_CHAIN_DEPTH links resolves to chain depth == the cap, which the
         // guard's own `depth > max_depth` check must allow; one link more must tip it over.
         assert!(
-            !reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH), MAX_REFERENCE_CHAIN_DEPTH),
+            !reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST),
             "a chain exactly at the cap must be allowed"
         );
         assert!(
-            reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH + 1), MAX_REFERENCE_CHAIN_DEPTH),
+            reference_chain_too_deep(&flat_use_chain_svg(MAX_REFERENCE_CHAIN_DEPTH + 1), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST),
             "one link past the cap must be rejected"
         );
     }
@@ -1037,7 +1189,7 @@ mod tests {
             <symbol id="b"><use xlink:href="#a"/></symbol>
             <use xlink:href="#a"/>
         </svg>"##;
-        assert!(reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH));
+        assert!(reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST));
     }
 
     #[test]
@@ -1047,7 +1199,7 @@ mod tests {
         let svg = br##"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
             <use id="self" href="#self"/>
         </svg>"##;
-        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH));
+        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST));
     }
 
     #[test]
@@ -1063,9 +1215,9 @@ mod tests {
             <rect id="u0" width="10" height="10" fill="#f00"/>
             <use id="u1" xlink:href="&#35;u0"/>
         </svg>"##;
-        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH), "a single resolved hop is well under the real cap");
+        assert!(!reference_chain_too_deep(svg, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST), "a single resolved hop is well under the real cap");
         assert!(
-            reference_chain_too_deep(svg, 0),
+            reference_chain_too_deep(svg, 0, MAX_REFERENCE_COMBINED_COST),
             "entity-encoded href must resolve to a real edge, not be silently dropped"
         );
     }
@@ -1091,7 +1243,7 @@ mod tests {
         }
         s.push_str("</svg>");
         assert!(
-            reference_chain_too_deep(s.as_bytes(), MAX_REFERENCE_CHAIN_DEPTH),
+            reference_chain_too_deep(s.as_bytes(), MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST),
             "a DTD-entity-built chain must resolve its edges and be caught as too deep, just like a literal one"
         );
     }
@@ -1113,5 +1265,115 @@ mod tests {
         </svg>"##;
         let img = rasterize_svg(svg, 32).unwrap();
         assert!(img.width() > 0 && img.height() > 0);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1444: combined (product) cost — hops × per-hop nesting — for the multiplicative types.
+    // -----------------------------------------------------------------------------------------
+
+    /// A chain of `hops` `<mask>`s where mask `m{i}`'s `mask="url(#m{i-1})"` reference sits at the bottom
+    /// of `nest` nested `<g>` levels, triggered by an outer `<rect mask="url(#m{hops})">`. The inner
+    /// reference-bearing shape is SELF-CLOSING, so total literal nesting is `svg`+`mask`+`nest` — exactly
+    /// 64 at `nest`=62, which PASSES [`xml_nesting_too_deep`]'s cap — while `usvg` still descends each hop's
+    /// `nest` `<g>` levels on-stack during mask resolution, so the real recursion cost is ≈ `hops × nest`
+    /// (the CPE-1444 multiplicative vector). Per-hop [`subtree_nesting_depth`] here is `nest`+2 (mask + the
+    /// `nest` `<g>`s + the self-closing rect).
+    fn nested_mask_chain(hops: usize, nest: usize) -> Vec<u8> {
+        let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        s.push_str(r##"<mask id="m0"><rect width="10" height="10" fill="#fff"/></mask>"##);
+        for i in 1..=hops {
+            s.push_str(&format!(r#"<mask id="m{i}">"#));
+            s.push_str(&"<g>".repeat(nest));
+            s.push_str(&format!(
+                r##"<rect width="10" height="10" fill="#fff" mask="url(#m{prev})"/>"##,
+                prev = i - 1
+            ));
+            s.push_str(&"</g>".repeat(nest));
+            s.push_str("</mask>");
+        }
+        s.push_str(&format!(r##"<rect width="10" height="10" mask="url(#m{hops})"/>"##));
+        s.push_str("</svg>");
+        s.into_bytes()
+    }
+
+    /// The `clip-path` analogue of [`nested_mask_chain`] — identical shape, but `clip-path` is ADDITIVE
+    /// (usvg resolves the clip chain separately from group descent), so it must NOT be product-costed.
+    fn nested_clip_chain(hops: usize, nest: usize) -> Vec<u8> {
+        let mut s = String::from(r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">"#);
+        s.push_str(r##"<clipPath id="c0"><rect width="10" height="10"/></clipPath>"##);
+        for i in 1..=hops {
+            s.push_str(&format!(r#"<clipPath id="c{i}">"#));
+            s.push_str(&"<g>".repeat(nest));
+            s.push_str(&format!(
+                r##"<rect width="10" height="10" clip-path="url(#c{prev})"/>"##,
+                prev = i - 1
+            ));
+            s.push_str(&"</g>".repeat(nest));
+            s.push_str("</clipPath>");
+        }
+        s.push_str(&format!(r##"<rect width="10" height="10" clip-path="url(#c{hops})"/>"##));
+        s.push_str("</svg>");
+        s.into_bytes()
+    }
+
+    #[test]
+    fn combined_cost_guard_rejects_a_multiplicative_chain_that_passes_the_hop_cap() {
+        // The exact CPE-1444 vector: 127 mask hops (== 128 chain nodes, which the hop cap of 128 ALLOWS)
+        // each 62 `<g>` deep → combined cost ≈ 127×64 ≫ 2048. Must be rejected by the COST dimension, not
+        // the hop dimension — proving the second dimension is load-bearing.
+        assert!(reference_chain_too_deep(
+            &nested_mask_chain(127, 62),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
+        // And it is specifically the COST cap doing it: with the cost cap raised out of the way but the hop
+        // cap unchanged, 127 hops sits at the cap and is allowed — so nothing but the product bound rejects
+        // the real payload.
+        assert!(!reference_chain_too_deep(&nested_mask_chain(127, 62), MAX_REFERENCE_CHAIN_DEPTH, usize::MAX));
+    }
+
+    #[test]
+    fn combined_cost_guard_boundary_just_under_is_allowed_just_over_is_rejected() {
+        // Per-hop cost is `nest`+2 = 64 at nest=62, so the cap of 2048 is reached at exactly 32 hops
+        // (32×64 = 2048, allowed by the `> max_cost` check) and exceeded at 33 (33×64 = 2112).
+        assert!(!reference_chain_too_deep(
+            &nested_mask_chain(32, 62),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
+        assert!(reference_chain_too_deep(
+            &nested_mask_chain(33, 62),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
+    }
+
+    #[test]
+    fn combined_cost_guard_does_not_product_cost_additive_clip_path() {
+        // `clip-path` is additive: usvg resolves the clip chain separately from group descent, so a 127-hop
+        // clip chain each 62 `<g>` deep is bounded by the HOP cap alone (127 < 128 → allowed), NOT the
+        // product cap — confirm the guard doesn't over-reject it as if clip were multiplicative.
+        assert!(!reference_chain_too_deep(
+            &nested_clip_chain(127, 62),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
+        // The hop cap still catches a genuinely too-long clip chain (regression for clip staying capped).
+        assert!(reference_chain_too_deep(
+            &nested_clip_chain(200, 2),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
+    }
+
+    #[test]
+    fn combined_cost_guard_allows_a_legit_shallow_multiplicative_chain() {
+        // A realistic layered-effect SVG: a handful of mask hops, a few groups deep — must render, never
+        // rejected by the product cap.
+        assert!(!reference_chain_too_deep(
+            &nested_mask_chain(4, 8),
+            MAX_REFERENCE_CHAIN_DEPTH,
+            MAX_REFERENCE_COMBINED_COST
+        ));
     }
 }
