@@ -1170,3 +1170,36 @@ Tuned defaults / lessons:
 - FRONTIER: headless FEATURE well dry (re-confirmed) AND the security vein now substantially tapped (font/net/doc readers
   checked clean). Backlog EMPTY. Next increment needs the USER — attended GUI verify of the 8 merged PRs, macOS, signing
   cert, live agent session, or a fresh feature direction.
+
+## Shift 2026-08-08 cont. (CLI, "keep going") — batch 2: network/IPC security sweep, 4 PRs, 1 HIGH traversal-to-RCE closed
+After the batch-1 wrap said "well dry", the user said "keep going" — which correctly surfaced that the UN-swept
+surface (network protocol + crypto + IPC + frontend) had never been audited. A 3-auditor deep sweep + a frontend
+XSS audit found real work the file-reader sweeps missed. Shipped 4 PRs / 8 tickets:
+- **CPE-1461/1462 (#717, HIGH)** — provider-agnostic path-traversal → arbitrary local write from a hostile
+  WebDAV/SFTP server (`transfer.rs download_tree` sink + webdav-href/sftp-name sources). `guarded_join`
+  (Normal-components-only), source `is_safe_name`, validate-before-mkdir symlink guard, leaf-symlink skip, walk
+  depth/entry caps + streaming, webdav `redirects(0)`. Adversarial opus auditor SEC PASS after 1 rework (symlink
+  ordering). LATENT (pre-CPE-616/685 wiring) but fixed before it ships.
+- **CPE-1471/1472/1473 (#718)** — sidecar host-OOM (unbounded `buf.lines()` → bounded `read_bounded_line` 16MiB),
+  handshake `expected_id` validation, ed25519 `verify_strict`. CPE-1471 was the one CURRENTLY-prod-reachable bug.
+- **CPE-1453/1454 (#716)** — net client stream-item / server WS-header unbounded reads → capped.
+- **CPE-1475 (#719)** — bounded-reader ~8KiB overshoot nit.
+Frontend XSS audit (all `{@html}`, previews, filenames): **CLEAN** — one dompurify funnel, SVG via `<img>`, email
+HTML backend-stripped, structured previews plain-text. No findings.
+Crypto/signing/vault/JWT/broker/egress/updater audited **CLEAN** (credit noted).
+
+Tuned defaults / lessons:
+- **"Well dry" was too hasty at the batch-1 wrap** — the file-reader sweeps never touched net/sftp/vfs/crypto/IPC/
+  frontend. When declaring a surface tapped, ENUMERATE which crates/surfaces were actually audited; an un-swept
+  crate that parses untrusted (esp. NETWORK) input is a real vein.
+- **Path traversal = the top class for a file explorer's remote layer**: `local_dir.join(untrusted)` where an
+  absolute/drive/UNC component REPLACES the base. Fix = keep only `Normal` path components + validate-before-mutate.
+- **Review-agent worktree hygiene**: some reviewers ran `git checkout -b` in the SHARED checkout, leaking a branch
+  onto main's working tree + leaking a worker commit onto local main twice. Brief review/audit agents to use
+  `git worktree add <tmp>` in their OWN dir, never a bare checkout in the shared repo. Foreman must re-verify local
+  main == origin/main after each merge (reset --hard origin/main) — the leak recurred 2×.
+- **Concurrent process coordination**: the desktop nightshift was building the workshifts_* skill family (CPE-1476)
+  the whole time — left its untracked WIP + IDs alone, numbered above it.
+- Session total across both batches: **11 PRs merged, 0 escaped defects**, 1 HIGH + 1 prod-MED + many DoS closed;
+  security surface now comprehensively audited (readers/network/crypto/IPC/frontend). FRONTIER: genuinely dry for
+  headless — next needs the user (attended GUI/macOS/cert/live-agent/network-E2E) or a fresh direction.
