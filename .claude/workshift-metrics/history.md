@@ -1118,3 +1118,27 @@ non-recursive depth pre-scan. Library entry: `untrusted-parser-fuzz-sweep-2026-0
 FRONTIER: this vein now COVERED (archive/svg/font/webdav/jwt batteries); remaining = 2 low-pri follow-ups
 (CPE-1414/1415) + user-gated feature work. Session TOTAL across all segments = 35 PRs, 0 escaped defects, 5 real
 security bugs found (4 fixed).
+
+## Shift 2026-08-07 (CLI, "Do 3 workshifts") — 8 PRs merged, epic CPE-1433 closed, feature well confirmed dry
+Shipped: CPE-1432 pane-aware quick-look (#701), CPE-1415 sevenz catch_unwind (#702), CPE-1427/1428 cert
+hardening (#703), **epic CPE-1433 structured previews** — .eml (#704) + .ics/.vcf (#705), CPE-1438 dual-pane
+crypto Inspect overlay (#706), CPE-1440/1441 security dep bumps (#707: quick-xml High DoS + dompurify XSS).
+Parked CPE-1414 (SVG use-cycle guard) after the 3-attempt circuit-breaker — adversarial reviewer found a real
+256KB-stack bypass on EACH attempt (entity-encoded href → DTD-entity → xlink:href precedence); low real risk
+(prod 2MB stack safe), exact remaining fix documented. Filed CPE-1437/1439/1442/1443 (deferred/blocked follow-ups).
+
+Tuned defaults / lessons:
+- **Adversarial security re-review is the highest-value leg** — caught the SVG guard bypass 3× AND the #707
+  lockfile-propagation gap. A security guard needs a reviewer that TRIES to evade it (re-run per fix).
+- **Repo has MULTIPLE independent Cargo.locks** (no workspace root): a dep bump in crates/server must ALSO
+  regenerate + commit `src-tauri/Cargo.lock` (the shipped-app lockfile) — cargo audit/build from crates/server
+  alone MISSES the shipped binary. New memory: [[multiple-independent-cargo-locks]].
+- **Verify epics against CODE, not briefs** — repeatedly found "candidate" epics already fully built (format
+  readers, checkpoint-rollback, file-type detection, activity-replay/cost-dashboard/conflict-radar all wired).
+- **Structured-preview template** (jwt_preview.rs → command → Svelte + jsdom, provider before text) = the proven
+  shape for new file-type viewers; hand-rolled zero-dep parsers + a panic-safety battery each.
+- Model mix: sonnet workers/reviewers for most; opus for the adversarial SVG review + the epic scouts (costly-if-wrong).
+- **FRONTIER: clean headless FEATURE well is DRY** (2 independent scouts + drained queue). Next increment needs
+  the USER: attended GUI punch-list, macOS (no tauri-driver path), signing cert (CPE-002), live agent session
+  (CPE-1098), 3D viewer (CPE-118), real-network E2E (CPE-819/820). Only headless left = low-value CPE-1414/1437
+  SVG hardening. See Library [[structured-preview-runway-2026-08-07]].

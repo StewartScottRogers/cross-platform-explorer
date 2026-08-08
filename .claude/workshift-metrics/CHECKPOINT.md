@@ -1,55 +1,35 @@
 # Workshift Checkpoint
 
-## RUN 2026-08-07 (CLI, user-present GUI+feature session) — CRYPTO EPIC SHIPPED + RUNNING · next epic = CPE-720 media player
-**State:** `main` @ origin (clean, 0 worktrees). App **built + installed + running**: v0.57.60-sidecar
-(Cross-Platform Explorer (Sidecar) 0.57.60, host+sidecar timestamps verified matching). User reinstalled +
-confirmed "Looks good."
+## RUN 2026-08-07 (CLI, "Do 3 workshifts") — SHIFT WRAPPED: 8 PRs merged, feature well DRY, needs user
+**State:** `main` @ origin `ee16d93e` (clean, 0 worktrees). App last built + running = v0.57.61-sidecar
+(media player). The 8 PRs below are code-merged but NOT yet in a fresh installed build — a rebuild is the
+natural next step whenever the user wants to exercise them live.
 
-### Shipped this session
-- **Epic CPE-1417 (Crypto Inspector & Certificate Management) COMPLETE** — all 8 children merged:
-  - CPE-1418 JWT decode (#692), CPE-1419 cert/CSR/key decode (#692), CPE-1420 cert create (#694),
-    CPE-1421 cert sign/issue-from-CSR (#695), CPE-1422 preview-pane views (#693), CPE-1423+1424 cert
-    management dialogs + pane-aware right-pane menu (#697), CPE-1425 samples/crypto/ (#691).
-  - Guarantees held: private-key material NEVER displayed/returned/logged (algo+size only); narrow
-    committed demo key under samples/crypto/ only (updater.key/.env still ignored).
-- **CPE-1426 folder drill-down** (#696) — preview pane becomes a folder browser; click a subfolder to descend.
-- Released v0.57.60-sidecar (bumped package.json + Cargo.toml + tauri.conf.json + Cargo.lock; dispatched
-  "Release (sidecar-enabled)"; published draft; installed; launched).
+### Shipped this run (8 PRs / 11 tickets)
+- CPE-1432 pane-aware Space quick-look (#701) · CPE-1415 sevenz catch_unwind mitigation (#702) ·
+  CPE-1427/1428 cert-create RSA-4096 test + cert-sign hardening (#703)
+- **EPIC CPE-1433 structured previews CLOSED** — CPE-1434 .eml (#704), CPE-1435 .ics + CPE-1436 .vcf (#705):
+  hand-rolled zero-dep parsers, HTML sanitized to text (no remote loads), vCard PHOTO presence-only, panic batteries.
+- CPE-1438 dual-pane crypto Inspect overlay (#706) — Inspect now works in dual-pane (was a no-op).
+- CPE-1440/1441 security dep bumps (#707) — quick-xml High DoS (RUSTSEC-2026-0194/0195 via calamine 0.26→0.36)
+  + dompurify XSS (3.4.13), fixed in BOTH lockfiles incl. src-tauri (shipped app).
 
-### Low-pri backlog (all well-specified, none blocking)
-- CPE-1414 — SVG mutual `<use>` cycle stack-overflow (SAFE on prod 2MB stacks; needs non-recursive cycle detector).
-- CPE-1415 — defensive `catch_unwind` around sevenz-rust parse (already contained via spawn_blocking).
-- CPE-1427 — cert-create RSA-4096 test.
-- CPE-1428 — cert-sign `ensure_previewable_size` guard on 3 file reads + CSR-requests-CA test + comment nit.
+### Parked / deferred / blocked (all documented, warm for pickup)
+- **CPE-1414** (Deferred) — SVG use-cycle guard; 3-attempt circuit-breaker; low-risk (256KB-probe only, prod
+  safe); PR #700 left as DRAFT with the sound roxmltree base; exact ~2-line remaining fix documented
+  (xlink:href-first precedence + svgtypes::IRI fragment parse to mirror usvg's resolve_href).
+- CPE-1437 (Deferred) SVG deep-acyclic use-chain small-stack overflow · CPE-1439 (Backlog) archive-ext provider
+  gap (verify backend first) · CPE-1442 (Blocked) rsa Marvin, await rsa 0.10 · CPE-1443 (Deferred) dev-toolchain
+  svelte4→5/vite5→8/vitest2→4 migration (dev-only advisories, big-design).
 
-### NEXT EPIC — ACTIVATED: CPE-720 Audio & Video Player Pane
-The app has **zero temporal-media playback today**; only the CPE-943 Playlist model exists. Remaining DoD is
-genuinely unbuilt + high-value + visible + user-verifiable-now. Uses the webview's native `<audio>`/`<video>`
-(no heavy decoder dep → fits lean-core guardrail). Decomposed just-in-time into:
-- **CPE-1429** — audio/video playback + transport in the preview pane (core): pure `mediaTransport.ts`
-  controller (play/pause/seek/volume/speed/loop) + `<video>`/`<audio>` via `convertFileSrc` (Tauri asset
-  protocol, Range-streamed — NOT data-URL; check assetProtocol capability scope) + new `media` provider kind
-  before generic handlers + graceful unsupported-codec fallback (native `error` → message + open-externally)
-  + jsdom tests + docs. *Build first.*
-- **CPE-1430** — full-screen quick-look media player + folder stepping (spacebar opens; arrow keys prev/next
-  across the folder's media via the CPE-943 Playlist model; Esc closes; reuses CPE-1429's transport
-  controller). *Depends on 1429; build after it merges.*
-- **CPE-1431** (DEFERRED follow-up) — waveform/keyframe scrub strip (heavier: extraction + caching; reuse
-  thumbnail pipeline CPE-718). Not this round unless cheap.
+### FRONTIER — the clean headless FEATURE well is DRY (verified, not assumed)
+Two independent opus scouts + the drained queue (Backlog empty of features, Doing empty, Blocked = user-gated)
+confirm it. The remaining headless work is only the low-value CPE-1414/1437 SVG hardening. **The next real
+increment needs the USER:** attended GUI verification punch-list (the 8 merged PRs), macOS (no tauri-driver
+path), signing cert (CPE-002), a live agent session for the cost-ledger tab (CPE-1098), the 3D-model viewer
+(CPE-118), real-network E2E (CPE-819/820), or a fresh user-directed feature/epic.
 
-**STATUS 2026-08-07 (cont.): epic CPE-720 CORE COMPLETE.**
-- **CPE-1429** (#698 MERGED) — audio/video playback + full transport in the preview pane. Reviewer reproduced a
-  mutation; one reviewer catch (stale gui-smoke `.preview-media`→`.mp-media` selector) fixed pre-merge.
-  New: `src/lib/mediaTransport.ts` (pure controller), `src/lib/components/MediaPlayer.svelte`, `media` provider kind.
-- **CPE-1430** (#699 MERGED) — Space full-screen quick-look + ←/→ folder stepping (repeat/shuffle mirror the
-  Rust CPE-943 playlist, verified line-by-line incl. u64-wrap shuffle parity). New: `src/lib/mediaQuickLook.ts`,
-  `MediaQuickLook.svelte`. Reviewer reproduced a mutation.
-- **Building v0.57.61-sidecar** now (run 31223702866) to verify media live with the present user.
-- Deferred/follow-ups: **CPE-1431** (waveform/keyframe strip, Deferred), **CPE-1432** (Space quick-look should
-  honor active pane in dual-pane — low-pri, pre-existing CPE-645 pattern).
-
-**To resume:** publish v0.57.61-sidecar draft (after asset check) → install (kill all cpe/ai-console procs first;
-verify host+sidecar timestamps match) → launch → user plays a `samples/audio|video/` clip + Space quick-look.
-Then PM picks the next epic (candidates whose backend ships + only GUI remains: CPE-716 drive-bay, CPE-713 tray,
-CPE-714 terminal-dock, CPE-715 link-forge — VERIFY build-state before committing; several epics are
-more-done-than-their-brief). Board clean + green.
+**To resume:** a fresh session should NOT hunt for more headless features (verified dry — don't re-scout, read
+Library [[structured-preview-runway-2026-08-07]]). Instead: (a) rebuild v0.57.62-sidecar so the user can
+exercise the 8 merged PRs live, and/or (b) wait for the user to name an attended epic / provide a resource /
+give direction. Board clean + green. Lock released.
