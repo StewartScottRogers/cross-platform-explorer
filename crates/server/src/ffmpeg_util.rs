@@ -13,7 +13,7 @@
 //! uses `"waveform"`), but the exclusivity/retry/cleanup mechanics are identical either way.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -57,6 +57,28 @@ pub fn resolve_ffmpeg_bin() -> PathBuf {
         }
     }
     PathBuf::from(exe_name)
+}
+
+/// The `-protocol_whitelist` value every ffmpeg-shelling module passes before `-i`: restricts ffmpeg to
+/// the `file` protocol for its input plus `pipe` (needed by [`crate::media_waveform`]'s `pipe:1` output;
+/// harmless for [`crate::thumb_video`], which never uses it). See [`reject_unsafe_ffmpeg_input`]'s doc
+/// for the full rationale — this is the load-bearing guard at the ffmpeg layer itself.
+pub const FFMPEG_PROTOCOL_WHITELIST: &str = "file,pipe";
+
+/// Defense-in-depth guard (CPE-1478, then shared with `thumb_video` in CPE-1480) for every ffmpeg-
+/// shelling module's IPC-reachable subprocess boundary: rejects any `path` that isn't an existing regular
+/// local file BEFORE it's handed to ffmpeg as `-i` input. Without this, a `path` of `http://…` (blind SSRF
+/// to internal hosts / cloud-metadata), `concat:…` / `subfile:…` (arbitrary local-file read), or `data:…`
+/// is a valid ffmpeg *protocol* string, not a filename — ffmpeg would happily open it. Pair with
+/// `-protocol_whitelist` (see [`FFMPEG_PROTOCOL_WHITELIST`]) on the spawned command, which is the
+/// load-bearing guard at the ffmpeg layer; this is the cheaper first line that also yields a clearer
+/// error for a genuinely-missing file.
+pub fn reject_unsafe_ffmpeg_input(path: &Path) -> Result<(), String> {
+    if std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
+        Ok(())
+    } else {
+        Err(format!("not a readable regular file: {}", path.display()))
+    }
 }
 
 /// Creates a fresh, **exclusively-owned** scratch directory under the OS temp dir for one ffmpeg
@@ -191,6 +213,47 @@ mod tests {
     #[test]
     fn resolve_ffmpeg_bin_never_panics_without_a_bundled_binary() {
         let _ = resolve_ffmpeg_bin();
+    }
+
+    /// Security (CPE-1478/1480): an ffmpeg *protocol* string that isn't a local file — e.g. an `http://`
+    /// URL (blind SSRF) or `concat:`/`subfile:` (arbitrary read) — must be rejected by the shared guard,
+    /// shielding every caller (`thumb_video`, `media_waveform`) from having to reimplement this check.
+    #[test]
+    fn reject_unsafe_ffmpeg_input_rejects_non_file_protocol_strings() {
+        for evil in [
+            "http://169.254.169.254/latest/meta-data/",
+            "concat:/etc/passwd",
+            "subfile:,start,0,end,64,,:/etc/passwd",
+        ] {
+            assert!(
+                reject_unsafe_ffmpeg_input(Path::new(evil)).is_err(),
+                "a non-file protocol input ({evil}) must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_unsafe_ffmpeg_input_rejects_a_nonexistent_path() {
+        assert!(reject_unsafe_ffmpeg_input(Path::new("Z:/definitely/does/not/exist/nope.mp4")).is_err());
+    }
+
+    #[test]
+    fn reject_unsafe_ffmpeg_input_accepts_an_existing_regular_file() {
+        let d = scratch("reject-guard");
+        let f = d.join("real.mp4");
+        fs::write(&f, b"irrelevant").unwrap();
+        assert!(reject_unsafe_ffmpeg_input(&f).is_ok());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn reject_unsafe_ffmpeg_input_rejects_a_directory() {
+        let d = scratch("reject-guard-dir");
+        assert!(
+            reject_unsafe_ffmpeg_input(&d).is_err(),
+            "a directory is not a regular file and must be rejected"
+        );
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

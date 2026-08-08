@@ -37,7 +37,7 @@ use std::io::Read;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
-use crate::ffmpeg_util::resolve_ffmpeg_bin;
+use crate::ffmpeg_util::{reject_unsafe_ffmpeg_input, resolve_ffmpeg_bin, FFMPEG_PROTOCOL_WHITELIST};
 
 /// Mono PCM sample rate (Hz) ffmpeg is asked to resample to before piping data back. Chosen low
 /// deliberately: a waveform strip only ever needs the min/max *envelope* shape, not audio fidelity, and
@@ -82,15 +82,12 @@ fn extract_waveform_peaks_with_ffmpeg(
 ) -> Result<Vec<(f32, f32)>, String> {
     let buckets = buckets.max(1);
 
-    // Defense-in-depth on this IPC-reachable subprocess boundary (CPE-1478 review): reject anything that
-    // isn't an existing regular local file BEFORE we hand the string to ffmpeg. Without this, a `path` of
-    // `http://…` / `concat:…` / `subfile:…` is a valid ffmpeg *protocol* input, not a filename — ffmpeg
-    // would happily open it (a blind SSRF to internal hosts / cloud-metadata, or arbitrary-file read). The
-    // `-protocol_whitelist file,pipe` below is the load-bearing guard at the ffmpeg layer; this is the
-    // cheaper first line that also yields a clearer error for a genuinely-missing file.
-    if !std::fs::metadata(path).map(|m| m.is_file()).unwrap_or(false) {
-        return Err(format!("not a readable regular file: {}", path.display()));
-    }
+    // Defense-in-depth on this IPC-reachable subprocess boundary (CPE-1478 review, guard shared with
+    // `thumb_video` via `ffmpeg_util` since CPE-1480): reject anything that isn't an existing regular
+    // local file BEFORE we hand the string to ffmpeg. See `reject_unsafe_ffmpeg_input`'s doc for the
+    // full rationale. `-protocol_whitelist` below is the load-bearing guard at the ffmpeg layer; this is
+    // the cheaper first line that also yields a clearer error for a genuinely-missing file.
+    reject_unsafe_ffmpeg_input(path)?;
 
     let mut child: Child = Command::new(ffmpeg)
         .arg("-nostdin") // never let ffmpeg read our stdin (there isn't one) or block waiting on it
@@ -101,7 +98,7 @@ fn extract_waveform_peaks_with_ffmpeg(
         // (`http:`/`tcp:` → SSRF) or read via a non-file protocol (`concat:`/`subfile:`/`data:`). `file`
         // covers the local input; `pipe` is needed for the `pipe:1` output below.
         .arg("-protocol_whitelist")
-        .arg("file,pipe")
+        .arg(FFMPEG_PROTOCOL_WHITELIST)
         .arg("-i")
         .arg(path)
         .arg("-vn") // audio only — don't waste effort decoding a video stream, if any
