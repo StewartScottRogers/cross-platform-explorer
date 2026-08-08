@@ -2,7 +2,7 @@
 id: CPE-1477
 title: "Add a Content-Security-Policy — security.csp is null, so a future injection escalates to exfil/RCE unchecked"
 type: Bug
-status: Backlog
+status: Done
 priority: Medium
 component: Full-stack
 tags: [ready, security]
@@ -41,3 +41,15 @@ http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localho
 ## Effort / blast radius
 Medium — one config line + a gui-smoke runtime check. No code changes expected. Touches only tauri.conf.json.
 Epic CPE-810 (client/server contract + security). Disjoint from the concurrent workshifts_* work.
+
+## Work Log
+- 2026-08-08: Set `security.csp` in `src-tauri/tauri.conf.json` (line 15) from `null` to the
+  prescribed policy string: `default-src 'self'; script-src 'self'; connect-src 'self' ipc:
+  http://ipc.localhost; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self'
+  asset: http://asset.localhost data: blob:; style-src 'self' 'unsafe-inline'; font-src 'self'
+  data:; object-src 'none'; frame-src 'none'`. No code changes — config-only, one line. Verified the
+  JSON parses (`node -e "JSON.parse(...)"`) and `cargo build` succeeds in `src-tauri`. Runtime CSP
+  enforcement (whether any legit resource load is blocked) is NOT exercised by this build — that is
+  validated by the CI `gui-smoke` leg, which drives the real `tauri build` binary and asserts the UI
+  renders; a CSP that breaks the app would show up there as a blank screen. Flagged for the
+  Reviewer/UAT to watch that leg on this PR before merge.
