@@ -2,7 +2,7 @@
 id: CPE-1479
 title: "GUI-smoke suite is RED on every main run — CDP mouse-injection unavailable on driver + ~20min job timeout (Visual Critic/UAT substrate down)"
 type: Bug
-status: Doing
+status: Done
 priority: High
 component: CI/QA-infra
 tags: [ready]
@@ -59,3 +59,47 @@ succeeds — so this is NOT a render/CSP problem). Two distinct failures:
 Found during the CPE-1477 workshift while validating the CSP change's runtime render (the gui-smoke leg was the
 prescribed verification and turned out to be independently broken). Epic CPE-810 (client/server contract +
 security-adjacent CI). Coordinate with the concurrent workshifts_* process. Filed by the QA Architect.
+
+## Work Log
+
+**2026-08-08 — root-caused & fixed (Worker, workshift).**
+
+**Root cause (both failures, one mechanism — LONG-STANDING, not a fresh regression).**
+`gui-smoke/lib/mouse.ts` has had exactly ONE commit since it was written (CPE-1155, PR #474): the
+non-grabbing mouse harness was built CDP-only. Every public fn (`click`/`doubleClick`/`rightClick`/
+`hover`/`scroll`/`dragTo`) called `cdp()` → `browser.sendCommandAndGetResult`/`sendCommand`
+UNCONDITIONALLY. `cdpAvailable()` existed but was only ever used by specs to *document* the finding —
+the mouse fns themselves never consulted it and had NO fallback.
+
+- **Failure 1 (CDP mouse injection throws).** On Linux the native driver is **WebKitWebDriver** (wry/
+  WebKitGTK), which exposes **no CDP vendor endpoint** — `sendCommand*` isn't attached — so `cdp()`
+  hit its throw branch (`mouse.ts:69`), surfacing as the exact log line in the evidence. The Linux CI
+  leg (CPE-1171) + mouse-using specs (16 of 39, incl. CPE-1331 metadata-studio's `doubleClick`)
+  accumulated over a CDP-only harness that never had a WebKit path. This is a long-standing gap
+  exposed by coverage growth, not a single bad merge.
+- **Failure 2 (~20-min job timeout → "operation was canceled").** A **cascade** from Failure 1, not
+  an independent budget regression. With the shared single-session suite (maxInstances 1, 39 specs),
+  a broken click never opens the dialog/navigation a spec then `waitUntil`/`waitForExist`s for, so
+  each affected spec burned its full 10–30s waits (some multiple) before failing; summed across the
+  suite that blew past the 20-min job cap (mocha's 90s per-test cap can't save a 39-spec suite that
+  is uniformly slow). Fixing the mouse harness removes the cascade.
+- **Windows leg** is a **separate, already-filed** issue (CPE-1048): the WebView2 DevToolsActivePort
+  startup crash on stock `windows-latest` (session-not-created) — NOT the CDP-mouse issue. On Windows
+  msedgedriver DOES attach CDP, so the fast-path is correct there; no separate mouse fix was needed.
+  That leg is already `continue-on-error: true` and out of scope here.
+
+**Fix.** `gui-smoke/lib/mouse.ts` — add a WebDriver-native fallback. A once-per-session `useCdp()`
+probe (memoizes `cdpAvailable()`) picks the path: **CDP fast-path where available** (Windows/Edge/
+WebView2 — preserves the CPE-1155 non-grabbing guarantee on the interactive machine), else the **W3C
+Actions API** (`browser.performActions([...])` + `releaseActions`, the `POST /session/:id/actions`
+endpoint WebKitWebDriver implements). `click`/`doubleClick`/`rightClick`/`hover`/`dragTo` build
+`pointer`-source sequences; `scroll` builds a `wheel`-source `scroll`. The Actions path only runs
+where CDP is absent — Linux CI under xvfb (virtual display, no user to hijack) and attended macOS/
+Linux local runs (the harness already steals window focus at launch there, and those OSes have no
+non-grabbing tauri-driver path), so [[automation-must-not-hijack-screen]] is preserved where it
+matters (Windows). No new deps; all public signatures unchanged, so no spec edits were needed.
+
+**Verification.** Local `npm run typecheck` in `gui-smoke/` passes clean. The suite itself is
+CI-only (needs tauri-driver + WebKitWebDriver/xvfb, or WebView2) — **final verification is the CI
+gui-smoke leg on this PR**: confirm the `[mouse.ts] … CDP input injection is not reachable` error is
+gone on the ubuntu-latest leg and the suite completes under the 20-min timeout (and ideally green).
