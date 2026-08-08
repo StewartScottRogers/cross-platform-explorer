@@ -83,4 +83,4 @@ file that's simply huge on disk (all-zeros 6 GB `.png`, say). Confirmed the sing
 - No `specta::Type` struct touched (`thumb_compute` is a plain private fn, not exposed to the frontend
   contract) — no bindings regen needed.
 
-**PR:** #708 (branch `cpe-1447-thumbnails-stream-size-gate`).
+**PR:** #711 (branch `cpe-1447-thumbnails-stream-size-gate`).
