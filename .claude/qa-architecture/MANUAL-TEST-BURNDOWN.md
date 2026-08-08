@@ -159,3 +159,13 @@ green including the new coverage test, `gui-smoke`'s own `typecheck` + `test:uni
 branch merged `origin/main` after CPE-1357's fix landed there first). The `samples.smoke.ts` walk itself
 needs a real `tauri build --no-bundle` + `tauri-driver` session (this worktree's sandbox couldn't run
 one) — it will execute for the first time in CI.
+
+---
+### 2026-08-08 (workshift) — gui-smoke mouse-CDP harness breakage FIXED (partial ratchet)
+**Surface:** the whole `gui-smoke` Linux leg (the Visual Critic/UAT automated-GUI substrate) was RED on every
+`main` run — `mouse.ts` was CDP-only and threw on WebKitWebDriver, failing all mouse specs → 20-min timeout.
+**Fixed (CPE-1479, PR #722 merged aed89022):** W3C-Actions fallback when CDP is absent — 0 CDP errors, mouse
+specs execute, 9 specs pass. **NOT yet fully green** → tracked as **CPE-1481** (8 revealed environmental spec
+failures on Linux CI + 20-min timeout too short now that specs run). Do NOT mark the gui-smoke GUI-driving row
+green until CPE-1481 lands the leg green and names the pinning job. MVD: mouse-driving substrate restored;
+full-green pinning still owed.

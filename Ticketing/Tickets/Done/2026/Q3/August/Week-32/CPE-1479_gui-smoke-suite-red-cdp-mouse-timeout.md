@@ -103,3 +103,16 @@ matters (Windows). No new deps; all public signatures unchanged, so no spec edit
 CI-only (needs tauri-driver + WebKitWebDriver/xvfb, or WebView2) — **final verification is the CI
 gui-smoke leg on this PR**: confirm the `[mouse.ts] … CDP input injection is not reachable` error is
 gone on the ubuntu-latest leg and the suite completes under the 20-min timeout (and ideally green).
+
+## Foreman outcome note (2026-08-08, post-merge of PR #722, aed89022)
+The mouse-CDP root cause is **fixed and proven**: PR #722's ubuntu gui-smoke run shows **0 CDP-mouse errors**
+(the `CDP input injection is not reachable` throw is gone), the W3C-Actions `performActions` pointer sequences
+execute on WebKitWebDriver, and **9 specs now PASS** that previously died on the first click. Merged on that
+basis (its other checks all green; gui-smoke is admin-overridden like every merge until it's green).
+
+The leg is **not yet fully green**, but for reasons this fix did not cause and were previously masked: ~8 specs
+now fail on **missing seeded content** (drive tiles / seeded folders / symlink / `--open` folder not present on
+the Linux runner — environmental), and the **20-min job timeout** is now too short (the run reached only ~17 of
+~39 specs before cancellation, because specs actually RUN now instead of failing instantly). Both are tracked as
+**CPE-1481** (raise the timeout FIRST to see the true failing set, then triage the revealed failures). This
+ticket is correctly Done for its own scope (the mouse harness); CPE-1481 owns "gui-smoke fully green."
