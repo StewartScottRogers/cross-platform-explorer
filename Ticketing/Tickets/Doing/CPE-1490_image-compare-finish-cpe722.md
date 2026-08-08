@@ -2,7 +2,7 @@
 id: CPE-1490
 title: "Finish image compare (side-by-side / onion-skin / pixel-diff heatmap) — the deferred CPE-722 scope"
 type: Feature
-status: Backlog
+status: Doing
 priority: Medium
 component: Multiple
 tags: [ready]
