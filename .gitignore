@@ -57,3 +57,4 @@ native-deps/
 .sandbox/
 *.pfx
 *.p12
+.claude/workshift-metrics/BATCH-COUNTER
