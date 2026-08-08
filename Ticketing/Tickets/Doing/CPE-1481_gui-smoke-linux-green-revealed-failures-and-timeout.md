@@ -99,3 +99,56 @@ best-effort robustness fixes against a plausible-but-unconfirmed race/scroll the
 round after seeing the actual CI log, especially for `archive-browse`/`archive-password` where a WebKitWebDriver
 Actions-API right-click limitation is a real possibility that would need a `mouse.ts` fix, not a spec fix. No app
 `src/` bugs found — `list_drives_impl` and `link_status` were both read and are correct + already unit-tested.
+
+## Work Log — Round 2 (2026-08-08, QA-infra Worker)
+
+**Status: still in Doing (CI-only verification).** Round 1's per-spec fixes moved the ubuntu leg 9 → 15
+passing. The **6 remaining failures are ONE root cause in the shared harness**, exactly as round 1's
+lowest-confidence note predicted — confirmed from PR #724's ubuntu run (job 93143361534).
+
+### Root cause (proven from the CI log, not hypothesised)
+All 6 still-red specs are the ones that open a menu via an Actions `rightClick` and assert `.ctx`:
+`context-menu` [0-5], `drive-menu` [0-9], `home-item-menu` [0-11], `macro-in-menu` [0-14],
+`macro-param-prompt` [0-15], `archive-password` [0-1]. Every failure message is "expected the … context
+menu (.ctx) to open". Cross-check: `new-link` [0-20] imports `rightClick` but never calls it → PASSED;
+`archive-browse` [0-0] doesn't right-click → PASSED; the `element not interactable`/`…/click` warning was
+`batch-media` [0-2], which **PASSED** (recovered WARN, not a failure); the `move target out of bounds when
+running "actions"` line was WebdriverIO's OWN `scrollIntoView` (Actions wheel) WARN falling back to JS
+scroll — non-fatal, not our `pointerMove`.
+
+**The bug:** WebKitWebDriver's W3C Actions API delivers a real `pointerdown`/`mousedown` +
+`pointerup`/`mouseup` for `button:2`, but — unlike CDP on Chromium — it does **not** synthesise the DOM
+`contextmenu` event a secondary-button press produces. So the app's `on:contextmenu` handlers never ran
+and no `.ctx` opened. (WebKitGTK WebDriver gap: the platform context-menu signal that dispatches
+`contextmenu` isn't fired from synthetic WebDriver input.) The CDP fast-path (Windows/Edge) was never
+affected — it emits a genuine native `contextmenu`.
+
+### The fix — `gui-smoke/lib/mouse.ts` (`rightClick`, Actions fallback ONLY)
+After the real `button:2` move→down→up, if no menu is open, dispatch a **hit-tested** synthetic
+`contextmenu` at the same viewport pixel: `document.elementFromPoint(x,y)` resolves the topmost element
+(real occlusion/z-order — NOT the CPE-1154 anti-pattern of firing at a hand-picked node), then a
+bubbling/cancelable `MouseEvent("contextmenu", {button:2, buttons:2, clientX, clientY, …})` fires there.
+The app handlers read exactly `clientX/clientY` and open the menu; most `stopPropagation`, and CPE-1160's
+50 ms open-guard absorbs the rest, so the event never reaches the window dismisser → no open-then-close.
+The `if (!contextMenuOpen())` guard means a future WebKit that DOES emit native `contextmenu` won't
+double-fire. CDP path untouched; non-focus-stealing guarantee preserved (nothing new grabs input, and the
+fallback runs only where CDP is absent).
+
+### Timeout
+Bumped `gui-smoke.yml` `timeout-minutes: 35 → 45` on **both** legs. Round-1's 35 still cut the ubuntu leg
+off: build ~10 min, then a SEQUENTIAL (`maxInstances: 1`) run reached only ~21 of 39 specs — the
+media-heavy back half (thumbnails / similar-images / metadata / snapshot-diff) is slow. The mouse fix
+reclaims only ~1 min (the 6 failures stop burning their 10 s `waitForExist`), so 45 is the pragmatic
+margin. **Real long-term fix: shard the suite across matrix jobs (revisit CPE-1266)** — not done this
+round to keep the change focused on the harness fix.
+
+### Verification
+- `cd gui-smoke && npx tsc --noEmit` — clean.
+- `cd gui-smoke && npm run test:unit` — 21/21 pass.
+- gui-smoke itself needs tauri-driver + WebKitWebDriver + xvfb → CI (ubuntu) is the only surface; Foreman
+  runs it. Confidence the 6 clear next run: **high** — the fix targets the exact, log-proven cause shared
+  by all 6, and the synthetic event carries precisely what the handlers read. Residual risk: (a) if a
+  target pixel is occluded/off-screen at right-click time `elementFromPoint` resolves wrong/no element —
+  but round 1 already added `scrollIntoView` to those specs; (b) `home-item-menu`/`drive-menu`/`macro-*`
+  also need the row/tile to actually be seeded/painted, a separate axis the synthetic event can't fix if
+  content is genuinely absent — round 1's polling fixes cover the render-race version of that.
