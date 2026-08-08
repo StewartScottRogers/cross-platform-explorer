@@ -168,13 +168,115 @@
 //! element via the same general converter that descends its subtree on-stack, exactly like `mask`. See
 //! [`func_iri_attr_is_multiplicative`], [`chain_edges`], and the nested-composition regression tests in
 //! `tests/thumb_svg_panic_safety.rs`.
+//!
+//! **CPE-1445 — the raw-byte guard's SVGZ (gzip) blind spot, plus uncapped decompression:** an
+//! independent adversarial sweep (during the CPE-1437/CPE-1444 investigation above) found that
+//! [`xml_nesting_too_deep`] — the ONLY guard that ran on the caller's own thread, ahead of everything
+//! else, specifically because it's cheap and provably non-recursive (see its own doc comment) — is a pure
+//! byte scan for `<`/`>` and never had any gzip awareness: handed the RAW (still-compressed) bytes of a
+//! `*.svg` file whose content happens to be gzip (an "SVGZ" file, valid and auto-detected by `usvg` via
+//! its `1F 8B` magic), the scan sees no XML tags at all and returns `false` — the guard is silently
+//! bypassed, not merely ineffective. Worse, [`reference_chain_too_deep`] (added by CPE-1437, below) DID
+//! already gzip-decompress SVGZ input before its own walk, but via `usvg`'s own public
+//! [`resvg::usvg::decompress_svgz`], which — like `usvg::Tree::from_data`'s own internal call to the same
+//! function — is a bare `Read::read_to_end` on a `flate2::read::GzDecoder` with **no size cap at all**: a
+//! tiny crafted gzip stream (e.g. `"A".repeat(4GB)` compressing to only a few MB) makes it allocate
+//! multiple gigabytes. Both sub-bugs stay well under `thumb_source`'s 128 MiB raw-file-size gate, since
+//! the crafted *file* itself (a small gzip stream) is tiny — only what it *decompresses to* is huge.
+//!
+//! Fixed by moving gzip handling to the very front of [`rasterize_svg`], once, for the whole function:
+//! [`decompress_svgz_bounded`] detects the `1F 8B` magic and inflates with a hard
+//! [`MAX_DECOMPRESSED_SVG_BYTES`] cap (closing the OOM half), and — critically — EVERY guard that follows
+//! ([`xml_nesting_too_deep`] on the caller's thread, then [`reference_chain_too_deep`] and the real `usvg`
+//! parse/render inside [`rasterize_svg_on_a_guaranteed_stack`]) now runs on those already-decompressed
+//! plain-XML bytes (closing the nesting-guard-bypass half): a gzipped deeply-nested document can no longer
+//! sail past [`xml_nesting_too_deep`] by looking like opaque binary. [`reference_chain_too_deep`]'s own
+//! (now normally unreachable in the `rasterize_svg` path, since its input is pre-decompressed) gzip
+//! branch is also switched from the uncapped `usvg::decompress_svgz` to [`decompress_svgz_bounded`],
+//! purely as defense-in-depth for any future direct caller of that function.
+//!
+//! **CPE-1445 attempt 2 — a DOUBLY-gzipped `.svg` bypassed attempt 1's whole premise:** an independent
+//! adversarial re-audit found that attempt 1's single bounded decompress does not, by itself, guarantee
+//! "the bytes handed onward are plain XML" — for a `.svg` that is gzip-of-gzip (two compression layers
+//! stacked), one bounded decompress peels only the OUTER layer, and the result still starts with `1F 8B`
+//! (the untouched INNER gzip stream). Attempt 1's own doc comment claimed `usvg::Tree::from_data`'s
+//! internal `decompress_svgz` "never fires a second time" past this point — true for single-gzip input,
+//! **false** for double (or triple, or N-fold) gzip: those still-magic'd bytes flow straight through to
+//! `usvg::Tree::from_data`, which re-detects `1F 8B` and decompresses the inner layer itself, with **no
+//! cap of its own** — reopening BOTH CPE-1445 sub-bugs one layer down. Confirmed reproducers: a
+//! doubly-gzipped 4000-deep `<g>` nesting document overflows the 256KB small-stack probe (the inner layer
+//! never passes through [`xml_nesting_too_deep`] on real XML, since that guard only ever sees attempt 1's
+//! single already-decompressed-but-still-gzip-magic'd bytes); a doubly-gzipped gzip bomb lets `usvg`'s
+//! internal decompression inflate the untouched inner layer without limit.
+//!
+//! A legitimate SVGZ file is always exactly one gzip layer — that's what every SVG authoring/export tool
+//! and the SVGZ format itself produces — so nested gzip has no legitimate use case to preserve. Rather
+//! than looping the bounded decompress across layers (which only relocates "how many layers is too many"
+//! to a new, equally arbitrary cap), [`rasterize_svg`] rejects outright: after the one bounded decompress,
+//! if the result STILL starts with `1F 8B`, that's an immediate graceful `Err`, never handed onward. A
+//! second, defense-in-depth check sits at the actual boundary into `usvg::Tree::from_data` inside
+//! [`rasterize_svg_on_a_guaranteed_stack`] — a bytes-still-gzip-magic'd assertion that also returns a
+//! graceful `Err` — so the invariant "usvg never receives gzip-magic'd bytes" is enforced at BOTH the
+//! point it's established and the point it's relied upon, not just the former.
 
 use image::{DynamicImage, RgbaImage};
 use std::collections::HashMap;
+use std::io::Read;
 
 /// Same spirit as `thumb_source::MAX_IMAGE_DIMENSION` — an SVG's *declared* intrinsic size is
 /// clamped to this before we ever allocate a canvas. Real SVG artwork is never this big.
 const MAX_SVG_DIMENSION: u32 = 20_000;
+
+/// The maximum size a gzip-compressed `.svg` (SVGZ) file's DECOMPRESSED bytes may reach before
+/// [`rasterize_svg`] rejects it outright (CPE-1445 — see the module doc comment). Applied via a bounded
+/// `Read::take` directly on the gzip stream (see [`decompress_svgz_bounded`]), not a check performed
+/// after an unbounded read already ran to completion, so a gzip "decompression bomb" — a tiny compressed
+/// stream whose embedded (attacker-controlled, unverified) length claims to inflate to gigabytes — can
+/// never make this function allocate more than this cap's worth of memory, no matter how the input is
+/// shaped or how small the compressed file on disk is.
+///
+/// 32 MiB, sized the same way `doc_text::MAX_DECOMPRESSED_PART_BYTES` (8 MiB, CPE-1446) is: comfortably
+/// above anything a legitimate hand-authored or tool-exported SVG's XML text ever reaches — real-world
+/// SVGs, even large detailed illustrations or icon-font sprite sheets, are almost always well under a few
+/// hundred KB, so multi-MB SVG XML is already an unusual outlier — while staying well under
+/// `thumb_source::MAX_SOURCE_FILE_BYTES` (128 MiB), the existing gate on the raw (compressed-or-not) file
+/// size read from disk. That relationship matters: it means decompressing a legitimate SVGZ can never use
+/// MORE memory than simply reading an equivalently-sized plain (uncompressed) `.svg` already would have —
+/// this cap doesn't shrink the legitimate SVGZ use case, it only removes gzip's ability to turn a
+/// kilobyte-scale file into a gigabyte-scale allocation.
+const MAX_DECOMPRESSED_SVG_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Gzip-decompresses `bytes` (an SVGZ file's raw contents, already confirmed to start with the `1F 8B`
+/// magic by the caller) with a hard cap on the decompressed size (CPE-1445): closes the uncapped-
+/// decompression-OOM half of the SVGZ bug, where `usvg`'s own `decompress_svgz` (and, before this fix,
+/// this module's [`reference_chain_too_deep`]) call `Read::read_to_end` directly on a
+/// `flate2::read::GzDecoder` with no size limit at all, letting a tiny crafted gzip stream (e.g. a few MB
+/// compressing `"A".repeat(4GB)`) allocate multiple gigabytes before any other guard ever gets a chance to
+/// run.
+///
+/// Wraps the decoder in `Read::take(MAX_DECOMPRESSED_SVG_BYTES + 1)` — one byte PAST the cap, so a stream
+/// that decompresses to exactly the cap (which must be allowed) is distinguishable from one that keeps
+/// producing bytes past it (which must be rejected) — and reads that bounded adapter to completion.
+/// `flate2`'s `GzDecoder` only inflates as much of the compressed input as the reader actually pulls from
+/// it, so a `Read::take`-limited `read_to_end` can never materialize more than
+/// `MAX_DECOMPRESSED_SVG_BYTES + 1` decompressed bytes in memory, regardless of how large the stream
+/// would keep expanding to if read further — the bomb's "would-be" size never gets a chance to matter.
+/// Graceful `Err` on either a genuinely malformed gzip stream or a decompressed size over the cap; never a
+/// panic, and never the unbounded allocation.
+fn decompress_svgz_bounded(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut limited = decoder.take(MAX_DECOMPRESSED_SVG_BYTES + 1);
+    let mut decompressed = Vec::new();
+    limited
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("malformed gzip (SVGZ) data: {e}"))?;
+    if decompressed.len() as u64 > MAX_DECOMPRESSED_SVG_BYTES {
+        return Err(format!(
+            "SVGZ decompressed size exceeds the {MAX_DECOMPRESSED_SVG_BYTES}-byte cap"
+        ));
+    }
+    Ok(decompressed)
+}
 
 /// The deepest element nesting [`xml_nesting_too_deep`] will allow before `rasterize_svg` refuses the
 /// document outright (CPE-1413). Mirrors `cpe_webdav::MAX_XML_NESTING_DEPTH`'s reasoning and value: the
@@ -696,11 +798,22 @@ fn chain_edges<'a>(
 /// exceeds `max_depth` (before exploring any further), so a single pathological chain can't force this scan
 /// to do more than `O(max_depth)` work before rejecting it.
 fn reference_chain_too_deep(bytes: &[u8], max_depth: usize, max_cost: usize) -> bool {
+    // In the `rasterize_svg` path this branch is normally unreachable: `rasterize_svg` already
+    // gzip-decompresses SVGZ input once, bounded, before this function ever runs, AND (CPE-1445 attempt 2)
+    // rejects outright if that single decompress still leaves the `1F 8B` magic (a doubly-gzipped
+    // payload) — so `bytes` here can never carry the gzip magic on that path, single- or multi-layer
+    // alike. Kept as defense-in-depth for any future direct caller, using the SAME bounded decompressor
+    // `rasterize_svg` uses (rather than `usvg`'s own uncapped `decompress_svgz`) so this function can
+    // never itself become an unbounded-decompression path — and if handed a DOUBLY-gzipped stream
+    // directly, the one decompress here still leaves the result gzip-magic'd, which fails the subsequent
+    // UTF-8 check below (gzip's binary bytes are essentially never valid UTF-8) and returns `false`
+    // gracefully; this function never hands anything to `usvg`, so unlike `rasterize_svg` it has no
+    // OOM/overflow exposure from that residual case, only a (harmless) missed pre-scan rejection.
     let decompressed;
     let text: &str = if bytes.starts_with(&[0x1f, 0x8b]) {
-        decompressed = match resvg::usvg::decompress_svgz(bytes) {
+        decompressed = match decompress_svgz_bounded(bytes) {
             Ok(d) => d,
-            Err(_) => return false, // malformed gzip: usvg's real parse will report this itself
+            Err(_) => return false, // malformed/oversized gzip: usvg's real parse will report this itself
         };
         match std::str::from_utf8(&decompressed) {
             Ok(s) => s,
@@ -868,11 +981,43 @@ const RASTERIZE_STACK_SIZE: usize = 16 * 1024 * 1024;
 ///   `<use>`-only to all six reference types) is back to being load-bearing for THOSE six, while the
 ///   guaranteed stack remains the defense for the `<use>`/nesting composition class attempt 2 fixed.
 pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String> {
+    // SVGZ (gzip-compressed .svg): decompress ONCE, up front, bounded (CPE-1445 — see the module doc
+    // comment), before ANY guard below runs. This must happen first and only once: `xml_nesting_too_deep`
+    // is a pure byte scan with no gzip awareness at all, so handing it the still-compressed bytes would
+    // silently bypass it (it'd see no '<' tags and report "not too deep" regardless of what the
+    // decompressed XML actually looks like); and decompressing unboundedly — as `usvg::Tree::from_data`'s
+    // own internal gzip handling does — lets a tiny crafted stream force a multi-gigabyte allocation. By
+    // decompressing here and threading the DECOMPRESSED bytes through everything that follows, both the
+    // nesting guard and the real `usvg` parse (inside `rasterize_svg_on_a_guaranteed_stack`, which no
+    // longer sees the gzip magic and so never re-decompresses) operate on the same bounded, plain-XML
+    // bytes exactly once.
+    let bytes: Vec<u8> = if bytes.starts_with(&[0x1f, 0x8b]) {
+        let decompressed = decompress_svgz_bounded(bytes)?;
+        // CPE-1445 attempt 2 (adversarial re-audit): a DOUBLY-gzipped `.svg` (gzip of a gzip of an SVG)
+        // decompresses ONE layer here and still starts with `1F 8B` — the inner gzip stream. A single
+        // bounded decompress does not, on its own, establish "the bytes handed onward are plain XML";
+        // without this check those still-compressed bytes would flow to `usvg::Tree::from_data` below,
+        // which re-detects the magic and decompresses the inner layer itself, UNBOUNDED — reopening both
+        // CPE-1445 sub-bugs one gzip layer down (a doubly-gzipped deep-nesting payload would reach
+        // `usvg`/`roxmltree` without ever passing through `xml_nesting_too_deep` on real XML, and a
+        // doubly-gzipped bomb would let the inner layer's uncapped `read_to_end` run past this cap). A
+        // legitimate SVGZ file is always exactly ONE gzip layer (that's what every SVG authoring/export
+        // tool and the SVGZ format itself produce), so nested gzip has no legitimate use here — reject it
+        // outright rather than looping the bounded decompress across layers, which would only move the
+        // "how many layers is too many" question to a new, equally-arbitrary cap.
+        if decompressed.starts_with(&[0x1f, 0x8b]) {
+            return Err("nested (double-gzipped) SVG rejected".to_string());
+        }
+        decompressed
+    } else {
+        bytes.to_vec()
+    };
+
     // Only the pure byte-scan guard runs on the CALLER's own thread — it's provably non-recursive (a flat
     // loop with an integer counter, see its own doc comment), so it can't overflow any stack regardless of
     // input depth, and rejecting an obviously-pathological document this cheaply avoids paying for a
     // dedicated large-stack thread spawn at all in the common "somebody sent garbage" case.
-    if xml_nesting_too_deep(bytes, MAX_SVG_NESTING_DEPTH) {
+    if xml_nesting_too_deep(&bytes, MAX_SVG_NESTING_DEPTH) {
         return Err("SVG element nesting too deep".to_string());
     }
 
@@ -885,7 +1030,7 @@ pub fn rasterize_svg(bytes: &[u8], max_edge: u32) -> Result<DynamicImage, String
     // only ~42 levels deep — comfortably under `xml_nesting_too_deep`'s own 64-level cap — already
     // overflows a 256KB stack by itself, so leaving that parse on the caller's thread would have silently
     // reintroduced the exact bug class this whole attempt exists to close.
-    rasterize_svg_on_a_guaranteed_stack(bytes.to_vec(), max_edge)
+    rasterize_svg_on_a_guaranteed_stack(bytes, max_edge)
 }
 
 /// Does the actual reference-chain check *and* the `usvg` parse + convert + `resvg` render on a
@@ -914,6 +1059,22 @@ fn rasterize_svg_on_a_guaranteed_stack(bytes: Vec<u8>, max_edge: u32) -> Result<
     let render = move || -> Result<DynamicImage, String> {
         if reference_chain_too_deep(&bytes, MAX_REFERENCE_CHAIN_DEPTH, MAX_REFERENCE_COMBINED_COST) {
             return Err("SVG reference chain too deep".to_string());
+        }
+
+        // Defense-in-depth (CPE-1445 attempt 2): `bytes` here must NEVER carry the gzip magic — by this
+        // point `rasterize_svg` has already decompressed any single gzip layer (bounded) and rejected a
+        // still-gzip-magic'd result outright (a doubly-gzipped payload). This is a graceful-`Err` belt
+        // enforcing that invariant right at the boundary into `usvg`, so a future change upstream in this
+        // function (or a new caller of `rasterize_svg_on_a_guaranteed_stack`) can't silently reintroduce
+        // "usvg re-decompresses an unbounded inner gzip layer" even by accident — `usvg::Tree::from_data`
+        // itself has no size cap on ITS OWN internal `decompress_svgz` fallback, so it must never be
+        // handed bytes it could interpret as gzip.
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            return Err(
+                "internal invariant violation: gzip-magic bytes reached the usvg parse boundary \
+                 (should have been rejected earlier in rasterize_svg)"
+                    .to_string(),
+            );
         }
 
         let opt = resvg::usvg::Options::default();
@@ -1375,5 +1536,139 @@ mod tests {
             MAX_REFERENCE_CHAIN_DEPTH,
             MAX_REFERENCE_COMBINED_COST
         ));
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1445: bounded SVGZ (gzip) decompression. See `tests/thumb_svg_panic_safety.rs` for the
+    // full `rasterize_svg`-level (nesting-bypass + gzip-bomb + legit-SVGZ) regression tests on the
+    // small-stack probe; these are fast unit-level checks of `decompress_svgz_bounded` itself.
+    // -----------------------------------------------------------------------------------------
+
+    fn gzip_bytes(content: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut out = Vec::new();
+        let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+        enc.write_all(content).unwrap();
+        enc.finish().unwrap();
+        out
+    }
+
+    #[test]
+    fn decompress_svgz_bounded_round_trips_a_small_payload() {
+        let original = square_svg(10, 10);
+        let gz = gzip_bytes(&original);
+        let decompressed = decompress_svgz_bounded(&gz).expect("small gzip payload must decompress");
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn decompress_svgz_bounded_rejects_malformed_gzip_gracefully() {
+        // Bytes starting with the gzip magic but not actually valid gzip past that point.
+        let err = decompress_svgz_bounded(&[0x1f, 0x8b, 0xff, 0xff, 0xff]);
+        assert!(err.is_err(), "malformed gzip data must be a graceful Err, not a panic");
+    }
+
+    #[test]
+    fn decompress_svgz_bounded_allows_exactly_the_cap_and_rejects_one_byte_over() {
+        // A payload that decompresses to EXACTLY MAX_DECOMPRESSED_SVG_BYTES must be allowed (the cap is a
+        // "may reach", not a strict "must stay under"), while one byte more must be rejected — confirms
+        // the `+ 1` in the `Read::take` bound and the `> max` (not `>=`) check are both exactly right, not
+        // off-by-one in either direction.
+        let at_cap = vec![b'A'; MAX_DECOMPRESSED_SVG_BYTES as usize];
+        let gz_at_cap = gzip_bytes(&at_cap);
+        let decompressed = decompress_svgz_bounded(&gz_at_cap).expect("exactly-at-cap payload must be allowed");
+        assert_eq!(decompressed.len() as u64, MAX_DECOMPRESSED_SVG_BYTES);
+
+        let over_cap = vec![b'A'; MAX_DECOMPRESSED_SVG_BYTES as usize + 1];
+        let gz_over_cap = gzip_bytes(&over_cap);
+        let err = decompress_svgz_bounded(&gz_over_cap);
+        assert!(err.is_err(), "one byte past the cap must be rejected");
+    }
+
+    #[test]
+    fn decompress_svgz_bounded_stops_a_gzip_bomb_without_allocating_the_full_size() {
+        // A highly-compressible stream whose true decompressed size is far past the cap (100 MiB of
+        // zeros, vs. a 32 MiB cap) — the classic gzip-bomb shape. Must be rejected, and the `Read::take`
+        // bound means this can never internally buffer more than `MAX_DECOMPRESSED_SVG_BYTES + 1` bytes
+        // regardless of how large the stream's true logical payload is, so this is safe to assert even
+        // with a payload well past the cap.
+        const CHUNK: usize = 1024 * 1024;
+        const LOGICAL_SIZE: usize = 100 * 1024 * 1024;
+        let zeros = vec![0u8; CHUNK];
+        let mut out = Vec::new();
+        {
+            use std::io::Write;
+            let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+            let mut written = 0usize;
+            while written < LOGICAL_SIZE {
+                enc.write_all(&zeros).unwrap();
+                written += CHUNK;
+            }
+            enc.finish().unwrap();
+        }
+        assert!(out.len() < LOGICAL_SIZE / 1000, "fixture must actually be a real bomb (high compression ratio)");
+        let err = decompress_svgz_bounded(&out);
+        assert!(err.is_err(), "a gzip stream past the decompressed-size cap must be rejected, not OOM");
+    }
+
+    #[test]
+    fn xml_nesting_guard_bypass_is_closed_by_pre_decompressing_gzip_before_the_scan() {
+        // CPE-1445's core bug: `xml_nesting_too_deep` itself is (deliberately) a pure byte scan with no
+        // gzip awareness at all — handed the RAW gzip bytes directly, it must NOT see the deep nesting
+        // (proving the bypass was real and this guard alone can't be blamed/expected to close it). The fix
+        // lives in `rasterize_svg`, which now decompresses BEFORE calling this guard — confirmed by the
+        // companion `rasterize_svg` test using the same fixture instead of calling this guard directly.
+        let gz = gzip_bytes(&deeply_nested_svg(4000));
+        assert!(
+            !xml_nesting_too_deep(&gz, MAX_SVG_NESTING_DEPTH),
+            "the raw byte-scan guard has no gzip awareness by design — it must not see nesting in \
+             compressed bytes; rasterize_svg is what pre-decompresses before this guard ever runs"
+        );
+        // ...but decompressed, the exact same document IS correctly flagged as too deep.
+        let decompressed = decompress_svgz_bounded(&gz).unwrap();
+        assert!(xml_nesting_too_deep(&decompressed, MAX_SVG_NESTING_DEPTH));
+    }
+
+    #[test]
+    fn rasterize_svg_rejects_a_gzipped_deeply_nested_svg() {
+        // The end-to-end regression: `rasterize_svg` (unlike the bare guard above) must reject this,
+        // because it now decompresses SVGZ input up front before running any guard.
+        let gz = gzip_bytes(&deeply_nested_svg(4000));
+        let err = rasterize_svg(&gz, 32);
+        assert!(err.is_err(), "a gzipped implausibly-deep SVG must be rejected via rasterize_svg");
+    }
+
+    #[test]
+    fn rasterize_svg_renders_a_legit_gzipped_svg() {
+        let gz = gzip_bytes(&square_svg(100, 40));
+        let img = rasterize_svg(&gz, 32).expect("a legitimate small SVGZ file must still render");
+        assert_eq!(img.width(), 32, "longest edge scaled to max_edge, same as the uncompressed case");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1445 attempt 2: DOUBLY (or N-fold) gzipped `.svg` input. A single bounded decompress alone
+    // doesn't guarantee "no gzip magic reaches usvg" — see `tests/thumb_svg_panic_safety.rs` for the
+    // small-stack/gzip-bomb-scale regression tests; these are the fast unit-level checks that the
+    // outright-reject guard fires exactly on multi-layer input and not on single-layer or plain input.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn rasterize_svg_rejects_a_doubly_gzipped_svg_even_when_the_inner_document_is_tiny_and_legit() {
+        // Not a deep-nesting/bomb payload at all — just proves the double-gzip REJECTION itself fires
+        // regardless of what's inside the inner layer, since nested gzip has no legitimate SVGZ use case.
+        let once = gzip_bytes(&square_svg(10, 10));
+        let twice = gzip_bytes(&once);
+        assert!(twice.starts_with(&[0x1f, 0x8b]), "outer layer must itself be valid gzip");
+        let err = rasterize_svg(&twice, 32);
+        assert!(err.is_err(), "a doubly-gzipped SVG must be rejected outright, even with a tiny legit inner document");
+    }
+
+    #[test]
+    fn rasterize_svg_single_gzip_still_renders_after_the_double_gzip_guard() {
+        // Regression: the new "reject if still gzip-magic'd after one decompress" check must not
+        // over-reject ordinary single-layer SVGZ input.
+        let once = gzip_bytes(&square_svg(10, 10));
+        let img = rasterize_svg(&once, 32).expect("single-layer SVGZ must still render after the double-gzip guard");
+        assert!(img.width() > 0 && img.height() > 0);
     }
 }
