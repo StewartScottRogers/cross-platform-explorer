@@ -9,6 +9,7 @@
 //! (content search's text-extraction dispatch); the preview pane doesn't currently call them.
 
 use std::fs;
+use std::io::Read;
 
 /// Value of a single ASCII hex digit, or `None`. Used to decode RTF `\'XX` byte escapes without slicing
 /// the source `str` (which would panic if `\'` were followed by a multi-byte UTF-8 char in malformed RTF).
@@ -71,15 +72,47 @@ fn collapse_blank_lines(s: &str) -> String {
     out.trim().to_string()
 }
 
-/// Read one entry of a zip as UTF-8 text.
+/// Hard cap on bytes pulled from a single zip entry's DECOMPRESSING reader before we stop reading
+/// (CPE-1446, deflate-bomb OOM). `zip`'s entry reader inflates lazily as bytes are read from it, so
+/// wrapping it in `Read::take` bounds how much we ever inflate into memory *regardless* of what the
+/// entry's `size()`/`compressed_size()` header metadata claims — a crafted zip can lie about both, so
+/// a pre-check against those numbers (e.g. `archive_safety::expansion_ratio`) is only ever a cheap
+/// early-warning, never a substitute for capping the actual read. 8 MiB is far more than any
+/// legitimate single office/ebook document *part* needs for a text preview (a real `word/document.xml`
+/// — the whole document's markup, not just what's on screen — is typically well under 1 MiB even for a
+/// long report); it's generous headroom for real content while making a bomb entry (which can claim to
+/// inflate to gigabytes) cheap to cut off well before memory pressure.
+const MAX_DECOMPRESSED_PART_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Read a zip entry up to [`MAX_DECOMPRESSED_PART_BYTES`], returning the text and whether the cap was
+/// hit. Reads into a byte buffer and lossy-decodes rather than `read_to_string` so a cap landing
+/// mid-codepoint (or genuinely non-UTF-8 bytes) degrades to replacement characters instead of an
+/// `Err` — this is the one place that actually stops the deflate-bomb OOM (CPE-1446); every entry read
+/// in this module goes through it instead of a raw `read_to_string`/`read_to_end`.
+fn read_entry_capped<R: Read>(entry: R) -> Result<(String, bool), String> {
+    let mut limited = entry.take(MAX_DECOMPRESSED_PART_BYTES);
+    let mut buf: Vec<u8> = Vec::new();
+    limited.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let truncated = buf.len() as u64 >= MAX_DECOMPRESSED_PART_BYTES;
+    Ok((String::from_utf8_lossy(&buf).into_owned(), truncated))
+}
+
+/// Append the truncation marker to text that was cut off by [`MAX_DECOMPRESSED_PART_BYTES`], matching
+/// the "… (truncated)" idiom [`epub_text`] already uses for its whole-document output cap.
+fn mark_truncated(mut text: String, truncated: bool) -> String {
+    if truncated {
+        text.push_str("\n… (truncated)");
+    }
+    text
+}
+
+/// Read one entry of a zip as UTF-8 text, capped at [`MAX_DECOMPRESSED_PART_BYTES`] (CPE-1446).
 fn zip_read_text(path: &str, entry_name: &str) -> Result<String, String> {
-    use std::io::Read;
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let mut entry = zip.by_name(entry_name).map_err(|e| format!("{entry_name}: {e}"))?;
-    let mut buf = String::new();
-    entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-    Ok(buf)
+    let entry = zip.by_name(entry_name).map_err(|e| format!("{entry_name}: {e}"))?;
+    let (text, truncated) = read_entry_capped(entry)?;
+    Ok(mark_truncated(text, truncated))
 }
 
 /// Extract the body text of a DOCX (word/document.xml) (CPE-071).
@@ -92,14 +125,12 @@ pub fn docx_text(path: &str) -> Result<String, String> {
 /// that part (a normal, non-error shape some documents legitimately lack — e.g. an all-numeric XLSX
 /// workbook has no `sharedStrings.xml` at all). A file that isn't a valid zip at all is still `Err`.
 fn zip_read_text_optional(path: &str, entry_name: &str) -> Result<Option<String>, String> {
-    use std::io::Read;
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let result = match zip.by_name(entry_name) {
-        Ok(mut entry) => {
-            let mut buf = String::new();
-            entry.read_to_string(&mut buf).map_err(|e| e.to_string())?;
-            Ok(Some(buf))
+        Ok(entry) => {
+            let (text, truncated) = read_entry_capped(entry)?;
+            Ok(Some(mark_truncated(text, truncated)))
         }
         Err(_) => Ok(None),
     };
@@ -122,7 +153,6 @@ pub fn xlsx_text(path: &str) -> Result<String, String> {
 /// enumerate-then-concatenate shape (list entries under a prefix, sort, strip each, join). A
 /// presentation with no slides yields an empty string, not an error.
 pub fn pptx_text(path: &str) -> Result<String, String> {
-    use std::io::Read;
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
@@ -140,10 +170,11 @@ pub fn pptx_text(path: &str) -> Result<String, String> {
 
     let mut out = String::new();
     for n in &names {
-        if let Ok(mut entry) = zip.by_name(n) {
-            let mut buf = String::new();
-            if entry.read_to_string(&mut buf).is_ok() {
-                let text = strip_markup_to_text(&buf, &["a:p"]);
+        if let Ok(entry) = zip.by_name(n) {
+            // Capped BEFORE strip_markup_to_text runs on it (CPE-1446): a bomb slide part can't
+            // inflate past MAX_DECOMPRESSED_PART_BYTES no matter what it claims to decompress to.
+            if let Ok((buf, entry_truncated)) = read_entry_capped(entry) {
+                let text = mark_truncated(strip_markup_to_text(&buf, &["a:p"]), entry_truncated);
                 if !text.trim().is_empty() {
                     out.push_str(text.trim());
                     out.push_str("\n\n");
@@ -163,7 +194,6 @@ pub fn odt_text(path: &str) -> Result<String, String> {
 /// Extract readable text from an EPUB's content documents in name order, capped so a whole book can't
 /// flood the pane (CPE-077).
 pub fn epub_text(path: &str) -> Result<String, String> {
-    use std::io::Read;
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
 
@@ -185,12 +215,17 @@ pub fn epub_text(path: &str) -> Result<String, String> {
             out.push_str("\n… (truncated)\n");
             break;
         }
-        if let Ok(mut entry) = zip.by_name(n) {
-            let mut buf = String::new();
-            if entry.read_to_string(&mut buf).is_ok() {
+        if let Ok(entry) = zip.by_name(n) {
+            // Cap the PER-ENTRY inflate BEFORE accumulating into `out` (CPE-1446): the 128KiB check
+            // above only runs between entries, so without this a single bomb content-document could
+            // OOM on its own `read_to_end` before that check is ever reached again.
+            if let Ok((buf, entry_truncated)) = read_entry_capped(entry) {
                 let text = strip_markup_to_text(&buf, &["p", "h1", "h2", "h3", "h4", "div", "li", "br"]);
                 if !text.trim().is_empty() {
                     out.push_str(text.trim());
+                    if entry_truncated {
+                        out.push_str("\n… (entry truncated)");
+                    }
                     out.push_str("\n\n");
                 }
             }
@@ -348,6 +383,54 @@ mod tests {
         let text = docx_text(&f.to_string_lossy()).unwrap();
         assert!(text.contains("Hello world"), "runs joined within a paragraph: {text:?}");
         assert!(text.contains("Next & last"), "entities decoded");
+        assert!(!text.contains("(truncated)"), "a small legitimate document must not be truncated: {text:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1446 regression: a `.docx` whose `word/document.xml` entry is a deflate-bomb (a small
+    /// on-disk zip that decompresses to far more than [`MAX_DECOMPRESSED_PART_BYTES`]) must be read
+    /// through the cap — proving the fix actually stops the OOM — rather than fully inflated. Before
+    /// the fix, `zip_read_text` called `entry.read_to_string` with no bound at all, so a real-world
+    /// ~1000:1 deflate bomb (a few KiB on disk expanding to gigabytes) would allocate gigabytes right
+    /// here. This fixture only needs to prove the *mechanism* works, so it uses a much smaller bomb
+    /// (64 MiB decompressed, 8x the cap) that still exercises the same code path in well under a
+    /// second, rather than actually constructing/inflating a multi-GB payload.
+    #[test]
+    fn docx_text_caps_a_deflate_bomb_entry_instead_of_inflating_it_fully() {
+        let d = scratch("docx-bomb");
+        let f = d.join("bomb.docx");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("word/document.xml", opts).unwrap();
+            // Stream a single repeated byte in 1 MiB chunks so building the fixture itself never holds
+            // the whole uncompressed payload in memory — 64 MiB total, well over MAX_DECOMPRESSED_PART_BYTES
+            // (8 MiB), and highly compressible (the classic zip-bomb shape: tiny on disk, huge inflated).
+            let chunk = vec![b'A'; 1024 * 1024];
+            for _ in 0..64 {
+                zip.write_all(&chunk).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        // Sanity-check the fixture is actually bomb-shaped: tiny on disk vs. its 64 MiB payload.
+        let on_disk = fs::metadata(&f).unwrap().len();
+        assert!(on_disk < 1024 * 1024, "fixture should compress to well under 1 MiB on disk, got {on_disk}");
+
+        let text = docx_text(&f.to_string_lossy()).unwrap();
+        // Must be capped at MAX_DECOMPRESSED_PART_BYTES (plus the short truncation marker) — NOT the
+        // full 64 MiB the entry would otherwise inflate to. This is the assertion that proves the cap
+        // actually bounded the read rather than allocating the whole decompressed stream.
+        const MAX_DECOMPRESSED_PART_BYTES: usize = 8 * 1024 * 1024;
+        assert!(
+            text.len() <= MAX_DECOMPRESSED_PART_BYTES + 64,
+            "capped read must stay near the {MAX_DECOMPRESSED_PART_BYTES}-byte cap, got {} bytes \
+             (would be ~64MiB uncapped)",
+            text.len()
+        );
+        assert!(text.contains("(truncated)"), "truncation marker present for a capped entry: len={}", text.len());
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -434,6 +517,48 @@ mod tests {
         }
         let text = pptx_text(&f.to_string_lossy()).unwrap();
         assert!(text.is_empty(), "no slide parts -> empty text, not an error: {text:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1446 regression, the epub-specific half of the bug: `epub_text`'s 128KiB *output* cap
+    /// (`out.len() > 128 * 1024`) is only checked between content documents, so before the fix a
+    /// single bomb `.xhtml` entry would fully inflate via `read_to_string` and OOM before that
+    /// between-entries check was ever reached again. This proves the PER-ENTRY cap now applied inside
+    /// the loop (via [`read_entry_capped`]) stops the bomb entry's own read regardless — using a
+    /// 64 MiB (8x [`MAX_DECOMPRESSED_PART_BYTES`]) bomb, not an actual multi-GB one, to keep the test
+    /// fast while still exercising the same code path.
+    #[test]
+    fn epub_text_caps_a_deflate_bomb_content_document_before_accumulating() {
+        let d = scratch("epub-bomb");
+        let f = d.join("bomb.epub");
+        {
+            let file = fs::File::create(&f).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file("OEBPS/bomb.xhtml", opts).unwrap();
+            let chunk = vec![b'A'; 1024 * 1024];
+            for _ in 0..64 {
+                zip.write_all(&chunk).unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        let on_disk = fs::metadata(&f).unwrap().len();
+        assert!(on_disk < 1024 * 1024, "fixture should compress to well under 1 MiB on disk, got {on_disk}");
+
+        let text = epub_text(&f.to_string_lossy()).unwrap();
+        // The single bomb entry's own contribution must be capped near MAX_DECOMPRESSED_PART_BYTES
+        // (8 MiB), not the 64 MiB it would otherwise inflate to — this bounds the whole function's
+        // output far below what an uncapped read would have allocated.
+        const MAX_DECOMPRESSED_PART_BYTES: usize = 8 * 1024 * 1024;
+        assert!(
+            text.len() <= MAX_DECOMPRESSED_PART_BYTES + 256,
+            "single bomb entry must be capped near {MAX_DECOMPRESSED_PART_BYTES} bytes, got {} \
+             (would be ~64MiB uncapped)",
+            text.len()
+        );
+        assert!(text.contains("(entry truncated)"), "per-entry truncation marker present: len={}", text.len());
         let _ = fs::remove_dir_all(&d);
     }
 }
