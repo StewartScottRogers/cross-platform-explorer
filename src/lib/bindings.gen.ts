@@ -3210,6 +3210,43 @@ async vaultForgetPassphrase(blobPath: string) : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Save `secret` (a password or key passphrase) for the saved connection named `name`, overwriting any
+ * value already stored for that name. The ONLY place this secret persists. Async + `spawn_blocking`: a
+ * blocking OS credential-store call (CPE-760/761). The secret value is never logged or echoed back.
+ */
+async connectionSecretSet(name: string, secret: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connection_secret_set", { name, secret }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Fetch the stored secret for the saved connection named `name`, or `None` if none is saved. Async +
+ * `spawn_blocking` (blocking OS credential-store call).
+ */
+async connectionSecretGet(name: string) : Promise<Result<string | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connection_secret_get", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Delete the stored secret for the saved connection named `name` (e.g. the sidebar's "forget password").
+ * Deleting a missing entry is `Ok`. Async + `spawn_blocking` (blocking OS credential-store call).
+ */
+async connectionSecretDelete(name: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connection_secret_delete", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
