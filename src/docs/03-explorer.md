@@ -15,8 +15,14 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Back / Forward / Up** — move through history and up the tree.
 - **Tabs** — Ctrl+T opens a new tab; each tab remembers its own folder and history.
 - **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
-  section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches) has a header
-  you can click to **collapse** it and reclaim vertical space; your choices persist across sessions.
+  section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches, Network,
+  Agents) has a header you can click to **collapse** it and reclaim vertical space; your choices persist
+  across sessions.
+- **Reorder sidebar sections** — grab a section's header by its grip handle and drag it up or down to
+  rearrange the sidebar to taste; a thin accent line shows where it will land. The new order persists
+  across restarts and is independent of each section's collapsed/expanded state — reordering never
+  changes what's open. A **Reset section order** control at the bottom of the sidebar puts every section
+  back in its original position.
 - **Drives update live** — plug in a USB stick or external disk and it appears in the **Drives**
   section within a few seconds, with its free-space bar and eject button; unplug (or eject) one and it
   drops out. No relaunch or manual refresh needed.
