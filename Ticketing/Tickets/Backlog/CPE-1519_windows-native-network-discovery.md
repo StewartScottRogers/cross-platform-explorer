@@ -60,3 +60,20 @@ network neighborhood Explorer shows**, via the OS. This is the Windows backend o
 ## Notes
 Windows-native, no new crate, real parity with what the user already sees in Explorer. Child of CPE-1517;
 complements CPE-1504 (SMB) and CPE-1500 (OS-mount). Test target [[qnap-nas-test-target]].
+
+## Work Log
+- 2026-08-09: **Backend slice landed** (PR pending) — `discover_network_windows()` (`#[cfg(windows)]`,
+  async + `spawn_blocking`, time-bounded via a detached-thread + `recv_timeout` pattern mirroring
+  `run_bounded_capture`) walks `RESOURCE_GLOBALNET`/`RESOURCETYPE_DISK` via `WNetOpenEnumW` →
+  `WNetEnumResourceW`, recursing into container `NETRESOURCE`s up to a depth cap; a server container's
+  own enumeration yields its disk shares directly, so `NetShareEnum` wasn't needed (decide-and-log: no
+  `Win32_NetworkManagement_NetManagement` feature added — only `Win32_NetworkManagement_WNet`). The pure
+  mapping/flatten/dedup logic lives in `cpe_server::net_share` (`DiscoveredResource`,
+  `map_discovered_share`, `flatten_discovered`), unit-tested (server→share mapping, nested-container
+  recursion flattening, skip-invalid-remote-name, dedup-across-containers). Non-Windows gets a compiled
+  stub returning an empty Vec. `bindings.gen.ts` deliberately NOT regenerated — the command is excluded
+  from the specta `collect_commands!` export (same convention as `set_file_attribute`/`set_permissions`:
+  a single-OS-behavior command would make the generated bindings OS-dependent), and `NetShare`'s shape
+  didn't change. Still open: the frontend "Discovered on your network" tier (dedupe against saved/mapped
+  shares, one-click pre-filled Add-a-connection, docs note) and the attended QNAP LAN verify (from
+  2026-08-10, tracked by CPE-1518) — this ticket stays in Backlog for that follow-on work.

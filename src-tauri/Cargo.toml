@@ -163,6 +163,9 @@ windows = { version = "0.56", features = [
     # (Win32_System_Com). Same `windows` dep — just more features, no second crate.
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
+    # Windows-native network discovery (CPE-1519, epic CPE-1517): WNetOpenEnumW/WNetEnumResourceW walk
+    # RESOURCE_GLOBALNET the same way Explorer's "Network" folder does — same `windows` dep, no new crate.
+    "Win32_NetworkManagement_WNet",
 ] }
 # Encrypted-vault passphrase storage in the OS credential store (CPE-1248, epic CPE-738): the ONLY place a
 # vault passphrase persists. The `KeyringBackend` adapter (mirroring the sidecar's, CPE-268/322) is the real
