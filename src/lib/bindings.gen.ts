@@ -3377,8 +3377,15 @@ actor?: string | null;
  */
 detail?: string | null }
 /**
- * How a saved connection authenticates. **No secret material** — a password's value and a key's
- * passphrase live in the OS keychain, not in the profile.
+ * How a saved connection authenticates. **No secret material** — a password's value, a key's
+ * passphrase, a bearer token, and an S3 secret access key all live in the OS keychain (CPE-1510), never
+ * in this enum or in `connections.json`.
+ * 
+ * Additive since CPE-1515: `Anonymous`/`Token`/`AccessKey` were added alongside the original
+ * `Password`/`Key`. Because this enum is serialized internally-tagged (`#[serde(tag = "kind")]`), adding
+ * variants is backward-compatible by construction — an old `connections.json` that only ever wrote
+ * `{"kind":"password"}` / `{"kind":"key",...}` still deserializes unchanged (see
+ * `connections.rs`'s tests for the explicit proof).
  */
 export type AuthMethod = 
 /**
@@ -3388,7 +3395,28 @@ export type AuthMethod =
 /**
  * Public-key auth using the private key at `key_path` (an optional passphrase lives in the keychain).
  */
-{ kind: "key"; key_path: string }
+{ kind: "key"; key_path: string } | 
+/**
+ * No credentials at all — anonymous/public access (e.g. a public FTP mirror or an unauthenticated
+ * share). First-class as of CPE-1515; `cpe-vfs`'s FTP auth mapping previously inferred this purely
+ * from a blank/`"anonymous"` username (CPE-1514) and still honours that heuristic for connections
+ * saved before this variant existed — new connections should set `Anonymous` explicitly.
+ */
+{ kind: "anonymous" } | 
+/**
+ * An opaque bearer/OAuth token, for a future cloud provider that authenticates that way. `token_ref`
+ * is **not** the token itself — it's a non-secret reference/label; the real token lives in the OS
+ * keychain (CPE-1510), fetched at connect time the same way a password is (keyed by the connection's
+ * `name`). No provider consumes this yet — it's plumbing ahead of a future cloud provider.
+ */
+{ kind: "token"; token_ref: string } | 
+/**
+ * S3-style access-key auth (SigV4). `id` is the access key ID — not secret, safe to store here like
+ * `user` is. `secret_ref` is a non-secret reference/label for the secret access key, which itself
+ * lives in the OS keychain (CPE-1510) and is never written here. No provider consumes this yet — it
+ * unblocks CPE-1503 (S3).
+ */
+{ kind: "access_key"; id: string; secret_ref: string }
 /**
  * One pickable metadata column for the picker UI: a stable string id (for persistence in
  * [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into

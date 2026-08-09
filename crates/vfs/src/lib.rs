@@ -52,10 +52,7 @@ pub fn open(
             Ok(Box::new(SftpProvider::connect_and_record(&cfg, known_hosts, policy, record_first_contact)?))
         }
         "webdav" | "davs" | "dav" => {
-            let mut cfg = WebdavConfig::new(webdav_base_url(conn));
-            if !conn.user.is_empty() {
-                cfg = cfg.with_basic_auth(&conn.user, secret.unwrap_or(""));
-            }
+            let cfg = webdav_auth_from(WebdavConfig::new(webdav_base_url(conn)), conn, secret)?;
             Ok(Box::new(WebdavProvider::connect(&cfg)))
         }
         "ftp" | "ftps" => {
@@ -63,7 +60,7 @@ pub fn open(
                 host: conn.host.clone(),
                 port: conn.port,
                 user: conn.user.clone(),
-                auth: ftp_auth_from(conn, secret),
+                auth: ftp_auth_from(conn, secret)?,
                 tls: conn.scheme == "ftps",
             };
             Ok(Box::new(FtpProvider::connect(&cfg)?))
@@ -72,27 +69,77 @@ pub fn open(
     }
 }
 
-/// The FTP auth for a connection: Anonymous when the profile's user is blank or literally `"anonymous"`
-/// (case-insensitive) — the common shape for a public FTP mirror/archive — else a password login using the
-/// keychain secret. FTP has no key-based auth ([`AuthMethod::Key`] never applies here), so unlike
-/// [`sftp_auth_from`] this doesn't need to branch on `conn.auth` at all; CPE-1514 handles Anonymous
-/// directly rather than waiting on CPE-1501's broader auth-model epic (see `cpe-ftp`'s module docs).
-fn ftp_auth_from(conn: &Connection, secret: Option<&str>) -> FtpAuth {
-    if conn.user.is_empty() || conn.user.eq_ignore_ascii_case("anonymous") {
-        FtpAuth::Anonymous
-    } else {
-        FtpAuth::Password(secret.unwrap_or("").to_string())
+/// The FTP auth for a connection. [`AuthMethod::Anonymous`] is first-class as of CPE-1515 and maps
+/// directly to [`FtpAuth::Anonymous`]. For [`AuthMethod::Password`]/[`AuthMethod::Key`] (FTP has no
+/// key-based auth, so `Key` is treated the same as `Password` here), the CPE-1514 heuristic still applies
+/// for connections saved before `Anonymous` existed: a blank or literal `"anonymous"` username
+/// (case-insensitive — the common shape for a public FTP mirror/archive) is still treated as anonymous,
+/// so an old saved connection keeps working unchanged. `Token`/`AccessKey` are cloud-only auth kinds FTP
+/// doesn't support — a connection profile combining `ftp`/`ftps` with either is a clear configuration
+/// error, not a silent fallback.
+fn ftp_auth_from(conn: &Connection, secret: Option<&str>) -> Result<FtpAuth, String> {
+    match &conn.auth {
+        AuthMethod::Anonymous => Ok(FtpAuth::Anonymous),
+        AuthMethod::Token { .. } => {
+            Err("ftp: token auth is not supported by this provider — reserved for a future cloud provider".into())
+        }
+        AuthMethod::AccessKey { .. } => Err(
+            "ftp: access-key auth is not supported by this provider — reserved for a future S3/cloud provider".into(),
+        ),
+        AuthMethod::Password | AuthMethod::Key { .. } => {
+            if conn.user.is_empty() || conn.user.eq_ignore_ascii_case("anonymous") {
+                Ok(FtpAuth::Anonymous)
+            } else {
+                Ok(FtpAuth::Password(secret.unwrap_or("").to_string()))
+            }
+        }
     }
 }
 
 /// Build the SFTP auth method from a connection + its secret: a password, or a private key **read from
-/// `key_path`** with `secret` as its passphrase.
+/// `key_path`** with `secret` as its passphrase. [`AuthMethod::Anonymous`] has no true SFTP/SSH
+/// equivalent (the protocol always authenticates a username), so it attempts a password login with an
+/// **empty** password — the conventional shape for the rare anonymous/public SFTP endpoint; `conn.user`
+/// still carries whatever username the profile specifies. `Token`/`AccessKey` are cloud-only auth kinds
+/// SFTP doesn't support — a clear error rather than a silent, wrong connect attempt.
 fn sftp_auth_from(conn: &Connection, secret: Option<&str>) -> Result<SftpAuth, String> {
     match &conn.auth {
         AuthMethod::Password => Ok(SftpAuth::Password(secret.unwrap_or("").to_string())),
         AuthMethod::Key { key_path } => {
             let pem = std::fs::read_to_string(key_path).map_err(|e| format!("{key_path}: {e}"))?;
             Ok(SftpAuth::PrivateKey { pem, passphrase: secret.map(str::to_string) })
+        }
+        AuthMethod::Anonymous => Ok(SftpAuth::Password(String::new())),
+        AuthMethod::Token { .. } => {
+            Err("sftp: token auth is not supported by this provider — reserved for a future cloud provider".into())
+        }
+        AuthMethod::AccessKey { .. } => Err(
+            "sftp: access-key auth is not supported by this provider — reserved for a future S3/cloud provider".into(),
+        ),
+    }
+}
+
+/// Apply a connection's auth to a WebDAV config. [`AuthMethod::Anonymous`] (and the pre-existing
+/// behaviour for `Password`/`Key` with a blank `user`) sends no `Authorization` header at all — many
+/// WebDAV shares allow unauthenticated read access. `Token`/`AccessKey` are cloud-only auth kinds WebDAV
+/// (as modeled here — HTTP Basic only) doesn't support — a clear error rather than silently dropping the
+/// credential.
+fn webdav_auth_from(cfg: WebdavConfig, conn: &Connection, secret: Option<&str>) -> Result<WebdavConfig, String> {
+    match &conn.auth {
+        AuthMethod::Anonymous => Ok(cfg),
+        AuthMethod::Token { .. } => Err(
+            "webdav: token auth is not supported by this provider — reserved for a future cloud provider".into(),
+        ),
+        AuthMethod::AccessKey { .. } => Err(
+            "webdav: access-key auth is not supported by this provider — reserved for a future S3/cloud provider"
+                .into(),
+        ),
+        AuthMethod::Password | AuthMethod::Key { .. } => {
+            if conn.user.is_empty() {
+                Ok(cfg)
+            } else {
+                Ok(cfg.with_basic_auth(&conn.user, secret.unwrap_or("")))
+            }
         }
     }
 }
@@ -205,14 +252,64 @@ mod tests {
     #[test]
     fn ftp_auth_from_picks_anonymous_or_password() {
         // A blank user, or literally "anonymous" (any case), means Anonymous — no keychain secret needed.
+        // This is the CPE-1514 heuristic, still honoured for a `Password`-auth profile saved before
+        // `AuthMethod::Anonymous` existed.
         let mut c = conn("ftp", AuthMethod::Password);
         c.user = String::new();
-        assert!(matches!(ftp_auth_from(&c, None), FtpAuth::Anonymous));
+        assert!(matches!(ftp_auth_from(&c, None).unwrap(), FtpAuth::Anonymous));
         c.user = "Anonymous".into();
-        assert!(matches!(ftp_auth_from(&c, Some("ignored")), FtpAuth::Anonymous));
+        assert!(matches!(ftp_auth_from(&c, Some("ignored")).unwrap(), FtpAuth::Anonymous));
 
         // A real username uses the keychain secret as the password.
         c.user = "deploy".into();
-        assert!(matches!(ftp_auth_from(&c, Some("pw")), FtpAuth::Password(p) if p == "pw"));
+        assert!(matches!(ftp_auth_from(&c, Some("pw")).unwrap(), FtpAuth::Password(p) if p == "pw"));
+    }
+
+    #[test]
+    fn ftp_auth_from_maps_the_first_class_anonymous_variant() {
+        // Even with a non-blank, non-"anonymous" username, the explicit AuthMethod::Anonymous wins.
+        let mut c = conn("ftp", AuthMethod::Anonymous);
+        c.user = "someone".into();
+        assert!(matches!(ftp_auth_from(&c, None).unwrap(), FtpAuth::Anonymous));
+    }
+
+    #[test]
+    fn ftp_auth_from_rejects_cloud_only_auth_kinds() {
+        let token = conn("ftp", AuthMethod::Token { token_ref: "t".into() });
+        assert!(ftp_auth_from(&token, None).unwrap_err().contains("token"));
+        let ak = conn("ftp", AuthMethod::AccessKey { id: "AKIA".into(), secret_ref: "s".into() });
+        assert!(ftp_auth_from(&ak, None).unwrap_err().contains("access-key"));
+    }
+
+    #[test]
+    fn sftp_auth_from_maps_anonymous_and_rejects_cloud_only_auth_kinds() {
+        // Anonymous → an empty-password attempt (SFTP has no true anonymous mechanism).
+        assert!(matches!(
+            sftp_auth_from(&conn("sftp", AuthMethod::Anonymous), None).unwrap(),
+            SftpAuth::Password(p) if p.is_empty()
+        ));
+        let token = conn("sftp", AuthMethod::Token { token_ref: "t".into() });
+        assert!(sftp_auth_from(&token, None).unwrap_err().contains("token"));
+        let ak = conn("sftp", AuthMethod::AccessKey { id: "AKIA".into(), secret_ref: "s".into() });
+        assert!(sftp_auth_from(&ak, None).unwrap_err().contains("access-key"));
+    }
+
+    #[test]
+    fn webdav_auth_from_maps_anonymous_password_and_rejects_cloud_only_auth_kinds() {
+        // Anonymous sends no Authorization header — same behaviour as the pre-existing blank-user case.
+        let anon = conn("webdav", AuthMethod::Anonymous);
+        let cfg = webdav_auth_from(WebdavConfig::new("http://h"), &anon, Some("ignored")).unwrap();
+        assert!(cfg.user.is_none() && cfg.password.is_none());
+
+        // Password with a real user still applies basic auth.
+        let pw = conn("webdav", AuthMethod::Password);
+        let cfg = webdav_auth_from(WebdavConfig::new("http://h"), &pw, Some("pw")).unwrap();
+        assert_eq!(cfg.user.as_deref(), Some("me"));
+        assert_eq!(cfg.password.as_deref(), Some("pw"));
+
+        let token = conn("webdav", AuthMethod::Token { token_ref: "t".into() });
+        assert!(webdav_auth_from(WebdavConfig::new("http://h"), &token, None).unwrap_err().contains("token"));
+        let ak = conn("webdav", AuthMethod::AccessKey { id: "AKIA".into(), secret_ref: "s".into() });
+        assert!(webdav_auth_from(WebdavConfig::new("http://h"), &ak, None).unwrap_err().contains("access-key"));
     }
 }

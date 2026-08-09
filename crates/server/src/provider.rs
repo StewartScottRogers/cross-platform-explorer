@@ -16,6 +16,42 @@ pub struct ProviderEntry {
     pub size: u64,
 }
 
+/// What a provider backend can do, so the UI + command router can adapt without probing (e.g. hide a
+/// "Rename" menu item for a backend that can't, or skip folder icons for a flat key-value store). Every
+/// field defaults to `true` — full POSIX-like behaviour — via [`ProviderCapabilities::default`], so an
+/// existing provider (Local, SFTP, WebDAV, FTP) needs **no change** unless it genuinely differs. The
+/// first expected override is a future S3 provider (CPE-1503), which will set `has_real_dirs = false` (S3
+/// "directories" are a key-prefix convention, not real objects) and likely `supports_rename = false` (S3
+/// has no atomic rename — a "rename" there is a copy + delete).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderCapabilities {
+    /// Can `write`/`mkdir`/`delete` succeed at all (vs. a read-only mount/share)?
+    pub supports_write: bool,
+    /// Does `rename` do an atomic, cheap move (vs. being unsupported or a copy+delete emulation)?
+    pub supports_rename: bool,
+    /// Can `read` address an arbitrary byte range cheaply (vs. only ever reading a whole object)?
+    pub random_read: bool,
+    /// Can this backend notify on change (vs. requiring the caller to poll)?
+    pub supports_watch: bool,
+    /// Are directories real, first-class objects (vs. a naming convention over flat keys, e.g. S3)?
+    pub has_real_dirs: bool,
+}
+
+impl Default for ProviderCapabilities {
+    /// Full POSIX-like behaviour: writable, atomic rename, random-access reads, watchable, real
+    /// directories. This is the trait method's default — a provider overrides only the fields it
+    /// genuinely lacks.
+    fn default() -> Self {
+        Self {
+            supports_write: true,
+            supports_rename: true,
+            random_read: true,
+            supports_watch: true,
+            has_real_dirs: true,
+        }
+    }
+}
+
 /// The operations a location backend must support. Errors are human-readable strings (surfaced to the UI),
 /// matching the rest of the command layer. Paths are provider-relative, forward-slash separated.
 pub trait FileSystemProvider {
@@ -27,6 +63,13 @@ pub trait FileSystemProvider {
     fn delete(&mut self, path: &str) -> Result<(), String>;
     /// Rename/move `from` to `to` within the same backend (a file or a whole directory subtree).
     fn rename(&mut self, from: &str, to: &str) -> Result<(), String>;
+
+    /// This backend's capabilities. Defaults to full POSIX-like behaviour
+    /// ([`ProviderCapabilities::default`]) so existing providers need no override; a backend that
+    /// genuinely differs (e.g. a future S3 provider) overrides only the fields where it does (CPE-1515).
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
 }
 
 /// The local disk, over `std::fs`. A thin wrapper so the existing behaviour (skip-unreadable, etc.) can be
@@ -92,6 +135,9 @@ impl FileSystemProvider for LocalProvider {
 pub struct FakeProvider {
     dirs: std::collections::BTreeSet<String>,
     files: BTreeMap<String, Vec<u8>>,
+    /// Test-only override for [`FileSystemProvider::capabilities`]; `None` reports the full-POSIX default,
+    /// same as every other provider that hasn't opted out.
+    caps: Option<ProviderCapabilities>,
 }
 
 fn norm(path: &str) -> String {
@@ -116,6 +162,13 @@ impl FakeProvider {
             self.dirs.insert(p.to_string());
             cur = parent_of(p);
         }
+    }
+
+    /// Override this instance's reported capabilities (test helper) — e.g. to model a read-only share or
+    /// a directory-less backend like S3 before a real provider for it exists.
+    pub fn with_capabilities(mut self, caps: ProviderCapabilities) -> Self {
+        self.caps = Some(caps);
+        self
     }
 }
 
@@ -229,6 +282,10 @@ impl FileSystemProvider for FakeProvider {
         }
         Err(format!("{from}: not found"))
     }
+
+    fn capabilities(&self) -> ProviderCapabilities {
+        self.caps.unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -305,5 +362,30 @@ mod tests {
         assert!(lp.stat(&format!("{base}/sub")).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn capabilities_default_to_full_posix_for_local_and_fake() {
+        let full = ProviderCapabilities::default();
+        assert!(full.supports_write && full.supports_rename && full.random_read && full.supports_watch && full.has_real_dirs);
+        assert_eq!(LocalProvider.capabilities(), full);
+        assert_eq!(FakeProvider::new().capabilities(), full);
+    }
+
+    #[test]
+    fn a_provider_can_override_capabilities_eg_s3_style_no_real_dirs() {
+        // Models the future S3 provider (CPE-1503): no real directories, no atomic rename, everything
+        // else stays the full-POSIX default — proving overrides are field-by-field, not all-or-nothing.
+        let fp = FakeProvider::new().with_capabilities(ProviderCapabilities {
+            has_real_dirs: false,
+            supports_rename: false,
+            ..ProviderCapabilities::default()
+        });
+        let caps = fp.capabilities();
+        assert!(!caps.has_real_dirs);
+        assert!(!caps.supports_rename);
+        assert!(caps.supports_write, "unrelated fields keep the full-POSIX default");
+        assert!(caps.random_read);
+        assert!(caps.supports_watch);
     }
 }
