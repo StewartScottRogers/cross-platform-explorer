@@ -169,3 +169,19 @@ specs execute, 9 specs pass. **NOT yet fully green** → tracked as **CPE-1481**
 failures on Linux CI + 20-min timeout too short now that specs run). Do NOT mark the gui-smoke GUI-driving row
 green until CPE-1481 lands the leg green and names the pinning job. MVD: mouse-driving substrate restored;
 full-green pinning still owed.
+
+---
+### 2026-08-09 (sprint) — Network sidebar + discovery: attended/hardware debt queued
+New manual-verification debt from the network/sidebar batch (all logged so the sprint keeps moving on the
+buildable halves; the user clears these on return / when the NAS is set up 2026-08-10):
+- **Visual sign-off — permanent Network section (CPE-1516)** + **reorderable sidebar sections (CPE-1520)**:
+  code + unit tests land headless, but the *look/feel* (empty Network section reads as a peer of Drives;
+  drag-to-reorder drop indicator; nothing feels heavier) needs the user's eyes or a gui-smoke Visual Critic
+  screenshot pass. → automate via the gui-smoke Visual Critic once the sidebar settles.
+- **Live Windows network discovery (CPE-1519)**: the `WNetEnumResource` walk compiles + the pure mapping is
+  unit-tested, but the actual enumeration returns real hosts only against a live LAN — attended verify against
+  the QNAP TS-133 (2026-08-10). MVD until a mock-provider or a LAN-in-CI harness exists (hard; likely stays
+  attended).
+- **Real-NAS E2E for shipped SFTP/WebDAV/FTP (CPE-1518)** + **SMB via Windows-UNC (CPE-1504 leg)**: hardware
+  (QNAP) required — inherently attended until a containerized SMB/WebDAV/FTP server is stood up in CI (future
+  QA-Architect ticket candidate: a docker-samba + rclone-serve-webdav + vsftpd test rig).
