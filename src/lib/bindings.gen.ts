@@ -3247,6 +3247,41 @@ async connectionSecretDelete(name: string) : Promise<Result<null, string>> {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Every saved connection profile (no secrets — see module docs on `cpe_server::connections`).
+ */
+async connectionsList() : Promise<Result<Connection[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_list") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Insert or replace a connection by name (editing is just an upsert with the same name). Returns the
+ * updated whole list.
+ */
+async connectionsUpsert(conn: Connection) : Promise<Result<Connection[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_upsert", { conn }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Remove the connection named `name` ("Forget" in the sidebar menu — the caller is also responsible
+ * for `connection_secret_delete`, so no orphaned keychain entry survives). Returns the updated list.
+ */
+async connectionsRemove(name: string) : Promise<Result<Connection[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("connections_remove", { name }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -3341,6 +3376,19 @@ actor?: string | null;
  * Optional extra detail (rename target, diff summary, ...).
  */
 detail?: string | null }
+/**
+ * How a saved connection authenticates. **No secret material** — a password's value and a key's
+ * passphrase live in the OS keychain, not in the profile.
+ */
+export type AuthMethod = 
+/**
+ * Password auth; the password itself is stored in the keychain, keyed by the connection.
+ */
+{ kind: "password" } | 
+/**
+ * Public-key auth using the private key at `key_path` (an optional passphrase lives in the keychain).
+ */
+{ kind: "key"; key_path: string }
 /**
  * One pickable metadata column for the picker UI: a stable string id (for persistence in
  * [`crate::column_config`]), a friendly label, the typed [`MetaColumn`] to pass back into
@@ -3674,6 +3722,18 @@ export type ConflictVersions = { base: string | null; ours: string | null; their
  * True when any side was omitted for being binary or over the size cap.
  */
 truncated: boolean }
+/**
+ * A saved remote connection profile. `name` is the stable display name / identity (unique in a store).
+ */
+export type Connection = { name: string; 
+/**
+ * Scheme, e.g. `"sftp"` (matches [`crate::location::Scheme`] lower-cased).
+ */
+scheme: string; host: string; port: number; user: string; auth: AuthMethod; 
+/**
+ * Optional initial remote path to open (defaults to the server's home/root).
+ */
+path?: string | null }
 /**
  * A sidecar's requested capabilities plus the persisted consent decision (CPE-296):
  * which are already granted, and which are still undecided (need a consent prompt).

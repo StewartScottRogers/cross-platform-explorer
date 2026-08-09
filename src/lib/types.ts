@@ -3,7 +3,7 @@
 // CPE-810). Deleting the hand-copies removes the drift surface; the ~26 importers are unchanged (they
 // still import these names from `./types`). The drift-guard CI regenerates `bindings.gen.ts` and fails on
 // any mismatch, so these can never silently diverge from Rust again.
-export type { DirEntry, Place, NetShare } from "./bindings.gen";
+export type { DirEntry, Place, NetShare, Connection, AuthMethod } from "./bindings.gen";
 
 // The 4 built-ins, plus `meta:<columnId>` for an active metadata column (CPE-1146, epic CPE-707) —
 // `string & {}` keeps the 4 literals autocompleting in editors while still accepting any string

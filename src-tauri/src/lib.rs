@@ -6514,6 +6514,61 @@ async fn connection_secret_delete(name: String) -> Result<(), String> {
     }
 }
 
+// ---- Saved-connection profile CRUD (CPE-1513, epic CPE-1498 — the Network sidebar's entry point) ----
+// Thin async wrappers over `cpe_server::connections::{load_connections, upsert, remove, save_connections}`
+// — the pure logic + on-disk JSON persistence already live in `cpe-server` (CPE-683); these three commands
+// are the dispatcher the sidebar's "＋ Add a connection" / Edit / Forget controls call. Each mutator
+// re-loads, applies the pure reducer, saves, and returns the fresh whole list so the sidebar can just
+// replace its local copy (same "return the updated store" shape as `set_tags`/`rename_tag` above). No
+// secrets ever pass through here — those are `connection_secret_set/get/delete` above.
+
+/// Every saved connection profile (no secrets — see module docs on `cpe_server::connections`).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connections_list() -> Result<Vec<cpe_server::connections::Connection>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let path = cpe_server::connections::default_connections_path()
+            .ok_or_else(|| "no config directory available on this platform".to_string())?;
+        Ok(cpe_server::connections::load_connections(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Insert or replace a connection by name (editing is just an upsert with the same name). Returns the
+/// updated whole list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connections_upsert(
+    conn: cpe_server::connections::Connection,
+) -> Result<Vec<cpe_server::connections::Connection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = cpe_server::connections::default_connections_path()
+            .ok_or_else(|| "no config directory available on this platform".to_string())?;
+        let list = cpe_server::connections::upsert(cpe_server::connections::load_connections(&path), conn);
+        cpe_server::connections::save_connections(&path, &list)?;
+        Ok(list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Remove the connection named `name` ("Forget" in the sidebar menu — the caller is also responsible
+/// for `connection_secret_delete`, so no orphaned keychain entry survives). Returns the updated list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connections_remove(name: String) -> Result<Vec<cpe_server::connections::Connection>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = cpe_server::connections::default_connections_path()
+            .ok_or_else(|| "no config directory available on this platform".to_string())?;
+        let list = cpe_server::connections::remove(cpe_server::connections::load_connections(&path), &name);
+        cpe_server::connections::save_connections(&path, &list)?;
+        Ok(list)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---- Remote-location routing (CPE-1511, epic CPE-1499 "mount anything" F3 — the crux) --------------
 // A remote URI (sftp://…, webdav://…) resolves to a live [`cpe_server::provider::FileSystemProvider`] via
 // `cpe_vfs::connect`, so `list_dir`/`list_dir_stream` browse it exactly like a folder. LOCAL PATHS NEVER
@@ -10763,7 +10818,10 @@ pub fn run() {
             vault_forget_passphrase,
             connection_secret_set,
             connection_secret_get,
-            connection_secret_delete
+            connection_secret_delete,
+            connections_list,
+            connections_upsert,
+            connections_remove
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -11556,6 +11614,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         connection_secret_set,
         connection_secret_get,
         connection_secret_delete,
+        connections_list,
+        connections_upsert,
+        connections_remove,
     ])
     // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
     // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and
