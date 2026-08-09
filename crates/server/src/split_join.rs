@@ -245,8 +245,17 @@ fn validate_manifest(m: &SplitManifest) -> Result<(), String> {
             return Err("manifest is corrupt: part_count is 0 but total_size is not".to_string());
         }
     } else {
-        let min = m.part_size.saturating_mul(m.part_count - 1) + 1;
-        let max = m.part_size.saturating_mul(m.part_count);
+        // Checked (not saturating) arithmetic: a hostile manifest (e.g. part_size = u64::MAX, part_count = 2)
+        // must be rejected as corrupt, never panic on overflow (debug) or silently wrap and defeat this
+        // consistency check (release). A checked_mul success here also guarantees the same raw multiplication
+        // when computing the last part's expected length below can't overflow.
+        let overflow = || "manifest is corrupt: part_size/part_count overflow".to_string();
+        let min = m
+            .part_size
+            .checked_mul(m.part_count - 1)
+            .and_then(|v| v.checked_add(1))
+            .ok_or_else(overflow)?;
+        let max = m.part_size.checked_mul(m.part_count).ok_or_else(overflow)?;
         if m.total_size < min || m.total_size > max {
             return Err("manifest is corrupt: total_size is inconsistent with part_size/part_count".to_string());
         }
@@ -547,6 +556,35 @@ mod tests {
         assert!(err.contains("cap"), "should reject a hostile part_count before touching any parts: {err}");
         assert!(!out.exists());
 
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn hostile_manifest_part_size_overflow_is_rejected_not_a_panic() {
+        // part_size = u64::MAX, part_count = 2 passes every earlier structural check (plain original_name,
+        // 64-hex sha, part_count under cap) and used to overflow `part_size*(part_count-1)+1` → panic in
+        // debug / silent wrap in release. Must now be a clean Err, and never panic.
+        let manifest = SplitManifest {
+            original_name: "f.bin".to_string(),
+            total_size: 1,
+            part_count: 2,
+            part_size: u64::MAX,
+            sha256: "a".repeat(64),
+        };
+        let err = validate_manifest(&manifest).unwrap_err();
+        assert!(err.contains("overflow"), "overflow manifest must be rejected as corrupt: {err}");
+
+        // And end-to-end through join_files (writing the hostile manifest), which must Err, not panic.
+        let d = scratch("hostile-overflow");
+        std::fs::write(
+            d.join("f.bin.split-manifest.json"),
+            serde_json::to_string(&manifest).unwrap(),
+        )
+        .unwrap();
+        let out = d.join("out.bin");
+        let e2 = join_files(&d.join("f.bin.split-manifest.json"), &out).unwrap_err();
+        assert!(e2.contains("overflow"), "join must reject the overflow manifest: {e2}");
+        assert!(!out.exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
