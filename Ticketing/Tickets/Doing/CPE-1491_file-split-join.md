@@ -2,7 +2,7 @@
 id: CPE-1491
 title: "File split / join — chunk a large file into parts and rejoin (classic commander utility)"
 type: Feature
-status: Backlog
+status: Doing
 priority: Low
 component: Multiple
 tags: [ready]

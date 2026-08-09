@@ -2,7 +2,7 @@
 id: CPE-1490
 title: "Finish image compare (side-by-side / onion-skin / pixel-diff heatmap) — the deferred CPE-722 scope"
 type: Feature
-status: Doing
+status: Deferred
 priority: Medium
 component: Multiple
 tags: [ready]
@@ -124,3 +124,10 @@ it as a `data:` URL for payload size on the GUI side, same as `thumbnail`'s conv
 
 **Status:** backend done; GUI view = CPE-1508. Leaving this ticket in `Doing/` for the Foreman to move to
 Blocked/Deferred/Done as appropriate.
+
+## 2026-08-08 (workshift) — BACKEND SHIPPED (PR #726, cbae346f); DEFERRED pending GUI view CPE-1508
+The image-diff engine (`crates/server/src/image_diff.rs` `diff_images` — side/onion/heatmap-ready mask + stats,
+bounded decode, differing-dim union canvas) is merged and gauntlet-verified (Reviewer APPROVE + UAT PASS: real
+photos + 8k+ adversarial inputs, 4096 cap fires, no panic/OOM). The remaining scope — the side-by-side /
+onion-skin / heatmap **GUI pane** in the compare shell — is split to **CPE-1508**. Deferred (not Done) because
+this ticket's own DoD included the view; it's postponed pending CPE-1508 which owns it.
