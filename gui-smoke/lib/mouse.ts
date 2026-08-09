@@ -129,6 +129,19 @@ function actionsBrowser(): ActionsBrowser {
   return browser as unknown as ActionsBrowser;
 }
 
+/**
+ * True if the standard W3C Actions endpoint (`browser.performActions`) is attached — the fallback
+ * mouse-input channel this harness falls back to when CDP is unreachable (CPE-1481). Every
+ * conformant WebDriver implements it (see `performPointer`'s comment above), so this is expected to
+ * be `true` universally; it exists so a spec can assert "some faithful mouse-input channel is
+ * available" without hard-coding a CDP-only expectation (CPE-1507 — the old assertion in
+ * populated-whitespace.smoke.ts required CDP specifically, which is false on Linux WebKitWebDriver
+ * BY DESIGN: that driver has no CDP vendor endpoint at all, the entire reason this fallback exists).
+ */
+export function actionsAvailable(): boolean {
+  return typeof actionsBrowser().performActions === "function";
+}
+
 /** W3C `button` numbers (`pointerDown`/`pointerUp`) — distinct from the CDP name enum above. */
 function w3cButton(button: CdpButton): number {
   switch (button) {
