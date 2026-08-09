@@ -96,7 +96,7 @@ run of lines out of a single blob is impossible; fold is the forcing function fo
       with any PreviewPane selector change explicitly justified); no new deps; no raw `@tauri-apps/api/core`.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as GUI slice #2 of the code-preview upgrade, on top of
+2026-07-26 (sprint, GUI) — Filed by the Foreman as GUI slice #2 of the code-preview upgrade, on top of
 CPE-1090 (outline strip) + the CPE-1089 `code_intel` command. Design de-risked by a research spike (filed to
 the Library) that chose the one-blob-highlight + pure span-safe splitter + per-line-rows approach and flagged
 the test/wrap/entity risks. Depends on CPE-1090 (same file) — dispatch after it merges.

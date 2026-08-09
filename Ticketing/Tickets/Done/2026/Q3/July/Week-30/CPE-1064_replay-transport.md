@@ -49,11 +49,11 @@ ts (sort defensively if needed).
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-728 slice. Independent of the projection core
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-728 slice. Independent of the projection core
 (ts-only). One-line lib.rs `pub mod` at a distinct anchor. Saturating-arithmetic requirement per this shift's
 reviewer-caught overflow bugs.
 
-2026-07-25 (workshift, Worker) — Built `crates/server/src/replay_transport.rs` end-to-end: `step_next`/
+2026-07-25 (sprint, Worker) — Built `crates/server/src/replay_transport.rs` end-to-end: `step_next`/
 `step_prev` (next/prev *distinct* ts via `filter().min()/.max()`, so duplicate timestamps are transparently
 skipped without any special-case code), `events_in_window` (half-open `[t0,t1)`, returns empty early if
 `t1 <= t0`), and `advance` (saturating `delta_ms.saturating_mul(speed_num) / speed_den`, then

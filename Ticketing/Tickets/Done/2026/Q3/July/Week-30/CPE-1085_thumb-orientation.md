@@ -51,11 +51,11 @@ Copy the proven `jpeg_with_exif_orientation(w, h, orient)` fixture builder from 
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed by the Product Manager as the CPE-718 orientation slice (the reusable home the
+2026-07-26 (sprint) — Filed by the Product Manager as the CPE-718 orientation slice (the reusable home the
 thumbnail path needs). Independent new file; distinct lib.rs anchor. CPE-1086 depends on this module's
 `orient_for_display`.
 
-2026-07-26 (workshift, overnight Worker) — Built `crates/server/src/thumb_orient.rs`: `read_exif_orientation`,
+2026-07-26 (sprint, overnight Worker) — Built `crates/server/src/thumb_orient.rs`: `read_exif_orientation`,
 `apply_orientation`, `orient_for_display`, all public. Logic is a documented local copy of
 `batch_transform::read_exif_orientation` / `normalize_orientation` (both private there) — same
 copy-not-edit pattern as CPE-1079; `batch_transform.rs` untouched. Registered `pub mod thumb_orient;`

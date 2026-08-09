@@ -22,5 +22,5 @@ compress/extract through `start_transfer` / the transfer queue with progress + c
 - [ ] Backend streams progress over an `ipc::Channel` per the STREAMING standard; `npm run check`/tests green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-705) as the streaming follow-up; build after the core
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-705) as the streaming follow-up; build after the core
   archive GUI tickets (1179–1183).

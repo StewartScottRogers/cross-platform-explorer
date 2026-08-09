@@ -33,7 +33,7 @@ Found by the CPE-1414 adversarial reviewer alongside the (now-fixed) entity-enco
 regression from CPE-1414 — pre-existing. Track under the thumbnail pipeline epic (CPE-718).
 
 ## Work Log
-2026-08-07 (workshift worker, branch `cpe-1437-svg-use-chain-depth`) — Implemented in
+2026-08-07 (sprint worker, branch `cpe-1437-svg-use-chain-depth`) — Implemented in
 `crates/server/src/thumb_svg.rs`.
 
 **Important correction to the ticket's own premise:** CPE-1414's "cycle guard" was never actually shipped as

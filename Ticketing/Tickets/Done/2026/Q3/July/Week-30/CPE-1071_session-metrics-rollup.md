@@ -51,10 +51,10 @@ it has an f64 field); NO serde/specta (mirror `cost.rs`'s `CostRollup`). No recu
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-731 foundation. Independent module in the
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-731 foundation. Independent module in the
 sidecar ai-console crate; distinct lib.rs anchor. CPE-1072/1074 depend on this module's `SessionMetrics`.
 
-2026-07-25 (workshift, Worker) — Built end-to-end in worktree `agent-a25460a717a9f076a`, branch
+2026-07-25 (sprint, Worker) — Built end-to-end in worktree `agent-a25460a717a9f076a`, branch
 `cpe-1071-session-metrics`. Added `sidecar/ai-console/src/session_metrics.rs` (`RunRecord`, `SessionMetrics`,
 `fold_session`) and registered `pub mod session_metrics;` in `lib.rs` immediately after `pub mod cost;` per the
 anchor instruction (note: the existing file already had `pub mod conflict_window;` right after `cost;`, not

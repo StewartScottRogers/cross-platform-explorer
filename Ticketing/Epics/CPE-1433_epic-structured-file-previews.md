@@ -8,7 +8,7 @@ component: Full-stack
 tags: [epic]
 created: 2026-08-07
 ---
-## Goal (workshift, PM-activated 2026-08-07)
+## Goal (sprint, PM-activated 2026-08-07)
 Turn three common plain-text-mapped file types into **structured preview cards**, following the shipped
 crypto-viewer pattern (CPE-1417: `jwt_preview.rs` → `jwt_preview` command → `JwtPreview.svelte` + jsdom test,
 provider entry ordered before `text`). Today `.eml/.ics/.vcf` all fall through to the plain-text/"code"

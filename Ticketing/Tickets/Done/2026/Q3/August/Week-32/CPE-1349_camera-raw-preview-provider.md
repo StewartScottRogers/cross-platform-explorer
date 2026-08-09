@@ -53,4 +53,4 @@ Do this on ONE branch (shared frontend files — do not parallelize with the DIC
 final "does the image look right" is a quick attended/Visual-Critic check after merge.
 
 ## Work Log
-- 2026-08-05 (workshift): PR #644 merged (a1488e3d). Camera-RAW wired: read_raw_preview_data_url command + raw-image provider + PreviewPane loader (Err->metadata fallback, generation guard), both surfaces. Bindings regen (drift-clean). Reviewer APPROVE + UAT PASS (mutation-tested). On-screen render = post-merge attended check.
+- 2026-08-05 (sprint): PR #644 merged (a1488e3d). Camera-RAW wired: read_raw_preview_data_url command + raw-image provider + PreviewPane loader (Err->metadata fallback, generation guard), both surfaces. Bindings regen (drift-clean). Reviewer APPROVE + UAT PASS (mutation-tested). On-screen render = post-merge attended check.

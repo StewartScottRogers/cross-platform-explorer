@@ -51,10 +51,10 @@ Normalize `\`→`/` then split into `/`-segments — **no `std::path`**, no `#[c
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-729 pure-core foundation. Independent module
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-729 pure-core foundation. Independent module
 in the sidecar ai-console crate; distinct lib.rs anchor. CPE-1076 depends on this module's `IgnoreRule`/`matches`.
 
-2026-07-25 (workshift, Worker) — Built `sidecar/ai-console/src/gate_ignore.rs`: `parse_rule` / `matches`,
+2026-07-25 (sprint, Worker) — Built `sidecar/ai-console/src/gate_ignore.rs`: `parse_rule` / `matches`,
 registered `pub mod gate_ignore;` immediately after `pub mod guardrail;` in `lib.rs`. Matching is fully
 iterative — an unanchored rule is evaluated by implicitly prefixing it with a `**` segment (rather than
 looping over every start index), then a DP table over (pattern-segment, path-segment) decides reachability;

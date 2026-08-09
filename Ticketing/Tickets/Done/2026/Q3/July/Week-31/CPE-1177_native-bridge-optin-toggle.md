@@ -30,7 +30,7 @@ CPE-1176 on one branch (same worker) to avoid a cross-branch key race.
 - [ ] `npm run check` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-717). Owns `nativeBridgeEnabled`. Built with CPE-1176 by one worker.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-717). Owns `nativeBridgeEnabled`. Built with CPE-1176 by one worker.
 - 2026-07-31 — Done. Added `nativeBridgeEnabled: boolean` (default `false`) to `src/lib/settings.ts`
   (persisted via the standard `read`/`write` helpers, round-trips through `settings.json`). Added a
   labelled toggle + description in `SettingsDialog.svelte` ("Native metadata bridge" section, self-contained

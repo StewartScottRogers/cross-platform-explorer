@@ -68,7 +68,7 @@ resource-exhaustion conventions (see STREAMING.md and the prior DoS-hardening sw
 ## Effort / tier
 Medium — plumbing is solved + reusable, but the bounded PCM streaming + bucketing algorithm + feature/dispatcher
 wiring + fixture-synthesis tests are real work (same complexity class as CPE-1257). Standard worker tier.
-Scoped by the workshift Planner 2026-08-08; disjoint from the concurrent workshifts_* work.
+Scoped by the sprint Planner 2026-08-08; disjoint from the concurrent sprints_* work.
 
 ## Work Log
 

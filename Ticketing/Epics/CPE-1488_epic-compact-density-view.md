@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, competitive-landscape pass — TUI survey).** Dormant brief — decompose on
+> **Filed 2026-08-08 (sprint PM, competitive-landscape pass — TUI survey).** Dormant brief — decompose on
 > `/ticketing-epic activate CPE-1488`.
 
 ## Why (the other real TUI strength CPE has no answer for)

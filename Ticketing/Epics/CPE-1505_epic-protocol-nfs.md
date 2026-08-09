@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616 / may use CPE-1500 OS-mount). Unix-native filesystem.**
-> Filed 2026-08-08 (workshift PM, Network research). Dormant.
+> Filed 2026-08-08 (sprint PM, Network research). Dormant.
 
 ## Why + reality check
 NFS is Unix-native (Linux/macOS NAS). Auth (**AUTH_SYS** — UID/GID trust, effectively anonymous) is trivially

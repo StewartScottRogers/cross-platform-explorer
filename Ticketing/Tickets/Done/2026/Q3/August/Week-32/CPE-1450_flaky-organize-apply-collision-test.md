@@ -9,7 +9,7 @@ tags: [ready]
 epic: CPE-810
 created: 2026-08-07
 ---
-## Observation (seen repeatedly across the 2026-08-07 workshift)
+## Observation (seen repeatedly across the 2026-08-07 sprint)
 `crates/server/src/organize_apply.rs`'s test `organize_apply_skips_on_name_collision_without_failing_the_rest`
 intermittently FAILS on the first `cargo test` run under full-suite parallel load, then PASSES in isolation
 (`--test-threads=1`) and on a clean rerun. Observed independently by ≥3 separate agents this shift (reviewers +
@@ -42,7 +42,7 @@ test hygiene). Good QA-Architect candidate.
   directory afterwards. That combination is **only unique within one `cargo test` process's lifetime**, not
   globally:
   - No test ever cleaned up its scratch dir, so every run left files behind under the OS temp dir forever
-    (across the whole 2026-08-07 workshift's many `cargo test` invocations from many agents/worktrees on the
+    (across the whole 2026-08-07 sprint's many `cargo test` invocations from many agents/worktrees on the
     same machine, this had been accumulating for a full day).
   - `(pid, counter)` is only collision-free while that exact process is alive. Windows recycles process ids
     quickly for short-lived processes like `cargo test` binaries; a *later* `cargo test` invocation that
@@ -51,7 +51,7 @@ test hygiene). Good QA-Architect candidate.
     **stale leftover files from an earlier pass of the exact same test** (e.g. a `Documents/b.pdf` already
     sitting there from a previous run). The collision test's "the pdf move must still succeed" assertion
     (`assert!(pdf_result.ok)`) would then fail against that pre-existing state — spuriously, and only under
-    the kind of sustained heavy parallel `cargo test` churn a full-suite run (or a whole workshift's worth of
+    the kind of sustained heavy parallel `cargo test` churn a full-suite run (or a whole sprint's worth of
     them) produces. This matches the reported signature exactly: fails on a full run, passes in isolation or
     on a fresh rerun (a rerun is far less likely to land on the same reused pid + counter value again).
   - No `set_current_dir` calls, no shared/global statics beyond that counter, and no ordering dependency were
@@ -79,7 +79,7 @@ test hygiene). Good QA-Architect candidate.
   - `cargo clippy --all-targets --features index -- -D warnings` — clean.
   - Could not reproduce the original flake even before the fix (7 full-suite runs on this machine, all
     green) — consistent with the root cause being tied to *accumulated cross-process leftover state* built
-    up over a long workshift rather than a single-run race, which a short local reproduction window won't
+    up over a long sprint rather than a single-run race, which a short local reproduction window won't
     trigger. The fix removes the mechanism (stale shared-name leftovers) regardless of whether it
     reproduced locally.
 

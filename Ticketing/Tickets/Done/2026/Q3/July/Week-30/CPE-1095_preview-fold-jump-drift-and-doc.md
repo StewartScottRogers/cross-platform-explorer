@@ -37,5 +37,5 @@ required to merge"), captured here so they aren't lost:
       extracted); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman from the CPE-1091 reviewer's two non-blocking notes so the
+2026-07-26 (sprint, GUI) — Filed by the Foreman from the CPE-1091 reviewer's two non-blocking notes so the
 polish isn't lost. Low priority; pickable anytime after GUI #1 shipped.

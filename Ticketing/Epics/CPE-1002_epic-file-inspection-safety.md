@@ -10,7 +10,7 @@ created: 2026-07-24
 closed:
 ---
 
-> **Filed + activated 2026-07-24** (workshift, Foreman; ideas from a research sweep — each grep-verified
+> **Filed + activated 2026-07-24** (sprint, Foreman; ideas from a research sweep — each grep-verified
 > non-duplicative against the 78 `cpe-server` modules + 39 epics). An umbrella for small, **pure,
 > headless** file-inspection detectors — deterministic algorithms over already-gathered bytes/metadata, no
 > GUI logic and no live AI model in the core, no new deps. Each ships its detector; the column/badge/review

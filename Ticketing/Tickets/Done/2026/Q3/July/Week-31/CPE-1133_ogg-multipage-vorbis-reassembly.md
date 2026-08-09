@@ -91,7 +91,7 @@ Verified locally (Windows, cargo in PATH via `C:\Users\Stewart Rogers\.cargo\bin
 - `cargo clippy --all-targets --all-features -- -D warnings` — clean.
 
 ## Notes
-- Queued in `.claude/workshift-metrics/CHECKPOINT.md` as genuine honest-headless work ("a legit read-side
+- Queued in `.claude/sprint-metrics/CHECKPOINT.md` as genuine honest-headless work ("a legit read-side
   correctness slice", per `[[cpe-server-logic-audited]]` which flagged the str-slice-at-byte-offset and
   dead-truncation-notice patterns to watch).
 - This read-side reassembler is also the safety net that would later unblock the risky OGG **write-back** path.

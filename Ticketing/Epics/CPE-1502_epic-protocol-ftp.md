@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616). FIRST net-new protocol — the "do the easiest first" pick.**
-> Filed 2026-08-08 (workshift PM, Network research — research-library `network-filesharing-program-2026-08-08`).
+> Filed 2026-08-08 (sprint PM, Network research — research-library `network-filesharing-program-2026-08-08`).
 > Dormant.
 
 ## Why FTP is the easiest genuinely-new protocol (after the foundation)

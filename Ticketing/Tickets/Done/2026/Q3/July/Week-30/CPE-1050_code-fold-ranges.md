@@ -61,10 +61,10 @@ Keep it O(n) over the source; no new dependencies (std only + serde/specta alrea
       clean in **both** default and `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent of the
+2026-07-25 (sprint) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent of the
 other children except a one-line lib.rs `pub mod` (serial-merge coordination only).
 
-2026-07-25 (workshift, Worker) — Implemented `crates/server/src/code_folds.rs` (`FoldKind`, `FoldRange`,
+2026-07-25 (sprint, Worker) — Implemented `crates/server/src/code_folds.rs` (`FoldKind`, `FoldRange`,
 `fold_ranges`), registered via `pub mod code_folds;` immediately after `pub mod code_outline;` in
 `crates/server/src/lib.rs`. Mirrored `code_outline.rs`'s derive stack and `normalize(lang) -> Lang`
 dispatch style, but collapsed Rust/JS-TS/Go/C-family into one `Lang::Brace` variant since they share the

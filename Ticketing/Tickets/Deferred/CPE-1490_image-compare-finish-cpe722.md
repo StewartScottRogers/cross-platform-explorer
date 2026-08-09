@@ -125,7 +125,7 @@ it as a `data:` URL for payload size on the GUI side, same as `thumbnail`'s conv
 **Status:** backend done; GUI view = CPE-1508. Leaving this ticket in `Doing/` for the Foreman to move to
 Blocked/Deferred/Done as appropriate.
 
-## 2026-08-08 (workshift) — BACKEND SHIPPED (PR #726, cbae346f); DEFERRED pending GUI view CPE-1508
+## 2026-08-08 (sprint) — BACKEND SHIPPED (PR #726, cbae346f); DEFERRED pending GUI view CPE-1508
 The image-diff engine (`crates/server/src/image_diff.rs` `diff_images` — side/onion/heatmap-ready mask + stats,
 bounded decode, differing-dim union canvas) is merged and gauntlet-verified (Reviewer APPROVE + UAT PASS: real
 photos + 8k+ adversarial inputs, 4096 cap fires, no panic/OOM). The remaining scope — the side-by-side /

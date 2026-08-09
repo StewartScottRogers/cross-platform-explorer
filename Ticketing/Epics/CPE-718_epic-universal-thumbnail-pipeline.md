@@ -46,7 +46,7 @@ and gallery views genuinely useful for mixed folders and is the visual backbone 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Per-format thumbnail extractors + frontend streaming client unbuilt (only cache core).
 
-## Re-activated 2026-08-01 (workshift) — DoD-gap assessment + decomposition
+## Re-activated 2026-08-01 (sprint) — DoD-gap assessment + decomposition
 PM scouting (grep-first; the 2026-07-30 note was accurate this time). TRUE state:
 - **Image path complete + cached** (thumbnail.rs, thumb_source.rs, thumb_orient.rs) + the CACHE and
   QUEUE cores are BUILT (thumb_cache.rs CPE-939, thumb_queue.rs CPE-950, cargo-tested) but **ORPHANED**
@@ -65,7 +65,7 @@ Decomposition (headless-buildable first; heavy-dep formats deferred):
   (ffmpeg/pdfium/mupdf) that fight PURPOSE's fast/small/predictable, and real-render verification is
   GUI/hardware-gated. Build-to-last-mile then defer to the user.
 
-## Headless slice COMPLETE 2026-08-01 (workshift) — remainder user-gated
+## Headless slice COMPLETE 2026-08-01 (sprint) — remainder user-gated
 Delivered every cleanly-headless part of the DoD; reverted to Proposed because the ONLY remaining work
 is heavy-dep + user-gated (a dependency-weight decision), not crew-buildable:
 - **CPE-1236 (merged #537)** — SVG (resvg/usvg, pure-Rust) + font glyph-sheet (ab_glyph + WOFF1 unwrap)
@@ -84,7 +84,7 @@ fast/small/predictable tiebreaker, plus real-render verification is GUI/hardware
 decision on the dependency approach (bundled vs feature-gated vs sidecar) before proceeding. Re-activate
 with `/ticketing-epic activate` once that call is made.
 
-## Closed 2026-08-02 (workshift)
+## Closed 2026-08-02 (sprint)
 All thumbnail formats delivered: raster/PSD (base), SVG + font glyph-sheets (CPE-1236), streaming client (CPE-1237),
 PDF first-page (CPE-1256, pdfium-render feature-gated), video representative-frame (CPE-1257, bundled-ffmpeg shell-out
 feature-gated), ship-enablement + CI + release binary provisioning + docs (CPE-1258). CPE-1238 (the pdf/video "remaining

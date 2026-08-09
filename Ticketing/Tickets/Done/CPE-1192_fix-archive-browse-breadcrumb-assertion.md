@@ -32,7 +32,7 @@ feature.
       entered state); `cd gui-smoke && npm run typecheck` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift) after the epic-705 Visual-Critic capture: the browse feature works
+- 2026-07-31 — Filed by Foreman (sprint) after the epic-705 Visual-Critic capture: the browse feature works
   (screenshot-confirmed) but the spec's breadcrumb selector is wrong.
 - 2026-08-01 — Root-caused: `NavToolbar.svelte` renders every crumb except the last as
   `<button class="crumb">`, but the LAST (active) crumb — the archive name once inside it — as a

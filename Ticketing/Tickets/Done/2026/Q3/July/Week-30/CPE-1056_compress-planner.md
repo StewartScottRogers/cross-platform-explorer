@@ -49,10 +49,10 @@ Logic:
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-705 slice (the inner-naming
+2026-07-25 (sprint) — Filed by the Product Manager as a clean headless CPE-705 slice (the inner-naming
 logic every compress command needs). Independent module; one-line lib.rs `pub mod` only.
 
-2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/compress_plan.rs` +
+2026-07-25 (sprint, overnight Worker) — Built `crates/server/src/compress_plan.rs` +
 `pub mod compress_plan;` after `pub mod checksum;` in `lib.rs`. Opened PR — see repo PR list for the
 number. `cargo test -p cpe-server`: 775 passed, 0 failed (10 new). `cargo clippy --all-targets -- -D
 warnings` and `--features index`: both clean. No new deps.

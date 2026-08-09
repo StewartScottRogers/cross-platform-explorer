@@ -45,11 +45,11 @@ Wire into `crates/server/src/column_extract.rs`:
       **both** feature modes (default and `--features specta`).
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched after CPE-1039 merged (column_extract.rs now free). Completes
+2026-07-25 (sprint) — Filed + dispatched after CPE-1039 merged (column_extract.rs now free). Completes
 the read→column value chain for CPE-1037's `read_mp4`, same per-family-extractor pattern as `audio_cell`.
 Column-picker UI stays attended.
 
-2026-07-25 (workshift) — **DONE, merged PR #357.** New `video_tag_column` module + `MetaColumn::VideoTag`
+2026-07-25 (sprint) — **DONE, merged PR #357.** New `video_tag_column` module + `MetaColumn::VideoTag`
 wired into `column_extract` (gated by `is_video_ext`, dispatched via `read_mp4`) — MP4/MOV videos now
 expose sortable Title/Artist/Album/Year/Comment/Genre/Composer/Encoder/Copyright columns; Year is numeric
 (Int, sorts 1999<2001). Faithful mirror of CPE-1039. Independently reviewed (APPROVE — all 9 key() strings

@@ -47,6 +47,6 @@ code-intelligence UI actually renders**, so these surfaces are pinned by CI and 
 - [ ] `MANUAL-TEST-BURNDOWN.md` CPE-1090 + CPE-1091 rows flipped to automated/pinned once the assertion is green.
 
 ## Work Log
-2026-07-26 (workshift, QA Architect) — Filed to burn down the manual visual-verification debt accrued by the
+2026-07-26 (sprint, QA Architect) — Filed to burn down the manual visual-verification debt accrued by the
 code-preview upgrade (GUI #1). Automating the render assertion pins the outline/gutter/minimap surfaces so
 they never silently regress and the human-eyes rows can close.

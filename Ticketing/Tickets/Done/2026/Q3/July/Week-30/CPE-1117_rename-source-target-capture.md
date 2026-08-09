@@ -56,8 +56,8 @@ and add it to the activity item. BACKEND (+ a thin frontend type). Design + grou
 - A pump-level pairing test: cookie-correlated From+To → one paired record; orphan → single-path.
 
 ## Work Log
-2026-07-26 (workshift) — Filed from the CPE-730 close plan. Prerequisite for CPE-1118 (competing-rename fold).
+2026-07-26 (sprint) — Filed from the CPE-730 close plan. Prerequisite for CPE-1118 (competing-rename fold).
 Dispatched to an opus worker (genuinely-hard cross-platform slice). Fidelity-ceiling degradation decided-and-
 logged (not a user-stop) — 3-OS CI proves it.
 
-2026-07-26 (workshift) — Built (PR #433, merged 80601b45). Reviewer APPROVE + UAT PASS: cookie-correlated From/To pairing + RenameMode::Both, every non-pairable case (Any/Other, cookieless, orphan From, never-arriving To, in-window cookie reuse) degrades to single-path `renamed` with NO wrong pair; off-means-off + no map leaks + coalesce dedup integrity all preserved; clippy+22 tests green both feature modes. NOTE for CPE-1118/replay owners: a PAIRED rename now writes ONE audit-journal row (target only) — the from/to pair is LIVE-ONLY (on the fs-activity emit), not persisted in the CPE-1108 audit journal. CPE-1118 consumes the live stream so it's unaffected; replay-of-renames would need a separate AuditEvent.from/to field (out of scope here).
+2026-07-26 (sprint) — Built (PR #433, merged 80601b45). Reviewer APPROVE + UAT PASS: cookie-correlated From/To pairing + RenameMode::Both, every non-pairable case (Any/Other, cookieless, orphan From, never-arriving To, in-window cookie reuse) degrades to single-path `renamed` with NO wrong pair; off-means-off + no map leaks + coalesce dedup integrity all preserved; clippy+22 tests green both feature modes. NOTE for CPE-1118/replay owners: a PAIRED rename now writes ONE audit-journal row (target only) — the from/to pair is LIVE-ONLY (on the fs-activity emit), not persisted in the CPE-1108 audit journal. CPE-1118 consumes the live stream so it's unaffected; replay-of-renames would need a separate AuditEvent.from/to field (out of scope here).

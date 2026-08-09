@@ -32,7 +32,7 @@ into ONE worker since all touch App.svelte). Backed by the CPE-1214 commands.
       shows most-frecent first. `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-704). Consolidates 1216/1217/1218 (shared App.svelte).
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-704). Consolidates 1216/1217/1218 (shared App.svelte).
   Depends on CPE-1214.
 - 2026-08-01 — Done. Built all three consolidated pieces against CPE-1214's `spotlightSearch`/`spotlightFrecent`
   bindings:

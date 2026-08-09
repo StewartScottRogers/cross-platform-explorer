@@ -39,4 +39,4 @@ handle re-invoking the SAME entry while manually on another tab).
 - [ ] i18n new keys × 12 locales; extend `src/docs/22-file-health.md`.
 
 ## Work Log
-2026-08-04 (workshift run 2) — Filed by the Foreman. Slice 3 of 4 (archive-safety is slice 4, separate).
+2026-08-04 (sprint run 2) — Filed by the Foreman. Slice 3 of 4 (archive-safety is slice 4, separate).

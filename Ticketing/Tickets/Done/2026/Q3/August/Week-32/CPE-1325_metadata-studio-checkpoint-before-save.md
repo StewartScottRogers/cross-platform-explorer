@@ -35,7 +35,7 @@ metadata edit stays recoverable.
       `npx vitest run` green (181 files / 2007 tests).
 
 ## Work Log
-2026-08-05 (workshift) — Implemented. `save()` in `src/lib/components/MetadataStudioDialog.svelte` now
+2026-08-05 (sprint) — Implemented. `save()` in `src/lib/components/MetadataStudioDialog.svelte` now
 calls `commands.checkpointCreate(parentDir(primary.path), "Before metadata edit")` once before the write
 loop, wrapped in try/catch so a rejection only logs and proceeds. Success is surfaced via a translated
 suffix appended to the existing save notice. Added `studio.checkpointed` to all 12 locales and a new test

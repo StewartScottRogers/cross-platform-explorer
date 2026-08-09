@@ -58,6 +58,6 @@ source — filed separately / deferred.)
       batch-media tests green.
 
 ## Work Log
-2026-07-26 (workshift) — Filed to fill the CPE-723 DoD compress gap (found by the PM epic-closure assessment).
+2026-07-26 (sprint) — Filed to fill the CPE-723 DoD compress gap (found by the PM epic-closure assessment).
 Watermark (the other gap) deferred pending a product decision (text vs image-overlay source). After this +
 watermark, CPE-723 is closeable.

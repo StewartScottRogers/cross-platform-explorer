@@ -33,4 +33,4 @@ intentional for the batch scan path; this ticket adds a distinguishable signal w
 Cargo-testable headless (backend) + a small jsdom frontend follow-up.
 
 ## Work Log
-2026-08-05 (workshift run 2) — Filed by the Foreman from CPE-1318's UAT (corrupt-zip false-safe). Backlog.
+2026-08-05 (sprint run 2) — Filed by the Foreman from CPE-1318's UAT (corrupt-zip false-safe). Backlog.

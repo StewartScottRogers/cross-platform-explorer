@@ -52,5 +52,5 @@ CPE-1002). Slice 1 = the tabbed dialog shell + ONE scan wired end-to-end: **dang
       verification defers to the Foreman's build→run + Visual-Critic pass (the risk flagged in the scope).
 
 ## Work Log
-2026-08-04 (workshift run 2) — Filed by the Foreman from the vetted File-Health scope. Slice 1 of 4.
+2026-08-04 (sprint run 2) — Filed by the Foreman from the vetted File-Health scope. Slice 1 of 4.
 Dispatched to a worker. Real streaming-consumer wiring to be GUI-verified by the Foreman before Done.

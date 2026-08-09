@@ -48,10 +48,10 @@ Read the session via `audit_journal::read_session`, compute `bounds` (CPE-1063) 
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-728 assembly seam. Held in Backlog:
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-728 assembly seam. Held in Backlog:
 depends on CPE-1063 (`replay::bounds`) landing first.
 
-2026-07-25 (workshift, Worker) — Built on branch `cpe-1066-replay-session`, off `main` (CPE-1063/1064
+2026-07-25 (sprint, Worker) — Built on branch `cpe-1066-replay-session`, off `main` (CPE-1063/1064
 already merged). New module `crates/server/src/replay_session.rs`: `ReplayData { events, bounds,
 summary }` + `load_replay(base, session)`, exactly as designed — no deviations from the spec. Registered
 `pub mod replay_session;` in `lib.rs` immediately after `pub mod replay_transport;`, per the anchor

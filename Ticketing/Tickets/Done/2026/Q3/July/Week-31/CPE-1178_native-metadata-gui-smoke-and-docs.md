@@ -28,7 +28,7 @@ section) and uses the actual selectors.
 - [x] Docs page added + `sectionDocs.ts` entry; `src/lib/sectionDocs.test.ts` guard passes; `npm run check` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-717). Wave 2 (after 1176/1177). Disjoint files.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-717). Wave 2 (after 1176/1177). Disjoint files.
 - 2026-07-31 — Done by Worker. Added `gui-smoke/specs/native-tags.smoke.ts`: opens Settings via the
   Command Palette, flips `native-bridge-toggle` on (asserting it's off by default first), closes
   Settings, selects the seeded marker file, opens Properties via `Alt+Enter`, and asserts

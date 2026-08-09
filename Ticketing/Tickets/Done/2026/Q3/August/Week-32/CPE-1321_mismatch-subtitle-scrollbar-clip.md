@@ -29,5 +29,5 @@ the reason text is not, because the taller stacked row's bottom is cut off by th
       useful, though the clipping itself is visual — the Foreman re-screenshots + re-runs the Visual Critic).
 
 ## Work Log
-2026-08-05 (workshift run 2) — Filed by the Foreman from the Visual Critic's re-judge of the CPE-1319 fix
+2026-08-05 (sprint run 2) — Filed by the Foreman from the Visual Critic's re-judge of the CPE-1319 fix
 (orphan pill = good; mismatch subtitle clipped by the horizontal scrollbar). Targeted CSS fix.

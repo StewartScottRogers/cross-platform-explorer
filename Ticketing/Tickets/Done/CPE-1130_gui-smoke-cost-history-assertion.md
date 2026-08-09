@@ -60,7 +60,7 @@ doc reference in `wdio.conf.ts`.
 
 ## Work Log
 
-2026-07-29 (workshift worker, CPE-1130) — Built end-to-end on branch
+2026-07-29 (sprint worker, CPE-1130) — Built end-to-end on branch
 `cpe-1130-gui-smoke-cost-history`.
 
 **Real file/schema found (ticket said "e.g. `history.jsonl`" — confirmed, with the exact path):**

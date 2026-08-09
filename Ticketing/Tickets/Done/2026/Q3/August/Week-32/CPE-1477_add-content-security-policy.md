@@ -40,7 +40,7 @@ http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localho
 
 ## Effort / blast radius
 Medium — one config line + a gui-smoke runtime check. No code changes expected. Touches only tauri.conf.json.
-Epic CPE-810 (client/server contract + security). Disjoint from the concurrent workshifts_* work.
+Epic CPE-810 (client/server contract + security). Disjoint from the concurrent sprints_* work.
 
 ## Work Log
 - 2026-08-08: Set `security.csp` in `src-tauri/tauri.conf.json` (line 15) from `null` to the

@@ -52,5 +52,5 @@ design: `.claude/research-library/entries/agent-watch-multisession-actor-plan.md
       bindings regen if any typed surface changed; no new deps; no new thread/timer.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed as conflict-radar slice (b) from the build spec. Follows CPE-1099
+2026-07-26 (sprint, GUI) — Filed as conflict-radar slice (b) from the build spec. Follows CPE-1099
 (multi-session watch). Blocks CPE-1100 (the radar panel).

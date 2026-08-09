@@ -2,7 +2,7 @@
 // epic CPE-1002): drives the real built app, opens the dialog via its real opener — the Command Palette
 // (Ctrl+Shift+P → "Find dangling links…", the same `tool.findDanglingLinks` command the Tools ▸ menu
 // item is wired to, see App.svelte's `paletteCommands`) — then, for each of the 4 tabs, clicks Scan and
-// asserts >=1 result row renders. This is the workshift QA end-to-end proof that the panel's 3 STREAMING
+// asserts >=1 result row renders. This is the sprint QA end-to-end proof that the panel's 3 STREAMING
 // tabs (dangling / mismatch / orphan, each over a real Tauri `ipc::Channel`) and its 1 plain-invoke tab
 // (empty) all actually deliver rows over a REAL IPC round trip against the real built binary — jsdom in
 // FileHealthDialog.test.ts / FileHealthDialogMismatch.test.ts / FileHealthDialogOrphan.test.ts /

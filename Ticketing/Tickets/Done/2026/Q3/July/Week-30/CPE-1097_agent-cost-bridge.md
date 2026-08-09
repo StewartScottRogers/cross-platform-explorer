@@ -56,7 +56,7 @@ do NOT scope in `session_metrics.rs`/`RunRecord`/`cost.rs`/`fleet_metrics.rs`, w
 - [ ] Zero new cost when no session runs (emit lives in the existing per-session reader thread only).
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed as GUI #3 cost-ledger enablement; **rescoped after a de-risk spike** (Library
+2026-07-26 (sprint, GUI) — Filed as GUI #3 cost-ledger enablement; **rescoped after a de-risk spike** (Library
 entry `sidecar-live-cost-usage-scanner.md`) from the unwired `session_metrics`/`RunRecord` stack to the
 actually-live `usage.rs` `UsageScanner`. Blocks CPE-1098 (the panel). Cut just-in-time after the scrubber.
 

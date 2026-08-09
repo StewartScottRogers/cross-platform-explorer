@@ -36,8 +36,8 @@ files → must be recoverable + keeper-guarded.
   safety flow (recoverable trash + keeper guard + no auto-select) to the user for confirmation.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Depends on CPE-1201. opus (L, safety-sensitive).
-- 2026-08-01 — Done (Worker, workshift). Built `src/lib/components/SimilarImagesDialog.svelte`, the perceptual
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-997). Depends on CPE-1201. opus (L, safety-sensitive).
+- 2026-08-01 — Done (Worker, sprint). Built `src/lib/components/SimilarImagesDialog.svelte`, the perceptual
   complement of `DuplicatesDialog.svelte`. Streaming scan over an `ipc::Channel` via `rawInvoke(
   "find_similar_images_stream")` + `createChannel` (streaming opts out of the busy cursor and the typed
   `commands.*Stream` client can't accept a transport-agnostic `StreamChannel` — every streaming call site in

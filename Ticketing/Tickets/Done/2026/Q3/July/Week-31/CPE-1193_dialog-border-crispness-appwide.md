@@ -30,10 +30,10 @@ dimmed backdrop can read as shadow-only, especially on smaller modals.
       outlier; `npm run check` + tests green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift) from the CPE-705 Visual-Critic finding; scoped app-wide because the
+- 2026-07-31 — Filed by Foreman (sprint) from the CPE-705 Visual-Critic finding; scoped app-wide because the
   password modal already matches the shared dialog border standard exactly.
 
-## Evidence 2026-08-01 (workshift)
+## Evidence 2026-08-01 (sprint)
 The epic-704/CPE-1221 Visual Critic pixel-sampled the `NearDuplicatesDialog` edges and found the
 `1px solid var(--border-strong)` present in CSS does NOT render as a distinct border line against the
 dimmed backdrop — it reads only as a white→grey transition (border colour ≈ backdrop value). Concrete

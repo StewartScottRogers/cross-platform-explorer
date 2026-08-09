@@ -50,7 +50,7 @@ video/PDF), and the studio editor UI.
 
 2026-07-24 (dayshift) — **CPE-973** completed the Vorbis codec for OGG: `media_meta_read::read_ogg` reuses `parse_vorbis_comment` via the `vorbis` comment-header signature. The audio read arc (ID3/FLAC/OGG → typed audio columns) now covers the common formats. Remaining: multi-page Ogg reassembly, EXIF/PDF/video read codecs, write-back, and the studio UI.
 
-2026-07-25 (workshift) — **CPE-1034** added the EXIF read codec `media_meta_read::read_exif` — parses an
+2026-07-25 (sprint) — **CPE-1034** added the EXIF read codec `media_meta_read::read_exif` — parses an
 image's EXIF (via the existing `kamadak-exif` dep, no new dependency) into group-`"exif"` `MetaField`s
 (Make/Model/DateTimeOriginal/exposure/ISO/focal/GPS + descriptive tags), with camera intrinsics read-only
 and ImageDescription/Artist/Copyright/UserComment editable. Same bounds-checked never-panic shape as the
@@ -58,7 +58,7 @@ audio codecs; also feeds CPE-707 image columns. Independently reviewed (fixture 
 verified) + UAT-passed via an independent EXIF-construction path (PR #351). The read-codec arc now covers
 ID3/FLAC/OGG audio + EXIF images. Remaining CPE-725 scope: write-back codecs + the studio editor UI.
 
-2026-07-25 (workshift) — **CPE-1035 DONE (PR #352): first WRITE-BACK codec.** `media_meta_write::write_id3v2`
+2026-07-25 (sprint) — **CPE-1035 DONE (PR #352): first WRITE-BACK codec.** `media_meta_write::write_id3v2`
 serialises edited `MetaField`s into a fresh ID3v2.4 tag prepended to the audio payload (strip-and-replace,
 idempotent) — the studio can now *edit* audio tags, not just read them. Pairs `read_id3v2` (CPE-970) +
 `apply_edits` (CPE-942); independently reviewed (opus, APPROVE) + UAT-passed (full read→edit→write→read
@@ -66,17 +66,17 @@ chain, audio byte-preserved). Remaining 725 scope: Vorbis/FLAC + EXIF write-back
 editor UI (attended). Read arc also expanding this shift: PDF doc-info (CPE-1036) + MP4/MOV video
 (CPE-1037) read codecs in review.
 
-2026-07-25 (workshift) — **CPE-1037 DONE (PR #353): video read codec.** `video_meta_read::read_mp4`
+2026-07-25 (sprint) — **CPE-1037 DONE (PR #353): video read codec.** `video_meta_read::read_mp4`
 extends the read arc to MP4/MOV video (iTunes `moov▸udta▸meta▸ilst` atoms → `MetaField{group:"video"}`).
 Independently reviewed (APPROVE + fuzzed) + UAT-passed. Read coverage now spans audio + image + video;
 PDF documents (CPE-1036) in review. Remaining 725: FLAC/EXIF write-back + the studio editor UI (attended).
 
-2026-07-25 (workshift) — **CPE-1038 DONE (PR #355): FLAC/Vorbis write-back.** Second write-back codec
+2026-07-25 (sprint) — **CPE-1038 DONE (PR #355): FLAC/Vorbis write-back.** Second write-back codec
 after ID3 (CPE-1035) — the studio can now edit-and-save both MP3 (ID3v2) and FLAC (Vorbis) tags.
 Independently reviewed + UAT-passed. Write-back arc so far: ID3 ✓, FLAC/Vorbis ✓; remaining: OGG
 (deferred, repaging complexity) + EXIF write-back, then the studio editor UI (attended).
 
-2026-07-25 (workshift) — **CPE-1036 DONE (PR #354): PDF document-info read codec.** Read arc now spans
+2026-07-25 (sprint) — **CPE-1036 DONE (PR #354): PDF document-info read codec.** Read arc now spans
 audio (ID3/FLAC/OGG) + image (EXIF) + video (MP4/MOV) + documents (PDF /Info). QA gate caught a real
 object-resolution bug pre-merge (fixed + regression-tested). Remaining 725: EXIF/OGG write-back (complex),
 studio editor UI (attended).

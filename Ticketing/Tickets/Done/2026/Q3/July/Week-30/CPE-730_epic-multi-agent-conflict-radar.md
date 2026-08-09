@@ -43,7 +43,7 @@ self-overlap; competing renames deferred (need source→target pairs); temporal 
 layered later. First slice shipped: **CPE-914** — `conflict::detect_conflicts`. Remaining: reliable
 per-session activity attribution feed + the radar UI (banner, "who else is here", owner-coloured heat-map).
 
-2026-07-26 (workshift) — **CLOSED. DoD met.** Remaining slices shipped this shift:
+2026-07-26 (sprint) — **CLOSED. DoD met.** Remaining slices shipped this shift:
 - **CPE-1116** owner-coloured activity heat-map + legend (PR #434) — FileList accent + legend coloured by
   owning agent (folderOwnerNorm mirrors conflict_owner/conflict_region; Okabe-Ito theme-var palette).
 - **CPE-1117** rename source->target capture (PR #433) — cookie-correlated From/To pairing + RenameMode::Both;

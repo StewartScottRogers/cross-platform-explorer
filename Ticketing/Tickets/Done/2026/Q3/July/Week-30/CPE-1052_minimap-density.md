@@ -56,10 +56,10 @@ O(total chars). Std + serde/specta only; no new deps.
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
+2026-07-25 (sprint) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
 only shared touch is a one-line lib.rs `pub mod` (serial-merge coordination only).
 
-2026-07-25 (workshift, Worker) — Built `crates/server/src/minimap.rs` and registered it in `lib.rs`
+2026-07-25 (sprint, Worker) — Built `crates/server/src/minimap.rs` and registered it in `lib.rs`
 right after `pub mod simhash;`. Implementation note / assumption: the ticket describes grouping as
 "`ceil(n / buckets)` sizing, last group short," but a literal fixed-chunk-size-then-remainder split can
 under-produce the bucket count for some `n`/`buckets` pairs (e.g. `n=4, buckets=3` → chunk size

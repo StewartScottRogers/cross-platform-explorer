@@ -36,8 +36,8 @@ Headless: `cargo test --features video-thumb` (existing thumb_video tests stay g
 `cargo clippy --all-targets -D warnings` both feature modes. ffmpeg is available locally for the real-render tests.
 
 ## Notes
-Filed from the CPE-1478 workshift review. Epic CPE-718 (universal thumbnail pipeline). Low blast radius, disjoint
-from the concurrent workshifts_* work.
+Filed from the CPE-1478 sprint review. Epic CPE-718 (universal thumbnail pipeline). Low blast radius, disjoint
+from the concurrent sprints_* work.
 
 ## Work Log
 

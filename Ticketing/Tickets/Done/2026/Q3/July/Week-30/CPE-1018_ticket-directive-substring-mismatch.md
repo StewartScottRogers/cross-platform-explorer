@@ -12,7 +12,7 @@ estimate: 30m
 ---
 
 ## Summary
-Found by the 2026-07-24 workshift bug-audit (fourth wave). `reply_to_directive`
+Found by the 2026-07-24 sprint bug-audit (fourth wave). `reply_to_directive`
 (`crates/server/src/ticket_board.rs:356`) locates the target directive header with
 `line.starts_with("### ▸ ") && line.contains(when)` — a **substring** test. If the requested `when` is a
 substring of a *different* directive's header (its `when`, or the `to` target), the scan matches the wrong

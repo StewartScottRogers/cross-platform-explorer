@@ -24,7 +24,7 @@ and the Windows CI runner for verification.
       flagged** (Windows CI runner). clippy clean; `npm run check` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-715). OS-gated; after CPE-1207. Build+unit-test what's
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-715). OS-gated; after CPE-1207. Build+unit-test what's
   possible; Windows-runner verifies.
 - 2026-08-01 — Done. Built directly on this Windows worker host, so the junction path is locally testable
   (not just build-gated). `crates/server/src/links.rs` gained `create_junction(target, link_path)`:

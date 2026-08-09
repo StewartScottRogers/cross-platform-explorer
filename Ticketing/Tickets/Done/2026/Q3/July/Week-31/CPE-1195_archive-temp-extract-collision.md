@@ -30,4 +30,4 @@ Windows-only verification missed it — the 3-OS matrix caught it: [[ci-runs-thr
 - [ ] macos-latest Server-crates CI leg green on the fix commit (confirm post-merge).
 
 ## Work Log
-- 2026-07-31 — Foreman hotfix during workshift. Verified locally; watch the macOS CI leg after merge.
+- 2026-07-31 — Foreman hotfix during sprint. Verified locally; watch the macOS CI leg after merge.

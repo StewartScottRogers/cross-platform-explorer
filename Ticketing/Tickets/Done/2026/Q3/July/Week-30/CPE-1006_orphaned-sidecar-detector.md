@@ -14,7 +14,7 @@ epic: CPE-1002
 A pure, deterministic **orphaned-sidecar-file detector** for `cpe-server` (CPE-1002 "File inspection &
 safety utilities"). A sidecar is a companion file (subtitle, XMP/NFO metadata, camera thumbnail) named
 after a primary file; it's "orphaned" when that primary file is missing. Operates on a caller-supplied,
-already-gathered listing of one directory — no filesystem access, no AI, no new deps. Workshift (Foreman)
+already-gathered listing of one directory — no filesystem access, no AI, no new deps. Sprint (Foreman)
 background slice, 2026-07-24.
 
 ## Design
@@ -47,7 +47,7 @@ background slice, 2026-07-24.
       and `cargo clippy --all-targets --features index -- -D warnings` both clean; no new deps.
 
 ## Work Log
-- 2026-07-24 (workshift, Foreman): Implemented `crates/server/src/orphan_sidecars.rs` +
+- 2026-07-24 (sprint, Foreman): Implemented `crates/server/src/orphan_sidecars.rs` +
   `pub mod orphan_sidecars;` in `lib.rs`. Default rule set as above (srt/sub/ass→video, xmp→image/raw,
   nfo→video, thm→video+image) — chosen from the ticket's examples plus the common real-world sidecar
   formats (Kodi/Plex `.nfo`, camera `.thm`) that share the same "companion of a media primary" shape.

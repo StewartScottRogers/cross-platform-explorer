@@ -24,7 +24,7 @@ mirror this logic in TS). So the Rust modules are dead code in the wrong process
 Not required for CPE-730 DoD (satisfied by the frontend folds). Flagged so they aren't mistaken for live code.
 
 ## Work Log
-2026-07-26 (workshift) — Filed from the CPE-730 close plan (Plan agent found the orphans). Deferred, low-pri —
+2026-07-26 (sprint) — Filed from the CPE-730 close plan (Plan agent found the orphans). Deferred, low-pri —
 our choice, pickable anytime; not blocking the CPE-730 close.
 
-2026-07-27 (workshift) — **Done.** Option (a) DELETE: removed 5 orphaned sidecar conflict modules (946 lines) after grep-proving each was referenced only by the others + own tests; sidecar build + clippy -D + 378 tests green. PR #442 merged (Foreman-reviewed — token-conserving furlough wind-down, independent gauntlet skipped by user request).
+2026-07-27 (sprint) — **Done.** Option (a) DELETE: removed 5 orphaned sidecar conflict modules (946 lines) after grep-proving each was referenced only by the others + own tests; sidecar build + clippy -D + 378 tests green. PR #442 merged (Foreman-reviewed — token-conserving furlough wind-down, independent gauntlet skipped by user request).

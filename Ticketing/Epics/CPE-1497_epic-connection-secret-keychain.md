@@ -11,7 +11,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, Network/"mount anything" research — see research-library
+> **Filed 2026-08-08 (sprint PM, Network/"mount anything" research — see research-library
 > `network-filesharing-program-2026-08-08`).** Part of the **Network Filesharing program** (parent CPE-616
 > in-app-VFS arm + CPE-716 OS-mount arm, hybrid). **Foundation epic F1.** Dormant — activate via
 > `/ticketing-epic`.

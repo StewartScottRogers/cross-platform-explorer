@@ -65,6 +65,6 @@ CPE-1107 (the live `agentSessionMetrics` accumulator). Design:
       `npm run check` clean; `npm test` green (flush-builds-right-record + flush-once tests); no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-731 slice b, from the filed plan. Sibling metrics_journal (audit-journal pattern) +
+2026-07-26 (sprint) — CPE-731 slice b, from the filed plan. Sibling metrics_journal (audit-journal pattern) +
 flush-on-end from the CPE-1107 accumulator. Unblocks 731c (cross-session rollup dashboard). Coordinates with
 CPE-728's audit journal — separate file, same app-data root.

@@ -68,7 +68,7 @@ The source really did dispatch `contextEmpty` on every path (as the ticket suspe
 `rowContext`/`emptyContext`. `preventDefault` still kills the native WebView2 menu.
 
 ## Work Log
-- 2026-07-31 (Worker, workshift): Reproduced + diagnosed with `specs/populated-whitespace.smoke.ts`
+- 2026-07-31 (Worker, sprint): Reproduced + diagnosed with `specs/populated-whitespace.smoke.ts`
   (CDP right-click, non-grabbing). Applied the minimal fix and a `mouse.ts`-driven regression test that
   fails-before / passes-after, plus a jsdom propagation-contract guard in `ExplorerPane.test.ts`.
   Verified against a fresh CLI release build: 5/5 harness tests green, `npm run check` 0/0.

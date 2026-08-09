@@ -83,6 +83,6 @@ bindings). Frontend only.
 - [ ] `npm run check` clean; vitest green (incl. new helper tests); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as GUI #2's dialog, on top of the CPE-1092 command
+2026-07-26 (sprint, GUI) — Filed by the Foreman as GUI #2's dialog, on top of the CPE-1092 command
 enablement. Design from the Library brief
 (`.claude/research-library/entries/batch-media-dialog-backend-surface.md`).

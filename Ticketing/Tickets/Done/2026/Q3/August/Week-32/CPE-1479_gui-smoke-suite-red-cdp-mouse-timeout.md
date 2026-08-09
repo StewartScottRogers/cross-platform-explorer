@@ -12,7 +12,7 @@ created: 2026-08-08
 ---
 ## Why this matters (QA-architecture, high leverage)
 The `GUI smoke` CI leg (tauri-driver + WebdriverIO, CPE-1171) is the **automated GUI-verification substrate** the
-workshift's Visual Critic + UAT Tester depend on to check user-facing changes *without pulling in the user*. It is
+sprint's Visual Critic + UAT Tester depend on to check user-facing changes *without pulling in the user*. It is
 currently **failing/cancelled on every recent `main` run** (CPE-1477 file: cancelled 20m35s; CPE-1414 close:
 cancelled; CPE-1478 file: in-progress → same pattern), so:
 - it produces **no green signal** — GUI changes can't be gated on it, and it can't hand the Visual Critic fresh
@@ -56,13 +56,13 @@ succeeds — so this is NOT a render/CSP problem). Two distinct failures:
 - Flip the QA burndown row for "gui-smoke GUI-driving" back to green + name the leg that pins it.
 
 ## Notes
-Found during the CPE-1477 workshift while validating the CSP change's runtime render (the gui-smoke leg was the
+Found during the CPE-1477 sprint while validating the CSP change's runtime render (the gui-smoke leg was the
 prescribed verification and turned out to be independently broken). Epic CPE-810 (client/server contract +
-security-adjacent CI). Coordinate with the concurrent workshifts_* process. Filed by the QA Architect.
+security-adjacent CI). Coordinate with the concurrent sprints_* process. Filed by the QA Architect.
 
 ## Work Log
 
-**2026-08-08 — root-caused & fixed (Worker, workshift).**
+**2026-08-08 — root-caused & fixed (Worker, sprint).**
 
 **Root cause (both failures, one mechanism — LONG-STANDING, not a fresh regression).**
 `gui-smoke/lib/mouse.ts` has had exactly ONE commit since it was written (CPE-1155, PR #474): the

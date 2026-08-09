@@ -49,10 +49,10 @@ Std only; reuses existing modules. No new deps.
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-724 slice. Held in Backlog: depends on
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-724 slice. Held in Backlog: depends on
 CPE-1050 (code_folds) landing first so this doesn't build against an unmerged API.
 
-2026-07-25 (workshift, Worker) — Built `crates/server/src/code_breadcrumb.rs` on top of merged
+2026-07-25 (sprint, Worker) — Built `crates/server/src/code_breadcrumb.rs` on top of merged
 `code_outline`/`code_folds`. Registered `pub mod code_breadcrumb;` in `lib.rs` immediately after
 `pub mod code_folds;`. Std only, no new deps.
 
@@ -87,7 +87,7 @@ tree-sitter-exact) — not exercised by the acceptance-criteria fixtures, which 
 
 Branch `cpe-1053-code-breadcrumb`, PR opened against `main`.
 
-2026-07-25 (workshift, Worker) — PR #371 got CHANGES REQUESTED from the independent reviewer: a real
+2026-07-25 (sprint, Worker) — PR #371 got CHANGES REQUESTED from the independent reviewer: a real
 correctness bug, not the limitation logged above. Rule 2's "smallest containing fold" could swallow an
 unrelated **sibling**: a symbol with a multi-line signature + one-line body (e.g. `fn a(\n x: i32,\n) ->
 i32 { x }`) gets no fold of its own (the brace scanner never opens a range for a same-line `{...}`), so
@@ -110,7 +110,7 @@ exact repro (asserts line 7 → `["Foo", "b"]`, and that `"a"` is absent).
 
 Pushed fix to `cpe-1053-code-breadcrumb` — PR #371 updated.
 
-2026-07-25 (workshift, Worker) — PR #371 got CHANGES REQUESTED a second time: the previous fix's guard
+2026-07-25 (sprint, Worker) — PR #371 got CHANGES REQUESTED a second time: the previous fix's guard
 was only one-directional. It rejected the ancestor fold when a LATER sibling fell inside it, but a
 fold-less symbol declared AFTER a folded sibling (with no sibling after IT) still inherited the whole
 ancestor fold — an extent starting BEFORE its own declaration line — and swallowed the EARLIER sibling.

@@ -25,7 +25,7 @@ Part of CPE-715 (after CPE-1206). A "New Link…" dialog to create symlinks/hard
       in a temp dir that then lists. `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-715). Batch with CPE-1209 (both edit App.svelte/ContextMenu).
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-715). Batch with CPE-1209 (both edit App.svelte/ContextMenu).
 - 2026-08-01 — Done. Added `NewLinkDialog.svelte` (kind Symlink|Hardlink, target field + native Browse
   picker via `@tauri-apps/plugin-dialog`, link-name field). "New Link…" wired into the empty-area New ▸
   submenu (`ContextMenu.svelte`) and the command palette (`file.newLink`); on confirm the dialog calls

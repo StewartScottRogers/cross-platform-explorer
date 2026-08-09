@@ -40,7 +40,7 @@ AgentTimeline uses). Completes the DoD's "browse the timeline and restore" with 
 - Frontend half (below) completed the wiring + gui-smoke pin — both halves are now Done.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-735). Backend half in the backend batch; frontend half
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-735). Backend half in the backend batch; frontend half
   (CheckpointDialog + DiffPeek reuse) can run parallel.
 - 2026-07-31 — Backend half implemented on branch `cpe-1196-1198-snapshot-backend`, alongside CPE-1196/1198.
   `cargo test -p cpe-server` green (3 new `checkpoint_store::` tests: correct before/after for a changed

@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616 / reconciles CPE-716). Foundation epic F2.** Filed 2026-08-08
-> (workshift PM, Network research — research-library `network-filesharing-program-2026-08-08`). Dormant.
+> (sprint PM, Network research — research-library `network-filesharing-program-2026-08-08`). Dormant.
 
 ## Why (the user-visible deliverable: a "Network" section in the left pane)
 `Sidebar.svelte` has sections (agents/favorites/tags/smart/savedSearch/explore/places/drives) in one persisted

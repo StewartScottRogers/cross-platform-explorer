@@ -54,4 +54,4 @@ shared-file collisions). Standalone new module → parallelizable with CPE-1346/
 NOT specta-exported, no bindings regen; if any are, regenerate `bindings.gen.ts`.
 
 ## Work Log
-- 2026-08-05 (workshift): DICOM reader (dicom-rs, feature-gated dicom-thumb, native codecs off). PR #642 squash-merged to main (3a994f5a). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.
+- 2026-08-05 (sprint): DICOM reader (dicom-rs, feature-gated dicom-thumb, native codecs off). PR #642 squash-merged to main (3a994f5a). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

@@ -47,9 +47,9 @@ Dependency/approach: Backend unrar. Editing model: none. Editable types reuse [[
 - [ ] Verify against RAR4 and RAR5 sample archives
 
 ## Work Log
-- 2026-08-05 (workshift): BACKEND landed via CPE-1347 — RAR entry-listing backend (rar_entries, RAR4/RAR5, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
+- 2026-08-05 (sprint): BACKEND landed via CPE-1347 — RAR entry-listing backend (rar_entries, RAR4/RAR5, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
 
 ## Work Log
-- 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1347/1348). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
+- 2026-08-05 (sprint): backend + preview-provider wiring SHIPPED (CPE-1347/1348). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
 
 - 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: RAR listing via the pure-Rust rar_entries walker (CPE-1347/1348), .rar registered in the archive preview provider (CPE-1359), and inner-entry extraction rar_extract_entry (CPE-1360). Read-only, graceful fallback, in-flight cancellation, tests green. Sample: samples/archives/sample.rar. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).

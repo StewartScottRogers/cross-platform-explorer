@@ -50,10 +50,10 @@ tar-in-gz nuance). O(1)/O(len) with no allocation beyond lowercasing the name.
       default AND `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-705 slice (planner/detector
+2026-07-25 (sprint) — Filed by the Product Manager as a clean headless CPE-705 slice (planner/detector
 layer over already-vendored formats; no new deps). Independent module; one-line lib.rs `pub mod` only.
 
-2026-07-25 (workshift, Worker) — Implemented `crates/server/src/archive_format.rs` (`ArchiveFormat`,
+2026-07-25 (sprint, Worker) — Implemented `crates/server/src/archive_format.rs` (`ArchiveFormat`,
 `detect_format`), registered via `pub mod archive_format;` immediately after `pub mod archive;` in
 `crates/server/src/lib.rs`. Mirrored the `code_outline.rs`/`archive.rs` derive stack. Used
 `[u8]::starts_with` for the offset-0 magic prefixes (zip/gzip/7z) since it's bounds-safe by construction,

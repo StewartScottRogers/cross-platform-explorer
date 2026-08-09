@@ -79,7 +79,7 @@ The orphan-session sweep (CPE-1252); the crew security-review doc (CPE-1251, nex
 Destructive default OFF; verify-before-shred is already backend-enforced but the confirm is the human
 safeguard. Passphrase kept in memory only (+ keychain if the user opts in); never logged.
 
-## Done 2026-08-02 (workshift) — merged #553 @ 22860da5
+## Done 2026-08-02 (sprint) — merged #553 @ 22860da5
 "Create encrypted vault…" folder action + VaultCreateDialog (passphrase+confirm w/ per-field show-hide,
 sibling <name>.cpevault dest with native picker, default-OFF secure-delete-original behind an honest
 warning, remember-in-keychain) + Settings toggle + in-app docs (src/docs/20-vaults.md + sectionDocs).

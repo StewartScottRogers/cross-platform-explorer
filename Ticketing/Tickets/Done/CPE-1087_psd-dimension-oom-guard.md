@@ -44,11 +44,11 @@ a malformed/huge PSD — return `Err`. Cross-OS: pure integer check, no `std::pa
       warnings` clean default AND `--features index`; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed by the Foreman from the CPE-1086 reviewer's fast-follow: the `psd` crate lacks
+2026-07-26 (sprint) — Filed by the Foreman from the CPE-1086 reviewer's fast-follow: the `psd` crate lacks
 a size limit, so a huge-declared PSD is a potential OOM in both thumb_source.rs and image_preview.rs. Real
 hardening, small + cargo-testable.
 
-2026-07-26 (workshift, Worker) — Implemented: added `pub(crate) fn psd_within_limits(psd: &psd::Psd) -> bool`
+2026-07-26 (sprint, Worker) — Implemented: added `pub(crate) fn psd_within_limits(psd: &psd::Psd) -> bool`
 in `crates/server/src/thumb_source.rs`, reusing the module's existing `MAX_IMAGE_DIMENSION` (20,000 px/side)
 and `MAX_ALLOC_BYTES` (256 MiB) constants (same budget as `batch_transform::bounded_limits`). Checks
 `width()`/`height()` against the per-side cap, then the `u64` RGBA byte budget (`w as u64 * h as u64 * 4`).

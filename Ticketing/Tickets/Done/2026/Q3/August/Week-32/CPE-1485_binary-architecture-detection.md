@@ -36,7 +36,7 @@ bounded read). `cargo clippy --all-targets -D warnings` both feature modes.
 
 ## Effort
 Small — pure logic + a match table + fixtures, same pattern as the shipped CPE-1000/1002 detectors. Backend-only,
-fully headless-verifiable. Good workshift-batch fodder.
+fully headless-verifiable. Good sprint-batch fodder.
 
 ## Work Log
 

@@ -49,6 +49,6 @@ scope here; a future ticket can add it if live capture is ever built.
       fold/clear + formatting/NaN-safe helpers tested); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed as GUI #3 cost-ledger panel on top of CPE-1097's bridge; **rescoped** to the
+2026-07-26 (sprint, GUI) — Filed as GUI #3 cost-ledger panel on top of CPE-1097's bridge; **rescoped** to the
 live `usage.rs` 3-field signal (tokens + cost) per the de-risk spike, dropping the unwired SessionMetrics
 ledger. Cut just-in-time after the scrubber (CPE-1094).

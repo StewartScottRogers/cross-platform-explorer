@@ -32,7 +32,7 @@ column is enabled, per visible row.
 - [x] `cargo clippy --all-targets -D warnings` clean (both feature modes if applicable); bindings regenerated.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-717 GUI remainder). Backend-only; disjoint from the
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-717 GUI remainder). Backend-only; disjoint from the
   frontend tickets. Reads native bridge; does not touch the `nativeBridgeEnabled` frontend key.
 - 2026-07-31 — Implemented by Worker. Added `MetaColumn::NativeTags` (id `native.tags`, label "Native
   Tags") to the catalog in `column_extract.rs`, applies-to-all like the CPE-1166 detectors. Added a

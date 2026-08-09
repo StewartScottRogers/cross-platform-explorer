@@ -10,7 +10,7 @@ created: 2026-08-02
 ---
 
 ## Summary
-GitHub Actions runners stalled for hours (fixed via CPE-1266), so a whole workshift merged to `main`
+GitHub Actions runners stalled for hours (fixed via CPE-1266), so a whole sprint merged to `main`
 via `--admin` with CI never running. Once CI came back healthy, `main` (commit v0.57.41, run
 `30767983374`) was RED across several jobs. This ticket makes `main` fully green again, splitting each
 failure into "real bug" vs "test/CI-env-only", and hardens the native-dep install steps so a flaky

@@ -28,7 +28,7 @@ context menu / hotkeys / command palette, with a dry-run confirm before executin
       `npm test` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Depends on CPE-1188 + CPE-1189; batch with 1189
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-739). Depends on CPE-1188 + CPE-1189; batch with 1189
   (both edit App.svelte). Watched-folder binding deferred (needs a CPE-734 rule engine that doesn't exist yet).
 - 2026-07-31 — **Done.** Built `src/lib/macroBindings.ts` (+ `.test.ts`, 12 tests) mirroring
   `userCommands.ts`'s `commandsForSurface`/reorder pattern, but keyed by macro NAME (a macro's identity

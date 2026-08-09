@@ -47,7 +47,7 @@ total-byte budget). Reuse the existing engine — no new capture/restore logic.
   rule field (needed by CPE-1198 too).
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-735). Backend batch (with 1197-backend + 1198, shared
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-735). Backend batch (with 1197-backend + 1198, shared
   lib.rs/bindings), one worker sequential.
 - 2026-07-31 — Implemented on branch `cpe-1196-1198-snapshot-backend`. `cargo test -p cpe-server` green
   (1149 tests incl. 4 new `snapshot_prune::` tests: non-destructive preview, GFS survivors restore

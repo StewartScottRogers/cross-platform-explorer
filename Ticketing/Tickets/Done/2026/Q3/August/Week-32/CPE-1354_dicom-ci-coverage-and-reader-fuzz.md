@@ -61,4 +61,4 @@ collision). High value: closes a live regression-detection hole for code shipped
 codebase's own proof layer to the new highest-risk parsers. Surfaced by the 2026-08-05 frontier scan.
 
 ## Work Log
-- 2026-08-06 (workshift): PR #649 merged. (A) CI server job now runs --features ...,dicom-thumb (clippy+test) so the DICOM tests incl. the CPE-1353 YBR regression actually execute in CI (were invisible). (B) rar/camera_raw/dicom added to binary_data_preview_panic_safety.rs battery with structurally-real magic seeds. Reviewer APPROVE (seeds verified reaching real parse code) + UAT PASS (proved non-hollow via injected-panic). Validated: Server-crates-ubuntu green with dicom-thumb.
+- 2026-08-06 (sprint): PR #649 merged. (A) CI server job now runs --features ...,dicom-thumb (clippy+test) so the DICOM tests incl. the CPE-1353 YBR regression actually execute in CI (were invisible). (B) rar/camera_raw/dicom added to binary_data_preview_panic_safety.rs battery with structurally-real magic seeds. Reviewer APPROVE (seeds verified reaching real parse code) + UAT PASS (proved non-hollow via injected-panic). Validated: Server-crates-ubuntu green with dicom-thumb.

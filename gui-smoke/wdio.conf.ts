@@ -804,7 +804,7 @@ function seedVaultCreateFixture(tmpDir: string): void {
   fs.writeFileSync(path.join(src, "notes", "CPE-1250-more.txt"), "nested plaintext\n", "utf-8");
 }
 
-// --- File-Health GUI verification fixture (workshift QA, epic CPE-1002) -------------------------
+// --- File-Health GUI verification fixture (sprint QA, epic CPE-1002) -------------------------
 // Seeds the 3 findings the File-Health panel's `mismatch`/`orphan`/`empty` tabs need for an
 // end-to-end proof over a REAL Tauri ipc::Channel (the `dangling` tab's finding already exists —
 // `seedLinkBadgeFixture`'s LINK_BROKEN_NAME broken symlink, shared at tmpDir root — so it is not
@@ -1086,7 +1086,7 @@ export const config: WebdriverIO.Config = {
     // above for why it is NOT a new top-level folder) for the "Create encrypted vault…" flow.
     seedVaultCreateFixture(tmpDir);
 
-    // File-Health GUI verification (workshift QA, epic CPE-1002): seed the mismatch/orphan/empty
+    // File-Health GUI verification (sprint QA, epic CPE-1002): seed the mismatch/orphan/empty
     // findings for file-health.smoke.ts's 4-tab end-to-end pass (see block above).
     seedFileHealthFixture(tmpDir);
 

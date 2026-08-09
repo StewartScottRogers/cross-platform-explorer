@@ -99,7 +99,7 @@ deferred GUI cap CPE-1126).
   clean. `src-tauri` signature unchanged (reviewer already confirmed it compiles).
 
 ## Notes
-- Queued in `.claude/workshift-metrics/CHECKPOINT.md` as "CPE-732 optional headless follow-up — thread
+- Queued in `.claude/sprint-metrics/CHECKPOINT.md` as "CPE-732 optional headless follow-up — thread
   `revert_attribution` into `checkpoint_preview_revert` so drift flags only *truly-outside* changes."
 - Distinct from CPE-1127 (manifest-id validation, already Done) — this is the attribution wiring, not path
   hardening.

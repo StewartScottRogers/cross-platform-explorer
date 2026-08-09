@@ -55,8 +55,8 @@ slow spec can't eat the budget, and/or shard the suite across matrix jobs (revis
   filed reason). Windows leg remains separately tracked under CPE-1048 (WebView2 DevToolsActivePort).
 
 ## Notes
-Filed from the CPE-1479 workshift. This is the "restore the Visual Critic/UAT substrate to GREEN" work; CPE-1479
-was the necessary first half (mouse). Epic CPE-810. Coordinate with the concurrent workshifts_* process.
+Filed from the CPE-1479 sprint. This is the "restore the Visual Critic/UAT substrate to GREEN" work; CPE-1479
+was the necessary first half (mouse). Epic CPE-810. Coordinate with the concurrent sprints_* process.
 
 ## Work Log — Round 1 (2026-08-08, QA-infra Worker)
 
@@ -313,7 +313,7 @@ un-gate these two tests once resolved. Referenced from the gate comment in the s
 the ubuntu leg completes within its timeout and passes, with the only non-passing cases being 2
 explicitly-Linux-gated drive-TILE tests tracked under CPE-1483.
 
-## CLOSED 2026-08-08 (workshift) — DONE for delivered scope; tail tracked as CPE-1507
+## CLOSED 2026-08-08 (sprint) — DONE for delivered scope; tail tracked as CPE-1507
 Shipped via PR #724 (merged f010276f) over 5 rounds. **gui-smoke Linux leg: 0 → 36 passing, suite now
 COMPLETES** (was a hard 20-min timeout with the mouse harness fully broken). Delivered:
 - **R1** timeout 20→35 + triage (9→15 passing); **R2** the root fix — `mouse.ts` W3C-Actions fallback for

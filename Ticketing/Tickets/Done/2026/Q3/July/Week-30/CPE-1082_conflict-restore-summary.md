@@ -44,10 +44,10 @@ If you include a `conflict_ratio`, it MUST be **division-safe**: denominator 0 �
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-732 report/gate slice. Held in Backlog:
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-732 report/gate slice. Held in Backlog:
 depends on CPE-1080 (`ClassifiedAction`) landing first; extends its `revert_safety.rs`.
 
-2026-07-25 (workshift, overnight Worker) — Dependency CPE-1080 confirmed merged into `main` (PR #398); ticket
+2026-07-25 (sprint, overnight Worker) — Dependency CPE-1080 confirmed merged into `main` (PR #398); ticket
 moved Backlog → Doing. Extended `crates/server/src/revert_safety.rs` per the design — no new `pub mod` line
 (module already registered). Added:
 

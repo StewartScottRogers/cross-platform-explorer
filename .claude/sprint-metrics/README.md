@@ -1,7 +1,7 @@
-# Workshift metrics — the teeth for the Capacity & throughput discipline
+# Sprint metrics — the teeth for the Capacity & throughput discipline
 
-This folder is the measurement substrate for the Workshift's **Capacity & throughput** discipline
-(see `.claude/commands/workshift.md`). It turns "run the right number of workers on the right model"
+This folder is the measurement substrate for the Sprint's **Capacity & throughput** discipline
+(see `.claude/commands/sprint.md`). It turns "run the right number of workers on the right model"
 from a vibe into a number the Foreman can consult.
 
 ## Files

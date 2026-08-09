@@ -44,7 +44,7 @@ the overwrite engine, and the encrypted-vault half (passphrase/key derivation + 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Overwrite engine + encrypted-vault (key derivation/mount) + security review unbuilt (only shred-plan model).
 
-## Re-activated 2026-08-01 (workshift) — secure-delete slice only; vaults stay user-gated
+## Re-activated 2026-08-01 (sprint) — secure-delete slice only; vaults stay user-gated
 PM scouting (grep-first). TRUE state:
 - The overwrite ENGINE `secure_shred::shred_file(path, scheme) -> ShredReport` (schemes
   Zero/Random/DoD3/Gutmann, CPE-1012) + the honest-caveat plan `secure_delete::plan_shred` (CPE-941)
@@ -64,7 +64,7 @@ Building the secure-delete DoD bullet only:
 **Deferred (user-gated):** encrypted vaults — needs a crypto-dep exception + a security review + OS
 keychain. Revisit with the user.
 
-## Re-activated 2026-08-01 (workshift) — VAULTS half, user said "do the vaults"
+## Re-activated 2026-08-01 (sprint) — VAULTS half, user said "do the vaults"
 User authorized the crypto-dependency call. Grep-first reuse found: `keyring` v3 is ALREADY a workspace
 dep (`sidecar/host`, per-OS native backends) with a proven `KeyringBackend` seam
 (`sidecar/host/src/providers/secrets.rs`) + a `SecretAccess`-style trait in `sidecar/ai-console/src/vault.rs`
@@ -90,7 +90,7 @@ Decomposition (SEQUENTIAL — each needs the prior; core-first, heaviest review 
   security review + an explicit "professional external audit recommended before GA" flag (DoD's review gate,
   done honestly — a crew review de-risks but does not substitute for a professional crypto audit).
 
-## CLOSED 2026-08-02 (workshift, user "do the vaults") — DoD MET
+## CLOSED 2026-08-02 (sprint, user "do the vaults") — DoD MET
 Both halves of CPE-738 are complete:
 - **Secure delete** (earlier this session): CPE-1240 (shred_paths command + "Securely delete…" action +
   honest permanent/best-effort ShredConfirmDialog) + CPE-1241 (gui-smoke pin). DoD bullet met.
@@ -125,7 +125,7 @@ hand-rolling AEAD/KDF/nonces is worth the weight for a security feature; and vau
 (zero cost when unused). Possible future trim (follow-up, not now): investigate whether age's i18n/fluent
 pull can be dropped. Recorded so the weight is a deliberate decision, not an accident.
 
-## Secure-delete slice COMPLETE 2026-08-01 (workshift) — vaults remain user-gated
+## Secure-delete slice COMPLETE 2026-08-01 (sprint) — vaults remain user-gated
 CPE-1240 (#539) wired the shred engine end-to-end: `shred_paths` command + "Securely delete…" context
 action + ShredConfirmDialog (honest permanence + best-effort platform caveat + scheme picker + red
 "Shred permanently"). CPE-1241 (#540) pinned it with a gui-smoke spec (Cancel-only, fixture-survives)

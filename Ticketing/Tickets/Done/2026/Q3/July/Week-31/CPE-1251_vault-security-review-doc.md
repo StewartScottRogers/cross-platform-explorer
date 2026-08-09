@@ -36,7 +36,7 @@ recommended before GA" flag. (User-facing summary already ships in `src/docs/20-
   which is recommended before shipping to real users at GA.
 - Independently sanity-checked by the security reviewer for accuracy.
 
-## Done 2026-08-02 (workshift) — docs/design/VAULT-SECURITY.md finalized @ main
+## Done 2026-08-02 (sprint) — docs/design/VAULT-SECURITY.md finalized @ main
 Threat model + crypto design + key handling + honest limits + adversarial-review record + explicit
 "professional external audit recommended before GA" flag. Independently accuracy-checked against the merged
 code by the security reviewer: verdict DOC ACCURATE except one performance overstatement (claimed

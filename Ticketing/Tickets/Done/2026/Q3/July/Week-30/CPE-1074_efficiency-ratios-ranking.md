@@ -49,10 +49,10 @@ Eq` (no f64); no serde/specta. No recursion.
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-731 slice. Held in Backlog: depends on CPE-1071
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-731 slice. Held in Backlog: depends on CPE-1071
 (`SessionMetrics`) landing first.
 
-2026-07-25 (workshift, Worker) — Built end-to-end in worktree `agent-af6dac4b026049a28`, branch
+2026-07-25 (sprint, Worker) — Built end-to-end in worktree `agent-af6dac4b026049a28`, branch
 `cpe-1074-efficiency`, off latest `main` (CPE-1071 `session_metrics` already merged). Added
 `sidecar/ai-console/src/efficiency.rs` with the four division-safe ratio functions
 (`usd_per_file`, `tokens_per_file`, `churn_per_1k_tokens`, `tokens_per_minute`, each `-> Option<f64>`,

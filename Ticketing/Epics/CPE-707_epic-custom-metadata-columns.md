@@ -52,7 +52,7 @@ video / doc extractors, the column-picker UI, and per-folder persistence.
 
 2026-07-24 (dayshift) — **CPE-975** added the dispatcher `column_extract::extract_column(ext, bytes, MetaColumn)` — the single seam routing a file to its per-family extractor (audio ID3/FLAC/OGG → typed audio cell; image header → Dimensions). Adding video/doc later is one more arm. Remaining: video/doc extractors, the column-picker UI (GUI), per-folder persistence.
 
-2026-07-25 (workshift) — **CPE-1028 + CPE-1029** added the remaining two per-family extractors:
+2026-07-25 (sprint) — **CPE-1028 + CPE-1029** added the remaining two per-family extractors:
 `video_column::video_cell` (ISO-BMFF `moov/mvhd` header walk → `CellValue::Float` duration seconds,
 `mp4`/`mov`/`m4v`) and `doc_column::doc_pages_cell` (pure PDF byte-scan of `/Type /Page` objects,
 excluding the `/Pages` tree node → `CellValue::Int` page count). Both wired into
@@ -61,19 +61,19 @@ ext guards, both pure + no new deps, each independently reviewed (opus) + UAT-pa
 audio/image/video/doc all covered, the **per-family extractor layer is complete**. Remaining epic scope:
 the column-picker UI (GUI/attended) + per-folder column persistence.
 
-2026-07-25 (workshift) — **CPE-1032** added the per-folder column-config persistence store
+2026-07-25 (sprint) — **CPE-1032** added the per-folder column-config persistence store
 (`cpe-server::column_config`: `get`/`set`/`clear` over a `column_config.json` catalog keyed by folder path,
 `ServerCtx`-based, tolerant-read, `HeadlessCtx`-tested), mirroring the CPE-836 template store. The details
 view can now remember a user's chosen columns per folder. Independently reviewed + UAT-passed (PR #349).
 Remaining epic scope: the column-picker UI (GUI/attended) that binds these pieces together.
 
-2026-07-25 (workshift) — **CPE-1039 DONE (PR #356): document-metadata column family.** PDFs now expose
+2026-07-25 (sprint) — **CPE-1039 DONE (PR #356): document-metadata column family.** PDFs now expose
 sortable Title/Author/Subject/Keywords/Creator/Producer/Date Created/Date Modified columns via the new
 `doc_info_column` extractor wired into `column_extract` (reads CPE-1036's `read_pdf`). Same per-family
 `→ CellValue` pattern as `audio_cell`/`image_dimensions_cell`. Independently reviewed + UAT-passed. Next
 column candidate: a video-tag family (Title/Artist/… from CPE-1037's `read_mp4`).
 
-2026-07-25 (workshift) — **CPE-1040 DONE (PR #357): video-tag column family.** MP4/MOV videos expose
+2026-07-25 (sprint) — **CPE-1040 DONE (PR #357): video-tag column family.** MP4/MOV videos expose
 sortable Title/Artist/Album/Year(numeric)/… columns via `video_tag_column` reading CPE-1037's `read_mp4`.
 Both new read codecs (PDF /Info, MP4 tags) are now reachable as columns. Column families shipped this
 shift: doc-info (PDF) + video-tag. Remaining 707: the column-picker/persistence UI (attended).

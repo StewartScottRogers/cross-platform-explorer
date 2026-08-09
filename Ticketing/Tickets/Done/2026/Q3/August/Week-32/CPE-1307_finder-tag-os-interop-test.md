@@ -52,7 +52,7 @@ its own ID; only this ticket's numbering changed. PR #603 and the test file's ow
 to reference CPE-1307. No code behaviour changed as part of the rename.
 
 ## Work Log
-2026-08-03 (workshift) — Filed by the Foreman from the QA-Architect survey (grep-verified: no finder_tags
+2026-08-03 (sprint) — Filed by the Foreman from the QA-Architect survey (grep-verified: no finder_tags
 interop test; native_bridge push/pull only demo-verified). Dispatched to a worker.
 
 2026-08-03 (worker) — Built `crates/server/tests/finder_tags_os_interop.rs` per the design above, copying

@@ -49,11 +49,11 @@ String paths only — no `std::path`, no `#[cfg]` assertion.
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-730 slice. Independent module (reuses
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-730 slice. Independent module (reuses
 conflict::AgentActivity, doesn't modify it); distinct lib.rs anchor. CPE-1070 depends on this module's
 `PathAttribution`.
 
-2026-07-25 (workshift, Worker) — Built end-to-end on branch `cpe-1069-conflict-owner`. New module
+2026-07-25 (sprint, Worker) — Built end-to-end on branch `cpe-1069-conflict-owner`. New module
 `sidecar/ai-console/src/conflict_owner.rs`: `PathAttribution { path, contributors: Vec<(String, u32, u32)>,
 owner: String }` and `pub fn attribute(activity: &[conflict::AgentActivity]) -> Vec<PathAttribution>`.
 Registered `pub mod conflict_owner;` in `lib.rs` immediately after `pub mod usage;`, per the ticket anchor.

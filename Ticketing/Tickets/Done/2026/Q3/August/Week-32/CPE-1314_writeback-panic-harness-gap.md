@@ -28,5 +28,5 @@ Now that #608 extracted the shared battery+harness into `tests/common/mod.rs`, c
 - [ ] `cargo test -p cpe-server --test parser_panic_safety` green; clippy clean (3 cpe-server CI modes). No new deps.
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the shift-3 bench researcher (grep-verified: 5 write codecs
+2026-08-04 (sprint) — Filed by the Foreman from the shift-3 bench researcher (grep-verified: 5 write codecs
 absent from the harness). Sequenced after #608's tests/common refactor merged. Dispatched to a worker.

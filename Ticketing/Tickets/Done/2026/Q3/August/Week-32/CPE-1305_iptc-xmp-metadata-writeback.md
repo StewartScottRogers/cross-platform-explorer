@@ -42,5 +42,5 @@ EXIF/OGG/WAV/PDF autonomously.
 - Video (`write_mp4` atom rewriting) is explicitly OUT of scope — riskier, a separate later ticket.
 
 ## Work Log
-2026-08-03 (workshift) — Filed by the Foreman from the epic-survey researcher (grep-verified: no
+2026-08-03 (sprint) — Filed by the Foreman from the epic-survey researcher (grep-verified: no
 `write_iptc`/`write_xmp` exist; read side already landed; UI auto-derives). Dispatched to an opus worker.

@@ -45,7 +45,7 @@ Epic CPE-712 ("Shell citizen"), currently Proposed/dormant — its 2026-07-30 Do
 apply glue unbuilt" as remaining scope. This ticket closes the Linux half; macOS stays Mac-gated.
 
 ## Work Log
-- 2026-08-03 — Filed and worked in the same pass (workshift). Built `apply_desktop_file`/
+- 2026-08-03 — Filed and worked in the same pass (sprint). Built `apply_desktop_file`/
   `remove_desktop_files` + `linux_plan_for_current_user` in `crates/server/src/shell_menu.rs`, cfg-gated to
   `target_os = "linux"`, wrapping the existing pure/tested `linux_shell_plan`. `install_shell_integration`
   writes the `.desktop` file (creating parent dirs) then best-effort shells to `xdg-mime`/

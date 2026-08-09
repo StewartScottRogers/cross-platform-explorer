@@ -45,11 +45,11 @@ A `#[cfg]`-gated integration test in `crates/server/tests/` that, on a temp file
 - [x] Burndown #8 flips to ✅ once the test is green in the 3-OS matrix, naming that job as the pin.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the QA Architect as the next clean headless MVD win (GUI surfaces #3/#4
+2026-07-25 (sprint) — Filed by the QA Architect as the next clean headless MVD win (GUI surfaces #3/#4
 are blocked on a self-hosted runner; this needs no user resource). Builds on the CPE-717 native_meta
 modules + the existing `native_tags_demo` example.
 
-2026-07-25 (workshift, Foreman) — Prior session had built the test (`crates/server/tests/native_meta_os_interop.rs`,
+2026-07-25 (sprint, Foreman) — Prior session had built the test (`crates/server/tests/native_meta_os_interop.rs`,
 189 lines) into PR #367, CI-green on the whole 3-OS backend/server matrix but never reviewed. Ran the
 gauntlet: **Reviewer APPROVE** (confirmed Windows `path:stream` read genuinely bypasses `native_meta::read`,
 namespacing correct, degrade branches tight, not hollow) + **UAT PASS** (ran the test locally on Windows:

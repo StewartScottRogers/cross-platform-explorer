@@ -27,7 +27,7 @@ CPE-1220 made highlights bolder). Cosmetic, pre-existing, not a CPE-1220 regress
   reads as intentional (matched run in the meaningful part of the entry).
 - Re-capture the spotlight gui-smoke screenshot; no regression to multi-run highlighting.
 
-## Deferred 2026-08-01 (workshift) — needs basename-DIRECT matching, not position-filtering
+## Deferred 2026-08-01 (sprint) — needs basename-DIRECT matching, not position-filtering
 PR #529 tried the "drop match positions before the last separator" approach (option 2). It removes
 the scattered prefix highlights (the main complaint) BUT the spotlight gui-smoke caught a real wart:
 because ranking still fuzzy-matches over the FULL path greedily, when the path prefix contains a

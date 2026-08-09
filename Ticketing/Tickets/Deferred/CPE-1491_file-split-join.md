@@ -131,7 +131,7 @@ wants an explicit "replace existing" affordance instead of requiring the caller 
 
 **Status:** backend done; GUI = CPE-1509. Leaving this ticket in `Doing/` for the Foreman to disposition.
 
-## 2026-08-08 (workshift) — BACKEND SHIPPED (PR #727, merged); DEFERRED pending GUI dialog CPE-1509
+## 2026-08-08 (sprint) — BACKEND SHIPPED (PR #727, merged); DEFERRED pending GUI dialog CPE-1509
 `crates/server/src/split_join.rs` (`split_file`/`join_files`, streamed 1 MiB buffers, single-pass sha256,
 traversal-safe hostile-manifest validation) merged + gauntlet-verified (Reviewer caught + fixed a manifest
 overflow-panic; UAT: round-trip byte-identical, corrupt/missing→Err, traversal rejected, 200 MiB → ~5.9 MB RSS).

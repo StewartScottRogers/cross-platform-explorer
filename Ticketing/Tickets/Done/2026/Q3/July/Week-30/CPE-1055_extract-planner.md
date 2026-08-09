@@ -57,12 +57,12 @@ first). Sum `file_count` (non-dir) and `total_uncompressed`. The total is shaped
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the highest-value CPE-705 headless slice (the
+2026-07-25 (sprint) — Filed by the Product Manager as the highest-value CPE-705 headless slice (the
 safety/conflict core the epic DoD needs). Reuses the existing tested `entry_name_is_safe` guard rather than
 duplicating it. Independent module; one-line lib.rs `pub mod` (+ possibly a one-line visibility change to
 archive.rs).
 
-2026-07-25 (workshift, Worker) — Implemented `crates/server/src/extract_plan.rs` (`plan_extract` +
+2026-07-25 (sprint, Worker) — Implemented `crates/server/src/extract_plan.rs` (`plan_extract` +
 `ExtractPlan`/`PlannedEntry`), registered via `pub mod extract_plan;` in `lib.rs` immediately after
 `pub mod archive_safety;`. Reused `archive::entry_name_is_safe` — changed its visibility from private to
 `pub(crate)` (one-line edit to `archive.rs`, logic untouched) rather than duplicating the zip-slip check.

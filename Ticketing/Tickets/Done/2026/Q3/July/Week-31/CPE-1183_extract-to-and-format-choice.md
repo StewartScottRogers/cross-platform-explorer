@@ -28,7 +28,7 @@ Part of the CPE-705 GUI remainder. Today compress is hardcoded `.zip` and extrac
 - [ ] gui-smoke `snap` of the enriched context menu; `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-705). Runs after/with CPE-1182 (same worker, sequential).
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-705). Runs after/with CPE-1182 (same worker, sequential).
 - 2026-07-31 — Done. New "Extract to…" context row → `doExtractTo` opens the native folder picker
   (`openFolderDialog`, cancel-safe like `copyMoveToFolder`) and extracts into the chosen dir via the
   shared `extractWithPasswordFallback` (so an "Extract to…" on a password-protected archive prompts too,

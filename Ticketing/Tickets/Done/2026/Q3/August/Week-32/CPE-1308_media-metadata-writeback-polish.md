@@ -43,4 +43,4 @@ Three follow-ups surfaced by the CPE-1305 gauntlet (opus reviewer + re-verifier)
 - [ ] `cargo test -p cpe-server` green; `clippy --all-targets -D warnings` clean in the 3 cpe-server CI modes.
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the CPE-1305 gauntlet findings. Dispatched to a worker.
+2026-08-04 (sprint) — Filed by the Foreman from the CPE-1305 gauntlet findings. Dispatched to a worker.

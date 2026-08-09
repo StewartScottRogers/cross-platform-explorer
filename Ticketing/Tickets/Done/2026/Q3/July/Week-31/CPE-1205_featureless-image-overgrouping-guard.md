@@ -36,7 +36,7 @@ distinct images don't); this is specifically the low-entropy edge.
       one group); `npm run check` + gui-smoke typecheck green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift) from the epic-997 Visual-Critic capture (red-square ~ blue-square
+- 2026-08-01 — Filed by Foreman (sprint) from the epic-997 Visual-Critic capture (red-square ~ blue-square
   over-grouping). Fixes both the detection edge and the gui-smoke fixture.
 - 2026-08-01 — Implemented (Worker). **Backend guard** in `crates/server/src/image_similarity.rs`: added
   `FEATURELESS_LOW = 6` + `is_featureless(hash)` (featureless ⇔ popcount outside `6..=58`, i.e. within 6 bits

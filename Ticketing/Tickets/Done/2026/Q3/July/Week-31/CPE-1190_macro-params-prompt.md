@@ -28,7 +28,7 @@ Add an **additive** prompt-parameter (model + pure resolution, headless) and a r
 - [ ] gui-smoke `snap("macro-param-prompt")`; `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Model half batched into the backend worker (additive);
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-739). Model half batched into the backend worker (additive);
   prompt-UI half in the frontend phase.
 - 2026-07-31 — **Model half landed** (built alongside CPE-1187/1188 on the same branch,
   `cpe-1187-1188-macro-backend`): `crates/server/src/action_macro.rs` now supports an `{ask:label}`

@@ -42,9 +42,9 @@ Deterministic ordering.
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-705 slice. Held in Backlog for the second
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-705 slice. Held in Backlog for the second
 dispatch wave (independent of CPE-1054/1055/1056; kept back to avoid a merge-queue pile-up).
-2026-07-25 (workshift, overnight Worker) — Implemented `crates/server/src/archive_diff.rs`
+2026-07-25 (sprint, overnight Worker) — Implemented `crates/server/src/archive_diff.rs`
 (`diff_archive`, `FolderEntry`, `DiffClass`, `ArchiveDiff`); registered `pub mod archive_diff;`
 immediately after `pub mod simhash;` in `crates/server/src/lib.rs`. Path comparison normalises to
 forward-slash strings (never `std::path`) so it's identical on Linux/macOS/Windows. Directory entries

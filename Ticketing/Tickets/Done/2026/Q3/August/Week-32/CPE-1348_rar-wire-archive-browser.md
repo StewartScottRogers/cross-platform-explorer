@@ -49,4 +49,4 @@ readers still need their own preview-provider wiring (separate follow-ups; those
 attended visual). Touches `archive.rs` + `archiveExts.ts` + the two test files.
 
 ## Work Log
-- 2026-08-05 (workshift): PR #643 merged. .rar now browses in the existing archive UI via read_archive_entries dispatch → crate::rar::rar_entries; browse-only (ARCHIVE_EXTS, not EXTRACT_EXTS). Reviewer APPROVE + UAT PASS; cargo+clippy+npm check+vitest all green. RAR is now end-to-end usable.
+- 2026-08-05 (sprint): PR #643 merged. .rar now browses in the existing archive UI via read_archive_entries dispatch → crate::rar::rar_entries; browse-only (ARCHIVE_EXTS, not EXTRACT_EXTS). Reviewer APPROVE + UAT PASS; cargo+clippy+npm check+vitest all green. RAR is now end-to-end usable.

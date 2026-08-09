@@ -44,6 +44,6 @@ classic "two agents (or agent vs. user) editing the same file" signal. Frontend 
       empty/degenerate cases tested); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed as GUI #3 conflict-radar panel on top of CPE-1099's multi-session +
+2026-07-26 (sprint, GUI) — Filed as GUI #3 conflict-radar panel on top of CPE-1099's multi-session +
 actor-tag enablement. From the Library substrate brief. Ships LAST of the GUI #3 slices; honesty-hedged until
 actor attribution is solid.

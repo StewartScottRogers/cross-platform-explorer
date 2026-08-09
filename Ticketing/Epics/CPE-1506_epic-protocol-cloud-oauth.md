@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616). A SEPARATE track — do NOT interleave with the protocol
-> difficulty ladder.** Filed 2026-08-08 (workshift PM, Network research). Dormant. Consistent with CPE-616's
+> difficulty ladder.** Filed 2026-08-08 (sprint PM, Network research). Dormant. Consistent with CPE-616's
 > own decision to defer OAuth cloud providers.
 
 ## Why it's a different problem shape

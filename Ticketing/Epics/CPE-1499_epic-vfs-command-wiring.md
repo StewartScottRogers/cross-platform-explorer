@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616). Foundation epic F3 — the enabling refactor CPE-616/CPE-685
-> flagged as the main risk.** Filed 2026-08-08 (workshift PM, Network research). Dormant.
+> flagged as the main risk.** Filed 2026-08-08 (sprint PM, Network research). Dormant.
 
 ## Why (this is what turns SFTP + WebDAV ON end-to-end — the first user-visible protocol milestone)
 `fs_route` today deliberately **rejects** remote URIs ("not connected"). Replace that with real dispatch so a

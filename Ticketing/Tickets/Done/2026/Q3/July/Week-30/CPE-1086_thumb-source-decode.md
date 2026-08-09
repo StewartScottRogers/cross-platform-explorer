@@ -64,11 +64,11 @@ reading the extension. No `#[cfg]`. **Assert dims/aspect, never exact PNG byte l
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed by the Product Manager as the CPE-718 source-decode + integration slice. Held
+2026-07-26 (sprint) — Filed by the Product Manager as the CPE-718 source-decode + integration slice. Held
 in Backlog: depends on CPE-1085 (`thumb_orient`) landing first. The minimal-PSD fixture is the riskiest bit —
 fallback path documented above.
 
-2026-07-26 (workshift, Worker) — Built end-to-end:
+2026-07-26 (sprint, Worker) — Built end-to-end:
 - New `crates/server/src/thumb_source.rs`: `decode_thumb_image(path) -> Result<(DynamicImage, Vec<u8>), String>`.
   Reads bytes once; `.psd` (lowercased ext via `crate::model::extension_of`) dispatches to
   `psd::Psd::from_bytes` → RGBA composite → `image::RgbaImage::from_raw` → `DynamicImage::ImageRgba8`

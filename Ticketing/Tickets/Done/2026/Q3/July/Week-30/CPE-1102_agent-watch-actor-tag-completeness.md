@@ -44,6 +44,6 @@ auto-rename-on-collision dest may miss and fall back to the session id, which is
 - [ ] A test (or extension of the CPE-1101 actor test) covers at least the `delete_permanent` = "user" case.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed from the CPE-1101 reviewer's non-blocking finding #1 (attribution
+2026-07-26 (sprint, GUI) — Filed from the CPE-1101 reviewer's non-blocking finding #1 (attribution
 completeness). Low priority; improves conflict-radar (CPE-1100) accuracy. The `delete_permanent` vs
 `delete_to_trash` inconsistency is the most user-visible piece.

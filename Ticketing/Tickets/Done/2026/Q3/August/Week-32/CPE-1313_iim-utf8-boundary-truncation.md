@@ -26,5 +26,5 @@ panic, but a data-correctness bug.
 - [ ] `cargo test -p cpe-server` green; clippy clean (3 cpe-server CI modes). No new deps.
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the shift-3 bench researcher (grep-verified real bug).
+2026-08-04 (sprint) — Filed by the Foreman from the shift-3 bench researcher (grep-verified real bug).
 Dispatched to a worker.

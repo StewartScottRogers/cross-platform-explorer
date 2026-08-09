@@ -38,4 +38,4 @@ Real re-verification: the Foreman re-runs the gui-smoke file-health screenshots 
 Do NOT run gui-smoke/tauri build in the worker.
 
 ## Work Log
-2026-08-05 (workshift run 2) — Filed by the Foreman from the Visual Critic's screenshot-grounded findings.
+2026-08-05 (sprint run 2) — Filed by the Foreman from the Visual Critic's screenshot-grounded findings.

@@ -54,10 +54,10 @@ separators differ). Normalize `\`→`/` if needed. No `#[cfg(windows)]` assertio
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-728 slice. Held in Backlog: depends on
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-728 slice. Held in Backlog: depends on
 CPE-1063 (`FsState`) landing first.
 
-2026-07-25 (workshift, Worker) — Built end-to-end on branch `cpe-1065-replay-view`. New module
+2026-07-25 (sprint, Worker) — Built end-to-end on branch `cpe-1065-replay-view`. New module
 `crates/server/src/replay_view.rs`: `ReplayEntry`/`StateDiff` (same derive stack as `code_outline.rs`),
 `children_at(state, dir)` and `diff_states(a, b)`. Registered `pub mod replay_view;` in `lib.rs`
 immediately after `pub mod replay;`, per the ticket anchor.

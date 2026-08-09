@@ -35,7 +35,7 @@ this is wired. Both the CPE-1116 Reviewer and UAT flagged it.
 - [ ] Off-means-off preserved; no new deps; `npm run check` clean; `npm test` green.
 
 ## Work Log
-2026-07-26 (workshift) — Filed as the CPE-1116 fast-follow (Reviewer + UAT both flagged the unwired `sessions`
+2026-07-26 (sprint) — Filed as the CPE-1116 fast-follow (Reviewer + UAT both flagged the unwired `sessions`
 prop). Low-pri; sequenced after CPE-1112/#432 (ExplorerPane owner).
 
-2026-07-26 (workshift) — Built (PR #436, merged f5e4979a). Reviewer APPROVE + UAT PASS: App passes `sessions={$agentSessions}` -> ExplorerPane -> FileList -> colorForActor; test proves the sorted-session index reached (asserts --agent-1, unreachable via the djb2 hash which gives --agent-4 for the same id) + legend shows friendlyActor names; off-means-off (empty sessions = pre-fix hash fallback). Completes the CPE-1116 owner-heat-map in production. Residual: visual confirm on installed build w/ live multi-agent session (burndown).
+2026-07-26 (sprint) — Built (PR #436, merged f5e4979a). Reviewer APPROVE + UAT PASS: App passes `sessions={$agentSessions}` -> ExplorerPane -> FileList -> colorForActor; test proves the sorted-session index reached (asserts --agent-1, unreachable via the djb2 hash which gives --agent-4 for the same id) + legend shows friendlyActor names; off-means-off (empty sessions = pre-fix hash fallback). Completes the CPE-1116 owner-heat-map in production. Residual: visual confirm on installed build w/ live multi-agent session (burndown).

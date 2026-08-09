@@ -47,11 +47,11 @@ ALL time-gap math via `u64::saturating_sub` — must NOT panic or wrap on `ts_ms
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-730 slice (answers the epic's "define conflict
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-730 slice (answers the epic's "define conflict
 precisely — temporal window" question). Independent module; distinct lib.rs anchor. Saturating-arithmetic
 requirement per this shift's reviewer-caught overflow bugs.
 
-2026-07-25 (workshift, Worker) — Implemented `sidecar/ai-console/src/conflict_window.rs`:
+2026-07-25 (sprint, Worker) — Implemented `sidecar/ai-console/src/conflict_window.rs`:
 `TouchEvent`/`WindowConflict` + `contended_within`. Groups by path (BTreeMap for stable path order),
 sorts each group by `ts_ms`, then walks adjacent pairs (`windows(2)`) in sorted order — a different-agent
 pair within `window_ms` adds both agents to that path's contender set (BTreeSet, so sorted+deduped).

@@ -40,11 +40,11 @@ Add to `crates/server/src/media_meta_read.rs`:
       **both** feature modes (default and `--features specta`).
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched to a worker. Extends the read-codec arc
+2026-07-25 (sprint) — Filed + dispatched to a worker. Extends the read-codec arc
 (ID3/FLAC/OGG/EXIF → +PDF documents). Disjoint file scope from CPE-1035 (which owns the new
 `media_meta_write.rs`).
 
-2026-07-25 (workshift) — **DONE, merged PR #354.** `media_meta_read::read_pdf` surfaces a PDF's `/Info`
+2026-07-25 (sprint) — **DONE, merged PR #354.** `media_meta_read::read_pdf` surfaces a PDF's `/Info`
 dictionary (Title/Author/Subject/Keywords/Creator/Producer/Date Created/Date Modified) as
 `MetaField{group:"pdf",editable:false}`; decodes literal/hex/escaped/octal/UTF-16BE strings; bounded,
 never-panics. **QA gate caught + fixed a real bug:** first review (CHANGES REQUESTED) found the

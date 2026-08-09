@@ -11,7 +11,7 @@ created: 2026-07-24
 closed: 2026-08-01
 ---
 
-> **Activated 2026-07-24** (workshift, Foreman — user away, decisions logged). First slice = the **pure
+> **Activated 2026-07-24** (sprint, Foreman — user away, decisions logged). First slice = the **pure
 > saved-query model + evaluator** (CPE-986), in **TypeScript** (`src/lib/`) reusing the existing
 > `Condition` matcher (`selectMatch.ts`/`colorRules.ts`) — NOT a parallel Rust matcher. Live-refresh wiring,
 > the sidebar UI, and persistence follow; a semantic saved query composes with CPE-976 later.
@@ -68,7 +68,7 @@ natural home for a saved **semantic** query ([[CPE-976]]).
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Sidebar smart-folder surface + live-refresh + persistence unbuilt (only pure saved-query evaluator).
 
-## Re-activated 2026-08-01 (workshift) — DoD-gap assessment + real decomposition
+## Re-activated 2026-08-01 (sprint) — DoD-gap assessment + real decomposition
 Grep-first assessment (the 2026-07-30 "remaining" note was STALE both ways). TRUE state:
 - `src/lib/savedSearch.ts` (CPE-986, this epic's OWN structured-query model + `evaluateSavedSearch`,
   9 tests) is built but ORPHANED — no store, no persistence, no UI, referenced only by its test.
@@ -86,7 +86,7 @@ Decomposition (all headless-buildable TS/Svelte; SEQUENTIAL — they overlap App
 - CPE-1231 — Reorder smart folders (both stores) + Sidebar reorder UI.
 - Deferred: semantic saved query (composes with CPE-976 + a model key).
 
-## Closed 2026-08-01 (workshift) — DoD met
+## Closed 2026-08-01 (sprint) — DoD met
 Wired the orphaned structured saved-search model into a complete, live feature. All DoD elements met:
 - **Save a search as a named smart folder** — CPE-1229 ("Save search…" in SelectByDialog + palette).
 - **Opening shows current matches across the tree** — CPE-1229 open-evaluator (scans the captured root

@@ -69,6 +69,6 @@ watermarking would require a font-rasteriser dependency (a follow-up if wanted).
       tests green.
 
 ## Work Log
-2026-07-26 (workshift) — Filed as the final CPE-723 DoD gap. User chose "optional watermark, none if unset";
+2026-07-26 (sprint) — Filed as the final CPE-723 DoD gap. User chose "optional watermark, none if unset";
 built as dep-free image overlay (text deferred — needs a font dep vs the lean-core guardrail). Closes CPE-723
 once merged (with compress CPE-1103 + the shipped resize/convert/rotate/flip/rename).

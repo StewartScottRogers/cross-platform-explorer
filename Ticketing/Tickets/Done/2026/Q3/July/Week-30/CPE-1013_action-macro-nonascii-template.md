@@ -13,7 +13,7 @@ estimate: 30m
 ---
 
 ## Summary
-Found by the 2026-07-24 workshift bug-audit. In `crates/server/src/action_macro.rs`, `expand_template`
+Found by the 2026-07-24 sprint bug-audit. In `crates/server/src/action_macro.rs`, `expand_template`
 scanned the template byte-by-byte and its literal-copy fallback (line ~194) did `out.push(bytes[i] as char)`.
 Casting a raw UTF-8 byte to `char` is a Latin-1 decode, so any **non-ASCII character in a rename template's
 literal text** was corrupted into mojibake — one byte at a time.
@@ -39,5 +39,5 @@ boundaries).
 - [x] `cargo test -p cpe-server action_macro` green (18/18); clippy clean both feature modes; no new deps.
 
 ## Work Log
-2026-07-24 (workshift) — Diagnosed by the audit researcher, fixed by a worker, independently reviewed
+2026-07-24 (sprint) — Diagnosed by the audit researcher, fixed by a worker, independently reviewed
 (APPROVE — full suite 561/561, clippy both modes clean, no scope creep). Merged in PR #337.

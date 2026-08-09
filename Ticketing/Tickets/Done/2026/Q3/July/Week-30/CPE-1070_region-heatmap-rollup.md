@@ -51,12 +51,12 @@ Honour `max_depth` so a pathological deep path can't run unbounded; **iterative,
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-730 rollup slice. Held in Backlog: depends on
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-730 rollup slice. Held in Backlog: depends on
 CPE-1069 (`PathAttribution`) landing first.
 
-2026-07-25 (workshift, dep merged) — Moved to Doing once CPE-1069 merged main.
+2026-07-25 (sprint, dep merged) — Moved to Doing once CPE-1069 merged main.
 
-2026-07-25 (workshift Worker) — Implemented `sidecar/ai-console/src/conflict_region.rs`: `roll_up(attributions,
+2026-07-25 (sprint Worker) — Implemented `sidecar/ai-console/src/conflict_region.rs`: `roll_up(attributions,
 max_depth) -> Vec<RegionOwner>`. Registered `pub mod conflict_region;` in `lib.rs` immediately after
 `pub mod conflict_owner;`, per the anchor. Reuses `conflict_owner::PathAttribution` unmodified; did not touch
 `conflict_owner.rs` or `conflict.rs`.

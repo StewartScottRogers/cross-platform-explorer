@@ -28,7 +28,7 @@ instead of reversing an op while a read-only view is showing.
       undo works normally otherwise; `npm run check` clean; `npm test` green; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed from the CPE-1112 #432 re-review (Reviewer's non-blocking observation). Low-pri
+2026-07-26 (sprint) — Filed from the CPE-1112 #432 re-review (Reviewer's non-blocking observation). Low-pri
 consistency polish; not a data-loss path.
 
-2026-07-27 (workshift) — **Done.** One-line guard `if (blockedInArchive()) return;` at top of `undo()` reusing the shared read-only predicate; seeded-undo-stack regression test added; `npm run check` 0 errors, 1311 vitest green. PR #443 merged (Foreman-reviewed — furlough wind-down).
+2026-07-27 (sprint) — **Done.** One-line guard `if (blockedInArchive()) return;` at top of `undo()` reusing the shared read-only predicate; seeded-undo-stack regression test added; `npm run check` 0 errors, 1311 vitest green. PR #443 merged (Foreman-reviewed — furlough wind-down).

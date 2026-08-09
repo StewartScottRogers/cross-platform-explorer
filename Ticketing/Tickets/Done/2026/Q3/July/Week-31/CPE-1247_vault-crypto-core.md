@@ -66,7 +66,7 @@ entry points moved across 0.9→0.11); pin a specific version.
 ## Out of scope (later slices)
 Keychain storage, Tauri commands, create/lock/unlock lifecycle, mount/browse, UI, the security-review doc.
 
-## Done 2026-08-01 (workshift) — merged #550 @ d6f09ed3
+## Done 2026-08-01 (sprint) — merged #550 @ d6f09ed3
 Pure `age`-passphrase (=0.12.1, ChaCha20-Poly1305 + scrypt) encrypt/decrypt of a folder tree ↔ a
 `.cpevault` blob (MAGIC+version+age-ciphertext), deterministic length-prefixed framing (not tar),
 symlink-skip, precise path sanitizer (drive-letter blocked, `:` allowed in normal components),

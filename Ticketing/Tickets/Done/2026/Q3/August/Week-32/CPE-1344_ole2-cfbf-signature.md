@@ -55,4 +55,4 @@ CPE-1343 (`type_mismatch_scan.rs`), so the two run in parallel. Surfaced by the 
 frontier scan. Feeds epic CPE-1000.
 
 ## Work Log
-- 2026-08-05 (workshift): PR #639 squash-merged to main (782cd700). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe: OLE2 magic detects, 6 container exts not flagged, disguised .pdf flagged, no panic). All CI green 3 OS. FileType::Ole2 (doc/xls/ppt/msi/msg/vsd); no new deps. Surfaced by the frontier scan.
+- 2026-08-05 (sprint): PR #639 squash-merged to main (782cd700). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe: OLE2 magic detects, 6 container exts not flagged, disguised .pdf flagged, no panic). All CI green 3 OS. FileType::Ole2 (doc/xls/ppt/msi/msg/vsd); no new deps. Surfaced by the frontier scan.

@@ -1,8 +1,13 @@
-# Workshift — Autonomous Supervised Work Loop
+# Sprint — Autonomous Supervised Work Loop
 
-An autonomous "work while you're away" mode. Triggered when the user says **"start the workshift"** /
-**"workshift"** / **"this is the workshift"** (the older **"dayshift"** phrasing is a kept alias). End it on
-**"stop the workshift"**; re-baseline mid-run on **"restart the workshift"**.
+> **Naming note (renamed from "workshift" 2026-08-08):** this **`/sprint`** skill is the *autonomous
+> supervised work loop* (formerly "workshift"). It is DISTINCT from **`/ticketing-sprint`** + the **SPR-NN**
+> "Sprints" (`Ticketing/Sprints/`), which are *time-boxed batches of tickets* managed separately. Both names
+> coexist by design: `/sprint` = the work loop; `/ticketing-sprint` = the ticket-batch manager.
+
+An autonomous "work while you're away" mode. Triggered when the user says **"start the sprint"** /
+**"sprint"** / **"this is the sprint"** (the older **"dayshift"** phrasing is a kept alias). End it on
+**"stop the sprint"**; re-baseline mid-run on **"restart the sprint"**.
 
 The user is away and **cannot answer questions** — make the best reasonable guess, log the assumption in the
 ticket work log, and keep moving until the work is **done** or the user **comes home**. **Never idle.** The
@@ -62,7 +67,7 @@ broken base or colliding with another shift.
 
 1. **Acquire the shift lock.** This repo is driven from **both** the CLI and the desktop Cowork app on the same
    files ([[concurrent-nightshift-coordination]]), so two Foremen can fight over `main` and collide on ticket
-   IDs. Before starting, check for `.claude/workshift-metrics/WORKSHIFT-LOCK` (gitignored). If it exists and its
+   IDs. Before starting, check for `.claude/sprint-metrics/SPRINT-LOCK` (gitignored). If it exists and its
    heartbeat timestamp is **fresh (< ~30 min old)**, another shift owns the merge lock — **do not start a second
    merging shift**; tell the user and stop. If it's absent or **stale**, claim it: write the lock with this
    session's id + a wall-clock timestamp, and **refresh that timestamp on every tick**. Release it (delete the
@@ -72,7 +77,7 @@ broken base or colliding with another shift.
    **fix the base** (or, if that needs the user, skip-and-note and start from the last green commit) — never
    build a shift's worth of PRs on red.
 3. **Verify the substrate.** Confirm the committed substrate dirs exist and are readable —
-   `.claude/workshift-metrics/` (`ledger.jsonl`, `history.md`, `CHECKPOINT.md`), `.claude/research-library/`
+   `.claude/sprint-metrics/` (`ledger.jsonl`, `history.md`, `CHECKPOINT.md`), `.claude/research-library/`
    (`INDEX.md`), `.claude/qa-architecture/` (`MANUAL-TEST-BURNDOWN.md`). Re-create a missing skeleton from its
    `README.md` rather than silently skipping the ledger/library/burndown.
 4. **Seed defaults.** Read the tails of `history.md` and the Library `INDEX.md` (already required at kickoff) to
@@ -110,17 +115,17 @@ Library hit or a decide-and-log over a fresh spawn.
 | **Accessibility Auditor** | per-ticket (GUI changes) | The Visual Critic's a11y sibling — where the Critic judges *taste*, this judges **usability for everyone**. For a GUI change it checks keyboard navigation + focus order, contrast ratios against the light-theme palette, screen-reader labels / ARIA, and target sizes, reading the same `gui-smoke` output where it can. Returns **`A11Y PASS`** / **`A11Y FINDINGS`** with concrete, reproducible defects. Headless/backend tickets skip it. |
 | **Integration Tester** | per-shift | Exercises **cross-feature workflows** that each pass in isolation but can break in combination — open folder → search → batch-rename → Agent Watch, tab churn, streaming under load, mode switch on/off. The UAT Tester validates *one* ticket's feature from the outside; the Integration Tester validates that the features still compose. Runs an end-to-end pass across the shift's merged work and **files a `CPE-NNN` ticket** for any interaction bug no single-ticket check would catch. Model tier: **sonnet**. |
 
-Spawning sub-agents is **pre-authorised** during a workshift (this overrides the default "don't spawn agents
+Spawning sub-agents is **pre-authorised** during a sprint (this overrides the default "don't spawn agents
 unless asked"). Give each agent enough context (the ticket + acceptance criteria + relevant crates/APIs +
 conventions + the delete-test rule) so it doesn't re-derive from cold.
 
 ## Shift kickoff — the Foreman introduces the crew, then starts
 
-Before announcing, the Foreman **reads the tail of `.claude/workshift-metrics/history.md`** to seed this
+Before announcing, the Foreman **reads the tail of `.claude/sprint-metrics/history.md`** to seed this
 shift's model/parallelism defaults from what past shifts learned (see the ledger teeth below) — no roll-call
 noise about it, just start smarter.
 
-The **very first message** of a workshift is the Foreman's roll-call. Lead with an ASCII-art banner (per
+The **very first message** of a sprint is the Foreman's roll-call. Lead with an ASCII-art banner (per
 [[use-ascii-art-when-addressing-user]]), then introduce the team in one line each — a quick, plain-language
 summary of what every role does — then state the assignment and that work is **starting now**. Keep it brief
 and warm; it sets the shift going. After this message, go straight to work and follow the normal
@@ -341,10 +346,10 @@ is a one-line append, not a second job.
 ### Teeth — the per-agent ledger (measure, then optimise)
 
 The capacity/throughput calls above are only as good as the data behind them, so the Foreman **keeps a
-ledger**. Substrate + full schema live in `.claude/workshift-metrics/` (`README.md`); the essentials:
+ledger**. Substrate + full schema live in `.claude/sprint-metrics/` (`README.md`); the essentials:
 
 - **Record a row when each sub-agent returns.** Append one JSON line to
-  `.claude/workshift-metrics/ledger.jsonl` (gitignored, transient): role, ticket, ticket *class*, model,
+  `.claude/sprint-metrics/ledger.jsonl` (gitignored, transient): role, ticket, ticket *class*, model,
   dispatched/returned timestamps, **measured `elapsed_s`**, outcome, `retries`, a `cost_proxy`, and a
   **`post_merge_defect`** field (see next bullet). Also keep the same rows as a live in-context table so the
   current shift can reason over them without re-reading the file.
@@ -369,7 +374,7 @@ ledger**. Substrate + full schema live in `.claude/workshift-metrics/` (`README.
   review before optimising it further.** These replace the earlier rules-of-thumb with a rule keyed to observed
   data.
 - **Learn across shifts.** At the **end-of-shift wrap**, append a short distilled block to
-  `.claude/workshift-metrics/history.md` (committed, shared CLI↔desktop): tickets shipped + the tuned
+  `.claude/sprint-metrics/history.md` (committed, shared CLI↔desktop): tickets shipped + the tuned
   defaults learned (e.g. `metadata-codec: sonnet, 2-wide, ~11m median, 0 stuck`). At **kickoff**, read the
   tail of `history.md` to **seed** this shift's model/parallelism defaults instead of relearning cold.
 - **Report it.** Add a compact `• Metrics —` line to the `FOREMAN` block (merged count · median gauntlet ·
@@ -401,9 +406,9 @@ the cap it **stalls mid-task** — the crew goes dark with in-flight work and no
   worktrees — quiesce to a clean, all-green, nothing-in-flight state.
 - **Checkpoint, then hand off for a session reset.** The per-session cap only refreshes in a **new session** (the
   Foreman cannot self-restart one). So at the reset line, after quiescing: append a **resumable checkpoint** to
-  `.claude/workshift-metrics/CHECKPOINT.md` (committed) — *what merged this batch, what's next in priority order,
+  `.claude/sprint-metrics/CHECKPOINT.md` (committed) — *what merged this batch, what's next in priority order,
   active epic/slice + its plan/Library entry, any decide-and-log assumptions, tuned defaults* — then tell the
-  user plainly: batch done, budget nearly spent, **start a fresh session and say "resume the workshift"** (or
+  user plainly: batch done, budget nearly spent, **start a fresh session and say "resume the sprint"** (or
   raise `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` to continue now). A fresh session reads `CHECKPOINT.md` +
   `history.md` and continues seamlessly with a full budget. This is the "reset often" loop: **work a bounded
   batch → quiesce → checkpoint → reset → resume**, indefinitely, without ever stalling with lost in-flight work.
@@ -504,9 +509,9 @@ Workers implement the harnesses on their right-sized tier.
 
 - **Return-facing wraps and any user question are the rich, plain-language version** — expand, don't
   compress; the user has been away and won't remember IDs/jargon (see
-  [[workshift-summarize-with-context]]). Lead with what a thing *is* in plain English, put `CPE-NNN` in
+  [[sprint-summarize-with-context]]). Lead with what a thing *is* in plain English, put `CPE-NNN` in
   parentheses. `AskUserQuestion` options must be self-explanatory to a cold reader.
-- **Sign every workshift PR** with `— Foreman · workshift supervisor · <YYYY-MM-DD>` as the **last line** of
+- **Sign every sprint PR** with `— Foreman · sprint supervisor · <YYYY-MM-DD>` as the **last line** of
   the PR body, below this repo's required trailer (keep the "🤖 Generated with Claude Code" + session link).
   Sign the PR, not each commit (commits keep the standard `Co-Authored-By` + `Claude-Session` trailers).
 
@@ -514,7 +519,7 @@ Workers implement the harnesses on their right-sized tier.
 
 Any time the user must **look at the GUI**, do the full **build → deploy (install the sidecar / AI-Console
 build) → run** cycle yourself — never "go run `tauri dev`". Publishing/installing for GUI testing IS
-authorised during a workshift. Build (`Release (sidecar-enabled)` workflow — plain `release.yml` is the wrong
+authorised during a sprint. Build (`Release (sidecar-enabled)` workflow — plain `release.yml` is the wrong
 one), kill every `cpe`/`ai-console` process (incl. `--session-daemon`) **before** installing or NSIS skips
 the file-locked sidecar, verify the installed version + sidecar timestamp, then launch + confirm it's
 responding. Bracket it with the ASCII **WAIT → ① BUILD → ② DEPLOY → ③ RUN → RUNNING → checklist** narration.
@@ -546,7 +551,7 @@ stop, or the user telling me to stop — **tear down the loop's live state** so 
 
 1. **Cancel the armed fallback wakeup** (`ScheduleWakeup` with `stop: true`) so no stray tick fires after the
    shift is over.
-2. **Release the shift lock** — delete `.claude/workshift-metrics/WORKSHIFT-LOCK` so the next Foreman (CLI or
+2. **Release the shift lock** — delete `.claude/sprint-metrics/SPRINT-LOCK` so the next Foreman (CLI or
    desktop) can claim it. On a checkpoint hand-off, the resuming fresh session re-acquires it.
 3. **Run the light Janitor pass one last time** (prune finished worktrees, delete merged branches) so the tree
    is left clean.
@@ -605,7 +610,7 @@ merge actually landed rather than trusting a push echo.
 
 ---
 
-*Cross-cutting habits referenced above live as memories (they apply outside the workshift too):*
+*Cross-cutting habits referenced above live as memories (they apply outside the sprint too):*
 `[[use-ascii-art-when-addressing-user]]`, `[[gui-verify-needs-build-deploy-run]]`,
-`[[workshift-summarize-with-context]]`, `[[loop-behavior-needs-timestamps]]`, `[[go-with-recommendation]]`,
+`[[sprint-summarize-with-context]]`, `[[loop-behavior-needs-timestamps]]`, `[[go-with-recommendation]]`,
 `[[code-changes-via-ticket]]`.

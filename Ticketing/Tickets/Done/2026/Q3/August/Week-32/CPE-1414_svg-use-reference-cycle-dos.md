@@ -12,7 +12,7 @@ closed: 2026-08-08
 resolution: superseded-in-practice
 ---
 
-## CLOSED 2026-08-08 (workshift) — SUPERSEDED-IN-PRACTICE by CPE-1437
+## CLOSED 2026-08-08 (sprint) — SUPERSEDED-IN-PRACTICE by CPE-1437
 This ticket's full technical scope is shipped and verified in `crates/server/src/thumb_svg.rs` under
 CPE-1437's unified non-recursive reference-graph walk — there is nothing left to build. Verified on current
 `main` (commit `e2c09122`): `cargo test --lib thumb_svg` → **35 passed, 0 failed, 0 ignored**, including the
@@ -32,7 +32,7 @@ verifiable outstanding work as remaining. Historical investigation notes retaine
 
 ---
 
-## PARKED 2026-08-07 (workshift circuit-breaker: 3 attempts, each failed adversarial re-review)
+## PARKED 2026-08-07 (sprint circuit-breaker: 3 attempts, each failed adversarial re-review)
 An attempt at this fix (PR #700, branch `worktree-agent-cpe1414`, left as a DRAFT) reached the 3-attempt cap. An
 adversarial security reviewer found a real 256KB-stack-overflow bypass on **every** attempt — each fix was sound
 as far as it went, but the hand-rolled `<use>` edge-extraction kept not-quite-matching what usvg actually

@@ -33,7 +33,7 @@ Keep `lastAt` for the label. Off-means-off + no new deps unchanged.
       `agentRenameConflicts.test.ts` with an in-window vs out-of-window case); no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed as the CPE-1118 fast-follow (both gates flagged the un-gated fold). Low-pri;
+2026-07-26 (sprint) — Filed as the CPE-1118 fast-follow (both gates flagged the un-gated fold). Low-pri;
 needs a one-line product decision on the window size (recommended: reuse OVERLAP_WINDOW_MS).
 
-2026-07-26 (workshift) — Built (PR #437, merged c3410a58). Reviewer APPROVE + UAT PASS: sliding trailing-window mirrors foldOverlaps exactly (same `>` boundary eviction), reuses OVERLAP_WINDOW_MS (5000ms); in-window renames still fold, out-of-window (incl the 11.5-day case CPE-1118 flagged) no longer fold; divergence/collision keying + same-actor/no-op exclusions unchanged; 20/20 tests. Resolves the un-time-gated UX quirk from CPE-1118.
+2026-07-26 (sprint) — Built (PR #437, merged c3410a58). Reviewer APPROVE + UAT PASS: sliding trailing-window mirrors foldOverlaps exactly (same `>` boundary eviction), reuses OVERLAP_WINDOW_MS (5000ms); in-window renames still fold, out-of-window (incl the 11.5-day case CPE-1118 flagged) no longer fold; divergence/collision keying + same-actor/no-op exclusions unchanged; 20/20 tests. Resolves the un-time-gated UX quirk from CPE-1118.

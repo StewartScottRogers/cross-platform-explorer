@@ -51,7 +51,7 @@ backend for the MAIN app by mirroring that proven pattern — no new backend dep
 Prereq for CPE-1243 (xterm.js UI). Reuse portable-pty (existing dep) — do NOT add a different PTY crate.
 
 ## Work Log
-2026-08-01 (workshift) — **Done.** Built `src-tauri/src/pty.rs`: `PtySession`/`PtyLaunch` mirror
+2026-08-01 (sprint) — **Done.** Built `src-tauri/src/pty.rs`: `PtySession`/`PtyLaunch` mirror
 `sidecar/ai-console/src/pty.rs` byte-for-byte in shape (spawn/reader/writer/resize/kill), plus a
 `PtyRegistry` (id-keyed live sessions, Arc-around-Mutex, cheaply cloneable like `IndexService`). Home
 crate: `src-tauri`, not `cpe-server` — a PTY session owns OS processes/handles and the streaming command

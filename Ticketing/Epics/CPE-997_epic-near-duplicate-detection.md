@@ -11,7 +11,7 @@ created: 2026-07-24
 closed:
 ---
 
-> **Filed + activated 2026-07-24** (workshift, Foreman). First slice = the **pure perceptual-hash +
+> **Filed + activated 2026-07-24** (sprint, Foreman). First slice = the **pure perceptual-hash +
 > similarity-clustering core** (CPE-998), model-free and reusing the already-vendored `image` crate. The
 > review/act UI is attended.
 
@@ -48,7 +48,7 @@ crate already in the tree — no AI backend, no new deps, delete-testable.
 ## Child tickets
 1. **CPE-998** — Pure perceptual-hash + clustering core (`cpe-server::perceptual`): `phash` (image → u64
    dHash via the `image` crate), `hamming`, `cluster(items, max_distance)` (union-find, 2+-member groups,
-   deterministic). ✅ **Done + independently reviewed (workshift QA gate: opus reviewer APPROVED — re-ran
+   deterministic). ✅ **Done + independently reviewed (sprint QA gate: opus reviewer APPROVED — re-ran
    tests + both clippy clean, verified logic + adversarial edges). PR #318.**
 2. **CPE-999** — SimHash near-duplicate **text/documents**: `simhash(text) -> u64` (token-shingle SimHash)
    which reuses CPE-998's `cluster`/`hamming` directly (a u64 fingerprint is a u64 fingerprint) to group
@@ -62,7 +62,7 @@ crate already in the tree — no AI backend, no new deps, delete-testable.
   bit-order/direction swap in packing could go uncaught. Add one golden-value assertion on a structured
   fixture to harden. Non-blocking (code verified correct), captured here.
 
-2026-07-25 (workshift) — **Golden-value dHash test done (CPE-1030, PR #346).** The captured follow-up is
+2026-07-25 (sprint) — **Golden-value dHash test done (CPE-1030, PR #346).** The captured follow-up is
 resolved: a golden `u64` assertion now pins the dHash bit layout. The first attempt used a symmetric
 `column_bands` fixture (all 8 rows identical → hash `0x5555…`, invariant under row-reversal); the
 independent reviewer caught that it left cross-row packing unguarded, and it was replaced with an

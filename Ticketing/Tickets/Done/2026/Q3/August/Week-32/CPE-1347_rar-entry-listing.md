@@ -51,4 +51,4 @@ a standalone non-colliding module PR). Parallelizable with CPE-1345/1346. If a r
 is ambiguous, implement the common case + return `Err` for the exotic one (log the assumption).
 
 ## Work Log
-- 2026-08-05 (workshift): RAR4/RAR5 listing (zero deps, no UnRAR). PR #640 squash-merged to main (25e25ef0). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.
+- 2026-08-05 (sprint): RAR4/RAR5 listing (zero deps, no UnRAR). PR #640 squash-merged to main (25e25ef0). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

@@ -31,7 +31,7 @@ bindings. Everything frontend depends on this.
       --all-targets -D warnings` clean (both modes); `npm run check` green against regenerated bindings.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Depends on CPE-1187; same worker, sequential.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-739). Depends on CPE-1187; same worker, sequential.
 - 2026-07-31 — Added 9 thin `#[tauri::command]` dispatchers in `src-tauri/src/lib.rs` (new "Action macros"
   section, right after the folder-template block, mirroring its `template_*` one-line-dispatcher pattern):
   `macro_save` / `macro_list` / `macro_load` / `macro_delete` / `macro_export` / `macro_import` into

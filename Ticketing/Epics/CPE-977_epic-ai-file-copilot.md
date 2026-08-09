@@ -57,7 +57,7 @@ tight preview/confirm/undo loop. High leverage, and it composes every batch capa
   [[CPE-729]], [[CPE-732]], [[CPE-739]]. See [[avoid-modal-permission-popups]] for where consent controls
   live.
 
-## Activation (2026-07-24, workshift Foreman — user away, decisions logged)
+## Activation (2026-07-24, sprint Foreman — user away, decisions logged)
 First slice = the **pure structured op-plan model + validator + dry-run** (CPE-990) in `cpe-server` (Rust),
 reusing `action_macro`/`restore_plan` concepts — a typed, inspectable, filesystem-free plan the UI previews.
 The **NL→plan translator** needs an LLM backend (user resource / big-design) → deferred + noted. Preview/

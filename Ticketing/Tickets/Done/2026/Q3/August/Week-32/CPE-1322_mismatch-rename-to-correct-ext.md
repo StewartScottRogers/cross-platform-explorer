@@ -39,4 +39,4 @@ files, not just see them. Completes the CPE-1000 "mismatch review + rename-to-co
       changed materially.)
 
 ## Work Log
-2026-08-05 (workshift run 2) — Filed by the Foreman as the natural fix-it extension of the mismatch tab.
+2026-08-05 (sprint run 2) — Filed by the Foreman as the natural fix-it extension of the mismatch tab.

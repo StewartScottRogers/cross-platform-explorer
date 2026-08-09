@@ -42,8 +42,8 @@ FRONTEND only. **Blocked on CPE-1117** (no `from`/`to` data until it lands). Des
   divergence, diff-from/same-to→collision, same-agent→none, no-op→none, both-reported, sorted output.
 
 ## Work Log
-2026-07-26 (workshift) — Filed from the CPE-730 close plan. **Blocked on CPE-1117** (rename from→to capture) and
+2026-07-26 (sprint) — Filed from the CPE-730 close plan. **Blocked on CPE-1117** (rename from→to capture) and
 sequenced after CPE-1116/CPE-1114 (shared files). Once this + CPE-1116 + CPE-1117 land, CPE-730's DoD is met →
 CLOSE the epic.
 
-2026-07-26 (workshift) — Built (PR #435, merged d1bf778c). Reviewer APPROVE + UAT PASS: foldRenameConflicts mirrors conflict_rename.rs exactly (divergence keyed on from, collision keyed on to, both require >=2 distinct actors AND >=2 distinct targets/sources; same-actor + from===to excluded; deterministic sorted). Rebased clean onto #432 (0 conflicts). Un-time-gated (matches Rust) -> low-pri follow-up CPE-1121 for optional windowing. FINAL DoD item for epic CPE-730.
+2026-07-26 (sprint) — Built (PR #435, merged d1bf778c). Reviewer APPROVE + UAT PASS: foldRenameConflicts mirrors conflict_rename.rs exactly (divergence keyed on from, collision keyed on to, both require >=2 distinct actors AND >=2 distinct targets/sources; same-actor + from===to excluded; deterministic sorted). Rebased clean onto #432 (0 conflicts). Un-time-gated (matches Rust) -> low-pri follow-up CPE-1121 for optional windowing. FINAL DoD item for epic CPE-730.

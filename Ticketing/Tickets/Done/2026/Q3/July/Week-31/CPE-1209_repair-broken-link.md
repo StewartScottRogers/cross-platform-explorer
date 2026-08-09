@@ -21,7 +21,7 @@ Part of CPE-715 (after CPE-1206). Repair a broken symlink by re-pointing it at a
 - [ ] gui-smoke render pin of the repair dialog with a suggested target; `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-715). Prereq CPE-1206. Batch with CPE-1207 (shared App.svelte/ContextMenu).
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-715). Prereq CPE-1206. Batch with CPE-1207 (shared App.svelte/ContextMenu).
 - 2026-08-01 — Done. Added `RepairLinkDialog.svelte`. `ContextMenu.svelte` gained a `linkBroken` prop
   that gates a new "Repair link…" row on the item menu; App.svelte's `onRowContext` resolves it async
   via `commands.linkStatus(entry.path).broken` (cheap-gated on `entry.is_symlink` first) whenever a

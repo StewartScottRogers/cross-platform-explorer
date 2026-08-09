@@ -21,5 +21,5 @@ Ensure the compress-with-password completion triggers a listing refresh (the `lo
 compress path presumably already does). Compare the with-password vs without-password completion handlers.
 Re-confirm via the gui-smoke assertion.
 
-## Done 2026-08-02 (workshift) — merged #555 @ 109e2f0a
+## Done 2026-08-02 (sprint) — merged #555 @ 109e2f0a
 Diagnosis corrected: not a missing refresh in the password path (both paths refresh identically) — a RACE in the shared transfer://done listener (fast op emits done before pendingArchiveOps is registered → silently dropped). Fix: unregistered clean compress/extract finish now refreshes + shows a fallback notice. Reviewer APPROVE; pinned by archive-password.smoke.ts test2 (reproduced-then-fixed, 2/2 real build).

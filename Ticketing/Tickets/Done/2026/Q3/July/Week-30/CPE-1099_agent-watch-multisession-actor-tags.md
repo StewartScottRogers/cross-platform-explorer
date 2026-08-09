@@ -68,7 +68,7 @@ behaviour is byte-identical to today — low blast radius. Full design + rationa
       no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Rescoped to slice (a) of the conflict-radar enablement per the filed build spec
+2026-07-26 (sprint, GUI) — Rescoped to slice (a) of the conflict-radar enablement per the filed build spec
 (watch-all decision; keyed HashMap; off-mode collapses to 0 threads). Slice (b) actor tags = CPE-1101; the
 radar panel = CPE-1100 (consumes a+b). Highest-risk slice — event shape kept unchanged to isolate risk to the
 watch lifecycle.

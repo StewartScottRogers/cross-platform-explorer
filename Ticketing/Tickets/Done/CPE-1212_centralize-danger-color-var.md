@@ -28,7 +28,7 @@ cleanup.
       component styles; `npm run check` + `npm test` green; no visual regression (Visual Critic spot-check).
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift) from repeated reviewer nits (CPE-1189, CPE-1208). App-wide polish,
+- 2026-08-01 — Filed by Foreman (sprint) from repeated reviewer nits (CPE-1189, CPE-1208). App-wide polish,
   like the dialog-border CPE-1193.
 - 2026-08-01 — Worker: implemented, mirroring the CPE-1193 codemod pattern. Added `--danger: #c42b1c` (plus
   `--danger-hover: #a82419`, needed for the two dialogs that had their own darker hover shade) to the single

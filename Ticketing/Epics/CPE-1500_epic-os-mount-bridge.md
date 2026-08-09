@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program — the OS-mount arm (extends CPE-716 drive bay; complements CPE-616's in-app
-> VFS). Foundation epic F4.** Filed 2026-08-08 (workshift PM, Network research). Dormant.
+> VFS). Foundation epic F4.** Filed 2026-08-08 (sprint PM, Network research). Dormant.
 
 ## Why (the hybrid escape hatch + the safe fallback for hard protocols)
 The recommended model is **hybrid**: in-app VFS is the default ("Connect"); **OS-mount is the optional

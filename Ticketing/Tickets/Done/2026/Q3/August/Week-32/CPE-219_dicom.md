@@ -45,9 +45,9 @@ Syntax highlighting builds on [[CPE-065]]; editable types reuse [[CPE-066]] writ
 - [ ] Verify with sample DICOM datasets on a display
 
 ## Work Log
-- 2026-08-05 (workshift): BACKEND landed via CPE-1345 — DICOM backend reader (tags + frame->PNG, dicom-rs feature-gated), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
+- 2026-08-05 (sprint): BACKEND landed via CPE-1345 — DICOM backend reader (tags + frame->PNG, dicom-rs feature-gated), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
 
 ## Work Log
-- 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1345/1350/1352/1353). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
+- 2026-08-05 (sprint): backend + preview-provider wiring SHIPPED (CPE-1345/1350/1352/1353). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
 
 - 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: .dcm dicom preview provider + read_dicom_image_data_url + read_dicom_tags (CPE-1350). Image + key tags, read-only, graceful fallback, cancellation, tests green. Sample: samples/medical/ct-scan.dcm. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).

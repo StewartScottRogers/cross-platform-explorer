@@ -24,8 +24,8 @@ Part of CPE-715 (after CPE-1206). Show which entries are links + their target, w
       `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-715). Prereq CPE-1206. Disjoint files from 1207 → parallel.
-- 2026-08-01 — Implemented by Worker (workshift):
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-715). Prereq CPE-1206. Disjoint files from 1207 → parallel.
+- 2026-08-01 — Implemented by Worker (sprint):
   - Added a `link`/`link-broken` glyph pair to `Icon.svelte` and a new `LinkBadge.svelte` component
     (mirrors `ThumbnailImage.svelte`'s CPE-643 lazy-fetch pattern): mounted only for rows where
     `DirEntry.is_symlink` is true, it lazily calls the typed `commands.linkStatus(path)` client

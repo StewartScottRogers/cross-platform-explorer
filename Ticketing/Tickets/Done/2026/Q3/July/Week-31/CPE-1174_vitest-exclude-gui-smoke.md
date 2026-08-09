@@ -34,6 +34,6 @@ The per-ticket gauntlets for CPE-1170/1172 ran `gui-smoke`'s own `npm run test:u
 - [x] main CI (the `CI` workflow) goes green again on the fix commit.
 
 ## Work Log
-- 2026-07-31 — Foreman hotfix during workshift. Verified root vitest green locally before merge. Ledger:
+- 2026-07-31 — Foreman hotfix during sprint. Verified root vitest green locally before merge. Ledger:
   CPE-1170 back-annotated `post_merge_defect: ci-red` (escaped defect signal). Gauntlet lesson: a
   gui-smoke-touching change must also run the ROOT `npm test`, not only `gui-smoke`'s `test:unit`.

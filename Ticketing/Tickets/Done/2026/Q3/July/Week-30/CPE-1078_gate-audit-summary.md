@@ -54,11 +54,11 @@ derives `Debug, Clone, PartialEq, Default` (**PartialEq NOT Eq** — f64 field);
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as an independent CPE-729 pure-core slice (own
+2026-07-25 (sprint) — Filed by the Product Manager as an independent CPE-729 pure-core slice (own
 `Resolution` enum, so independent of A/B/C). Distinct lib.rs anchor. Dispatched in the first wave alongside
 CPE-1075.
 
-2026-07-25 (workshift, Worker) — Implemented `sidecar/ai-console/src/gate_audit.rs` exactly to the design:
+2026-07-25 (sprint, Worker) — Implemented `sidecar/ai-console/src/gate_audit.rs` exactly to the design:
 `Resolution` (Copy + Eq, 5 variants), `GateRecord` (Eq), `AuditSummary` (`PartialEq, Default`, no `Eq`
 because of the `f64` `approval_rate` field), `summarize_audit(&[GateRecord]) -> AuditSummary`. Registered
 `pub mod gate_audit;` immediately after `pub mod swarm_locks;` in `lib.rs` (line 79/80). No serde/specta, no

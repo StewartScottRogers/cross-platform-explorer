@@ -59,6 +59,6 @@ file-pane overlay is the later slice 728e. Design:
       exercised); no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-728 slice d, from the filed plan. Renders `childrenAt(stateAtFrom(baseline,
+2026-07-26 (sprint) — CPE-728 slice d, from the filed plan. Renders `childrenAt(stateAtFrom(baseline,
 events, t), currentPath)` in the Replay tab. Slice 728e (read-only file-pane overlay) is the optional graduate.
 After this, CPE-728's core DoD (folder view reconstructs state at any point) is met in-drawer.

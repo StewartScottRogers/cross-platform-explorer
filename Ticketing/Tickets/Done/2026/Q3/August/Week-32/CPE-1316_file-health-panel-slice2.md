@@ -42,4 +42,4 @@ Real streamed-Channel + visual verification is batched by the Foreman across the
 build → gui-smoke → Visual-Critic pass) — jsdom green is the merge gate here, same as slice 1.
 
 ## Work Log
-2026-08-04 (workshift run 2) — Filed by the Foreman. Slice 2 of 4. Reuses slice-1's proven streaming pattern.
+2026-08-04 (sprint run 2) — Filed by the Foreman. Slice 2 of 4. Reuses slice-1's proven streaming pattern.

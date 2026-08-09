@@ -77,7 +77,7 @@ Keep the passphrase in memory only; never log it. If `vaultRememberPassphrase` i
 that's fine, but the full "remember in keychain" checkbox UX belongs to CPE-1250 — a minimal or no
 remember here is acceptable.
 
-## Done 2026-08-02 (workshift) — merged #552 @ f2d53089
+## Done 2026-08-02 (sprint) — merged #552 @ f2d53089
 Unlock a .cpevault via a passphrase dialog → browse the decrypted tree as a location; lock wipes it.
 VaultBadge 🔒/🔓 + VaultBanner + vaultStore + app-cache session dir. Full gauntlet (this slice was the
 hardest): Reviewer APPROVE after fixing re-unlock plaintext-orphan (#1, frontend guard + backend

@@ -38,11 +38,11 @@ recomputation + segment-table rebuild, materially riskier; leave it for a dedica
       --all-targets -D warnings` clean in **both** feature modes.
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched after CPE-1035 merged (media_meta_write.rs now on main).
+2026-07-25 (sprint) — Filed + dispatched after CPE-1035 merged (media_meta_write.rs now on main).
 Reuses the read side (CPE-972 read_flac / parse_vorbis_comment). OGG write-back deferred to its own
 ticket (repaging complexity).
 
-2026-07-25 (workshift) — **DONE, merged PR #355.** `media_meta_write::write_flac` + `write_vorbis_comment`
+2026-07-25 (sprint) — **DONE, merged PR #355.** `media_meta_write::write_flac` + `write_vorbis_comment`
 — rebuilds a FLAC stream with its VORBIS_COMMENT block replaced/inserted, STREAMINFO + other blocks +
 audio frames preserved byte-for-byte, last-block flag recomputed; idempotent; never-panics on bad input.
 20 tests + independent opus review (APPROVE: friendly-key inverse table verified against the reader,

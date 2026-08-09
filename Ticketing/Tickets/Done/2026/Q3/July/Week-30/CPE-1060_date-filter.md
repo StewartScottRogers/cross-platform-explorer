@@ -50,10 +50,10 @@ pub fn matches(f: &DateFilter, mtime_s: i64) -> bool;
       clean; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-703 DSL slice. Independent module; `now` is
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-703 DSL slice. Independent module; `now` is
 injected for deterministic tests. One-line lib.rs `pub mod` at a distinct anchor.
 
-2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/date_filter.rs` end-to-end, std-only,
+2026-07-25 (sprint, overnight Worker) — Built `crates/server/src/date_filter.rs` end-to-end, std-only,
 no new deps. Registered `pub mod date_filter;` in `lib.rs` immediately after `pub mod name_search;` as
 directed.
 
@@ -91,7 +91,7 @@ added to `Cargo.toml`.
 
 Branch `cpe-1060-date-filter`, PR opened against `main` (#379).
 
-2026-07-25 (workshift, overnight Worker) — PR #379 got CHANGES REQUESTED: reviewer (UAT) found a real
+2026-07-25 (sprint, overnight Worker) — PR #379 got CHANGES REQUESTED: reviewer (UAT) found a real
 overflow bug — the absolute-date path (`parse_absolute`/`days_from_civil`) used raw, unchecked
 arithmetic, unlike `parse_relative` which already used `checked_mul`/`checked_sub`. A syntactically-valid
 but huge digit string as a year (`9223372036854775807`, `99999999999999999`) parsed fine as an `i64` but

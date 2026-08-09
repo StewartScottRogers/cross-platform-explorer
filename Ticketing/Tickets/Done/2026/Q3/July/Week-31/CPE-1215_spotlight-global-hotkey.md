@@ -24,7 +24,7 @@ Part of CPE-704. A global OS hotkey that opens spotlight even when the window is
 - [x] **OS-gated:** the hotkey firing while the window is hidden is attended-verified (flagged, not headless).
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-704). Depends on CPE-1214's event/open. OS-gated.
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-704). Depends on CPE-1214's event/open. OS-gated.
 - 2026-08-01 — Implemented: `tauri-plugin-global-shortcut` added (desktop-only target dep, alongside
   updater/window-state); plugin initialized in `run()` with zero shortcuts claimed at startup (no
   background cost by default). `global-shortcut:allow-register`/`allow-unregister` added to

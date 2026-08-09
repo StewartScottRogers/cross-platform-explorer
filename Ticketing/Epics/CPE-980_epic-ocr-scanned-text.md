@@ -50,7 +50,7 @@ so the lean core pulls in no OCR engine unless enabled.
   weight, mirroring `provider::FakeProvider`), then integrate a real engine behind the feature. See
   [[headless-frontier-and-cpe-net]].
 
-## Activation (2026-07-24, workshift Foreman — user away, decisions logged)
+## Activation (2026-07-24, sprint Foreman — user away, decisions logged)
 First slice = the **pure `OcrEngine` seam + a `FakeOcr` + a content-hash text cache** (CPE-991) in
 `cpe-server` (Rust), so the pipeline is testable with zero engine weight (mirrors `provider::FakeProvider`).
 A **real OCR engine** (bundled model / external service) is the big-design + user-resource call → deferred +

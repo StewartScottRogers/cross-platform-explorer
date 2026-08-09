@@ -26,7 +26,7 @@ prompt).
 - [ ] gui-smoke `snap("macros-library")`; `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Frontend phase; depends on CPE-1188. Batch with
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-739). Frontend phase; depends on CPE-1188. Batch with
   CPE-1191 (both edit App.svelte).
 - 2026-07-31 — **Done.** Built `src/lib/components/MacrosDialog.svelte` (+ `.test.ts`, 13 tests), modeled on
   `TemplatesDialog.svelte`: lists saved macros (name + step count) via `commands.macroList`/`macroLoad`; a

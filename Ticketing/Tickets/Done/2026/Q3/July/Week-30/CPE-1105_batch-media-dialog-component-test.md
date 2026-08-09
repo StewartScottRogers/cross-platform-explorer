@@ -63,6 +63,6 @@ needed) covering the dialog's user-facing logic with `commands.batchMediaPlan` +
 - [ ] `MANUAL-TEST-BURNDOWN.md` CPE-1093 logic portion flipped to automated; pixel/feel left as residual debt.
 
 ## Work Log
-2026-07-26 (workshift, QA Architect) — Filed to burn down the batch-media dialog manual-verification debt
+2026-07-26 (sprint, QA Architect) — Filed to burn down the batch-media dialog manual-verification debt
 (the CPE-1093 UAT explicitly noted no component test exists). Pins the dialog interaction logic in CI without
 flaky browser automation.

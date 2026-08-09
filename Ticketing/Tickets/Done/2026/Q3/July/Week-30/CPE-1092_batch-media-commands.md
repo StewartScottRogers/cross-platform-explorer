@@ -73,6 +73,6 @@ progress. Backend only; the dialog is CPE-1093.
       `--features index`); `cargo build` (app) succeeds; no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as the backend enablement for GUI #2 (batch-media dialog),
+2026-07-26 (sprint, GUI) — Filed by the Foreman as the backend enablement for GUI #2 (batch-media dialog),
 from the Researcher brief filed in the Library
 (`.claude/research-library/entries/batch-media-dialog-backend-surface.md`). Blocks CPE-1093 (the dialog).

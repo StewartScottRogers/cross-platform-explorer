@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616 / uses CPE-1500 OS-mount). Most-requested protocol, biggest
-> crate risk.** Filed 2026-08-08 (workshift PM, Network research). Dormant.
+> crate risk.** Filed 2026-08-08 (sprint PM, Network research). Dormant.
 
 ## Why + the honest risk (read before scoping)
 SMB is the #1 user request (Windows shares / Samba / NAS) — but **no mature, cross-platform, pure-Rust SMB

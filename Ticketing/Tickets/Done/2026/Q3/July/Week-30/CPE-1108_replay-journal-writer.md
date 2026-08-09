@@ -63,6 +63,6 @@ Add a **host-side writer** that appends each watched-session fs batch to the exi
       regenerated + drift-guard passes; `npm run check` clean; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-728 slice a, from the filed plan (the replay backend is ~80% built+unwired; this
+2026-07-26 (sprint) — CPE-728 slice a, from the filed plan (the replay backend is ~80% built+unwired; this
 adds the missing persistence writer). Unblocks 728b (baseline), 728c (replay_load + fold port), 728d (listing
 UI). Coordinates with CPE-731b (which gets a SIBLING per-session metrics_journal, not this per-event one).

@@ -53,4 +53,4 @@ overlap with CPE-1344 (which touches `file_type.rs`). Surfaced by the 2026-08-05
 Feeds epic CPE-1000.
 
 ## Work Log
-- 2026-08-05 (workshift): PR #638 squash-merged to main (25ec5128). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe confirmed disguised .tar now flagged, genuine .tar not). All backend/server/sidecar/frontend CI green on 3 OS. HEADER_CAP 64->512; no new deps. Surfaced by the frontier scan (a real inconsistency introduced by CPE-1342 TAR detection vs the 64B scan cap).
+- 2026-08-05 (sprint): PR #638 squash-merged to main (25ec5128). Worker(sonnet); Reviewer APPROVE + UAT PASS (independent probe confirmed disguised .tar now flagged, genuine .tar not). All backend/server/sidecar/frontend CI green on 3 OS. HEADER_CAP 64->512; no new deps. Surfaced by the frontier scan (a real inconsistency introduced by CPE-1342 TAR detection vs the 64B scan cap).

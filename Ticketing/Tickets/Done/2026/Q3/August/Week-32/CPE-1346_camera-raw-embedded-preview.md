@@ -53,4 +53,4 @@ Backend-only (no command/frontend wiring — follow-up). Standalone new module �
 CPE-1345/1347. Consider adding `read_raw_preview_data_url` to the parser panic-safety battery.
 
 ## Work Log
-- 2026-08-05 (workshift): Camera-RAW embedded-JPEG via TIFF/IFD walk (zero deps). PR #641 squash-merged to main (b7a0f829). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.
+- 2026-08-05 (sprint): Camera-RAW embedded-JPEG via TIFF/IFD walk (zero deps). PR #641 squash-merged to main (b7a0f829). Worker(sonnet); independent Reviewer(+security lens) APPROVE + UAT PASS. Backend-only (no command/frontend wiring — follow-up). main compiles clean both feature modes.

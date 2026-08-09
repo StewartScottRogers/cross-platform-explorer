@@ -44,7 +44,7 @@ and the dock layout.
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
 Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** PTY/shell spawn + xterm render + dock layout unbuilt (only tab model).
 
-## Activated 2026-08-01 (workshift, user said "you choose") — decomposition
+## Activated 2026-08-01 (sprint, user said "you choose") — decomposition
 User granted the epic pick + the xterm.js dependency decision ("you choose"). Grep-first TRUE state:
 - `crates/server/src/terminal_tabs.rs` (`TerminalDock`: open/close/activate/rename/set_cwd/tabs,
   CPE-947) is BUILT but ORPHANED (no PTY, no UI). `ThumbnailImage`-style orphaned-engine pattern.
@@ -61,14 +61,14 @@ Decomposition (sequential — 1243 needs 1242's commands):
   `terminal_tabs` dock (tabs open/close/activate/rename), open-at-current-folder + follow-navigation
   (`set_cwd`), per-OS shell selection, resize. Panel-closed = no PTY/background cost. gui-smoke + vitest.
 
-2026-08-01 (workshift) — **CPE-1242 Done.** `src-tauri/src/pty.rs`: `PtySession`/`PtyRegistry` (mirrors
+2026-08-01 (sprint) — **CPE-1242 Done.** `src-tauri/src/pty.rs`: `PtySession`/`PtyRegistry` (mirrors
 the sidecar's `pty.rs`, same `portable-pty = "0.8"`, no drift) + `open_pty`/`write_pty`/`resize_pty`/
 `close_pty` commands, plus `TerminalDockState` wiring 6 `terminal_dock_*` dispatchers onto CPE-947's
 model. Registry self-cleans on a child's own exit, so "no live PTY when closed" holds even without an
 explicit close. 6 new real-PTY tests + 2 dock-state tests, clippy clean both feature modes, bindings
 regenerated. CPE-1243 (xterm.js UI) is now unblocked.
 
-## Closed 2026-08-01 (workshift, user "you choose") — DoD met
+## Closed 2026-08-01 (sprint, user "you choose") — DoD met
 A working embedded terminal dock. Both children merged with full gauntlets:
 - **CPE-1242 (#544)** — PTY backend: `pty.rs` (PtySession + PtyRegistry) mirroring the sidecar's proven
   pattern on `portable-pty` (already vendored — no new backend dep); streaming open/write/resize/close

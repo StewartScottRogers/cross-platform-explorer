@@ -28,4 +28,4 @@ green CI (231 test files must stay green). Re-run `npm audit` to confirm the 15 
 
 ## Notes
 Dependency Steward finding, shift-1 audit 2026-08-07. Deferred by our choice (dev-only, big migration) — pickable
-anytime as a dedicated effort, not workshift filler. Track the vitest critical as the priority driver.
+anytime as a dedicated effort, not sprint filler. Track the vitest critical as the priority driver.

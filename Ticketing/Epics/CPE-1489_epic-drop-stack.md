@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, competitive-landscape pass — GUI survey).** Dormant brief — decompose on
+> **Filed 2026-08-08 (sprint PM, competitive-landscape pass — GUI survey).** Dormant brief — decompose on
 > `/ticketing-epic activate CPE-1489`.
 
 ## Why (the one genuinely NOVEL, unclaimed feature the whole survey surfaced)

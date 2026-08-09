@@ -29,5 +29,5 @@ components) checks `.ok` before treating an op as done — this path is the outl
 - [ ] `npm run check` clean + `npm run test:unit` green.
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the shift-3 bench researcher (grep-verified real bug).
+2026-08-04 (sprint) — Filed by the Foreman from the shift-3 bench researcher (grep-verified real bug).
 Dispatched to a worker in parallel with CPE-1309.

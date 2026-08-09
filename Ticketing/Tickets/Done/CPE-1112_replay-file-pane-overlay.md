@@ -35,7 +35,7 @@ listing on exit. Must NOT mutate the live navigation/listing store.
 - [x] `npm run check` clean; vitest green; no new deps; off-means-off.
 
 ## Work Log
-2026-07-26 (workshift) — Filed as the optional CPE-728 graduate (file-pane overlay). The epic closed on the
+2026-07-26 (sprint) — Filed as the optional CPE-728 graduate (file-pane overlay). The epic closed on the
 in-drawer reconstruction (CPE-1111); this is a nice-to-have, pickable anytime.
 
 2026-07-26 — DONE. Built a new pure module `src/lib/replayOverlay.ts` (mode-gating is ONE function,

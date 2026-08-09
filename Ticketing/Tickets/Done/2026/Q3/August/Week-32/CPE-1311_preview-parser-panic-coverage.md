@@ -29,5 +29,5 @@ temp-file wrapper around the malformed-input battery generator rather than direc
 - [ ] `cargo test -p cpe-server` green; clippy clean (3 cpe-server CI modes).
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the shift-3 bench researcher (grep-verified: 5 of these
+2026-08-04 (sprint) — Filed by the Foreman from the shift-3 bench researcher (grep-verified: 5 of these
 entrypoints have zero adversarial coverage). Dispatched in parallel with CPE-1309.

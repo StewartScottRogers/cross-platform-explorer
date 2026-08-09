@@ -11,7 +11,7 @@ epic: CPE-724
 estimate: 2h
 ---
 
-> **Done 2026-07-25 (workshift).** PR #368 merged (squash). Reviewer APPROVE (hand-traced tab expansion,
+> **Done 2026-07-25 (sprint).** PR #368 merged (squash). Reviewer APPROVE (hand-traced tab expansion,
 > min-neighbour bridging, tab_width==0 safety; one non-blocking nit: `col/tab_width as u16` truncates rather
 > than saturates — unreachable for real source, follow-up-optional). UAT PASS (`[0,1,1,1]` bridging verified).
 > CI green on the 3-OS Backend + Server-crates matrix.
@@ -55,10 +55,10 @@ O(n) with a single forward pass to record non-blank depths + a second pass to br
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
+2026-07-25 (sprint) — Filed by the Product Manager as a clean headless CPE-724 slice. Independent module;
 only shared touch is a one-line lib.rs `pub mod` (serial-merge coordination only).
 
-2026-07-25 (workshift, overnight worker) — Built end-to-end: `crates/server/src/indent_guides.rs` +
+2026-07-25 (sprint, overnight worker) — Built end-to-end: `crates/server/src/indent_guides.rs` +
 `pub mod indent_guides;` in `lib.rs` right after `pub mod archive;` per the anchor. 12 new tests (nesting,
 tab/space parity, mixed tab+space column math, blank-line bridging incl. leading/trailing/all-blank/
 multi-line runs, `tab_width == 0`, empty input, no-trailing-newline). `cargo test`: 739 passed, 0 failed.

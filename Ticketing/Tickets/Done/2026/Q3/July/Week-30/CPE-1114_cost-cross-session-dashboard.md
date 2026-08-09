@@ -57,15 +57,15 @@ commands already exist). Design: `.claude/research-library/entries/cost-dashboar
       `npm test` green; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-731 slice c (final), from the filed plan. Rollup (mirror fleet_metrics/efficiency)
+2026-07-26 (sprint) — CPE-731 slice c (final), from the filed plan. Rollup (mirror fleet_metrics/efficiency)
 + cross-session dashboard reading the CPE-1113 journal. Closes epic CPE-731 (fuller per-session metrics 731a +
 persistence 731b + this history view).
 
-2026-07-26 (workshift) — Filed + designed (Library-backed) but NOT built: the session hit the 200-agent crew cap
+2026-07-26 (sprint) — Filed + designed (Library-backed) but NOT built: the session hit the 200-agent crew cap
 before a worker could be dispatched. Ready to build (pure frontend, commands + persistence already merged in
 731a/731b). Pick up in a fresh session (resets the agent budget) or with a raised cap.
 
-2026-07-26 (workshift, worker) — Built end-to-end on branch `cpe-1114-cost-history-dashboard`:
+2026-07-26 (sprint, worker) — Built end-to-end on branch `cpe-1114-cost-history-dashboard`:
 `src/lib/agentMetricsRollup.ts` (pure `rollup`/`overTime`, mirroring `fleet_metrics::aggregate` +
 `efficiency.rs`, division/NaN-safe throughout) + `src/lib/agentMetricsRollup.test.ts` (14 vitest cases:
 empty, single, multi-model, multi-agent, 0-safe ratios, day/hour bucketing). Added a "History" tab to

@@ -55,10 +55,10 @@ Pure map/set diff over the same `/`-segment keys as CPE-1079. No arithmetic, no 
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as CPE-732's flagged un-mined vein. Parallel-independent
+2026-07-25 (sprint) — Filed by the Product Manager as CPE-732's flagged un-mined vein. Parallel-independent
 (agent_touched is a plain param). Distinct lib.rs anchor. CPE-1082 depends on this module's `ClassifiedAction`.
 
-2026-07-25 (workshift Worker) — Built `crates/server/src/revert_safety.rs` per design; registered
+2026-07-25 (sprint Worker) — Built `crates/server/src/revert_safety.rs` per design; registered
 `pub mod revert_safety;` immediately after `pub mod restore_plan;` in `lib.rs`. `classify_plan` marks an
 action `Safe` iff `agent_touched.contains(&action.path)` (action.path IS the root-relative key — it's
 already the same string `RestoreAction`/`Snapshot` key `restore_plan.rs` uses, so no extra normalization

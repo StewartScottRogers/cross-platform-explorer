@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, theme-engine research pass — see research-library
+> **Filed 2026-08-08 (sprint PM, theme-engine research pass — see research-library
 > `cross-platform-theme-engine-2026-08-08`).** User directive: a cross-platform theme engine that respects
 > each platform's native conventions. **Dormant brief — decompose on `/ticketing-epic activate CPE-1492`.**
 > **This is epic #1 of 5 and is strictly serial before CPE-1493/1494/1495/1496.**

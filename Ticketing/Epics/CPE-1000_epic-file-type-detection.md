@@ -10,7 +10,7 @@ created: 2026-07-24
 closed:
 ---
 
-> **Filed + activated 2026-07-24** (workshift, Foreman). First slice = the **pure magic-byte type detector +
+> **Filed + activated 2026-07-24** (sprint, Foreman). First slice = the **pure magic-byte type detector +
 > mismatch check** (CPE-1001). The column/badge UI is attended.
 
 ## Goal

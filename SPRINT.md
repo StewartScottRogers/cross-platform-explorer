@@ -1,8 +1,8 @@
-# Workshift
+# Sprint
 
-A **workshift** is an autonomous "work while you're away" mode. You say **"start the workshift,"** step away
+A **sprint** is an autonomous "work while you're away" mode. You say **"start the sprint,"** step away
 (day job, errands, hours), and the assistant keeps making real, merged progress on this project **without
-needing to ask you anything**. When you're back, say **"stop the workshift."**
+needing to ask you anything**. When you're back, say **"stop the sprint."**
 
 The point: **you don't babysit it.** If something is ambiguous, it makes a sensible call, writes down the
 assumption in the ticket, and keeps going instead of stalling for you.
@@ -45,8 +45,8 @@ which is why the independent review matters.
 
 ## Using it
 
-- Start: **"start the workshift"**
-- Stop: **"stop the workshift"**
-- Restart from a clean point: **"restart the workshift"**
+- Start: **"start the sprint"**
+- Stop: **"stop the sprint"**
+- Restart from a clean point: **"restart the sprint"**
 
 Related runbooks: [RELEASING.md](RELEASING.md) · project guide: [CLAUDE.md](CLAUDE.md).

@@ -68,7 +68,7 @@ Desired behaviour (from the user):
       this line is deliberately left unchecked for the Foreman + user pass (build → deploy → run).
 
 ## Notes
-- Added to the workshift per the user (2026-07-29). Filed under epic CPE-688 (explorer performance/UX polish);
+- Added to the sprint per the user (2026-07-29). Filed under epic CPE-688 (explorer performance/UX polish);
   it's a layout-correctness fix to the core three-pane explorer.
 - Touch points: `src/App.svelte` (the `SIDEBAR_*`/`RIGHT_*` consts, `gridCols`/`effectiveGridCols`,
   `onResize`/`clampWidth`, the load-time clamp) and `src/lib/components/FileList.svelte` (column min widths →

@@ -1,4 +1,4 @@
-# Workshift learnings — rolling log
+# Sprint learnings — rolling log
 
 Distilled, human-readable defaults learned from past shifts. Appended at each end-of-shift; read at
 kickoff to seed model/parallelism choices. Newest last. Raw per-agent detail lives in `ledger.jsonl`
@@ -10,7 +10,7 @@ kickoff to seed model/parallelism choices. Newest last. Raw per-agent detail liv
 <!-- - Tuned defaults: <class>: <model>, <N>-wide, ~<median> median, <stuck/retry note> -->
 <!-- - Notes: <anything that changed a default> -->
 
-_(no shifts recorded yet — first real workshift will seed this)_
+_(no shifts recorded yet — first real sprint will seed this)_
 
 ## 2026-07-25 — Media-metadata studio: write-back + read codecs + columns (6 shipped)
 - Shipped: CPE-1035 (ID3v2 write-back), CPE-1038 (FLAC/Vorbis write-back), CPE-1037 (MP4/MOV video read),
@@ -308,7 +308,7 @@ here. For multi-epic marathons, either raise CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSI
 crew budget resets. Reviewers again caught every rework item (6 cycles, all fixed pre-merge). sonnet-worker +
 opus-reviewer stayed the right pairing; opus-worker for the genuinely-hard slices (fold port, persistence, cfg-gated).
 
-## 2026-07-27 (workshift — short, furlough wind-down)
+## 2026-07-27 (sprint — short, furlough wind-down)
 
 Resumed on a stale checkpoint; found the prior session had already closed epics CPE-730/731 + the CPE-732
 headless scope and cut v0.57.37. Drained the last 3 genuinely-headless tickets, then the user called a
@@ -328,7 +328,7 @@ attended GUI / big-design / user-resource. The *honest* headless work left (queu
 OGG read-side multi-page packet reassembly (a real correctness bug), CPE-732 revert_attribution threading,
 and a gui-smoke extension for the CPE-1114 cost-History visual residual. Full detail in `CHECKPOINT.md`.
 
-## 2026-07-29 (workshift — Ticketing/ container realignment + QA burndown)
+## 2026-07-29 (sprint — Ticketing/ container realignment + QA burndown)
 
 Triggered right after the CPE-1128 `Tickets/ → Ticketing/` restructure. Assignment: CPE-1129 (realign the
 sidecars to the new container). Shipped it + one QA follow-up, then the headless well was tapped (same
@@ -360,7 +360,7 @@ format decoders, CPE-672/674 drag-out, CPE-1126 restore panel).
 
 **Budget:** ~9 sub-agents (2 workers + 2 reviewers + 2 UAT + Foreman recon). Nowhere near the 200 cap.
 
-## 2026-07-29 (workshift — the 3 checkpoint-queued honest-headless slices)
+## 2026-07-29 (sprint — the 3 checkpoint-queued honest-headless slices)
 
 Backlog empty, all Deferred/Blocked user-gated. Assignment = the critical path: build the three genuine
 headless slices the prior CHECKPOINT queued but never built, then confirm the frontier.
@@ -402,7 +402,7 @@ honest-headless queue from the last checkpoint is now **empty**. Remaining epic 
 
 **Budget:** ~13/200 sub-agents. Nowhere near the reset line.
 
-## 2026-07-29 (workshift #2 — docs debt; user present)
+## 2026-07-29 (sprint #2 — docs debt; user present)
 
 Second shift of the day, started right after the attended GUI session. Backlog empty, headless CODE well
 confirmed tapped (this session's Library entry `headless-frontier-tapped-2026-07-29`). The one honest,
@@ -430,7 +430,7 @@ ever touching that page — not worth standalone tickets.
 **Frontier: unchanged — tapped.** Remaining work is user-gated (GUI / model key / signing cert / Mac /
 attended big-design go-ahead on the instant-index engine). User was present this session.
 
-## 2026-07-29 (workshift #3 — instant-index epic CPE-703 shipped, attended)
+## 2026-07-29 (sprint #3 — instant-index epic CPE-703 shipped, attended)
 
 User gave the go-ahead on the "big-design" instant-index engine. Research revealed the engine (CPE-831/832/833)
 was ALREADY built + tested but wired to nothing — so the work was enablement + UI, not a from-scratch build.
@@ -465,9 +465,9 @@ GUI/model-key/cert/Mac gated. QA follow-up noted (not filed): a gui-smoke render
 
 **Budget:** ~18 sub-agents this epic; well under the 200 cap across the whole session's shifts.
 
-## 2026-07-29→30 (workshifts ×2, attended — board hygiene + UX/feature polish)
+## 2026-07-29→30 (sprints ×2, attended — board hygiene + UX/feature polish)
 
-User asked for "two workshifts back to back", then gave two mid-run directives (epic-board cleanup + a pane
+User asked for "two sprints back to back", then gave two mid-run directives (epic-board cleanup + a pane
 min-width bug). Delivered both plus two "instant-index twin" features the shift-2 researcher surfaced.
 
 **Shift 1:**
@@ -502,7 +502,7 @@ model- or GUI-gated. Frontier is now user-gated except a real-embedder decision 
 one-worker-per-file zero conflicts; regen `bindings.gen.ts` on any new specta command; batch GUI verifies into
 one build→deploy→run.
 
-## 2026-07-30 (workshifts ×3 request — QA pins + epic closure; frontier confirmed user-gated)
+## 2026-07-30 (sprints ×3 request — QA pins + epic closure; frontier confirmed user-gated)
 
 User asked for three back-to-back shifts. Honest genuine autonomous work found + done (did NOT pad with filler):
 - **QA new-surface pins (CPE-1143, #458):** gui-smoke render pins for the Ctrl+K instant-search overlay +
@@ -556,10 +556,10 @@ this was enablement + UI, shipped in slices through the full Reviewer+UAT gauntl
 + longer tick gaps (memory `[[circuit-breaker-for-retryable-errors]]`). No further overloads.
 
 **Process idea raised by the user (NOT yet built — awaiting go-ahead):** a **Visual Critic** role +
-gui-smoke **screenshot capture** so the workshift can judge GUI work from screenshots (as the gauntlet's visual
+gui-smoke **screenshot capture** so the sprint can judge GUI work from screenshots (as the gauntlet's visual
 leg, next to Reviewer=code / UAT=behavior) and escalate to the user minimally. This directly targets the
 button-polish round-trips (clip/placement are screenshot-visible; only pure icon *preference* needed the user).
-When approved: a QA-Architect ticket for the screenshot harness + a workshift-skill change adding the Critic to
+When approved: a QA-Architect ticket for the screenshot harness + a sprint-skill change adding the Critic to
 the crew + gauntlet. The manual-test burndown's row #1 (headless GUI) + row #3 (visual/theme regression) are the
 natural homes.
 
@@ -598,7 +598,7 @@ natural homes.
 - Frontier verdict: after this batch the well closes back to user-gated (GUI interaction-feel, model/embedder, certs, Mac). Filed no filler. Next genuinely-headless work will likely need a NEW capability to land first (as CPE-707 did) before another vein opens.
 
 ### 2026-07-31 18:58 USMST — wrap: three back-to-back QA/hardening batches (well confirmed near-dry)
-- User asked to "run three workshifts back to back." Queue was empty; PM (opus) frontier scout confirmed the
+- User asked to "run three sprints back to back." Queue was empty; PM (opus) frontier scout confirmed the
   deep headless well is essentially TAPPED — all 38 epics' remainders user-gated — leaving one honest
   QA/hardening batch, a thin second, and NO honest third. Ran it exactly that way; filed zero filler.
 - **Shipped (6 PRs merged, all through the ≥2-check gauntlet, all pushed, final HEAD CI 10/10 jobs green ×3 OS):**
@@ -721,7 +721,7 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   (camelCase) while the imported/tracked file is `filetypes.ts` (lowercase), so the "fix" never entered the build.
   Landed in the correct lowercase file, shipped in **v0.57.41-sidecar** (verified live by the user). LESSON: headless
   tests + reviews can't catch a frontend↔backend WIRING gap; and on Windows always edit/commit the exact tracked case.
-- **CI greened after the outage (CPE-1268):** the whole workshift had merged via `--admin` during the stall, so CI's
+- **CI greened after the outage (CPE-1268):** the whole sprint had merged via `--admin` during the stall, so CI's
   first real run was red across many jobs — thumb_video tiny-max_edge (real), pty kill-already-reaped ESRCH (real Unix),
   macro-via-trash (CI has no Recycle Bin → probe-skip), macOS dead_code cfg-gate, pdfium install tar/cygpath +
   best-effort. PR #566: all 10 CI jobs green (verified), merged; main green across all 3 OSes.
@@ -752,7 +752,7 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   invasive shell (712 default-file-manager, 716 drive-eject) need explicit consent/hardware. Plus pending ATTENDED
   tests: AI search (v0.57.45), tray, archive-drag. Did NOT manufacture filler.
 
-## 2026-08-03 — "3 workshifts back to back": safety-scan vein + media-metadata codecs (14 shipped)
+## 2026-08-03 — "3 sprints back to back": safety-scan vein + media-metadata codecs (14 shipped)
 - Shipped: CPE-1279 (release single-draft + eject glyph), CPE-1281/1282/1283/1284/1285 (5 cpe-server safety
   scans: archive/zip-bomb, empty-dirs, orphan-sidecars, dangling-links, disguised-file sweep), CPE-1286
   (file_type +13 magic-byte formats), CPE-1287 (wire 5 scan commands + specta bindings), CPE-1293 (front-end
@@ -783,7 +783,7 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
 - Throughput: ~14 tickets, ~34 sub-agent runs, deep budget headroom (never near the 200 reset line). Main green
   throughout (real CI; GUI-smoke still times out at 20m systemically — pre-existing, unrelated).
 
-## 2026-08-03 (run 2) — "another 3 workshifts": streaming scans + robustness + write symmetry (9 shipped)
+## 2026-08-03 (run 2) — "another 3 sprints": streaming scans + robustness + write symmetry (9 shipped)
 - Shipped: CPE-1294/1295/1296 (streaming walkers for the mismatch/dangling/orphan tree-sweeps —
   flush-callback over ipc::Channel per listing.rs), CPE-1297 (close parser_panic_safety gap:
   iptc/exif-write/ogg-write/vorbis-write), CPE-1298 (write_wav RIFF LIST/INFO), CPE-1299 (wire 3 stream
@@ -819,7 +819,7 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   (AI model/key, OCR engine, cloud/SFTP creds, code-signing cert, Mac). Next session should either take an
   attended/GUI epic WITH the user, or get a user resource — not scrape for more headless filler.
 
-## 2026-08-04 (run "6 workshifts") — media-metadata write-back completion + robustness (10 shipped)
+## 2026-08-04 (run "6 sprints") — media-metadata write-back completion + robustness (10 shipped)
 - Shipped: CPE-1304 (perf-budget harness), 1305 (IPTC/XMP write-back), 1306 (Linux shell integration), 1307
   (macOS xattr OS-interop test — retired MVD row5; was mis-numbered CPE-828), 1308 (media-meta polish:
   EXIF clear-symmetry + IPTC 1:90 UTF-8 charset + 8BIM survivor), 1309 (write_mp4 video metadata + iso_bmff
@@ -883,7 +883,7 @@ them; history.md stopped at 07-31). Authoritative record is the checkpoint commi
   clean checkpoint. LESSON: never rm -rf worktree globs while a worker is live (clobbered one; recovered).
 
 ## 2026-08-05 (run 3) — GUI "backends-exist" sweep: 7 tickets, 4 epics, 0 retries, 0 escaped
-User: "start three workshifts back to back". Headless well long-dry, so continued the proven GUI-via-Visual-Critic
+User: "start three sprints back to back". Headless well long-dry, so continued the proven GUI-via-Visual-Critic
 template (build → gui-smoke screenshots → taste-aware Critic, no user round-trip). Shipped 7 FE-only tickets,
 each through the full Reviewer+UAT gauntlet, all merged on Frontend CI green, **zero rework, zero escaped defects**:
 - **CPE-1323** File-Health exclude-glob input UI (backend CPE-1302 existed; frontend hardcoded `excludes:[]`). #619
@@ -970,7 +970,7 @@ Everything of scale is USER-GATED (AI model key, Mac, cert, SFTP/Docker/hardware
 (HEIC/DICOM/RAR/camera-RAW). See [[clean-backend-vein-3d-reader-2026-08-05]], [[clean-gui-vein-tapped-after-declutter-2026-08-05]].
 
 ## Shift 2026-08-05 (resume) — 4 tickets, file-type correctness lane (epic CPE-1000)
-Resumed the workshift; fresh session, full budget. Checkpoint said the last clean slice was "font signatures"
+Resumed the sprint; fresh session, full budget. Checkpoint said the last clean slice was "font signatures"
 but they were already done — reading file_type.rs surfaced 2 real items instead, and a mid-shift evidence-based
 frontier scan surfaced 2 more. Shipped 4, all gauntlet (Reviewer+UAT) + CI-green on 3 OS, 0 escaped defects:
 - CPE-1341 (#637) ftyp-brand disambiguation — real false-positive bug (mov/heic/avif/3gp flagged as MP4 mismatch).
@@ -1020,7 +1020,7 @@ sign bug, drive-type whole-disk reduction). ~105 sub-agents. FRONTIER: clean hea
 is attended visual (build->deploy->run; a Mac) or the heavier gui-smoke-fixtures infra.
 
 ## Shift 2026-08-06→07 (CLI, ~19:30–02:00) — DUAL-PANE EPIC COMPLETE + QA-AUTOMATION BATCH — 19 PRs, 0 escaped defects
-User: "run 10 workshifts back to back." Started with a 5-ticket backlog (dual-pane/selection bugs); it opened a
+User: "run 10 sprints back to back." Started with a 5-ticket backlog (dual-pane/selection bugs); it opened a
 huge vein. Delivered **19 PRs merged, main GREEN throughout, 0 escaped defects**, ~140 sub-agents.
 
 **Program 1 — Dual-pane commander pane-B FULL PARITY (epic CPE-617), 11 PRs (CPE-1370–1388):** pane B went from
@@ -1054,7 +1054,7 @@ AI keys, SFTP/Docker creds). Low-value remainder: QA-Architect 2nd-tier render-s
 follow-ups CPE-1385(done)/1386(done); open follow-ups: none in backlog (all closed).
 
 ## Shift 2026-08-07 (CLI, resume ~04:50–06:30) — SECURITY + COVERAGE HARDENING — 8 PRs, found a REAL DoS
-User: "start 8 workshifts back to back" (after the dual-pane+QA shift confirmed the feature well dry). A scout
+User: "start 8 sprints back to back" (after the dual-pane+QA shift confirmed the feature well dry). A scout
 re-verified: integration-bug vein is genuinely THIN (dual-pane program drained it, seams already guarded w/
 citing comments); real value in Vein C (security-hardening) + Vein B (component coverage). Delivered 8 PRs
 (CPE-1398–1406), main GREEN throughout, 0 escaped defects, ~40 sub-agents.
@@ -1119,7 +1119,7 @@ FRONTIER: this vein now COVERED (archive/svg/font/webdav/jwt batteries); remaini
 (CPE-1414/1415) + user-gated feature work. Session TOTAL across all segments = 35 PRs, 0 escaped defects, 5 real
 security bugs found (4 fixed).
 
-## Shift 2026-08-07 (CLI, "Do 3 workshifts") — 8 PRs merged, epic CPE-1433 closed, feature well confirmed dry
+## Shift 2026-08-07 (CLI, "Do 3 sprints") — 8 PRs merged, epic CPE-1433 closed, feature well confirmed dry
 Shipped: CPE-1432 pane-aware quick-look (#701), CPE-1415 sevenz catch_unwind (#702), CPE-1427/1428 cert
 hardening (#703), **epic CPE-1433 structured previews** — .eml (#704) + .ics/.vcf (#705), CPE-1438 dual-pane
 crypto Inspect overlay (#706), CPE-1440/1441 security dep bumps (#707: quick-xml High DoS + dompurify XSS).
@@ -1143,7 +1143,7 @@ Tuned defaults / lessons:
   (CPE-1098), 3D viewer (CPE-118), real-network E2E (CPE-819/820). Only headless left = low-value CPE-1414/1437
   SVG hardening. See Library [[structured-preview-runway-2026-08-07]].
 
-## Shift 2026-08-07→08 (CLI, "run 12 workshifts in batches") — 8 PRs merged, SVG stack-overflow DoS class CLOSED, well confirmed dry
+## Shift 2026-08-07→08 (CLI, "run 12 sprints in batches") — 8 PRs merged, SVG stack-overflow DoS class CLOSED, well confirmed dry
 Pivoted off the (still-dry) feature well into security hardening — a real, high-yield vein. Shipped 8 PRs / 9 tickets:
 - CPE-1439 archive-ext preview routing (#708) — xz/bz2/zst/lz/lzma → "compressed file" info preview, dmg/cab won't-fix.
 - **SVG stack-overflow DoS class CLOSED** — CPE-1437 (parked after 3-attempt breaker) re-scoped into **CPE-1444** (#712,
@@ -1198,7 +1198,7 @@ Tuned defaults / lessons:
   onto main's working tree + leaking a worker commit onto local main twice. Brief review/audit agents to use
   `git worktree add <tmp>` in their OWN dir, never a bare checkout in the shared repo. Foreman must re-verify local
   main == origin/main after each merge (reset --hard origin/main) — the leak recurred 2×.
-- **Concurrent process coordination**: the desktop nightshift was building the workshifts_* skill family (CPE-1476)
+- **Concurrent process coordination**: the desktop nightshift was building the sprints_* skill family (CPE-1476)
   the whole time — left its untracked WIP + IDs alone, numbered above it.
 - Session total across both batches: **11 PRs merged, 0 escaped defects**, 1 HIGH + 1 prod-MED + many DoS closed;
   security surface now comprehensively audited (readers/network/crypto/IPC/frontend). FRONTIER: genuinely dry for

@@ -55,10 +55,10 @@ serde/specta. No `std::path`, no `#[cfg]`.
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-729 fusion heart. Held in Backlog: depends on
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-729 fusion heart. Held in Backlog: depends on
 CPE-1076 (`gate_scope`) landing first.
 
-2026-07-25 (workshift, overnight) — Built by a Worker on branch `cpe-1077-gate-decision`, PR opened. Added
+2026-07-25 (sprint, overnight) — Built by a Worker on branch `cpe-1077-gate-decision`, PR opened. Added
 `sidecar/ai-console/src/gate_decision.rs` (`GateOutcome`, `GateDecision`, `decide`), registered
 `pub mod gate_decision;` immediately after `pub mod gate_scope;` in `lib.rs`. `cargo test` green (11 new
 tests + full crate suite: 421 passed, 0 failed, 2 pre-existing ignored); `cargo clippy --all-targets --

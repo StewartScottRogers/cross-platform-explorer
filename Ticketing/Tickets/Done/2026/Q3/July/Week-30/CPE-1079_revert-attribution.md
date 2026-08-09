@@ -50,9 +50,9 @@ Only a `ts` comparison (no arithmetic risk); no recursion. Plain derives (no f64
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-732 attribution foundation (audit is already
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-732 attribution foundation (audit is already
 session-tagged, so this is live-feed-ready). Independent module; distinct lib.rs anchor.
-2026-07-25 (workshift Worker) — Implemented `crates/server/src/revert_attribution.rs`:
+2026-07-25 (sprint Worker) — Implemented `crates/server/src/revert_attribution.rs`:
 `agent_touched(events, session, since_ts, root)` (pure fold, excludes `read`, includes
 created/modified/removed/renamed, `session` + `ts >= since_ts` filter) and `to_root_relative(root, abs)`
 (cross-OS containment via `/`-segment equality, never `starts_with`; `\`→`/` normalized by splitting on

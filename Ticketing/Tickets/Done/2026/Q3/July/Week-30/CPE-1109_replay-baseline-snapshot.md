@@ -67,6 +67,6 @@ so `children_at(state_at_from(...), dir)` shows the folder as it actually looked
       pass if any type crosses; `npm run check` clean.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-728 slice b, from the filed plan. Chose representation B (separate snapshot) +
+2026-07-26 (sprint) — CPE-728 slice b, from the filed plan. Chose representation B (separate snapshot) +
 bounded recursive walk (decide-and-log micro-decisions). Unblocks 728c (replay_load + fold port) and 728d
 (listing UI).

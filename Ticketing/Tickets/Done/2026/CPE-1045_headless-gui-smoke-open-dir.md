@@ -112,7 +112,7 @@ pipeline. (Windows runners already have Edge + the WebView2 runtime.)
 - Consider promoting shared launch helpers if a second GUI spec appears.
 
 ## Work Log
-2026-07-25 — Filed by the QA Architect (workshift). Retires burndown #1/#2; directly automates the
+2026-07-25 — Filed by the QA Architect (sprint). Retires burndown #1/#2; directly automates the
 `--open <dir>` check hand-done for CPE-1043/1044. Approach + tradeoffs (WebdriverIO vs. fantoccini vs.
 a no-WebDriver health-ping) captured in Library entry `headless-gui-smoke-test-tauri-driver`.
 Recommended: `tauri-driver` + WebdriverIO driving the `tauri build` release binary on Windows, asserting

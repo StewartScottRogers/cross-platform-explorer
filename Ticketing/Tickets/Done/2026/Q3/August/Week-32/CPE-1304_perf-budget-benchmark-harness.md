@@ -39,5 +39,5 @@ console marks / `performance.measure` only. (2) Instrument `ExplorerPane.svelte`
 (3) Fresh ticket, don't reopen CPE-691.
 
 ## Work Log
-2026-08-03 (workshift) — Filed by the Foreman from the survey researcher's finding (CPE-691 harness half is
+2026-08-03 (sprint) — Filed by the Foreman from the survey researcher's finding (CPE-691 harness half is
 genuinely unbuilt + fully headless). Dispatched to a worker.

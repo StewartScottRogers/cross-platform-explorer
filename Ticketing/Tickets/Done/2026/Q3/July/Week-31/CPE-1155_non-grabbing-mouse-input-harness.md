@@ -62,7 +62,7 @@ so the whole run is invisible + non-intrusive.
       and `cdpAvailable()` reports the negative case if a future driver drops the endpoint.
 
 ## Work Log
-- 2026-07-31 (Worker, workshift): Built `gui-smoke/lib/mouse.ts` — CDP `Input.dispatchMouseEvent` /
+- 2026-07-31 (Worker, sprint): Built `gui-smoke/lib/mouse.ts` — CDP `Input.dispatchMouseEvent` /
   `Input.dispatchMouseWheelEvent` via msedgedriver's vendor endpoint
   `POST /session/:id/chromium/send_command_and_get_result`, surfaced by WebdriverIO as
   `browser.sendCommandAndGetResult`. (`browser.cdp(...)` — the puppeteer-backed variant the ticket

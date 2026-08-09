@@ -52,10 +52,10 @@ Sums `saturating_add`; averages guarded (count 0 → 0.0). All compute structs `
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-731 slice. Held in Backlog: depends on CPE-1071
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-731 slice. Held in Backlog: depends on CPE-1071
 (`SessionMetrics`) landing first.
 
-2026-07-25 (workshift, Worker, overnight) — Built. CPE-1071 (`session_metrics::SessionMetrics`) had already
+2026-07-25 (sprint, Worker, overnight) — Built. CPE-1071 (`session_metrics::SessionMetrics`) had already
 merged to `main` by the time this was picked up; branched `cpe-1072-fleet-metrics` off latest `main`. Added
 `sidecar/ai-console/src/fleet_metrics.rs` with `SessionAverages`, `FleetRollup`, a private
 `add_saturating(a, b) -> SessionMetrics` helper (every integer field via `u64::saturating_add`, `cost_usd` via

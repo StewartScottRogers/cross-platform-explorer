@@ -25,7 +25,7 @@ built: `duplicates` (exact-dupe detection), `folder_stats`/`disk_usage` (what's 
 (target scaffolds), `restore_plan`/[[CPE-732]] (undo), and the [[CPE-977]] plan/preview/confirm loop. Rules
 first keeps it honest and testable; the AI layer only *suggests*, never auto-moves.
 
-> **Activated 2026-07-24** (workshift, Foreman — user away, decisions logged). First slice = the **pure
+> **Activated 2026-07-24** (sprint, Foreman — user away, decisions logged). First slice = the **pure
 > `plan_organize` rules engine** (CPE-987) in `cpe-server` (Rust) — deterministic, filesystem-free, no AI.
 > The opt-in AI classification layer needs a model backend (user resource) and is skipped-and-noted for now;
 > the preview/apply/undo UI is attended.

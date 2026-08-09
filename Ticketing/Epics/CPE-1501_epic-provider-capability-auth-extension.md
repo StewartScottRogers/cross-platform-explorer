@@ -12,7 +12,7 @@ closed:
 ---
 
 > **Network Filesharing program (parent CPE-616). Foundation epic F5 — enabling; needed only for protocols
-> beyond SFTP/WebDAV/SMB-browse.** Filed 2026-08-08 (workshift PM, Network research). Dormant.
+> beyond SFTP/WebDAV/SMB-browse.** Filed 2026-08-08 (sprint PM, Network research). Dormant.
 
 ## Why
 The `FileSystemProvider` trait fits SFTP/WebDAV/SMB-browse, but "anything and everything" needs three

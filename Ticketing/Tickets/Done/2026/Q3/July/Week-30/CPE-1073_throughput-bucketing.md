@@ -47,10 +47,10 @@ capped at `max_buckets`. `Bucket` derives `Debug, Clone, PartialEq, Default` (f6
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-731 slice. Standalone (own `TimedRun`); distinct
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-731 slice. Standalone (own `TimedRun`); distinct
 lib.rs anchor. Bounded (max_buckets) + saturating arithmetic per this session's reviewer-caught bugs.
 
-2026-07-25 (workshift Worker, autonomous overnight) — Built `sidecar/ai-console/src/throughput.rs`:
+2026-07-25 (sprint Worker, autonomous overnight) — Built `sidecar/ai-console/src/throughput.rs`:
 `TimedRun`/`Bucket` (both `Debug, Clone, PartialEq, Default`, no `Eq` since `cost_usd: f64`; no
 serde/specta, matching `cost.rs`'s convention) and `bucketize(runs, origin_ms, bucket_ms, max_buckets)`.
 Registered `pub mod throughput;` in `lib.rs` immediately after `pub mod catalog;` per the anchor

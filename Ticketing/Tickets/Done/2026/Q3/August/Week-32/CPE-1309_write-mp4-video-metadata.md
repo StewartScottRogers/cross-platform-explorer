@@ -42,5 +42,5 @@ keys, group `"video"`) but can't write it (`is_writable("mp4")` is false; no `wr
       change expected (video keys already exist); if any, regen bindings.
 
 ## Work Log
-2026-08-04 (workshift) — Filed by the Foreman from the vetted research plan (Library entry above).
+2026-08-04 (sprint) — Filed by the Foreman from the vetted research plan (Library entry above).
 Dispatched to an opus worker after CPE-1308 merges (shares media_meta.rs).

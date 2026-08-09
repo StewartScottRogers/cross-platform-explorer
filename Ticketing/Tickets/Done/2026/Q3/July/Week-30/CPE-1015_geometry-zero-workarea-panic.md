@@ -17,7 +17,7 @@ estimate: 30m
 > reviewed (APPROVE), 3-OS CI green.
 
 ## Summary
-Found by the 2026-07-24 workshift bug-audit (second wave). `crates/server/src/geometry.rs` `resolve()`
+Found by the 2026-07-24 sprint bug-audit (second wave). `crates/server/src/geometry.rs` `resolve()`
 **panics at window-launch time** when a monitor reports a zero-width or zero-height work area (a real, if rare,
 condition — a display that just disconnected, or a virtual/RDP monitor mid-transition).
 

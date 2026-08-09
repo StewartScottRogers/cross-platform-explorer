@@ -25,7 +25,7 @@ Part of CPE-997. Expose CPE-1200's scan to the frontend, mirroring the exact-dup
       (both feature modes); a `HeadlessCtx`/unit exercise of the collect command returns groups for a fixture.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Depends on CPE-1200; same worker, sequential.
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-997). Depends on CPE-1200; same worker, sequential.
   Serialize lib.rs/bindings with CPE-1204 if that runs concurrently.
 - 2026-08-01 — Added two thin `spawn_blocking` dispatchers in `src-tauri/src/lib.rs` (next to
   `find_duplicates`/`find_duplicates_stream`): `find_similar_images(root)` and

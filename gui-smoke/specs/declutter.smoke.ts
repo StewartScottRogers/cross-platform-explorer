@@ -2,7 +2,7 @@
 // the real built app, opens the dialog via its real opener — the Command Palette (Ctrl+Shift+P →
 // "Declutter…", the same `tool.findClutter` command the Tools ▸ menu item is wired to, see App.svelte's
 // `paletteCommands`) — scans the seeded fixture folder, and asserts each of the four seeded findings
-// (one per ClutterReason) renders under its human-labelled reason group. This is the workshift QA proof
+// (one per ClutterReason) renders under its human-labelled reason group. This is the sprint QA proof
 // that `organize_clutter` actually delivers findings over a REAL IPC round trip against the real built
 // binary — DeclutterDialog.test.ts already covers the grouping/selection/checkpoint-then-trash logic in
 // isolation with a mocked invoke, but never against a real backend process.

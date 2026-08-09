@@ -52,11 +52,11 @@ correctly. Empty stream → empty state.
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-728 foundation (virtual-time projection
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-728 foundation (virtual-time projection
 over the audit journal). Independent module; one-line lib.rs `pub mod` at a distinct anchor. CPE-1065/1066
 depend on this module's `FsState`.
 
-2026-07-25 (workshift Worker, overnight) — Built `crates/server/src/replay.rs`: `FsNode { ts, kind }`,
+2026-07-25 (sprint Worker, overnight) — Built `crates/server/src/replay.rs`: `FsNode { ts, kind }`,
 `FsState = BTreeMap<String, FsNode>`, `state_at`, `bounds`, `seek_index`, exactly per the design's
 signatures. Registered `pub mod replay;` in `lib.rs` immediately after `pub mod activity_timeline;` as
 directed.

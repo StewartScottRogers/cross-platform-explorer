@@ -47,9 +47,9 @@ Dependency/approach: Backend RAW preview extract. Editing model: none. Editable 
 - [ ] Decide scope: embedded-preview only vs. full demosaic
 
 ## Work Log
-- 2026-08-05 (workshift): BACKEND landed via CPE-1346 — Camera-RAW embedded-preview backend (read_raw_preview_data_url, TIFF/IFD walk, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
+- 2026-08-05 (sprint): BACKEND landed via CPE-1346 — Camera-RAW embedded-preview backend (read_raw_preview_data_url, TIFF/IFD walk, zero deps), merged to main, cargo-verified + gauntlet-passed. REMAINING (still blocked): frontend preview-provider registration + a thin #[tauri::command] dispatcher + jsdom tests, then attended visual verification. The heavy/decode half is done; the wiring + eyes-on half remains.
 
 ## Work Log
-- 2026-08-05 (workshift): backend + preview-provider wiring SHIPPED (CPE-1346/1349). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
+- 2026-08-05 (sprint): backend + preview-provider wiring SHIPPED (CPE-1346/1349). Remaining = attended-only (on-screen visual verification via build->deploy->run). Moved Blocked->Deferred (our-choice: attended verification), no longer externally gated.
 
 - 2026-08-06 — Closed as **Done**: superseded/delivered by the CPE-13xx preview work. Delivered: cr2/nef/arw raw-image preview provider + read_raw_preview_data_url embedded-JPEG extraction (CPE-1349). Read-only, graceful fallback, cancellation, tests green. Sample: samples/raw/sunset.cr2. All acceptance criteria met (provider registered in the bundled registry; read-only viewer; graceful large/corrupt fallback; in-flight cancellation; unit/provider tests green; npm run check clean).

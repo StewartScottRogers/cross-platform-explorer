@@ -43,11 +43,11 @@ New module `crates/server/src/media_meta_write.rs`:
       **both** feature modes (default and `--features specta`).
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched to a worker. Pairs `read_id3v2` (CPE-970) + `apply_edits`
+2026-07-25 (sprint) — Filed + dispatched to a worker. Pairs `read_id3v2` (CPE-970) + `apply_edits`
 (CPE-942); the flagship write-back that turns the studio editable. Follow-ups (separate tickets):
 Vorbis/FLAC/OGG write-back, EXIF write-back.
 
-2026-07-25 (workshift) — **DONE, merged PR #352.** `media_meta_write::write_id3v2` builds a valid
+2026-07-25 (sprint) — **DONE, merged PR #352.** `media_meta_write::write_id3v2` builds a valid
 ID3v2.4 tag from `group=="id3"` `MetaField`s and prepends it to the audio payload after stripping any
 pre-existing tag (replace, not stack; idempotent). 10 unit tests + independent opus review (APPROVE:
 syncsafe/tag-replacement/never-panic/round-trip all verified) + independent UAT PASS (read→edit via

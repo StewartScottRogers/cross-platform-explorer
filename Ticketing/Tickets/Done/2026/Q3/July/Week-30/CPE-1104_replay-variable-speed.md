@@ -46,6 +46,6 @@ need a design decision; not this ticket.)
 - [ ] `npm run check` clean; vitest green (incl. any new helper test); no new deps; theme vars only.
 
 ## Work Log
-2026-07-26 (workshift) — Filed to fill the CPE-728 variable-speed DoD gap (from the PM epic-closure
+2026-07-26 (sprint) — Filed to fill the CPE-728 variable-speed DoD gap (from the PM epic-closure
 assessment). The bigger CPE-728 gaps (folder-state reconstruction, event-log persistence) remain open pending
 a design decision.

@@ -13,7 +13,7 @@ epic: CPE-979
 ## Summary
 Extends the CPE-979 `organize` engine (CPE-987) with pure **clutter detection**: flag likely-junk files
 (empty, installers, partial/temp downloads, backups/leftovers) as *suggestions* for the declutter view —
-never auto-actioned. Workshift (Foreman) foreground slice, 2026-07-24.
+never auto-actioned. Sprint (Foreman) foreground slice, 2026-07-24.
 
 ## Design
 - `find_clutter(entries) -> Vec<ClutterFinding{ name, reason }>` — pure metadata heuristics over the existing

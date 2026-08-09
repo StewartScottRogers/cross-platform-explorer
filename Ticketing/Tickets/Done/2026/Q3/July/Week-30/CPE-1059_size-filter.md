@@ -48,10 +48,10 @@ pub fn matches(f: &SizeFilter, bytes: u64) -> bool;
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the first slice of the CPE-703 power-filter query
+2026-07-25 (sprint) — Filed by the Product Manager as the first slice of the CPE-703 power-filter query
 DSL (fresh headless vein). Independent module; one-line lib.rs `pub mod` at a distinct anchor.
 
-2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/size_filter.rs` per design: `SizeOp`
+2026-07-25 (sprint, overnight Worker) — Built `crates/server/src/size_filter.rs` per design: `SizeOp`
 {Gt,Lt,Ge,Le,Eq} + `SizeFilter` {Cmp,Range} with the `serde::Serialize` + `cfg_attr(specta)` derive stack
 matching `code_outline.rs`/`index_query.rs`. `pub mod size_filter;` added immediately after `pub mod
 index_query;` in `lib.rs`. Std-only, no new deps, no `#[cfg]`-dependent behavior, operates only on `u64` +

@@ -24,7 +24,7 @@ FOLDERS.
   **serialize the command-registration step**. Not on the DoD-critical path (epic's stated target is images).
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Stretch; pick up after the image spine lands.
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-997). Stretch; pick up after the image spine lands.
 - 2026-08-01 — Wired end-to-end: `cpe_server::document_similarity` (walk + SimHash adapter over
   `simhash::near_duplicate_docs`) and `cpe_server::folder_similarity_scan` (walk + per-folder hash-set
   adapter over `folder_similarity::cluster_similar_folders`), each with cargo tests. Thin dispatchers

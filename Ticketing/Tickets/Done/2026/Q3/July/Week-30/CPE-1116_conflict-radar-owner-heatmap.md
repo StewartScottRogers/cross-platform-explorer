@@ -49,8 +49,8 @@ heat-map by the **owning agent** instead, with a legend. FRONTEND only. Design +
 - `agentColors` stable-index + user/unknown mapping test.
 
 ## Work Log
-2026-07-26 (workshift) — Filed from the CPE-730 close plan (Plan agent). **Blocked on CPE-1112 merging** — both
+2026-07-26 (sprint) — Filed from the CPE-730 close plan (Plan agent). **Blocked on CPE-1112 merging** — both
 edit `FileList.svelte`; serialize to avoid a merge collision. Also sequences BEFORE CPE-1118 (both edit
 `agentActivity.ts` type region). Palette decided Opt A (fixed theme vars) per go-with-recommendation.
 
-2026-07-26 (workshift) — Built (PR #434, merged be360da2). Independent Reviewer APPROVE + UAT PASS: owner rule mirrors conflict_owner/conflict_region (write>read, most-touches, tie->lexically-least, empty->null), colour stability + user/unknown fixed vars, Okabe-Ito palette in single :root (app is LIGHT-ONLY — no dark theme exists, both gates confirmed), i18n gate green, off-means-off held. Follow-up CPE-1120: ExplorerPane doesn't pass `sessions` to FileList yet -> colours use the djb2-hash fallback in production instead of the stable sorted-session index (deterministic, so AC holds; wire after CPE-1112/#432 which owns ExplorerPane).
+2026-07-26 (sprint) — Built (PR #434, merged be360da2). Independent Reviewer APPROVE + UAT PASS: owner rule mirrors conflict_owner/conflict_region (write>read, most-touches, tie->lexically-least, empty->null), colour stability + user/unknown fixed vars, Okabe-Ito palette in single :root (app is LIGHT-ONLY — no dark theme exists, both gates confirmed), i18n gate green, off-means-off held. Follow-up CPE-1120: ExplorerPane doesn't pass `sessions` to FileList yet -> colours use the djb2-hash fallback in production instead of the stable sorted-session index (deterministic, so AC holds; wire after CPE-1112/#432 which owns ExplorerPane).

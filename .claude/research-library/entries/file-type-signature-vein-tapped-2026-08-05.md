@@ -6,7 +6,7 @@ status: current
 ---
 
 ## Question
-After the 2026-08-05 workshift shipped four file-type tickets, is there more *clean, headless,
+After the 2026-08-05 sprint shipped four file-type tickets, is there more *clean, headless,
 cargo-testable, no-user-resource, no-heavy-dep* work in the file-type/format-signature vein
 (`crates/server/src/file_type.rs` + its consumers), or is it tapped?
 

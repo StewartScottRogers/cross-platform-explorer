@@ -61,5 +61,5 @@ so scrubbing re-derives the folder listing per tick WITHOUT an IPC round-trip ea
       `npm run check` clean; `npm test` green; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-728 slice c, from the filed plan. Command + TS fold port (tested vs Rust oracle);
+2026-07-26 (sprint) — CPE-728 slice c, from the filed plan. Command + TS fold port (tested vs Rust oracle);
 728d then renders `childrenAt(stateAtFrom(baseline, events, t), currentPath)` in the Replay tab.

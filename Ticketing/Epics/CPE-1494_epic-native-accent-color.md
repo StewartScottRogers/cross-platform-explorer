@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, theme-engine research pass).** Dormant brief — decompose on
+> **Filed 2026-08-08 (sprint PM, theme-engine research pass).** Dormant brief — decompose on
 > `/ticketing-epic activate CPE-1494`. **Depends on CPE-1492 + CPE-1493. Epic #3 of 5.**
 
 ## Why

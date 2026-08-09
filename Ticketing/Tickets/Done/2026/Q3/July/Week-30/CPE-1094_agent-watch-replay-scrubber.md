@@ -69,7 +69,7 @@ the `agentTimeline` + `agentDiffs` stores; no backend change. Design from the Li
       pure helper, e.g. `entriesUpTo(timeline, t)` / slider-range math incl. degenerate cases); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as GUI #3 slice 1 (the zero-backend one), from the Library
+2026-07-26 (sprint, GUI) — Filed by the Foreman as GUI #3 slice 1 (the zero-backend one), from the Library
 substrate brief. Slices 2 (cost ledger — needs a sidecar→host `ai-console://agent-cost` bridge) and 3
 (conflict radar — needs multi-session AgentWatchState + actor tagging) are larger and will be cut just-in-time
 from the same Library entry after this validates the tabbed-drawer mount.

@@ -88,6 +88,6 @@ refactor are the **next** ticket (CPE-1091), so DO NOT refactor the `<pre>` here
       in a small testable module with a unit test (division-by-zero + empty-outline + boundary cases).
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as GUI slice #1 of the code-preview upgrade, on top of the
+2026-07-26 (sprint, GUI) — Filed by the Foreman as GUI slice #1 of the code-preview upgrade, on top of the
 merged `code_intel` command (CPE-1089). Scoped to the outline (breadcrumb + jump) so it stays blob-compatible
 and conflict-free with CPE-1091 (minimap/folds/indent, which does the per-line refactor and runs next).

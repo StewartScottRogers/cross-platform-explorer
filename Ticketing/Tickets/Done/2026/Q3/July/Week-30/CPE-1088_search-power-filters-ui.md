@@ -84,7 +84,7 @@ backend change; instant; verified by the vitest suite + a real build.
 - [x] `npm run check` (svelte-check + tsc) clean. In-app search docs updated; `sectionDocs.test.ts` green.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman: user picked "search power-filters" as the first GUI
+2026-07-26 (sprint, GUI) — Filed by the Foreman: user picked "search power-filters" as the first GUI
 surface after the headless epics. Client-side TS port of the four Rust filter modules into the instant folder
 filter (DirEntry already has size/modified/ext, so no backend change). The Rust modules remain the backend
 (feature-gated index) implementation; this TS matcher is the shipping folder-filter implementation — keep

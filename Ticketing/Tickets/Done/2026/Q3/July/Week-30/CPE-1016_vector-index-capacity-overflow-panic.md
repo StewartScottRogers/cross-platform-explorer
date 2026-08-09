@@ -12,7 +12,7 @@ estimate: 45m
 ---
 
 ## Summary
-Found by the 2026-07-24 workshift bug-audit (third wave, binary parsers). `VectorIndex::from_bytes`
+Found by the 2026-07-24 sprint bug-audit (third wave, binary parsers). `VectorIndex::from_bytes`
 (`crates/server/src/vector_index.rs:194-200`) reads `dim` and `count` as raw untrusted `u32` header fields,
 then does `Vec::with_capacity(count)` (line 199) and `Vec::with_capacity(count * dim)` (line 200) **with no
 validation** against the file's remaining size.

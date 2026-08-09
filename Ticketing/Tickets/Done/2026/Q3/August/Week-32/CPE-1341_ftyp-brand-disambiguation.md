@@ -62,4 +62,4 @@ touch a `specta::Type`-exported struct, regenerate `bindings.gen.ts` (they shoul
 enum is internal to the sniffer). Feeds epic CPE-1000.
 
 ## Work Log
-- 2026-08-05 (workshift): Implemented in PR #637 (squash-merged to main as 3425e136). Worker(sonnet); independent Reviewer APPROVE + UAT PASS; all backend/server/sidecar/frontend CI green on 3 OS. GUI-smoke cancelled twice (concurrency-group supersede, not a real failure) — non-blocking on a pure-backend diff; main is unprotected so gauntlet+authoritative-CI is the gate. No new deps; bindings.gen.ts unchanged.
+- 2026-08-05 (sprint): Implemented in PR #637 (squash-merged to main as 3425e136). Worker(sonnet); independent Reviewer APPROVE + UAT PASS; all backend/server/sidecar/frontend CI green on 3 OS. GUI-smoke cancelled twice (concurrency-group supersede, not a real failure) — non-blocking on a pure-backend diff; main is unprotected so gauntlet+authoritative-CI is the gate. No new deps; bindings.gen.ts unchanged.

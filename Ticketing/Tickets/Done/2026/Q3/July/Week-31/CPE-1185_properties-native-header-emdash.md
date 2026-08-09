@@ -23,5 +23,5 @@ space on both sides. One-line cosmetic fix.
 - [ ] Header shows "Native metadata — cpe.tags" with symmetric spacing; `npm run check` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift) from the CPE-717 Visual Critic non-blocking note. Pick up in a
+- 2026-07-31 — Filed by Foreman (sprint) from the CPE-717 Visual Critic non-blocking note. Pick up in a
   polish pass / batch with nearby frontend work.

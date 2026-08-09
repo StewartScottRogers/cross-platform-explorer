@@ -64,6 +64,6 @@ sidecar capture. Design + rationale: `.claude/research-library/entries/cost-dash
       0-denominator, churn on repeated edits); no new deps; theme vars only.
 
 ## Work Log
-2026-07-26 (workshift) — CPE-731 slice a, from the filed plan. User chose full ledger + history; this delivers
+2026-07-26 (sprint) — CPE-731 slice a, from the filed plan. User chose full ledger + history; this delivers
 the fuller per-session live panel with NO new capture (all derivable from existing streams). 731b (sibling
 metrics_journal persistence + flush-on-end) and 731c (cross-session rollup dashboard) follow.

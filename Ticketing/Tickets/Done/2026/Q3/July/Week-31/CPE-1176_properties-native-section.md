@@ -30,7 +30,7 @@ by the same worker on one branch (it consumes CPE-1177's setting key).
 - [ ] `npm run check` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-717). Consumes CPE-1177's `nativeBridgeEnabled`; same worker.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-717). Consumes CPE-1177's `nativeBridgeEnabled`; same worker.
 - 2026-07-31 — Done. Added a bordered, read-only "Native metadata" section to `PropertiesDialog.svelte`,
   gated on `nativeBridgeEnabled` (CPE-1177) and shown only for a single selected entry. Calls
   `nativeTagStoreName()` (`native_tags_name`) for the store display name and a Pull button calls

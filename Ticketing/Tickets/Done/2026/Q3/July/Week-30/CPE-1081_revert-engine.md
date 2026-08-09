@@ -54,11 +54,11 @@ stays green. No unchecked arithmetic; no recursion (iterate the plan).
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as CPE-732's surgical execution layer (distinct from
+2026-07-25 (sprint) — Filed by the Product Manager as CPE-732's surgical execution layer (distinct from
 CPE-735's whole-manifest restore). Parallel-independent. Distinct lib.rs anchor. Uses a real tempdir like the
 snapshot_capture tests (process-unique dir + cleanup).
 
-2026-07-25 (workshift, overnight Worker) — Built `crates/server/src/revert_engine.rs` per the design:
+2026-07-25 (sprint, overnight Worker) — Built `crates/server/src/revert_engine.rs` per the design:
 `RestoreReport {applied, skipped}` + `execute_restore(plan, dest_root, store_dir, checkpoint)`. Registered
 `pub mod revert_engine;` immediately after `pub mod snapshot_capture;` in `lib.rs`. Std-only, no new deps;
 `restore_plan`/`snapshot_capture` left untouched (import-only reuse).

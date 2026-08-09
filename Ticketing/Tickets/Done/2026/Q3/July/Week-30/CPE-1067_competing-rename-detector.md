@@ -51,10 +51,10 @@ Paths are opaque strings compared by whole/segment equality — NEVER `std::path
       (match how `conflict.rs` is built/tested — read the crate); no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-730 slice. Independent module in the sidecar
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-730 slice. Independent module in the sidecar
 ai-console crate; one-line lib.rs `pub mod` at a distinct anchor. Reuses conflict.rs style, doesn't modify it.
 
-2026-07-25 (workshift, Worker) — Implemented `sidecar/ai-console/src/conflict_rename.rs`:
+2026-07-25 (sprint, Worker) — Implemented `sidecar/ai-console/src/conflict_rename.rs`:
 `RenameActivity`, `RenameConflictKind` (Divergence/Collision), `RenameConflict`,
 `detect_rename_conflicts`. Registered `pub mod conflict_rename;` in `lib.rs` immediately after
 `pub mod conflict;`. Mirrored `conflict.rs`'s derive stack exactly — plain `Debug`/`Clone`/`Eq`

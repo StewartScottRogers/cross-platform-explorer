@@ -1,6 +1,6 @@
 # QA Architecture — drive manual testing to zero
 
-This folder is the substrate for the Workshift's **QA Architect** (see `.claude/commands/workshift.md`).
+This folder is the substrate for the Sprint's **QA Architect** (see `.claude/commands/sprint.md`).
 
 **The mission, stated by the user:** *"I would prefer to never test anything manually. The QA Architect
 should eliminate my manual testing over time."* So this is not a per-ticket tester — it is a **standing,
@@ -18,7 +18,7 @@ Two hard rules give the ratchet teeth:
 
 1. **New manual step = new debt, logged immediately.** Any change that ships with "verify this by hand", or
    any UAT that had to be *skipped-and-noted* for a user resource (interactive cross-OS GUI check, a Mac,
-   credentials — escalation #2 in the workshift), **becomes a burndown row** the same shift. Debt is never
+   credentials — escalation #2 in the sprint), **becomes a burndown row** the same shift. Debt is never
    silently absorbed.
 2. **Automated stays automated (no regression).** Once a surface is automated, a CI job / guard test
    **pins** it. A surface can leave the "still-manual" column exactly once; it may never quietly return.
@@ -103,6 +103,6 @@ Grounded in what the repo already runs (extend these before inventing new stacks
 
 ## Ledger note
 
-Log a `qa-architect` role row in `.claude/workshift-metrics/ledger.jsonl` when it runs; its payoff shows
+Log a `qa-architect` role row in `.claude/sprint-metrics/ledger.jsonl` when it runs; its payoff shows
 up indirectly as **fewer `skipped` (user-resource) UAT rows over successive shifts** — that decline *is*
 the MVD burndown, measured.

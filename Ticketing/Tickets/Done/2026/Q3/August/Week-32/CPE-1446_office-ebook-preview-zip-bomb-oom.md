@@ -34,7 +34,7 @@ S / small — one helper + a couple of enumerate-loops in `doc_text.rs`; disjoin
 and thumbnails_stream (lib.rs) work, so parallel-safe.
 
 ## Work Log
-2026-08-07 (workshift) — Fixed. Added `MAX_DECOMPRESSED_PART_BYTES = 8 MiB` in `doc_text.rs` and a
+2026-08-07 (sprint) — Fixed. Added `MAX_DECOMPRESSED_PART_BYTES = 8 MiB` in `doc_text.rs` and a
 `read_entry_capped` helper that wraps every zip-entry reader in `Read::take(MAX_DECOMPRESSED_PART_BYTES)`
 before reading — the actual OOM defense, since it bounds the read regardless of what the entry's
 `size()`/`compressed_size()` metadata claims (a crafted zip can lie about both, so a ratio pre-check

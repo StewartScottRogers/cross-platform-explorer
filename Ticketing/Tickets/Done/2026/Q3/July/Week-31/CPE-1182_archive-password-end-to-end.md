@@ -31,7 +31,7 @@ CPE-1183 by one worker (shared `ContextMenu.svelte` + `doCompress`).
 - [ ] gui-smoke `snap("password-prompt-extract")` + the new menu row; `npm run check` + `npm test` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-705). Dep: CPE-1179. Batched with CPE-1183 (shared files).
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-705). Dep: CPE-1179. Batched with CPE-1183 (shared files).
 - 2026-07-31 — Done. Added `passwordPrompt` state + a render block (`App.svelte`) mirroring `confirm`/
   `ConfirmDialog`'s show/dismiss pattern, using `PasswordPromptDialog` (CPE-1179). `doExtract` and
   `enterArchive` share a new `extractWithPasswordFallback`/`promptForExtractPassword` pair: a plain

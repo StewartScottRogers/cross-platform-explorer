@@ -30,7 +30,7 @@ can't escape the working root. (Actual disk writes happen in the CPE-1188 comman
 - [x] `cargo clippy --all-targets -D warnings` clean (both feature modes).
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-739). Backend phase; built with CPE-1188 by one worker.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-739). Backend phase; built with CPE-1188 by one worker.
 - 2026-07-31 — Built `crates/server/src/macro_run.rs` (new module, `mod` added in `crates/server/src/lib.rs`):
   `resolve(&ActionMacro, &[String], root: &str) -> Result<ResolvedRun, Vec<String>>`. Threads each input's
   path through its steps (a rename/move/convert changes `current`, a tag doesn't), reusing

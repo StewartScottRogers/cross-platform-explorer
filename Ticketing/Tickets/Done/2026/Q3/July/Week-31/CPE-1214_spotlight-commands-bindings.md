@@ -27,7 +27,7 @@ frontend.
       output; clippy both modes clean; `npm run check` green; bindings-drift guard green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-704). Backbone; build first. 1216-1218 depend on the shape.
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-704). Backbone; build first. 1216-1218 depend on the shape.
 - 2026-08-01 — Done. Two thin `#[tauri::command]` dispatchers added to `src-tauri/src/lib.rs`, following the
   existing `_impl`-fn + `spawn_blocking` pattern (same as `board_cards`/`text_stats`):
 

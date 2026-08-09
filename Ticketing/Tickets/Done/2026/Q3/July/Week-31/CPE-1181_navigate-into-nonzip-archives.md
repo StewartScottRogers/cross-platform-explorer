@@ -30,7 +30,7 @@ new `extract_archive_entry_any` from CPE-1180.
 - [ ] `npm run check` + `cd gui-smoke && npm run typecheck` green.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-705). Soft dep on CPE-1180 for leaf-open.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-705). Soft dep on CPE-1180 for leaf-open.
 - 2026-07-31 — Done. Extended `ARCHIVE_EXTS` (App.svelte) to tar/gz/tgz/7z/iso alongside the original
   zip-family set (now `ZIP_FAMILY_EXTS`) so double-click enters them — `archiveChildren` needed no
   changes (already format-agnostic off `readArchiveEntries`). `openInArchive` routes zip-family

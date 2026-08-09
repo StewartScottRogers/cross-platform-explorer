@@ -1,7 +1,7 @@
 # Research Library — the crew's accumulating knowledge base
 
-This folder is the **persistent research corpus** for the Workshift (see
-`.claude/commands/workshift.md`). Researchers are sub-agents that answer genuinely-hard questions and
+This folder is the **persistent research corpus** for the Sprint (see
+`.claude/commands/sprint.md`). Researchers are sub-agents that answer genuinely-hard questions and
 return tradeoff-labelled options — but historically their findings **evaporated** when the sub-agent
 returned. The Library fixes that: every research deliverable is **filed** here by the **Librarian**, so
 the next shift, the Product Manager, and future Researchers can **draw on everything the crew has ever
@@ -57,7 +57,7 @@ sources:     [in-repo, context7, web, worktree-probe]
 
 ## The Librarian's protocol
 
-The **Librarian** is a Workshift crew role (played by the assistant + sub-agents). Three duties:
+The **Librarian** is a Sprint crew role (played by the assistant + sub-agents). Three duties:
 
 1. **Accession ("put it away").** When a Researcher returns, the Librarian normalises the findings into
    an `entries/<slug>.md` file and appends its `INDEX.md` line. **Dedup like the memory system:** if an
@@ -80,5 +80,5 @@ The **Librarian** is a Workshift crew role (played by the assistant + sub-agents
 
 A Library hit is a **researcher dispatch avoided**. When the Librarian answers from the corpus instead
 of a fresh Researcher being spawned, log a `librarian` ledger row (see
-`.claude/workshift-metrics/README.md`) with `outcome: "library-hit"` and `elapsed_s` ≈ the lookup time
+`.claude/sprint-metrics/README.md`) with `outcome: "library-hit"` and `elapsed_s` ≈ the lookup time
 — its `cost_proxy` against the cost of the Researcher it replaced is the Library's measurable ROI.

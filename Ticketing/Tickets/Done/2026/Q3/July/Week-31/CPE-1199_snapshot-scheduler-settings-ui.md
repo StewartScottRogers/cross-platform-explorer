@@ -28,9 +28,9 @@ Reviewer pass focused on the prune no-double-release / no-data-loss invariant + 
 - [ ] Reviewer confirms the auto-prune preserves the manifest-first / no-double-release invariant.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-735). Final phase; hard dep on CPE-1198 + CPE-1196.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-735). Final phase; hard dep on CPE-1198 + CPE-1196.
   Model tier opus (new scheduler infra). Natural point for attended GUI/visual verify.
-- 2026-08-01 — Implemented (Worker, workshift). **Background timer** (`src-tauri/src/lib.rs`): a single
+- 2026-08-01 — Implemented (Worker, sprint). **Background timer** (`src-tauri/src/lib.rs`): a single
   dedicated `cpe-snapshot-scheduler` thread wakes every 60s (`SNAPSHOT_SCHEDULE_TICK`) and runs
   `snapshot_schedule_tick` — a pure-over-injected-`ServerCtx`+clock helper that **early-returns before
   any capture/disk write when no rule is enabled** (off-means-off, verified by construction), else calls

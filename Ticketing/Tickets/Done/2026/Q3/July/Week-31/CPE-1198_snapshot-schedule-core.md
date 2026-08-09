@@ -43,7 +43,7 @@ Part of CPE-735. The headless core of the periodic-snapshot scheduler, decoupled
   `bindings.gen.ts` regenerated (`ScheduleRule`/`RunDueOutcome` types).
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-735). Backend batch (with 1196 + 1197-backend), one worker
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-735). Backend batch (with 1196 + 1197-backend), one worker
   sequential. Consumes 1196's retention apply (soft). Prereq for CPE-1199.
 - 2026-07-31 — Implemented on branch `cpe-1196-1198-snapshot-backend`. `cargo test -p cpe-server` green
   (10 new `snapshot_schedule::` tests: rule CRUD round-trip + replace + corrupt-tolerant, `due()`

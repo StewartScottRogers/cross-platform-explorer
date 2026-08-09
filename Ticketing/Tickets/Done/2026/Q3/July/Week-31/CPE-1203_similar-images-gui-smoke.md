@@ -23,8 +23,8 @@ Part of CPE-997 (after CPE-1202). Pin the similar-images review dialog in gui-sm
       one group). `cd gui-smoke && npm run typecheck` clean.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Depends on CPE-1202; can fold into 1202's DoD.
-- 2026-08-01 — Done (Worker, workshift). Added `gui-smoke/specs/similar-images.smoke.ts` + a
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-997). Depends on CPE-1202; can fold into 1202's DoD.
+- 2026-08-01 — Done (Worker, sprint). Added `gui-smoke/specs/similar-images.smoke.ts` + a
   `wdio.conf.ts#seedSimilarImagesFixture` seeder writing two near-duplicate gradient PNGs (`CPE-1203-scene-a
   .png` 240×160 and `scene-b.png` 120×80 — the same horizontal grayscale gradient at two sizes, a genuine
   dHash near-duplicate pair; a new `gradientPng()` helper built on the existing PNG chunk/CRC/deflate

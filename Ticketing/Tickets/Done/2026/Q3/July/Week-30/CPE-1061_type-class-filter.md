@@ -51,10 +51,10 @@ Unknown ext → `Other`. Case-insensitive on ext. `type:image,video` parses to t
       `--features index` builds; no new deps. (If reusing `file_type`'s enum, note it in the work log.)
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-703 DSL slice. Independent module; grep
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-703 DSL slice. Independent module; grep
 `file_type.rs` before defining a class enum. One-line lib.rs `pub mod` at a distinct anchor.
 
-2026-07-25 (workshift Worker) — Built end-to-end in worktree, branch `cpe-1061-type-class`, PR opened.
+2026-07-25 (sprint Worker) — Built end-to-end in worktree, branch `cpe-1061-type-class`, PR opened.
 - **Redundancy check:** grepped `crates/server/src/file_type.rs` — its `FileType` enum is magic-byte
   content sniffing (`Png`/`Jpeg`/.../`Mp4`, from `sniff(bytes)`), a different purpose entirely (it answers
   "what does this file's content actually look like", not "what semantic bucket does this extension fall

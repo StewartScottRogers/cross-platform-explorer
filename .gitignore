@@ -34,10 +34,10 @@ updater.pw
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
 
-# Workshift raw per-agent metrics (transient/noisy; the distilled history.md IS committed)
-.claude/workshift-metrics/ledger.jsonl
-# Workshift concurrency lock (per-machine, transient; never committed)
-.claude/workshift-metrics/WORKSHIFT-LOCK
+# Sprint raw per-agent metrics (transient/noisy; the distilled history.md IS committed)
+.claude/sprint-metrics/ledger.jsonl
+# Sprint concurrency lock (per-machine, transient; never committed)
+.claude/sprint-metrics/SPRINT-LOCK
 
 # Generated catalog bundle (produced by CI / catalog-sign)
 catalog-out/
@@ -57,4 +57,4 @@ native-deps/
 .sandbox/
 *.pfx
 *.p12
-.claude/workshift-metrics/BATCH-COUNTER
+.claude/sprint-metrics/BATCH-COUNTER

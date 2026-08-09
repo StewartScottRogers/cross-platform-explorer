@@ -47,4 +47,4 @@ Out: iSCSI (block), Git-over-SSH (VCS), MEGA (proprietary).
 OS-mount bridge (F4) · CPE-1501 capability+auth extension (F5).
 **Protocols (after F1–F3):** CPE-1502 FTP ⭐first · CPE-1503 S3 · CPE-1504 SMB · CPE-1505 NFSv3 · CPE-1506 cloud-OAuth (last).
 **Suggested order:** F0-reconcile(docs) → F1 → F2 → F3 → *(SFTP+WebDAV milestone)* → F4(SMB via OS-mount) → F5 →
-FTP → S3 → SMB-inapp → NFS → cloud. Most backend halves are headless-buildable (good workshift batches).
+FTP → S3 → SMB-inapp → NFS → cloud. Most backend halves are headless-buildable (good sprint batches).

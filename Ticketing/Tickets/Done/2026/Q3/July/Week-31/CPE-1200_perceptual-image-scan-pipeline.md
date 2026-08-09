@@ -32,7 +32,7 @@ exact-duplicate `stream_duplicates`).
 - [ ] `cargo clippy --all-targets -D warnings` clean (both feature modes).
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-997). Foundation; built with CPE-1201 by one worker.
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-997). Foundation; built with CPE-1201 by one worker.
 - 2026-08-01 — Built `crates/server/src/image_similarity.rs` (+ `mod` line in `crates/server/src/lib.rs`).
   Recursive walk mirrors `duplicates::stream_duplicates` exactly (skip dot/symlinked dirs, cap at
   `SIM_MAX_FILES = 50_000` → `truncated`, skip-on-error), filtered to a decodable-image extension set,

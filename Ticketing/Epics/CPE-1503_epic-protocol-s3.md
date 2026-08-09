@@ -11,7 +11,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Network Filesharing program (parent CPE-616). 2nd net-new protocol.** Filed 2026-08-08 (workshift PM,
+> **Network Filesharing program (parent CPE-616). 2nd net-new protocol.** Filed 2026-08-08 (sprint PM,
 > Network research). Dormant. **Overlaps CPE-616's own "cloud half" (its phase 4) — this IS that phase.**
 
 ## Why (high leverage — one provider, many backends)

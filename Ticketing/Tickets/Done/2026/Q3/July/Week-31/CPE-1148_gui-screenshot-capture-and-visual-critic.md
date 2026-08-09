@@ -1,6 +1,6 @@
 ---
 id: CPE-1148
-title: "Workshift visual self-check: gui-smoke screenshot capture + a Visual-Critic role that judges them"
+title: "Sprint visual self-check: gui-smoke screenshot capture + a Visual-Critic role that judges them"
 type: feature
 component: Testing
 priority: high
@@ -13,9 +13,9 @@ epic: CPE-579
 
 ## Summary
 User-requested (2026-07-30). GUI-verify keeps bouncing to the user for *visual* judgments (button placement,
-icon choice, clipping, alignment) because the workshift has no way to *see* its own GUI work. Give it eyes:
+icon choice, clipping, alignment) because the sprint has no way to *see* its own GUI work. Give it eyes:
 **(A)** the `gui-smoke` harness captures **screenshots** of the real built app at each surface/state, and
-**(B)** a new **Visual Critic** workshift role reads those screenshots and judges the work against the design
+**(B)** a new **Visual Critic** sprint role reads those screenshots and judges the work against the design
 conventions + good taste — the gauntlet's **visual leg** (Reviewer = code, UAT = behaviour, **Critic =
 looks/feel**) — so the user is asked **minimally** (only genuine subjective taste, or things a screenshot
 can't show).
@@ -31,8 +31,8 @@ can't show).
   how a worker captures the surface it changed, and where the Critic finds the PNGs.
 - `npm run check` green; running the real gui-smoke produces the PNGs; the `.screenshots/` dir is gitignored.
 
-## Part B — the Visual Critic role (process; Foreman authors in the workshift skill + a memory)
-*(Not app code — a change to `.claude/commands/workshift.md` + a memory. Done by the Foreman alongside Part A;
+## Part B — the Visual Critic role (process; Foreman authors in the sprint skill + a memory)
+*(Not app code — a change to `.claude/commands/sprint.md` + a memory. Done by the Foreman alongside Part A;
 listed here so the whole feature is one tracked unit.)*
 - Add **Visual Critic** to the crew (per-ticket, for GUI-affecting tickets): an independent sub-agent that
   reads the gui-smoke screenshots + the design standards (MENUS.md, TABS.md, pill/tick-tack reflow rules,
@@ -53,7 +53,7 @@ listed here so the whole feature is one tracked unit.)*
 - [x] `gui-smoke` has a `snap(name)` helper; a full run writes PNGs of the key surfaces to a gitignored
       `.screenshots/` dir; existing specs still pass; `npm run check` green.
 - [x] A short doc explains how a worker/critic captures + finds screenshots.
-- [x] `.claude/commands/workshift.md` gains the **Visual Critic** role in the crew table, the per-ticket
+- [x] `.claude/commands/sprint.md` gains the **Visual Critic** role in the crew table, the per-ticket
       gauntlet (3rd visual leg), and the minimal-escalation policy.
 - [x] A memory records the screenshots + Visual-Critic standard.
 - [x] (Nice-to-have) first real exercise proven end-to-end: the harness produced all 6 PNGs on a real run
@@ -69,8 +69,8 @@ listed here so the whole feature is one tracked unit.)*
   legitimately reached the user.
 
 ## Work Log
-2026-07-30 (workshift, Worker) — Implemented Part A only (screenshot-capture infra); Part B (the Visual
-Critic role in `.claude/commands/workshift.md`) is the Foreman's, still pending — ticket left in Backlog.
+2026-07-30 (sprint, Worker) — Implemented Part A only (screenshot-capture infra); Part B (the Visual
+Critic role in `.claude/commands/sprint.md`) is the Foreman's, still pending — ticket left in Backlog.
 
 - Added `gui-smoke/lib/snap.ts`: `snap(name)` creates `gui-smoke/.screenshots/` (if missing) and calls
   `browser.saveScreenshot(...)` to write `<name>.png` there. Deliberately swallows its own errors — a
@@ -109,9 +109,9 @@ Verified:
 Landed as branch `cpe-1148a-gui-screenshots`, PR opened against `main`. Part B (Visual Critic role +
 memory) is the Foreman's separate change; this ticket stays in Backlog until both parts land.
 
-2026-07-30 (workshift, Foreman) — **Part B done; ticket closed (both parts landed).**
+2026-07-30 (sprint, Foreman) — **Part B done; ticket closed (both parts landed).**
 - Part B (already committed to main before Part A): added the **Visual Critic** row to the crew table in
-  `.claude/commands/workshift.md` (independent, per-ticket, GUI-only; reads the gui-smoke screenshots and
+  `.claude/commands/sprint.md` (independent, per-ticket, GUI-only; reads the gui-smoke screenshots and
   judges the look against `docs/design/MENUS.md`, `TABS.md`, pill/tick-tack reflow, the light-theme palette,
   and alignment/spacing; returns `VISUAL PASS` / `VISUAL CHANGES`), wired it into the per-ticket pipeline as
   the gauntlet's 3rd (visual) leg for GUI changes, made a `VISUAL PASS` a merge-gate condition for GUI

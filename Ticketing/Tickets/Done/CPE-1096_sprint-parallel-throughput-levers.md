@@ -1,6 +1,6 @@
 ---
 id: CPE-1096
-title: Workshift — lift parallel-throughput ceilings (ready bench, measured parallelism, batch-merge)
+title: Sprint — lift parallel-throughput ceilings (ready bench, measured parallelism, batch-merge)
 type: Task
 status: Done
 priority: Medium
@@ -13,7 +13,7 @@ closed: 2026-07-26
 
 ## Summary
 
-The workshift skill (`.claude/commands/workshift.md`) capped total useful throughput at three
+The sprint skill (`.claude/commands/sprint.md`) capped total useful throughput at three
 distinct ceilings, and its defaults addressed none of them explicitly: (1) the serial merge lock +
 single Foreman attention, (2) machine hardware — concurrent `cargo build`s thrashing the box, and
 (3) the supply of *ready, independent* tickets to parallelise over. This ticket revises the skill's
@@ -36,7 +36,7 @@ metrics ledger can drive.
 
 ## Resolution
 
-Edited `.claude/commands/workshift.md`:
+Edited `.claude/commands/sprint.md`:
 
 - **Capacity & throughput → At each dispatch:** added the **"Keep a deep ready bench"** bullet and
   rewrote **"Right-size parallelism"** into **"Right-size parallelism to *measured* capacity"** with a
@@ -52,10 +52,10 @@ are data-driven rather than fixed guesses.
 
 ## Work Log
 
-2026-07-26 — Filed from a live design discussion on increasing workshift parallel throughput.
+2026-07-26 — Filed from a live design discussion on increasing sprint parallel throughput.
 2026-07-26 — Framed the three throughput ceilings (serial merge / hardware / work supply); user asked
              to install concrete edits addressing each.
-2026-07-26 — Applied three edits to `.claude/commands/workshift.md`; wrapped in this ticket at user
+2026-07-26 — Applied three edits to `.claude/commands/sprint.md`; wrapped in this ticket at user
              request. Closed Done.
 
 ## Notes

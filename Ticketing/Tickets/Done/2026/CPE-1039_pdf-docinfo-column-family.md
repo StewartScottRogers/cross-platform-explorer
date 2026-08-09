@@ -42,11 +42,11 @@ Wire into `crates/server/src/column_extract.rs`:
       **both** feature modes (default and `--features specta`).
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched. Completes the value chain for CPE-1036 (`read_pdf`) by making
+2026-07-25 (sprint) — Filed + dispatched. Completes the value chain for CPE-1036 (`read_pdf`) by making
 it reachable/sortable as a column, using the same per-family-extractor pattern as `audio_cell`
 (precedent: DocPages/VideoDuration columns already ship headlessly). The column-picker UI stays attended.
 
-2026-07-25 (workshift) — **DONE, merged PR #356.** New `doc_info_column` module (`DocInfoColumn` +
+2026-07-25 (sprint) — **DONE, merged PR #356.** New `doc_info_column` module (`DocInfoColumn` +
 `doc_info_cell`) + `MetaColumn::DocInfo` wired into `column_extract` (gated by `is_doc_ext`, dispatched
 via `read_pdf`) — PDFs now expose sortable Title/Author/Subject/Keywords/Creator/Producer/Date columns,
 mirroring the audio-column pattern. Independently reviewed (APPROVE — key() strings verified verbatim

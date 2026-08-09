@@ -1,8 +1,8 @@
-# Workshift Checkpoint
+# Sprint Checkpoint
 
-## RUN 2026-08-08 (CLI, "run 12 workshifts" → "keep going") — WRAPPED: 11 PRs merged over 2 batches, security surface comprehensively hardened, headless well genuinely dry
+## RUN 2026-08-08 (CLI, "run 12 sprints" → "keep going") — WRAPPED: 11 PRs merged over 2 batches, security surface comprehensively hardened, headless well genuinely dry
 **State:** `main` @ origin `f788e6c5` (clean, Backlog EMPTY, Doing EMPTY). Lock released, loop stopped. A CONCURRENT
-desktop process is building the `workshifts_*` skill family (CPE-1476) — its untracked WIP + IDs were left alone.
+desktop process is building the `sprints_*` skill family (CPE-1476) — its untracked WIP + IDs were left alone.
 
 ### Shipped this run (11 PRs / ~17 tickets — all backend security/hardening, 0 escaped defects)
 **Batch 1 — file-reader security (7 PRs):** SVG stack-overflow DoS class CLOSED (CPE-1437 parked→CPE-1444 #712 +
@@ -27,7 +27,7 @@ backend-only, no new user-facing surface, but a rebuild lets them be exercised),
 (CPE-002), (d) a live agent session (CPE-1098), (e) two-host network E2E (CPE-819/820), or (f) a fresh direction.
 ONE possible remaining headless audit if desired: the AI-Console `sidecar/ai-console/src/launcher.html` agent-output
 `innerHTML` rendering (a DIFFERENT threat model than file-preview — agent output, not untrusted files; the frontend
-auditor flagged but did not trace it). Low-confidence yield. Coordinate with the concurrent workshifts_* process.
+auditor flagged but did not trace it). Low-confidence yield. Coordinate with the concurrent sprints_* process.
 
 Tuned defaults: opus adversarial Sec-Auditor gates every untrusted-parser/traversal diff (sonnet reviewers missed
 the real bypass every time); reject-nested-input over predict-recursion; validate-before-mutate for fs sinks; keep

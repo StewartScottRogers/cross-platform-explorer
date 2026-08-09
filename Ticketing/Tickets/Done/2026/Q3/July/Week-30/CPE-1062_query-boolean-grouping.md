@@ -50,11 +50,11 @@ pub fn eval(node: &Node, leaf: &impl Fn(&str) -> bool) -> bool;
       `--features index` builds; no new deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as the CPE-703 DSL slice that turns the filters into a
+2026-07-25 (sprint) — Filed by the Product Manager as the CPE-703 DSL slice that turns the filters into a
 real query language. Independent of the sibling filter modules (stub leaf matcher). One-line lib.rs `pub mod`
 at a distinct anchor.
 
-2026-07-25 (workshift Worker, overnight, unattended) — Implemented `crates/server/src/query_group.rs`:
+2026-07-25 (sprint Worker, overnight, unattended) — Implemented `crates/server/src/query_group.rs`:
 recursive-descent parser (`lex` → `parse_or` → `parse_and` → `parse_not` → `parse_atom`) producing
 `Node::{And,Or,Not,Leaf}`, plus `eval` against a caller-supplied leaf predicate. Registered
 `pub mod query_group;` in `lib.rs` immediately after `pub mod simhash;` per the anchor instruction.
@@ -92,7 +92,7 @@ Assumptions (none blocking, logged for the user):
 
 No blockers. Branch `cpe-1062-query-group`, PR opened targeting `main`.
 
-2026-07-25 (workshift Worker, PR #380 review follow-up) — Reviewer found a real bug in UAT: `parse`'s
+2026-07-25 (sprint Worker, PR #380 review follow-up) — Reviewer found a real bug in UAT: `parse`'s
 paren-recursion and NOT-prefix recursion had no depth bound, so adversarial input (e.g.
 `"(".repeat(10_000)`) triggered an uncatchable `STATUS_STACK_OVERFLOW` in a release build — worse than a
 panic, and a violation of this module's own "tolerant recovery, never panics" contract. Fixed on the same

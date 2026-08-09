@@ -70,7 +70,7 @@ bindings. Backend, `cargo test` + specta export — no GUI in this ticket.
 - [ ] clippy `--all-targets -- -D warnings` clean (default AND `--features index`); no new deps.
 
 ## Work Log
-2026-07-26 (workshift, GUI) — Filed by the Foreman as the backend enablement for the code-preview upgrade
+2026-07-26 (sprint, GUI) — Filed by the Foreman as the backend enablement for the code-preview upgrade
 (GUI #1). The five code-intel modules exist but reach nothing; this one aggregate command + regenerated
 bindings unblock the frontend tickets (CPE-1090 breadcrumb/jump, CPE-1091 minimap/folds/indent).
 

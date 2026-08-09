@@ -61,12 +61,12 @@ are FINE here (crates/server, not sidecar) — but this fn returns `Vec<u8>`, no
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed by the Product Manager as the CPE-723 transform engine (CPE-940 built only the
+2026-07-26 (sprint) — Filed by the Product Manager as the CPE-723 transform engine (CPE-940 built only the
 plan). Reuses `batch_media::MediaOp` + the already-vendored `image`/`kamadak-exif`. CPE-1084 (execute_plan
 runner) depends on this. Kept as one cohesive module (all ops fold into one `apply_ops`) to avoid a shared-
 function merge conflict.
 
-2026-07-26 (workshift Worker, overnight) — Implemented `crates/server/src/batch_transform.rs::apply_ops`,
+2026-07-26 (sprint Worker, overnight) — Implemented `crates/server/src/batch_transform.rs::apply_ops`,
 registered `pub mod batch_transform;` in `lib.rs` immediately after `batch_media`. Reused
 `batch_media::MediaOp` as-is (Resize/Convert/Rotate/Flip/StripMetadata/Rename — did not touch the enum).
 `Rename` is a no-op in this fn (it's a filename-only concern the planner already owns; this fn only ever

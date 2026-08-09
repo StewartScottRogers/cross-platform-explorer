@@ -43,5 +43,5 @@ action, not a panel tab (per the vetted scope). Surface the built-but-unsurfaced
 - [ ] `npm run check` clean + full `npm run test:unit` green.
 
 ## Work Log
-2026-08-05 (workshift run 2) — Filed by the Foreman. Slice 4 of the File-Health feature (single-archive,
+2026-08-05 (sprint run 2) — Filed by the Foreman. Slice 4 of the File-Health feature (single-archive,
 right-click). Real GUI verification batched with the panel's build pass.

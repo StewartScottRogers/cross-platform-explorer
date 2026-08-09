@@ -11,14 +11,14 @@ created: 2026-07-18
 closed:
 ---
 
-> **CLOSED 2026-07-31** (workshift). GUI remainder shipped: CPE-1175 (native-tags column, #491), CPE-1176 +
+> **CLOSED 2026-07-31** (sprint). GUI remainder shipped: CPE-1175 (native-tags column, #491), CPE-1176 +
 > CPE-1177 (Properties native section + opt-in toggle + TagEditor gating, #492), CPE-1178 (gui-smoke pin +
 > docs page, #493). All merged, full gauntlet green (Reviewer + UAT + **Visual Critic VISUAL PASS** on a real
 > WebView2 gui-smoke capture of the Properties native section). Only remainder is the **Mac-physical Finder
 > byte-compat verification** (CPE-829, Tier-C / MVD row 5, attended — needs a Mac). Non-blocking polish noted:
 > add a space before the em dash in the "Native metadata — cpe.tags" header (to file as a small follow-up).
 >
-> **GUI remainder activated 2026-07-31** (workshift, user directed "build all user-gated epics"). Backend +
+> **GUI remainder activated 2026-07-31** (sprint, user directed "build all user-gated epics"). Backend +
 > Tauri commands + specta bindings all landed already; remaining DoD is the attended GUI: Properties surfacing,
 > a native-tags column, and an opt-in toggle. Decomposed into CPE-1175 (native-tags column), CPE-1176
 > (Properties native section), CPE-1177 (opt-in toggle + gate TagEditor controls), CPE-1178 (gui-smoke pin +

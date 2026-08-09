@@ -51,10 +51,10 @@ scope of allow-root `/repo`. Normalize `\`→`/`; no `std::path`, no `#[cfg]` as
       deps.
 
 ## Work Log
-2026-07-25 (workshift) — Filed by the Product Manager as a CPE-729 pure-core slice. Held in Backlog: depends on
+2026-07-25 (sprint) — Filed by the Product Manager as a CPE-729 pure-core slice. Held in Backlog: depends on
 CPE-1075 (`gate_ignore`) landing first. CPE-1077 depends on this module's `ScopeVerdict`.
 
-2026-07-25 (workshift, Worker) — Built `sidecar/ai-console/src/gate_scope.rs`: `FsOp`/`FsAction`/
+2026-07-25 (sprint, Worker) — Built `sidecar/ai-console/src/gate_scope.rs`: `FsOp`/`FsAction`/
 `ScopePolicy`/`ScopeVerdict`/`evaluate_scope`, registered `pub mod gate_scope;` immediately after
 `pub mod gate_ignore;` in `lib.rs`. Reuses `gate_ignore::{IgnoreRule, matches}` unmodified for deny/secret
 matching; `gate_ignore.rs` itself was not touched.

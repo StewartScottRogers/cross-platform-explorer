@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, competitive-landscape pass — TUI survey; see research-library
+> **Filed 2026-08-08 (sprint PM, competitive-landscape pass — TUI survey; see research-library
 > `competitive-file-managers-2026-08-08`).** Dormant brief — decompose on `/ticketing-epic activate CPE-1487`.
 
 ## Why (THE biggest keyboard-first differentiator TUIs have that CPE lacks)

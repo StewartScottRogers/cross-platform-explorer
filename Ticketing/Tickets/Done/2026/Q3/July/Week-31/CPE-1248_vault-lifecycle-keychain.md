@@ -75,7 +75,7 @@ security-review doc (CPE-1251).
 Keep the destructive "shred original" OFF by default and gated behind the verify-first invariant — the
 confirm UX comes in CPE-1250, but the backend must be safe even if called directly.
 
-## Done 2026-08-01 (workshift) — merged #551 @ aa442900
+## Done 2026-08-01 (sprint) — merged #551 @ aa442900
 VaultRegistry (create/unlock/lock/status/is_vault) in cpe-server behind a SecretAccess keychain seam
 (real KeyringBackend on keyring v3, mirroring sidecar) + 7 thin async spawn_blocking Tauri commands +
 VaultStatus specta type (bindings regenerated). Verify-before-shred invariant enforced. Full gauntlet:

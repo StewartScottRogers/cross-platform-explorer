@@ -11,7 +11,7 @@ epic: CPE-1002
 ---
 
 ## Summary
-Workshift-scouted (2026-07-31). `crates/server` has grown a large family of hand-rolled byte parsers
+Sprint-scouted (2026-07-31). `crates/server` has grown a large family of hand-rolled byte parsers
 (magic-byte type detection, ID3/FLAC/OGG/EXIF/PDF/MP4 metadata read+write codecs, column extractors, text
 encoding, perceptual hash, …). Each module already documents and unit-tests its own "never panics on
 malformed input" contract individually. This ticket adds the missing **cross-cutting** proof: one

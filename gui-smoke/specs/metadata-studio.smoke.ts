@@ -6,7 +6,7 @@
 // asserts the two seeded ID3 text frames render as EDITABLE fields (real `input.v` elements bound to
 // real values, not just static text) over a real `metadata_read` / `metadata_writable` IPC round trip.
 //
-// This is the workshift QA end-to-end proof this dialog never had: MetadataStudioDialog.test.ts already
+// This is the sprint QA end-to-end proof this dialog never had: MetadataStudioDialog.test.ts already
 // covers the checkpoint-before-save / batch-op / revert logic in isolation with a mocked `invoke`, but
 // never against the real backend codec (crates/server/src/media_meta.rs's `read_id3v2`/`is_writable`).
 //

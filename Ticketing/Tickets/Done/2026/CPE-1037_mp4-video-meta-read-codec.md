@@ -42,11 +42,11 @@ New module `crates/server/src/video_meta_read.rs`:
       **both** feature modes (default and `--features specta`).
 
 ## Work Log
-2026-07-25 (workshift) — Filed + dispatched. Disjoint new file (`video_meta_read.rs`) so it runs safely
+2026-07-25 (sprint) — Filed + dispatched. Disjoint new file (`video_meta_read.rs`) so it runs safely
 in parallel with CPE-1035 (`media_meta_write.rs`) and CPE-1036 (`read_pdf` in `media_meta_read.rs`).
 Completes the read arc: audio (ID3/FLAC/OGG) + images (EXIF) + documents (PDF) + video (MP4/MOV).
 
-2026-07-25 (workshift) — **DONE, merged PR #353.** `video_meta_read::read_mp4` walks the ISO-BMFF box
+2026-07-25 (sprint) — **DONE, merged PR #353.** `video_meta_read::read_mp4` walks the ISO-BMFF box
 tree (moov▸udta▸meta▸ilst) extracting iTunes-style tags (Title/Artist/Album/Year/Comment/Genre/Composer/
 Encoder/Copyright) as `MetaField{group:"video",editable:false}`; bounds-clamped, depth-capped,
 never-panics, `meta` version/flags prelude handled defensively. 12 tests + independent sonnet review

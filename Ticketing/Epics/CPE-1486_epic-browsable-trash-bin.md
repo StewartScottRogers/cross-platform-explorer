@@ -10,7 +10,7 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (workshift PM, from the superfile reference pass — see [[superfile-pm-reference]]).**
+> **Filed 2026-08-08 (sprint PM, from the superfile reference pass — see [[superfile-pm-reference]]).**
 > **Dormant brief — not decomposed until activated** via `/ticketing-epic activate CPE-1486`.
 
 ## Why

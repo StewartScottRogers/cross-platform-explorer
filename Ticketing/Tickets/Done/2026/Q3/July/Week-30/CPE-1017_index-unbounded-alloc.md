@@ -12,7 +12,7 @@ estimate: 30m
 ---
 
 ## Summary
-Found by the 2026-07-24 workshift bug-audit (third wave). `Index::from_bytes`
+Found by the 2026-07-24 sprint bug-audit (third wave). `Index::from_bytes`
 (`crates/server/src/index.rs:550-560`) reads `name_count` and `entry_count` as raw untrusted `u32` fields off
 disk and immediately `Vec::with_capacity(name_count as usize)` / `Vec::with_capacity(entry_count as usize)`
 (lines 551, 560) with **no** sanity check against the file's remaining size, before reading a single name/entry.

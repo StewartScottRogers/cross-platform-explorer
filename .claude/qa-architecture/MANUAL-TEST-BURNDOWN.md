@@ -72,7 +72,7 @@ numbered Ledger, that's a separate reorganisation, not part of this ticket's sco
   logic) — the CPE-1093 "real image-transform output" residual is now largely covered at the integration level;
   only pure pixel/theme *feel* on the installed build remains human debt.
 
-### Workshift 2026-07-26 (resume) — new manual debt from merged PRs
+### Sprint 2026-07-26 (resume) — new manual debt from merged PRs
 | CPE-1114 | Cost History tab: SVG over-time bar-chart geometry + hover tooltips; light/dark theme of `.hd-stat`/`.hd-bar`; drawer at 340px/90vw reflow; long agent/model name ellipsis+title; a real multi-week `history.jsonl` round-tripping into believable numbers | **logic fully automated** (`agentMetricsRollup.test.ts` 14 cases assert real values; AgentTimeline History-tab component behaviour, pull-only, empty/error states covered) **+ render pinned by `gui-smoke` (CPE-1130):** `wdio.conf.ts#seedHistoryFixture` seeds a synthetic 3-row `history.jsonl` straight into the real app-data dir the built binary reads from; `specs/cost-history.smoke.ts` seeds a synthetic watched-session announcement (test-mode-only hook) to reach the drawer, opens the History tab, and asserts `.hd-bar` (over-time chart), `.hd-totals`/`.hd-stat` (totals strip), and a `.hd-table` row (by-model/by-agent) all render non-empty on a real `tauri build` binary — non-blocking CI smoke signal (`continue-on-error`, CPE-1048), not a hard gate; exact pixel/theme colour fidelity still worth an occasional human glance (same framing as the CPE-1090/1091 rows above) | **automated — pinned by `gui-smoke` (CPE-1130; non-blocking per CPE-1048)** | 2026-07-29 |
 
 - 2026-07-30 16:31 USMST — **CPE-1126 revert-safety GUI verify** (owner: user). The Agent-Watch restore panel + checkpoint markers are code-complete + reviewer-APPROVED (PR #466), but "confirm-to-revert is safe/clear" + "markers land right" need a user-present build→run. Blocker to full headless coverage: gui-smoke cannot render a checkpoint marker without a `checkpoint_create` test-mode seam (see CPE-1126 P2). Automating that seam would retire this row.
@@ -87,7 +87,7 @@ locally 2026-08-05. Advances MVD rows 1/3 (headless GUI + visual). The Visual Cr
 screenshots and caught 2 real layout defects (mismatch badge overflow, orphan missing badge), both fixed
 (CPE-1319/1321) — the CPE-1148 Visual-Critic loop working end-to-end without a user round-trip.
 
-### Workshift 2026-08-05 — GUI batch (CPE-1323/1324 + Metadata Studio 1325-1328 + Declutter 1329)
+### Sprint 2026-08-05 — GUI batch (CPE-1323/1324 + Metadata Studio 1325-1328 + Declutter 1329)
 Seven GUI tickets shipped across 4 epics. QA/coverage changes:
 - **File-Health exclude UI (CPE-1323) + near-dup cleanup (CPE-1324):** render-covered by the existing
   `file-health.smoke.ts` / `near-duplicates.smoke.ts` specs and **Visual-Critic judged VISUAL PASS** on a real
@@ -107,7 +107,7 @@ Seven GUI tickets shipped across 4 epics. QA/coverage changes:
   page. Not a CI failure (no new Section enum added), but a `src/docs` page for the new Tools features is owed
   per the self-maintaining-docs rule — worth a small follow-up ticket.
 
-### Workshift 2026-08-05 (cont.) — coverage debt CLOSED (CPE-1331/1332) + backend 3D reader (CPE-1333)
+### Sprint 2026-08-05 (cont.) — coverage debt CLOSED (CPE-1331/1332) + backend 3D reader (CPE-1333)
 - ✅ **Metadata Studio render/visual gap RETIRED:** `gui-smoke/specs/metadata-studio.smoke.ts` (CPE-1331) now drives
   a real `tauri build`, seeds a byte-accurate ID3v2.3 mp3, opens the Studio via the palette, and asserts the
   editable Title/Artist inputs render with correct values over live IPC. **Visual Critic judged it VISUAL PASS.**
@@ -161,7 +161,7 @@ needs a real `tauri build --no-bundle` + `tauri-driver` session (this worktree's
 one) — it will execute for the first time in CI.
 
 ---
-### 2026-08-08 (workshift) — gui-smoke mouse-CDP harness breakage FIXED (partial ratchet)
+### 2026-08-08 (sprint) — gui-smoke mouse-CDP harness breakage FIXED (partial ratchet)
 **Surface:** the whole `gui-smoke` Linux leg (the Visual Critic/UAT automated-GUI substrate) was RED on every
 `main` run — `mouse.ts` was CDP-only and threw on WebKitWebDriver, failing all mouse specs → 20-min timeout.
 **Fixed (CPE-1479, PR #722 merged aed89022):** W3C-Actions fallback when CDP is absent — 0 CDP errors, mouse

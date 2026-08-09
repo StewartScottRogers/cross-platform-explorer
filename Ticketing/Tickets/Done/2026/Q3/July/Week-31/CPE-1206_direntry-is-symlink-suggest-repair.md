@@ -28,7 +28,7 @@ flag links, and `links::suggest_repair` (broken-link basename search) is a pure 
 - [x] clippy clean both modes; bindings regenerated (drift guard green); `npm run check` green.
 
 ## Work Log
-- 2026-08-01 — Filed by Foreman (workshift, epic CPE-715). Foundation; land first (1208/1209 depend on it).
+- 2026-08-01 — Filed by Foreman (sprint, epic CPE-715). Foundation; land first (1208/1209 depend on it).
 - 2026-08-01 — Implemented (Worker). **`is_symlink` on `DirEntry`** (`crates/server/src/model.rs`): new
   required `bool` field, doc-commented that it's sourced without an extra syscall. Two construction sites:
   - `crates/server/src/listing.rs::dir_entry_from` (the hot `list_dir`/`list_dir_stream` walker) — sourced

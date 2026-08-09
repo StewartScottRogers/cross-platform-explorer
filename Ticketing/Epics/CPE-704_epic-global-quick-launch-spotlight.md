@@ -40,7 +40,7 @@ system-level tool, and it is the natural front-end for the instant index ([[CPE-
 pure fuzzy-match/ranking core the overlay lists results with. Remaining: the system-wide hotkey, the
 lightweight overlay window, and feeding real files/folders/actions in.
 
-## Closed 2026-08-01 (workshift) — DoD met
+## Closed 2026-08-01 (sprint) — DoD met
 Re-activated and finished this shift. The remaining DoD (global hotkey + overlay window + real
 file/action feeding) is built and merged:
 - **CPE-1214** — `spotlight_search` + `spotlight_frecent` backbone commands + typed bindings.

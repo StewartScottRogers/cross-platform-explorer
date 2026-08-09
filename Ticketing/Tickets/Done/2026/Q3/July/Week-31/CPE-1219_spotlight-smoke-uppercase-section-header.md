@@ -28,9 +28,9 @@ Compare case-insensitively: lower-case the collected label texts and assert `.to
 - The assertion still genuinely verifies a Files section header renders (not weakened to a no-op).
 
 ## Work Log
-2026-08-01 (workshift) — Foreman fix: case-insensitive section-header check. Caught by the live
+2026-08-01 (sprint) — Foreman fix: case-insensitive section-header check. Caught by the live
 epic-704 Visual Critic screenshot run (the assertion blocked screenshot capture).
-2026-08-01 (workshift) — Second assertion also fixed in the same spec: the matched-run highlight
+2026-08-01 (sprint) — Second assertion also fixed in the same spec: the matched-run highlight
 check assumed the FIRST <mark class="sp-hl"> spelled the whole query, but fuzzy matches split into
 multiple non-contiguous runs, so the first run was just 'm'. Now collects ALL runs in the row and
 asserts their concatenation includes "marker". Both are spec-only assertion corrections.

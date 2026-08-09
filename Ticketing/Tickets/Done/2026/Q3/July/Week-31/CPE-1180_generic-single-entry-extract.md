@@ -27,7 +27,7 @@ archive and opening a leaf needs a generic single-entry extractor. Backend-only;
 - [x] `cargo clippy --all-targets -D warnings` clean (both feature modes); bindings regenerated.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift, epic CPE-705). Backend-only, fully parallel with the frontend tickets.
+- 2026-07-31 — Filed by Foreman (sprint, epic CPE-705). Backend-only, fully parallel with the frontend tickets.
 - 2026-07-31 — Implemented `extract_archive_entry_any(path, inner)` in `crates/server/src/archive.rs`,
   dispatching by extension: `.tar`/`.tar.gz`/`.tgz` via a shared `extract_tar_entry` helper, `.7z` via a
   new `extract_7z_entry` (built on `sevenz_rust::decompress_file_with_extract_fn`, applying the same

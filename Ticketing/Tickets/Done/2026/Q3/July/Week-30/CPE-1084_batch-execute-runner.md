@@ -50,10 +50,10 @@ Windows CI leg stays green.
       `--features index`; no new deps.
 
 ## Work Log
-2026-07-26 (workshift) — Filed by the Product Manager as the CPE-723 execution runner (ties CPE-940's plan to
+2026-07-26 (sprint) — Filed by the Product Manager as the CPE-723 execution runner (ties CPE-940's plan to
 the CPE-1083 engine). Held in Backlog: depends on CPE-1083 landing first. Real-fs but fully headless (tempdir).
 
-2026-07-26 (workshift, Worker) — Built `crates/server/src/batch_execute.rs`. Registered
+2026-07-26 (sprint, Worker) — Built `crates/server/src/batch_execute.rs`. Registered
 `pub mod batch_execute;` in `lib.rs` immediately after `pub mod batch_transform;` per the anchor.
 
 **Assumption on the ambiguous "that item's ops" wording:** `PlannedItem` (in `batch_media.rs`) only

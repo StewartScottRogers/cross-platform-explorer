@@ -11,7 +11,7 @@ estimate: 4-6h
 burndown: "MANUAL-TEST-BURNDOWN row #6 (auto-update flow)"
 ---
 
-## ✅ User-approved 2026-07-25 (workshift)
+## ✅ User-approved 2026-07-25 (sprint)
 User green-lit building this ("do it"): the new **test/release-only `minisign` dep** (NOT linked into the
 shipped app) and the **`release.yml` guard step** are both approved. The `release.yml` step MUST degrade
 cleanly (skip, not fail) when signing secrets are absent, so it never breaks the green pipeline on forks/PRs.
@@ -76,15 +76,15 @@ and **fails the job** on a manifest that wouldn't verify. Degrade cleanly (skip,
       narrowed residual is judged small enough to drop to 6.
 
 ## Work Log
-2026-07-25 (workshift, QA Architect) — Filed as the highest-leverage CI-automatable MVD pick this shift.
+2026-07-25 (sprint, QA Architect) — Filed as the highest-leverage CI-automatable MVD pick this shift.
 Rejected row #7 (remote network): `crates/net` already tests a real client over a real `127.0.0.1` TCP
 socket doing a real listing (`loopback_browse_returns_entries` + WS + streaming + security matrix); the only
 manual delta left is true multi-host, needing a container/second host — not cargo-testable without new infra.
 Row #6 had zero coverage and its dominant failure modes are pure artifact correctness → automatable without a
 GUI. One new dep (`minisign`, the lib Tauri's updater uses), confined to the non-shipped verify crate.
-2026-07-25 (workshift, Foreman) — Held for a user green-light rather than built overnight: adds a dep +
+2026-07-25 (sprint, Foreman) — Held for a user green-light rather than built overnight: adds a dep +
 touches `release.yml`. Burndown #6 flipped to 🔧 in progress.
-2026-07-25 (workshift, Worker) — Built both slices on branch `cpe-1058-updater-verify`.
+2026-07-25 (sprint, Worker) — Built both slices on branch `cpe-1058-updater-verify`.
 - **Crate:** new standalone `crates/updater-verify` (`cpe-updater-verify`), out of any workspace (no root
   `Cargo.toml`; `crates/.gitignore` keeps `target/` out), **NOT** a dependency of `src-tauri` (grep-confirmed
   clean). One crypto dep: `minisign = "0.9"` (v0.9.1 resolved) — the same lib Tauri uses; confined here.

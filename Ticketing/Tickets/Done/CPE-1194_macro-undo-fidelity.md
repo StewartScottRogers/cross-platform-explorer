@@ -70,7 +70,7 @@ and runtime string values), confirmed by the `typed_bindings_are_committed_and_r
 test staying green with the committed `bindings.gen.ts` untouched.
 
 ## Work Log
-- 2026-07-31 — Filed by Foreman (workshift) from the PR #498 review findings 3a/3b. The rollback-honesty blocker
+- 2026-07-31 — Filed by Foreman (sprint) from the PR #498 review findings 3a/3b. The rollback-honesty blocker
   (finding 2) was fixed inline in #498; these two fidelity improvements are the follow-up.
 - 2026-08-01 — Picked up. Estimate: 1-2h. Plan: dedicated `"restore_convert"` inverse kind (trash-based
   restore) for convert; apply-time tag-presence snapshot correcting the tag inverse kind for tag.

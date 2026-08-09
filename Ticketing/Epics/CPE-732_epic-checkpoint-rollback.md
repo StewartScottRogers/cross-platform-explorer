@@ -48,7 +48,7 @@ under a per-file + whole-store byte `CaptureBudget` (the "bounded, dedup" DoD). 
 **Remaining (GUI/attended):** the revert **engine** (execute a `restore_plan`, skip-unreadable) and the
 timeline checkpoint-marker + restore UI.
 
-2026-07-27 (workshift) — **Headless scope COMPLETE.** The pre-built engines (snapshot/snapshot_capture/
+2026-07-27 (sprint) — **Headless scope COMPLETE.** The pre-built engines (snapshot/snapshot_capture/
 restore_plan/revert_engine/revert_safety/BlobStore) are now wired into a live feature:
 - CPE-1123 command layer — per-root checkpoint store (SHA-256 key, tolerant JSONL index mirroring audit_journal)
   + 5 commands (create/list/preview_revert/revert/revert_one), revert write-safe (safe_segments). PR #439.

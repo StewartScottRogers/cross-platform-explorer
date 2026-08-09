@@ -50,7 +50,7 @@ Frontend-only — no Rust changes, no bindings regen (CPE-1302 already shipped t
 `excludes` params). Epic CPE-1002 (File-Health).
 
 ## Work Log
-- 2026-08-05 — Picked up by a workshift Worker. Ticket file was missing from this worktree at pickup
+- 2026-08-05 — Picked up by a sprint Worker. Ticket file was missing from this worktree at pickup
   time (not yet committed anywhere); recreated from the assigning brief before starting, since the spec
   was fully detailed there. Backend dependency CPE-1302 confirmed Done via `Ticketing/Tickets/Done/`.
 - 2026-08-05 — Implemented: shared `excludes: string[]` + `excludeDraft` state in
