@@ -158,6 +158,104 @@ pub fn load_known_hosts(path: &std::path::Path) -> Vec<KnownHost> {
     }
 }
 
+/// Render one [`KnownHost`] back to its `known_hosts` line form (the inverse of the per-entry half of
+/// [`parse_known_hosts`]), with no trailing newline.
+fn format_entry(entry: &KnownHost) -> String {
+    let marker = match entry.marker {
+        Some(Marker::Revoked) => "@revoked ",
+        Some(Marker::CertAuthority) => "@cert-authority ",
+        None => "",
+    };
+    format!("{marker}{} {} {}", entry.patterns.join(","), entry.key_type, entry.key_b64)
+}
+
+/// Persist `entries` to `path` as a `known_hosts`-format file (one line per entry, the same shape
+/// [`parse_known_hosts`] reads back), creating parent directories as needed. Writes to a sibling temp file
+/// and renames it into place, so a crash mid-write can never leave a half-written store behind (CPE-1512:
+/// this is the **app-managed** store — callers must never point it at the user's real `~/.ssh/known_hosts`,
+/// which this module only ever reads).
+pub fn save_known_hosts(path: &std::path::Path, entries: &[KnownHost]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut out = String::new();
+    for entry in entries {
+        out.push_str(&format_entry(entry));
+        out.push('\n');
+    }
+    // Same-directory temp file so the rename is same-filesystem (atomic on all three target OSes).
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, out).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Record a first-contact host key into the **app-managed** `known_hosts` store at `path` (CPE-1512): the
+/// TOFU completion. Reads the existing store, and — unless an entry for the exact same
+/// `(host, port, key_type, key_b64)` is already present (no duplicate entries on a re-record of the same
+/// key) — appends a new plain entry and rewrites the store. Never touches an existing entry for a
+/// *different* key on the same host: this function is only ever called on an `Unknown` verdict, and must
+/// never be used to silently accept a `Changed` key. A malformed existing store line is skipped (never a
+/// panic), matching [`parse_known_hosts`].
+pub fn append_host_key(
+    path: &std::path::Path,
+    host: &str,
+    port: u16,
+    key_type: &str,
+    key_b64: &str,
+) -> Result<(), String> {
+    let mut entries = load_known_hosts(path);
+    let token = host_token(host, port);
+    let already_recorded = entries
+        .iter()
+        .any(|e| e.marker.is_none() && e.key_type == key_type && e.key_b64 == key_b64 && e.patterns.iter().any(|p| p == &token));
+    if already_recorded {
+        return Ok(());
+    }
+    entries.push(KnownHost {
+        marker: None,
+        patterns: vec![token],
+        key_type: key_type.to_string(),
+        key_b64: key_b64.to_string(),
+    });
+    save_known_hosts(path, &entries)
+}
+
+/// The app-managed `known_hosts` store path (CPE-1512): sits next to `connections.json` in the per-OS user
+/// config dir (`%APPDATA%\cross-platform-explorer\known_hosts` on Windows; `$XDG_CONFIG_HOME` or
+/// `~/.config/cross-platform-explorer/known_hosts` elsewhere). Deliberately **not** the user's real
+/// `~/.ssh/known_hosts` ([`default_known_hosts_path`]) — this module never writes to that file; recording a
+/// first-contact key writes only here.
+pub fn default_app_known_hosts_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::Path::new(&h).join(".config")))?;
+    Some(base.join("cross-platform-explorer").join("known_hosts"))
+}
+
+/// Load + merge the app-managed store (`app_path`) with the user's real `~/.ssh/known_hosts` (`ssh_path`)
+/// for a verify call (CPE-1512). **The user's `~/.ssh` entries always win**: an app-store entry whose host
+/// token + key-type is already covered by an `ssh_path` entry is dropped from the merge — regardless of
+/// whether the key material agrees — so a stale or (in a compromise scenario) tampered app-store entry can
+/// never override a genuine OpenSSH pin, and a real key rotation the user already accepted via `ssh`/`scp`
+/// is not masked by an app-recorded key for the old one. Either path may be missing/unreadable; that side
+/// then contributes no entries (never an error).
+pub fn load_merged_known_hosts(app_path: &std::path::Path, ssh_path: &std::path::Path) -> Vec<KnownHost> {
+    let ssh_entries = load_known_hosts(ssh_path);
+    let app_entries = load_known_hosts(app_path);
+    let covered_by_ssh = |pattern: &str, key_type: &str| {
+        ssh_entries.iter().any(|e| e.key_type == key_type && e.patterns.iter().any(|p| p == pattern))
+    };
+    let mut merged = ssh_entries.clone();
+    for entry in app_entries {
+        if entry.patterns.iter().any(|p| covered_by_ssh(p, &entry.key_type)) {
+            continue; // the user's ~/.ssh pin for this host+type wins
+        }
+        merged.push(entry);
+    }
+    merged
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -305,5 +403,164 @@ malformed-line-only-two-fields ssh-rsa
         if let Some(p) = default_known_hosts_path() {
             assert!(p.ends_with(std::path::Path::new(".ssh").join("known_hosts")), "got {p:?}");
         }
+    }
+
+    /// A fresh scratch dir for the persistence tests below, unique per test run (PID + a counter so
+    /// several tests in the same process don't collide).
+    fn scratch_dir(tag: &str) -> std::path::PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("cpe-kh-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn save_known_hosts_round_trips_through_parse() {
+        let dir = scratch_dir("save-roundtrip");
+        let path = dir.join("known_hosts");
+        let entries = vec![
+            KnownHost {
+                marker: None,
+                patterns: vec!["h".into()],
+                key_type: "ssh-ed25519".into(),
+                key_b64: "AAAAONE".into(),
+            },
+            KnownHost {
+                marker: Some(Marker::Revoked),
+                patterns: vec!["evil.example.com".into()],
+                key_type: "ssh-ed25519".into(),
+                key_b64: "AAAABAD".into(),
+            },
+        ];
+        save_known_hosts(&path, &entries).expect("save");
+        let loaded = load_known_hosts(&path);
+        assert_eq!(loaded, entries, "round-trips byte-for-byte through save + load");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_host_key_records_a_first_contact_key() {
+        let dir = scratch_dir("append-first");
+        let path = dir.join("known_hosts");
+        assert!(!path.exists(), "store starts absent, like a fresh app install");
+
+        append_host_key(&path, "nas.example.com", 22, "ssh-ed25519", "AAAANEW").expect("record");
+        let loaded = load_known_hosts(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].patterns, vec!["nas.example.com"]);
+        assert_eq!(loaded[0].key_type, "ssh-ed25519");
+        assert_eq!(loaded[0].key_b64, "AAAANEW");
+        assert_eq!(loaded[0].marker, None);
+
+        // A second connect presenting the SAME key resolves Trusted against the now-recorded store.
+        assert_eq!(
+            verify_host_key(&loaded, "nas.example.com", 22, "ssh-ed25519", "AAAANEW"),
+            HostKeyVerdict::Trusted,
+        );
+        // A DIFFERENT key for the same host resolves Changed, never a silent Unknown/Trusted.
+        assert_eq!(
+            verify_host_key(&loaded, "nas.example.com", 22, "ssh-ed25519", "AAAAIMPOSTOR"),
+            HostKeyVerdict::Changed,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_host_key_does_not_duplicate_the_same_key() {
+        let dir = scratch_dir("append-dup");
+        let path = dir.join("known_hosts");
+        append_host_key(&path, "h", 22, "ssh-ed25519", "AAAAKEY").unwrap();
+        append_host_key(&path, "h", 22, "ssh-ed25519", "AAAAKEY").unwrap();
+        append_host_key(&path, "h", 22, "ssh-ed25519", "AAAAKEY").unwrap();
+        assert_eq!(load_known_hosts(&path).len(), 1, "re-recording the same key must not duplicate");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_host_key_distinguishes_port_and_host() {
+        let dir = scratch_dir("append-distinct");
+        let path = dir.join("known_hosts");
+        append_host_key(&path, "h", 22, "ssh-ed25519", "AAAAKEY").unwrap();
+        append_host_key(&path, "h", 2222, "ssh-ed25519", "AAAAKEY").unwrap(); // different port, same key
+        append_host_key(&path, "other", 22, "ssh-ed25519", "AAAAKEY").unwrap(); // different host
+        assert_eq!(load_known_hosts(&path).len(), 3, "distinct host/port pairs are separate entries");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn append_host_key_skips_a_malformed_existing_line_without_panicking() {
+        let dir = scratch_dir("append-malformed");
+        let path = dir.join("known_hosts");
+        std::fs::write(&path, "this-line-is-garbage\nh ssh-rsa AAAAOLD\n").unwrap();
+        append_host_key(&path, "new-host", 22, "ssh-ed25519", "AAAANEW").expect("must not panic");
+        let loaded = load_known_hosts(&path);
+        // The malformed line never round-trips (parse_known_hosts already drops it); the well-formed
+        // pre-existing entry survives alongside the newly appended one.
+        assert_eq!(loaded.len(), 2, "got {loaded:?}");
+        assert!(loaded.iter().any(|e| e.patterns == vec!["h".to_string()] && e.key_b64 == "AAAAOLD"));
+        assert!(loaded.iter().any(|e| e.patterns == vec!["new-host".to_string()] && e.key_b64 == "AAAANEW"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn default_app_known_hosts_path_is_distinct_from_the_real_ssh_one() {
+        if let (Some(app), Some(ssh)) = (default_app_known_hosts_path(), default_known_hosts_path()) {
+            assert_ne!(app, ssh, "the app store must never alias the user's real ~/.ssh/known_hosts");
+            assert!(app.ends_with("known_hosts"), "got {app:?}");
+            assert!(
+                app.to_string_lossy().contains("cross-platform-explorer"),
+                "lives under the app's own config dir, got {app:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn merged_known_hosts_prefers_ssh_pin_on_conflict() {
+        let dir = scratch_dir("merge-conflict");
+        let ssh_path = dir.join("ssh_known_hosts");
+        let app_path = dir.join("app_known_hosts");
+        // The user genuinely pinned this host via OpenSSH with KEY-REAL.
+        std::fs::write(&ssh_path, "pinned.example.com ssh-ed25519 KEYREAL\n").unwrap();
+        // The app store (e.g. stale, or in a compromise scenario tampered with) has a DIFFERENT key for
+        // the same host.
+        append_host_key(&app_path, "pinned.example.com", 22, "ssh-ed25519", "KEYOTHER").unwrap();
+
+        let merged = load_merged_known_hosts(&app_path, &ssh_path);
+        // The user's pin wins: the real key is Trusted...
+        assert_eq!(
+            verify_host_key(&merged, "pinned.example.com", 22, "ssh-ed25519", "KEYREAL"),
+            HostKeyVerdict::Trusted,
+        );
+        // ...and the app-store's conflicting key is refused as Changed, NOT silently Trusted.
+        assert_eq!(
+            verify_host_key(&merged, "pinned.example.com", 22, "ssh-ed25519", "KEYOTHER"),
+            HostKeyVerdict::Changed,
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_known_hosts_includes_app_only_entries() {
+        let dir = scratch_dir("merge-app-only");
+        let ssh_path = dir.join("ssh_known_hosts"); // never created — no ~/.ssh entry for this host
+        let app_path = dir.join("app_known_hosts");
+        append_host_key(&app_path, "app-only.example.com", 22, "ssh-ed25519", "AAAAAPP").unwrap();
+
+        let merged = load_merged_known_hosts(&app_path, &ssh_path);
+        assert_eq!(
+            verify_host_key(&merged, "app-only.example.com", 22, "ssh-ed25519", "AAAAAPP"),
+            HostKeyVerdict::Trusted,
+            "an app-recorded, first-contact key is honoured when ~/.ssh has no opinion",
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn merged_known_hosts_tolerates_missing_files_on_both_sides() {
+        let dir = scratch_dir("merge-missing");
+        // Neither file exists.
+        let merged = load_merged_known_hosts(&dir.join("app"), &dir.join("ssh"));
+        assert!(merged.is_empty());
     }
 }

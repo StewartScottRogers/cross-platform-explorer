@@ -6585,18 +6585,28 @@ async fn connections_remove(name: String) -> Result<Vec<cpe_server::connections:
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 static REMOTE_POOL: std::sync::OnceLock<cpe_vfs::connect::ProviderPool> = std::sync::OnceLock::new();
 
-/// Resolve a remote `uri` to a pooled provider: load the saved connections + `known_hosts`, fetch the
-/// connection's secret through the keychain, then open (or reuse) a provider via `cpe_vfs`. A changed host
-/// key refuses loudly (TOFU); a missing connection or missing password-secret is a clear `Err`.
+/// Resolve a remote `uri` to a pooled provider: load the saved connections + the merged `known_hosts`
+/// (CPE-1512: the app-managed store, which records first-contact SFTP keys, merged with the user's real
+/// `~/.ssh/known_hosts` — whose pins always win on a conflict, see
+/// [`cpe_server::known_hosts::load_merged_known_hosts`]), fetch the connection's secret through the
+/// keychain, then open (or reuse) a provider via `cpe_vfs`. A changed host key refuses loudly (TOFU); a
+/// missing connection or missing password-secret is a clear `Err`. A first-contact (`Unknown`) SFTP host
+/// key is persisted to the app-managed store (never the user's own `~/.ssh/known_hosts`) so the next
+/// connect to that host resolves `Trusted` instead of `Unknown` forever.
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
 fn remote_provider_for(uri: &str) -> Result<cpe_vfs::connect::SharedProvider, String> {
     let pool = REMOTE_POOL.get_or_init(cpe_vfs::connect::ProviderPool::new);
     let conns = cpe_server::connections::default_connections_path()
         .map(|p| cpe_server::connections::load_connections(&p))
         .unwrap_or_default();
-    let known = cpe_server::known_hosts::default_known_hosts_path()
-        .map(|p| cpe_server::known_hosts::load_known_hosts(&p))
-        .unwrap_or_default();
+    let app_known_hosts_path = cpe_server::known_hosts::default_app_known_hosts_path();
+    let ssh_known_hosts_path = cpe_server::known_hosts::default_known_hosts_path();
+    let known = match (&app_known_hosts_path, &ssh_known_hosts_path) {
+        (Some(app), Some(ssh)) => cpe_server::known_hosts::load_merged_known_hosts(app, ssh),
+        (Some(app), None) => cpe_server::known_hosts::load_known_hosts(app),
+        (None, Some(ssh)) => cpe_server::known_hosts::load_known_hosts(ssh),
+        (None, None) => Vec::new(),
+    };
     cpe_vfs::connect::connected_provider(
         pool,
         &cpe_vfs::connect::VfsOpener,
@@ -6605,6 +6615,7 @@ fn remote_provider_for(uri: &str) -> Result<cpe_vfs::connect::SharedProvider, St
         &known,
         cpe_vfs::HostKeyPolicy::Tofu,
         uri,
+        app_known_hosts_path.as_deref(),
     )
 }
 

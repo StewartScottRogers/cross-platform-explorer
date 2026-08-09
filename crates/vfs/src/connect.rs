@@ -27,6 +27,7 @@
 //! hostile server hands back a `../escape` name.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use cpe_server::connections::{AuthMethod, Connection};
@@ -44,6 +45,8 @@ pub type SharedProvider = Arc<Mutex<BoxedProvider>>;
 
 /// The seam that actually opens a provider — [`VfsOpener`] in production (a real SFTP/WebDAV connect via
 /// [`crate::open`]), an injectable fake in tests so the routing logic is exercised with **no network**.
+/// `record_first_contact` is the app-managed `known_hosts` store path (CPE-1512): the real opener persists
+/// a first-contact SFTP host key there so a later connect resolves `Trusted` instead of `Unknown` forever.
 pub trait ProviderOpener: Send + Sync {
     fn open(
         &self,
@@ -51,11 +54,12 @@ pub trait ProviderOpener: Send + Sync {
         secret: Option<&str>,
         known_hosts: Vec<KnownHost>,
         policy: HostKeyPolicy,
+        record_first_contact: Option<&Path>,
     ) -> Result<BoxedProvider, String>;
 }
 
 /// Production opener: dispatches to [`crate::open`], performing the real SFTP/WebDAV connect + host-key
-/// verification.
+/// verification (and, for SFTP, first-contact key persistence — CPE-1512).
 pub struct VfsOpener;
 
 impl ProviderOpener for VfsOpener {
@@ -65,8 +69,9 @@ impl ProviderOpener for VfsOpener {
         secret: Option<&str>,
         known_hosts: Vec<KnownHost>,
         policy: HostKeyPolicy,
+        record_first_contact: Option<&Path>,
     ) -> Result<BoxedProvider, String> {
-        crate::open(conn, secret, known_hosts, policy)
+        crate::open(conn, secret, known_hosts, policy, record_first_contact)
     }
 }
 
@@ -137,7 +142,9 @@ pub fn find_connection(uri: &str, conns: &[Connection]) -> Option<Connection> {
 
 /// Resolve a remote `uri` to a live, pooled provider (CPE-1511's crux). Loads the matching saved
 /// connection, fetches its secret through the keychain seam, and opens (or reuses) a provider via
-/// `opener`.
+/// `opener`. `record_first_contact` is the app-managed `known_hosts` store path forwarded to the opener
+/// (CPE-1512) — `None` if this platform has no app config dir, which only skips persistence, never the
+/// connect itself.
 ///
 /// Errors, never panics:
 /// - no saved connection matches the URI → clear `Err`;
@@ -154,6 +161,7 @@ pub fn connected_provider(
     known_hosts: &[KnownHost],
     policy: HostKeyPolicy,
     uri: &str,
+    record_first_contact: Option<&Path>,
 ) -> Result<SharedProvider, String> {
     let conn = find_connection(uri, conns)
         .ok_or_else(|| format!("no saved connection matches '{uri}'"))?;
@@ -170,7 +178,7 @@ pub fn connected_provider(
                 conn.name
             ));
         }
-        opener.open(&conn, secret.as_deref(), known, policy)
+        opener.open(&conn, secret.as_deref(), known, policy, record_first_contact)
     })
 }
 
@@ -306,15 +314,20 @@ mod tests {
     }
 
     /// An opener that hands back a pre-seeded [`FakeProvider`] instead of connecting, so the whole routing
-    /// path is testable with no server. Records how many times it opened, to prove the pool reuses.
+    /// path is testable with no server. Records how many times it opened (to prove the pool reuses) and
+    /// the `record_first_contact` path it was last called with (CPE-1512 seam: proves `connected_provider`
+    /// actually forwards the app-managed known_hosts store path down to the opener, since the real SFTP
+    /// recording behaviour itself lives — and is exercised against a real in-process server — in
+    /// `cpe-sftp`'s own tests, not reachable through this trait-object boundary).
     struct FakeOpener {
         opens: Mutex<usize>,
+        last_record_path: Mutex<Option<std::path::PathBuf>>,
         // A factory so each open produces a fresh provider (with the seeded tree).
         seed: Box<dyn Fn() -> FakeProvider + Send + Sync>,
     }
     impl FakeOpener {
         fn new(seed: impl Fn() -> FakeProvider + Send + Sync + 'static) -> Self {
-            Self { opens: Mutex::new(0), seed: Box::new(seed) }
+            Self { opens: Mutex::new(0), last_record_path: Mutex::new(None), seed: Box::new(seed) }
         }
     }
     impl ProviderOpener for FakeOpener {
@@ -324,8 +337,10 @@ mod tests {
             _secret: Option<&str>,
             _known: Vec<KnownHost>,
             _policy: HostKeyPolicy,
+            record_first_contact: Option<&Path>,
         ) -> Result<BoxedProvider, String> {
             *self.opens.lock().unwrap() += 1;
+            *self.last_record_path.lock().unwrap() = record_first_contact.map(Path::to_path_buf);
             Ok(Box::new((self.seed)()))
         }
     }
@@ -339,6 +354,7 @@ mod tests {
             _s: Option<&str>,
             _k: Vec<KnownHost>,
             _p: HostKeyPolicy,
+            _record_first_contact: Option<&Path>,
         ) -> Result<BoxedProvider, String> {
             Err("sftp: host key CHANGED — refused (possible man-in-the-middle)".to_string())
         }
@@ -386,6 +402,7 @@ mod tests {
         cpe_server::secret_store::set_secret(&access, "prod", "pw").unwrap();
         let conns = vec![sftp_conn()];
 
+        let store = std::path::Path::new("/fake/app-config/known_hosts");
         let provider = connected_provider(
             &pool,
             &opener,
@@ -394,8 +411,14 @@ mod tests {
             &[],
             HostKeyPolicy::Tofu,
             uri(),
+            Some(store),
         )
         .expect("resolves");
+
+        // CPE-1512 seam: connected_provider forwards the app-managed known_hosts store path down to the
+        // opener unchanged (the real recording behaviour, exercised against a live in-process SFTP server,
+        // lives in `cpe-sftp`'s own tests — this trait-object boundary can only prove the wiring/plumbing).
+        assert_eq!(opener.last_record_path.lock().unwrap().as_deref(), Some(store));
 
         // list → maps to DirEntry rows with navigable child URIs; the hostile-looking hidden file is kept
         // (it's a safe name), directories sort in.
@@ -426,7 +449,7 @@ mod tests {
         let conns = vec![sftp_conn()];
 
         for _ in 0..3 {
-            connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri()).unwrap();
+            connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri(), None).unwrap();
         }
         assert_eq!(*opener.opens.lock().unwrap(), 1, "opened once, reused thereafter");
         assert_eq!(pool.len(), 1);
@@ -434,7 +457,7 @@ mod tests {
         // After invalidation the next op reconnects.
         pool.invalidate("prod");
         assert!(pool.is_empty());
-        connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri()).unwrap();
+        connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri(), None).unwrap();
         assert_eq!(*opener.opens.lock().unwrap(), 2);
     }
 
@@ -443,7 +466,7 @@ mod tests {
         let pool = ProviderPool::new();
         let opener = FakeOpener::new(seeded);
         let access = MemAccess::default();
-        let err = err_of(connected_provider(&pool, &opener, &access, &[], &[], HostKeyPolicy::Tofu, uri()));
+        let err = err_of(connected_provider(&pool, &opener, &access, &[], &[], HostKeyPolicy::Tofu, uri(), None));
         assert!(err.contains("no saved connection"), "got: {err}");
     }
 
@@ -453,7 +476,7 @@ mod tests {
         let opener = FakeOpener::new(seeded);
         let access = MemAccess::default(); // no secret stored
         let conns = vec![sftp_conn()];
-        let err = err_of(connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri()));
+        let err = err_of(connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri(), None));
         assert!(err.contains("no saved secret"), "got: {err}");
         assert!(pool.is_empty(), "a failed resolve must not cache a session");
         assert_eq!(*opener.opens.lock().unwrap(), 0, "never attempted a blank-password connect");
@@ -468,7 +491,7 @@ mod tests {
         let mut conn = sftp_conn();
         conn.auth = AuthMethod::Key { key_path: "/home/me/.ssh/id".into() };
         let conns = vec![conn];
-        assert!(connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri()).is_ok());
+        assert!(connected_provider(&pool, &opener, &access, &conns, &[], HostKeyPolicy::Tofu, uri(), None).is_ok());
     }
 
     #[test]
@@ -477,7 +500,7 @@ mod tests {
         let access = MemAccess::default();
         cpe_server::secret_store::set_secret(&access, "prod", "pw").unwrap();
         let conns = vec![sftp_conn()];
-        let err = err_of(connected_provider(&pool, &ChangedKeyOpener, &access, &conns, &[], HostKeyPolicy::Tofu, uri()));
+        let err = err_of(connected_provider(&pool, &ChangedKeyOpener, &access, &conns, &[], HostKeyPolicy::Tofu, uri(), None));
         assert!(err.contains("CHANGED"), "distinct changed-key error, got: {err}");
         assert!(pool.is_empty(), "a refused connect is never cached");
     }

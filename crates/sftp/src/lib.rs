@@ -207,6 +207,32 @@ impl SftpProvider {
         &self.presented_key
     }
 
+    /// Connect like [`Self::connect`], and — completing TOFU (CPE-1512) — on a first-contact (`Unknown`)
+    /// verdict, persist the presented host key to the **app-managed** `known_hosts` store at `record_path`
+    /// (see [`cpe_server::known_hosts::append_host_key`]; never the user's real `~/.ssh/known_hosts`). A
+    /// `Trusted` verdict is already recorded (no-op, no reprompt); a `Changed`/`Revoked` verdict is refused
+    /// by `connect` itself before this ever runs, so this path can never write a swapped key over a
+    /// disagreeing one. A `None` `record_path` (e.g. no app config dir on this platform) simply skips
+    /// persistence — the connect itself still succeeds/fails exactly as [`Self::connect`] would.
+    ///
+    /// Persistence failure (e.g. the app config dir is unwritable) does not fail the connect — the caller
+    /// already has a working session; it just won't be remembered as Trusted next time.
+    pub fn connect_and_record(
+        config: &SftpConfig,
+        known: Vec<KnownHost>,
+        policy: HostKeyPolicy,
+        record_path: Option<&std::path::Path>,
+    ) -> Result<Self, String> {
+        let provider = Self::connect(config, known, policy)?;
+        if provider.verdict == HostKeyVerdict::Unknown {
+            if let Some(path) = record_path {
+                let (key_type, key_b64) = &provider.presented_key;
+                let _ = cpe_server::known_hosts::append_host_key(path, &config.host, config.port, key_type, key_b64);
+            }
+        }
+        Ok(provider)
+    }
+
     /// Recursively walk the tree under `root`, invoking `on_entry` for each entry; cancellable. Delegates
     /// to the provider-agnostic [`cpe_server::transfer::walk`] (shared by all backends, CPE-905).
     pub fn walk(
@@ -652,6 +678,96 @@ mod tests {
     /// A `known_hosts` list trusting `(key_type, key_b64)` at `127.0.0.1:port`.
     fn known_for(port: u16, key: &KeyFields) -> Vec<KnownHost> {
         parse_known_hosts(&format!("{} {} {}", host_token("127.0.0.1", port), key.0, key.1))
+    }
+
+    /// A fresh scratch **path** for an app-managed known_hosts store used by a test (the file itself
+    /// starts absent — `connect_and_record`/`load_known_hosts` both treat that as empty). Unique per test
+    /// run so parallel `cargo test` runs never collide.
+    fn scratch_known_hosts_path(tag: &str) -> std::path::PathBuf {
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("cpe-sftp-kh-{tag}-{}-{n}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir.join("known_hosts")
+    }
+
+    // CPE-1512: connect_and_record completes TOFU — a first-contact connect persists the presented key to
+    // the app-managed store, a later connect with the SAME key resolves Trusted against that store (no
+    // reprompt, no re-record/duplicate), and a later connect with a DIFFERENT key for the same host is
+    // refused as Changed (never silently auto-trusted).
+    #[test]
+    fn connect_and_record_persists_first_contact_then_trusts_the_same_key() {
+        let (addr, hostkey) = spawn_server();
+        let store = scratch_known_hosts_path("first-contact");
+        assert!(!store.exists(), "store starts absent, like a fresh app install");
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+
+        // First contact: no known_hosts entry anywhere → Unknown, accepted under Tofu, and recorded.
+        let first = SftpProvider::connect_and_record(&cfg, vec![], HostKeyPolicy::Tofu, Some(&store))
+            .expect("TOFU should accept a first-contact host");
+        assert_eq!(first.host_key_verdict(), HostKeyVerdict::Unknown);
+        assert!(store.exists(), "the presented key must be written to the app-managed store");
+        let recorded = cpe_server::known_hosts::load_known_hosts(&store);
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].key_type, hostkey.0);
+        assert_eq!(recorded[0].key_b64, hostkey.1);
+
+        // A second connect loads the now-recorded store: SAME key → Trusted, and even under Strict (no
+        // TOFU needed anymore) — proving the record actually established trust, not just Tofu leniency.
+        let known = cpe_server::known_hosts::load_known_hosts(&store);
+        let second = SftpProvider::connect_and_record(&cfg, known, HostKeyPolicy::Strict, Some(&store))
+            .expect("a recorded key should now be Trusted under Strict");
+        assert_eq!(second.host_key_verdict(), HostKeyVerdict::Trusted);
+
+        // Re-recording (Trusted, not Unknown) must not duplicate the entry.
+        assert_eq!(cpe_server::known_hosts::load_known_hosts(&store).len(), 1, "no duplicate on re-record");
+
+        let _ = std::fs::remove_dir_all(store.parent().unwrap());
+    }
+
+    #[test]
+    fn connect_and_record_refuses_a_swapped_key_without_auto_trusting() {
+        let (addr, _real_hostkey) = spawn_server();
+        let store = scratch_known_hosts_path("swapped-key");
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+
+        // Simulate an app store that already recorded a DIFFERENT key for this host (e.g. from a prior,
+        // now-replaced server) — a real MITM (or legitimate rekey) presents the server's actual key, which
+        // won't match.
+        cpe_server::known_hosts::append_host_key(
+            &store,
+            "127.0.0.1",
+            addr.port(),
+            "ssh-ed25519",
+            "AAAAAstalekeythatdoesnotmatch",
+        )
+        .unwrap();
+        let known = cpe_server::known_hosts::load_known_hosts(&store);
+
+        let err = match SftpProvider::connect_and_record(&cfg, known, HostKeyPolicy::Tofu, Some(&store)) {
+            Ok(_) => panic!("a changed host key must be refused, even under Tofu"),
+            Err(e) => e,
+        };
+        assert!(err.contains("CHANGED"), "expected a changed-key refusal, got: {err}");
+
+        // The store must be untouched — no auto-trust of the swapped key, still just the one stale entry.
+        let after = cpe_server::known_hosts::load_known_hosts(&store);
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].key_b64, "AAAAAstalekeythatdoesnotmatch");
+
+        let _ = std::fs::remove_dir_all(store.parent().unwrap());
+    }
+
+    #[test]
+    fn connect_and_record_with_no_record_path_behaves_like_plain_connect() {
+        // A platform with no app config dir (record_path = None) must not fail the connect — persistence
+        // is simply skipped.
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider = SftpProvider::connect_and_record(&cfg, vec![], HostKeyPolicy::Tofu, None)
+            .expect("TOFU should still accept with no record_path");
+        assert_eq!(provider.host_key_verdict(), HostKeyVerdict::Unknown);
+        assert_eq!(provider.presented_key(), &hostkey);
     }
 
     // Full happy path over a real in-process SSH/SFTP handshake: host-key verification (Trusted) →
