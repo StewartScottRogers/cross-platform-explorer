@@ -1213,3 +1213,20 @@ binary-arch, image-diff, split/join. Lessons: worktrees INSIDE project (.claude/
 never git add -A while worktrees live (a leak swept files onto main); workers run cargo/git/gh synchronously; opus
 adversarial reviewer catches SSRF/overflow/local-regression sonnet misses; providers mirror cpe-sftp/webdav +
 regen src-tauri/Cargo.lock via cargo check. Handed off at batch 20/40, budget ~118/200 — resume fresh.
+
+## Sprint 2026-08-09 (CLI) — batch 21: Network discovery + sidebar UX (user-directed, mostly away)
+5 merges, 0 escaped defects: CPE-1516 permanent Network sidebar section (#736), CPE-1519 Windows-native WNet
+discovery backend (#737) + frontend "Discovered" tier (#741), CPE-1520 user-reorderable sidebar sections (#739),
+bindings base-fix (#740). Separate user request: Gource repo-history visualization → PR #738 (open for user
+review; orphan-branch publish, NOT committed to main to avoid history bloat). Filed CPE-1521 (WNet outer-loop
+cap, opus follow-up). **Incident:** #737's `NetShare.kind` DOC-COMMENT change (a specta::Type) drifted
+bindings.gen.ts → CI Typed-bindings drift guard reddened main (Backend ubuntu); the Windows-local gauntlet + the
+drift *unit test* both passed and masked it; caught via a later PR's inherited-red, fixed by regen (#740).
+**Lessons:** (1) verify the ubuntu Backend drift-guard CI leg before merging ANY specta/backend PR — don't merge
+on the Windows-local gauntlet alone; doc-comment changes DO drift bindings. (2) `cargo` isn't on the
+non-interactive shell PATH → `%USERPROFILE%\.cargo\bin\cargo.exe` (PowerShell). Tuned defaults: frontend=sonnet,
+2-wide, ~20-35m, clean; unsafe-FFI diffs=opus adversarial reviewer; Foreman-apply mechanical fixes (bindings
+regen) directly = 0 agents. Z: drive I/O-saturates under concurrent cargo builds; GitHub API intermittently
+slow → background git/gh + Read .output files. Wrapped on work-dry (~135/200), not the budget wall. Queue:
+CPE-1521; CPE-1518 QNAP TS-133 E2E (ATTENDED, NAS 2026-08-10); epics CPE-1504 SMB / CPE-1500 OS-mount / CPE-1517
+LAN mDNS discovery.

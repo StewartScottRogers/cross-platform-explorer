@@ -1,68 +1,57 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-08→09 (CLI) — batch 20/40, agent budget ~118/200 → HAND OFF for a fresh session
-**State:** `main` @ origin `af5c2c7e`, working tree clean, main CI green (backend/server/sidecar/frontend all
-pass; gui-smoke is the known-flaky leg at 37/39). `Z:\repos\` cleaned of all `cpe-*` worktree strays. Lock held
-(`.claude/sprint-metrics/SPRINT-LOCK`). **This is a clean budget hand-off, NOT a stop** — resume with a fresh
-session for a full agent budget.
+## RUN 2026-08-09 (CLI, "keep working on the sprints" — user away w/ intermittent requests) — batch 21 WRAPPED
+**State:** `main` @ origin `aaa64fff` (clean, CI GREEN, 0 worktrees, Backlog has only queued/user-gated work).
+Lock released, wakeup cancelled. Budget ~135/200 (well under the 150 reset line — stopped on *work-ran-dry*,
+not budget: the remaining ready headless work is thin, the rest is user-gated).
 
-> **⚠ Concurrent process:** the shared checkout is currently on branch `chore/sprint-lights-out-factory`
-> (created by ANOTHER process — CLI or desktop Cowork — which hardened `sprint.md`/`continue-sprints-without-the-user`
-> memory with "lights-out factory" language). It points at the same commit as origin/main. Do NOT delete/clobber
-> that branch. Commit to main via `git push origin HEAD:main` or switch to `main` only if the tree is clean.
-> Coordinate ([[concurrent-nightshift-coordination]]).
+### Shipped this batch (5 merges, all gauntlet-verified Reviewer+UAT, 0 escaped defects after the one caught below)
+User asked (while mostly away) to build out the **Network / left-pane UX** and a **Gource** showcase. Delivered:
+- **CPE-1516 (#736)** — Network is now a **permanent top-level sidebar section** (was hidden until a
+  connection existed; entry was buried in Explore). Frontend.
+- **CPE-1519 backend (#737)** — **Windows-native network discovery** via `WNetOpenEnum`/`WNetEnumResource`
+  (`discover_network_windows`, `#[cfg(windows)]`, async+spawn_blocking+6s-bounded, depth/buffer caps); pure
+  map/flatten/dedup in `cpe_server::net_share`. Opus-reviewed (unsafe FFI). No new dep (windows crate feature).
+- **CPE-1520 (#739)** — **user-reorderable sidebar sections** (drag headers + persisted `sidebarOrder` store +
+  reset; CSS-order on flex children, low-churn). Frontend.
+- **CPE-1519 frontend (#741)** — **"Discovered on your network" tier** in the Network section: calls the
+  command (raw invoke, it's excluded from typed bindings), dedupes across all 3 tiers, one-click pre-filled
+  add (`smb` scheme; connect fails cleanly until CPE-1504). Feature now COMPLETE E2E.
+- **bindings base-fix (#740)** — see incident below.
+Also: **Gource visualization → PR #738** (CPE-1522, a SEPARATE user request) — a weekly Actions render of the
+repo history embedded under the README hero, published to an orphan `gource` branch (NOT committed to main —
+would bloat history). **Open for the USER to review/merge** (outward-facing landing page). Filed **CPE-1521**
+(WNet outer-loop entry-cap hardening, opus-review follow-up to #737).
 
-## Shipped this run (20 batches, 0 escaped defects; every merge gauntlet-verified: independent Reviewer + UAT)
-1. **`workshift` → `Sprint` rename** (commit `1f31f045`, 266 files) — skills `/sprint` + `/sprint-batched`,
-   `.claude/sprint-metrics/`, `SPRINT.md`, memories. The pre-existing SPR-NN "Sprints" (`/ticketing-sprint`) kept
-   + disambiguated per user ("keep both"). No ticket (user directive).
-2. **Network "mount anything" program — SFTP + WebDAV + FTP now LIVE + secured** (user activated it):
-   - CPE-1510 connection-secret **keychain** store (`crates/server/src/secret_store.rs`, reuses
-     `vault_manager::SecretAccess`/`KeyringBackend`, no new dep; real Windows Credential Manager round-trip UAT).
-   - CPE-1511 **vfs-route crux** (`crates/vfs/src/connect.rs` `connected_provider` + `ProviderPool`; `fs_route`
-     routes remote URIs; **LOCAL path proven byte-for-byte unchanged** — opus adversarial review + UAT). SFTP +
-     WebDAV browse via `list_dir`.
-   - CPE-1513 **Network sidebar UI** (`src/lib/network.ts` +27 tests, Sidebar "network" section + Explore
-     "Network…" row, add-connection form, per-connection menu, secret prompt, `connections_*` commands). **CODE on
-     main + reviewed (nit fixed: `--success` token). ⚠ VISUAL SIGN-OFF OWED by the user** (5 surfaces — see
-     `Ticketing/Tickets/Deferred/CPE-1513_*`). Landed via a worktree-leak+`git add -A` onto main (PR #731 closed
-     superseded; verified byte-identical) — hence the "never `git add -A` while worktrees live" rule.
-   - CPE-1514 **cpe-ftp provider** (FTP/FTPS via suppaftp, `ftp`/`ftps` scheme; hostile-server UAT: traversal
-     dropped, 32MiB RETR + 100k LIST bounded). First net-new protocol.
-   - CPE-1512 **SFTP host-key TOFU persistence** (`known_hosts.rs` app-managed store at `%APPDATA%`/XDG; never
-     mutates `~/.ssh`; Changed-key can't auto-trust; user pins win on merge). Completes TOFU.
-3. **Earlier backend run (batches 1–15):** CSP CPE-1477; audio-waveform CPE-1478; **gui-smoke restoration**
-   CPE-1479/1481/1507 (0→37 passing, mouse harness CDP→W3C-Actions fallback); thumb_video SSRF CPE-1480;
-   binary-arch detection CPE-1485; image-diff engine CPE-1490; file split/join CPE-1491; CPE-1414 closed superseded.
+### Incident caught + fixed (lesson)
+#737 changed `NetShare.kind`'s **doc comment** (a `specta::Type`) but didn't regenerate `bindings.gen.ts` → the
+CI **Typed-bindings drift guard** reddened `main` (Backend ubuntu). The Windows-local gauntlet + the drift
+*unit test* both passed, masking it; only a later PR's inherited-red surfaced it. Fixed by regenerating +
+merging #740; main green again (confirmed `completed/success`). **Lesson (saved to memory
+[[regen-specta-bindings-on-struct-change]]):** for ANY backend/specta PR, regenerate bindings on a doc-comment
+change too, and **verify the ubuntu Backend drift-guard CI leg before merging** — don't merge on the
+Windows-local gauntlet alone. `cargo` is NOT on the non-interactive shell PATH → use
+`%USERPROFILE%\.cargo\bin\cargo.exe` (PowerShell).
 
-## Queued / next (all Proposed unless noted)
-- **Network program (continue):** CPE-1500 (OS-mount "Mount as drive"), CPE-1503 (S3 → unlocks B2/GCS free),
-  CPE-1506 (cloud OAuth Drive/OneDrive/Dropbox), CPE-1501 (provider capability/auth-model ext).
-- **GUIs on shipped backends (need visual/attended verify):** CPE-1508 image-compare pane, CPE-1509 split/join dialog.
-- **gui-smoke tail:** CPE-1483 (Linux drive-tile), CPE-1507 remaining (samples + saved-search).
-- **superfile/competitive/theme epics:** CPE-1484–1496 (hotkeys, vim-nav, dense-view, Drop Stack, theme engine 5-epic).
-- Follow-up filed: CPE-1512 done; no open follow-ups from it.
+## To resume (say "resume the sprint" in a fresh session)
+The clean-headless well is thin again. Remaining queue (priority order):
+1. **CPE-1521** — WNet outer-loop entry-cap hardening (backend, small, `#[cfg(windows)]` — buildable+testable
+   on THIS Windows machine; low priority, bounded risk). The one genuinely-ready headless ticket.
+2. **CPE-1518** — E2E-verify shipped SFTP/WebDAV/FTP + the new WNet discovery against the real **QNAP TS-133**
+   NAS. **ATTENDED — needs the hardware (arrives/installed 2026-08-10)** + the user's LAN. See
+   [[qnap-nas-test-target]].
+3. Epics needing decomposition / user decisions: **CPE-1504** (SMB — crate-risk, Windows-UNC leg testable vs
+   QNAP now), **CPE-1500** (OS-mount), **CPE-1517** (LAN mDNS/SSDP discovery — the cross-platform complement to
+   the Windows-native tier just shipped; needs a dep decision).
 
-## OWED TO THE USER (the only non-headless blocker)
-**Attended VISUAL verification of the Network sidebar (CPE-1513)** — a build→install→run so the user can add an
-sftp/webdav/ftp connection and browse it, and eyeball the sidebar UI (5 surfaces). Offer it on their return.
+**Owed to the USER (async, non-blocking):**
+- Review/merge **Gource PR #738** (+ then run the workflow once to populate the `gource` branch).
+- **Visual sign-off** on the sidebar changes (permanent Network section + drag-reorder + Discovered tier) —
+  none are pixel-verified (jsdom only). A `build→install→run` or a gui-smoke Visual Critic pass would close it.
+- **QNAP E2E** (CPE-1518) once the NAS is set up.
 
-## Tuned defaults / lessons (seed the next session)
-- **Worktrees live INSIDE the project** at `.claude/worktrees/cpe-<id>-wt` (gitignored) — NEVER `Z:\repos\`
-  (parent) or Temp ([[keep-all-fs-work-inside-project]], user 2026-08-09). Dispatch prompts must say so.
-- **NEVER `git add -A`** on the shared main checkout while worktree workers are live — explicit paths only (a
-  leak swept a worker's files onto main once). Verify `HEAD == origin/main` + no stranded commits after merges.
-- Workers must run `cargo`/`git`/`gh` **synchronously inline** — several appeared "stalled" but were just doing
-  long real builds ([[subagents-run-work-synchronously]]).
-- **Opus adversarial Reviewer** gates high-blast-radius / traversal / untrusted-parser diffs (it caught a real
-  SSRF, a manifest overflow-panic, and confirmed the local-path safety) — sonnet reviewers missed the SSRF.
-- New protocol providers **mirror `cpe-sftp`/`cpe-webdav`** exactly (sync crate + FileSystemProvider + is_safe_name
-  + bounded reads + scheme arm in `cpe_vfs::open`). Regenerate + commit **`src-tauri/Cargo.lock`** on any dep
-  (use `cargo check`, NOT `cargo generate-lockfile` which churns ~990 packages).
-- **Lights-out:** never AskUserQuestion mid-sprint; decide-and-log; user resource/authority needs → skip-and-queue,
-  never asked-and-awaited ([[continue-sprints-without-the-user]]).
-
-## To resume
-Fresh session → "start the sprint" (or "start a batched sprint"). Read this file + `history.md` tail. Continue
-the Network program (CPE-1500 OS-mount or CPE-1503 S3 are the natural next headless builds) OR whatever the user
-directs. The Network sidebar visual verify is the one thing to surface to the user for their hands-on check.
+**Tuned defaults (seed next run):** frontend tickets = sonnet, 2-wide, ~20-35m each, clean; unsafe-FFI diffs =
+OPUS adversarial reviewer (caught the null-PWSTR question on #737, confirmed guarded). Foreman-apply worked
+well for the mechanical bindings regen (0 agents). Z: drive I/O-saturates under concurrent cargo builds — cap
+heavy Rust builds low; GitHub API intermittently slow — run merges/git in background, Read `.output` files
+instead of shell `cat`.
