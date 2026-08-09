@@ -2,7 +2,7 @@
 id: CPE-1507
 title: "gui-smoke Linux tail: 3 pre-existing failures revealed once the suite completes (populated-whitespace CDP-assumption + samples + saved-search)"
 type: Bug
-status: Doing
+status: Deferred
 priority: Medium
 component: CI/QA-infra
 tags: [ready]
@@ -125,3 +125,12 @@ Epic CPE-810. QA-Architect owned.
   Linux-side triage above. Net expected: ubuntu leg goes from 36 passing/3 failing to **38 passing/1 failing**,
   not fully green. Left this ticket in `Doing/` per its own acceptance criteria (needs CI verification) rather
   than closing early on an unconfirmed guess.
+
+## 2026-08-08 (sprint) — populated-whitespace FIXED (PR #728); samples + saved-search remain (DEFERRED)
+gui-smoke ubuntu leg improved 36→**37 passing** via PR #728. **populated-whitespace FIXED** — incl. a real
+Linux-only bug (`osCursor()` shelled out to Windows `powershell`, throwing on Linux and aborting the CPE-1155/
+1157 right-click guards before their real assertions ran; gated to win32) + the CDP assertion now accepts
+`cdpAvailable() || actionsAvailable()`. The samples `navigateTo()` harness fix (retry Ctrl+L + set-value via
+browser.execute) landed too but did NOT fully green **samples.smoke.ts** (CPE-1358) — still ≥1 failing case;
+and **saved-search.smoke.ts** (CPE-1233, sidebar never grows the Saved Searches header) remains unfixed and
+documented. Deferred with these 2 as the remaining tracked tail (needs another focused pass or per-spec tickets).
