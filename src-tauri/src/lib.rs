@@ -494,10 +494,22 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
-    cpe_server::fs_route::require_local(&path)?;
-    tauri::async_runtime::spawn_blocking(move || cpe_server::listing::list_dir(&path))
-        .await
-        .map_err(|e| e.to_string())?
+    // Local fast-path (CPE-1511): a local URI takes the EXACT same code path as before — the same
+    // classification `require_local` did, then the same `listing::list_dir` on a blocking thread — so the
+    // plain explorer's hot path is byte-for-byte unchanged (PURPOSE.md). Only a recognised remote scheme
+    // diverts to the provider router.
+    match cpe_server::fs_route::route(&path) {
+        cpe_server::fs_route::Route::Local => {
+            tauri::async_runtime::spawn_blocking(move || cpe_server::listing::list_dir(&path))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        cpe_server::fs_route::Route::Remote(_) => {
+            tauri::async_runtime::spawn_blocking(move || remote_list_dir_impl(path))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+    }
 }
 
 /// Registry of in-flight `list_dir_stream` walks' cancel flags, keyed by the frontend-supplied stream id,
@@ -527,10 +539,24 @@ async fn list_dir_stream(
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
 ) -> Result<usize, String> {
-    cpe_server::fs_route::require_local(&path)?;
-    tauri::async_runtime::spawn_blocking(move || list_dir_stream_impl(path, stream_id, on_entry))
-        .await
-        .map_err(|e| e.to_string())?
+    // Local fast-path (CPE-1511): unchanged from before for a local URI (same classification + same
+    // streaming walker on a blocking thread). A remote scheme streams the resolved provider's listing over
+    // the SAME `Channel` + cancel registry, so the pane paints identically and `cancel_dir_stream` works
+    // for remote too (STREAMING.md).
+    match cpe_server::fs_route::route(&path) {
+        cpe_server::fs_route::Route::Local => {
+            tauri::async_runtime::spawn_blocking(move || list_dir_stream_impl(path, stream_id, on_entry))
+                .await
+                .map_err(|e| e.to_string())?
+        }
+        cpe_server::fs_route::Route::Remote(_) => {
+            tauri::async_runtime::spawn_blocking(move || {
+                remote_list_dir_stream_impl(path, stream_id, on_entry)
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        }
+    }
 }
 
 fn list_dir_stream_impl(
@@ -6486,6 +6512,118 @@ async fn connection_secret_delete(name: String) -> Result<(), String> {
         let _ = name;
         Ok(())
     }
+}
+
+// ---- Remote-location routing (CPE-1511, epic CPE-1499 "mount anything" F3 — the crux) --------------
+// A remote URI (sftp://…, webdav://…) resolves to a live [`cpe_server::provider::FileSystemProvider`] via
+// `cpe_vfs::connect`, so `list_dir`/`list_dir_stream` browse it exactly like a folder. LOCAL PATHS NEVER
+// REACH HERE: each command's fast-path classifies with `fs_route::route` first and only calls in for a
+// recognised remote scheme, so the plain explorer's hot path is byte-for-byte unchanged (PURPOSE.md).
+//
+// The provider pool keeps one live session per saved connection (open once, reuse across ops). Secrets
+// come from the OS keychain via the same `KeyringBackend`/`SecretAccess` seam the vault + connection-secret
+// commands use; host keys use TOFU — a CHANGED/REVOKED key is refused loudly by the SFTP provider, and that
+// distinct error propagates out here (never a silent connect). Provider-supplied names are re-filtered
+// through `is_safe_name` inside `remote_dir_entries`, inheriting the CPE-1461/1462 traversal defense.
+
+/// The process-wide pool of live remote providers, keyed by connection name — open once, reuse across ops.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+static REMOTE_POOL: std::sync::OnceLock<cpe_vfs::connect::ProviderPool> = std::sync::OnceLock::new();
+
+/// Resolve a remote `uri` to a pooled provider: load the saved connections + `known_hosts`, fetch the
+/// connection's secret through the keychain, then open (or reuse) a provider via `cpe_vfs`. A changed host
+/// key refuses loudly (TOFU); a missing connection or missing password-secret is a clear `Err`.
+#[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+fn remote_provider_for(uri: &str) -> Result<cpe_vfs::connect::SharedProvider, String> {
+    let pool = REMOTE_POOL.get_or_init(cpe_vfs::connect::ProviderPool::new);
+    let conns = cpe_server::connections::default_connections_path()
+        .map(|p| cpe_server::connections::load_connections(&p))
+        .unwrap_or_default();
+    let known = cpe_server::known_hosts::default_known_hosts_path()
+        .map(|p| cpe_server::known_hosts::load_known_hosts(&p))
+        .unwrap_or_default();
+    cpe_vfs::connect::connected_provider(
+        pool,
+        &cpe_vfs::connect::VfsOpener,
+        &KeyringBackend,
+        &conns,
+        &known,
+        cpe_vfs::HostKeyPolicy::Tofu,
+        uri,
+    )
+}
+
+/// Platforms without an OS keychain can't resolve a connection secret, so remote locations are unavailable
+/// there (the app only ships on desktop; this keeps the non-desktop build honest).
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+fn remote_provider_for(_uri: &str) -> Result<cpe_vfs::connect::SharedProvider, String> {
+    Err("remote locations require an OS keychain, unavailable on this platform".to_string())
+}
+
+/// Drop any pooled session for `uri`'s connection so the next op reconnects (used when a session looks
+/// dead — a poisoned lock). A no-op on a platform without remote support.
+fn invalidate_remote(uri: &str) {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        let conns = cpe_server::connections::default_connections_path()
+            .map(|p| cpe_server::connections::load_connections(&p))
+            .unwrap_or_default();
+        if let Some(conn) = cpe_vfs::connect::find_connection(uri, &conns) {
+            if let Some(pool) = REMOTE_POOL.get() {
+                pool.invalidate(&conn.name);
+            }
+        }
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = uri;
+    }
+}
+
+/// Collect-to-vec remote directory listing — the remote arm of `list_dir`.
+fn remote_list_dir_impl(uri: String) -> Result<Vec<DirEntry>, String> {
+    let provider = remote_provider_for(&uri)?;
+    let guard = match provider.lock() {
+        Ok(g) => g,
+        Err(_) => {
+            invalidate_remote(&uri);
+            return Err("remote provider is unavailable (session dropped); retry".to_string());
+        }
+    };
+    cpe_vfs::connect::remote_dir_entries(&**guard, &uri)
+}
+
+/// Streaming remote directory listing — the remote arm of `list_dir_stream`. Reuses the SAME cancel
+/// registry as the local walk (so `cancel_dir_stream` stops a superseded remote walk), and pushes the
+/// mapped rows over the IPC `Channel` in `LIST_DIR_BATCH`-sized batches so the pane paints immediately.
+fn remote_list_dir_stream_impl(
+    uri: String,
+    stream_id: u64,
+    on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
+) -> Result<usize, String> {
+    use std::sync::atomic::Ordering;
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    dir_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
+    let result = (|| {
+        let rows = remote_list_dir_impl(uri)?;
+        let total = rows.len();
+        // Drain into owned batches (DirEntry isn't `Clone`, so move rather than copy) — one flush for a
+        // small listing, several for a big one, mirroring the local batch size.
+        let mut it = rows.into_iter();
+        loop {
+            let batch: Vec<DirEntry> = it.by_ref().take(cpe_server::listing::LIST_DIR_BATCH).collect();
+            if batch.is_empty() {
+                break;
+            }
+            let _ = on_entry.send(batch);
+            if cancel.load(Ordering::Relaxed) {
+                break;
+            }
+        }
+        Ok(total)
+    })();
+    dir_stream_registry().lock().unwrap().remove(&stream_id);
+    result
 }
 
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------

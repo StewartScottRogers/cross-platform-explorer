@@ -59,6 +59,13 @@ tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], 
 # shells out to the SAME bundled ffmpeg `video-thumb` already provisions (CPE-1258), so it adds no new
 # native dependency to bundle/ship; enabling it here is what actually exposes the command.
 cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "waveform", "http-embedder", "copilot", "dicom-thumb"] }
+# Remote-location routing (CPE-1511, epic CPE-1499): turns a remote URI (sftp://…, webdav://…) into a
+# live provider so it browses through the same commands a local path does. `cpe-vfs` re-exports the
+# connections model + concrete SFTP/WebDAV providers behind one `connected_provider`/pool seam, so this is
+# the only new dependency the app needs to go from "remote rejected" to "remote browsable". The plain
+# explorer's local hot path never touches it — the command fast-path routes local straight to the local
+# backend as before (PURPOSE.md).
+cpe-vfs = { path = "../crates/vfs" }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);
