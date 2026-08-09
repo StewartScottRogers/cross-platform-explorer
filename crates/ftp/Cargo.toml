@@ -1,0 +1,32 @@
+[package]
+name = "cpe-ftp"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "FTP/FTPS FileSystemProvider for the Cross-Platform Explorer (epic CPE-616/CPE-1502): a remote backend over FTP/FTPS via suppaftp (rustls-ring — pure Rust, no C build tooling, matching cpe-sftp's ring backend). Sync (no async runtime), like cpe-webdav."
+license = "MIT"
+
+# The 3rd remote backend alongside cpe-sftp (SSH/SFTP) and cpe-webdav (HTTP/WebDAV): the first net-new
+# Network protocol (CPE-1514, epic CPE-1502). Depends on cpe-server for the FileSystemProvider trait +
+# the traversal-name guard. suppaftp is a maintained, actively-developed fork of the abandoned/vulnerable
+# `ftp` crate; its sync API needs no internal async runtime (like cpe-webdav). Standalone (out of any
+# workspace), like the sibling crates.
+
+[dependencies]
+cpe-server = { path = "../server" }
+# `rustls-ring` (not `rustls-aws-lc-rs`): the same self-contained pure-Rust/asm crypto backend cpe-sftp
+# already chose for `russh` — consistency across the remote-provider family, no NASM/cmake needed to
+# build on the Windows CI leg, and no new TLS stack in the tree (rustls itself is already present via
+# ureq/reqwest). `deprecated` is NOT enabled — this crate only ever uses explicit FTPS (AUTH TLS on the
+# plaintext control channel via `into_secure`), never the deprecated implicit-FTPS connect helpers.
+suppaftp = { version = "10", default-features = false, features = ["rustls-ring"] }
+# Mozilla's root CA bundle for the FTPS `rustls::ClientConfig` (suppaftp itself only pulls this in as a
+# dev-dependency — see its own README example — so a real FTPS caller must supply a root store). Version
+# 1.x is already resolved in the tree (transitively, at 1.0.8) as well as the older 0.26 line, so this adds
+# no new major dependency, just a direct edge onto an already-present crate. `rustls` itself is NOT a
+# direct dependency here: suppaftp re-exports its own `rustls` (`suppaftp::rustls`), and building the
+# ClientConfig through that re-export (rather than a separately-versioned direct dep) guarantees the type
+# handed to `into_secure` is always the exact version suppaftp itself compiled against.
+webpki-roots = "1"
+
+[dev-dependencies]
