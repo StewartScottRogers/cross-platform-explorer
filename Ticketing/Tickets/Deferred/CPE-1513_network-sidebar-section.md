@@ -2,7 +2,7 @@
 id: CPE-1513
 title: "Network left-pane sidebar section + connections UI (SFTP/WebDAV entry point)"
 type: Feature
-status: Doing
+status: Deferred
 priority: High
 component: Frontend
 tags: [ready]
@@ -47,3 +47,13 @@ unchanged when unused.
 Frontend-heavy + a thin connections command layer. Leave CPE-1513 in `Doing` (pending visual verification) with a
 Work Log; the Foreman will run a gui-smoke Visual Critic pass or hand it to the user. Sits on top of CPE-1510 +
 CPE-1511 (both merged).
+
+## 2026-08-09 (Sprint) — CODE MERGED to main (e5993417); VISUAL sign-off PENDING (Deferred)
+The Network sidebar UI code (network.ts +27 tests, Sidebar section + Explore "Network…" row, add-connection
+form, per-connection menu, secret prompt, connections_* command wrappers, docs) is on main — npm check + 2582
+tests green per the worker; independent code review was in flight (findings apply to the identical code on main).
+Landed via a concurrent-worktree file-leak + git add -A (not a clean PR merge — noted; PR #731 closed as
+superseded). **DEFERRED because the VISUAL/interaction result is unverified** — needs the user's attended eyes
+(build→install→run) or a gui-smoke Visual Critic screenshot pass on 5 surfaces (Explore row, add-form
+layout/border, status-dot colours + row menu, entry-point placement, OS-share tier rows). Un-defer to Done once
+visually signed off.
