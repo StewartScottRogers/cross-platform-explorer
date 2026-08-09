@@ -1,13 +1,23 @@
 // CPE-1155 (harness proof) + CPE-1157 (bug repro/diagnosis/regression) — a FAITHFUL, NON-GRABBING
-// right-click driven by gui-smoke/lib/mouse.ts (CDP `Input.dispatchMouseEvent`).
+// right-click driven by gui-smoke/lib/mouse.ts (CDP `Input.dispatchMouseEvent` on Windows/Chromium,
+// or the W3C-Actions fallback on Linux/WebKitWebDriver — CPE-1481).
 //
 // Unlike a synthetic `dispatchEvent` (which let CPE-1154/1157 slip by delivering the event straight
 // to a chosen handler), CDP input injects through the real browser pipeline — true hit-testing, real
 // event order, the native context menu — but never moves the OS cursor. This spec:
 //
-//   A) CPE-1155: proves the CDP mouse channel is reachable here, a real right-click opens the app's
-//      OWN menu (`.ctx`) not the native WebView2 one, and does NOT move the physical OS cursor
-//      (captured via PowerShell before/after — belt-and-braces on top of CDP's design guarantee).
+//   A) CPE-1155: proves a faithful mouse-input channel is reachable here, a real right-click opens
+//      the app's OWN menu (`.ctx`) not the native WebView2 one, and — on the Windows/CDP path only,
+//      see CPE-1507 below — does NOT move the physical OS cursor (captured via PowerShell before/
+//      after — belt-and-braces on top of CDP's design guarantee).
+//
+//   CPE-1507: this spec originally asserted `cdpAvailable() === true` unconditionally, which is
+//   FALSE on Linux WebKitWebDriver by design (no CDP vendor endpoint at all — the entire reason
+//   CPE-1481 added the W3C-Actions fallback in mouse.ts). It also called a Windows-only `osCursor()`
+//   (shells out to `powershell`, which doesn't exist on Linux) inside the CPE-1157/empty-folder its,
+//   which threw before ever reaching the real app-menu-opens assertions those tests exist to make.
+//   Both are now gated: the CDP-specific checks are Windows-only, and the app-menu/non-native
+//   behavior is asserted on every platform through whichever channel mouse.ts picked.
 //
 //   B) CPE-1157: in a POPULATED folder, right-clicks the BLANK area below the last row and asserts the
 //      empty-area menu opens. This is the regression test — it FAILS on the buggy build and PASSES
@@ -27,14 +37,24 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
-import { rightClick, click, doubleClick, cdpAvailable, type Point } from "../lib/mouse.js";
+import { rightClick, click, doubleClick, cdpAvailable, actionsAvailable, type Point } from "../lib/mouse.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 const MARKER_NAME = "CPE-1045-marker.txt"; // seeded into the tmpDir root — proves it's populated
 const EMPTY_DIR_NAME = "CPE-1154-empty-folder"; // seeded EMPTY subdir (CPE-1154)
 
-/** Current OS cursor position via .NET, so we can assert CDP input never moved the physical pointer. */
+// CPE-1507: the "never moves the physical OS cursor" guarantee is specific to the CDP `Input.*`
+// injection path (Windows/Chromium) — it is CDP's own documented design property, not something the
+// W3C-Actions fallback (Linux/WebKitWebDriver, CPE-1481) promises or that this harness can verify
+// there anyway: `osCursor()` below shells out to Windows PowerShell, which doesn't exist on Linux CI
+// (confirmed by job 93164774027 — every call threw `Command failed: powershell … /bin/sh: 1:
+// powershell: not found`, which was ABORTING the CPE-1157/empty-folder its before they ever reached
+// their real app-menu-opens assertions). Gate the whole cursor-probe to Windows so those assertions
+// still run everywhere; the behavioral checks (menu opens, correct variant) are unconditional below.
+const CAN_CHECK_OS_CURSOR = process.platform === "win32";
+
+/** Current OS cursor position via .NET (Windows only — see {@link CAN_CHECK_OS_CURSOR}). */
 function osCursor(): { x: number; y: number } {
   const out = execSync(
     'powershell -NoProfile -Command "Add-Type -AssemblyName System.Windows.Forms; ' +
@@ -43,6 +63,11 @@ function osCursor(): { x: number; y: number } {
   ).trim();
   const [x, y] = out.split(",").map((n) => parseInt(n, 10));
   return { x, y };
+}
+
+/** `osCursor()` on Windows, `null` everywhere else (CPE-1507 — see {@link CAN_CHECK_OS_CURSOR}). */
+function maybeOsCursor(): { x: number; y: number } | null {
+  return CAN_CHECK_OS_CURSOR ? osCursor() : null;
 }
 
 /** Viewport-space centre of the FIRST `.row` whose text contains `name` (or `null`). */
@@ -177,11 +202,20 @@ describe("CPE-1155 + CPE-1157 — faithful non-grabbing right-click on populated
     await dismissMenu();
   });
 
-  it("CPE-1155: the CDP mouse-input channel is available in this driver", async () => {
-    const ok = await cdpAvailable();
+  it("CPE-1155/CPE-1507: a faithful mouse-input channel is available (CDP on Chromium, or the W3C-Actions fallback on WebKitWebDriver)", async () => {
+    const cdp = await cdpAvailable();
+    const actions = actionsAvailable();
     // eslint-disable-next-line no-console
-    console.log(`[CPE-1155] cdpAvailable() = ${ok}`);
-    expect(ok, "CDP Input injection via msedgedriver's chromium/send_command endpoint").to.equal(true);
+    console.log(`[CPE-1155] cdpAvailable() = ${cdp}, actionsAvailable() = ${actions}`);
+    // CPE-1507: the OLD assertion here required CDP specifically ("expected false to equal true" on
+    // every Linux CI run — job 93164774027), which is FALSE on WebKitWebDriver by design: that driver
+    // has no CDP vendor endpoint at all, the entire reason CPE-1481 added the Actions fallback in
+    // mouse.ts. What actually matters for the rest of this suite is that SOME faithful mouse-input
+    // channel is reachable; the real right-click behavior (app menu vs native, non-grabbing) is
+    // validated by the its below, through whichever channel mouse.ts picked.
+    expect(cdp || actions, "mouse.ts needs CDP or the W3C Actions API to inject faithful mouse input").to.equal(
+      true,
+    );
   });
 
   it("is at the POPULATED tmpDir root with files rendered", async () => {
@@ -224,12 +258,17 @@ describe("CPE-1155 + CPE-1157 — faithful non-grabbing right-click on populated
     console.log(`[CPE-1157] blank point (${point.x},${point.y}) elementFromPoint = ${hit}`);
 
     await armDeepProbe();
-    const before = osCursor();
+    const before = maybeOsCursor();
     await rightClick(point);
-    const after = osCursor();
+    const after = maybeOsCursor();
     // eslint-disable-next-line no-console
-    console.log(`[CPE-1157] OS cursor before=${before.x},${before.y} after=${after.x},${after.y}`);
-    expect(after, "CDP right-click must not move the OS cursor").to.deep.equal(before);
+    console.log(`[CPE-1157] OS cursor before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    // CPE-1507: CDP's "never moves the OS cursor" guarantee is Windows-only (see CAN_CHECK_OS_CURSOR) —
+    // skip the comparison on the Actions fallback rather than crash `osCursor()` against a nonexistent
+    // `powershell` binary. The behavioral assertions below (menu opens, correct variant) still run.
+    if (CAN_CHECK_OS_CURSOR) {
+      expect(after, "CDP right-click must not move the OS cursor").to.deep.equal(before);
+    }
 
     await browser.pause(500);
     const probe = await readDeepProbe();
@@ -273,12 +312,16 @@ describe("CPE-1155 + CPE-1157 — faithful non-grabbing right-click on populated
     const size = await pane.getSize();
     const point: Point = { x: Math.round(loc.x + size.width / 2), y: Math.round(loc.y + 12) };
 
-    const before = osCursor();
+    const before = maybeOsCursor();
     await rightClick(point);
-    const after = osCursor();
+    const after = maybeOsCursor();
     // eslint-disable-next-line no-console
-    console.log(`[CPE-1155] empty-folder OS cursor before=${before.x},${before.y} after=${after.x},${after.y}`);
-    expect(after, "CDP input must NOT move the physical OS cursor").to.deep.equal(before);
+    console.log(`[CPE-1155] empty-folder OS cursor before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    // CPE-1507: see the identical guard above — Windows/CDP-only comparison, skipped on the Actions
+    // fallback (no `powershell` on Linux CI, and no CDP no-move guarantee to verify there anyway).
+    if (CAN_CHECK_OS_CURSOR) {
+      expect(after, "CDP input must NOT move the physical OS cursor").to.deep.equal(before);
+    }
 
     const ctx = await $(".ctx");
     await ctx.waitForExist({ timeout: 10_000, timeoutMsg: "app .ctx menu did not open on a real CDP right-click (empty folder)" });

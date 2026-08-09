@@ -139,15 +139,62 @@ async function waitForPreviewToSettle(relPath: string, timeoutMs = 20_000): Prom
  *  "Type a path (Ctrl+L)" flow a user driving the address bar uses, NavToolbar.svelte), then waits for
  *  the breadcrumb to confirm the folder actually changed. Used instead of double-clicking through nested
  *  folders so every sample's own subdirectory (audio/, images/, documents/, …) is reachable in one step
- *  regardless of nesting depth. */
+ *  regardless of nesting depth.
+ *
+ *  CPE-1507: the original single-shot "Ctrl+L -> waitForExist -> `.setValue()`" sequence raced two ways
+ *  on Linux (WebKitWebDriver) that a real CI run (job 93164774027) caught cold — both invisible on
+ *  Windows/CDP, which is why this went unnoticed until the Linux leg finished a full run for the first
+ *  time (CPE-1481):
+ *   (a) the FIRST Ctrl+L of the walk sometimes never opened `.pathedit` at all (a clean 10s of empty
+ *       `findElements` polls, no flicker) — WebKitWebDriver's Actions-based key delivery occasionally
+ *       drops the very first keypress of a session/after a long idle. Fixed by retrying the Ctrl+L
+ *       keypress a few times with a short poll each, instead of sending it once and waiting the full
+ *       timeout.
+ *   (b) once `.pathedit` DID mount, WebdriverIO's `setValue()` (native `elementClear` then
+ *       `elementSendKeys`) raced NavToolbar.svelte's unconditional `on:blur={() => (editingPath =
+ *       false)}`: the log shows `elementClear` succeed, then the very next `elementSendKeys` fail with
+ *       "stale element — terminating request" — the input had already been unmounted between the two
+ *       native WebDriver calls. Because every spec `it()` in this suite shares ONE app session, that
+ *       first stale-element throw left the SAME desync behind for every later sample in the walk,
+ *       cascading into ~30 identical ".pathedit not found" failures from one root cause. Fixed by
+ *       setting the value directly via `browser.execute` — the one primitive this harness has already
+ *       proven reliable against wry's webview (see mouse.ts's `pointOf()` comment) — which never
+ *       triggers WebDriver's native clear/sendKeys pair and so never races that blur handler. */
 async function navigateTo(absDir: string): Promise<void> {
-  await browser.keys(["Control", "l"]);
-  const input = await $(".pathedit");
-  await input.waitForExist({
-    timeout: 10_000,
-    timeoutMsg: "expected the address-bar path input (.pathedit) to appear after Ctrl+L",
-  });
-  await input.setValue(absDir);
+  const PATHEDIT_SELECTOR = ".pathedit";
+  const CTRL_L_ATTEMPTS = 3;
+  let opened = false;
+  for (let attempt = 1; attempt <= CTRL_L_ATTEMPTS && !opened; attempt++) {
+    await browser.keys(["Control", "l"]);
+    try {
+      await $(PATHEDIT_SELECTOR).waitForExist({ timeout: 4_000 });
+      opened = true;
+    } catch {
+      // CPE-1507: Ctrl+L occasionally doesn't register on WebKitWebDriver's Actions-based key
+      // delivery — retry rather than fail on the first miss (unless this was the last attempt).
+      if (attempt === CTRL_L_ATTEMPTS) {
+        throw new Error(
+          `expected the address-bar path input (${PATHEDIT_SELECTOR}) to appear after Ctrl+L (${CTRL_L_ATTEMPTS} attempts)`,
+        );
+      }
+    }
+  }
+
+  // CPE-1507: set the value via `browser.execute` (bypasses the native elementClear/elementSendKeys
+  // pair that races NavToolbar's `on:blur` on WebKitWebDriver — see the header comment above). Svelte's
+  // `bind:value={draft}` just reads `el.value` off the bubbling `input` event, so a plain property
+  // assignment + dispatched event is exactly as faithful here as real keystrokes would be.
+  await browser.execute(
+    (sel, value) => {
+      const el = document.querySelector(sel) as HTMLInputElement | null;
+      if (!el) return;
+      el.focus();
+      el.value = value;
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    },
+    PATHEDIT_SELECTOR,
+    absDir,
+  );
   await browser.keys(["Enter"]);
 
   const expectedName = path.basename(absDir);
