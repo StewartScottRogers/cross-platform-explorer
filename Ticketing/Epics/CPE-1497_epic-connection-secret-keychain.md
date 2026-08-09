@@ -2,7 +2,7 @@
 id: CPE-1497
 title: "EPIC: Network F1 — connection-secret storage in the app (OS keychain)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Backend
 tags: [epic]
@@ -31,3 +31,13 @@ app** for connection secrets.
 ## Effort / deps / fit
 S–M (pattern exists to copy). Backend-heavy + tiny frontend. Deps: none (uses existing `connections.rs`).
 Purpose-fit: clean; behind the Network feature. Not `vault_manager.rs` (that's file-encryption — unrelated).
+
+## ACTIVATED 2026-08-08 (Sprint, user-directed: "Activate Network SFTP/WebDAV")
+Decomposed just-in-time. Confirmed the substrate exists: `sidecar/host/src/providers/secrets.rs` (keyring v3
+pattern to lift), `crates/server/src/connections.rs` (secret-free profiles), `crates/vfs/src/lib.rs`
+(`vfs::open(conn, secret, ...)` already takes the secret param). First (and likely only) buildable slice:
+- **CPE-1510** — connection-secret keychain store (backend: lift keyring into cpe-server, set/get/delete keyed
+  by connection name, testable seam). Headless-buildable. The "remember" toggle UI folds into CPE-1498's
+  Network sidebar.
+Sequence for the program: CPE-1497 (this) → CPE-1498 (Network sidebar) → CPE-1499 (vfs::open command wiring →
+SFTP+WebDAV live).
