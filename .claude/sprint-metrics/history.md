@@ -1203,3 +1203,13 @@ Tuned defaults / lessons:
 - Session total across both batches: **11 PRs merged, 0 escaped defects**, 1 HIGH + 1 prod-MED + many DoS closed;
   security surface now comprehensively audited (readers/network/crypto/IPC/frontend). FRONTIER: genuinely dry for
   headless — next needs the user (attended GUI/macOS/cert/live-agent/network-E2E) or a fresh direction.
+
+## Sprint 2026-08-08→09 (CLI) — 20 batches: workshift→Sprint rename + Network SFTP/WebDAV/FTP LIVE
+Renamed the loop workshift→Sprint (1f31f045, 266 files; SPR-NN kept). User activated the Network program; shipped
+the whole foundation LIVE: keychain CPE-1510, vfs-route CPE-1511 (local byte-for-byte PROVEN by opus adversarial
+review), sidebar UI CPE-1513 (VISUAL VERIFY OWED), FTP provider CPE-1514, host-key TOFU persist CPE-1512 — so
+sftp://, webdav://, ftp:// browse in the left pane. Earlier: CSP, waveform, gui-smoke restoration (0→37), thumb SSRF,
+binary-arch, image-diff, split/join. Lessons: worktrees INSIDE project (.claude/worktrees/), never Z:\repos parent;
+never git add -A while worktrees live (a leak swept files onto main); workers run cargo/git/gh synchronously; opus
+adversarial reviewer catches SSRF/overflow/local-regression sonnet misses; providers mirror cpe-sftp/webdav +
+regen src-tauri/Cargo.lock via cargo check. Handed off at batch 20/40, budget ~118/200 — resume fresh.
