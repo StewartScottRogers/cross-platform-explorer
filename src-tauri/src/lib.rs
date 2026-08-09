@@ -6419,6 +6419,75 @@ async fn vault_forget_passphrase(blob_path: String) -> Result<(), String> {
     .map_err(|e| e.to_string())?
 }
 
+// ---- Connection-secret keychain store (CPE-1510, epic CPE-1497 "mount anything" F1 slice) ----------
+// A saved remote-connection profile (`cpe_server::connections::Connection`) records only non-secret
+// metadata; the password/passphrase lives in the OS keychain, keyed by the connection's `name`, via
+// `cpe_server::secret_store` — the same `SecretAccess`/`KeyringBackend` seam the vault work above uses,
+// just under its own service (`cpe_server::secret_store::CONNECTION_SECRET_SERVICE`) so a connection
+// secret never collides with a vault passphrase or any other stored secret. These three commands are the
+// thin dispatchers; wiring the resolved secret into `vfs::open` at connect time is CPE-1499's job.
+
+/// Save `secret` (a password or key passphrase) for the saved connection named `name`, overwriting any
+/// value already stored for that name. The ONLY place this secret persists. Async + `spawn_blocking`: a
+/// blocking OS credential-store call (CPE-760/761). The secret value is never logged or echoed back.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connection_secret_set(name: String, secret: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            cpe_server::secret_store::set_secret(&KeyringBackend, &name, &secret)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (name, secret);
+        Err("no OS keychain available on this platform".to_string())
+    }
+}
+
+/// Fetch the stored secret for the saved connection named `name`, or `None` if none is saved. Async +
+/// `spawn_blocking` (blocking OS credential-store call).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connection_secret_get(name: String) -> Result<Option<String>, String> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            cpe_server::secret_store::get_secret(&KeyringBackend, &name)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = name;
+        Ok(None)
+    }
+}
+
+/// Delete the stored secret for the saved connection named `name` (e.g. the sidebar's "forget password").
+/// Deleting a missing entry is `Ok`. Async + `spawn_blocking` (blocking OS credential-store call).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn connection_secret_delete(name: String) -> Result<(), String> {
+    #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
+    {
+        tauri::async_runtime::spawn_blocking(move || {
+            cpe_server::secret_store::delete_secret(&KeyringBackend, &name)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
+    {
+        let _ = name;
+        Ok(())
+    }
+}
+
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
 // Runs a user's resolved command line (built by userCommands.resolveCommand / cmdTemplate, CPE-781) and
 // returns its captured output + exit code. Executed through the platform shell (`cmd /C` on Windows,
@@ -10553,7 +10622,10 @@ pub fn run() {
             vault_lock,
             vault_status,
             vault_remember_passphrase,
-            vault_forget_passphrase
+            vault_forget_passphrase,
+            connection_secret_set,
+            connection_secret_get,
+            connection_secret_delete
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -11343,6 +11415,9 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         vault_status,
         vault_remember_passphrase,
         vault_forget_passphrase,
+        connection_secret_set,
+        connection_secret_get,
+        connection_secret_delete,
     ])
     // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
     // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and

@@ -44,6 +44,12 @@ pub mod known_hosts;
 /// excluded — those live in the OS keychain). Pure data + JSON persistence (CPE-683).
 pub mod connections;
 
+/// Connection-secret keychain store (CPE-1510, epic CPE-1497): `set_secret`/`get_secret`/`delete_secret`
+/// keyed by a [`connections::Connection`]'s `name`, over the same [`vault_manager::SecretAccess`]
+/// keychain seam the vault work uses, namespaced under its own service so it never collides with a vault
+/// passphrase or any other stored secret. `secret_for` is the lookup CPE-1499's `vfs::open` wiring calls.
+pub mod secret_store;
+
 /// Provider-agnostic recursive walk + bidirectional tree transfer over the `FileSystemProvider` trait,
 /// so every backend (local/SFTP/WebDAV) shares one cancellable enumeration + copy (CPE-905).
 pub mod transfer;
