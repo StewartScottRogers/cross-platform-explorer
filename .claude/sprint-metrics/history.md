@@ -1230,3 +1230,17 @@ regen) directly = 0 agents. Z: drive I/O-saturates under concurrent cargo builds
 slow → background git/gh + Read .output files. Wrapped on work-dry (~135/200), not the budget wall. Queue:
 CPE-1521; CPE-1518 QNAP TS-133 E2E (ATTENDED, NAS 2026-08-10); epics CPE-1504 SMB / CPE-1500 OS-mount / CPE-1517
 LAN mDNS discovery.
+
+## Sprint 2026-08-09 (CLI) — batch 22: WNet hardening + mDNS epic activation (post-"resume")
+User said "resume the sprint" (same session, so budget continued ~135→~140, NOT reset). Shipped: **CPE-1521**
+(#742) — WNet discovery outer-loop cap (WNET_MAX_TOTAL_ENTRIES=4096 + iteration guard, partial-results),
+closing the opus-review follow-up from CPE-1519; Reviewer+UAT+backend-CI green. **Activated + decomposed epic
+CPE-1517** (LAN mDNS/SSDP discovery): dep-vetted → adopted **`mdns-sd`** (pure-Rust, no native Bonjour SDK,
+permissive, maintained; beats zeroconf/astro-dnssd which need the Bonjour SDK on Windows). Filed fully-specified
+slice-1 **CPE-1523** (new `crates/mdns` + `discover_network_mdns` command + parallel WNet+mDNS merge in the
+existing Discovered tier) + research entry. **Wrapped on budget discipline** (~140/200 same-session, reset line
+150) rather than start CPE-1523 (new-crate+dep+bindings — needs full budget headroom to avoid stalling at the
+wall). Hand off: resume in a FRESH session → build CPE-1523 first. Lessons reinforced: verify ubuntu Backend
+drift-guard CI leg before merging specta PRs; Foreman-apply mechanical fixes = 0 agents; cargo at
+%USERPROFILE%\.cargo\bin\cargo.exe for own shells. Queue: CPE-1523; CPE-1518 QNAP E2E (attended, now covers WNet
++ mDNS + SFTP/WebDAV/FTP); epics CPE-1504/1500. Owed to user: Gource PR #738 review, sidebar visual sign-off.

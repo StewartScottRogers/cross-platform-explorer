@@ -1,57 +1,53 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-09 (CLI, "keep working on the sprints" — user away w/ intermittent requests) — batch 21 WRAPPED
-**State:** `main` @ origin `aaa64fff` (clean, CI GREEN, 0 worktrees, Backlog has only queued/user-gated work).
-Lock released, wakeup cancelled. Budget ~135/200 (well under the 150 reset line — stopped on *work-ran-dry*,
-not budget: the remaining ready headless work is thin, the rest is user-gated).
+## RUN 2026-08-09 (CLI) — batch 22 WRAPPED (budget hand-off, NOT a stop — resume in a fresh session)
+**State:** `main` @ origin `35ec186d` (clean, backend CI green, 0 worktrees). Lock released, wakeup cancelled.
+Budget ~140/200 in THIS session (the user resumed in-session, so the cap did NOT reset) — stopping at the reset
+line because the next ready ticket (CPE-1523) is a new-crate + new-dep + bindings job that needs full budget
+headroom. **Resume in a genuinely fresh session (or raise `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`).**
 
-### Shipped this batch (5 merges, all gauntlet-verified Reviewer+UAT, 0 escaped defects after the one caught below)
-User asked (while mostly away) to build out the **Network / left-pane UX** and a **Gource** showcase. Delivered:
-- **CPE-1516 (#736)** — Network is now a **permanent top-level sidebar section** (was hidden until a
-  connection existed; entry was buried in Explore). Frontend.
-- **CPE-1519 backend (#737)** — **Windows-native network discovery** via `WNetOpenEnum`/`WNetEnumResource`
-  (`discover_network_windows`, `#[cfg(windows)]`, async+spawn_blocking+6s-bounded, depth/buffer caps); pure
-  map/flatten/dedup in `cpe_server::net_share`. Opus-reviewed (unsafe FFI). No new dep (windows crate feature).
-- **CPE-1520 (#739)** — **user-reorderable sidebar sections** (drag headers + persisted `sidebarOrder` store +
-  reset; CSS-order on flex children, low-churn). Frontend.
-- **CPE-1519 frontend (#741)** — **"Discovered on your network" tier** in the Network section: calls the
-  command (raw invoke, it's excluded from typed bindings), dedupes across all 3 tiers, one-click pre-filled
-  add (`smb` scheme; connect fails cleanly until CPE-1504). Feature now COMPLETE E2E.
-- **bindings base-fix (#740)** — see incident below.
-Also: **Gource visualization → PR #738** (CPE-1522, a SEPARATE user request) — a weekly Actions render of the
-repo history embedded under the README hero, published to an orphan `gource` branch (NOT committed to main —
-would bloat history). **Open for the USER to review/merge** (outward-facing landing page). Filed **CPE-1521**
-(WNet outer-loop entry-cap hardening, opus-review follow-up to #737).
+### Shipped/done this batch (22)
+- **CPE-1521 (#742)** — WNet discovery outer-pagination loop hardened (`WNET_MAX_TOTAL_ENTRIES=4096` cumulative
+  + iteration cap, partial-results semantics) — closes the opus-review follow-up from CPE-1519. Merged, backend
+  CI green. Reviewer+UAT passed.
+- **Epic CPE-1517 (LAN discovery) ACTIVATED + decomposed.** Dep decided: **`mdns-sd`** (pure-Rust, no native
+  Bonjour SDK, permissive, maintained) — see research [[mdns-discovery-dependency-2026-08-09]]. Windows-native
+  leg already shipped (CPE-1519).
 
-### Incident caught + fixed (lesson)
-#737 changed `NetShare.kind`'s **doc comment** (a `specta::Type`) but didn't regenerate `bindings.gen.ts` → the
-CI **Typed-bindings drift guard** reddened `main` (Backend ubuntu). The Windows-local gauntlet + the drift
-*unit test* both passed, masking it; only a later PR's inherited-red surfaced it. Fixed by regenerating +
-merging #740; main green again (confirmed `completed/success`). **Lesson (saved to memory
-[[regen-specta-bindings-on-struct-change]]):** for ANY backend/specta PR, regenerate bindings on a doc-comment
-change too, and **verify the ubuntu Backend drift-guard CI leg before merging** — don't merge on the
-Windows-local gauntlet alone. `cargo` is NOT on the non-interactive shell PATH → use
-`%USERPROFILE%\.cargo\bin\cargo.exe` (PowerShell).
+### NEXT TICKET — ready to build first in the fresh session
+**CPE-1523** (`Ticketing/Tickets/Backlog/CPE-1523_mdns-discovery-slice1.md`) — mDNS slice 1, FULLY SPECIFIED:
+- New crate **`crates/mdns` (`cpe-mdns`)** (path-dep on cpe-server + `mdns-sd`), mirroring cpe-ftp/webdav/sftp.
+  Pure `map_mdns_service(...)→Option<NetShare>` (table: _smb→smb:445, _sftp-ssh→sftp:22, _webdav→webdav:80,
+  _webdavs→davs:443, _ftp→ftp:21, _nfs→nfs:2049; else None) + impure `discover(timeout)→Vec<NetShare>`
+  (browse 6 types, ~6s bound, dedup via `net_share::dedup_key`→make pub).
+- Command **`discover_network_mdns`** (cross-platform, NOT cfg-gated, INCLUDED in specta bindings — unlike the
+  per-OS `discover_network_windows`). `App.svelte loadDiscovered()`: run WNet + mDNS in parallel, merge+dedupe
+  (pure TS helper, unit-tested). Tier-3 UI already renders it → no Sidebar change.
+- **Chores (don't skip):** regen `bindings.gen.ts` (new specta command), regen root + src-tauri `Cargo.lock`
+  ([[multiple-independent-cargo-locks]]), add the workspace member. **⚠ VERIFY the ubuntu Backend drift-guard
+  CI leg is GREEN before merging** (batch-21 bit us here).
+- **Folded fixes:** extend `discoveredShareToFormInput` for `scheme://host[:port]` paths; add `ftp` to
+  `SUPPORTED_SCHEMES` (cpe-ftp ships).
+- Note: touches `src-tauri/src/lib.rs` — serialize vs anything else editing that file.
 
-## To resume (say "resume the sprint" in a fresh session)
-The clean-headless well is thin again. Remaining queue (priority order):
-1. **CPE-1521** — WNet outer-loop entry-cap hardening (backend, small, `#[cfg(windows)]` — buildable+testable
-   on THIS Windows machine; low priority, bounded risk). The one genuinely-ready headless ticket.
-2. **CPE-1518** — E2E-verify shipped SFTP/WebDAV/FTP + the new WNet discovery against the real **QNAP TS-133**
-   NAS. **ATTENDED — needs the hardware (arrives/installed 2026-08-10)** + the user's LAN. See
-   [[qnap-nas-test-target]].
-3. Epics needing decomposition / user decisions: **CPE-1504** (SMB — crate-risk, Windows-UNC leg testable vs
-   QNAP now), **CPE-1500** (OS-mount), **CPE-1517** (LAN mDNS/SSDP discovery — the cross-platform complement to
-   the Windows-native tier just shipped; needs a dep decision).
+### Rest of the queue (priority order)
+1. CPE-1523 (above) — the one ready buildable ticket.
+2. **CPE-1518** — QNAP TS-133 E2E (ATTENDED, needs the NAS — from 2026-08-10 — + user LAN). Now covers BOTH the
+   WNet discovery AND the mDNS discovery + shipped SFTP/WebDAV/FTP. See [[qnap-nas-test-target]].
+3. Epics: CPE-1504 (SMB — crate-risk; Windows-UNC leg testable vs QNAP), CPE-1500 (OS-mount), CPE-1517 later
+   slices (SSDP/UPnP v3).
 
-**Owed to the USER (async, non-blocking):**
-- Review/merge **Gource PR #738** (+ then run the workflow once to populate the `gource` branch).
-- **Visual sign-off** on the sidebar changes (permanent Network section + drag-reorder + Discovered tier) —
-  none are pixel-verified (jsdom only). A `build→install→run` or a gui-smoke Visual Critic pass would close it.
-- **QNAP E2E** (CPE-1518) once the NAS is set up.
+### Owed to the USER (async, non-blocking)
+- Review/merge **Gource PR #738** (then run the workflow once to populate the `gource` branch).
+- **Visual sign-off** on the sidebar changes (permanent Network section CPE-1516 + drag-reorder CPE-1520 +
+  Discovered tier CPE-1519fe) — jsdom-tested only, not pixel-verified.
+- **QNAP E2E** (CPE-1518) once the NAS is up — the first real-hardware test of the whole Network feature.
 
-**Tuned defaults (seed next run):** frontend tickets = sonnet, 2-wide, ~20-35m each, clean; unsafe-FFI diffs =
-OPUS adversarial reviewer (caught the null-PWSTR question on #737, confirmed guarded). Foreman-apply worked
-well for the mechanical bindings regen (0 agents). Z: drive I/O-saturates under concurrent cargo builds — cap
-heavy Rust builds low; GitHub API intermittently slow — run merges/git in background, Read `.output` files
-instead of shell `cat`.
+### Tuned defaults / lessons (seed next run)
+frontend=sonnet 2-wide ~20-35m; unsafe-FFI=opus reviewer (safe-Rust follow-ups=sonnet); Foreman-apply
+mechanical fixes (bindings regen) = 0 agents. **Verify the ubuntu Backend drift-guard CI leg before merging ANY
+specta/backend PR** — Windows-local gauntlet + the drift unit-test both pass while the CI shell-step fails
+([[regen-specta-bindings-on-struct-change]]). `cargo` NOT on non-interactive shell PATH →
+`%USERPROFILE%\.cargo\bin\cargo.exe` (workers have it on PATH; my own Bash/PowerShell tools don't). Z: drive
+I/O-saturates under concurrent cargo builds; GitHub API intermittently slow → background git/gh + Read `.output`
+files, don't hammer.
