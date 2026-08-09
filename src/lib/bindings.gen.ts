@@ -1383,6 +1383,32 @@ async verifyAllBaselines(baselines: Partial<{ [key in string]: ChecksumEntry[] }
 }
 },
 /**
+ * Split `path` into fixed-`part_size` parts under `out_dir`, plus a manifest recording the original
+ * name, size, part count, and whole-file SHA-256 (CPE-1491). Refuses `part_size == 0` and refuses to
+ * overwrite a pre-existing manifest/part in `out_dir`.
+ */
+async splitFile(path: string, partSize: number, outDir: string) : Promise<Result<SplitManifest, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("split_file", { path, partSize, outDir }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Rejoin the parts referenced by `first_part_or_manifest` (the manifest itself, or any one numbered
+ * part) into `out_path`, verifying the reconstructed SHA-256 against the manifest (CPE-1491). Refuses to
+ * overwrite a pre-existing `out_path`; a missing/short/corrupt part is a clear `Err`, never a panic.
+ */
+async joinFiles(firstPartOrManifest: string, outPath: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("join_files", { firstPartOrManifest, outPath }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Scan the children of `path` into a `CompareNode`-shaped tree (CPE-779). Model lives in
  * `cpe_server::compare` (CPE-815); this is a thin `spawn_blocking` dispatcher.
  */
@@ -5029,6 +5055,37 @@ export type SkippedInfo = { path: string; size: number;
  * `"oversize"` (larger than the per-file cap) or `"budget"` (would breach the store cap).
  */
 reason: string }
+/**
+ * The manifest written by [`split_file`] and consumed by [`join_files`]. Deliberately small — just
+ * enough to relocate the ordered parts and verify the reconstruction; the part width (zero-padding) is
+ * re-derived from `part_count` rather than stored, and part sizes are derived from `total_size`/
+ * `part_size`/`part_count` rather than stored per-part.
+ */
+export type SplitManifest = { 
+/**
+ * The original file's name (not path) — parts are named `<original_name>.NNN` and join's default
+ * output uses this name.
+ */
+original_name: string; 
+/**
+ * Total size of the original file, in bytes.
+ */
+total_size: number; 
+/**
+ * Number of parts written. A 0-byte source has `part_count == 0` (no part files at all) — see
+ * [`split_file`].
+ */
+part_count: number; 
+/**
+ * The requested part size in bytes. Every part is exactly this size except the last, which holds
+ * the remainder.
+ */
+part_size: number; 
+/**
+ * SHA-256 of the whole original file, lowercase hex — recomputed from the concatenated parts on
+ * join and compared against this.
+ */
+sha256: string }
 /**
  * One aggregated result: the matched text, its kind, fuzzy score, and matched positions (for highlight).
  */

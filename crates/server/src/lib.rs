@@ -801,3 +801,11 @@ pub mod column_config;
 /// deliverable without the heavy WebGL dependency the full viewer needs. Pure, std-only, no new
 /// dependencies.
 pub mod model_3d;
+
+/// File split/join (CPE-1491): chunk a large file into fixed-size numbered parts (`.001`, `.002`, …)
+/// plus a small JSON manifest, and rejoin them back into the original — the classic orthodox-commander
+/// utility for FAT32/USB size limits, chunked uploads, and email-attachment splits. Both directions
+/// stream through a bounded chunk buffer and reuse the existing SHA-256 streaming approach
+/// (`fsutil::sha256_file`, CPE-412/737) computed in the same pass as the I/O. Pure and Tauri-free
+/// (CPE-815).
+pub mod split_join;
