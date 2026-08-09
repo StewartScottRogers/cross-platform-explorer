@@ -70,11 +70,11 @@ export function dedupeShares(shares: NetShare[], connections: Connection[]): Net
   return shares.filter((s) => !isDuplicateShare(s, connections));
 }
 
-/** Whether the Network section has anything to show — the section is hidden/empty (no header, no rows) when
- *  both tiers are empty, so the plain explorer is unchanged for a user who has never touched Network (see
- *  CLAUDE.md's mode-additive tiebreaker). The always-visible "Network…" row in the Explore section (a tiny,
- *  permanent entry point, mirroring Repositories/Agent Board/Workbench) is how a first connection ever gets
- *  added — this only gates the collapsible section itself. Pure. */
+/** Whether the Network section has any connection/share rows to show. The section itself is a PERMANENT
+ *  top-level peer of Drives (CPE-1516) — its header always renders — so this no longer gates the section's
+ *  visibility; it only decides what the section's body shows: the real rows when true, or the "＋ Add a
+ *  connection" control + a one-line empty hint when false, so the plain explorer stays visually quiet (see
+ *  CLAUDE.md's mode-additive tiebreaker) even though the header is always present. Pure. */
 export function hasAnyNetworkRows(connections: Connection[], dedupedShares: NetShare[]): boolean {
   return connections.length > 0 || dedupedShares.length > 0;
 }
