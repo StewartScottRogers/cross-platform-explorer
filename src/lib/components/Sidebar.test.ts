@@ -263,3 +263,71 @@ describe("Sidebar Network section (CPE-1516: permanent top-level section)", () =
     expect(connected).toHaveBeenCalledWith(conn);
   });
 });
+
+describe("Sidebar 'Discovered on your network' tier (CPE-1519)", () => {
+  it("renders nothing extra when discoveredShares is empty (the common non-Windows case)", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], connections: [], networkShares: [], discoveredShares: [] });
+    expect(screen.getByText("＋ Add a connection")).toBeTruthy();
+    expect(screen.getByText(/No connections yet/)).toBeTruthy();
+  });
+
+  it("shows a discovered row and hides the empty state, even with no connections/OS shares", () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [],
+      discoveredShares: [{ name: "Media", path: "\\\\qnap\\media", kind: "discovered" }],
+    });
+    expect(screen.getByText("Media")).toBeTruthy();
+    expect(screen.queryByText("＋ Add a connection")).toBeNull();
+    expect(screen.queryByText(/No connections yet/)).toBeNull();
+  });
+
+  it("dedupes a discovered share against a saved connection's host (tier 1)", () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [
+        { name: "prod", scheme: "sftp", host: "qnap", port: 22, user: "deploy", auth: { kind: "password" } },
+      ],
+      networkShares: [],
+      discoveredShares: [{ name: "Media", path: "\\\\qnap\\media", kind: "discovered" }],
+    });
+    expect(screen.queryByText("Media")).toBeNull();
+  });
+
+  it("dedupes a discovered share against an already-mapped OS share (tier 2)", () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [{ name: "\\\\qnap\\media (Z:)", path: "Z:\\", kind: "mapped" }],
+      discoveredShares: [{ name: "Media", path: "\\\\qnap\\media", kind: "discovered" }],
+    });
+    expect(screen.queryByText("Media")).toBeNull();
+    // The mapped tier-2 row for the same share is still shown.
+    expect(screen.getByText("\\\\qnap\\media (Z:)")).toBeTruthy();
+  });
+
+  it("clicking a discovered row dispatches networkAdd pre-filled with scheme smb, host, and path", async () => {
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [],
+      discoveredShares: [{ name: "Media", path: "\\\\qnap\\media", kind: "discovered" }],
+    });
+    const added = vi.fn();
+    component.$on("networkAdd", (e) => added(e.detail));
+
+    await fireEvent.click(screen.getByText("Media"));
+    expect(added).toHaveBeenCalledOnce();
+    const detail = added.mock.calls[0][0];
+    expect(detail.prefill).toMatchObject({ scheme: "smb", host: "qnap", path: "/media" });
+  });
+});

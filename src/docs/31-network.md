@@ -18,7 +18,8 @@ the Network section itself.
 
 1. Click **＋ Add a connection** in the Network section body (shown when nothing's saved yet), or the
    **+** button on the Network section header once you have a connection or two already.
-2. Fill in the form: a **name** for the connection, the **protocol** (SFTP or WebDAV to start), the
+2. Fill in the form: a **name** for the connection, the **protocol** (SFTP or WebDAV to start — SMB is
+   also selectable, mainly so a **Discovered on your network** row below can pre-fill it for you), the
    **host**, and optionally a **user**, **port**, and a starting **remote path**.
 3. Choose how it authenticates — a **password** or a **key file** (with **Browse…** to pick the key).
 4. Click **Add**. The connection is saved (no password/passphrase is stored yet — see below) and
@@ -52,6 +53,27 @@ Below your saved connections, the Network section also lists network drives/shar
 system already has mapped or mounted (the same list as Home's **Shared** tab), skipping any that
 duplicate a saved connection. Click one to browse it; manage disconnecting or removing it from the
 Shared tab.
+
+## Discovered on your network (Windows)
+
+On Windows, a third tier — **Discovered on your network** — lists servers and shares Windows itself
+has found on your local network (the same neighborhood Windows Explorer's **Network** folder shows),
+skipping any that duplicate a saved connection or an already-mapped share above it.
+
+A discovered row isn't connected to anything yet — click it to open the **＋ Add a connection** form,
+pre-filled with that server as the host and its share as the path (protocol **SMB**), so you only need
+to fill in a name and, if the share isn't open, credentials.
+
+**Caveats, honestly:**
+
+- This only shows what **Windows itself has already discovered** — it needs the OS's own **Network
+  discovery** setting turned on, and the device has to be advertising itself (most modern NAS boxes and
+  Windows PCs do this automatically). A device that isn't discoverable in Windows Explorer's Network
+  folder won't appear here either — this tier has the same reach, and the same gaps, as Explorer's.
+- It's Windows-only. On macOS and Linux this tier is simply absent; those platforms get network
+  discovery through a different mechanism.
+- The scan is bounded to a few seconds, so a slow or unreachable segment of the network can't hang the
+  app — it just means fewer results that round.
 
 ## Limits
 

@@ -56,33 +56,60 @@ export function stateTitle(state: ConnState, error?: string): string {
   return "Saved — not connected";
 }
 
-/** Case-insensitive: does an OS-discovered share duplicate a saved connection? Best-effort — the two come
- *  from different worlds (an OS mapped-drive/mount's UNC or mountpoint string vs. a saved sftp/webdav host),
- *  so this treats a share as a duplicate when its name or path contains a saved connection's host. Pure. */
-export function isDuplicateShare(share: NetShare, connections: Connection[]): boolean {
-  const hay = `${share.name} ${share.path}`.toLowerCase();
-  return connections.some((c) => c.host.trim() !== "" && hay.includes(c.host.toLowerCase()));
+/** Trimmed, trailing-slash-stripped, lowercased — a share `path`'s dedup key. Mirrors
+ *  `cpe_server::net_share::dedup_key` on the Rust side (case/slash-insensitive: share paths are
+ *  case-insensitive on Windows, and treating them so cross-platform is harmless here). Pure. */
+function shareDedupKey(path: string): string {
+  return path.trim().replace(/[/\\]+$/, "").toLowerCase();
 }
 
-/** OS-discovered shares with any saved-connection duplicate removed (order preserved) — tier 2 of the
- *  sidebar section, deduped against tier 1. Pure. */
-export function dedupeShares(shares: NetShare[], connections: Connection[]): NetShare[] {
-  return shares.filter((s) => !isDuplicateShare(s, connections));
+/** Case-insensitive: does a share duplicate a saved connection or an already-listed share? Best-effort —
+ *  these come from different worlds (an OS mapped-drive/mount's UNC or mountpoint string, a WNet-discovered
+ *  UNC, vs. a saved sftp/webdav/smb host), so two checks apply:
+ *  - it's a duplicate of a saved connection when its name or path contains that connection's host;
+ *  - (CPE-1519) it's a duplicate of an already-listed share (`existingShares` — tier 2's OS `net use`/mount
+ *    rows, when dedupe-ing tier 3's WNet-discovered rows against them) when that share's own name/path
+ *    contains this share's normalized path — e.g. a discovered `\\qnap\media` duplicates a mapped row whose
+ *    name embeds the same UNC (`\\qnap\media (Z:)`).
+ *  `existingShares` defaults to empty so the original tier-2-vs-tier-1 call site is unaffected. Pure. */
+export function isDuplicateShare(share: NetShare, connections: Connection[], existingShares: NetShare[] = []): boolean {
+  const hay = `${share.name} ${share.path}`.toLowerCase();
+  if (connections.some((c) => c.host.trim() !== "" && hay.includes(c.host.toLowerCase()))) return true;
+  const key = shareDedupKey(share.path);
+  if (!key) return false;
+  return existingShares.some((s) => `${s.name} ${s.path}`.toLowerCase().includes(key));
+}
+
+/** Shares with any saved-connection (and, when passed, already-listed-share) duplicate removed, order
+ *  preserved. Tier 2 (OS `net use`/mount shares) dedupes against tier 1 (`dedupeShares(shares,
+ *  connections)`, `existingShares` omitted); tier 3 (CPE-1519's WNet-discovered shares) dedupes against
+ *  BOTH tier 1 and tier 2 (`dedupeShares(discovered, connections, dedupedTier2Shares)`). Pure. */
+export function dedupeShares(shares: NetShare[], connections: Connection[], existingShares: NetShare[] = []): NetShare[] {
+  return shares.filter((s) => !isDuplicateShare(s, connections, existingShares));
 }
 
 /** Whether the Network section has any connection/share rows to show. The section itself is a PERMANENT
  *  top-level peer of Drives (CPE-1516) — its header always renders — so this no longer gates the section's
  *  visibility; it only decides what the section's body shows: the real rows when true, or the "＋ Add a
  *  connection" control + a one-line empty hint when false, so the plain explorer stays visually quiet (see
- *  CLAUDE.md's mode-additive tiebreaker) even though the header is always present. Pure. */
-export function hasAnyNetworkRows(connections: Connection[], dedupedShares: NetShare[]): boolean {
-  return connections.length > 0 || dedupedShares.length > 0;
+ *  CLAUDE.md's mode-additive tiebreaker) even though the header is always present. `discoveredShares`
+ *  (CPE-1519's tier 3) is optional so existing 2-arg call sites are unaffected. Pure. */
+export function hasAnyNetworkRows(
+  connections: Connection[],
+  dedupedShares: NetShare[],
+  discoveredShares: NetShare[] = [],
+): boolean {
+  return connections.length > 0 || dedupedShares.length > 0 || discoveredShares.length > 0;
 }
 
 // ---- "+ Add a connection" inline form ------------------------------------------------------------------
 
-/** The supported protocols for this slice (CPE-1513 scope: sftp/webdav "to start" per the ticket). */
-export const SUPPORTED_SCHEMES = ["sftp", "webdav"] as const;
+/** The supported protocols for this slice (CPE-1513 scope: sftp/webdav "to start" per the ticket), plus
+ *  `smb` (CPE-1519): a discovered `\\server\share` pre-fills scheme `smb`, and the form must accept it
+ *  rather than reject the very row it just offered to add. Saving an `smb` connection profile is honest
+ *  about today's limits — there's no generic-remote SMB client yet (`Scheme::Smb` routes to a "not
+ *  connected" message in `fs_route.rs`), matching the ticket's "don't build new SMB browsing" scope. */
+export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb"] as const;
 
 /** Raw text fields from the add/edit form — everything is a string (even port), matching what an `<input>`
  *  actually hands back, so `buildConnection` owns all the parsing/validation in one pure place. */
@@ -131,7 +158,7 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
   const scheme = input.scheme.trim().toLowerCase();
   if (!name) return "Give the connection a name.";
   if (!(SUPPORTED_SCHEMES as readonly string[]).includes(scheme)) {
-    return `Unsupported protocol "${input.scheme}" — choose sftp or webdav.`;
+    return `Unsupported protocol "${input.scheme}" — choose sftp, webdav, or smb.`;
   }
   if (!host) return "Host is required.";
 
@@ -148,4 +175,37 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
 
   const path = input.path.trim();
   return { name, scheme, host, port, user: input.user.trim(), auth, path: path ? path : undefined };
+}
+
+// ---- "Discovered on your network" tier (CPE-1519) ------------------------------------------------------
+
+/** Split a `\\server\share[\sub...]` UNC token into its server and (first) share segment. Forward-slash
+ *  tolerant (WNet/Explorer both accept either). `null` when it isn't UNC-shaped at all — defensive; the
+ *  backend's `map_discovered_share` already only ever emits a `\\`-prefixed `path`, so this should always
+ *  succeed for a real discovered row. Pure. */
+function parseUncPath(path: string): { host: string; share: string } | null {
+  const trimmed = path.trim().replace(/\//g, "\\");
+  if (!trimmed.startsWith("\\\\")) return null;
+  const [host, share = ""] = trimmed.slice(2).split("\\").filter((s) => s.length > 0);
+  if (!host) return null;
+  return { host, share };
+}
+
+/** Map a discovered share (`kind: "discovered"`, a WNet-found `\\server\share`) to a pre-filled
+ *  "＋ Add a connection" form: scheme `smb`, host = the server, path = `/share` (so the saved connection's
+ *  `location()` round-trips back through `parse_share`/`location.rs` to the same host+share) — one click
+ *  from a discovered row to a ready-to-save connection, needing only a name (and credentials, if the share
+ *  isn't anonymous). Falls back to a blank `smb` form when `share.path` isn't parseable UNC (shouldn't
+ *  happen for a real backend row — see `parseUncPath` — but never throws either way). Pure. */
+export function discoveredShareToFormInput(share: NetShare): ConnectionFormInput {
+  const blank = blankConnectionForm();
+  const parsed = parseUncPath(share.path);
+  if (!parsed) return { ...blank, scheme: "smb" };
+  return {
+    ...blank,
+    scheme: "smb",
+    name: parsed.share ? `${parsed.host}-${parsed.share}` : parsed.host,
+    host: parsed.host,
+    path: parsed.share ? `/${parsed.share}` : "",
+  };
 }
