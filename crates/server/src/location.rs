@@ -16,6 +16,9 @@ pub enum Scheme {
     Smb,
     Webdav,
     S3,
+    /// FTP or explicit FTPS (CPE-1514) — the scheme *word* (`ftp` vs `ftps`) distinguishes plain from TLS
+    /// the same way `webdav` vs `davs` already does for WebDAV; both map to this one variant here.
+    Ftp,
 }
 
 /// A parsed location. For `Local`, only `path` is meaningful (the whole input); remote schemes fill in
@@ -49,6 +52,7 @@ fn remote_scheme(word: &str) -> Option<Scheme> {
         "smb" => Some(Scheme::Smb),
         "webdav" | "davs" | "dav" => Some(Scheme::Webdav),
         "s3" => Some(Scheme::S3),
+        "ftp" | "ftps" => Some(Scheme::Ftp),
         _ => None,
     }
 }
@@ -144,6 +148,28 @@ mod tests {
         let s3 = parse("s3://bucket/key");
         assert_eq!(s3.host.as_deref(), Some("bucket"));
         assert_eq!(s3.path, "/key");
+    }
+
+    #[test]
+    fn ftp_and_ftps_both_map_to_the_ftp_scheme() {
+        // ftp vs ftps distinguishes plain from explicit-TLS the same way webdav vs davs does — both map to
+        // the one Scheme::Ftp variant; the app tells them apart via the scheme *word*, same as WebDAV.
+        let ftp = parse("ftp://alice@files.example.com:2121/incoming");
+        assert_eq!(ftp.scheme, Scheme::Ftp);
+        assert_eq!(ftp.user.as_deref(), Some("alice"));
+        assert_eq!(ftp.host.as_deref(), Some("files.example.com"));
+        assert_eq!(ftp.port, Some(2121));
+        assert_eq!(ftp.path, "/incoming");
+
+        let ftps = parse("ftps://files.example.com/pub");
+        assert_eq!(ftps.scheme, Scheme::Ftp);
+        assert_eq!(ftps.port, None, "no explicit port defaults to None (the caller applies port 21)");
+
+        // A bare ftp:// with no user (anonymous) still parses cleanly.
+        let anon = parse("ftp://mirror.example.com/");
+        assert_eq!(anon.scheme, Scheme::Ftp);
+        assert_eq!(anon.user, None);
+        assert_eq!(anon.path, "/");
     }
 
     #[test]

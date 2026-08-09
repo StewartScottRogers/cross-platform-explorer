@@ -1,10 +1,12 @@
-//! Scheme router (epic CPE-616): open the right [`FileSystemProvider`] for a saved connection.
+//! Scheme router (epic CPE-616/CPE-1502): open the right [`FileSystemProvider`] for a saved connection.
 //!
 //! The connections model ([`cpe_server::connections`]) stores non-secret profiles; the actual password /
 //! key-passphrase comes from the OS keychain at connect time. This crate is the seam that turns a
-//! `(Connection, secret)` into a live, boxed provider — dispatching by scheme to `cpe-sftp` or
-//! `cpe-webdav`. The app calls [`open`] with the secret it fetched from the keychain.
+//! `(Connection, secret)` into a live, boxed provider — dispatching by scheme to `cpe-sftp`, `cpe-webdav`,
+//! or `cpe-ftp` (CPE-1514, the first net-new Network protocol). The app calls [`open`] with the secret it
+//! fetched from the keychain.
 
+use cpe_ftp::{FtpAuth, FtpConfig, FtpProvider};
 use cpe_server::connections::{AuthMethod, Connection};
 use cpe_server::known_hosts::KnownHost;
 use cpe_server::provider::FileSystemProvider;
@@ -22,13 +24,13 @@ pub mod connect;
 pub use cpe_sftp::HostKeyPolicy;
 
 /// A live provider that is safe to move to a blocking worker thread and hold in the shared pool. Every
-/// concrete backend ([`cpe_sftp::SftpProvider`], [`cpe_webdav::WebdavProvider`],
+/// concrete backend ([`cpe_sftp::SftpProvider`], [`cpe_webdav::WebdavProvider`], [`cpe_ftp::FtpProvider`],
 /// [`cpe_server::provider::LocalProvider`]) is `Send`.
 pub type BoxedProvider = Box<dyn FileSystemProvider + Send>;
 
 /// Open a live [`FileSystemProvider`] for `conn`, using `secret` (the password, or a key's passphrase)
 /// fetched from the OS keychain. `known_hosts` + `policy` govern SFTP host-key verification (ignored for
-/// WebDAV). Errors carry the scheme/host context.
+/// WebDAV and FTP). Errors carry the scheme/host context.
 pub fn open(
     conn: &Connection,
     secret: Option<&str>,
@@ -52,7 +54,30 @@ pub fn open(
             }
             Ok(Box::new(WebdavProvider::connect(&cfg)))
         }
+        "ftp" | "ftps" => {
+            let cfg = FtpConfig {
+                host: conn.host.clone(),
+                port: conn.port,
+                user: conn.user.clone(),
+                auth: ftp_auth_from(conn, secret),
+                tls: conn.scheme == "ftps",
+            };
+            Ok(Box::new(FtpProvider::connect(&cfg)?))
+        }
         other => Err(format!("vfs: unsupported scheme '{other}'")),
+    }
+}
+
+/// The FTP auth for a connection: Anonymous when the profile's user is blank or literally `"anonymous"`
+/// (case-insensitive) — the common shape for a public FTP mirror/archive — else a password login using the
+/// keychain secret. FTP has no key-based auth ([`AuthMethod::Key`] never applies here), so unlike
+/// [`sftp_auth_from`] this doesn't need to branch on `conn.auth` at all; CPE-1514 handles Anonymous
+/// directly rather than waiting on CPE-1501's broader auth-model epic (see `cpe-ftp`'s module docs).
+fn ftp_auth_from(conn: &Connection, secret: Option<&str>) -> FtpAuth {
+    if conn.user.is_empty() || conn.user.eq_ignore_ascii_case("anonymous") {
+        FtpAuth::Anonymous
+    } else {
+        FtpAuth::Password(secret.unwrap_or("").to_string())
     }
 }
 
@@ -155,5 +180,35 @@ mod tests {
         // server; a later op would surface a connection error.
         let c = conn("webdav", AuthMethod::Password);
         assert!(open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu).is_ok());
+    }
+
+    #[test]
+    fn open_dispatches_ftp_and_ftps_to_the_ftp_provider() {
+        // Port 1 has nothing listening → FTP connect fails; the error proves we routed to FTP (not an
+        // "unsupported scheme"), exercising the dispatch + config path end to end, for both scheme words.
+        for scheme in ["ftp", "ftps"] {
+            let mut c = conn(scheme, AuthMethod::Password);
+            c.host = "127.0.0.1".into();
+            c.port = 1;
+            let err = match open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu) {
+                Ok(_) => panic!("connect to a dead port must fail ({scheme})"),
+                Err(e) => e,
+            };
+            assert!(err.starts_with("ftp"), "expected an FTP-flavoured error for {scheme}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn ftp_auth_from_picks_anonymous_or_password() {
+        // A blank user, or literally "anonymous" (any case), means Anonymous — no keychain secret needed.
+        let mut c = conn("ftp", AuthMethod::Password);
+        c.user = String::new();
+        assert!(matches!(ftp_auth_from(&c, None), FtpAuth::Anonymous));
+        c.user = "Anonymous".into();
+        assert!(matches!(ftp_auth_from(&c, Some("ignored")), FtpAuth::Anonymous));
+
+        // A real username uses the keychain secret as the password.
+        c.user = "deploy".into();
+        assert!(matches!(ftp_auth_from(&c, Some("pw")), FtpAuth::Password(p) if p == "pw"));
     }
 }
