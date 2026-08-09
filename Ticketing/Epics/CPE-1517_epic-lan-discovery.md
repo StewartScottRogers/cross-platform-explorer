@@ -2,7 +2,7 @@
 id: CPE-1517
 title: "EPIC: Network — LAN device & service discovery (auto-find NAS/servers: mDNS + SSDP/UPnP + SMB browse)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -10,6 +10,12 @@ epic: CPE-616
 created: 2026-08-09
 closed:
 ---
+
+> **ACTIVATED 2026-08-09 (Sprint, decide-and-log).** Decomposed just-in-time. Windows-native leg already
+> shipped (CPE-1519, WNet). Cross-platform mDNS leg dep-vetted → **`mdns-sd`** chosen (pure-Rust, no native
+> Bonjour SDK; research entry [[mdns-discovery-dependency-2026-08-09]]). First slice filed as **CPE-1523**
+> (new `crates/mdns` + `discover_network_mdns` command + merge into the existing Discovered tier). SSDP/UPnP
+> (v3) remains dormant. Live verification folds into the QNAP E2E (CPE-1518, 2026-08-10).
 > **Network Filesharing program (parent CPE-616).** Filed 2026-08-09 after the user added a real **QNAP
 > TS-133** NAS to the LAN and asked for "maximum network functionality." Dormant — activate via
 > `/ticketing-epic`.
