@@ -57,3 +57,10 @@ superseded). **DEFERRED because the VISUAL/interaction result is unverified** �
 (build→install→run) or a gui-smoke Visual Critic screenshot pass on 5 surfaces (Explore row, add-form
 layout/border, status-dot colours + row menu, entry-point placement, OS-share tier rows). Un-defer to Done once
 visually signed off.
+
+## 2026-08-09 — user feedback after installing v0.57.62 (sidecar) via "Run"
+The user expected Network to be its own **permanent top-level section** (peer to Tags/Explore/Quick
+Access/Drives), not a conditional section reached via a buried Explore "Network…" row. That reorg is spun out
+to **CPE-1516** (keep this ticket scoped to the original two-tier section). The user also added a real **QNAP
+TS-133** NAS (2026-08-10), which finally gives the shipped SFTP/WebDAV/FTP providers a live remote — the owed
+E2E is captured in **CPE-1518**, and LAN auto-discovery in the new epic **CPE-1517**.

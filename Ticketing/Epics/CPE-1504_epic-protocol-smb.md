@@ -34,3 +34,12 @@ has no read pipelining → slow). So this epic is deliberately staged conservati
 Large (per-OS + the crate gamble). Mostly headless except the Windows native-UNC leg (needs GUI verify). Deps:
 CPE-1500 (OS-mount) for the non-Windows path; F1–F3. Call the crate-immaturity risk out to the user at
 activation.
+
+## Test target — real QNAP TS-133 NAS (available 2026-08-10)
+The user has a **QNAP TS-133** (1-bay, QTS) on the LAN whose **SMB/Samba is its primary, default-on file
+service (TCP 445)** — the exact #1 use-case this epic targets. This makes the conservative v1 directly
+verifiable **now, without any new crate**: on Windows, browse `\\<qnap-host>\<share>` via `LocalProvider`
+(the native-UNC leg) against the real device. The Linux/macOS OS-mount fallback (`mount.cifs` /
+`mount_smbfs`, via CPE-1500) can likewise be validated against the same share. Prefer proving the
+zero-new-code Windows-UNC + OS-mount paths against the QNAP before betting on an immature pure-Rust SMB crate.
+QNAP also advertises SMB over mDNS `_smb._tcp` → ties into the discovery epic CPE-1517.

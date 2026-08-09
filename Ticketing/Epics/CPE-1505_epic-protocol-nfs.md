@@ -29,3 +29,9 @@ absent on Home) → cross-platform is a stretch from day one; (b) the RPC/XDR tr
 ## Effort / deps / fit
 Medium. Headless for the client half; Windows exclusion documented. Deps: F1–F3 (+ CPE-1500 if OS-mount path).
 Lower priority than SMB (narrower audience). `nfs3_client` maturity is a flagged risk.
+
+## Test target — real QNAP TS-133 NAS (available 2026-08-10)
+QTS exposes **NFS (ports 111 + 2049)** as an enable-in-Control-Panel service, so the user's QNAP gives a real
+NFSv3 export to validate against — mainly the Linux/macOS legs (the OS-mount path via CPE-1500 first, the
+`nfs3_client` in-app path if/when it proves out). Windows stays out of v1 as documented. QNAP advertises NFS
+over mDNS `_nfs._tcp` → feeds the discovery epic CPE-1517.

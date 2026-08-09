@@ -32,3 +32,9 @@ enumerates it into Drives/Shared. This is also the realistic **v1 path for SMB o
 M–L (per-OS + elevation). Backend-heavy per-OS + small frontend action. Deps: CPE-1498 (menu). Independent of
 CPE-1499 (a different path to the same goal). Opt-in, off by default. Reconciles CPE-716's open question #1
 (how it sequences with CPE-616).
+
+## Test target — real QNAP TS-133 NAS (available 2026-08-10)
+The user's QNAP TS-133 (QTS: SMB 445 + NFS 111/2049) is the concrete device to validate "Mount as drive"
+against on every OS: Windows `net use \\<qnap>\<share>` / `WNetAddConnection2`, macOS `mount_smbfs`, Linux
+`mount.cifs` / `mount -t nfs` / `gio mount`. This is also the realistic **v1 SMB path** for Linux/macOS
+(CPE-1504) — so a single QNAP share exercises both this OS-mount arm and the SMB/NFS protocol epics end-to-end.
