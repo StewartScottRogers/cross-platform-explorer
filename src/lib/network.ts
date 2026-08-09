@@ -113,7 +113,10 @@ export function formFromConnection(conn: Connection): ConnectionFormInput {
     host: conn.host,
     port: String(conn.port),
     user: conn.user,
-    authKind: conn.auth.kind,
+    // The inline form only edits password/key auth; the other AuthMethod variants
+    // (anonymous/token/access_key, reserved for future cloud providers) collapse to
+    // the password default rather than widening the form's authKind union.
+    authKind: conn.auth.kind === "key" ? "key" : "password",
     keyPath: conn.auth.kind === "key" ? conn.auth.key_path : "",
     path: conn.path ?? "",
   };
