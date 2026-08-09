@@ -11,8 +11,15 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// How a saved connection authenticates. **No secret material** — a password's value and a key's
-/// passphrase live in the OS keychain, not in the profile.
+/// How a saved connection authenticates. **No secret material** — a password's value, a key's
+/// passphrase, a bearer token, and an S3 secret access key all live in the OS keychain (CPE-1510), never
+/// in this enum or in `connections.json`.
+///
+/// Additive since CPE-1515: `Anonymous`/`Token`/`AccessKey` were added alongside the original
+/// `Password`/`Key`. Because this enum is serialized internally-tagged (`#[serde(tag = "kind")]`), adding
+/// variants is backward-compatible by construction — an old `connections.json` that only ever wrote
+/// `{"kind":"password"}` / `{"kind":"key",...}` still deserializes unchanged (see
+/// `connections.rs`'s tests for the explicit proof).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -21,6 +28,21 @@ pub enum AuthMethod {
     Password,
     /// Public-key auth using the private key at `key_path` (an optional passphrase lives in the keychain).
     Key { key_path: String },
+    /// No credentials at all — anonymous/public access (e.g. a public FTP mirror or an unauthenticated
+    /// share). First-class as of CPE-1515; `cpe-vfs`'s FTP auth mapping previously inferred this purely
+    /// from a blank/`"anonymous"` username (CPE-1514) and still honours that heuristic for connections
+    /// saved before this variant existed — new connections should set `Anonymous` explicitly.
+    Anonymous,
+    /// An opaque bearer/OAuth token, for a future cloud provider that authenticates that way. `token_ref`
+    /// is **not** the token itself — it's a non-secret reference/label; the real token lives in the OS
+    /// keychain (CPE-1510), fetched at connect time the same way a password is (keyed by the connection's
+    /// `name`). No provider consumes this yet — it's plumbing ahead of a future cloud provider.
+    Token { token_ref: String },
+    /// S3-style access-key auth (SigV4). `id` is the access key ID — not secret, safe to store here like
+    /// `user` is. `secret_ref` is a non-secret reference/label for the secret access key, which itself
+    /// lives in the OS keychain (CPE-1510) and is never written here. No provider consumes this yet — it
+    /// unblocks CPE-1503 (S3).
+    AccessKey { id: String, secret_ref: String },
 }
 
 /// A saved remote connection profile. `name` is the stable display name / identity (unique in a store).
@@ -178,6 +200,51 @@ mod tests {
 
         let back = load_connections(&path);
         assert_eq!(back, list);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn auth_method_round_trips_every_variant_through_serde() {
+        for auth in [
+            AuthMethod::Password,
+            AuthMethod::Key { key_path: "/home/me/.ssh/id".into() },
+            AuthMethod::Anonymous,
+            AuthMethod::Token { token_ref: "tok-1".into() },
+            AuthMethod::AccessKey { id: "AKIAEXAMPLE".into(), secret_ref: "sec-1".into() },
+        ] {
+            let json = serde_json::to_string(&auth).unwrap();
+            let back: AuthMethod = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, auth, "round-trip mismatch for {json}");
+        }
+    }
+
+    #[test]
+    fn an_old_connections_json_with_only_password_and_key_still_deserializes() {
+        // The frozen v1 on-disk shape (pre-CPE-1515): only "password"/"key" `kind`s ever existed. A
+        // binary that now knows about Anonymous/Token/AccessKey must still load an existing user's
+        // connections.json byte-for-byte unchanged — the explicit back-compat proof this ticket exists
+        // to deliver. Internally-tagged enums (`#[serde(tag = "kind")]`) are additive by construction:
+        // new variants don't change how old tags parse.
+        let dir = std::env::temp_dir().join(format!("cpe-conns-oldfmt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("connections.json");
+        let _ = std::fs::create_dir_all(&dir);
+        std::fs::write(
+            &path,
+            r#"[
+                {"name":"prod","scheme":"sftp","host":"h.example.com","port":22,"user":"me","auth":{"kind":"password"}},
+                {"name":"keyed","scheme":"sftp","host":"h2.example.com","port":22,"user":"me2","auth":{"kind":"key","key_path":"/home/me/.ssh/id_ed25519"}}
+            ]"#,
+        )
+        .unwrap();
+
+        let conns = load_connections(&path);
+        assert_eq!(conns.len(), 2, "an old-format store must not be dropped as garbage");
+        assert_eq!(conns[0].name, "prod");
+        assert_eq!(conns[0].auth, AuthMethod::Password);
+        assert_eq!(conns[1].name, "keyed");
+        assert_eq!(conns[1].auth, AuthMethod::Key { key_path: "/home/me/.ssh/id_ed25519".into() });
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
