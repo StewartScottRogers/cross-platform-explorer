@@ -4722,9 +4722,10 @@ name: string;
  */
 path: string; 
 /**
- * `"mapped"` (OS-enumerated Windows mapped drive), `"mount"` (Unix SMB/NFS mount), or `"user"`
- * (a location the user typed + we persist). The UI adapts the menu: mapped → "Disconnect",
- * user → "Remove".
+ * `"mapped"` (OS-enumerated Windows mapped drive), `"mount"` (Unix SMB/NFS mount), `"user"`
+ * (a location the user typed + we persist), or `"discovered"` (a Windows `WNet`-discovered share
+ * the user hasn't connected to yet, CPE-1519). The UI adapts the menu: mapped → "Disconnect",
+ * user → "Remove", discovered → "Add a connection".
  */
 kind: string }
 /**
