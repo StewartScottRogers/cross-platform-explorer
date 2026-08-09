@@ -2,7 +2,7 @@
 id: CPE-1501
 title: "EPIC: Network F5 — provider capability descriptor + auth-model extension (unblocks S3/cloud/FTP)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Backend
 tags: [epic]
@@ -26,3 +26,7 @@ extensions so the UI + router adapt to non-POSIX shares:
 ## Effort / deps / fit
 M — mostly pure/backend, well-tested via the existing `FakeProvider`. Deps: CPE-1499 (so capabilities can drive
 real UI). Purpose-fit: enabling. Sequence before S3/FTP-anonymous/cloud need it.
+
+## ACTIVATED 2026-08-09 (Sprint) — unblocks S3/cloud protocols
+Network foundation + SFTP/WebDAV/FTP are live. Building this enabling extension (headless, FakeProvider-tested)
+so S3 (CPE-1503) + cloud (CPE-1506) can express their non-POSIX shape. Slice: CPE-1515.
