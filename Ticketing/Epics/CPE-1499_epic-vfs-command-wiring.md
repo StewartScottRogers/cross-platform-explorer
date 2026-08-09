@@ -2,7 +2,7 @@
 id: CPE-1499
 title: "EPIC: Network F3 — wire vfs::open into the command layer (the crux refactor) + first protocol milestone"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Backend
 tags: [epic]
@@ -34,3 +34,9 @@ new client is needed for the first protocol milestone: just this wiring.
 ## Effort / deps / fit
 L (the crux). Backend-heavy. Deps: CPE-1497 + CPE-1498. On completion: **SFTP + WebDAV are live in the UI** —
 the payoff milestone. Every later protocol epic plugs into this seam.
+
+## ACTIVATED 2026-08-08 (Sprint, user-directed Network SFTP/WebDAV; built BEFORE CPE-1498 sidebar)
+F1 keychain (CPE-1510) is merged. Building this backend crux next (headless-testable via FakeProvider + the
+crates/sftp & crates/webdav harnesses) before the GUI sidebar (CPE-1498), since it's the functional core and
+fully verifiable without eyes-on. Uses CPE-1510's `secret_store::secret_for(name)` for the secret + `known_hosts`
+for host-keys. HARD constraint: `fs_route::require_local` keeps local paths byte-for-byte unchanged.
