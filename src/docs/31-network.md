@@ -1,0 +1,59 @@
+---
+title: Network Connections
+order: 31
+category: Explorer
+categoryOrder: 2
+---
+
+# Network Connections
+
+The **Network** section in the left-pane sidebar is the entry point for browsing a remote server —
+SFTP or WebDAV — right alongside your local drives. It appears only once you have something to show:
+a saved connection, or a network share your operating system already knows about. Until then, a
+single **Network…** row under Explore is where you add your first connection.
+
+## Adding a connection
+
+1. Click **Network…** (under Explore) if you have no connections yet, or the **+** button on the
+   Network section header once it's showing.
+2. Fill in the form: a **name** for the connection, the **protocol** (SFTP or WebDAV to start), the
+   **host**, and optionally a **user**, **port**, and a starting **remote path**.
+3. Choose how it authenticates — a **password** or a **key file** (with **Browse…** to pick the key).
+4. Click **Add**. The connection is saved (no password/passphrase is stored yet — see below) and
+   appears as a row under Network.
+
+Editing a saved connection (via its right-click menu) reopens the same form, pre-filled.
+
+## Connecting
+
+Click a saved connection to browse it — the explorer navigates into it exactly like any local folder.
+A small **status dot** on the row shows whether it's connected (green), saved but not yet connected
+(gray), or hit an error on its last attempt (red, with the reason in the row's tooltip — e.g. a
+changed host key).
+
+If the connection needs a password or key passphrase and none is stored yet, you're prompted for it
+inline. Check **Remember** to save it in your operating system's keychain so you won't be asked again
+next time; leave it unchecked to use it for this session only.
+
+## The row menu
+
+Right-click a saved connection for:
+
+- **Connect** / **Disconnect** — connect, or clear the row's connected status.
+- **Edit…** — reopen the add form, pre-filled, to change any field.
+- **Forget** — remove the saved connection and its stored password/passphrase (if any) from the
+  keychain.
+
+## OS-discovered shares
+
+Below your saved connections, the Network section also lists network drives/shares your operating
+system already has mapped or mounted (the same list as Home's **Shared** tab), skipping any that
+duplicate a saved connection. Click one to browse it; manage disconnecting or removing it from the
+Shared tab.
+
+## Limits
+
+Reconnecting after an app restart may ask for your password/passphrase again even if you didn't
+check **Remember** — the app only holds a not-remembered secret for the current session. There is
+currently no way to mount a remote connection as a drive letter/volume, or to forcibly close an
+open remote session from the sidebar — both are on the roadmap.

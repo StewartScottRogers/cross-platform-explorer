@@ -54,6 +54,10 @@
   import { extractAskLabels, resolveAskParams } from "./lib/macroParams";
   import type { ActionMacro, MacroSummary } from "./lib/bindings.gen";
   import AgentMenu from "./lib/components/AgentMenu.svelte";
+  import NetworkConnectionMenu from "./lib/components/NetworkConnectionMenu.svelte";
+  import NetworkConnectionForm from "./lib/components/NetworkConnectionForm.svelte";
+  import NetworkSecretPrompt from "./lib/components/NetworkSecretPrompt.svelte";
+  import { connectionLocation, secretAlwaysRequired, formFromConnection, blankConnectionForm, type ConnState } from "./lib/network";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import ExplorerPane from "./lib/components/ExplorerPane.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
@@ -211,7 +215,7 @@
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare } from "./lib/types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare, Connection } from "./lib/types";
 
   interface OpResult { path: string; ok: boolean; error: string }
 
@@ -458,6 +462,15 @@
   let networkLocations: string[] = [];
   let shared: NetShare[] = [];
   let sharedLoading = false;
+  // Network sidebar section (CPE-1513, epic CPE-1498): saved SFTP/WebDAV connection profiles + their
+  // live, client-tracked connect state (see `lib/network.ts` module docs — there is no backend
+  // session-status query yet, so this resets to "disconnected" every app restart).
+  let connections: Connection[] = [];
+  let connectionStates: Record<string, ConnState> = {};
+  let connectionErrors: Record<string, string> = {};
+  let networkForm: { x: number; y: number; editing: Connection | null } | null = null;
+  let networkContextMenu: { x: number; y: number; conn: Connection } | null = null;
+  let networkSecretPrompt: { x: number; y: number; conn: Connection } | null = null;
   let columnWidths: number[] = settings.loadColumnWidths();
   /** Active metadata columns for the CURRENT folder (CPE-1146, epic CPE-707): id + width, in display
       order. Loaded/saved per-folder in `loadPath` below; empty (Home, or a folder with none saved) is
@@ -4369,7 +4382,9 @@
   async function loadShared(): Promise<void> {
     sharedLoading = true;
     try {
-      shared = await commands.listNetworkShares(networkLocations);
+      // `?? []` guards a backend/test-double that hands back `null` (CPE-1513: this now also runs at
+      // startup for the sidebar's Network section, not just when the Home Shared tab pull-loads it).
+      shared = (await commands.listNetworkShares(networkLocations)) ?? [];
     } catch {
       // A failed enumeration degrades to just the user-added locations, never a crash.
       shared = networkLocations
@@ -4410,6 +4425,107 @@
       showNotice(String(e), true);
     }
     void loadShared();
+  }
+
+  // ---- Network sidebar section (CPE-1513, epic CPE-1498) ------------------------------------------
+  // The visible entry point for the SFTP/WebDAV backend CPE-1510 (keychain secrets) + CPE-1511 (remote
+  // `list_dir` routing) already ship. `connections` is loaded once at startup (see the onMount Promise.all
+  // below); every mutation here re-fetches the authoritative list from `connections_upsert`/`_remove`'s own
+  // return value rather than hand-patching the array, so the sidebar can never drift from the on-disk store.
+
+  /** Connect to a saved connection: resolve whether it needs a keychain secret first (password auth always
+   *  does; key auth is tried directly and only reactively re-prompted on failure — see `secretAlwaysRequired`'s
+   *  docs), then navigate into its location via the existing `navigate`/`navigateB`, reusing CPE-1511's
+   *  remote routing exactly like any other sidebar row. Tracks connected/error state from the SAME
+   *  `error`/`errorB` the pane already surfaces, so this never double-fetches the listing. */
+  async function onNetworkConnect(conn: Connection, inPaneB = false): Promise<void> {
+    if (secretAlwaysRequired(conn.auth)) {
+      try {
+        const stored = unwrap(await commands.connectionSecretGet(conn.name));
+        if (!stored) {
+          networkSecretPrompt = { x: 40, y: 80, conn };
+          return;
+        }
+      } catch {
+        networkSecretPrompt = { x: 40, y: 80, conn };
+        return;
+      }
+    }
+    await connectNetworkConnection(conn, inPaneB);
+  }
+
+  /** Actually perform the connect-by-navigating, after any needed secret is already in the keychain. */
+  async function connectNetworkConnection(conn: Connection, inPaneB = false): Promise<void> {
+    const uri = connectionLocation(conn);
+    if (inPaneB) await navigateB(uri);
+    else { if (archive) exitArchive(); await navigate(uri); }
+    const err = inPaneB ? errorB : error;
+    if (err) {
+      connectionStates = { ...connectionStates, [conn.name]: "error" };
+      connectionErrors = { ...connectionErrors, [conn.name]: err };
+    } else {
+      connectionStates = { ...connectionStates, [conn.name]: "connected" };
+      connectionErrors = { ...connectionErrors, [conn.name]: "" };
+    }
+  }
+
+  /** The secret prompt's submit (CPE-1510): stash the secret in the keychain long enough for THIS connect
+   *  to succeed (the remote route reads secrets from the keychain, not from the navigate call — see
+   *  NetworkSecretPrompt's doc comment), then scrub it back out immediately when "Remember" was unchecked,
+   *  so "Remember" really means "persist past this app session" rather than silently always persisting. */
+  async function submitNetworkSecret(conn: Connection, secret: string, remember: boolean): Promise<void> {
+    networkSecretPrompt = null;
+    try {
+      await commands.connectionSecretSet(conn.name, secret);
+    } catch (e) {
+      showNotice(String(e), true);
+      return;
+    }
+    await connectNetworkConnection(conn);
+    if (!remember) {
+      try {
+        await commands.connectionSecretDelete(conn.name);
+      } catch {
+        // Best-effort scrub; a failure here just means the secret outlives this session, which is the
+        // safer failure direction (a re-prompt is more annoying than useful, but never a security hole).
+      }
+    }
+  }
+
+  /** The add/edit form's Save (CPE-1513): upsert (editing is just an upsert with the same name), then
+   *  replace `connections` with the command's returned whole list — the on-disk store is authoritative. */
+  async function saveNetworkConnection(conn: Connection): Promise<void> {
+    try {
+      connections = unwrap(await commands.connectionsUpsert(conn));
+      networkForm = null;
+      showNotice(`Saved connection "${conn.name}".`);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** "Forget" (CPE-1513): remove the saved profile AND its keychain secret, so nothing orphaned survives. */
+  async function forgetNetworkConnection(conn: Connection): Promise<void> {
+    try {
+      connections = unwrap(await commands.connectionsRemove(conn.name));
+    } catch (e) {
+      showNotice(String(e), true);
+      return;
+    }
+    try {
+      await commands.connectionSecretDelete(conn.name);
+    } catch {
+      // Best-effort; the profile is already gone either way.
+    }
+    connectionStates = { ...connectionStates, [conn.name]: "disconnected" };
+    showNotice(`Forgot connection "${conn.name}".`);
+  }
+
+  /** "Disconnect" (CPE-1513): client-side state reset only — there is no backend command yet to tear down
+   *  the pooled remote session (CPE-1499's provider pool has no exposed "close" — a natural follow-up once
+   *  a real session-status query lands). The connection stays saved; only its status dot resets. */
+  function disconnectNetworkConnection(name: string): void {
+    connectionStates = { ...connectionStates, [name]: "disconnected" };
   }
 
   async function checkHomeCtxStale(path: string): Promise<void> {
@@ -5431,6 +5547,23 @@
     } catch (e) {
       console.debug("could not load places:", e);
     }
+    // Network sidebar section (CPE-1513): saved connections + OS-discovered shares, both needed up front
+    // (not pull-on-open like the Home Shared tab used to be alone) so the section's hidden-when-empty check
+    // is correct from first paint. Both are time-bounded in the backend, so an offline server/share can't
+    // hang startup (see `loadShared`'s own doc comment) — and deliberately NOT awaited inline here: this
+    // whole onMount is one sequential chain ending in `restoreLastSession()` below, so an awaited call here
+    // would delay session restore by exactly this round trip for zero benefit (the sidebar reacting a beat
+    // later is invisible; a delayed session restore is not). Fire-and-forget, same as `loadShared` itself.
+    (async () => {
+      try {
+        // `?? []` guards a backend/test-double that hands back `null` for an empty store — the sidebar
+        // section's hidden-when-empty check (`hasAnyNetworkRows`) assumes a real array.
+        connections = unwrap(await commands.connectionsList()) ?? [];
+      } catch (e) {
+        console.debug("could not load saved connections:", e);
+      }
+    })();
+    void loadShared();
     try {
       appVersion = await getVersion();
     } catch {
@@ -5682,6 +5815,13 @@
       activeSmartFolder={smartFolder?.id ?? ""}
       savedSearches={$savedSearches}
       activeSavedSearch={structuredSearch?.id ?? ""}
+      {connections}
+      networkShares={shared}
+      {connectionStates}
+      {connectionErrors}
+      on:networkAdd={(e) => (networkForm = { x: e.detail.x, y: e.detail.y, editing: null })}
+      on:networkConnect={(e) => void onNetworkConnect(e.detail)}
+      on:networkContext={(e) => (networkContextMenu = { x: e.detail.x, y: e.detail.y, conn: e.detail.conn })}
       on:filterTag={(e) => {
         // The Sidebar is shared by both panes (CPE-1376), so route the click to whichever pane is
         // active — same `activePane` split as `commanderContext`/`activePaneState` (CPE-1370).
@@ -6519,6 +6659,46 @@
     on:moveUp={() => moveSmartSaved(smartFolderMenu?.id ?? "", -1)}
     on:moveDown={() => moveSmartSaved(smartFolderMenu?.id ?? "", 1)}
     on:close={() => (smartFolderMenu = null)}
+  />
+{/if}
+
+{#if networkForm}
+  <NetworkConnectionForm
+    x={networkForm.x}
+    y={networkForm.y}
+    editing={networkForm.editing}
+    initial={networkForm.editing ? formFromConnection(networkForm.editing) : blankConnectionForm()}
+    on:save={(e) => void saveNetworkConnection(e.detail)}
+    on:close={() => (networkForm = null)}
+  />
+{/if}
+
+{#if networkContextMenu}
+  {@const ctxConn = networkContextMenu.conn}
+  {@const ctxX = networkContextMenu.x}
+  {@const ctxY = networkContextMenu.y}
+  <NetworkConnectionMenu
+    x={ctxX}
+    y={ctxY}
+    name={ctxConn.name}
+    state={connectionStates[ctxConn.name] ?? "disconnected"}
+    on:connect={() => void onNetworkConnect(ctxConn)}
+    on:disconnect={() => disconnectNetworkConnection(ctxConn.name)}
+    on:edit={() => (networkForm = { x: ctxX, y: ctxY, editing: ctxConn })}
+    on:forget={() => void forgetNetworkConnection(ctxConn)}
+    on:close={() => (networkContextMenu = null)}
+  />
+{/if}
+
+{#if networkSecretPrompt}
+  {@const promptConn = networkSecretPrompt.conn}
+  <NetworkSecretPrompt
+    x={networkSecretPrompt.x}
+    y={networkSecretPrompt.y}
+    name={promptConn.name}
+    label={promptConn.auth.kind === "key" ? "Passphrase" : "Password"}
+    on:submit={(e) => void submitNetworkSecret(promptConn, e.detail.secret, e.detail.remember)}
+    on:close={() => (networkSecretPrompt = null)}
   />
 {/if}
 

@@ -2,7 +2,7 @@
 id: CPE-1502
 title: "EPIC: Network protocol — FTP/FTPS provider (cpe-ftp) ⭐ EASIEST-FIRST new protocol"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Backend
 tags: [epic]
@@ -31,3 +31,8 @@ gamble in the whole catalogue. This is the flagship "first protocol milestone" t
 Small–Medium. **Headless-buildable** (pure backend crate + `FakeProvider`-style tests; test against a local FTP
 server fixture). Deps: F1–F3 (CPE-1497/1498/1499) live + F5 (CPE-1501) for Anonymous auth. Backend-only until the
 UI wiring (which F2/F3 already provide). Source: suppaftp (crates.io, maintained ~2026).
+
+## ACTIVATED 2026-08-09 (Sprint, continuing Network per user direction) — first net-new protocol
+Foundation merged: CPE-1510 keychain + CPE-1511 vfs-route + CPE-1513 sidebar UI. FTP mirrors cpe-sftp/cpe-webdav
+exactly (a sync provider crate wrapping a connection-oriented protocol). Slice: CPE-1514 (cpe-ftp provider crate
++ ftp/ftps scheme in vfs::open + location.rs). Headless-buildable.

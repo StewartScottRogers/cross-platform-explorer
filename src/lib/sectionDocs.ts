@@ -26,7 +26,8 @@ export type Section =
   | "folder-preview"
   | "cert-management"
   | "media-player"
-  | "structured-previews";
+  | "structured-previews"
+  | "network";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -91,6 +92,11 @@ const SECTION_DOC: Record<Section, string> = {
   // into (it's whichever decoded panel the preview pane shows for a supported file), but it still earns
   // its own doc page + registry entry per [[maintain-in-app-docs-library]].
   "structured-previews": "30-structured-previews",
+  // CPE-1513 (epic CPE-1498): the Network sidebar section — saved SFTP/WebDAV connections + OS-discovered
+  // shares. Like folder-preview/media-player above, not a full-screen view you switch into (it's a
+  // sidebar section + its add/edit/connect popovers), but it still earns its own doc page + registry
+  // entry per [[maintain-in-app-docs-library]].
+  network: "31-network",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

@@ -8,12 +8,13 @@
   import { formatSize, diskUsage } from "../format";
   import { t } from "../i18n";
   import { sessionColor, sessionNum, shortModel } from "../sessionChip";
-  import type { DirEntry, Place, Favorite } from "../types";
+  import type { DirEntry, Place, Favorite, Connection, NetShare } from "../types";
   import type { AgentSession } from "../sidecar";
   import type { SmartFolder } from "../smartFolders";
   import type { SavedSearch } from "../savedSearch";
   import { isValidDrop, hoverEffect } from "../dnd";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
+  import { dedupeShares, hasAnyNetworkRows, stateOf, stateTitle, type ConnState } from "../network";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -47,6 +48,18 @@
   export let savedSearches: SavedSearch[] = [];
   /** The id of the currently-open saved search (or ""), for the highlight. */
   export let activeSavedSearch = "";
+  /** Saved remote-connection profiles (CPE-1513, epic CPE-1498) — tier 1 of the Network section. */
+  export let connections: Connection[] = [];
+  /** OS-discovered network shares (CPE-1163's `list_network_shares`) — tier 2, deduped against
+   *  `connections` below. Empty (after dedup) with no saved connections ⇒ the section is hidden. */
+  export let networkShares: NetShare[] = [];
+  /** Live, client-tracked connect state per connection name (CPE-1513) — see `network.ts` module docs
+   *  for why this can't come from the backend yet. Absent ⇒ "disconnected" (saved, not connected). */
+  export let connectionStates: Record<string, ConnState> = {};
+  /** The last connect-attempt error per connection name, for the state dot's tooltip. */
+  export let connectionErrors: Record<string, string> = {};
+  $: dedupedShares = dedupeShares(networkShares, connections);
+  $: networkOpen = isOpen($sidebarSections, "network");
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -70,6 +83,16 @@
     /** Safely eject a removable drive (CPE-1278). Only removable drive rows dispatch this; App runs
      *  the backend `eject_drive`, toasts the outcome, and refreshes the drive list. */
     eject: { path: string; name: string };
+    /** Open the "+ Add a connection" popover (CPE-1513) — from the Network section's header "+" button,
+     *  or from the always-visible "Network…" row in Explore (the entry point when no connection is
+     *  saved yet, so a user can reach it before the collapsible section itself has anything to show). */
+    networkAdd: { x: number; y: number };
+    /** Connect a saved connection (CPE-1513): App resolves/prompts for a secret if needed, then navigates
+     *  into the connection's location — works via CPE-1511's remote `list_dir` routing. */
+    networkConnect: Connection;
+    /** Right-clicking a saved-connection row (CPE-1513): App opens `NetworkConnectionMenu`
+     *  (Connect/Disconnect · Edit · Forget). */
+    networkContext: { x: number; y: number; conn: Connection };
   }>();
 
   // Every sidebar section's collapse state now comes from one persisted store (CPE-675), so a layout the
@@ -407,6 +430,22 @@
       <Icon name="details" />
       <span class="label">Workbench</span>
     </button>
+    {#if !hasAnyNetworkRows(connections, dedupedShares)}
+      <!-- CPE-1513: the permanent, tiny-footprint entry point for a user's FIRST SFTP/WebDAV connection —
+           the collapsible Network section below is hidden until there's something to show it (mirroring
+           Favorites/Tags/Smart), so this static row is how "+ Add a connection" stays reachable before
+           that. Once a connection is saved (or a share is discovered) this row is replaced by the real
+           section, whose own header "+" does the same job from then on. -->
+      <button
+        class="nav-item"
+        title="Add a saved SFTP/WebDAV connection"
+        on:click={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
+      >
+        <span class="twisty hidden" />
+        <Icon name="globe" />
+        <span class="label">Network…</span>
+      </button>
+    {/if}
   {/if}
 
   <div class="navigation-pane-sep" />
@@ -524,6 +563,58 @@
     </div>
     {/if}
   {/each}
+
+  {#if hasAnyNetworkRows(connections, dedupedShares)}
+    <!-- Network section (CPE-1513, epic CPE-1498): the visible entry point for the SFTP/WebDAV backend —
+         two deduped tiers (saved connections, then OS-discovered shares), hidden entirely until either
+         has a row (see the static Explore "Network…" row above for how the FIRST connection gets added). -->
+    <div class="navigation-pane-sep" />
+    <div class="nav-item fav-head">
+      <button class="twisty" class:open={networkOpen} title={networkOpen ? "Collapse" : "Expand"} aria-expanded={networkOpen} on:click={() => toggleSection("network")}>
+        <Icon name="chev-right" size={12} />
+      </button>
+      <Icon name="globe" />
+      <span class="label fav-title">Network</span>
+      <button
+        class="add-btn"
+        title="Add a connection"
+        aria-label="Add a connection"
+        on:click|stopPropagation={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
+      >
+        <Icon name="plus" size={12} />
+      </button>
+    </div>
+    {#if networkOpen}
+      <div class="nav-children">
+        {#each connections as conn (conn.name)}
+          {@const state = stateOf(connectionStates, conn.name)}
+          <button
+            class="nav-item fav-item"
+            title={`${conn.scheme}://${conn.host} — ${stateTitle(state, connectionErrors[conn.name])} (right-click for more)`}
+            on:click={() => dispatch("networkConnect", conn)}
+            on:contextmenu|preventDefault|stopPropagation={(e) =>
+              dispatch("networkContext", { x: e.clientX, y: e.clientY, conn })}
+          >
+            <span class="twisty hidden" />
+            <span class="state-dot state-{state}" aria-hidden="true" />
+            <Icon name="globe" />
+            <span class="label">{conn.name}</span>
+          </button>
+        {/each}
+        {#each dedupedShares as s (s.path)}
+          <button
+            class="nav-item fav-item"
+            title={`${s.path} — an OS-discovered network location; manage it from Home's Shared tab`}
+            on:click={() => dispatch("navigate", s.path)}
+          >
+            <span class="twisty hidden" />
+            <Icon name="drive" />
+            <span class="label">{s.name}</span>
+          </button>
+        {/each}
+      </div>
+    {/if}
+  {/if}
 </div>
 
 <style>
@@ -583,4 +674,30 @@
   }
   .eject-btn:hover { opacity: 1; background: var(--selection); }
   .nav-item:hover .eject-btn { opacity: 0.8; }
+  /* Network section (CPE-1513) — the "+" mirrors the eject button's reveal-on-hover treatment so the
+     header stays uncluttered at rest. */
+  .add-btn {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    margin-left: auto;
+    padding: 2px;
+    border-radius: 4px;
+    color: var(--text);
+    opacity: 0.55;
+    cursor: pointer;
+  }
+  .add-btn:hover { opacity: 1; background: var(--selection); }
+  /* Saved-connection status dot (CPE-1513): connected / saved-disconnected / error. Semantic colours
+     for a status indicator (not menu text, so MENUS.md's "theme-only, never red" item-text rule doesn't
+     apply here) — same pattern as the existing drive-usage bar's warn/full states above. */
+  .state-dot {
+    flex: 0 0 auto;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--text-faint);
+  }
+  .state-dot.state-connected { background: #3a9d4a; }
+  .state-dot.state-error { background: var(--danger); }
 </style>
