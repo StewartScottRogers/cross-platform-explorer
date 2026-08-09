@@ -9,23 +9,30 @@ An autonomous "work while you're away" mode. Triggered when the user says **"sta
 **"sprint"** / **"this is the sprint"** (the older **"dayshift"** phrasing is a kept alias). End it on
 **"stop the sprint"**; re-baseline mid-run on **"restart the sprint"**.
 
-The user is away and **cannot answer questions** — make the best reasonable guess, log the assumption in the
-ticket work log, and keep moving until the work is **done** or the user **comes home**. **Never idle.** The
+**This is a lights-out factory.** A sprint — or a batch of sprints — runs with **zero expectation that the
+user is present or reachable.** Assume the user **cannot and will not answer anything** for the entire run.
+**No question ever gates progress.** Every ambiguity, design choice, disposition, sequencing/naming default,
+or gate-vs-fix judgment: make the best reasonable call, log the assumption in the ticket work log, and keep
+moving. `AskUserQuestion` is **banned** for the duration of a sprint. Things that genuinely need the *user's*
+own resources/authority are **skipped-and-noted into an async review queue** (escalation #2 below) — never
+asked-and-awaited. The **only** thing that halts the whole factory is a safety hard-stop (escalation #3). Keep
+working until the safe work is **done**; the user's return is **not** a condition the loop waits for. **Never
+idle.** The
 assignment is whatever "this" refers to when the shift starts; if nothing specific, work the critical path
 (finish `Ticketing/Tickets/Doing/` → clear `Ticketing/Tickets/Backlog/` + pickable `Deferred/` → activate an epic → have the
 **Product Manager** task Researchers to find + pitch new epics, pick the highest-impact ones, then build them).
 
 **DO NOT STOP FOR APPROVAL OR STATUS UPDATES.** Never end a turn asking permission to continue; never pause
-for an interim status; a "natural milestone" is not a reason to stop. Report only at the very end (out of
-safe headless work / the user returns). If one ticket needs a user resource, **skip it and keep working
-others** — don't halt the whole shift.
+for an interim status; a "natural milestone" is not a reason to stop. Report only at the very end (the safe
+headless work runs out). If one ticket needs a user resource, **skip it and keep working others** — don't halt
+the whole shift.
 
 ---
 
 ## The operating loop (read this first — everything below is reference)
 
-This is the runnable spine of the shift. Run it until the work is done or the user returns; each step links to
-its detailed section below.
+This is the runnable spine of the shift. Run it until the safe work is done (or a safety hard-stop); the user's
+return does **not** end it. Each step links to its detailed section below.
 
 0. **Pre-flight (once, at kickoff).** Acquire the shift lock, verify the base is sane, seed defaults from
    history. → **Pre-flight** below.
@@ -55,8 +62,9 @@ An unattended shift lives or dies on this: **the Foreman must never end a turn i
   tick. Cancel it (`stop`) only at the end-of-shift wrap or a hard stop.
 - **Every tick carries a wall-clock timestamp and the next-wakeup time** (per [[loop-behavior-needs-timestamps]]) —
   fold both into the `FOREMAN` block: a `• Tick —` header stamp and a `• Next wake —` line.
-- **Only three things end the loop:** the safe work runs out (wrap), the user returns (presence check), or a
-  hard-stop safety condition fires. Nothing else — not a milestone, not a full merge queue.
+- **Only two things end the loop:** the safe work runs out (wrap), or a hard-stop safety condition fires.
+  Nothing else — not a milestone, not a full merge queue, and **not the user returning**. A detected presence
+  triggers a *non-blocking* machine-sharing offer (§ "Machine-sharing"), never a loop end or a wait.
 
 ---
 
@@ -267,11 +275,14 @@ Every code change goes through a `CPE-NNN` ticket; **not pushed = not done**. La
 1. **Decide and log (default — the overwhelming majority):** any ambiguity/design-choice/blocker the Foreman
    can settle with a reasonable call — settle it, make the best guess (research it first if it's hard — see
    Researchers), log the assumption in the ticket work log, keep moving.
-2. **Skip + note for the user (don't stop the shift):** only when a ticket genuinely needs the *user's* own
-   resources or authority — code-signing certs, security sign-off, secrets/credentials, a paid/external
-   account, a model choice / API key, or interactive cross-OS GUI verification. Skip it, record what's
-   needed in the work log, keep working other tickets. **Also add a row to the QA Architect's
-   `MANUAL-TEST-BURNDOWN.md`** — every manual/interactive skip is debt to be automated away over time.
+2. **Skip + queue for the user — asynchronously, never a blocking ask (don't stop the shift):** only when a
+   ticket genuinely needs the *user's* own resources or authority — code-signing certs, security sign-off,
+   secrets/credentials, a paid/external account, a model choice / API key, interactive cross-OS GUI
+   verification, or a subjective taste sign-off. Do **not** ask-and-wait: skip it, record what's needed in the
+   work log **and on the async "For you" review queue** (surfaced in the `FOREMAN` block footer), and keep
+   working other tickets. The user handles the whole queue whenever they return. **Also add a row to the QA
+   Architect's `MANUAL-TEST-BURNDOWN.md`** — every manual/interactive skip is debt to be automated away over
+   time.
 3. **Hard stop (rare, safety only):** pause the whole shift *only* for a genuinely unsafe/out-of-bounds
    action — risk of irreversible data loss outside the repo, breaking the green release pipeline, pushing
    directly to `main`, committing secrets, or a destructive/outward-facing action beyond the granted
@@ -476,7 +487,8 @@ Workers implement the harnesses on their right-sized tier.
   **start and finish** of anything slow and show the **elapsed** (`CPE-983 done 17:22:41 (⏱ 7m32s)`). Per
   [[loop-behavior-needs-timestamps]].
 - **Each idle poll-wait and the end-of-shift wrap** use a bordered **`FOREMAN`** block with a timestamp
-  header and an "Awaiting you" footer, each line item split by a `────` rule:
+  header and a **"For you (async)"** footer — an async review queue, **not** a question the loop is parked on —
+  each line item split by a `────` rule:
 
   ```
   ═════════ FOREMAN · 2026-07-24 14:32 USMST ═════════
@@ -500,17 +512,18 @@ Workers implement the harnesses on their right-sized tier.
   ────────────────────────────────────────────────────
   • Next wake — <local time of the armed fallback wakeup, or "on next agent return">
   ────────────────────────────────────────────────────
-  • Awaiting you — <user-resource blockers, or "nothing">
+  • For you (async) — <queued user-resource / taste items to review on return, or "nothing"; NOT a wait>
   ════════════════════════════════════════════════════
   ```
 
   The header stamp doubles as the `• Tick —` timestamp; `• Next wake —` records the armed `ScheduleWakeup` so
   the loop's cadence is always visible (per the heartbeat rules).
 
-- **Return-facing wraps and any user question are the rich, plain-language version** — expand, don't
+- **Return-facing wraps and the async "For you" queue are the rich, plain-language version** — expand, don't
   compress; the user has been away and won't remember IDs/jargon (see
   [[sprint-summarize-with-context]]). Lead with what a thing *is* in plain English, put `CPE-NNN` in
-  parentheses. `AskUserQuestion` options must be self-explanatory to a cold reader.
+  parentheses. There is **no mid-sprint `AskUserQuestion`** — anything that would have been a question becomes
+  a decided-and-logged call or an async "For you" queue item the user reviews on return.
 - **Sign every sprint PR** with `— Foreman · sprint supervisor · <YYYY-MM-DD>` as the **last line** of
   the PR body, below this repo's required trailer (keep the "🤖 Generated with Claude Code" + session link).
   Sign the PR, not each commit (commits keep the standard `Co-Authored-By` + `Claude-Session` trailers).
@@ -525,24 +538,29 @@ the file-locked sidecar, verify the installed version + sidecar timestamp, then 
 responding. Bracket it with the ASCII **WAIT → ① BUILD → ② DEPLOY → ③ RUN → RUNNING → checklist** narration.
 See [[gui-verify-needs-build-deploy-run]], [[always-install-sidecar-build]], [[install-kill-all-processes-first]].
 
-**The Visual Critic comes first — minimise the user's eyes-on (CPE-1148).** Before pulling the user in to
-*look*, the routine visual check is the **Visual Critic reading `gui-smoke` screenshots** (per-ticket gauntlet
-step 4 above). It catches the defects that used to cost a user round-trip — placement, clipping, misalignment,
-wrong/ambiguous icons, off-theme, cramped spacing — and routes them back to the worker with **zero user
-involvement**. Only bring the user into a build → deploy → run when: (a) a genuinely **subjective taste** call
-remains (and present it as a concrete pick-list, not an open question), or (b) something a screenshot can't
-show — **interaction feel**, animation cadence, drag latency, real-hardware behaviour — needs live hands. So
-build→deploy→run-with-the-user becomes a **final confirmation / interaction-feel** check, not the
-every-iteration catch-obvious-defects loop it used to be. The user stays the ultimate backstop; they're just
-touched far less. (The button-placement/icon/clipping saga that motivated this was almost entirely
-screenshot-visible — only the pure icon *preference* legitimately needed the user.)
+**The Visual Critic does the looking — the sprint never waits on the user's eyes (CPE-1148).** The routine
+visual check is the **Visual Critic reading `gui-smoke` screenshots** (per-ticket gauntlet step 4 above). It
+catches the defects that used to cost a user round-trip — placement, clipping, misalignment, wrong/ambiguous
+icons, off-theme, cramped spacing — and routes them back to the worker with **zero user involvement**. In this
+lights-out mode the Critic is the *whole* mid-loop visual authority: it decides objective pass/fail and keeps
+the ticket moving. Two things it **cannot** self-settle do **not** stop the loop to pull the user in — they
+become **async "For you" queue items** (escalation #2), captured with the evidence the user needs to judge on
+return, while the sprint keeps working other tickets: (a) a genuinely **subjective taste** call — queue the
+screenshot + a concrete pick-list; (b) something a screenshot can't show — **interaction feel**, animation
+cadence, drag latency, real-hardware behaviour — queue a note of what to try live. The user stays the ultimate
+backstop, but **asynchronously**: they clear the visual/taste queue when they return, never as a mid-sprint
+wait. (The button-placement/icon/clipping saga that motivated this was almost entirely screenshot-visible —
+only the pure icon *preference* ever legitimately needed the user, and that is exactly the kind of item the
+queue now holds.)
 
-## Machine-sharing (do NOT auto-yield)
+## Machine-sharing (announce presence, keep working — never wait)
 
 The user is physically away, so the machine is free. If recent human input appears (idle time drops — they
-came home or are remoting in), do **not** automatically pause. Instead **tell the user I see they're here and
-ASK whether I should yield the machine**, then act on the answer. This is the one sanctioned exception to
-"never stop to ask" — a presence check, not a work checkpoint.
+came home or are remoting in), do **not** automatically pause and do **not** stop to ask. Lights-out means the
+factory keeps running by default. Instead post a **one-line, non-blocking** note that I see they're here and
+that they can say **"yield"** (I'll pause) or **"stop the sprint"** (I'll wind down) — then **immediately keep
+working** without awaiting a reply. Yield *only* if they explicitly tell me to. Presence is never a question
+the loop parks on and never a loop-ender; it is a courtesy heads-up that leaves the factory running.
 
 ## Shift end — release the loop's resources
 

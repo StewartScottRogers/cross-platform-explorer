@@ -49,8 +49,10 @@ batch. Count a batch when its ticket reaches a terminal state (merged / parked),
 3. **Budget reset line** — as before: quiesce → checkpoint (`CHECKPOINT.md`, including the `BATCH-COUNTER`
    state) → tell the user to resume in a fresh session. This is a *hand-off*, not a stop: the batched run
    continues under the same count.
-4. **User returns** — the machine-sharing presence check from `sprint.md` (ask whether to yield); not an
-   automatic stop.
+**The user returning is NOT a stop condition.** Per `sprint.md` → "Machine-sharing", a detected presence is a
+one-line, non-blocking heads-up (they can say "yield"/"stop the sprint"); the batched run keeps working by
+default and never waits on a reply. Likewise nothing in the run ever pauses to *ask* the user anything —
+lights-out: decide-and-log, or skip-and-queue asynchronously (`sprint.md` escalation #2).
 
 ## Sizing — pick a `max_batches` that outlasts your away-window
 
