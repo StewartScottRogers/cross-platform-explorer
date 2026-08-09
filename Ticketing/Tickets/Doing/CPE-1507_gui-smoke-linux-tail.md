@@ -2,7 +2,7 @@
 id: CPE-1507
 title: "gui-smoke Linux tail: 3 pre-existing failures revealed once the suite completes (populated-whitespace CDP-assumption + samples + saved-search)"
 type: Bug
-status: Backlog
+status: Doing
 priority: Medium
 component: CI/QA-infra
 tags: [ready]
