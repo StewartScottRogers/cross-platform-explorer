@@ -198,3 +198,68 @@ describe("Sidebar drive usage bars (CPE-406)", () => {
     expect(container.querySelector(".drive-bar")).toBeNull();
   });
 });
+
+describe("Sidebar Network section (CPE-1516: permanent top-level section)", () => {
+  it("always renders the Network header, even with zero connections and zero shares", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], connections: [], networkShares: [] });
+    expect(screen.getByText("Network")).toBeTruthy();
+  });
+
+  it("shows the empty-state '+ Add a connection' control and hint when there's nothing saved", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], connections: [], networkShares: [] });
+    expect(screen.getByText("＋ Add a connection")).toBeTruthy();
+    expect(screen.getByText(/No connections yet/)).toBeTruthy();
+  });
+
+  it("dispatches networkAdd from the empty-state control", async () => {
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [],
+    });
+    const added = vi.fn();
+    component.$on("networkAdd", (e) => added(e.detail));
+
+    await fireEvent.click(screen.getByText("＋ Add a connection"));
+    expect(added).toHaveBeenCalledOnce();
+  });
+
+  it("no longer shows a 'Network…' row under Explore (removed — the section itself is now permanent)", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], connections: [], networkShares: [] });
+    expect(screen.queryByText("Network…")).toBeNull();
+  });
+
+  it("shows saved-connection and OS-share rows, and hides the empty-state control, once there's something to show", () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [
+        { name: "prod", scheme: "sftp", host: "host.example.com", port: 22, user: "deploy", auth: { kind: "password" } },
+      ],
+      networkShares: [{ name: "backups (Y:)", path: "Y:\\", kind: "mapped" }],
+    });
+    expect(screen.getByText("prod")).toBeTruthy();
+    expect(screen.getByText("backups (Y:)")).toBeTruthy();
+    expect(screen.queryByText("＋ Add a connection")).toBeNull();
+    expect(screen.queryByText(/No connections yet/)).toBeNull();
+  });
+
+  it("clicking a saved connection dispatches networkConnect", async () => {
+    const conn = { name: "prod", scheme: "sftp", host: "host.example.com", port: 22, user: "deploy", auth: { kind: "password" as const } };
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [conn],
+      networkShares: [],
+    });
+    const connected = vi.fn();
+    component.$on("networkConnect", (e) => connected(e.detail));
+
+    await fireEvent.click(screen.getByText("prod"));
+    expect(connected).toHaveBeenCalledWith(conn);
+  });
+});

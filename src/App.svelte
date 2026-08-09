@@ -5547,17 +5547,18 @@
     } catch (e) {
       console.debug("could not load places:", e);
     }
-    // Network sidebar section (CPE-1513): saved connections + OS-discovered shares, both needed up front
-    // (not pull-on-open like the Home Shared tab used to be alone) so the section's hidden-when-empty check
-    // is correct from first paint. Both are time-bounded in the backend, so an offline server/share can't
-    // hang startup (see `loadShared`'s own doc comment) — and deliberately NOT awaited inline here: this
-    // whole onMount is one sequential chain ending in `restoreLastSession()` below, so an awaited call here
-    // would delay session restore by exactly this round trip for zero benefit (the sidebar reacting a beat
-    // later is invisible; a delayed session restore is not). Fire-and-forget, same as `loadShared` itself.
+    // Network sidebar section (CPE-1513; permanent since CPE-1516): saved connections + OS-discovered
+    // shares, both needed up front (not pull-on-open like the Home Shared tab used to be alone) so the
+    // section's empty-vs-populated body is correct from first paint. Both are time-bounded in the backend,
+    // so an offline server/share can't hang startup (see `loadShared`'s own doc comment) — and deliberately
+    // NOT awaited inline here: this whole onMount is one sequential chain ending in `restoreLastSession()`
+    // below, so an awaited call here would delay session restore by exactly this round trip for zero
+    // benefit (the sidebar reacting a beat later is invisible; a delayed session restore is not).
+    // Fire-and-forget, same as `loadShared` itself.
     (async () => {
       try {
         // `?? []` guards a backend/test-double that hands back `null` for an empty store — the sidebar
-        // section's hidden-when-empty check (`hasAnyNetworkRows`) assumes a real array.
+        // section's empty-body check (`hasAnyNetworkRows`) assumes a real array.
         connections = unwrap(await commands.connectionsList()) ?? [];
       } catch (e) {
         console.debug("could not load saved connections:", e);

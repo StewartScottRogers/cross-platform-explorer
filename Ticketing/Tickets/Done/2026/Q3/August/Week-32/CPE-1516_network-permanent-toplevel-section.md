@@ -2,7 +2,7 @@
 id: CPE-1516
 title: "Promote Network to a permanent top-level left-pane section (like Drives/Quick Access)"
 type: Feature
-status: Backlog
+status: Done
 priority: High
 component: Frontend
 tags: [ready]
@@ -50,3 +50,30 @@ connection exists — the same mental model as Drives (always shown, even with o
 Small, frontend-only, testable without a NAS. Spun out of the CPE-1513 visual-verification feedback. Sits on
 top of the merged CPE-1513 code. Relates to [[prefer-inline-instant-controls]] (the ＋ Add control),
 [[menu-items-need-icons]], the TABS/section conventions.
+
+## Work Log (2026-08-09)
+- `src/lib/components/Sidebar.svelte`: the Network section header + body now always render (no longer
+  gated on `hasAnyNetworkRows(...)`); the standalone Explore "Network…" row (`Sidebar.svelte:433-446`) was
+  removed. When the section has no saved connections/shares, its body shows a "＋ Add a connection" row
+  (same `networkAdd` dispatch, same title text the old Explore row used) plus a one-line "No connections
+  yet — add an SFTP or WebDAV server." hint — header + control + hint only, so the plain explorer stays
+  visually quiet per CLAUDE.md's additive-mode guarantee.
+- Ordering was already Network-after-Drives in the DOM (the section markup sits right after the
+  places/drives loop), which matches the ticket's proposed order — no reordering needed.
+- `src/lib/sidebarSections.ts` is a generic id→open map with no fixed section list or explicit ordering
+  concept (`isOpen` already defaults any unset id, including `"network"`, to open) — confirmed no code
+  change was needed there; DOM order is what drives visual ordering.
+- `src/lib/network.ts`: updated `hasAnyNetworkRows`'s doc comment — it now gates the section's *body*
+  content (rows vs. empty-state), not the section's visibility.
+- Docs: `src/docs/31-network.md` rewritten to describe Network as a permanent section (peer of Drives) and
+  the "＋ Add a connection" row as living inside the section itself.
+- `gui-smoke/specs/network.smoke.ts`: updated comments/assertions for the permanent header; the empty-state
+  button kept its original title text ("Add a saved SFTP/WebDAV connection") so the existing selector still
+  matches after the move.
+- Tests: added 6 new cases to `src/lib/components/Sidebar.test.ts` covering the always-rendered header, the
+  empty-state control + hint, the `networkAdd` dispatch from it, the removed Explore row, and that rows
+  replace the empty state once connections/shares exist. `npm run check` — 0 errors/warnings. `npx vitest
+  run` on `network.test.ts` + `Sidebar.test.ts` + `sectionDocs.test.ts` — 48/48 passing.
+- **Visual/interaction sign-off is OWED to the user** (attended check or gui-smoke Visual Critic
+  screenshots) — not claimed done here, per the ticket's Verify section. Pairs with the still-pending
+  CPE-1513 visual verification.

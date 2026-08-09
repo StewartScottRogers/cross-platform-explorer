@@ -8,14 +8,16 @@ categoryOrder: 2
 # Network Connections
 
 The **Network** section in the left-pane sidebar is the entry point for browsing a remote server —
-SFTP or WebDAV — right alongside your local drives. It appears only once you have something to show:
-a saved connection, or a network share your operating system already knows about. Until then, a
-single **Network…** row under Explore is where you add your first connection.
+SFTP or WebDAV — right alongside your local drives. It's a **permanent section**, always shown as a
+peer of **Drives**, right below it — the same way Drives is always shown even with just one drive.
+Before you've added anything, the section still appears, just with an empty body: its header, plus a
+**＋ Add a connection** row and a one-line hint. Adding your first connection happens right there, in
+the Network section itself.
 
 ## Adding a connection
 
-1. Click **Network…** (under Explore) if you have no connections yet, or the **+** button on the
-   Network section header once it's showing.
+1. Click **＋ Add a connection** in the Network section body (shown when nothing's saved yet), or the
+   **+** button on the Network section header once you have a connection or two already.
 2. Fill in the form: a **name** for the connection, the **protocol** (SFTP or WebDAV to start), the
    **host**, and optionally a **user**, **port**, and a starting **remote path**.
 3. Choose how it authenticates — a **password** or a **key file** (with **Browse…** to pick the key).

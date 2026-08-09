@@ -84,8 +84,8 @@
      *  the backend `eject_drive`, toasts the outcome, and refreshes the drive list. */
     eject: { path: string; name: string };
     /** Open the "+ Add a connection" popover (CPE-1513) — from the Network section's header "+" button,
-     *  or from the always-visible "Network…" row in Explore (the entry point when no connection is
-     *  saved yet, so a user can reach it before the collapsible section itself has anything to show). */
+     *  or (CPE-1516) its own empty-state "＋ Add a connection" row when there are no connections/shares
+     *  yet, now that the section itself is permanent rather than appearing only once something exists. */
     networkAdd: { x: number; y: number };
     /** Connect a saved connection (CPE-1513): App resolves/prompts for a secret if needed, then navigates
      *  into the connection's location — works via CPE-1511's remote `list_dir` routing. */
@@ -430,22 +430,6 @@
       <Icon name="details" />
       <span class="label">Workbench</span>
     </button>
-    {#if !hasAnyNetworkRows(connections, dedupedShares)}
-      <!-- CPE-1513: the permanent, tiny-footprint entry point for a user's FIRST SFTP/WebDAV connection —
-           the collapsible Network section below is hidden until there's something to show it (mirroring
-           Favorites/Tags/Smart), so this static row is how "+ Add a connection" stays reachable before
-           that. Once a connection is saved (or a share is discovered) this row is replaced by the real
-           section, whose own header "+" does the same job from then on. -->
-      <button
-        class="nav-item"
-        title="Add a saved SFTP/WebDAV connection"
-        on:click={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
-      >
-        <span class="twisty hidden" />
-        <Icon name="globe" />
-        <span class="label">Network…</span>
-      </button>
-    {/if}
   {/if}
 
   <div class="navigation-pane-sep" />
@@ -564,56 +548,71 @@
     {/if}
   {/each}
 
-  {#if hasAnyNetworkRows(connections, dedupedShares)}
-    <!-- Network section (CPE-1513, epic CPE-1498): the visible entry point for the SFTP/WebDAV backend —
-         two deduped tiers (saved connections, then OS-discovered shares), hidden entirely until either
-         has a row (see the static Explore "Network…" row above for how the FIRST connection gets added). -->
-    <div class="navigation-pane-sep" />
-    <div class="nav-item fav-head">
-      <button class="twisty" class:open={networkOpen} title={networkOpen ? "Collapse" : "Expand"} aria-expanded={networkOpen} on:click={() => toggleSection("network")}>
-        <Icon name="chev-right" size={12} />
-      </button>
-      <Icon name="globe" />
-      <span class="label fav-title">Network</span>
-      <button
-        class="add-btn"
-        title="Add a connection"
-        aria-label="Add a connection"
-        on:click|stopPropagation={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
-      >
-        <Icon name="plus" size={12} />
-      </button>
+  <!-- Network section (CPE-1513, epic CPE-1498; permanent per CPE-1516): the visible entry point for the
+       SFTP/WebDAV backend — two deduped tiers (saved connections, then OS-discovered shares). Always
+       rendered as a peer of Drives (discoverable before the first connection exists, like Drives is always
+       shown with just one drive); when both tiers are empty the body is just the "＋ Add a connection"
+       control + a one-line hint, so the plain explorer stays visually quiet (CLAUDE.md's additive-mode
+       guarantee) rather than gaining a heavier permanent section. -->
+  <div class="navigation-pane-sep" />
+  <div class="nav-item fav-head">
+    <button class="twisty" class:open={networkOpen} title={networkOpen ? "Collapse" : "Expand"} aria-expanded={networkOpen} on:click={() => toggleSection("network")}>
+      <Icon name="chev-right" size={12} />
+    </button>
+    <Icon name="globe" />
+    <span class="label fav-title">Network</span>
+    <button
+      class="add-btn"
+      title="Add a connection"
+      aria-label="Add a connection"
+      on:click|stopPropagation={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
+    >
+      <Icon name="plus" size={12} />
+    </button>
+  </div>
+  {#if networkOpen}
+    <div class="nav-children">
+      {#each connections as conn (conn.name)}
+        {@const state = stateOf(connectionStates, conn.name)}
+        <button
+          class="nav-item fav-item"
+          title={`${conn.scheme}://${conn.host} — ${stateTitle(state, connectionErrors[conn.name])} (right-click for more)`}
+          on:click={() => dispatch("networkConnect", conn)}
+          on:contextmenu|preventDefault|stopPropagation={(e) =>
+            dispatch("networkContext", { x: e.clientX, y: e.clientY, conn })}
+        >
+          <span class="twisty hidden" />
+          <span class="state-dot state-{state}" aria-hidden="true" />
+          <Icon name="globe" />
+          <span class="label">{conn.name}</span>
+        </button>
+      {/each}
+      {#each dedupedShares as s (s.path)}
+        <button
+          class="nav-item fav-item"
+          title={`${s.path} — an OS-discovered network location; manage it from Home's Shared tab`}
+          on:click={() => dispatch("navigate", s.path)}
+        >
+          <span class="twisty hidden" />
+          <Icon name="drive" />
+          <span class="label">{s.name}</span>
+        </button>
+      {/each}
+      {#if !hasAnyNetworkRows(connections, dedupedShares)}
+        <!-- Empty state (CPE-1516): the section's own "first connection" affordance, replacing the old
+             static Explore "Network…" row now that the section is always present. -->
+        <button
+          class="nav-item fav-item"
+          title="Add a saved SFTP/WebDAV connection"
+          on:click={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY })}
+        >
+          <span class="twisty hidden" />
+          <Icon name="plus" size={12} />
+          <span class="label">＋ Add a connection</span>
+        </button>
+        <div class="nav-empty">No connections yet — add an SFTP or WebDAV server.</div>
+      {/if}
     </div>
-    {#if networkOpen}
-      <div class="nav-children">
-        {#each connections as conn (conn.name)}
-          {@const state = stateOf(connectionStates, conn.name)}
-          <button
-            class="nav-item fav-item"
-            title={`${conn.scheme}://${conn.host} — ${stateTitle(state, connectionErrors[conn.name])} (right-click for more)`}
-            on:click={() => dispatch("networkConnect", conn)}
-            on:contextmenu|preventDefault|stopPropagation={(e) =>
-              dispatch("networkContext", { x: e.clientX, y: e.clientY, conn })}
-          >
-            <span class="twisty hidden" />
-            <span class="state-dot state-{state}" aria-hidden="true" />
-            <Icon name="globe" />
-            <span class="label">{conn.name}</span>
-          </button>
-        {/each}
-        {#each dedupedShares as s (s.path)}
-          <button
-            class="nav-item fav-item"
-            title={`${s.path} — an OS-discovered network location; manage it from Home's Shared tab`}
-            on:click={() => dispatch("navigate", s.path)}
-          >
-            <span class="twisty hidden" />
-            <Icon name="drive" />
-            <span class="label">{s.name}</span>
-          </button>
-        {/each}
-      </div>
-    {/if}
   {/if}
 </div>
 
