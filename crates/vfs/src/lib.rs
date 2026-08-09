@@ -30,12 +30,16 @@ pub type BoxedProvider = Box<dyn FileSystemProvider + Send>;
 
 /// Open a live [`FileSystemProvider`] for `conn`, using `secret` (the password, or a key's passphrase)
 /// fetched from the OS keychain. `known_hosts` + `policy` govern SFTP host-key verification (ignored for
-/// WebDAV and FTP). Errors carry the scheme/host context.
+/// WebDAV and FTP). `record_first_contact` is the app-managed `known_hosts` store path (CPE-1512): for
+/// SFTP, a first-contact (`Unknown`) host key is persisted there so a later connect to the same host
+/// resolves `Trusted` (or `Changed` → refused, on a key swap) — `None` skips persistence (e.g. no app
+/// config dir on this platform) without failing the connect. Errors carry the scheme/host context.
 pub fn open(
     conn: &Connection,
     secret: Option<&str>,
     known_hosts: Vec<KnownHost>,
     policy: HostKeyPolicy,
+    record_first_contact: Option<&std::path::Path>,
 ) -> Result<BoxedProvider, String> {
     match conn.scheme.as_str() {
         "sftp" | "ssh" => {
@@ -45,7 +49,7 @@ pub fn open(
                 user: conn.user.clone(),
                 auth: sftp_auth_from(conn, secret)?,
             };
-            Ok(Box::new(SftpProvider::connect(&cfg, known_hosts, policy)?))
+            Ok(Box::new(SftpProvider::connect_and_record(&cfg, known_hosts, policy, record_first_contact)?))
         }
         "webdav" | "davs" | "dav" => {
             let mut cfg = WebdavConfig::new(webdav_base_url(conn));
@@ -118,7 +122,7 @@ mod tests {
 
     #[test]
     fn an_unsupported_scheme_is_a_clear_error() {
-        let err = match open(&conn("s3", AuthMethod::Password), None, vec![], HostKeyPolicy::Tofu) {
+        let err = match open(&conn("s3", AuthMethod::Password), None, vec![], HostKeyPolicy::Tofu, None) {
             Ok(_) => panic!("s3 must be unsupported"),
             Err(e) => e,
         };
@@ -167,7 +171,7 @@ mod tests {
         let mut c = conn("sftp", AuthMethod::Password);
         c.host = "127.0.0.1".into();
         c.port = 1;
-        let err = match open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu) {
+        let err = match open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu, None) {
             Ok(_) => panic!("connect to a dead port must fail"),
             Err(e) => e,
         };
@@ -179,7 +183,7 @@ mod tests {
         // WebdavProvider::connect is lazy (no request), so routing a webdav connection succeeds without a
         // server; a later op would surface a connection error.
         let c = conn("webdav", AuthMethod::Password);
-        assert!(open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu).is_ok());
+        assert!(open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu, None).is_ok());
     }
 
     #[test]
@@ -190,7 +194,7 @@ mod tests {
             let mut c = conn(scheme, AuthMethod::Password);
             c.host = "127.0.0.1".into();
             c.port = 1;
-            let err = match open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu) {
+            let err = match open(&c, Some("pw"), vec![], HostKeyPolicy::Tofu, None) {
                 Ok(_) => panic!("connect to a dead port must fail ({scheme})"),
                 Err(e) => e,
             };
