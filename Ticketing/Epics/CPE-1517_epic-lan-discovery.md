@@ -31,16 +31,31 @@ listen to the standard ones (no vendor SDK):
 - **SMB/NetBIOS browse (UDP 137 / WS-Discovery)** — Windows-world neighbourhood; lowest-value, highest-noise,
   scope carefully or defer.
 
-## Scope (staged; mDNS first)
-- **v1 — mDNS/DNS-SD listener** (pure-Rust; `mdns-sd` or `astro-dnssd`-class crate, vet the lean-core cost with
-  the Dependency Steward): passively browse the file-service service-types above, surface discovered hosts as a
-  **"Discovered on your network" tier** in the Network section (dedup against saved connections + OS shares,
-  reusing `isDuplicateShare`/`dedupeShares`). Each discovered host maps its advertised service → a pre-filled
-  **"＋ Add a connection"** (protocol + host + port already chosen) so one click connects.
-- **v2 — SSDP/UPnP** for devices that don't do mDNS.
-- **v3 (DEFER unless demanded)** — SMB/NetBIOS/WS-Discovery browse.
-- Discovery is **opt-in and quiet**: a bounded, cancellable background listen (no continuous chatter),
-  respecting [[avoid-modal-permission-popups]] and the additive-mode "plain explorer stays light" rule.
+## Design — use each OS's OWN discovery (mirror how we enumerate shares)
+Just as share enumeration already uses the native path per OS (`net use` / `/proc/mounts` / `mount`), discovery
+should lean on each platform's built-in mechanism first, then a cross-platform mDNS listener as the shared
+complement:
+- **Windows — use the OS's built-in network discovery (Explorer's "Network" folder).** User-requested
+  (2026-08-09): "Windows File Explorer has network discovery built in — can we support this?" Yes — enumerate
+  the same neighborhood via **`WNetOpenEnum`/`WNetEnumResource` (`RESOURCE_GLOBALNET`)** + `NetShareEnum`, no
+  new protocol code and no new dep (the `windows` crate is already in `src-tauri`, add the
+  `Win32_NetworkManagement_WNet` feature). Full slice: **CPE-1519**. This is the easiest, highest-parity
+  Windows path (modern Windows discovery already rides WS-Discovery + mDNS under the hood; the QNAP shows via
+  mDNS).
+- **macOS — Bonjour** (`NSNetServiceBrowser` / `dns-sd`), the OS-native DNS-SD browser.
+- **Linux — Avahi / mDNS** (the same DNS-SD, via Avahi where present).
+
+## Scope (staged)
+- **v1 — Windows-native (CPE-1519):** WNet enumeration → a **"Discovered on your network" tier** in the Network
+  section (dedup against saved connections + `net use` shares via `isDuplicateShare`/`dedupeShares`); each
+  discovered `\\server\share` → a pre-filled one-click **"＋ Add a connection"**.
+- **v2 — cross-platform mDNS/DNS-SD listener** (pure-Rust; `mdns-sd`/`astro-dnssd`-class crate, vet the
+  lean-core cost with the Dependency Steward): browse the file-service service-types above. Serves macOS/Linux
+  natively AND catches device-advertised hosts that Explorer's chain misses on Windows (a superset complement,
+  not a duplicate).
+- **v3 — SSDP/UPnP** for devices that do neither.
+- Discovery is **opt-in and quiet**: a bounded, cancellable listen (no continuous chatter), respecting
+  [[avoid-modal-permission-popups]] and the additive-mode "plain explorer stays light" rule.
 - Streams results as they arrive ([[prefer-streaming-liveness]]) — the section paints hosts as they answer.
 
 ## Effort / deps / fit
