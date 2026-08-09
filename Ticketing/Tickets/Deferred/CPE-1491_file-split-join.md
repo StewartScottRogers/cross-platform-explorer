@@ -2,7 +2,7 @@
 id: CPE-1491
 title: "File split / join — chunk a large file into parts and rejoin (classic commander utility)"
 type: Feature
-status: Doing
+status: Deferred
 priority: Low
 component: Multiple
 tags: [ready]
@@ -130,3 +130,9 @@ for both directions (decided here since the ticket left it open — flagged in c
 wants an explicit "replace existing" affordance instead of requiring the caller to delete first).
 
 **Status:** backend done; GUI = CPE-1509. Leaving this ticket in `Doing/` for the Foreman to disposition.
+
+## 2026-08-08 (workshift) — BACKEND SHIPPED (PR #727, merged); DEFERRED pending GUI dialog CPE-1509
+`crates/server/src/split_join.rs` (`split_file`/`join_files`, streamed 1 MiB buffers, single-pass sha256,
+traversal-safe hostile-manifest validation) merged + gauntlet-verified (Reviewer caught + fixed a manifest
+overflow-panic; UAT: round-trip byte-identical, corrupt/missing→Err, traversal rejected, 200 MiB → ~5.9 MB RSS).
+Remaining scope — the split/join dialog + context-menu — is **CPE-1509**. Deferred (not Done) pending that.
