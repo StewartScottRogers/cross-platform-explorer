@@ -3028,6 +3028,46 @@ async fn verify_all_baselines(
     .map_err(|e| e.to_string())
 }
 
+// ---- File split/join (CPE-1491) --------------------------------------------------------------------
+// The classic orthodox-commander utility: chunk a large file into fixed-size numbered parts plus a small
+// manifest, and rejoin them back into the original, verified by SHA-256. Model lives in
+// `cpe_server::split_join` (bounded/streamed both ways, reuses the existing streaming SHA-256 approach);
+// these are thin `spawn_blocking` dispatchers. GUI dialog + context-menu entries are the follow-up
+// CPE-1509 — these two commands are the whole backend surface for now.
+
+/// Split `path` into fixed-`part_size` parts under `out_dir`, plus a manifest recording the original
+/// name, size, part count, and whole-file SHA-256 (CPE-1491). Refuses `part_size == 0` and refuses to
+/// overwrite a pre-existing manifest/part in `out_dir`.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn split_file(
+    path: String,
+    part_size: u64,
+    out_dir: String,
+) -> Result<cpe_server::split_join::SplitManifest, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::split_join::split_file(std::path::Path::new(&path), part_size, std::path::Path::new(&out_dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Rejoin the parts referenced by `first_part_or_manifest` (the manifest itself, or any one numbered
+/// part) into `out_path`, verifying the reconstructed SHA-256 against the manifest (CPE-1491). Refuses to
+/// overwrite a pre-existing `out_path`; a missing/short/corrupt part is a clear `Err`, never a panic.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn join_files(first_part_or_manifest: String, out_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::split_join::join_files(
+            std::path::Path::new(&first_part_or_manifest),
+            std::path::Path::new(&out_path),
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 // ---- Folder-tree scan for the compare view (CPE-779, epic CPE-722) --------------------------------
 // Recursively scan a folder into a nested tree the frontend `diffTrees` (CPE-777) consumes: files carry
 // size + epoch-ms mtime (what the diff compares on), dirs carry children. Symlinks aren't followed and
@@ -10328,6 +10368,8 @@ pub fn run() {
             checksum_folder,
             verify_folder,
             verify_all_baselines,
+            split_file,
+            join_files,
             scan_tree,
             create_symlink,
             create_hard_link,
@@ -11151,6 +11193,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         checksum_folder,
         verify_folder,
         verify_all_baselines,
+        split_file,
+        join_files,
         scan_tree,
         create_symlink,
         create_hard_link,
