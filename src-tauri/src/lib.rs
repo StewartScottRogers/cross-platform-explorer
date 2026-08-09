@@ -5953,6 +5953,15 @@ const WNET_INITIAL_BUFFER_ENTRIES: usize = 32;
 #[cfg(windows)]
 const WNET_MAX_BUFFER_GROWS: u32 = 6;
 
+/// Cap on the outer pagination loop in [`wnet_enum_level`]: the cumulative entries emitted across
+/// all `WNetEnumResource` batches at one level, and (belt-and-suspenders) the raw count of outer
+/// iterations. Far above any real network neighborhood's share count — guards against a
+/// pathological/hostile provider that keeps returning `ERROR_SUCCESS` with `count > 0` without
+/// advancing its enumeration cursor, which would otherwise spin the (detached, post-timeout)
+/// background thread and grow the output `Vec` unboundedly.
+#[cfg(windows)]
+const WNET_MAX_TOTAL_ENTRIES: usize = 4096;
+
 /// Open a `WNetEnumResource` handle at `RESOURCE_GLOBALNET`, either the top level (`container: None`)
 /// or recursed into one specific container `NETRESOURCE` returned by a previous call at this scope.
 /// `RESOURCETYPE_DISK` filters to disk shares (and the containers that may hold them) — printer shares
@@ -5983,10 +5992,11 @@ fn wnet_open(
 /// Enumerate one level of the WNet tree (the top level when `container` is `None`, or one container's
 /// children when recursing) into [`DiscoveredResource`](cpe_server::net_share::DiscoveredResource)
 /// nodes, recursing into any child container up to [`WNET_MAX_DEPTH`]. Skips (rather than fails) a
-/// level this can't open, a call that errors mid-enumeration, or a container whose buffer keeps
-/// demanding more space past [`WNET_MAX_BUFFER_GROWS`] — the caller (`flatten_discovered`) treats a
-/// partial/empty result as "nothing found here", never a hard error, mirroring `list_dir`'s
-/// skip-on-error guarantee.
+/// level this can't open, a call that errors mid-enumeration, a container whose buffer keeps
+/// demanding more space past [`WNET_MAX_BUFFER_GROWS`], or an outer pagination loop that keeps
+/// yielding entries (or bare iterations) past [`WNET_MAX_TOTAL_ENTRIES`] — the caller
+/// (`flatten_discovered`) treats a partial/empty result as "nothing found here", never a hard
+/// error, mirroring `list_dir`'s skip-on-error guarantee.
 #[cfg(windows)]
 fn wnet_enum_level(
     container: Option<&windows::Win32::NetworkManagement::WNet::NETRESOURCEW>,
@@ -6004,8 +6014,16 @@ fn wnet_enum_level(
 
     let mut out = Vec::new();
     let mut cap: usize = WNET_INITIAL_BUFFER_ENTRIES;
+    let mut outer_iters: usize = 0;
 
     loop {
+        outer_iters += 1;
+        if outer_iters > WNET_MAX_TOTAL_ENTRIES {
+            // Belt-and-suspenders: even if every batch reported zero new entries (so the
+            // `out.len()` check below never trips), a provider that just keeps returning
+            // `ERROR_SUCCESS` can't spin this loop past a bounded number of passes.
+            break;
+        }
         let mut buf: Vec<NETRESOURCEW> = vec![NETRESOURCEW::default(); cap];
         let mut count: u32 = u32::MAX; // "as many entries as fit in the buffer"
         let mut cb: u32 = (cap * std::mem::size_of::<NETRESOURCEW>()) as u32;
@@ -6061,6 +6079,15 @@ fn wnet_enum_level(
         }
         for entry in &buf[..n] {
             out.push(discovered_resource_from(entry, depth));
+        }
+        if out.len() >= WNET_MAX_TOTAL_ENTRIES {
+            // Cumulative-entry cap: a provider that keeps reporting `ERROR_SUCCESS` with
+            // `count > 0` without advancing its cursor would otherwise grow `out` forever. This
+            // is a hard bound far above any real network neighborhood's share count, so it never
+            // fires in practice; when it does, return the partial results gathered so far rather
+            // than error the whole walk (same skip-on-error semantics as the depth and
+            // buffer-grows caps above).
+            break;
         }
     }
 
