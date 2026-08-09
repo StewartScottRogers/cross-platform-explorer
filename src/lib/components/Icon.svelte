@@ -197,6 +197,14 @@
     <circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" />
     <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
     <circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none" />
+  {:else if name === "grip"}
+    <!-- Drag handle (CPE-1520): a classic two-column six-dot grip, for the sidebar section drag affordance. -->
+    <circle cx="9" cy="6" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="9" cy="18" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none" />
+    <circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none" />
   {:else if name === "details"}
     <rect x="3" y="5" width="18" height="14" rx="2" />
     <path d="M14 5v14" />

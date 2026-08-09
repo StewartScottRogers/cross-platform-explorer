@@ -14,6 +14,7 @@
   import type { SavedSearch } from "../savedSearch";
   import { isValidDrop, hoverEffect } from "../dnd";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
+  import { sidebarOrder, orderStyleMap, reorderSection, resetSidebarOrder } from "../sidebarOrder";
   import { dedupeShares, hasAnyNetworkRows, stateOf, stateTitle, type ConnState } from "../network";
 
   export let places: Place[] = [];
@@ -105,6 +106,52 @@
   $: tagsOpen = isOpen($sidebarSections, "tags");
   $: smartOpen = isOpen($sidebarSections, "smart");
   $: savedSearchOpen = isOpen($sidebarSections, "savedSearch");
+
+  // Section ORDER (CPE-1520): a persisted array of section ids drives each section's CSS `order` —
+  // deliberately orthogonal to the collapse state above (reordering a section never opens/closes it,
+  // and toggling one never moves it). `omap` maps id → a flex `order` index; every top-level child of
+  // `.navigation-pane` below carries an explicit `style="order:…"` from it (including separators, which
+  // reuse their owning section's value — same-order flex items keep source order, so a separator that
+  // sits right after a section's own markup renders right after that section wherever it ends up).
+  $: omap = orderStyleMap($sidebarOrder);
+
+  // Drag-to-reorder a section HEADER (CPE-1520): local-only state, distinct from the file-drag
+  // machinery above (`draggedPaths`/`dropPath`, which drags files from the file list onto folder
+  // targets) — this drags a section id onto another section's header to reorder the sidebar itself.
+  let draggingSection = "";
+  let dragOverSection = "";
+  let dragOverBefore = true;
+
+  function onSectionDragStart(e: DragEvent, id: string) {
+    draggingSection = id;
+    if (e.dataTransfer) {
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/x-cpe-sidebar-section", id);
+    }
+  }
+  function onSectionDragOver(e: DragEvent, id: string) {
+    if (!draggingSection || draggingSection === id) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    dragOverSection = id;
+    dragOverBefore = e.clientY < rect.top + rect.height / 2;
+  }
+  function onSectionDragLeave(id: string) {
+    if (dragOverSection === id) dragOverSection = "";
+  }
+  function onSectionDrop(e: DragEvent, id: string) {
+    if (!draggingSection) return;
+    e.preventDefault();
+    reorderSection(draggingSection, id, dragOverBefore);
+    draggingSection = "";
+    dragOverSection = "";
+  }
+  function onSectionDragEnd() {
+    draggingSection = "";
+    dragOverSection = "";
+  }
+
   const extOf = (name: string) => {
     const i = name.lastIndexOf(".");
     return i > 0 ? name.slice(i + 1).toLowerCase() : "";
@@ -252,7 +299,20 @@
 
 <div class="navigation-pane" role="region" aria-label="Navigation">
   {#if sessions.length > 0}
-    <div class="nav-item agents-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item agents-head section-head"
+      class:drop-before={dragOverSection === "agents" && dragOverBefore}
+      class:drop-after={dragOverSection === "agents" && !dragOverBefore}
+      style="order:{omap.agents}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "agents")}
+      on:dragover={(e) => onSectionDragOver(e, "agents")}
+      on:dragleave={() => onSectionDragLeave("agents")}
+      on:drop={(e) => onSectionDrop(e, "agents")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Agents section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={agentsOpen} title={agentsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("agents")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -260,7 +320,7 @@
       <span class="label agents-title">{$t("sidebar.agents")}</span>
     </div>
     {#if agentsOpen}
-      <div class="nav-children">
+      <div class="nav-children" style="order:{omap.agents}">
         {#each sessions as s (s.sessionId)}
           {@const model = shortModel(s.model)}
           <button
@@ -287,10 +347,23 @@
         {/each}
       </div>
     {/if}
-    <div class="navigation-pane-sep" />
+    <div class="navigation-pane-sep" style="order:{omap.agents}" />
   {/if}
   {#if favorites.length > 0}
-    <div class="nav-item fav-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item fav-head section-head"
+      class:drop-before={dragOverSection === "favorites" && dragOverBefore}
+      class:drop-after={dragOverSection === "favorites" && !dragOverBefore}
+      style="order:{omap.favorites}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "favorites")}
+      on:dragover={(e) => onSectionDragOver(e, "favorites")}
+      on:dragleave={() => onSectionDragLeave("favorites")}
+      on:drop={(e) => onSectionDrop(e, "favorites")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Favorites section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("favorites")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -298,7 +371,7 @@
       <span class="label fav-title">Favorites</span>
     </div>
     {#if favOpen}
-      <div class="nav-children">
+      <div class="nav-children" style="order:{omap.favorites}">
         {#each favorites as f (f.path)}
           <button
             class="nav-item fav-item"
@@ -313,10 +386,23 @@
         {/each}
       </div>
     {/if}
-    <div class="navigation-pane-sep" />
+    <div class="navigation-pane-sep" style="order:{omap.favorites}" />
   {/if}
   {#if tagList.length > 0}
-    <div class="nav-item fav-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item fav-head section-head"
+      class:drop-before={dragOverSection === "tags" && dragOverBefore}
+      class:drop-after={dragOverSection === "tags" && !dragOverBefore}
+      style="order:{omap.tags}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "tags")}
+      on:dragover={(e) => onSectionDragOver(e, "tags")}
+      on:dragleave={() => onSectionDragLeave("tags")}
+      on:drop={(e) => onSectionDrop(e, "tags")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Tags section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={tagsOpen} title={tagsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("tags")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -324,7 +410,7 @@
       <span class="label fav-title">Tags</span>
     </div>
     {#if tagsOpen}
-      <div class="nav-children">
+      <div class="nav-children" style="order:{omap.tags}">
         {#each tagList as [tag, count] (tag)}
           <button
             class="nav-item fav-item"
@@ -341,10 +427,23 @@
         {/each}
       </div>
     {/if}
-    <div class="navigation-pane-sep" />
+    <div class="navigation-pane-sep" style="order:{omap.tags}" />
   {/if}
   {#if smartFolders.length > 0}
-    <div class="nav-item fav-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item fav-head section-head"
+      class:drop-before={dragOverSection === "smart" && dragOverBefore}
+      class:drop-after={dragOverSection === "smart" && !dragOverBefore}
+      style="order:{omap.smart}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "smart")}
+      on:dragover={(e) => onSectionDragOver(e, "smart")}
+      on:dragleave={() => onSectionDragLeave("smart")}
+      on:drop={(e) => onSectionDrop(e, "smart")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Smart Folders section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={smartOpen} title={smartOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("smart")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -352,7 +451,7 @@
       <span class="label fav-title">{$t("smart.section")}</span>
     </div>
     {#if smartOpen}
-      <div class="nav-children">
+      <div class="nav-children" style="order:{omap.smart}">
         {#each smartFolders as sf (sf.id)}
           <button
             class="nav-item fav-item"
@@ -368,10 +467,23 @@
         {/each}
       </div>
     {/if}
-    <div class="navigation-pane-sep" />
+    <div class="navigation-pane-sep" style="order:{omap.smart}" />
   {/if}
   {#if savedSearches.length > 0}
-    <div class="nav-item fav-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item fav-head section-head"
+      class:drop-before={dragOverSection === "savedSearch" && dragOverBefore}
+      class:drop-after={dragOverSection === "savedSearch" && !dragOverBefore}
+      style="order:{omap.savedSearch}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "savedSearch")}
+      on:dragover={(e) => onSectionDragOver(e, "savedSearch")}
+      on:dragleave={() => onSectionDragLeave("savedSearch")}
+      on:drop={(e) => onSectionDrop(e, "savedSearch")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Saved Searches section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={savedSearchOpen} title={savedSearchOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("savedSearch")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -379,7 +491,7 @@
       <span class="label fav-title">{$t("smart.searchSection")}</span>
     </div>
     {#if savedSearchOpen}
-      <div class="nav-children">
+      <div class="nav-children" style="order:{omap.savedSearch}">
         {#each savedSearches as ss (ss.id)}
           <button
             class="nav-item fav-item"
@@ -395,9 +507,22 @@
         {/each}
       </div>
     {/if}
-    <div class="navigation-pane-sep" />
+    <div class="navigation-pane-sep" style="order:{omap.savedSearch}" />
   {/if}
-  <div class="nav-item fav-head">
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div
+    class="nav-item fav-head section-head"
+    class:drop-before={dragOverSection === "explore" && dragOverBefore}
+    class:drop-after={dragOverSection === "explore" && !dragOverBefore}
+    style="order:{omap.explore}"
+    draggable="true"
+    on:dragstart={(e) => onSectionDragStart(e, "explore")}
+    on:dragover={(e) => onSectionDragOver(e, "explore")}
+    on:dragleave={() => onSectionDragLeave("explore")}
+    on:drop={(e) => onSectionDrop(e, "explore")}
+    on:dragend={onSectionDragEnd}
+  >
+    <span class="section-grip" title="Drag to reorder the Explore section"><Icon name="grip" size={12} /></span>
     <button class="twisty" class:open={exploreOpen} title={exploreOpen ? "Collapse" : "Expand"} aria-expanded={exploreOpen} on:click={() => toggleSection("explore")}>
       <Icon name="chev-right" size={12} />
     </button>
@@ -405,37 +530,50 @@
     <span class="label fav-title">{$t("sidebar.explore")}</span>
   </div>
   {#if exploreOpen}
-    <button class="nav-item" class:active={isHome} on:click={() => dispatch("home")}>
+    <button class="nav-item" style="order:{omap.explore}" class:active={isHome} on:click={() => dispatch("home")}>
       <span class="twisty hidden" />
       <Icon name="home" />
       <span class="label">Home</span>
     </button>
-    <button class="nav-item" disabled title="Gallery — not implemented yet">
+    <button class="nav-item" style="order:{omap.explore}" disabled title="Gallery — not implemented yet">
       <span class="twisty hidden" />
       <Icon name="gallery" />
       <span class="label">Gallery</span>
     </button>
-    <button class="nav-item" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
+    <button class="nav-item" style="order:{omap.explore}" title="Browse GitHub and other code repositories" on:click={() => dispatch("repos")}>
       <span class="twisty hidden" />
       <Icon name="code" />
       <span class="label">{$t("sidebar.repositories")}</span>
     </button>
-    <button class="nav-item" title="Agent Board — Kanban over this folder's Ticketing/" on:click={() => dispatch("board")}>
+    <button class="nav-item" style="order:{omap.explore}" title="Agent Board — Kanban over this folder's Ticketing/" on:click={() => dispatch("board")}>
       <span class="twisty hidden" />
       <Icon name="documents" />
       <span class="label">Agent Board</span>
     </button>
-    <button class="nav-item" title="Workbench — view this folder's git diff" on:click={() => dispatch("workbench")}>
+    <button class="nav-item" style="order:{omap.explore}" title="Workbench — view this folder's git diff" on:click={() => dispatch("workbench")}>
       <span class="twisty hidden" />
       <Icon name="details" />
       <span class="label">Workbench</span>
     </button>
   {/if}
 
-  <div class="navigation-pane-sep" />
+  <div class="navigation-pane-sep" style="order:{omap.explore}" />
 
   {#if places.length > 0}
-    <div class="nav-item fav-head">
+    <!-- svelte-ignore a11y-no-static-element-interactions -->
+    <div
+      class="nav-item fav-head section-head"
+      class:drop-before={dragOverSection === "places" && dragOverBefore}
+      class:drop-after={dragOverSection === "places" && !dragOverBefore}
+      style="order:{omap.places}"
+      draggable="true"
+      on:dragstart={(e) => onSectionDragStart(e, "places")}
+      on:dragover={(e) => onSectionDragOver(e, "places")}
+      on:dragleave={() => onSectionDragLeave("places")}
+      on:drop={(e) => onSectionDrop(e, "places")}
+      on:dragend={onSectionDragEnd}
+    >
+      <span class="section-grip" title="Drag to reorder the Quick Access section"><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={placesOpen} title={placesOpen ? "Collapse" : "Expand"} aria-expanded={placesOpen} on:click={() => toggleSection("places")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -447,9 +585,22 @@
     {@const open = expanded.has(place.path)}
     {@const isDrive = i >= places.length}
     {#if isDrive && i === places.length}
-      <div class="navigation-pane-sep" />
+      <div class="navigation-pane-sep" style="order:{omap.places}" />
       {#if drives.length > 0}
-        <div class="nav-item fav-head">
+        <!-- svelte-ignore a11y-no-static-element-interactions -->
+        <div
+          class="nav-item fav-head section-head"
+          class:drop-before={dragOverSection === "drives" && dragOverBefore}
+          class:drop-after={dragOverSection === "drives" && !dragOverBefore}
+          style="order:{omap.drives}"
+          draggable="true"
+          on:dragstart={(e) => onSectionDragStart(e, "drives")}
+          on:dragover={(e) => onSectionDragOver(e, "drives")}
+          on:dragleave={() => onSectionDragLeave("drives")}
+          on:drop={(e) => onSectionDrop(e, "drives")}
+          on:dragend={onSectionDragEnd}
+        >
+          <span class="section-grip" title="Drag to reorder the Drives section"><Icon name="grip" size={12} /></span>
           <button class="twisty" class:open={drivesOpen} title={drivesOpen ? "Collapse" : "Expand"} aria-expanded={drivesOpen} on:click={() => toggleSection("drives")}>
             <Icon name="chev-right" size={12} />
           </button>
@@ -459,7 +610,7 @@
       {/if}
     {/if}
     {#if isDrive ? drivesOpen : placesOpen}
-    <div>
+    <div style="order:{isDrive ? omap.drives : omap.places}">
       <!-- svelte-ignore a11y-no-static-element-interactions -->
       <div
         class="nav-item"
@@ -554,8 +705,21 @@
        shown with just one drive); when both tiers are empty the body is just the "＋ Add a connection"
        control + a one-line hint, so the plain explorer stays visually quiet (CLAUDE.md's additive-mode
        guarantee) rather than gaining a heavier permanent section. -->
-  <div class="navigation-pane-sep" />
-  <div class="nav-item fav-head">
+  <div class="navigation-pane-sep" style="order:{omap.drives}" />
+  <!-- svelte-ignore a11y-no-static-element-interactions -->
+  <div
+    class="nav-item fav-head section-head"
+    class:drop-before={dragOverSection === "network" && dragOverBefore}
+    class:drop-after={dragOverSection === "network" && !dragOverBefore}
+    style="order:{omap.network}"
+    draggable="true"
+    on:dragstart={(e) => onSectionDragStart(e, "network")}
+    on:dragover={(e) => onSectionDragOver(e, "network")}
+    on:dragleave={() => onSectionDragLeave("network")}
+    on:drop={(e) => onSectionDrop(e, "network")}
+    on:dragend={onSectionDragEnd}
+  >
+    <span class="section-grip" title="Drag to reorder the Network section"><Icon name="grip" size={12} /></span>
     <button class="twisty" class:open={networkOpen} title={networkOpen ? "Collapse" : "Expand"} aria-expanded={networkOpen} on:click={() => toggleSection("network")}>
       <Icon name="chev-right" size={12} />
     </button>
@@ -571,7 +735,7 @@
     </button>
   </div>
   {#if networkOpen}
-    <div class="nav-children">
+    <div class="nav-children" style="order:{omap.network}">
       {#each connections as conn (conn.name)}
         {@const state = stateOf(connectionStates, conn.name)}
         <button
@@ -614,6 +778,19 @@
       {/if}
     </div>
   {/if}
+
+  <!-- Reset section order (CPE-1520): a small, always-last affordance to undo any drag reordering above.
+       Fixed order (well past any section's) so it never gets swept into the reorderable set itself. -->
+  <div class="sidebar-reset-row" style="order:1000">
+    <button
+      class="sidebar-reset-btn"
+      title="Reset the sidebar sections back to their default order"
+      on:click={() => resetSidebarOrder()}
+    >
+      <Icon name="refresh" size={12} />
+      <span>Reset section order</span>
+    </button>
+  </div>
 </div>
 
 <style>
@@ -699,4 +876,39 @@
   }
   .state-dot.state-connected { background: var(--success); }
   .state-dot.state-error { background: var(--danger); }
+
+  /* Section drag-to-reorder (CPE-1520): every section header carries a grip affordance and is itself
+     the draggable element. The grip is faint until the header (or the grip itself) is hovered, matching
+     the eject/add-btn reveal-on-hover treatment above. */
+  .section-head { cursor: grab; }
+  .section-head:active { cursor: grabbing; }
+  .section-grip {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    margin-right: -2px;
+    color: var(--text-faint);
+    opacity: 0.5;
+  }
+  .section-head:hover .section-grip { opacity: 1; }
+  /* Drop indicator: a thin accent bar at the header's top or bottom edge, showing where the dragged
+     section will land relative to this one — inset so it never shifts layout. */
+  .section-head.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
+  .section-head.drop-after { box-shadow: inset 0 -2px 0 0 var(--accent); }
+
+  /* Reset section order (CPE-1520) — a small, quiet affordance pinned to the very bottom of the pane
+     (fixed order:1000 in the markup) so it's always reachable regardless of how sections are arranged. */
+  .sidebar-reset-row { padding: 8px 4px 0; }
+  .sidebar-reset-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    padding: 4px 6px;
+    border-radius: var(--radius);
+    color: var(--text-faint);
+    font-size: 11px;
+    opacity: 0.7;
+  }
+  .sidebar-reset-btn:hover { opacity: 1; background: var(--selection); color: var(--text); }
 </style>

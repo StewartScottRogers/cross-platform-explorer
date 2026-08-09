@@ -300,6 +300,12 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
   border-right: 1px solid var(--border);
   background: var(--surface);
   min-height: 0;
+  /* CPE-1520: a flex column so each section's CSS `order` (driven by the persisted sidebarOrder store)
+     controls its visual position — the section markup below stays in its original document order,
+     only the paint order is reassigned. Items default to align-items:stretch, so widths are unchanged
+     from the previous block-layout behaviour. */
+  display: flex;
+  flex-direction: column;
 }
 .nav-item {
   display: flex; align-items: center; gap: 6px;

@@ -2,7 +2,7 @@
 id: CPE-1520
 title: "User-reorderable left-pane sections (drag to reorder Tags/Explore/Quick Access/Drives/Network/…)"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Frontend
 tags: [ready]
@@ -52,3 +52,39 @@ Frontend-only, testable without hardware. Pairs with **CPE-1516** (Network must 
 be reorderable — its default slot goes in this ticket's default order). Epic CPE-660 (sidebar). Relates to
 [[prefer-inline-instant-controls]]. Consider whether the AI-console/board sidebars share the pattern (they may
 not — scope to the main explorer sidebar unless trivially shared).
+
+## Work Log (2026-08-09)
+- Added `src/lib/sidebarOrder.ts`: a persisted (`cpe.sidebarOrder`) array of the 9 section ids, orthogonal to
+  `sidebarSections.ts`'s collapse map. Pure reducers: `defaultOrder`, `mergeOrder` (drops unknown ids, appends
+  any missing known id), `parseOrder` (unset/malformed/legacy → default), `moveBy` (up/down), `moveToEnd`,
+  `moveNextTo` (drag-and-drop before/after), `orderStyleMap` (id → CSS `order`, spaced by 10).
+- `Sidebar.svelte`: kept every section's existing inline markup block as-is (no extract-to-component
+  refactor) and gave `.navigation-pane` `display:flex; flex-direction:column` (in `app.css`), then set an
+  explicit `style="order:…"` on every direct child (each section's header, its `.nav-children`/button rows,
+  and its trailing separator, which reuses its owning section's order value — same-order flex items keep
+  source order, so a separator still renders right after its section wherever that section ends up).
+  Explore's 5 unwrapped buttons and the combined places+drives `{#each}` loop (which interleaves two
+  sections in one loop) each got their own per-item `order` — flex reordering doesn't care that they're
+  not contiguous in the DOM.
+- Drag-to-reorder: every section header is `draggable="true"` with a leading grip icon (new `Icon.svelte`
+  glyph, "grip") and local component-only drag state (`draggingSection`/`dragOverSection`/`dragOverBefore`)
+  — deliberately separate from the existing file-drag machinery (`draggedPaths`/`dnd.ts`) so dragging a
+  section header can never be mistaken for a file drag. A drop indicator (inset accent box-shadow,
+  `.drop-before`/`.drop-after`) shows above/below the hovered header depending on cursor position, and
+  drop calls `reorderSection` from `sidebarOrder.ts`.
+- Reset control: a small "Reset section order" button pinned to the very bottom of the sidebar (fixed
+  `order:1000`, so it's never itself swept into the reorderable set) calling `resetSidebarOrder()`.
+- Tests: `src/lib/sidebarOrder.test.ts` (24 new tests) — default order, parse/malformed/legacy → default,
+  a persisted order missing an id gets it appended, unknown ids dropped, move up/down/to-ends, drag-drop
+  before/after, no-mutation, and an explicit orthogonality test (reordering never touches
+  `sidebarSections`'s collapse map). Full suite: 233 files / 2612 tests green, `npm run check` 0
+  errors/warnings.
+- Docs: `src/docs/03-explorer.md` sidebar bullet now documents drag-to-reorder + the reset control.
+- **Decide-and-log:** the separator-ownership scheme is intentionally simple (each separator inherits its
+  *preceding* section's order value rather than dynamically tracking whichever section ends up adjacent
+  after a reorder), so an unusual custom order can occasionally leave a section without a divider directly
+  above it, or a stray trailing divider at the very bottom. Purely cosmetic, no functional impact, left
+  as-is per the ticket's "pragmatic, low-churn" steer.
+- **Visual/interaction sign-off is OWED to the user** (or gui-smoke Visual Critic): actual drag feel, drop
+  indicator legibility, reset button placement, and no-jank-with-a-collapsed-section-mid-drag were not
+  hands-on verified — only unit tests + type-check ran headlessly.
