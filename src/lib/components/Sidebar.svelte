@@ -698,6 +698,6 @@
     border-radius: 50%;
     background: var(--text-faint);
   }
-  .state-dot.state-connected { background: #3a9d4a; }
+  .state-dot.state-connected { background: var(--success); }
   .state-dot.state-error { background: var(--danger); }
 </style>

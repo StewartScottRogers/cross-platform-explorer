@@ -30,6 +30,7 @@
      and already the base `.error` colour below. NOT for menu-item text — MENUS.md keeps that
      `var(--text)` always; this token is for genuine error/destructive affordances only. */
   --danger: #c42b1c;
+  --success: #3a9d4a;
   --danger-hover: #a82419;
 
   --text: #1b1b1b;
