@@ -8,8 +8,23 @@
 use cpe_server::connections::{AuthMethod, Connection};
 use cpe_server::known_hosts::KnownHost;
 use cpe_server::provider::FileSystemProvider;
-use cpe_sftp::{HostKeyPolicy, SftpAuth, SftpConfig, SftpProvider};
+use cpe_sftp::{SftpAuth, SftpConfig, SftpProvider};
 use cpe_webdav::{WebdavConfig, WebdavProvider};
+
+/// The command-layer routing seam (CPE-1511): a per-connection provider pool + `connected_provider`, so
+/// a remote URI browses through the same commands a local path does. Kept in this crate because it is the
+/// only place that can see both the connection model (`cpe-server`) and the concrete providers this
+/// module opens.
+pub mod connect;
+
+/// Re-export so the app adapter can name the host-key policy without a direct `cpe-sftp` dependency —
+/// `open`/`connect` take it, and the app only depends on `cpe-vfs`.
+pub use cpe_sftp::HostKeyPolicy;
+
+/// A live provider that is safe to move to a blocking worker thread and hold in the shared pool. Every
+/// concrete backend ([`cpe_sftp::SftpProvider`], [`cpe_webdav::WebdavProvider`],
+/// [`cpe_server::provider::LocalProvider`]) is `Send`.
+pub type BoxedProvider = Box<dyn FileSystemProvider + Send>;
 
 /// Open a live [`FileSystemProvider`] for `conn`, using `secret` (the password, or a key's passphrase)
 /// fetched from the OS keychain. `known_hosts` + `policy` govern SFTP host-key verification (ignored for
@@ -19,7 +34,7 @@ pub fn open(
     secret: Option<&str>,
     known_hosts: Vec<KnownHost>,
     policy: HostKeyPolicy,
-) -> Result<Box<dyn FileSystemProvider>, String> {
+) -> Result<BoxedProvider, String> {
     match conn.scheme.as_str() {
         "sftp" | "ssh" => {
             let cfg = SftpConfig {

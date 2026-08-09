@@ -1,14 +1,18 @@
 //! Scheme-based routing seam (CPE-685, epic CPE-616): the single dispatch point that decides which
 //! [`FileSystemProvider`](crate::provider::FileSystemProvider) backs a given location string, by
 //! classifying its scheme ([`location`](crate::location), CPE-680). Local paths run the local backend;
-//! recognised remote schemes (`sftp`/`smb`/`webdav`/`s3`) are **not yet wired into the command layer**, so
-//! they are rejected here with one clear, consistent message rather than being handed to the OS as a bogus
-//! local path (which would surface as a cryptic "No such file" error).
+//! recognised remote schemes (`sftp`/`smb`/`webdav`/`s3`) route to a remote provider.
 //!
-//! This is the seam the epic establishes: command entry points call [`require_local`] as a guard so local
-//! behaviour is byte-for-byte unchanged and every command rejects a remote URI identically, and
-//! [`provider_for`] is where the already-headless SFTP/WebDAV providers slot in when remote operations are
-//! turned on. Deliberately thin and pure — no I/O, unit-tested.
+//! This module stays the pure **classifier** (`local` vs `remote`), no I/O, unit-tested. As of CPE-1511 the
+//! app's browse commands classify with [`route`] and, for a remote scheme, resolve a live provider through
+//! `cpe_vfs::connect` (which can see the concrete SFTP/WebDAV crates this Tauri-free crate deliberately
+//! cannot depend on). A local URI still takes [`Route::Local`] and the unchanged local path, so the plain
+//! explorer's hot path is byte-for-byte identical (PURPOSE.md).
+//!
+//! [`require_local`] remains the guard for commands that are still local-only (they reject a remote URI
+//! with one clear, consistent message), and [`provider_for`] returns the [`LocalProvider`] for a local
+//! path (a not-connected error for a remote scheme — the app resolves remote providers via `cpe-vfs`, not
+//! through this pure crate).
 
 use crate::location::{self, Scheme};
 use crate::provider::{FileSystemProvider, LocalProvider};
@@ -126,6 +130,37 @@ mod tests {
         assert_eq!(p.read(&fp).unwrap(), b"hi");
         let listed = p.list(&root).unwrap();
         assert!(listed.iter().any(|e| e.name == "hello.txt"), "written file appears in listing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_local_uri_routes_local_and_the_seam_listing_matches_the_direct_listing() {
+        // The hard CPE-1511 constraint: a local URI is classified Local (so the command's local fast-path
+        // runs the unchanged `listing::list_dir`, never remote resolution), and the LocalProvider seam and
+        // the direct-local listing agree entry-for-entry — the local content path is unchanged.
+        let dir = std::env::temp_dir().join(format!("cpe_fsroute_local_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), b"hello").unwrap();
+        std::fs::write(dir.join("b.rs"), b"xy").unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let root = dir.to_string_lossy().to_string();
+
+        // Classified Local — the command layer's fast-path never enters remote resolution for this.
+        assert_eq!(route(&root), Route::Local);
+        assert!(require_local(&root).is_ok());
+
+        // Direct-local listing (what the local command arm actually calls).
+        let mut direct: Vec<(String, bool, u64)> =
+            crate::listing::list_dir(&root).unwrap().into_iter().map(|e| (e.name, e.is_dir, e.size)).collect();
+        // The LocalProvider obtained through the routing seam.
+        let seam: Box<dyn FileSystemProvider> = provider_for(&root).unwrap();
+        let mut via_seam: Vec<(String, bool, u64)> =
+            seam.list(&root).unwrap().into_iter().map(|e| (e.name, e.is_dir, e.size)).collect();
+        direct.sort();
+        via_seam.sort();
+        assert_eq!(direct, via_seam, "local seam listing is identical to the direct-local listing");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
