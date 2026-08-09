@@ -129,9 +129,10 @@ pub struct NetShare {
     pub name: String,
     /// Navigable path: a drive root (`Z:\`), a mountpoint (`/mnt/share`), or the user's raw address.
     pub path: String,
-    /// `"mapped"` (OS-enumerated Windows mapped drive), `"mount"` (Unix SMB/NFS mount), or `"user"`
-    /// (a location the user typed + we persist). The UI adapts the menu: mapped → "Disconnect",
-    /// user → "Remove".
+    /// `"mapped"` (OS-enumerated Windows mapped drive), `"mount"` (Unix SMB/NFS mount), `"user"`
+    /// (a location the user typed + we persist), or `"discovered"` (a Windows `WNet`-discovered share
+    /// the user hasn't connected to yet, CPE-1519). The UI adapts the menu: mapped → "Disconnect",
+    /// user → "Remove", discovered → "Add a connection".
     pub kind: String,
 }
 
@@ -279,6 +280,92 @@ pub fn combine_shares(enumerated: Vec<NetShare>, user_added: &[String]) -> Vec<N
         }
     }
     out
+}
+
+// ── Windows-native network discovery (CPE-1519, epic CPE-1517) ─────────────────────────────────
+//
+// Explorer's "Network" folder (WNet provider chain / WS-Discovery + mDNS) is walked recursively via
+// `WNetOpenEnum`/`WNetEnumResource`, recursing into container `NETRESOURCE`s (workgroup/domain →
+// server → share). That walk is unavoidably I/O (`lib.rs`'s `discover_network_windows`, `#[cfg(windows)]`
+// only) — this half is the pure, platform-agnostic part: a plain-data mirror of the FFI `NETRESOURCE`
+// tree the walk produces, and the mapping/flattening logic that turns it into `NetShare` rows uniform
+// with `parse_net_use`'s. No FFI, no `windows` crate — unit-testable on every OS.
+
+/// A plain-data mirror of one discovered Win32 `NETRESOURCE` node from the WNet walk, decoupled from
+/// the raw FFI struct so the container-recursion + mapping logic below is pure and unit-testable.
+/// `is_container` marks a workgroup/domain/server node whose `children` were fetched by a nested
+/// `WNetEnumResource` call — a container's own `remote_name` (e.g. `\\SERVER` with no share, or a
+/// workgroup name with no UNC form at all) isn't itself a navigable share, so containers are always
+/// recursed into and never surfaced as a row of their own; only their leaf disk-share descendants are.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DiscoveredResource {
+    /// The `\\server` or `\\server\share` UNC token (`NETRESOURCE::lpRemoteName`). `None`/empty for a
+    /// container that WNet can enumerate but doesn't itself address as a UNC (e.g. a bare workgroup).
+    pub remote_name: Option<String>,
+    /// A friendlier label (`NETRESOURCE::lpComment`) when the provider supplies one; falls back to
+    /// `remote_name` in [`map_discovered_share`] when absent.
+    pub display_name: Option<String>,
+    /// Whether this node must be recursed into (`RESOURCEUSAGE_CONTAINER`) rather than treated as a
+    /// leaf share.
+    pub is_container: bool,
+    /// Pre-fetched children of a container node (empty for a leaf). Populated by the impure walk
+    /// re-calling `WNetOpenEnum`/`WNetEnumResource` on this node; [`flatten_discovered`] recurses into
+    /// it purely.
+    pub children: Vec<DiscoveredResource>,
+}
+
+/// Map one non-container discovered resource to a [`NetShare`] row (`kind: "discovered"`), matching the
+/// shape of `parse_net_use`'s mapped-drive rows. Returns `None` for:
+/// - a container node (recurse into it instead — see [`flatten_discovered`]);
+/// - an entry with no `remote_name`, or one that's empty/whitespace after trimming, or that isn't a
+///   `\\`-prefixed UNC token — WNet occasionally hands back a placeholder/partial node with no usable
+///   address, and a row with a broken `path` isn't navigable, so it's dropped rather than surfaced.
+pub fn map_discovered_share(resource: &DiscoveredResource) -> Option<NetShare> {
+    if resource.is_container {
+        return None;
+    }
+    let remote = resource.remote_name.as_deref()?.trim();
+    if remote.is_empty() || !remote.starts_with("\\\\") {
+        return None;
+    }
+    let name = resource
+        .display_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(remote)
+        .to_string();
+    Some(NetShare { name, path: remote.to_string(), kind: "discovered".to_string() })
+}
+
+/// Recursively flatten a WNet discovery tree into deduplicated [`NetShare`] rows: containers
+/// (workgroups, domains, servers) are walked but never themselves emitted as a row (see
+/// [`map_discovered_share`]), and any entry it rejects is silently skipped rather than failing the
+/// whole walk — mirroring `list_dir`'s skip-on-error guarantee, since one unreadable/misbehaving branch
+/// of the network neighborhood shouldn't blank out the rest. Duplicate `path`s (the same server can
+/// legitimately appear under more than one workgroup/domain container) collapse to their first
+/// occurrence, using the same case/slash-insensitive key as [`combine_shares`]'s dedup.
+pub fn flatten_discovered(resources: &[DiscoveredResource]) -> Vec<NetShare> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    flatten_discovered_into(resources, &mut seen, &mut out);
+    out
+}
+
+fn flatten_discovered_into(
+    resources: &[DiscoveredResource],
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<NetShare>,
+) {
+    for resource in resources {
+        if resource.is_container {
+            flatten_discovered_into(&resource.children, seen, out);
+        } else if let Some(share) = map_discovered_share(resource) {
+            if seen.insert(dedup_key(&share.path)) {
+                out.push(share);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -505,5 +592,123 @@ mod tests {
     #[test]
     fn combine_shares_with_no_input_is_empty_not_a_hang() {
         assert!(combine_shares(Vec::new(), &[]).is_empty());
+    }
+
+    // ── Windows-native network discovery (CPE-1519) ─────────────────────────────────────────────────
+
+    fn leaf(remote: &str, comment: Option<&str>) -> DiscoveredResource {
+        DiscoveredResource {
+            remote_name: Some(remote.to_string()),
+            display_name: comment.map(str::to_string),
+            is_container: false,
+            children: Vec::new(),
+        }
+    }
+
+    fn container(remote: Option<&str>, children: Vec<DiscoveredResource>) -> DiscoveredResource {
+        DiscoveredResource {
+            remote_name: remote.map(str::to_string),
+            display_name: None,
+            is_container: true,
+            children,
+        }
+    }
+
+    #[test]
+    fn map_discovered_share_maps_a_leaf_disk_share() {
+        let share =
+            map_discovered_share(&leaf(r"\\qnap\media", Some("Media"))).expect("valid leaf maps");
+        assert_eq!(share.name, "Media", "prefers the friendly comment over the raw UNC");
+        assert_eq!(share.path, r"\\qnap\media");
+        assert_eq!(share.kind, "discovered");
+    }
+
+    #[test]
+    fn map_discovered_share_falls_back_to_remote_name_when_no_comment() {
+        let share = map_discovered_share(&leaf(r"\\qnap\media", None)).unwrap();
+        assert_eq!(share.name, r"\\qnap\media");
+
+        // A comment that's present but blank/whitespace is treated the same as absent.
+        let blank = map_discovered_share(&leaf(r"\\qnap\media", Some("   "))).unwrap();
+        assert_eq!(blank.name, r"\\qnap\media");
+    }
+
+    #[test]
+    fn map_discovered_share_rejects_a_container_node() {
+        assert!(map_discovered_share(&container(Some(r"\\qnap"), Vec::new())).is_none());
+    }
+
+    #[test]
+    fn map_discovered_share_rejects_empty_or_invalid_remote_names() {
+        assert!(map_discovered_share(&leaf("", Some("junk"))).is_none());
+        assert!(map_discovered_share(&leaf("   ", None)).is_none());
+        assert!(map_discovered_share(&DiscoveredResource {
+            remote_name: None,
+            display_name: None,
+            is_container: false,
+            children: Vec::new(),
+        })
+        .is_none());
+        // Not a UNC token at all (a bare workgroup/host name some providers hand back).
+        assert!(map_discovered_share(&leaf("WORKGROUP", None)).is_none());
+    }
+
+    #[test]
+    fn flatten_discovered_recurses_through_nested_containers() {
+        // domain → server → share, three levels deep, matching the real WNet shape.
+        let tree = vec![container(
+            Some("WORKGROUP"),
+            vec![container(
+                Some(r"\\qnap"),
+                vec![leaf(r"\\qnap\media", Some("Media")), leaf(r"\\qnap\backups", None)],
+            )],
+        )];
+        let shares = flatten_discovered(&tree);
+        assert_eq!(shares.len(), 2, "both leaves surface; neither container does");
+        assert_eq!(shares[0].path, r"\\qnap\media");
+        assert_eq!(shares[1].path, r"\\qnap\backups");
+        assert!(shares.iter().all(|s| s.kind == "discovered"));
+    }
+
+    #[test]
+    fn flatten_discovered_never_emits_a_row_for_a_container_itself() {
+        // A container with NO leaf children (e.g. a server with no shares, or one WNet couldn't read)
+        // contributes nothing — not even a row for the container's own remote_name.
+        let tree = vec![container(Some(r"\\emptyserver"), Vec::new())];
+        assert!(flatten_discovered(&tree).is_empty());
+    }
+
+    #[test]
+    fn flatten_discovered_skips_invalid_leaves_without_dropping_the_rest() {
+        let tree = vec![
+            leaf("", None),               // invalid → skipped
+            leaf(r"\\qnap\media", None),  // valid → kept
+            container(
+                Some(r"\\deadserver"),
+                vec![leaf("not-a-unc", None), leaf(r"\\deadserver\pub", None)],
+            ),
+        ];
+        let shares = flatten_discovered(&tree);
+        assert_eq!(shares.len(), 2, "one skipped at top level, one skipped inside the container");
+        assert_eq!(shares[0].path, r"\\qnap\media");
+        assert_eq!(shares[1].path, r"\\deadserver\pub");
+    }
+
+    #[test]
+    fn flatten_discovered_dedupes_a_server_reachable_via_two_containers() {
+        // The same server can legitimately be enumerated under more than one workgroup/domain
+        // container; the flattened list should still list it once.
+        let tree = vec![
+            container(Some("WORKGROUP"), vec![leaf(r"\\qnap\media", Some("Media"))]),
+            container(Some("DOMAIN"), vec![leaf(r"\\QNAP\Media", None)]), // case-insensitive dup
+        ];
+        let shares = flatten_discovered(&tree);
+        assert_eq!(shares.len(), 1, "case/slash-insensitive dedup collapses the repeat");
+        assert_eq!(shares[0].name, "Media", "keeps the FIRST occurrence's row");
+    }
+
+    #[test]
+    fn flatten_discovered_with_no_input_is_empty_not_a_hang() {
+        assert!(flatten_discovered(&[]).is_empty());
     }
 }

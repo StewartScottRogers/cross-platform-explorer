@@ -5887,6 +5887,239 @@ fn run_bounded_output(
     }
 }
 
+// ---- Windows-native network discovery (CPE-1519, epic CPE-1517) -----------------------------------
+//
+// Explorer's "Network" folder is populated by the WNet provider chain (WS-Discovery + mDNS, per the
+// ticket's research) — this walks the SAME `RESOURCE_GLOBALNET` tree Explorer does, via
+// `WNetOpenEnumW`/`WNetEnumResourceW`, recursing into container `NETRESOURCE`s (workgroup/domain →
+// server → share). A server container's own `WNetEnumResource` call yields its disk shares directly, so
+// there's no separate `NetShareEnum` step. The pure mapping/flatten logic lives in
+// `cpe_server::net_share` (`DiscoveredResource`/`map_discovered_share`/`flatten_discovered`); this is
+// only the FFI walk + the timeout wrapper. Frontend "Discovered on your network" tier is a follow-up
+// slice (this ticket's backend half only) — see CPE-1519's Work Log.
+
+/// Windows-native network discovery: the OS's own view of the network neighborhood (CPE-1519),
+/// returned as [`NetShare`](cpe_server::net_share::NetShare) rows (`kind: "discovered"`) uniform with
+/// `list_network_shares`'s mapped-drive rows. **Windows only** — WS-Discovery/mDNS device discovery has
+/// no WNet equivalent on other platforms; those get it via the cross-platform mDNS/Avahi backend
+/// (CPE-1517) instead. Async + `spawn_blocking` + time-bounded: WNet enumeration is live network I/O
+/// per hop (workgroup/domain → server → share) and can hang on an unresponsive/wedged provider, and
+/// unlike a subprocess an in-flight WNet call can't be killed to force it to give up. So — mirroring
+/// `run_bounded_capture`'s spawn+`recv_timeout` shape — the walk runs on a detached thread; if it
+/// hasn't finished within [`DISCOVERY_TIMEOUT`] this gives up waiting and returns nothing (same as a
+/// dead `net use` host today for `list_network_shares`). The abandoned thread simply keeps running to
+/// completion in the background rather than being force-killed.
+#[cfg(windows)]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn discover_network_windows() -> Vec<cpe_server::net_share::NetShare> {
+    tauri::async_runtime::spawn_blocking(discover_network_windows_impl)
+        .await
+        .unwrap_or_default()
+}
+
+#[cfg(windows)]
+const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+#[cfg(windows)]
+fn discover_network_windows_impl() -> Vec<cpe_server::net_share::NetShare> {
+    use std::sync::mpsc;
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(wnet_enum_level(None, 0));
+    });
+
+    match rx.recv_timeout(DISCOVERY_TIMEOUT) {
+        Ok(resources) => cpe_server::net_share::flatten_discovered(&resources),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// How many `NETRESOURCE` containers deep the walk will recurse (real network neighborhoods are 2-3
+/// levels: workgroup/domain → server → share). Guards against a pathological or hostile provider
+/// reporting a container that (directly or via a cycle) contains itself.
+#[cfg(windows)]
+const WNET_MAX_DEPTH: u32 = 6;
+
+/// Starting `WNetEnumResource` buffer size, in `NETRESOURCEW` array elements. Generous enough that a
+/// typical home/office network neighborhood never needs to grow it, while staying small (a few KB) for
+/// the common case.
+#[cfg(windows)]
+const WNET_INITIAL_BUFFER_ENTRIES: usize = 32;
+
+/// Cap on `ERROR_MORE_DATA` buffer-growth retries for a single `WNetEnumResource` call, so a provider
+/// that keeps reporting "need more" can't spin this thread forever.
+#[cfg(windows)]
+const WNET_MAX_BUFFER_GROWS: u32 = 6;
+
+/// Open a `WNetEnumResource` handle at `RESOURCE_GLOBALNET`, either the top level (`container: None`)
+/// or recursed into one specific container `NETRESOURCE` returned by a previous call at this scope.
+/// `RESOURCETYPE_DISK` filters to disk shares (and the containers that may hold them) — printer shares
+/// and other resource types are out of scope for a file explorer. Returns `None` on any failure (access
+/// denied, an unreachable/unresponsive provider, a container that vanished between enumeration and this
+/// open) so the caller can skip that branch rather than fail the whole walk.
+#[cfg(windows)]
+fn wnet_open(
+    container: Option<&windows::Win32::NetworkManagement::WNet::NETRESOURCEW>,
+) -> Option<windows::Win32::Foundation::HANDLE> {
+    use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE};
+    use windows::Win32::NetworkManagement::WNet::{
+        WNetOpenEnumW, RESOURCETYPE_DISK, RESOURCEUSAGE_NONE, RESOURCE_GLOBALNET,
+    };
+
+    let mut henum = HANDLE::default();
+    let lpnetresource = container.map(|c| c as *const _);
+    // SAFETY: `container`, when `Some`, is a live `&NETRESOURCEW` borrowed from the caller's
+    // still-in-scope `Vec<NETRESOURCEW>` buffer (see `wnet_enum_level`) — `WNetOpenEnumW` only reads
+    // through the pointer for the duration of this synchronous call, which is within that borrow's
+    // lifetime. `henum` is a valid `&mut` to a stack local, matching the documented out-parameter.
+    let status = unsafe {
+        WNetOpenEnumW(RESOURCE_GLOBALNET, RESOURCETYPE_DISK, RESOURCEUSAGE_NONE, lpnetresource, &mut henum)
+    };
+    (status == ERROR_SUCCESS).then_some(henum)
+}
+
+/// Enumerate one level of the WNet tree (the top level when `container` is `None`, or one container's
+/// children when recursing) into [`DiscoveredResource`](cpe_server::net_share::DiscoveredResource)
+/// nodes, recursing into any child container up to [`WNET_MAX_DEPTH`]. Skips (rather than fails) a
+/// level this can't open, a call that errors mid-enumeration, or a container whose buffer keeps
+/// demanding more space past [`WNET_MAX_BUFFER_GROWS`] — the caller (`flatten_discovered`) treats a
+/// partial/empty result as "nothing found here", never a hard error, mirroring `list_dir`'s
+/// skip-on-error guarantee.
+#[cfg(windows)]
+fn wnet_enum_level(
+    container: Option<&windows::Win32::NetworkManagement::WNet::NETRESOURCEW>,
+    depth: u32,
+) -> Vec<cpe_server::net_share::DiscoveredResource> {
+    use windows::Win32::Foundation::{ERROR_MORE_DATA, ERROR_SUCCESS};
+    use windows::Win32::NetworkManagement::WNet::{WNetCloseEnum, WNetEnumResourceW, NETRESOURCEW};
+
+    if depth > WNET_MAX_DEPTH {
+        return Vec::new();
+    }
+    let Some(henum) = wnet_open(container) else {
+        return Vec::new();
+    };
+
+    let mut out = Vec::new();
+    let mut cap: usize = WNET_INITIAL_BUFFER_ENTRIES;
+
+    loop {
+        let mut buf: Vec<NETRESOURCEW> = vec![NETRESOURCEW::default(); cap];
+        let mut count: u32 = u32::MAX; // "as many entries as fit in the buffer"
+        let mut cb: u32 = (cap * std::mem::size_of::<NETRESOURCEW>()) as u32;
+
+        let mut grows = 0u32;
+        let status = loop {
+            // SAFETY: `henum` is the handle opened above and closed on every exit path below (still
+            // open here). `buf` is a real `Vec<NETRESOURCEW>` (not a raw byte buffer reinterpreted),
+            // so its allocation is correctly aligned for an array of `NETRESOURCEW` — required, since
+            // the struct contains pointer-sized fields. `cb` is always `buf.len() *
+            // size_of::<NETRESOURCEW>()` in bytes on input, matching the capacity we actually pass;
+            // `count`/`cb` are valid `&mut` out-parameters the API is documented to write through.
+            let s = unsafe {
+                WNetEnumResourceW(
+                    henum,
+                    &mut count,
+                    buf.as_mut_ptr() as *mut core::ffi::c_void,
+                    &mut cb,
+                )
+            };
+            if s == ERROR_MORE_DATA && grows < WNET_MAX_BUFFER_GROWS {
+                // The buffer was too small for even one entry; `cb` now holds the byte size the API
+                // needs. A `Vec<NETRESOURCEW>` sized to fit that many bytes' worth of *structs* is
+                // always large enough — the entries' variable-length string data packs into the same
+                // flat buffer a raw byte allocation would need, so rounding up to whole `NETRESOURCEW`
+                // elements only ever over-allocates relative to that byte count, never under-allocates.
+                // Nothing was consumed by this failed call, so retrying at the SAME enumeration
+                // position (not calling again after this loop) is correct.
+                let need = (cb as usize).div_ceil(std::mem::size_of::<NETRESOURCEW>()).max(1);
+                cap = need.max(cap * 2);
+                buf = vec![NETRESOURCEW::default(); cap];
+                count = u32::MAX;
+                cb = (cap * std::mem::size_of::<NETRESOURCEW>()) as u32;
+                grows += 1;
+                continue;
+            }
+            break s;
+        };
+
+        if status != ERROR_SUCCESS {
+            // ERROR_NO_MORE_ITEMS (normal end of this level) or any other error (skip the rest of this
+            // level rather than fail the whole walk) both stop here.
+            break;
+        }
+        // SAFETY: the API just reported `count` valid, initialized `NETRESOURCEW` entries at the front
+        // of `buf`; `count <= buf.len()` by construction (we always told it exactly `buf.len()`
+        // elements of space was available), but `.min()` guards that invariant defensively rather than
+        // trusting it blindly for an unsafe slice index.
+        let n = (count as usize).min(buf.len());
+        if n == 0 {
+            // Defensive: a provider reporting success with zero entries would otherwise spin forever.
+            break;
+        }
+        for entry in &buf[..n] {
+            out.push(discovered_resource_from(entry, depth));
+        }
+    }
+
+    // SAFETY: `henum` was returned by the matching `WNetOpenEnumW` in `wnet_open` above and hasn't been
+    // closed on any earlier path in this function.
+    unsafe {
+        let _ = WNetCloseEnum(henum);
+    }
+    out
+}
+
+/// Map one FFI `NETRESOURCEW` entry (still backed by the live enumeration buffer) into a plain-data
+/// [`DiscoveredResource`](cpe_server::net_share::DiscoveredResource), recursing into it first if it's a
+/// container so `children` arrives pre-populated for the pure `flatten_discovered` step.
+#[cfg(windows)]
+fn discovered_resource_from(
+    entry: &windows::Win32::NetworkManagement::WNet::NETRESOURCEW,
+    depth: u32,
+) -> cpe_server::net_share::DiscoveredResource {
+    use windows::Win32::NetworkManagement::WNet::RESOURCEUSAGE_CONTAINER;
+
+    let remote_name = unsafe { wnet_wide_field(entry.lpRemoteName) };
+    let display_name = unsafe { wnet_wide_field(entry.lpComment) };
+    let is_container = entry.dwUsage & RESOURCEUSAGE_CONTAINER.0 != 0;
+    let children = if is_container { wnet_enum_level(Some(entry), depth + 1) } else { Vec::new() };
+
+    cpe_server::net_share::DiscoveredResource { remote_name, display_name, is_container, children }
+}
+
+/// Read a `NETRESOURCEW` wide-string field (`lpRemoteName`/`lpComment`) into an owned `String`. Returns
+/// `None` for a null pointer (fields the provider left unset) or a run that isn't valid UTF-16 — never
+/// panics either way.
+///
+/// # Safety
+/// `field` must be either null, or a pointer taken directly from a `NETRESOURCEW` entry that a
+/// `WNetEnumResourceW` call just populated, read before the buffer backing it is dropped or reused.
+/// `WNetEnumResourceW` packs each entry's variable-length string data into the SAME flat buffer as the
+/// struct array, NUL-terminated, so `PWSTR::to_string`'s `wcslen`-then-copy is sound for as long as
+/// that buffer is alive — true at every call site here (`buf` in `wnet_enum_level` outlives the
+/// `discovered_resource_from` call that reads its entries).
+#[cfg(windows)]
+unsafe fn wnet_wide_field(field: windows::core::PWSTR) -> Option<String> {
+    if field.is_null() {
+        return None;
+    }
+    field.to_string().ok()
+}
+
+#[cfg(not(windows))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn discover_network_windows() -> Vec<cpe_server::net_share::NetShare> {
+    // WNet/Explorer-parity network discovery is a Windows-only concept (CPE-1519); other platforms get
+    // discovery via the cross-platform mDNS/Avahi backend (CPE-1517) instead. Never called from a
+    // non-Windows frontend, but kept as a real stub (not `#[cfg(windows)]`-absent) so the command exists
+    // uniformly in `generate_handler!` and the build stays clean on every OS.
+    Vec::new()
+}
+
 /// Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
@@ -10537,6 +10770,7 @@ pub fn run() {
             list_drives,
             list_network_shares,
             disconnect_network_share,
+            discover_network_windows,
             disk_space,
             special_folders,
             create_dir,
@@ -11350,10 +11584,12 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     // `./invoke`, which re-exports `Channel`) AND the `sidecar-platform` commands (this bin requires both
     // features). Their types derive `specta::Type` across `cpe-server` + the app modules + the sidecar
     // crates (`sidecar-contract`/`repos`, behind their own OFF-by-default `specta` features).
-    // Deliberately EXCLUDED: the single-OS commands `set_permissions` (`#[cfg(unix)]`) and
-    // `set_file_attribute` (`#[cfg(windows)]`) — they exist on only one platform, so including them would
-    // make `bindings.gen.ts` OS-dependent and break the drift guard (CPE-813), which regenerates on Linux.
-    // Callers use raw `invoke` for those two.
+    // Deliberately EXCLUDED: the single-OS-behavior commands `set_permissions` (`#[cfg(unix)]`),
+    // `set_file_attribute` (real impl `#[cfg(windows)]` / error stub `#[cfg(not(windows))]`), and
+    // `discover_network_windows` (real impl `#[cfg(windows)]` / empty-Vec stub `#[cfg(not(windows))]`,
+    // CPE-1519) — even where a same-shaped stub exists on the rest, the ACTUAL behavior is one
+    // platform's, so including them would make `bindings.gen.ts` semantics OS-dependent and risk the
+    // drift guard (CPE-813), which regenerates on Linux. Callers use raw `invoke` for these.
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         list_dir,
         find_project_root,
