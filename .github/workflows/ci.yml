@@ -230,6 +230,7 @@ jobs:
             ./crates/net -> target
             ./crates/sftp -> target
             ./crates/webdav -> target
+            ./crates/ftp -> target
             ./crates/vfs -> target
             ./crates/updater-verify -> target
 
@@ -292,9 +293,20 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
+      - name: ftp — clippy + test
+        # The FTP/FTPS FileSystemProvider (CPE-1514, epic CPE-1502): the 3rd remote backend, and the
+        # first net-new Network protocol since SFTP/WebDAV. Sync (suppaftp + rustls/ring — pure Rust, no
+        # C tooling), tested against an in-process hand-rolled FTP server, so it runs on all three OSes
+        # with no Docker/real FTP daemon.
+        working-directory: crates/ftp
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
       - name: vfs — clippy + test
-        # The scheme router (CPE-616): open(connection, secret, …) -> boxed FileSystemProvider, dispatching
-        # to cpe-sftp / cpe-webdav. Ties the connections model to the concrete remote providers.
+        # The scheme router (CPE-616/CPE-1502): open(connection, secret, …) -> boxed FileSystemProvider,
+        # dispatching to cpe-sftp / cpe-webdav / cpe-ftp. Ties the connections model to the concrete
+        # remote providers.
         working-directory: crates/vfs
         run: |
           cargo clippy --all-targets -- -D warnings

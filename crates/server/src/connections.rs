@@ -55,6 +55,9 @@ fn default_port(scheme: &str) -> u16 {
         "smb" => 445,
         "webdav" => 80,
         "davs" => 443,
+        // Explicit FTPS negotiates TLS on the same port as plain FTP (unlike legacy implicit-TLS port
+        // 990), so both share port 21.
+        "ftp" | "ftps" => 21,
         _ => 0,
     }
 }

@@ -45,6 +45,7 @@ pub fn scheme_label(scheme: Scheme) -> &'static str {
         Scheme::Smb => "SMB",
         Scheme::Webdav => "WebDAV",
         Scheme::S3 => "S3",
+        Scheme::Ftp => "FTP",
     }
 }
 
@@ -107,6 +108,8 @@ mod tests {
             ("webdav://host/dav", Scheme::Webdav),
             ("davs://host/dav", Scheme::Webdav),
             ("s3://bucket/key", Scheme::S3),
+            ("ftp://host/pub", Scheme::Ftp),
+            ("ftps://host/pub", Scheme::Ftp),
         ];
         for (uri, scheme) in cases {
             assert_eq!(route(uri), Route::Remote(scheme), "{uri} should route Remote({scheme:?})");
