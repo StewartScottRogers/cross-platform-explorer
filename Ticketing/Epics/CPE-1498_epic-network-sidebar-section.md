@@ -2,7 +2,7 @@
 id: CPE-1498
 title: "EPIC: Network F2 — 'Network' left-pane section + connections UI"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -36,3 +36,9 @@ pattern. Hidden/empty when the user has no connections and no OS-mounted shares 
 ## Effort / deps / fit
 M (frontend-heavy) + thin command layer. Deps: CPE-1497 (to actually connect). Additive, hidden when unused.
 Ship docs per CPE-579.
+
+## ACTIVATED 2026-08-08 (Sprint, user-directed Network SFTP/WebDAV) — the visible entry point
+Backend is ready: CPE-1510 (keychain) + CPE-1511 (vfs-route: sftp/webdav dirs browse via list_dir) merged.
+First buildable slice = CPE-1513 (the "network" sidebar section + saved-connections list + OS-discovered shares
++ Add-connection + connect/forget). "Mount as drive" (CPE-1500) is deferred (OS-mount not built). GUI →
+VISUAL result needs gui-smoke Visual Critic screenshots or attended user eyes before it's truly done.
