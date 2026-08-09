@@ -188,6 +188,10 @@ pub mod thumb_pipeline;
 /// File comparison — byte-identical check (CPE-418).
 pub mod compare;
 
+/// Image compare — bounded per-pixel diff (mask + stats) for two images, the deferred image-compare
+/// half of the CPE-722 compare studio (CPE-1490). GUI pane is a separate follow-up (CPE-1508).
+pub mod image_diff;
+
 /// Snapshot retention / thinning — grandfather-father-son (hourly/daily/weekly/monthly) keep-vs-prune
 /// policy over a list of local snapshots (CPE-944, epic CPE-735). Pure; the engine takes/deletes them.
 pub mod snapshot_retention;

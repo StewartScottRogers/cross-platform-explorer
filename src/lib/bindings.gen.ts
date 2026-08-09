@@ -1882,6 +1882,23 @@ async filesIdentical(a: string, b: string) : Promise<Result<boolean, string>> {
 }
 },
 /**
+ * Per-pixel diff of two images — the headless engine for the compare studio's deferred image-compare
+ * mode (CPE-1490, epic CPE-722; GUI pane is the separate follow-up CPE-1508). Decodes both through the
+ * thumbnail pipeline's bomb-guarded decoder and returns a grayscale diff-mask PNG plus summary stats
+ * (`percentDifferent`, changed-pixel count, bounding box). Differing dimensions and non-image/oversized
+ * sources are reported as documented in `cpe_server::image_diff`, never a panic.
+ * Model lives in `cpe_server::image_diff` (bounded, no new dependency); this is a thin `spawn_blocking`
+ * dispatcher.
+ */
+async diffImages(a: string, b: string) : Promise<Result<ImageDiff, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("diff_images", { a, b }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Find duplicate files under `root` (CPE-420) — size-then-hash two-pass scan. Model lives in
  * `cpe_server::duplicates` (CPE-815); this is a thin `spawn_blocking` dispatcher.
  */
@@ -3744,6 +3761,11 @@ level: string;
  */
 message: string }
 /**
+ * A rectangle bounding the changed-pixel region, in the aligned diff-canvas coordinate space
+ * (top-left origin, inclusive extent). Absent from [`ImageDiff`] when nothing differs.
+ */
+export type DiffBBox = { x: number; y: number; width: number; height: number }
+/**
  * One entry in a directory listing. Fields serialize by name to match the frontend `DirEntry`.
  */
 export type DirEntry = { name: string; path: string; is_dir: boolean; size: number; 
@@ -4105,6 +4127,18 @@ events: IcalEvent[];
  * component — the (possibly empty) calendar card still renders whatever was found.
  */
 error: string | null }
+/**
+ * Result of [`diff_images`]. `mask_png` is a grayscale-in-RGBA PNG, `width`x`height` (the union
+ * bounding box of the two inputs — equal to both inputs' own size unless `size_mismatch`), where each
+ * pixel's brightness is that coordinate's per-channel-averaged delta (0 = identical, 255 = maximally
+ * different) — handed to the UI as a heatmap overlay by the separate CPE-1508 GUI pane.
+ */
+export type ImageDiff = { width: number; height: number; changedPixels: number; totalPixels: number; percentDifferent: number; bbox?: DiffBBox | null; 
+/**
+ * `true` when the two source images didn't share the same dimensions — see the module docs for
+ * how the pair is aligned in that case (union-bbox, top-left origin, out-of-bounds = max delta).
+ */
+sizeMismatch: boolean; maskPng: number[] }
 /**
  * Image dimensions + basic EXIF for the Properties dialog. Best-effort: every field is optional and a
  * non-image / EXIF-less file yields an all-`None` struct rather than an error.

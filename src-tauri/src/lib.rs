@@ -4055,6 +4055,23 @@ async fn files_identical(a: String, b: String) -> Result<bool, String> {
         .await.map_err(|e| e.to_string())?
 }
 
+/// Per-pixel diff of two images — the headless engine for the compare studio's deferred image-compare
+/// mode (CPE-1490, epic CPE-722; GUI pane is the separate follow-up CPE-1508). Decodes both through the
+/// thumbnail pipeline's bomb-guarded decoder and returns a grayscale diff-mask PNG plus summary stats
+/// (`percentDifferent`, changed-pixel count, bounding box). Differing dimensions and non-image/oversized
+/// sources are reported as documented in `cpe_server::image_diff`, never a panic.
+/// Model lives in `cpe_server::image_diff` (bounded, no new dependency); this is a thin `spawn_blocking`
+/// dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn diff_images(a: String, b: String) -> Result<cpe_server::image_diff::ImageDiff, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::image_diff::diff_images(Path::new(&a), Path::new(&b))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Search text files under `root` for lines containing `query` (CPE-416). Model lives in
 /// `cpe_server::content_search` (CPE-815); this is a thin `spawn_blocking` dispatcher.
 #[tauri::command]
@@ -10355,6 +10372,7 @@ pub fn run() {
             search_file_contents,
             find_files_by_name,
             files_identical,
+            diff_images,
             find_duplicates,
             find_duplicates_stream,
             find_similar_images,
@@ -11175,6 +11193,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         search_file_contents,
         find_files_by_name,
         files_identical,
+        diff_images,
         find_duplicates,
         find_duplicates_stream,
         find_similar_images,
