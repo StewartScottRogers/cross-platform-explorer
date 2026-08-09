@@ -10,6 +10,7 @@ import {
   blankConnectionForm,
   formFromConnection,
   buildConnection,
+  discoveredShareToFormInput,
   type ConnectionFormInput,
 } from "./network";
 import type { Connection, NetShare } from "./types";
@@ -103,6 +104,50 @@ describe("network (CPE-1513)", () => {
     });
   });
 
+  describe("dedupe across three tiers (CPE-1519: tier 3 'discovered' vs tier 1 connections + tier 2 shares)", () => {
+    const connections = [conn({ name: "prod", host: "files.example.com" })];
+    const tier2: NetShare[] = [
+      // A mapped drive whose name embeds the same UNC a WNet discovery would find for that server.
+      { name: "\\\\qnap\\media (Z:)", path: "Z:\\", kind: "mapped" },
+      { name: "backups (Y:)", path: "Y:\\", kind: "mapped" },
+    ];
+
+    it("flags a discovered share whose UNC is already mapped (tier 2)", () => {
+      const discovered: NetShare = { name: "\\\\qnap\\media", path: "\\\\qnap\\media", kind: "discovered" };
+      expect(isDuplicateShare(discovered, connections, tier2)).toBe(true);
+    });
+
+    it("is case- and trailing-slash-insensitive against tier 2", () => {
+      const discovered: NetShare = { name: "Media share", path: "\\\\QNAP\\MEDIA\\", kind: "discovered" };
+      expect(isDuplicateShare(discovered, connections, tier2)).toBe(true);
+    });
+
+    it("still flags a discovered share whose host matches a saved connection (tier 1)", () => {
+      const discovered: NetShare = { name: "\\\\files.example.com\\docs", path: "\\\\files.example.com\\docs", kind: "discovered" };
+      expect(isDuplicateShare(discovered, connections, tier2)).toBe(true);
+    });
+
+    it("does not flag a genuinely new discovered share", () => {
+      const discovered: NetShare = { name: "\\\\nas2\\photos", path: "\\\\nas2\\photos", kind: "discovered" };
+      expect(isDuplicateShare(discovered, connections, tier2)).toBe(false);
+    });
+
+    it("dedupeShares(discovered, connections, tier2) drops both kinds of duplicate, keeps the rest, preserves order", () => {
+      const discovered: NetShare[] = [
+        { name: "\\\\nas2\\photos", path: "\\\\nas2\\photos", kind: "discovered" }, // new
+        { name: "\\\\qnap\\media", path: "\\\\qnap\\media", kind: "discovered" }, // dup of tier 2
+        { name: "\\\\files.example.com\\docs", path: "\\\\files.example.com\\docs", kind: "discovered" }, // dup of tier 1
+        { name: "\\\\nas3\\vault", path: "\\\\nas3\\vault", kind: "discovered" }, // new
+      ];
+      expect(dedupeShares(discovered, connections, tier2)).toEqual([discovered[0], discovered[3]]);
+    });
+
+    it("the 2-arg call (tier 2 vs tier 1) is unaffected — existingShares defaults to empty", () => {
+      const shares: NetShare[] = [{ name: "\\\\qnap\\media (Z:)", path: "Z:\\", kind: "mapped" }];
+      expect(dedupeShares(shares, connections)).toEqual(shares);
+    });
+  });
+
   describe("hasAnyNetworkRows", () => {
     it("is false when both tiers are empty", () => {
       expect(hasAnyNetworkRows([], [])).toBe(false);
@@ -110,6 +155,14 @@ describe("network (CPE-1513)", () => {
     it("is true when either tier has rows", () => {
       expect(hasAnyNetworkRows([conn()], [])).toBe(true);
       expect(hasAnyNetworkRows([], [{ name: "a", path: "a", kind: "mapped" }])).toBe(true);
+    });
+
+    it("is true when only the discovered tier (CPE-1519) has rows", () => {
+      expect(hasAnyNetworkRows([], [], [{ name: "a", path: "\\\\a\\b", kind: "discovered" }])).toBe(true);
+    });
+
+    it("is false when all three tiers are empty", () => {
+      expect(hasAnyNetworkRows([], [], [])).toBe(false);
     });
   });
 
@@ -174,7 +227,20 @@ describe("network (CPE-1513)", () => {
     });
 
     it("rejects an unsupported scheme", () => {
-      expect(buildConnection(input({ scheme: "smb" }))).toMatch(/Unsupported protocol/);
+      expect(buildConnection(input({ scheme: "ftp" }))).toMatch(/Unsupported protocol/);
+    });
+
+    it("accepts smb (CPE-1519: a discovered share's pre-filled scheme)", () => {
+      const c = buildConnection(input({ name: "qnap-media", scheme: "smb", path: "/media" }));
+      expect(c).toEqual({
+        name: "qnap-media",
+        scheme: "smb",
+        host: "host.example.com",
+        port: 445,
+        user: "",
+        auth: { kind: "password" },
+        path: "/media",
+      });
     });
 
     it("rejects an out-of-range port", () => {
@@ -205,6 +271,44 @@ describe("network (CPE-1513)", () => {
     it("editing (same name) is allowed — upsert-by-name IS how Edit works", () => {
       const c = buildConnection(input({ name: "prod", host: "new-host.example.com" }));
       expect(c).toMatchObject({ name: "prod", host: "new-host.example.com" });
+    });
+  });
+
+  describe("discoveredShareToFormInput (CPE-1519: discovered row → pre-filled 'Add a connection' form)", () => {
+    it("maps a server+share UNC to scheme smb, host = server, path = /share", () => {
+      const share: NetShare = { name: "Media", path: "\\\\qnap\\media", kind: "discovered" };
+      const f = discoveredShareToFormInput(share);
+      expect(f).toEqual({
+        name: "qnap-media",
+        scheme: "smb",
+        host: "qnap",
+        port: "",
+        user: "",
+        authKind: "password",
+        keyPath: "",
+        path: "/media",
+      });
+    });
+
+    it("the pre-filled form builds a valid connection one click later", () => {
+      const share: NetShare = { name: "Media", path: "\\\\qnap\\media", kind: "discovered" };
+      const c = buildConnection(discoveredShareToFormInput(share));
+      expect(c).toMatchObject({ name: "qnap-media", scheme: "smb", host: "qnap", path: "/media" });
+    });
+
+    it("handles a nested sub-path UNC, keeping only the first segment as the share", () => {
+      const share: NetShare = { name: "Media", path: "\\\\qnap\\media\\movies", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toMatchObject({ host: "qnap", path: "/media" });
+    });
+
+    it("a server-only UNC (no share) still pre-fills the host, with a blank path", () => {
+      const share: NetShare = { name: "\\\\qnap", path: "\\\\qnap", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toMatchObject({ host: "qnap", path: "", name: "qnap" });
+    });
+
+    it("falls back to a blank smb form for a non-UNC path (defensive; shouldn't occur post-backend-filter)", () => {
+      const share: NetShare = { name: "junk", path: "not-a-unc-path", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toEqual({ ...blankConnectionForm(), scheme: "smb" });
     });
   });
 });

@@ -2,7 +2,7 @@
 id: CPE-1519
 title: "Windows-native network discovery (WNetEnumResource / Explorer's Network folder parity)"
 type: Feature
-status: Backlog
+status: Done
 priority: High
 component: Multiple
 tags: [ready]
@@ -77,3 +77,30 @@ complements CPE-1504 (SMB) and CPE-1500 (OS-mount). Test target [[qnap-nas-test-
   didn't change. Still open: the frontend "Discovered on your network" tier (dedupe against saved/mapped
   shares, one-click pre-filled Add-a-connection, docs note) and the attended QNAP LAN verify (from
   2026-08-10, tracked by CPE-1518) — this ticket stays in Backlog for that follow-on work.
+- 2026-08-09: **Frontend "Discovered on your network" tier landed** (PR pending) — a third tier in the
+  Sidebar's Network section, populated from `discover_network_windows()` via the raw `invoke` (the
+  command is deliberately excluded from the typed specta bindings, per the backend Work Log entry above),
+  loaded fire-and-forget at startup alongside the existing tier-2 `loadShared()` call (decide-and-log: no
+  separate "scan" button — the backend call is already time-bounded to ~6s, and the existing tier-2 shares
+  follow the identical fire-and-forget-at-startup pattern, so mirroring it keeps the section's loading
+  behaviour uniform across tiers). `network.ts`'s `isDuplicateShare`/`dedupeShares` gained a third,
+  backward-compatible `existingShares` parameter so a discovered `\\server\share` dedupes against BOTH
+  saved connections (tier 1) and OS `net use`/mount shares (tier 2) — matched via a normalized
+  (trim/trailing-slash/case-insensitive) substring check mirroring the Rust side's `dedup_key`.
+  `SUPPORTED_SCHEMES` gained `smb` (was previously rejected by `buildConnection`) so the new
+  `discoveredShareToFormInput` mapping's pre-filled scheme is actually acceptable to the existing
+  "＋ Add a connection" form (reused unchanged from CPE-1513) — clicking a discovered row opens that form
+  pre-filled with scheme `smb`, host = the server, and path = `/share`. Each discovered row shows an
+  accent status dot ("discovered — not yet added") and a hover-revealed "+" hint; the whole row is the
+  one-click add action (no separate SMB browsing built — out of scope per the ticket). 65 jsdom tests
+  added/updated across `network.test.ts` (dedupe-across-three-tiers, `discoveredShareToFormInput`
+  UNC-parsing incl. sub-path and server-only edge cases, `smb` now accepted by `buildConnection`) and
+  `Sidebar.test.ts` (empty tier renders nothing, a populated tier hides the empty state, dedupe against
+  both other tiers at the component level, click → pre-filled `networkAdd` event); `npm run check` is
+  clean (0 errors), and the full `npx vitest run` suite (233 files / 2631 tests) is green. Docs
+  (`src/docs/31-network.md`) updated with a "Discovered on your network (Windows)" section, including the
+  honest caveat that this only surfaces what Windows itself has already discovered (Network discovery
+  setting must be on, device must be advertising) — parity with Explorer's Network folder, including its
+  gaps. **Still owed:** the attended live-LAN verify against the QNAP NAS (from 2026-08-10, tracked by
+  CPE-1518) and the user's visual sign-off — this frontend slice hasn't been run against a real network
+  neighborhood yet. Backend slice merged separately in #737; this closes out CPE-1519's remaining scope.

@@ -15,7 +15,15 @@
   import { isValidDrop, hoverEffect } from "../dnd";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
   import { sidebarOrder, orderStyleMap, reorderSection, resetSidebarOrder } from "../sidebarOrder";
-  import { dedupeShares, hasAnyNetworkRows, stateOf, stateTitle, type ConnState } from "../network";
+  import {
+    dedupeShares,
+    hasAnyNetworkRows,
+    stateOf,
+    stateTitle,
+    discoveredShareToFormInput,
+    type ConnState,
+  } from "../network";
+  import type { ConnectionFormInput } from "../network";
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
@@ -54,12 +62,19 @@
   /** OS-discovered network shares (CPE-1163's `list_network_shares`) — tier 2, deduped against
    *  `connections` below. Empty (after dedup) with no saved connections ⇒ the section is hidden. */
   export let networkShares: NetShare[] = [];
+  /** Windows-native WNet-discovered shares (CPE-1519's `discover_network_windows`, `kind: "discovered"`) —
+   *  tier 3, "Discovered on your network". Deduped against BOTH `connections` (tier 1) and `networkShares`
+   *  (tier 2). Always empty on non-Windows (the backend command is a compiled no-op stub there) or when
+   *  Windows "Network discovery" is off / nothing is advertising — the tier then renders nothing, keeping
+   *  the plain explorer quiet (CLAUDE.md's additive-mode guarantee). */
+  export let discoveredShares: NetShare[] = [];
   /** Live, client-tracked connect state per connection name (CPE-1513) — see `network.ts` module docs
    *  for why this can't come from the backend yet. Absent ⇒ "disconnected" (saved, not connected). */
   export let connectionStates: Record<string, ConnState> = {};
   /** The last connect-attempt error per connection name, for the state dot's tooltip. */
   export let connectionErrors: Record<string, string> = {};
   $: dedupedShares = dedupeShares(networkShares, connections);
+  $: dedupedDiscovered = dedupeShares(discoveredShares, connections, networkShares);
   $: networkOpen = isOpen($sidebarSections, "network");
 
   const dispatch = createEventDispatcher<{
@@ -85,9 +100,11 @@
      *  the backend `eject_drive`, toasts the outcome, and refreshes the drive list. */
     eject: { path: string; name: string };
     /** Open the "+ Add a connection" popover (CPE-1513) — from the Network section's header "+" button,
-     *  or (CPE-1516) its own empty-state "＋ Add a connection" row when there are no connections/shares
-     *  yet, now that the section itself is permanent rather than appearing only once something exists. */
-    networkAdd: { x: number; y: number };
+     *  (CPE-1516) its own empty-state "＋ Add a connection" row when there are no connections/shares
+     *  yet, now that the section itself is permanent rather than appearing only once something exists, or
+     *  (CPE-1519) a "Discovered on your network" row, which supplies `prefill` — the form opens
+     *  pre-populated with that discovered share's scheme/host/path instead of blank. */
+    networkAdd: { x: number; y: number; prefill?: ConnectionFormInput };
     /** Connect a saved connection (CPE-1513): App resolves/prompts for a secret if needed, then navigates
      *  into the connection's location — works via CPE-1511's remote `list_dir` routing. */
     networkConnect: Connection;
@@ -700,11 +717,13 @@
   {/each}
 
   <!-- Network section (CPE-1513, epic CPE-1498; permanent per CPE-1516): the visible entry point for the
-       SFTP/WebDAV backend — two deduped tiers (saved connections, then OS-discovered shares). Always
-       rendered as a peer of Drives (discoverable before the first connection exists, like Drives is always
-       shown with just one drive); when both tiers are empty the body is just the "＋ Add a connection"
-       control + a one-line hint, so the plain explorer stays visually quiet (CLAUDE.md's additive-mode
-       guarantee) rather than gaining a heavier permanent section. -->
+       SFTP/WebDAV backend — three deduped tiers (saved connections, then OS-discovered `net use`/mount
+       shares, then CPE-1519's Windows-native "Discovered on your network" WNet shares — each deduped
+       against everything above it). Always rendered as a peer of Drives (discoverable before the first
+       connection exists, like Drives is always shown with just one drive); when all three tiers are empty
+       the body is just the "＋ Add a connection" control + a one-line hint, so the plain explorer stays
+       visually quiet (CLAUDE.md's additive-mode guarantee) rather than gaining a heavier permanent
+       section — this is the common case off Windows, or on Windows with network discovery off. -->
   <div class="navigation-pane-sep" style="order:{omap.drives}" />
   <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div
@@ -762,7 +781,24 @@
           <span class="label">{s.name}</span>
         </button>
       {/each}
-      {#if !hasAnyNetworkRows(connections, dedupedShares)}
+      {#each dedupedDiscovered as s (s.path)}
+        <!-- "Discovered on your network" tier (CPE-1519): a Windows WNet-found `\\server\share` the user
+             hasn't connected to yet. There's no generic SMB client to browse it directly yet (scope stays
+             discovery + pre-filled add this slice — see network.ts's SUPPORTED_SCHEMES doc), so the whole
+             row's action is the one-click "＋ Add a connection" pre-fill rather than a navigate. -->
+        <button
+          class="nav-item fav-item"
+          title={`${s.path} — discovered on your network; click to add it as a connection`}
+          on:click={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY, prefill: discoveredShareToFormInput(s) })}
+        >
+          <span class="twisty hidden" />
+          <span class="state-dot state-discovered" aria-hidden="true" title="Discovered — not yet added" />
+          <Icon name="globe" />
+          <span class="label">{s.name}</span>
+          <span class="discover-add-hint" aria-hidden="true"><Icon name="plus" size={11} /></span>
+        </button>
+      {/each}
+      {#if !hasAnyNetworkRows(connections, dedupedShares, dedupedDiscovered)}
         <!-- Empty state (CPE-1516): the section's own "first connection" affordance, replacing the old
              static Explore "Network…" row now that the section is always present. -->
         <button
@@ -876,6 +912,22 @@
   }
   .state-dot.state-connected { background: var(--success); }
   .state-dot.state-error { background: var(--danger); }
+  /* Discovered-share status dot (CPE-1519): tier 3's "not yet added" cue — accent, not the faint default,
+     since (unlike a never-connected saved connection) this row IS actionable right now via its own
+     "＋ Add a connection" click. */
+  .state-dot.state-discovered { background: var(--accent); }
+  /* Discovered-row "＋" hint (CPE-1519): mirrors the eject-btn/add-btn reveal-on-hover treatment — faint
+     at rest, clear on row hover — so the row reads as "click to add" without a second, separately-clickable
+     control (the whole row is the one click). */
+  .discover-add-hint {
+    flex: 0 0 auto;
+    display: inline-grid;
+    place-items: center;
+    margin-left: auto;
+    opacity: 0.45;
+    color: var(--text);
+  }
+  .nav-item:hover .discover-add-hint { opacity: 1; }
 
   /* Section drag-to-reorder (CPE-1520): every section header carries a grip affordance and is itself
      the draggable element. The grip is faint until the header (or the grip itself) is hovered, matching

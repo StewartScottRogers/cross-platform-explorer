@@ -57,7 +57,14 @@
   import NetworkConnectionMenu from "./lib/components/NetworkConnectionMenu.svelte";
   import NetworkConnectionForm from "./lib/components/NetworkConnectionForm.svelte";
   import NetworkSecretPrompt from "./lib/components/NetworkSecretPrompt.svelte";
-  import { connectionLocation, secretAlwaysRequired, formFromConnection, blankConnectionForm, type ConnState } from "./lib/network";
+  import {
+    connectionLocation,
+    secretAlwaysRequired,
+    formFromConnection,
+    blankConnectionForm,
+    type ConnState,
+    type ConnectionFormInput,
+  } from "./lib/network";
   import Toolbar from "./lib/components/Toolbar.svelte";
   import ExplorerPane from "./lib/components/ExplorerPane.svelte";
   import DetailsPane from "./lib/components/DetailsPane.svelte";
@@ -468,7 +475,11 @@
   let connections: Connection[] = [];
   let connectionStates: Record<string, ConnState> = {};
   let connectionErrors: Record<string, string> = {};
-  let networkForm: { x: number; y: number; editing: Connection | null } | null = null;
+  // Windows-native "Discovered on your network" tier (CPE-1519): WNet-enumerated shares, loaded once at
+  // startup alongside `shared` (see `loadDiscovered`'s doc comment below for why fire-and-forget).
+  let discoveredShares: NetShare[] = [];
+  let networkForm: { x: number; y: number; editing: Connection | null; prefill: ConnectionFormInput | null } | null =
+    null;
   let networkContextMenu: { x: number; y: number; conn: Connection } | null = null;
   let networkSecretPrompt: { x: number; y: number; conn: Connection } | null = null;
   let columnWidths: number[] = settings.loadColumnWidths();
@@ -4395,6 +4406,23 @@
     }
   }
 
+  /** Load the sidebar's "Discovered on your network" tier (CPE-1519): Windows-native WNet enumeration of
+   *  the same network neighborhood Explorer shows. `discover_network_windows` is deliberately excluded
+   *  from the typed specta bindings (its behavior is Windows-only, like `set_file_attribute` — see
+   *  CLAUDE.md), so this calls it via the raw `invoke`, not `commands.*`. Bounded (~6s) backend-side, and
+   *  on non-Windows it's a compiled no-op stub returning `[]` immediately, so this can never hang startup.
+   *  A failure (or the non-Windows/nothing-discovered case) degrades to an empty tier, never an error —
+   *  the section simply doesn't grow a third tier, exactly like it doesn't grow tier 2 rows when there are
+   *  no OS shares. */
+  async function loadDiscovered(): Promise<void> {
+    try {
+      discoveredShares = (await invoke<NetShare[]>("discover_network_windows")) ?? [];
+    } catch (e) {
+      console.debug("discover_network_windows failed:", e);
+      discoveredShares = [];
+    }
+  }
+
   /** Add a user-typed network location (CPE-1163): persist it, then reload so it appears (the backend
    *  validates + dedupes against enumerated drives). An unparseable address simply won't list. */
   function addNetworkLocation(path: string): void {
@@ -5565,6 +5593,9 @@
       }
     })();
     void loadShared();
+    // CPE-1519's "Discovered on your network" tier: same fire-and-forget treatment as `loadShared` just
+    // above (time-bounded backend-side, an offline/absent neighborhood can't hang session restore below).
+    void loadDiscovered();
     try {
       appVersion = await getVersion();
     } catch {
@@ -5818,9 +5849,11 @@
       activeSavedSearch={structuredSearch?.id ?? ""}
       {connections}
       networkShares={shared}
+      {discoveredShares}
       {connectionStates}
       {connectionErrors}
-      on:networkAdd={(e) => (networkForm = { x: e.detail.x, y: e.detail.y, editing: null })}
+      on:networkAdd={(e) =>
+        (networkForm = { x: e.detail.x, y: e.detail.y, editing: null, prefill: e.detail.prefill ?? null })}
       on:networkConnect={(e) => void onNetworkConnect(e.detail)}
       on:networkContext={(e) => (networkContextMenu = { x: e.detail.x, y: e.detail.y, conn: e.detail.conn })}
       on:filterTag={(e) => {
@@ -6668,7 +6701,9 @@
     x={networkForm.x}
     y={networkForm.y}
     editing={networkForm.editing}
-    initial={networkForm.editing ? formFromConnection(networkForm.editing) : blankConnectionForm()}
+    initial={networkForm.editing
+      ? formFromConnection(networkForm.editing)
+      : (networkForm.prefill ?? blankConnectionForm())}
     on:save={(e) => void saveNetworkConnection(e.detail)}
     on:close={() => (networkForm = null)}
   />
@@ -6685,7 +6720,7 @@
     state={connectionStates[ctxConn.name] ?? "disconnected"}
     on:connect={() => void onNetworkConnect(ctxConn)}
     on:disconnect={() => disconnectNetworkConnection(ctxConn.name)}
-    on:edit={() => (networkForm = { x: ctxX, y: ctxY, editing: ctxConn })}
+    on:edit={() => (networkForm = { x: ctxX, y: ctxY, editing: ctxConn, prefill: null })}
     on:forget={() => void forgetNetworkConnection(ctxConn)}
     on:close={() => (networkContextMenu = null)}
   />
