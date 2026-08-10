@@ -124,3 +124,71 @@ describe("DropStackPanel (CPE-1532)", () => {
     expect(clearDropStack).not.toHaveBeenCalled();
   });
 });
+
+describe("DropStackPanel — Move-all/Copy-all (CPE-1533)", () => {
+  it("hides both buttons when the stack is empty, alongside Clear all", async () => {
+    const { getByLabelText, queryByText } = render(DropStackPanel);
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+
+    expect(queryByText("Move all here")).toBeNull();
+    expect(queryByText("Copy all here")).toBeNull();
+  });
+
+  it("shows both buttons, enabled, once something is shelved and the destination is valid", async () => {
+    store.set([entry("/repo/notes.txt")]);
+    const { getByLabelText, getByText } = render(DropStackPanel, { props: { canTransfer: true } });
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+
+    const moveBtn = getByText("Move all here") as HTMLButtonElement;
+    const copyBtn = getByText("Copy all here") as HTMLButtonElement;
+    expect(moveBtn.disabled).toBe(false);
+    expect(copyBtn.disabled).toBe(false);
+  });
+
+  it("disables both buttons when canTransfer is false, even with a non-empty stack", async () => {
+    store.set([entry("/repo/notes.txt")]);
+    const { getByLabelText, getByText } = render(DropStackPanel, { props: { canTransfer: false } });
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+
+    const moveBtn = getByText("Move all here") as HTMLButtonElement;
+    const copyBtn = getByText("Copy all here") as HTMLButtonElement;
+    expect(moveBtn.disabled).toBe(true);
+    expect(copyBtn.disabled).toBe(true);
+  });
+
+  it("clicking Move all here dispatches a moveAll event", async () => {
+    store.set([entry("/repo/notes.txt"), entry("/repo/b.txt")]);
+    const { getByLabelText, getByText, component } = render(DropStackPanel, { props: { canTransfer: true } });
+    const moveAll = vi.fn();
+    component.$on("moveAll", moveAll);
+
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+    await fireEvent.click(getByText("Move all here"));
+
+    expect(moveAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("clicking Copy all here dispatches a copyAll event", async () => {
+    store.set([entry("/repo/notes.txt"), entry("/repo/b.txt")]);
+    const { getByLabelText, getByText, component } = render(DropStackPanel, { props: { canTransfer: true } });
+    const copyAll = vi.fn();
+    component.$on("copyAll", copyAll);
+
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+    await fireEvent.click(getByText("Copy all here"));
+
+    expect(copyAll).toHaveBeenCalledTimes(1);
+  });
+
+  it("a disabled Move all here does not dispatch moveAll when clicked", async () => {
+    store.set([entry("/repo/notes.txt")]);
+    const { getByLabelText, getByText, component } = render(DropStackPanel, { props: { canTransfer: false } });
+    const moveAll = vi.fn();
+    component.$on("moveAll", moveAll);
+
+    await fireEvent.click(getByLabelText("Show Drop Stack"));
+    await fireEvent.click(getByText("Move all here"));
+
+    expect(moveAll).not.toHaveBeenCalled();
+  });
+});

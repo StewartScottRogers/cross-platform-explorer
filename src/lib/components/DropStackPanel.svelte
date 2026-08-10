@@ -1,11 +1,26 @@
 <script lang="ts">
   // Drop Stack panel (CPE-1532, epic CPE-1489): the dockable panel that actually shows what's on the
   // stack CPE-1530's store accumulated. Off by default (PURPOSE.md tiebreaker: zero cost on the plain
-  // explorer when unused) — this file renders only a small toggle handle until the user opens it. This
-  // ticket ships listing + per-item remove + clear-all only; Move-all/Copy-all land in CPE-1533 (a
-  // separate ticket touching this same component file, sequenced after this one).
+  // explorer when unused) — this file renders only a small toggle handle until the user opens it.
+  //
+  // Move-all/Copy-all (CPE-1533, epic finale): the panel itself has no navigation state (no
+  // `currentPath`, no transfer-queue access), so — same pattern as every other App-owned action this
+  // panel doesn't implement locally — it just dispatches an event and lets App.svelte's
+  // `doDropStackMoveAll`/`doDropStackCopyAll` (near `doPaste`) do the actual work against the transfer
+  // commands, then clear the transferred paths back out of this same store. `canTransfer` (App-computed,
+  // mirroring doPaste's isHome/archive/smart-folder/saved-search/Replay guard) additionally disables both
+  // buttons when the CURRENT folder isn't a valid destination, same spirit as the paste menu item greying
+  // out — the stack itself might still be perfectly fine to act on later.
   import { dropStackEntries, removeFromDropStack, clearDropStack } from "../dropStack";
   import Icon from "./Icon.svelte";
+  import { createEventDispatcher } from "svelte";
+
+  /** Whether the CURRENT folder (App.svelte's `currentPath`) is a valid Move-all/Copy-all destination.
+   *  Defaults true so an unrelated caller/test that doesn't pass it doesn't spuriously disable the
+   *  buttons. */
+  export let canTransfer = true;
+
+  const dispatch = createEventDispatcher<{ moveAll: void; copyAll: void }>();
 
   let open = false;
 
@@ -54,6 +69,24 @@
     {#if $dropStackEntries.length === 0}
       <div class="dsp-empty">Drop Stack is empty — right-click a file → Add to Drop Stack</div>
     {:else}
+      <div class="dsp-actions">
+        <button
+          class="dsp-action"
+          disabled={!canTransfer}
+          title={canTransfer ? "Move every shelved item into the current folder" : "Not a valid destination for the Drop Stack"}
+          on:click={() => canTransfer && dispatch("moveAll")}
+        >
+          Move all here
+        </button>
+        <button
+          class="dsp-action"
+          disabled={!canTransfer}
+          title={canTransfer ? "Copy every shelved item into the current folder" : "Not a valid destination for the Drop Stack"}
+          on:click={() => canTransfer && dispatch("copyAll")}
+        >
+          Copy all here
+        </button>
+      </div>
       <div class="dsp-pills">
         {#each $dropStackEntries as entry (entry.path)}
           <span class="dsp-pill" title={entry.path}>
@@ -153,6 +186,29 @@
     color: var(--text-dim);
     font-size: 12px;
   }
+
+  /* CPE-1533: Move-all/Copy-all sit above the pill list, sharing the row's width and wrapping to a
+     second row rather than overflowing on a cramped viewport (these are action buttons, not the
+     tick-tack pills below, so they may shrink/wrap freely). */
+  .dsp-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 10px 10px 0;
+  }
+  .dsp-action {
+    flex: 1 1 auto;
+    white-space: nowrap;
+    height: 26px;
+    padding: 0 10px;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 12px;
+  }
+  .dsp-action:hover:not(:disabled) { background: var(--hover); }
+  .dsp-action:disabled { color: var(--text-dim); cursor: default; opacity: 0.6; }
 
   /* Tick-tack reflow: the container wraps pills onto more rows and grows height; each pill keeps its
      text on one line (nowrap) and never shrinks, with a max-width + ellipsis for a long name/path. */
