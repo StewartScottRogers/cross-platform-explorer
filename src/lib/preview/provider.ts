@@ -11,6 +11,7 @@ import { categoryOf } from "../filetypes";
 import { invoke as ipcInvoke, createChannel } from "../invoke";
 import { formatJson, parseJson } from "./jsonTree";
 import type { BatchJob, BatchReport, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
+import { EXTRACT_EXTS, ARCHIVE_SAFETY_EXTS } from "../archiveExts";
 
 export type PreviewKind =
   | "image"
@@ -92,6 +93,21 @@ export interface PreviewActionCtx {
    *  result, CPE-1573). Takes an i18n key + params rather than pre-rendered text — `run()` lives in this
    *  framework-free module, so `PreviewPane` (which has `$t`) resolves the actual string. */
   showMessage?(key: string, params?: Record<string, string | number>): void;
+  /** Extract the previewed archive into a new subfolder next to it — the pane's counterpart to the
+   *  context menu's "Extract" (CPE-1578, epic CPE-1568 slice 4). `PreviewPane` wires this straight
+   *  through to the SAME `extractHereDest`/`extractWithPasswordFallback` core the context menu's
+   *  `doExtract` uses (queued transfer + AES password fallback), just entered with the previewed entry
+   *  instead of the pane's selection. Optional: undefined in a harness that hasn't wired it (the archive
+   *  actions below then just no-op via the `run` guard). */
+  extractHere?(entry: DirEntry): Promise<void>;
+  /** Extract the previewed archive into a folder chosen from the native picker — the pane's counterpart
+   *  to the context menu's "Extract to…" (CPE-1578). Same reuse as {@link extractHere}. */
+  extractTo?(entry: DirEntry): Promise<void>;
+  /** Run the archive-safety scan (zip-bomb / expansion-ratio risk) for the previewed archive — the
+   *  pane's counterpart to the context menu's "Check archive safety…" (CPE-1578). `PreviewPane` wires
+   *  this to open the SAME `ArchiveSafetyDialog` the context menu opens (it owns the `analyze_archive_safety`
+   *  call + result rendering) — no new scan logic, just a different trigger. */
+  checkSafety?(entry: DirEntry): void;
 }
 
 /**
@@ -348,6 +364,41 @@ const CALENDAR_EXT = new Set(["ics", "ical", "ifb", "icalendar"]);
 const VCARD_EXT = new Set(["vcf", "vcard"]);
 
 /**
+ * Extract-here / Extract-to… / Check-safety actions on the preview action bar for the `archive`
+ * provider (CPE-1578, epic CPE-1568 slice 4): pure UI wiring onto the EXISTING context-menu backend
+ * paths (queued transfer extract + `analyze_archive_safety` scan) — no new backend, no duplicated
+ * logic, just a second trigger surfacing the same operations the context menu already offers for the
+ * single previewed archive. Gated on the same extension sets the context menu itself gates
+ * `extractable`/`archiveSafetyEligible` on ({@link EXTRACT_EXTS}/{@link ARCHIVE_SAFETY_EXTS} from
+ * `archiveExts.ts`, CPE-1181/1318's single source of truth) — an `.iso`/`.rar` archive (browsable but
+ * not extractable) or a non-ZIP archive (not safety-scorable) simply doesn't offer the action, exactly
+ * like the context menu.
+ */
+const archiveActions: PreviewAction[] = [
+  {
+    id: "extract-here",
+    labelKey: "pv.action.extractHere",
+    icon: "archive",
+    enabled: (ctx) => EXTRACT_EXTS.has(ctx.entry.extension),
+    run: (ctx) => ctx.extractHere?.(ctx.entry) ?? Promise.resolve(),
+  },
+  {
+    id: "extract-to",
+    labelKey: "pv.action.extractTo",
+    icon: "archive",
+    enabled: (ctx) => EXTRACT_EXTS.has(ctx.entry.extension),
+    run: (ctx) => ctx.extractTo?.(ctx.entry) ?? Promise.resolve(),
+  },
+  {
+    id: "check-safety",
+    labelKey: "pv.action.checkSafety",
+    icon: "archive",
+    enabled: (ctx) => ARCHIVE_SAFETY_EXTS.has(ctx.entry.extension),
+    run: (ctx) => ctx.checkSafety?.(ctx.entry),
+  },
+];
+
+/**
  * Ordered by priority — the first match wins. Markdown is listed before text
  * because a `.md` file's category is "text"; without the ordering, text would
  * claim it first.
@@ -515,6 +566,8 @@ export const providers: PreviewProvider[] = [
     // zip family (jar/apk/war/… are zips), plus tar and gzip — all listed by the
     // read_archive_entries backend (CPE-064/109/112/217).
     canPreview: (e) => !e.is_dir && ARCHIVE_EXT.has(e.extension),
+    // Extract / Extract to… / Check safety (CPE-1578) — see `archiveActions`'s own doc comment.
+    actions: archiveActions,
   },
   {
     id: "font",

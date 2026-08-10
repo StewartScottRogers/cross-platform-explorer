@@ -4051,6 +4051,54 @@
     });
   }
 
+  // ---- Archive actions on the preview pane's action bar (CPE-1578, epic CPE-1568 slice 4) ----------
+  // Pure UI wiring onto the EXISTING context-menu backend paths above: the single `<PreviewPane>` in
+  // this file only ever shows pane A's own selection (see its `entry={...}` binding below), so these
+  // three simply call the SAME `extractHereDest`/`extractWithPasswordFallback`/`archiveSafetyFor` core
+  // `doExtract`/`doExtractTo`/`askArchiveSafety` use — entered with the previewed entry directly rather
+  // than derived from `pane.selectedEntries[0]` — instead of a pane-selection-based wrapper. No
+  // `inPaneB` branch: unlike the context menu (which can act on either pane), the preview pane has no
+  // pane-B counterpart to route to.
+
+  /** Extract the previewed archive here — the preview-pane counterpart to `doExtract` above. */
+  async function extractPreviewHere(entry: DirEntry): Promise<void> {
+    if (isHome || blockedInArchive() || !isExtractable(entry)) return;
+    const { dest, name } = extractHereDest(entry);
+    await extractWithPasswordFallback(entry, dest, currentPath, () => {
+      pendingSelectPath = dest;
+      showNotice(`Extracted "${entry.name}" to "${name}".`);
+    });
+  }
+
+  /** Extract the previewed archive to a picked folder — the preview-pane counterpart to `doExtractTo`
+   *  above. */
+  async function extractPreviewTo(entry: DirEntry): Promise<void> {
+    if (isHome || blockedInArchive() || !isExtractable(entry)) return;
+    let dest: string | string[] | null;
+    try {
+      dest = await openFolderDialog({
+        directory: true,
+        multiple: false,
+        defaultPath: currentPath,
+        title: `Extract "${entry.name}" to…`,
+      });
+    } catch {
+      return; // dialog unavailable / errored — no-op
+    }
+    if (!dest || typeof dest !== "string") return; // cancelled
+    const target = dest;
+    await extractWithPasswordFallback(entry, target, target, () => {
+      showNotice(`Extracted "${entry.name}" to "${target}".`);
+    });
+  }
+
+  /** Check the previewed archive's safety — the preview-pane counterpart to `askArchiveSafety` above:
+   *  opens the SAME `ArchiveSafetyDialog` (it owns the `analyze_archive_safety` call + rendering). */
+  function checkPreviewArchiveSafety(entry: DirEntry): void {
+    if (isHome || archive || !isArchiveSafetyEligible(entry)) return;
+    archiveSafetyFor = entry.path;
+  }
+
   /** Move `paths` into `dest` (drag & drop). Ctrl-drag copies instead. */
   /** The drop-path of the folder row / sidebar place under a physical cursor position, or "" (CPE-670).
       Physical pixels → CSS pixels via the device pixel ratio before hit-testing the DOM. */
@@ -6517,6 +6565,9 @@
           loadPdfValidity={loadPdfValidity}
           saveText={savePreviewText}
           openExternal={async (p) => { unwrap(await commands.openExternal(p)); }}
+          extractArchiveHere={extractPreviewHere}
+          extractArchiveTo={extractPreviewTo}
+          checkArchiveSafety={checkPreviewArchiveSafety}
           on:pick={onFolderPeekPick}
           on:open={onFolderPeekOpen}
         >
