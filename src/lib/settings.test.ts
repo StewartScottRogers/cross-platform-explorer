@@ -13,6 +13,7 @@ import {
   loadContentEmbedderModel, saveContentEmbedderModel,
   loadContentEmbedderConfig,
   loadDensity, saveDensity,
+  loadTheme, saveTheme,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -168,6 +169,28 @@ describe("density (CPE-1526)", () => {
   it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
     saveDensity("ultra-cozy" as unknown as ReturnType<typeof loadDensity>);
     expect(loadDensity()).toBe("comfortable");
+  });
+});
+
+// CPE-1535 (foundation slice of epic CPE-1492 "light/dark theme"): the persisted theme setting.
+// "system" is the default and today resolves to "light" only (see theme.ts's resolveTheme) — this
+// ticket has zero visible effect until CPE-1534's CSS + CPE-1493's dark palette land; the delete-test
+// requires an absent/corrupt stored value to degrade to "system" cleanly rather than crash (mirrors
+// the density validator immediately above).
+describe("theme (CPE-1535)", () => {
+  it("defaults to system with nothing saved", () => {
+    expect(loadTheme()).toBe("system");
+  });
+
+  it("round-trips light through save/load", () => {
+    saveTheme("light");
+    expect(loadTheme()).toBe("light");
+    saveTheme("system"); // reset for other tests
+  });
+
+  it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
+    saveTheme("solarized" as unknown as ReturnType<typeof loadTheme>);
+    expect(loadTheme()).toBe("system");
   });
 });
 

@@ -5,7 +5,8 @@ import FloatPreview from "./lib/components/FloatPreview.svelte";
 import AgentBoardApp from "./lib/components/AgentBoardApp.svelte";
 import AgentCardApp from "./lib/components/AgentCardApp.svelte";
 import { bootMode } from "./lib/bootMode";
-import { initSettings } from "./lib/settings";
+import { initSettings, loadTheme } from "./lib/settings";
+import { applyTheme } from "./lib/theme";
 
 const target = document.getElementById("app")!;
 
@@ -23,6 +24,7 @@ async function bootstrap(): Promise<void> {
   // synchronously at init (CPE-226). A failure here is non-fatal — the app falls back to defaults. The
   // board window loads it too so it picks up the theme.
   await initSettings().catch(() => {});
+  applyTheme(loadTheme()); // stamp dataset.theme before mount, avoiding a flash (CPE-1535)
   if (mode === "board") {
     new AgentBoardApp({ target });
     return;
