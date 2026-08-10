@@ -5868,6 +5868,7 @@
   on:browse={browseForFolder}
   on:help={() => openDocs(currentSection())}
   on:diskusage={() => { if (inFolder()) spacePath = currentPath; }}
+  on:density={(e) => setDensity(e.detail)}
   on:navigate={(e) => onCrumbNavigate(e.detail)}
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
   on:searchDocs={() => openDocsSlug("12-search")}

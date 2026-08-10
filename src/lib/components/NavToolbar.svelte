@@ -25,6 +25,7 @@
   const dispatch = createEventDispatcher<{
     back: void; forward: void; up: void; refresh: void; browse: void; help: void; diskusage: void;
     navigate: string; search: string; pathError: string; searchDeep: string; searchDocs: void;
+    density: DensityMode;
   }>();
 
   let pathInput: HTMLInputElement | undefined;
@@ -100,6 +101,21 @@
   </button>
   <button class="iconbtn" title="Browse for a folder…" aria-label="Browse for a folder" on:click={() => dispatch("browse")}>
     <Icon name="folder" />
+  </button>
+  <!-- Instant density toggle (CPE-1529, capstone of epic CPE-1488): flips comfortable <-> compact on a
+       dime — no dialog. Dispatches the new value; the parent's `setDensity` (App.svelte, CPE-1526)
+       updates the reactive `density` prop threaded to every consumer and persists it via
+       `settings.saveDensity`. `aria-pressed` + the `.on` class (same convention as CommandBar's
+       `.cmd.on`) reflect the CURRENT state so the control reads as a toggle, not a one-shot action. -->
+  <button
+    class="iconbtn"
+    class:on={density === "compact"}
+    title={density === "compact" ? "Switch to comfortable density" : "Switch to compact density"}
+    aria-label={density === "compact" ? "Switch to comfortable density" : "Switch to compact density"}
+    aria-pressed={density === "compact"}
+    on:click={() => dispatch("density", density === "compact" ? "comfortable" : "compact")}
+  >
+    <Icon name="density" size={18} />
   </button>
 
   {#if editingPath}

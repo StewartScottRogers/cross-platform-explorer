@@ -191,6 +191,11 @@
     <rect x="13" y="4" width="7" height="7" rx="1" />
     <rect x="4" y="13" width="7" height="7" rx="1" />
     <rect x="13" y="13" width="7" height="7" rx="1" />
+  {:else if name === "density"}
+    <!-- Row-density toggle (CPE-1529): three evenly-spaced horizontal rows — reads as "rows" whether
+         the current density is comfortable or compact; the toggle button's own pressed/active state
+         (not a second glyph) conveys which one is active. -->
+    <path d="M4 6h16M4 12h16M4 18h16" />
   {:else if name === "filter"}
     <path d="M4 5h16l-6 7v6l-4 2v-8z" />
   {:else if name === "more"}
