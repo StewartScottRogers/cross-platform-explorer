@@ -18,6 +18,10 @@ export type ViewMode = "details" | "list" | "icons" | "gallery";
 // only models + threads the value — no renderer reads it yet.
 export type DensityMode = "comfortable" | "compact";
 
+// Theme preference (CPE-1535, epic CPE-1492): only "system" and "light" are meaningful today — "system"
+// resolves to "light" until CPE-1493 ships a real dark palette. See theme.ts's resolveTheme.
+export type ThemeSetting = "system" | "light";
+
 export interface RecentFile {
   path: string;
   name: string;
