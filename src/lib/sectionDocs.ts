@@ -30,7 +30,8 @@ export type Section =
   | "network"
   | "split-join"
   | "compare"
-  | "drop-stack";
+  | "drop-stack"
+  | "appearance";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -117,6 +118,11 @@ const SECTION_DOC: Record<Section, string> = {
   // above, not a sidebar view you switch into (it's a small dockable panel toggled from its own handle),
   // but it still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
   "drop-stack": "34-drop-stack",
+  // CPE-1537 (epic CPE-1492, foundation slice): the Settings → Appearance section — the Theme
+  // (System/Light) selector CPE-1536 adds. Like drop-stack/split-join/compare above, not a sidebar view
+  // you switch into (it's a row on the Settings dialog), but it still earns its own doc page + registry
+  // entry per [[maintain-in-app-docs-library]].
+  appearance: "35-appearance",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
