@@ -22,10 +22,11 @@
    * silently share one chord. "Cancel" discards the candidate; both bindings stay exactly as they
    * were.
    *
-   * NOT LIVE YET: `App.svelte`'s `handleKeydown` does not consult this keymap — that migration is
-   * deliberately deferred to a future ticket (see the epic brief). A remap made here is saved and
-   * survives restart, but doesn't change what the key actually does until that migration lands;
-   * the note below the search bar says so.
+   * LIVE (CPE-1557): `App.svelte`'s `handleKeydown` now resolves every remappable built-in through this
+   * keymap (via `settings.keymapStore`, which `saveKeymap` publishes to), so a rebind/reset made here
+   * changes what the key actually does immediately — no restart. The contextual/shadowed keys the
+   * migration intentionally left alone (Enter=open, Escape=clear, "?"=cheat sheet) still can't be
+   * rebound to effect; everything else can.
    */
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
@@ -212,8 +213,8 @@
     </div>
 
     <div class="livenote">
-      Rebinding here saves your choice, but shortcuts don't use it yet — that wiring is coming in a
-      future update. For now every key still does what it always did.
+      Rebinding here takes effect right away — no restart needed. A few keys stay fixed: Enter (open),
+      Escape (clear selection), and <strong>?</strong> (this list).
     </div>
 
     <div class="groups" data-testid="keyboard-bindings-groups">

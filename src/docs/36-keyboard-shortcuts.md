@@ -38,10 +38,12 @@ silently end up sharing one chord.
 Each row has its own **Reset** button that restores that one action to its built-in default.
 **Reset all to defaults** at the top clears every override in one step.
 
-## Saved, but not live yet
+## Live immediately
 
-Every change here is saved immediately and survives a restart. Actually *using* your new chord to
-trigger the action is a separate piece of work still in progress — for now, every shortcut
-continues to behave exactly as it always has, regardless of what's shown in this dialog. The
-in-app note under the search box is a reminder of that while it's true. In the meantime, the
-quick "?" cheat sheet still reflects the shortcuts that are actually live.
+Every change here is saved and takes effect right away — no restart needed. Rebind an action and
+its new chord works on your very next keystroke; clear an action's chord and that shortcut simply
+stops firing until you set a new one.
+
+A few keys stay fixed and can't be rebound to effect, because they're context-sensitive rather
+than plain shortcuts: **Enter** (open the selected item), **Escape** (clear the selection), and
+**?** (open the quick shortcuts cheat sheet). Everything else in the list is fully remappable.

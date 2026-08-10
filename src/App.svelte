@@ -205,6 +205,11 @@
   import MediaQuickLook from "./lib/components/MediaQuickLook.svelte";
   import { buildMediaPlaylist, mediaQuickLookAction } from "./lib/mediaQuickLook";
   import * as settings from "./lib/settings";
+  import { keymapStore } from "./lib/settings";
+  // Remappable built-in shortcuts (CPE-1557, epic CPE-1484): handleKeydown resolves the pressed chord
+  // against the effective keymap so a user remap takes effect live. `chordFromEvent` is the permissive
+  // matcher (bare F5/F2/Delete/… included); `actionForChord` is exact-match, first-wins.
+  import { actionForChord, chordFromEvent, type ActionId } from "./lib/keymap";
   import type { ColorRule } from "./lib/colorRules";
   import ColorRulesDialog from "./lib/components/ColorRulesDialog.svelte";
   import SessionHistoryDialog from "./lib/components/SessionHistoryDialog.svelte";
@@ -5011,6 +5016,73 @@
   }
 
   // ---- keyboard ----
+
+  /**
+   * Run the handler for a remappable built-in action resolved from the effective keymap (CPE-1557, epic
+   * CPE-1484). Returns true when it consumed the event (the caller then returns); false for the actions
+   * this migration intentionally leaves to the contextual handlers below — `openItem` (Enter) and
+   * `clearSelection` (Escape) are context-sensitive, and `shortcutsCheatSheet` ("?") is shadowed by
+   * type-ahead today, so routing any of them here would change default behavior. Every `true` branch runs
+   * the exact code the old literal chord branch ran, so the default keymap is a no-op change.
+   */
+  function dispatchMappedAction(
+    id: ActionId,
+    event: KeyboardEvent,
+    pane: ReturnType<typeof activePaneState>,
+    inPaneB: boolean,
+  ): boolean {
+    switch (id) {
+      case "back": event.preventDefault(); goBack(); return true;
+      case "forward": event.preventDefault(); goForward(); return true;
+      case "up": event.preventDefault(); goUp(); return true;
+      case "refresh": event.preventDefault(); refresh(); return true;
+      case "editAddress": event.preventDefault(); editingPath = true; return true;
+      case "searchFolder": event.preventDefault(); navToolbar?.focusSearch(); return true;
+      case "findFiles": event.preventDefault(); if (!isHome && !archive) fileSearchOpen = true; return true;
+      case "contentSearch": event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return true;
+      case "instantSearch": event.preventDefault(); instantSearchOpen = true; return true;
+      case "newTab": event.preventDefault(); newTab(); return true;
+      case "closeTab": event.preventDefault(); closeTab(activeId); return true;
+      case "reopenTab": event.preventDefault(); reopenClosedTab(); return true;
+      case "nextTab": event.preventDefault(); cycleTab(1); return true;
+      case "prevTab": event.preventDefault(); cycleTab(-1); return true;
+      case "selectAll":
+        event.preventDefault();
+        // CPE-1373: keep the current lead (scroll position) instead of jumping to the last row.
+        pane.setSelection(selectAll(pane.visible.length, pane.selection.lead));
+        return true;
+      case "copy": event.preventDefault(); doCopy(inPaneB); return true;
+      case "cut": event.preventDefault(); doCut(inPaneB); return true;
+      case "paste": event.preventDefault(); doPaste(inPaneB); return true;
+      case "duplicate": event.preventDefault(); doDuplicate(inPaneB); return true;
+      case "addToDropStack": event.preventDefault(); doAddToDropStack(inPaneB); return true;
+      case "undo": event.preventDefault(); undo(); return true;
+      case "rename":
+        event.preventDefault();
+        if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0], inPaneB);
+        return true;
+      case "deleteToTrash": event.preventDefault(); askDelete(false); return true;
+      case "deletePermanent": event.preventDefault(); askDelete(true); return true;
+      case "newFolder": event.preventDefault(); newFolder(); return true;
+      case "copyAsPath": event.preventDefault(); doCopyPath(); return true;
+      case "properties": event.preventDefault(); openProperties(); return true;
+      case "toggleDetails":
+        event.preventDefault();
+        showDetails = !showDetails;
+        settings.saveShowDetails(showDetails);
+        return true;
+      case "popOutPreview": event.preventDefault(); popOutPreview(); return true;
+      case "commandPalette": event.preventDefault(); paletteOpen = true; return true;
+      case "docsHelp": event.preventDefault(); openDocs(currentSection()); return true;
+      // Contextual / shadowed — handled by the switch + type-ahead below, not here.
+      case "openItem":
+      case "clearSelection":
+      case "shortcutsCheatSheet":
+        return false;
+    }
+    return false;
+  }
+
   function handleKeydown(event: KeyboardEvent) {
     const target = event.target as HTMLElement | null;
     // Never hijack keys while typing in an editor, the path bar, or search.
@@ -5090,54 +5162,27 @@
     // then the full-screen media player; both are guarded to their own file kinds so they never collide.
     if (!ctrl && !event.altKey && !event.shiftKey && event.key === " " && (openQuickLook(inPaneB) || openMediaQuickLook(inPaneB))) { event.preventDefault(); return; }
 
-    if (ctrl && event.key.toLowerCase() === "l") { event.preventDefault(); editingPath = true; return; }
-    if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
-    // Ctrl+Shift+F (contentSearch) must be checked BEFORE the unguarded Ctrl+F (focusSearch) below —
-    // same shift-variant-first convention as the Ctrl+Shift+D/Ctrl+D and Ctrl+Shift+C/Ctrl+C pairs
-    // further down, otherwise Ctrl+Shift+F never reaches this branch (CPE-1551).
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
-    if (ctrl && event.key.toLowerCase() === "f") { event.preventDefault(); navToolbar?.focusSearch(); return; }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); newFolder(); return; }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); popOutPreview(); return; }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); paletteOpen = true; return; } // command palette (CPE-602)
-    if (ctrl && !event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); if (!isHome && !archive) fileSearchOpen = true; return; } // find files by name (CPE-603)
-    if (ctrl && !event.shiftKey && event.key.toLowerCase() === "k") { event.preventDefault(); instantSearchOpen = true; return; } // Instant Search — cross-volume index (CPE-1139); free binding, works anywhere (incl. Home)
-    if (ctrl && event.key.toLowerCase() === "t") { event.preventDefault(); newTab(); return; }
-    if (ctrl && event.key.toLowerCase() === "w") { event.preventDefault(); closeTab(activeId); return; }
-    if (ctrl && event.key === "Tab") { event.preventDefault(); cycleTab(event.shiftKey ? -1 : 1); return; }
-    if (ctrl && event.key.toLowerCase() === "a") {
-      event.preventDefault();
-      // CPE-1373: keep the current lead (scroll position) instead of jumping to the last row.
-      pane.setSelection(selectAll(pane.visible.length, pane.selection.lead));
-      return;
-    }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); doCopyPath(); return; }
-    // Don't hijack Ctrl+C when text is selected (e.g. in the Preview Pane) — let the browser copy it.
+    // --- Remappable built-in actions (CPE-1557, epic CPE-1484 "hotkey customization"). ---
+    // Every hard-coded chord branch that used to live here is now resolved through the EFFECTIVE keymap:
+    // `chordFromEvent` canonicalizes the keypress (permissively — bare F5/F2/Delete included),
+    // `actionForChord` maps it (exact match, first-wins) to a registry ActionId, and `dispatchMappedAction`
+    // runs that action's existing handler. With the DEFAULT keymap every default chord resolves to exactly
+    // the action it always fired, so this is a byte-for-byte no-op change; a remap saved via the bindings UI
+    // (which publishes to `keymapStore`) changes what a chord does LIVE, no restart. A chord the user
+    // cleared to "" never matches, so that action simply stops firing. Contextual/shadowed keys — Enter
+    // (open), Escape (clear), the "?" cheat sheet (shadowed by type-ahead below today) — are deliberately
+    // NOT routed here; `dispatchMappedAction` returns false for them so they fall through to the switch
+    // and type-ahead exactly as before.
+    //
+    // Two escape hatches stay AHEAD of the keymap so their exact prior behavior is preserved:
+    //   • Ctrl+C while text is selected must fall through to the browser's own copy (Preview Pane text),
+    //     returning before any later handler — unchanged from before.
+    //   • Alt+D is a secondary "edit address" accelerator the single-binding registry doesn't model
+    //     (Ctrl+L is the registry's editAddress), so it stays as a literal and keeps working.
     if (ctrl && event.key.toLowerCase() === "c" && !(window.getSelection()?.isCollapsed ?? true)) return;
-    if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(inPaneB); return; }
-    if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(inPaneB); return; }
-    if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(inPaneB); return; }
-    // Add to Drop Stack (CPE-1531, epic CPE-1489): fixed default hotkey, same as every other current
-    // built-in shortcut (Ctrl+Shift+N/O/T/F/P/C above) — not routed through the macro-hotkey system
-    // (that's for user-saved macros only, matched last below). Becomes user-remappable for free once
-    // CPE-1484 (hotkey customization) ships. Checked BEFORE plain Ctrl+D (duplicate) below — same
-    // Ctrl+Shift+<key>-before-Ctrl+<key> ordering as Ctrl+Shift+C vs Ctrl+C above, since `event.key`
-    // is "d" regardless of Shift and the bare Ctrl+D check doesn't itself exclude Shift.
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "d") { event.preventDefault(); doAddToDropStack(inPaneB); return; }
-    if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(inPaneB); return; }
-    if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
-
-    if (event.altKey && event.key === "ArrowLeft") { event.preventDefault(); goBack(); return; }
-    if (event.altKey && event.key === "ArrowRight") { event.preventDefault(); goForward(); return; }
-    if (event.altKey && event.key === "ArrowUp") { event.preventDefault(); goUp(); return; }
-    if (event.altKey && event.key === "Enter") { event.preventDefault(); openProperties(); return; }
-    if (event.altKey && event.key.toLowerCase() === "p") {
-      event.preventDefault();
-      showDetails = !showDetails;
-      settings.saveShowDetails(showDetails);
-      return;
-    }
+    if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
+    const mappedAction = actionForChord($keymapStore, chordFromEvent(event));
+    if (mappedAction && dispatchMappedAction(mappedAction, event, pane, inPaneB)) return;
 
     // Type-ahead find: a printable key with no modifier jumps to the next match.
     if (!ctrl && !event.altKey && event.key.length === 1 && /\S/.test(event.key)) {
@@ -5157,18 +5202,15 @@
       return;
     }
 
+    // NOTE: F1 (docsHelp), F5 (refresh), F2 (rename), Delete/Shift+Delete (deleteToTrash/deletePermanent),
+    // and "?" (shortcutsCheatSheet) used to live in this switch. The first four are now remappable and
+    // resolved above via the keymap dispatch (removed here to avoid double-firing). "?" stays UNMIGRATED:
+    // a bare "?" is caught by the type-ahead block above (length-1, no modifier) before it could ever reach
+    // this switch, so it never opened the cheat sheet here today — routing it through the keymap would
+    // CHANGE that default behavior, which this ticket forbids. (This case is left for documentation; it is,
+    // as before, unreachable for a bare "?".)
     switch (event.key) {
-      case "F1": event.preventDefault(); openDocs(currentSection()); break; // help for this section (CPE-596)
-      case "?": event.preventDefault(); shortcutsOpen = true; break; // keyboard shortcuts (moved off F1)
-      case "F5": event.preventDefault(); refresh(); break;
-      case "F2":
-        event.preventDefault();
-        if (pane.selectedEntries.length === 1) beginRename(pane.selectedEntries[0], inPaneB);
-        break;
-      case "Delete":
-        event.preventDefault();
-        askDelete(event.shiftKey); // Shift+Del = permanent, and is confirmed
-        break;
+      case "?": event.preventDefault(); shortcutsOpen = true; break; // keyboard shortcuts (shadowed by type-ahead — see note above)
       case "Escape":
         // CPE-1370 review: route through the active pane like every other case here, so Escape clears
         // pane B's selection when it's the one focused instead of always hard-clearing pane A's.

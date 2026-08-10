@@ -12,6 +12,7 @@
  * defensive — a corrupt or hand-edited value degrades to its default rather than
  * crashing the app on launch.
  */
+import { writable, type Writable } from "svelte/store";
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { invoke, unwrap } from "./invoke";
 import type {
@@ -163,6 +164,10 @@ export async function initSettings(): Promise<void> {
     }
   };
   state = mergeLegacy(fileObj, get);
+
+  // Publish the persisted keymap so handleKeydown (CPE-1557) uses the user's overrides from the first
+  // keystroke of this session, not the default seed the store was constructed with.
+  keymapStore.set(loadKeymap());
 
   // Persist the merged document so the migration is captured on disk.
   schedulePersist();
@@ -530,12 +535,25 @@ export const saveMacroBindings = (v: MacroBinding[]): void => write(KEYS.macroBi
 // Keymap action registry overrides (CPE-1547, epic CPE-1484 "hotkey customization"): the full
 // effective chord-per-action map (built-in default or user override). Loaded through the
 // tolerant `parseKeymap` so a corrupt/partial entry degrades to (or is backfilled with) defaults
-// rather than crashing. INERT — nothing reads/writes this yet; see keymap.ts.
+// rather than crashing.
 export const loadKeymap = (): Keymap => {
   const v = state[KEYS.keymap];
   return v === undefined ? defaultKeymap() : parseKeymap(JSON.stringify(v));
 };
-export const saveKeymap = (v: Keymap): void => write(KEYS.keymap, v);
+
+/**
+ * Reactive mirror of the effective keymap (CPE-1557, epic CPE-1484). `App.svelte`'s `handleKeydown`
+ * subscribes to this so a remap saved via the bindings UI changes what a key DOES immediately —
+ * without an app restart. Seeded to `defaultKeymap()` (byte-for-byte today's behavior); `initSettings()`
+ * publishes the persisted map at startup and every `saveKeymap` publishes here, so the dialog's existing
+ * `saveKeymap` call is the whole wiring — no dialog change needed.
+ */
+export const keymapStore: Writable<Keymap> = writable(defaultKeymap());
+
+export const saveKeymap = (v: Keymap): void => {
+  write(KEYS.keymap, v);
+  keymapStore.set(v);
+};
 
 // Integrity baselines (CPE-792, epic CPE-737): a per-folder checksum manifest, keyed by folder path.
 // Each manifest is loaded through the tolerant `parseManifest` so a corrupt entry degrades to a shorter
@@ -627,6 +645,7 @@ export const saveSpotlightFrecency = (v: Visit[]): void => write(KEYS.spotlightF
 /** Reset every stored preference to its default (used by the app Settings gear). */
 export function resetSettings(): void {
   state = {};
+  keymapStore.set(defaultKeymap()); // keep the reactive keymap (CPE-1557) in step with the wiped state
   schedulePersist();
 }
 
