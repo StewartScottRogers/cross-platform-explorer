@@ -72,6 +72,43 @@ pub struct EntryInfo {
     pub hidden: bool,
 }
 
+/// One item sitting in the OS Recycle Bin / Trash (epic CPE-1486, slice 1: browsable in-app Trash).
+///
+/// This DTO is deliberately `trash`-crate-free: the crate's `os_limited` listing API only exists on
+/// Windows + Linux (see `docs/design/SERVER-ARCHITECTURE.md`), so the adapter in `src-tauri/src/lib.rs`
+/// owns the `trash` dependency and maps its `TrashItem`/metadata into this plain, cross-platform-safe
+/// struct via [`trash_entry`].
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct TrashEntry {
+    /// Platform-specific identifier of the trashed item (Windows: `IShellItem` display name; Linux: the
+    /// `.trashinfo` path) — opaque to the frontend, round-tripped back for restore/purge.
+    pub id: String,
+    pub name: String,
+    /// Full original path (parent + name) the item was trashed from.
+    pub original_path: String,
+    /// Unix seconds since epoch when the item was moved to the trash.
+    pub time_deleted: i64,
+    /// Size in bytes, when known. `None` for a directory (the `trash` crate reports a directory's own
+    /// trash-metadata as an entry count, not a byte size) or when metadata couldn't be read for this item.
+    pub size: Option<u64>,
+}
+
+/// Pure mapping from plain fields to a [`TrashEntry`] — no `trash` crate dependency, so it's
+/// unit-testable in `cpe-server` even off Windows/Linux. The adapter passes `original_parent`/`name`
+/// separately (joining them here) because that's the shape `trash::TrashItem` exposes; keeping the join
+/// on this side means the join logic itself is covered by a plain unit test.
+pub fn trash_entry(
+    id: String,
+    name: String,
+    original_parent: String,
+    time_deleted: i64,
+    size: Option<u64>,
+) -> TrashEntry {
+    let original_path = Path::new(&original_parent).join(&name).to_string_lossy().to_string();
+    TrashEntry { id, name, original_path, time_deleted, size }
+}
+
 /// A sidebar quick-access location (special folder or drive).
 #[derive(Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
@@ -154,6 +191,32 @@ mod tests {
         assert!(!info.is_dir && info.size == 5);
         assert!(entry_info(&dir.join("nope").to_string_lossy()).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trash_entry_joins_parent_and_name_into_original_path() {
+        let e = trash_entry(
+            "id-123".into(),
+            "photo.png".into(),
+            "/home/user/Pictures".into(),
+            1_700_000_000,
+            Some(4096),
+        );
+        assert_eq!(e.id, "id-123");
+        assert_eq!(e.name, "photo.png");
+        assert_eq!(
+            Path::new(&e.original_path),
+            Path::new("/home/user/Pictures").join("photo.png")
+        );
+        assert_eq!(e.time_deleted, 1_700_000_000);
+        assert_eq!(e.size, Some(4096));
+    }
+
+    #[test]
+    fn trash_entry_size_is_optional() {
+        // Directories (and items whose per-item metadata couldn't be read) carry no byte size.
+        let e = trash_entry("id-456".into(), "Old Folder".into(), "/home/user".into(), 42, None);
+        assert_eq!(e.size, None);
     }
 
     #[test]
