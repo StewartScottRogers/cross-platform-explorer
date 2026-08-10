@@ -15,10 +15,12 @@ import {
   loadDensity, saveDensity,
   loadTheme, saveTheme,
   loadContrast, saveContrast,
+  loadKeymap, saveKeymap,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
 import type { ActiveMetaColumn } from "./columns";
+import { ACTIONS, defaultKeymap, setChord } from "./keymap";
 
 describe("auto-restore session settings (CPE-789)", () => {
   it("defaults to off with no saved session", () => {
@@ -225,6 +227,42 @@ describe("contrast (CPE-1544)", () => {
   it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
     saveContrast("extreme" as unknown as ReturnType<typeof loadContrast>);
     expect(loadContrast()).toBe("off");
+  });
+});
+
+// CPE-1547 (epic CPE-1484 "hotkey customization"): the persisted keymap — the full effective
+// chord-per-action map (built-in default or user override). Nothing consumes this yet (inert
+// foundation); mirrors the macroBindings/density accessors' default-on-missing, round-trip, and
+// corrupt-degrades-to-default coverage shape.
+describe("keymap (CPE-1547)", () => {
+  it("defaults to defaultKeymap() with nothing saved", () => {
+    expect(loadKeymap()).toEqual(defaultKeymap());
+  });
+
+  it("round-trips an overridden keymap through save/load", () => {
+    const km = setChord(defaultKeymap(), "copy", "Ctrl+Alt+C");
+    saveKeymap(km);
+    expect(loadKeymap()).toEqual(km);
+    saveKeymap(defaultKeymap()); // reset for other tests
+  });
+
+  it("degrades a corrupt stored value to defaults rather than crashing", () => {
+    saveKeymap({ garbage: true } as unknown as ReturnType<typeof loadKeymap>);
+    expect(loadKeymap()).toEqual(defaultKeymap());
+  });
+
+  it("drops an unknown action id and an invalid chord, backfilling their defaults", () => {
+    saveKeymap({
+      copy: "Ctrl+Alt+C",
+      notARealAction: "Ctrl+Alt+Z",
+      cut: "Ctrl+Alt", // invalid — modifier-only
+    } as unknown as ReturnType<typeof loadKeymap>);
+    const loaded = loadKeymap();
+    expect(loaded.copy).toBe("Ctrl+Alt+C");
+    expect("notARealAction" in loaded).toBe(false);
+    const cutDef = ACTIONS.find((a) => a.id === "cut")!;
+    expect(loaded.cut).toBe(cutDef.defaultChord);
+    saveKeymap(defaultKeymap()); // reset for other tests
   });
 });
 

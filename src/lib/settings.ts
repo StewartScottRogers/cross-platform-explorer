@@ -39,6 +39,8 @@ import { parseCommands, serializeCommands } from "./userCommands";
 import type { UserCommand } from "./userCommands";
 import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
+import { defaultKeymap, parseKeymap } from "./keymap";
+import type { Keymap } from "./keymap";
 import { parseFrecent, serializeFrecent } from "./spotlightFrecency";
 import type { Visit, ContentEmbedderConfig, CopilotConfig } from "./bindings.gen";
 import type { DropStackEntry } from "./dropStack";
@@ -69,6 +71,7 @@ export const KEYS = {
   backupJobs: "cpe.backupJobs",
   userCommands: "cpe.userCommands",
   macroBindings: "cpe.macroBindings",
+  keymap: "cpe.keymap",
   watchedFolders: "cpe.watchedFolders",
   backupHistory: "cpe.backupHistory",
   autoRestore: "cpe.autoRestore",
@@ -514,6 +517,16 @@ export const loadMacroBindings = (): MacroBinding[] => {
   return v === undefined ? [] : parseBindings(serializeBindings(v as MacroBinding[]));
 };
 export const saveMacroBindings = (v: MacroBinding[]): void => write(KEYS.macroBindings, v);
+
+// Keymap action registry overrides (CPE-1547, epic CPE-1484 "hotkey customization"): the full
+// effective chord-per-action map (built-in default or user override). Loaded through the
+// tolerant `parseKeymap` so a corrupt/partial entry degrades to (or is backfilled with) defaults
+// rather than crashing. INERT — nothing reads/writes this yet; see keymap.ts.
+export const loadKeymap = (): Keymap => {
+  const v = state[KEYS.keymap];
+  return v === undefined ? defaultKeymap() : parseKeymap(JSON.stringify(v));
+};
+export const saveKeymap = (v: Keymap): void => write(KEYS.keymap, v);
 
 // Integrity baselines (CPE-792, epic CPE-737): a per-folder checksum manifest, keyed by folder path.
 // Each manifest is loaded through the tolerant `parseManifest` so a corrupt entry degrades to a shorter
