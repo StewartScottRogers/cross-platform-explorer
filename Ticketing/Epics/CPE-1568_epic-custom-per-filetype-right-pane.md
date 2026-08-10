@@ -2,7 +2,7 @@
 id: CPE-1568
 title: "EPIC: Custom per-file-type right pane — view + sensible actions tailored to each file type"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -41,6 +41,25 @@ The spike delivers: (1) a catalog of common file types by extension/family with 
 actions" means for each; (2) a coverage matrix vs the existing providers above; (3) the prioritized GAP list;
 (4) a proposed registry/architecture for type→(viewer,actions) so new types plug in cleanly; (5) headless-first
 slices. Slices are filed as `CPE-NNN` child tickets once the spike returns and the epic is activated.
+
+## Spike-locked plan (2026-08-10) — see Library `filetype-right-pane-coverage-2026-08-10`
+The preview system has 20 providers in `src/lib/preview/provider.ts` but **no per-provider `actions` field** — that's
+the unlock. **Architecture:** add a declarative `actions?: PreviewAction[]` to `PreviewProvider`
+(`{id, labelKey ($t), icon, enabled?(ctx), run(ctx)}`) + a generic **action bar** in `PreviewPane.svelte` (styled like
+the existing `.preview-edit-bar`); actions call through `invoke.ts`. Backend logic in `cpe-server` + thin command; large
+payloads stream. Do NOT fork the registry or fold in ContextMenu's boolean-prop pattern (separate, non-blocking untangle).
+
+**Child slices (decompose just-in-time; slice 1 filed as CPE-1570):**
+1. **CPE-1570** — action-bar groundwork (types + render + migrate Edit/Wrap/JWT/Cert buttons as the worked example). *Unblocker; all others depend on it.*
+2. JSON tree view + actions (copy path/value, format, validate).
+3. Single-file image actions (rotate/convert/copy/set-as — reuse CPE-1093 batch-media backend, drop the ≥2 gate).
+4. Archive Extract/Extract-to/Check-safety surfaced in the pane.
+5. Font glyph grid + copy-glyph/install (pure-Rust font parse; check deps first).
+6. Notebook `.ipynb` viewer (pure-JS cell render — zero coverage today).
+7. YAML/TOML structured view + validate (verify serde_yaml/toml already deps).
+8. Log viewer (level highlight/filter) — stretch.
+
+**Excluded (owned elsewhere):** EXE/DLL/.class/.jar internals = CPE-1561 (Binary Studio); full 3D render = CPE-118.
 
 ## Constraints
 PURPOSE.md fast/small/predictable: viewers stream/cap; no heavy deps in the core (heavy format engines go via
