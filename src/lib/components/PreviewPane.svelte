@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, onDestroy } from "svelte";
+  import { get } from "svelte/store";
   import type { DirEntry } from "../types";
   import { pickProvider, mediaType, visibleActions, type ArchiveEntry, type PreviewAction, type PreviewActionCtx } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
@@ -20,6 +21,7 @@
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
   import JwtPreview from "./JwtPreview.svelte";
+  import JsonTree from "./JsonTree.svelte";
   import CertPreview from "./CertPreview.svelte";
   import EmailPreview from "./EmailPreview.svelte";
   import IcalPreview from "./IcalPreview.svelte";
@@ -153,6 +155,46 @@
     jwtValues = v;
   }
 
+  // JSON tree (CPE-1573, epic CPE-1568): the tree only reports a value when the user clicks a node (see
+  // `JsonTree.svelte`'s `setFocus`), unlike JWT's always-reactive `onValues` — so a stale focus from a
+  // previously previewed file must be cleared explicitly on entry change, or "Copy path" could stay
+  // enabled pointing at the wrong file.
+  let jsonValues: Record<string, string> = {};
+  function onJsonValues(v: Record<string, string>) {
+    jsonValues = v;
+  }
+  let jsonValuesEntryPath = "";
+  $: if (entry?.path !== jsonValuesEntryPath) {
+    jsonValuesEntryPath = entry?.path ?? "";
+    jsonValues = {};
+  }
+
+  // Collapse-all/expand-all (CPE-1573): a one-shot command sent DOWN into the mounted JsonTree via
+  // `ctx.dispatch` — the counterpart to the `values` bags above, which only send data UP. `token` bumps
+  // on every dispatch so repeating the same command id still re-triggers (see JsonTree's command prop).
+  let jsonCommand: { id: string; token: number } | null = null;
+  let jsonCommandToken = 0;
+  function jsonDispatch(commandId: string) {
+    jsonCommandToken += 1;
+    jsonCommand = { id: commandId, token: jsonCommandToken };
+  }
+
+  // Transient action-bar status message (CPE-1573) — e.g. the JSON Validate action's parse result.
+  // `run()` lives in the framework-free `preview/provider.ts`, so it hands PreviewPane an i18n key +
+  // params instead of pre-rendered text; PreviewPane (which has `$t`) resolves the string here.
+  let actionMessage = "";
+  let actionMessageIsError = false;
+  let actionMessageTimer: ReturnType<typeof setTimeout> | undefined;
+  const ACTION_MESSAGE_ERROR_KEYS = new Set(["pv.json.invalid", "pv.json.formatError"]);
+  function showActionMessage(key: string, params?: Record<string, string | number>) {
+    actionMessage = get(t)(key, params);
+    actionMessageIsError = ACTION_MESSAGE_ERROR_KEYS.has(key);
+    if (actionMessageTimer !== undefined) clearTimeout(actionMessageTimer);
+    actionMessageTimer = setTimeout(() => {
+      actionMessage = "";
+    }, 4000);
+  }
+
   async function copyToClipboard(value: string): Promise<void> {
     try {
       await navigator.clipboard.writeText(value);
@@ -166,9 +208,11 @@
     ? {
         entry,
         text: needsText ? text : undefined,
-        values: provider.kind === "jwt" ? jwtValues : {},
+        values: provider.kind === "jwt" ? jwtValues : provider.kind === "json" ? jsonValues : {},
         copyToClipboard,
         invoke: ipcInvoke,
+        dispatch: provider.kind === "json" ? jsonDispatch : undefined,
+        showMessage: showActionMessage,
       }
     : null;
   $: actions = actionCtx ? visibleActions(provider, actionCtx) : [];
@@ -758,6 +802,16 @@
   // The `<pre>`-rendered previews where wrapping applies (JSON + text/code); markdown + tables don't.
   $: isPreText = provider.kind === "json" || provider.kind === "text";
 
+  // ---- JSON tree view (CPE-1573, epic CPE-1568) ----
+  // The collapsible tree is the default view; a toggle in the edit bar switches to the plain
+  // pretty-printed raw text (the pane's pre-CPE-1573 behavior), remembered like word-wrap above.
+  const JSON_VIEW_KEY = "cpe.jsonTreeView";
+  let jsonTreeView = lsBool(JSON_VIEW_KEY, true);
+  function setJsonView(tree: boolean) {
+    jsonTreeView = tree;
+    lsSet(JSON_VIEW_KEY, tree ? "1" : "0");
+  }
+
   // ---- editing ----
   let editing = false;
   let draft = "";
@@ -918,6 +972,13 @@
           {$t(action.labelKey)}
         </button>
       {/each}
+      {#if actionMessage}
+        <!-- Transient status from an action that needs to surface more than a checkmark (e.g. JSON
+             Validate's parse result, CPE-1573). -->
+        <span class="action-msg" class:err={actionMessageIsError} data-testid="preview-action-message">
+          {actionMessage}
+        </span>
+      {/if}
     </div>
   {/if}
   {#if modelInfo}
@@ -1099,7 +1160,21 @@
     {:else}
       {#if provider.editable}
         <div class="preview-edit-bar">
-          {#if isPreText}
+          {#if provider.kind === "json"}
+            <!-- Tree/Raw view toggle (CPE-1573, epic CPE-1568): the collapsible tree is the default;
+                 Raw keeps the pre-CPE-1573 pretty-printed `<pre>` available. -->
+            <button
+              class="editbtn"
+              class:on={jsonTreeView}
+              aria-pressed={jsonTreeView}
+              on:click={() => setJsonView(true)}>{$t("pv.json.viewTree")}</button>
+            <button
+              class="editbtn"
+              class:on={!jsonTreeView}
+              aria-pressed={!jsonTreeView}
+              on:click={() => setJsonView(false)}>{$t("pv.json.viewRaw")}</button>
+          {/if}
+          {#if isPreText && !(provider.kind === "json" && jsonTreeView)}
             <button class="editbtn wrapbtn" class:on={wrapLines} title="Wrap long lines" aria-label="Wrap long lines" aria-pressed={wrapLines} on:click={toggleWrap}>↩</button>
           {/if}
           <button class="editbtn" on:click={startEdit}>{$t("pv.edit")}</button>
@@ -1119,7 +1194,15 @@
           {/if}
         </div>
       {:else if provider.kind === "json"}
-        <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}>{prettyJson(text)}</pre>
+        {#if jsonTreeView}
+          <!-- Collapsible tree (CPE-1573, epic CPE-1568) — {#key} remounts per file so a previous
+               file's expand/collapse state never leaks into the next one. -->
+          {#key entry?.path}
+            <JsonTree text={text} command={jsonCommand} onValues={onJsonValues} />
+          {/key}
+        {:else}
+          <pre class="preview-text" class:nowrap={!wrapLines} bind:this={textContentEl}>{prettyJson(text)}</pre>
+        {/if}
       {:else if provider.kind === "markdown"}
         <!-- mdHtml is DOMPurify-sanitized (lazy renderer), safe to inject. -->
         <div class="preview-markdown" bind:this={textContentEl}>{@html mdHtml}</div>
@@ -1471,6 +1554,10 @@
   .editbtn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .editbtn:disabled { opacity: 0.5; }
   .edit-err { color: var(--danger); font-size: 12px; }
+  /* Transient action-bar status message (CPE-1573) — e.g. JSON Validate's result. Theme-only colours
+     (MENUS.md): neutral text by default, `--danger` only for an actual error. */
+  .action-msg { font-size: 12px; color: var(--text-dim); }
+  .action-msg.err { color: var(--danger); }
   .preview-editor {
     flex: 1;
     width: 100%;
