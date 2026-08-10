@@ -151,3 +151,16 @@ describe("SettingsDialog Appearance section — Contrast control (CPE-1545)", ()
     expect(document.documentElement.dataset.theme).toBe("hc-dark");
   });
 });
+
+describe("SettingsDialog Keyboard shortcuts section (CPE-1548)", () => {
+  it("the viewer is closed by default", async () => {
+    render(SettingsDialog);
+    expect(screen.queryByRole("dialog", { name: "Keyboard shortcuts" })).toBeNull();
+  });
+
+  it("clicking 'Customize shortcuts…' opens the KeyboardBindingsDialog viewer", async () => {
+    render(SettingsDialog);
+    await fireEvent.click(screen.getByTestId("keyboard-shortcuts-btn"));
+    expect(screen.getByRole("dialog", { name: "Keyboard shortcuts" })).toBeTruthy();
+  });
+});

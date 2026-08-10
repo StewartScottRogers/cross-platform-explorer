@@ -13,6 +13,7 @@ import {
   parseKeymap,
   normalizeChord,
   chordFromEvent,
+  formatChord,
   isActionId,
   type Keymap,
   type ActionId,
@@ -303,5 +304,35 @@ describe("keymap serializeKeymap / parseKeymap round-trip (CPE-1547)", () => {
     const km: Keymap = { ...defaultKeymap(), refresh: "F5" };
     const parsed = parseKeymap(serializeKeymap(km));
     expect(parsed.refresh).toBe("F5");
+  });
+});
+
+describe("keymap formatChord (CPE-1548)", () => {
+  it("renders an unbound chord as 'Unbound'", () => {
+    expect(formatChord("")).toBe("Unbound");
+  });
+
+  it("substitutes arrow keys with their glyph, keeping modifiers as-is", () => {
+    expect(formatChord("Alt+ArrowLeft")).toBe("Alt+←");
+    expect(formatChord("Alt+ArrowRight")).toBe("Alt+→");
+    expect(formatChord("Alt+ArrowUp")).toBe("Alt+↑");
+  });
+
+  it("substitutes Escape with 'Esc' and Delete with 'Del'", () => {
+    expect(formatChord("Escape")).toBe("Esc");
+    expect(formatChord("Shift+Delete")).toBe("Shift+Del");
+  });
+
+  it("passes through a chord with no display substitution unchanged", () => {
+    expect(formatChord("Ctrl+Shift+F")).toBe("Ctrl+Shift+F");
+    expect(formatChord("F5")).toBe("F5");
+    expect(formatChord("Enter")).toBe("Enter");
+  });
+
+  it("is purely cosmetic — the source ActionDef.defaultChord is untouched by formatting it", () => {
+    const before = ACTIONS.map((a) => a.defaultChord);
+    for (const a of ACTIONS) formatChord(a.defaultChord);
+    const after = ACTIONS.map((a) => a.defaultChord);
+    expect(after).toEqual(before);
   });
 });
