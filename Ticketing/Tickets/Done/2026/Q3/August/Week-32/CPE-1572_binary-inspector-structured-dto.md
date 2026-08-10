@@ -2,7 +2,7 @@
 id: CPE-1572
 title: "Binary Inspector slice 1: structured binary-info DTO + ELF/Mach-O parity (extend binary_preview.rs)"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Backend
 epic: CPE-1562
