@@ -14,7 +14,15 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import SettingsDialog from "./SettingsDialog.svelte";
-import { loadTheme, saveTheme, loadContrast, saveContrast, resetSettings } from "../settings";
+import {
+  loadTheme,
+  saveTheme,
+  loadContrast,
+  saveContrast,
+  resetSettings,
+  loadNavigationModeEnabled,
+  saveNavigationModeEnabled,
+} from "../settings";
 
 const { invoke, Channel } = vi.hoisted(() => ({
   invoke: vi.fn(async (_cmd?: string, _args?: unknown) => null as unknown),
@@ -149,6 +157,36 @@ describe("SettingsDialog Appearance section — Contrast control (CPE-1545)", ()
 
     expect(loadTheme()).toBe("dark");
     expect(document.documentElement.dataset.theme).toBe("hc-dark");
+  });
+});
+
+// CPE-1552 (epic CPE-1487 "keyboard navigation mode"): the Settings toggle that will gate the
+// whole opt-in vim-modal keyboard layer. OFF by default; this ticket only wires the checkbox to
+// the persisted setting — nothing in the running app reads it yet.
+describe("SettingsDialog Navigation Mode section (CPE-1552)", () => {
+  it("the toggle renders unchecked by default", async () => {
+    render(SettingsDialog);
+    const checkbox = screen.getByTestId("navigation-mode-toggle") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+    expect(loadNavigationModeEnabled()).toBe(false);
+  });
+
+  it("reflects a persisted on value on mount", async () => {
+    saveNavigationModeEnabled(true);
+    render(SettingsDialog);
+    const checkbox = screen.getByTestId("navigation-mode-toggle") as HTMLInputElement;
+    expect(checkbox.checked).toBe(true);
+  });
+
+  it("toggling calls saveNavigationModeEnabled(true)", async () => {
+    render(SettingsDialog);
+    const checkbox = screen.getByTestId("navigation-mode-toggle") as HTMLInputElement;
+    expect(checkbox.checked).toBe(false);
+
+    await fireEvent.click(checkbox);
+
+    expect(checkbox.checked).toBe(true);
+    expect(loadNavigationModeEnabled()).toBe(true);
   });
 });
 

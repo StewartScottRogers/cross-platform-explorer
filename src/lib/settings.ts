@@ -80,6 +80,7 @@ export const KEYS = {
   paneBPath: "cpe.paneBPath",
   networkLocations: "cpe.networkLocations",
   nativeBridgeEnabled: "cpe.nativeBridgeEnabled",
+  navigationModeEnabled: "cpe.navigationModeEnabled",
   vaultRememberPassphrases: "cpe.vaultRememberPassphrases",
   spotlightHotkeyEnabled: "cpe.spotlightHotkeyEnabled",
   spotlightHotkeyChord: "cpe.spotlightHotkeyChord",
@@ -336,6 +337,14 @@ export const saveNetworkLocations = (v: string[]) => write(KEYS.networkLocations
 // the plain explorer never touches native file metadata unless the user opts in here.
 export const loadNativeBridgeEnabled = (): boolean => read(KEYS.nativeBridgeEnabled, false, isBool);
 export const saveNativeBridgeEnabled = (v: boolean) => write(KEYS.nativeBridgeEnabled, v);
+
+// Navigation Mode opt-in (CPE-1552, epic CPE-1487 "keyboard navigation mode"): gates the whole
+// opt-in vim-modal keyboard layer (h/j/k/l motion, gg/G jump, v visual-range select, d/y/p
+// cut/copy/paste, /  and : mini-command). Off by default — the plain explorer's fast/small/
+// predictable core is untouched unless the user opts in here. Landing this ticket is INERT: the
+// setting exists but nothing reads it yet (CPE-1556 wires App.svelte's handleKeydown to check it).
+export const loadNavigationModeEnabled = (): boolean => read(KEYS.navigationModeEnabled, false, isBool);
+export const saveNavigationModeEnabled = (v: boolean) => write(KEYS.navigationModeEnabled, v);
 
 // Remember-vault-passphrases opt-in (CPE-1250, epic CPE-738): drives the DEFAULT state of the "Remember
 // passphrase in this device's keychain" checkbox in the vault-create dialog (VaultCreateDialog.svelte) and
