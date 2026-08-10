@@ -111,6 +111,8 @@
   import Spotlight from "./lib/components/Spotlight.svelte";
   import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
+  import DropStackPanel from "./lib/components/DropStackPanel.svelte";
+  import { initDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
@@ -5551,6 +5553,9 @@
     // Tag store (CPE-636): load persisted tags/labels once so rows can show chips + tints. Idle
     // (empty) until something is actually tagged, so the plain explorer is unaffected.
     initTags().catch(() => {});
+    // Drop Stack (CPE-1530/1532): load the persisted shelf once so the panel shows what survived a
+    // restart, not just items added this session. Idle (empty) until something is shelved.
+    initDropStack();
     listen<TransferReport>("transfer://done", (e) => {
       const r = e.payload;
       // Archive compress/extract (CPE-1184) queue through the same engine but resolve via the
@@ -6670,6 +6675,7 @@
 {/if}
 
 <TransferPanel />
+<DropStackPanel />
 
 {#if quickLook}
   <QuickLook

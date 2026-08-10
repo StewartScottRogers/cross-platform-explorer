@@ -29,7 +29,8 @@ export type Section =
   | "structured-previews"
   | "network"
   | "split-join"
-  | "compare";
+  | "compare"
+  | "drop-stack";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -111,6 +112,11 @@ const SECTION_DOC: Record<Section, string> = {
   // dialog without one; this ticket closes that pre-existing gap since it needs somewhere to document the
   // new image sub-views anyway.
   compare: "32-compare",
+  // CPE-1532 (epic CPE-1489, parent CPE-1530's store): the Drop Stack panel — the bottom-left toggle
+  // handle + docked list of shelved items with per-item remove and clear-all. Like split-join/compare
+  // above, not a sidebar view you switch into (it's a small dockable panel toggled from its own handle),
+  // but it still earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
+  "drop-stack": "34-drop-stack",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
