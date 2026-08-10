@@ -168,9 +168,11 @@ objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSAccessibility"]
 # interface. `zbus` is pure-Rust D-Bus (no libdbus / no C build tooling) — the same crate the repo already
 # trusts transitively for the Linux keyring (`keyring`'s `sync-secret-service`, src-tauri/Cargo.toml).
 # The `zbus::blocking` API (default `blocking-api` feature over the default `async-io` runtime) gives the
-# synchronous one-shot form (no async event loop); matches the app's shipped zbus 5.
+# synchronous one-shot form (no async event loop). Pinned to 5.17 so the standalone `crates/server` build
+# resolves the SAME zbus 5.17.0 the shipped app (src-tauri/Cargo.lock) already pins via keyring — no
+# 5.17→5.19 drift between the two lockfiles / CI legs.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "5"
+zbus = "5.17"
 
 # Windows registry access for the shell-citizen integration — writing/removing the "Open in CPE"
 # context-menu entries under HKCU (CPE-1020, epic CPE-712). Windows-only; same version the app adapter
