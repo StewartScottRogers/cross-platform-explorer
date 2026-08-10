@@ -6,6 +6,12 @@
 
 use std::fs;
 
+use crate::bin_arch::{self, BinaryArch};
+use crate::model::{
+    BinaryExport, BinaryFormat, BinaryImport, BinaryInfo, BinarySection, BinarySymbol,
+    MAX_BINARY_LIST_ENTRIES,
+};
+
 /// Classic hex + ASCII dump of the first `max` bytes (CPE-214). Reads at most `max` bytes so a multi-GB
 /// binary is never slurped into memory (CPE-633).
 pub fn hex_dump(path: &str, max: usize) -> Result<String, String> {
@@ -87,6 +93,231 @@ pub fn pe_info(path: &str) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// Cap on the number of Mach-O fat/universal slices [`binary_info`] will walk into looking for the
+/// first thin slice it can parse. `goblin::mach::MultiArch`'s own iterator trusts the file's
+/// `nfat_arch` header field directly (unlike [`crate::bin_arch`]'s own fat-header walk, which caps
+/// it), so a hostile file claiming billions of slices would otherwise spin the loop that many times
+/// (each iteration cheap, but 2^32 of them is not) before giving up — this bounds that scan the same
+/// way `bin_arch::detect_arch` bounds its own.
+const MAX_FAT_SLICES_TO_INSPECT: usize = 64;
+
+/// Human-readable architecture label(s) for a [`BinaryArch`] — a single label, or (for a Mach-O
+/// fat/universal binary) every slice's label joined with ", ".
+fn arch_label(arch: BinaryArch) -> String {
+    match arch {
+        BinaryArch::Single(info) => info.arch.label().to_string(),
+        BinaryArch::Fat(slices) => {
+            if slices.is_empty() {
+                "Unknown (empty fat header)".to_string()
+            } else {
+                slices
+                    .iter()
+                    .take(MAX_BINARY_LIST_ENTRIES)
+                    .map(|s| s.arch.label())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        }
+    }
+}
+
+/// Structured summary of a PE, ELF, or Mach-O binary (CPE-1572, epic CPE-1562 "Binary Inspector"
+/// slice 1): format + architecture (via [`bin_arch::detect_arch`]) plus bounded Sections / Imports /
+/// Exports / Symbols tables, via goblin — parity across all three formats. Added alongside
+/// [`pe_info`] (which keeps serving its existing text-summary callers) rather than replacing it.
+///
+/// Never panics on malformed input: every list is built skip-on-error per entry and capped at
+/// [`MAX_BINARY_LIST_ENTRIES`], and a Mach-O fat/universal binary's slice scan is itself bounded
+/// (see [`MAX_FAT_SLICES_TO_INSPECT`]). The only `Err` cases are an unreadable file and a header
+/// goblin can't recognise as PE/ELF/Mach-O at all — everything else degrades to a partial (or empty)
+/// [`BinaryInfo`].
+pub fn binary_info(path: &str) -> Result<BinaryInfo, String> {
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    let arch = bin_arch::detect_arch(&bytes).map(arch_label);
+    match goblin::Object::parse(&bytes).map_err(|e| e.to_string())? {
+        goblin::Object::PE(pe) => Ok(pe_binary_info(&pe, arch)),
+        goblin::Object::Elf(elf) => Ok(elf_binary_info(&elf, arch)),
+        goblin::Object::Mach(mach) => Ok(mach_binary_info(&mach, arch)),
+        _ => Err("not a PE, ELF, or Mach-O binary".to_string()),
+    }
+}
+
+fn pe_binary_info(pe: &goblin::pe::PE, arch: Option<String>) -> BinaryInfo {
+    let sections = pe
+        .sections
+        .iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|s| BinarySection {
+            name: String::from_utf8_lossy(&s.name).trim_end_matches('\0').to_string(),
+            address: s.virtual_address as u64,
+            size: s.virtual_size as u64,
+        })
+        .collect();
+    let imports = pe
+        .imports
+        .iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|i| BinaryImport { name: i.name.to_string(), library: Some(i.dll.to_string()) })
+        .collect();
+    let exports = pe
+        .exports
+        .iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|e| BinaryExport {
+            name: e.name.unwrap_or("<unnamed>").to_string(),
+            address: Some(e.rva as u64),
+        })
+        .collect();
+    BinaryInfo {
+        format: BinaryFormat::Pe,
+        arch,
+        is_64: pe.is_64,
+        sections,
+        imports,
+        exports,
+        // A PE EXE/DLL image carries no equivalent symbol table (see `BinarySymbol`'s doc comment).
+        symbols: Vec::new(),
+    }
+}
+
+fn elf_binary_info(elf: &goblin::elf::Elf, arch: Option<String>) -> BinaryInfo {
+    let sections = elf
+        .section_headers
+        .iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|sh| BinarySection {
+            name: elf.shdr_strtab.get_at(sh.sh_name).unwrap_or("").to_string(),
+            address: sh.sh_addr,
+            size: sh.sh_size,
+        })
+        .collect();
+
+    // ELF has no separate per-symbol "library" concept in its dynamic symbol table: an undefined
+    // (imported) global/weak symbol is an import, a defined one is an export (CPE-1572).
+    let mut imports = Vec::new();
+    let mut exports = Vec::new();
+    for sym in elf.dynsyms.iter() {
+        if imports.len() >= MAX_BINARY_LIST_ENTRIES && exports.len() >= MAX_BINARY_LIST_ENTRIES {
+            break;
+        }
+        let Some(name) = elf.dynstrtab.get_at(sym.st_name) else { continue };
+        if name.is_empty() {
+            continue;
+        }
+        if sym.is_import() {
+            if imports.len() < MAX_BINARY_LIST_ENTRIES {
+                imports.push(BinaryImport { name: name.to_string(), library: None });
+            }
+        } else if exports.len() < MAX_BINARY_LIST_ENTRIES {
+            exports.push(BinaryExport { name: name.to_string(), address: Some(sym.st_value) });
+        }
+    }
+
+    let symbols = elf
+        .syms
+        .iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .filter_map(|sym| {
+            let name = elf.strtab.get_at(sym.st_name)?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(BinarySymbol { name: name.to_string(), address: Some(sym.st_value) })
+        })
+        .collect();
+
+    BinaryInfo {
+        format: BinaryFormat::Elf,
+        arch,
+        is_64: elf.is_64,
+        sections,
+        imports,
+        exports,
+        symbols,
+    }
+}
+
+fn mach_binary_info(mach: &goblin::mach::Mach, arch: Option<String>) -> BinaryInfo {
+    match mach {
+        goblin::mach::Mach::Binary(macho) => macho_binary_info(macho, arch),
+        goblin::mach::Mach::Fat(multi) => {
+            // Parity for a fat/universal binary: summarize the first thin Mach-O slice this bounded
+            // scan can actually parse, rather than merging every architecture's tables together into
+            // one confusing combined list.
+            for entry in multi.into_iter().take(MAX_FAT_SLICES_TO_INSPECT) {
+                if let Ok(goblin::mach::SingleArch::MachO(macho)) = entry {
+                    return macho_binary_info(&macho, arch);
+                }
+            }
+            BinaryInfo {
+                format: BinaryFormat::MachO,
+                arch,
+                is_64: false,
+                sections: Vec::new(),
+                imports: Vec::new(),
+                exports: Vec::new(),
+                symbols: Vec::new(),
+            }
+        }
+    }
+}
+
+fn macho_binary_info(macho: &goblin::mach::MachO, arch: Option<String>) -> BinaryInfo {
+    let mut sections = Vec::new();
+    'segs: for section_iter in macho.segments.sections() {
+        for entry in section_iter {
+            if sections.len() >= MAX_BINARY_LIST_ENTRIES {
+                break 'segs;
+            }
+            if let Ok((sect, _data)) = entry {
+                sections.push(BinarySection {
+                    name: sect.name().unwrap_or("").to_string(),
+                    address: sect.addr,
+                    size: sect.size,
+                });
+            }
+        }
+    }
+
+    let imports = macho
+        .imports()
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|i| BinaryImport { name: i.name.to_string(), library: Some(i.dylib.to_string()) })
+        .collect();
+
+    let exports = macho
+        .exports()
+        .unwrap_or_default()
+        .into_iter()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .map(|e| BinaryExport { name: e.name, address: Some(e.offset) })
+        .collect();
+
+    let symbols = macho
+        .symbols()
+        .take(MAX_BINARY_LIST_ENTRIES)
+        .filter_map(|entry| {
+            let (name, nlist) = entry.ok()?;
+            if name.is_empty() {
+                return None;
+            }
+            Some(BinarySymbol { name: name.to_string(), address: Some(nlist.n_value) })
+        })
+        .collect();
+
+    BinaryInfo {
+        format: BinaryFormat::MachO,
+        arch,
+        is_64: macho.is_64,
+        sections,
+        imports,
+        exports,
+        symbols,
+    }
 }
 
 /// Summary of a MIDI file via midly (CPE-210).
@@ -261,5 +492,574 @@ mod tests {
     #[test]
     fn compressed_file_info_errors_on_a_missing_file() {
         assert!(compressed_file_info("Z:/does/not/exist.zst", "Zstandard").is_err());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // binary_info (CPE-1572): structured PE/ELF/Mach-O DTO
+    // -----------------------------------------------------------------------------------------
+
+    fn write_temp_binary_info(bytes: &[u8], tag: &str) -> std::path::PathBuf {
+        let d = scratch(tag);
+        let f = d.join("bin.dat");
+        fs::write(&f, bytes).unwrap();
+        f
+    }
+
+    /// Builds a minimal-but-real PE32 image with one section, one import, and one export — enough
+    /// for goblin's `PE::parse` to succeed and populate every list `binary_info` reads.
+    fn build_minimal_pe32() -> Vec<u8> {
+        // ---- Optional header (standard COFF fields + a couple of data directories) ----
+        // PE32 standard fields: magic(2) + 22 bytes, then Windows-specific fields, then data
+        // directories (8 bytes each). We only need the Import and Export directory entries
+        // (indices 0 and 1) to be present and correct; NumberOfRvaAndSizes covers just those two so
+        // the optional header stays small.
+        const NUM_RVA_AND_SIZES: u32 = 2;
+        let opt_header_size: u16 = (28 + 68 + NUM_RVA_AND_SIZES as usize * 8) as u16;
+
+        // Section layout: one ".text"-ish section holding both the import and export directory
+        // tables back to back, at a fixed virtual address so RVAs are simple to compute.
+        const SECTION_VA: u32 = 0x2000;
+        const SECTION_FILE_OFF: u32 = 0x400; // arbitrary, page-ish aligned
+
+        // --- Export directory table (goblin::pe::export) ---
+        // ExportDirectoryTable(40 bytes) + one name-pointer(4) + one ordinal(2) + one address(4) +
+        // the DLL name string + the exported symbol's name string.
+        let export_dir_rva = SECTION_VA;
+        let export_dll_name = b"test.dll\0";
+        let export_dll_name_rva = export_dir_rva + 40 + 4 + 2 + 4;
+        let export_sym_name = b"exported_fn\0";
+        let export_sym_name_rva = export_dll_name_rva + export_dll_name.len() as u32;
+        let export_addr_table_rva = export_dir_rva + 40;
+        let export_name_ptr_table_rva = export_addr_table_rva + 4;
+        let export_ordinal_table_rva = export_name_ptr_table_rva + 4;
+
+        let mut export_dir = Vec::new();
+        export_dir.extend_from_slice(&0u32.to_le_bytes()); // export_flags
+        export_dir.extend_from_slice(&0u32.to_le_bytes()); // time_date_stamp
+        export_dir.extend_from_slice(&0u16.to_le_bytes()); // major_version
+        export_dir.extend_from_slice(&0u16.to_le_bytes()); // minor_version
+        export_dir.extend_from_slice(&export_dll_name_rva.to_le_bytes()); // name_rva
+        export_dir.extend_from_slice(&1u32.to_le_bytes()); // ordinal_base
+        export_dir.extend_from_slice(&1u32.to_le_bytes()); // address_table_entries
+        export_dir.extend_from_slice(&1u32.to_le_bytes()); // number_of_name_pointers
+        export_dir.extend_from_slice(&export_addr_table_rva.to_le_bytes());
+        export_dir.extend_from_slice(&export_name_ptr_table_rva.to_le_bytes());
+        export_dir.extend_from_slice(&export_ordinal_table_rva.to_le_bytes());
+        assert_eq!(export_dir.len(), 40);
+
+        let text_rva = export_sym_name_rva + export_sym_name.len() as u32; // exported function body
+        export_dir.extend_from_slice(&text_rva.to_le_bytes()); // export address table[0]
+        export_dir.extend_from_slice(&export_name_ptr_table_rva.to_le_bytes()); // placeholder, fixed below
+        // Fix up: name pointer table[0] must point at the symbol name, not itself.
+        let fixup_at = export_dir.len() - 4;
+        export_dir[fixup_at..fixup_at + 4].copy_from_slice(&export_sym_name_rva.to_le_bytes());
+        export_dir.extend_from_slice(&0u16.to_le_bytes()); // ordinal table[0] (ordinal_base-relative)
+        export_dir.extend_from_slice(export_dll_name);
+        export_dir.extend_from_slice(export_sym_name);
+
+        let export_dir_size = export_dir.len() as u32;
+
+        // --- Import directory table (goblin::pe::import) ---
+        // One IMAGE_IMPORT_DESCRIPTOR (20 bytes, all-zero terminator follows) + a 2-entry (1 real +
+        // 1 null terminator) Import Lookup/Address Table + the imported name (hint(2) + name).
+        let import_dir_rva = export_dir_rva + export_dir_size;
+        // PE32 (32-bit) uses 4-byte ILT/IAT entries; each table holds one real entry + a null terminator.
+        let ilt_rva = import_dir_rva + 20 * 2; // descriptor + null terminator
+        let iat_rva = ilt_rva + 4 * 2;
+        let import_name_rva = iat_rva + 4 * 2;
+        let imported_lib_name_rva = import_name_rva + 2 + b"imported_fn\0".len() as u32;
+
+        let mut import_dir = Vec::new();
+        import_dir.extend_from_slice(&ilt_rva.to_le_bytes()); // import_lookup_table_rva
+        import_dir.extend_from_slice(&0u32.to_le_bytes()); // time_date_stamp
+        import_dir.extend_from_slice(&0u32.to_le_bytes()); // forwarder_chain
+        import_dir.extend_from_slice(&imported_lib_name_rva.to_le_bytes()); // name_rva
+        import_dir.extend_from_slice(&iat_rva.to_le_bytes()); // import_address_table_rva
+        import_dir.extend_from_slice(&[0u8; 20]); // null terminator descriptor
+        // ILT: one entry (RVA to hint/name, top bit clear = import-by-name) + null terminator.
+        import_dir.extend_from_slice(&import_name_rva.to_le_bytes());
+        import_dir.extend_from_slice(&0u32.to_le_bytes());
+        // IAT: identical layout to the ILT before binding.
+        import_dir.extend_from_slice(&import_name_rva.to_le_bytes());
+        import_dir.extend_from_slice(&0u32.to_le_bytes());
+        // Hint/Name table entry: hint(2) + name + NUL.
+        import_dir.extend_from_slice(&0u16.to_le_bytes());
+        import_dir.extend_from_slice(b"imported_fn\0");
+        import_dir.extend_from_slice(b"imported.dll\0");
+
+        let import_dir_size = import_dir.len() as u32;
+
+        let mut section_data = export_dir;
+        section_data.extend(import_dir);
+        // Pad so the section has a little real "code" too (cosmetic only).
+        section_data.extend_from_slice(&[0x90u8; 8]);
+
+        // ---- Optional header ----
+        let mut opt = Vec::new();
+        opt.extend_from_slice(&0x010Bu16.to_le_bytes()); // magic: PE32
+        opt.push(0); // major_linker_version
+        opt.push(0); // minor_linker_version
+        opt.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_code
+        opt.extend_from_slice(&0u32.to_le_bytes()); // size_of_initialized_data
+        opt.extend_from_slice(&0u32.to_le_bytes()); // size_of_uninitialized_data
+        opt.extend_from_slice(&SECTION_VA.to_le_bytes()); // address_of_entry_point
+        opt.extend_from_slice(&SECTION_VA.to_le_bytes()); // base_of_code
+        opt.extend_from_slice(&(SECTION_VA + 0x1000).to_le_bytes()); // base_of_data (PE32 only)
+        assert_eq!(opt.len(), 28);
+        opt.extend_from_slice(&0x0040_0000u32.to_le_bytes()); // image_base
+        opt.extend_from_slice(&0x1000u32.to_le_bytes()); // section_alignment
+        opt.extend_from_slice(&0x0200u32.to_le_bytes()); // file_alignment
+        opt.extend_from_slice(&6u16.to_le_bytes()); // major_os_version
+        opt.extend_from_slice(&0u16.to_le_bytes()); // minor_os_version
+        opt.extend_from_slice(&0u16.to_le_bytes()); // major_image_version
+        opt.extend_from_slice(&0u16.to_le_bytes()); // minor_image_version
+        opt.extend_from_slice(&6u16.to_le_bytes()); // major_subsystem_version
+        opt.extend_from_slice(&0u16.to_le_bytes()); // minor_subsystem_version
+        opt.extend_from_slice(&0u32.to_le_bytes()); // win32_version_value
+        opt.extend_from_slice(&(SECTION_VA + 0x3000).to_le_bytes()); // size_of_image
+        opt.extend_from_slice(&SECTION_FILE_OFF.to_le_bytes()); // size_of_headers
+        opt.extend_from_slice(&0u32.to_le_bytes()); // checksum
+        opt.extend_from_slice(&3u16.to_le_bytes()); // subsystem: console
+        opt.extend_from_slice(&0u16.to_le_bytes()); // dll_characteristics
+        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes()); // size_of_stack_reserve
+        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes()); // size_of_stack_commit
+        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes()); // size_of_heap_reserve
+        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes()); // size_of_heap_commit
+        opt.extend_from_slice(&0u32.to_le_bytes()); // loader_flags
+        opt.extend_from_slice(&NUM_RVA_AND_SIZES.to_le_bytes()); // number_of_rva_and_sizes
+        assert_eq!(opt.len(), 28 + 68);
+        opt.extend_from_slice(&export_dir_rva.to_le_bytes()); // data directory 0: Export
+        opt.extend_from_slice(&export_dir_size.to_le_bytes());
+        opt.extend_from_slice(&import_dir_rva.to_le_bytes()); // data directory 1: Import
+        opt.extend_from_slice(&import_dir_size.to_le_bytes());
+        assert_eq!(opt.len(), opt_header_size as usize);
+
+        // ---- Section table (one entry, ".data" holding both directory tables) ----
+        let mut section_header = Vec::new();
+        let mut name = [0u8; 8];
+        name[..5].copy_from_slice(b".data");
+        section_header.extend_from_slice(&name);
+        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // virtual_size
+        section_header.extend_from_slice(&SECTION_VA.to_le_bytes());
+        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_raw_data
+        section_header.extend_from_slice(&SECTION_FILE_OFF.to_le_bytes());
+        section_header.extend_from_slice(&0u32.to_le_bytes()); // pointer_to_relocations
+        section_header.extend_from_slice(&0u32.to_le_bytes()); // pointer_to_linenumbers
+        section_header.extend_from_slice(&0u16.to_le_bytes()); // number_of_relocations
+        section_header.extend_from_slice(&0u16.to_le_bytes()); // number_of_linenumbers
+        section_header.extend_from_slice(&0xC000_0040u32.to_le_bytes()); // characteristics: initialized data, read/write
+        assert_eq!(section_header.len(), 40);
+
+        // ---- COFF header ----
+        let mut coff = Vec::new();
+        coff.extend_from_slice(&0x014Cu16.to_le_bytes()); // machine: I386
+        coff.extend_from_slice(&1u16.to_le_bytes()); // number_of_sections
+        coff.extend_from_slice(&0u32.to_le_bytes()); // time_date_stamp
+        coff.extend_from_slice(&0u32.to_le_bytes()); // pointer_to_symbol_table
+        coff.extend_from_slice(&0u32.to_le_bytes()); // number_of_symbols
+        coff.extend_from_slice(&opt_header_size.to_le_bytes());
+        coff.extend_from_slice(&0x0102u16.to_le_bytes()); // characteristics: executable, 32-bit
+        assert_eq!(coff.len(), 20);
+
+        // ---- DOS stub + PE signature ----
+        const PE_OFFSET: u32 = 0x80;
+        let mut out = vec![0u8; PE_OFFSET as usize];
+        out[0] = b'M';
+        out[1] = b'Z';
+        out[0x3C..0x40].copy_from_slice(&PE_OFFSET.to_le_bytes());
+        out.extend_from_slice(b"PE\0\0");
+        out.extend_from_slice(&coff);
+        out.extend_from_slice(&opt);
+        out.extend_from_slice(&section_header);
+
+        // Pad up to the section's file offset, then place the section's raw data there.
+        out.resize(SECTION_FILE_OFF as usize, 0);
+        out.extend_from_slice(&section_data);
+        out
+    }
+
+    #[test]
+    fn binary_info_reports_pe_sections_imports_and_exports() {
+        let bytes = build_minimal_pe32();
+        let path = write_temp_binary_info(&bytes, "pe");
+        let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal PE must parse");
+        assert_eq!(info.format, crate::model::BinaryFormat::Pe);
+        assert!(!info.is_64, "this fixture is PE32, not PE32+");
+        assert!(!info.sections.is_empty(), "expected at least one section: {info:?}");
+        assert!(
+            info.sections.iter().any(|s| s.name == ".data"),
+            "expected the .data section: {info:?}"
+        );
+        assert!(
+            info.imports.iter().any(|i| i.name == "imported_fn" && i.library.as_deref() == Some("imported.dll")),
+            "expected the imported_fn import from imported.dll: {info:?}"
+        );
+        assert!(
+            info.exports.iter().any(|e| e.name == "exported_fn"),
+            "expected the exported_fn export: {info:?}"
+        );
+        assert!(info.symbols.is_empty(), "a PE EXE/DLL image carries no symbol table: {info:?}");
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Builds a minimal-but-real, statically-identity-mapped ELF64 x86-64 binary: one PT_LOAD
+    /// segment covering the whole file (so every virtual address a `PT_DYNAMIC` entry names equals
+    /// its own file offset — the standard trick for a tiny hand-built ELF fixture, since goblin
+    /// resolves `DT_*` virtual addresses through the program headers), a `.symtab`/`.strtab` pair,
+    /// and a dynamic section exposing one imported (undefined) and one exported (defined) symbol via
+    /// `.dynsym`/`.dynstr` plus a `DT_HASH` table (`nchain` alone drives goblin's dynamic-symbol
+    /// count when no relocations reference a symbol index).
+    fn build_minimal_elf64() -> Vec<u8> {
+        fn push_name(table: &mut Vec<u8>, s: &str) -> u32 {
+            let off = table.len() as u32;
+            table.extend_from_slice(s.as_bytes());
+            table.push(0);
+            off
+        }
+        fn sym64(name: u32, info: u8, shndx: u16, value: u64, size: u64) -> Vec<u8> {
+            let mut b = Vec::with_capacity(24);
+            b.extend_from_slice(&name.to_le_bytes());
+            b.push(info);
+            b.push(0); // st_other
+            b.extend_from_slice(&shndx.to_le_bytes());
+            b.extend_from_slice(&value.to_le_bytes());
+            b.extend_from_slice(&size.to_le_bytes());
+            b
+        }
+        fn shdr64(name: u32, typ: u32, offset: u64, size: u64, link: u32, info: u32, entsize: u64) -> Vec<u8> {
+            let mut b = Vec::with_capacity(64);
+            b.extend_from_slice(&name.to_le_bytes());
+            b.extend_from_slice(&typ.to_le_bytes());
+            b.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
+            b.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+            b.extend_from_slice(&offset.to_le_bytes());
+            b.extend_from_slice(&size.to_le_bytes());
+            b.extend_from_slice(&link.to_le_bytes());
+            b.extend_from_slice(&info.to_le_bytes());
+            b.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
+            b.extend_from_slice(&entsize.to_le_bytes());
+            b
+        }
+        fn phdr64(p_type: u32, offset: u64, filesz: u64, memsz: u64) -> Vec<u8> {
+            let mut b = Vec::with_capacity(56);
+            b.extend_from_slice(&p_type.to_le_bytes());
+            b.extend_from_slice(&6u32.to_le_bytes()); // p_flags: R+W
+            b.extend_from_slice(&offset.to_le_bytes()); // p_offset
+            b.extend_from_slice(&offset.to_le_bytes()); // p_vaddr (identity-mapped)
+            b.extend_from_slice(&offset.to_le_bytes()); // p_paddr
+            b.extend_from_slice(&filesz.to_le_bytes());
+            b.extend_from_slice(&memsz.to_le_bytes());
+            b.extend_from_slice(&1u64.to_le_bytes()); // p_align
+            b
+        }
+
+        const STB_GLOBAL: u8 = 1;
+        const STT_FUNC: u8 = 2;
+        let stinfo = |bind: u8, typ: u8| -> u8 { (bind << 4) | typ };
+
+        let mut shstrtab: Vec<u8> = vec![0];
+        let off_shstrtab = push_name(&mut shstrtab, ".shstrtab");
+        let off_text = push_name(&mut shstrtab, ".text");
+        let off_strtab = push_name(&mut shstrtab, ".strtab");
+        let off_symtab = push_name(&mut shstrtab, ".symtab");
+
+        let mut strtab: Vec<u8> = vec![0];
+        let sym_name_off = push_name(&mut strtab, "local_fn");
+
+        let mut dynstr: Vec<u8> = vec![0];
+        let dyn_export_off = push_name(&mut dynstr, "exported_fn");
+        let dyn_import_off = push_name(&mut dynstr, "imported_fn");
+
+        let text: Vec<u8> = vec![0x90; 8];
+
+        let mut symtab_data = sym64(0, 0, 0, 0, 0); // mandatory null symbol
+        symtab_data.extend(sym64(sym_name_off, stinfo(STB_GLOBAL, STT_FUNC), 1, 0x1000, 8));
+
+        let mut dynsym_data = sym64(0, 0, 0, 0, 0); // index 0: mandatory null symbol
+        dynsym_data.extend(sym64(dyn_export_off, stinfo(STB_GLOBAL, STT_FUNC), 1, 0x2000, 16)); // index 1: defined -> export
+        dynsym_data.extend(sym64(dyn_import_off, stinfo(STB_GLOBAL, STT_FUNC), 0, 0, 0)); // index 2: undefined -> import
+
+        let hash_data: Vec<u8> = {
+            let mut h = Vec::new();
+            h.extend_from_slice(&1u32.to_le_bytes()); // nbucket (unused by goblin's num_syms calc)
+            h.extend_from_slice(&3u32.to_le_bytes()); // nchain: drives dynsyms' symbol count
+            h
+        };
+
+        const EHDR_SIZE: u64 = 64;
+        const PHDR_SIZE: u64 = 56;
+        const PHNUM: u64 = 2;
+
+        let mut offset = EHDR_SIZE + PHDR_SIZE * PHNUM;
+        let shstrtab_off = offset;
+        offset += shstrtab.len() as u64;
+        let text_off = offset;
+        offset += text.len() as u64;
+        let strtab_off = offset;
+        offset += strtab.len() as u64;
+        let symtab_off = offset;
+        offset += symtab_data.len() as u64;
+        let dynstr_off = offset;
+        offset += dynstr.len() as u64;
+        let dynsym_off = offset;
+        offset += dynsym_data.len() as u64;
+        let hash_off = offset;
+        offset += hash_data.len() as u64;
+
+        // The `.dynamic` array itself (identity-mapped, so `d_val`s below double as file offsets).
+        const DT_NULL: u64 = 0;
+        const DT_HASH: u64 = 4;
+        const DT_STRTAB: u64 = 5;
+        const DT_SYMTAB: u64 = 6;
+        const DT_STRSZ: u64 = 10;
+        const DT_SYMENT: u64 = 11;
+        let mut dynamic = Vec::new();
+        for (tag, val) in [
+            (DT_HASH, hash_off),
+            (DT_STRTAB, dynstr_off),
+            (DT_STRSZ, dynstr.len() as u64),
+            (DT_SYMTAB, dynsym_off),
+            (DT_SYMENT, 24),
+            (DT_NULL, 0),
+        ] {
+            dynamic.extend_from_slice(&tag.to_le_bytes());
+            dynamic.extend_from_slice(&val.to_le_bytes());
+        }
+        let dynamic_off = offset;
+        offset += dynamic.len() as u64;
+
+        let shoff = offset;
+
+        const SHT_NULL: u32 = 0;
+        const SHT_PROGBITS: u32 = 1;
+        const SHT_SYMTAB: u32 = 2;
+        const SHT_STRTAB: u32 = 3;
+        let mut shdrs = Vec::new();
+        shdrs.extend(shdr64(0, SHT_NULL, 0, 0, 0, 0, 0)); // index 0: mandatory null section
+        shdrs.extend(shdr64(off_shstrtab, SHT_STRTAB, shstrtab_off, shstrtab.len() as u64, 0, 0, 0));
+        shdrs.extend(shdr64(off_text, SHT_PROGBITS, text_off, text.len() as u64, 0, 0, 0));
+        shdrs.extend(shdr64(off_strtab, SHT_STRTAB, strtab_off, strtab.len() as u64, 0, 0, 0));
+        shdrs.extend(shdr64(off_symtab, SHT_SYMTAB, symtab_off, symtab_data.len() as u64, 3, 1, 24));
+
+        let mut ehdr = Vec::with_capacity(64);
+        ehdr.extend_from_slice(&[0x7F, b'E', b'L', b'F']);
+        ehdr.push(2); // EI_CLASS: 64-bit
+        ehdr.push(1); // EI_DATA: little-endian
+        ehdr.push(1); // EI_VERSION
+        ehdr.push(0); // EI_OSABI
+        ehdr.extend_from_slice(&[0u8; 8]); // EI_ABIVERSION + padding
+        ehdr.extend_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC
+        ehdr.extend_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: EM_X86_64
+        ehdr.extend_from_slice(&1u32.to_le_bytes()); // e_version
+        ehdr.extend_from_slice(&0x1000u64.to_le_bytes()); // e_entry
+        ehdr.extend_from_slice(&EHDR_SIZE.to_le_bytes()); // e_phoff
+        ehdr.extend_from_slice(&shoff.to_le_bytes()); // e_shoff
+        ehdr.extend_from_slice(&0u32.to_le_bytes()); // e_flags
+        ehdr.extend_from_slice(&(EHDR_SIZE as u16).to_le_bytes()); // e_ehsize
+        ehdr.extend_from_slice(&(PHDR_SIZE as u16).to_le_bytes()); // e_phentsize
+        ehdr.extend_from_slice(&(PHNUM as u16).to_le_bytes()); // e_phnum
+        ehdr.extend_from_slice(&64u16.to_le_bytes()); // e_shentsize
+        ehdr.extend_from_slice(&5u16.to_le_bytes()); // e_shnum
+        ehdr.extend_from_slice(&1u16.to_le_bytes()); // e_shstrndx
+        assert_eq!(ehdr.len(), EHDR_SIZE as usize);
+
+        // A single PT_LOAD covering a generous identity-mapped range, plus the PT_DYNAMIC pointing
+        // at the `.dynamic` array built above.
+        let mut phdrs = Vec::new();
+        phdrs.extend(phdr64(1 /* PT_LOAD */, 0, 0x0010_0000, 0x0010_0000));
+        phdrs.extend(phdr64(2 /* PT_DYNAMIC */, dynamic_off, dynamic.len() as u64, dynamic.len() as u64));
+        assert_eq!(phdrs.len(), (PHDR_SIZE * PHNUM) as usize);
+
+        let mut out = ehdr;
+        out.extend(phdrs);
+        out.extend_from_slice(&shstrtab);
+        out.extend_from_slice(&text);
+        out.extend_from_slice(&strtab);
+        out.extend_from_slice(&symtab_data);
+        out.extend_from_slice(&dynstr);
+        out.extend_from_slice(&dynsym_data);
+        out.extend_from_slice(&hash_data);
+        out.extend_from_slice(&dynamic);
+        out.extend_from_slice(&shdrs);
+        out
+    }
+
+    #[test]
+    fn binary_info_reports_elf_sections_imports_exports_and_symbols() {
+        let bytes = build_minimal_elf64();
+        let path = write_temp_binary_info(&bytes, "elf");
+        let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal ELF64 must parse");
+        assert_eq!(info.format, crate::model::BinaryFormat::Elf);
+        assert!(info.is_64);
+        assert!(
+            info.sections.iter().any(|s| s.name == ".text"),
+            "expected the .text section: {info:?}"
+        );
+        assert!(
+            info.imports.iter().any(|i| i.name == "imported_fn"),
+            "expected the undefined dynamic symbol as an import: {info:?}"
+        );
+        assert!(
+            info.exports.iter().any(|e| e.name == "exported_fn" && e.address == Some(0x2000)),
+            "expected the defined dynamic symbol as an export: {info:?}"
+        );
+        assert!(
+            info.symbols.iter().any(|s| s.name == "local_fn" && s.address == Some(0x1000)),
+            "expected the .symtab entry: {info:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Builds a minimal-but-real thin Mach-O 64-bit little-endian x86-64 executable: one
+    /// `LC_SEGMENT_64` (`__TEXT`) with a single `__text` section, and one `LC_SYMTAB` naming one
+    /// external defined symbol.
+    fn build_minimal_macho64() -> Vec<u8> {
+        const SECTION_ADDR: u64 = 0x1000;
+        let text: Vec<u8> = vec![0x90; 8];
+
+        let mut strtab: Vec<u8> = vec![0]; // index 0 is always the empty string
+        let sym_name_off = strtab.len() as u32;
+        strtab.extend_from_slice(b"my_symbol\0");
+
+        const HEADER_SIZE: u64 = 32;
+        const SEGCMD_SIZE: u64 = 72;
+        const SECTION_SIZE: u64 = 80;
+        const SYMTABCMD_SIZE: u64 = 24;
+        let sizeofcmds = SEGCMD_SIZE + SECTION_SIZE + SYMTABCMD_SIZE;
+        let load_cmds_end = HEADER_SIZE + sizeofcmds;
+
+        let section_file_off = load_cmds_end;
+        let symoff = section_file_off + text.len() as u64;
+        let nsyms = 2u64;
+        let nlist_size = 16u64;
+        let stroff = symoff + nsyms * nlist_size;
+        let total_len = stroff + strtab.len() as u64;
+
+        let mut segname = [0u8; 16];
+        segname[..6].copy_from_slice(b"__TEXT");
+        let mut sectname = [0u8; 16];
+        sectname[..6].copy_from_slice(b"__text");
+
+        let mut seg = Vec::new();
+        seg.extend_from_slice(&0x19u32.to_le_bytes()); // cmd: LC_SEGMENT_64
+        seg.extend_from_slice(&((SEGCMD_SIZE + SECTION_SIZE) as u32).to_le_bytes()); // cmdsize
+        seg.extend_from_slice(&segname);
+        seg.extend_from_slice(&0u64.to_le_bytes()); // vmaddr
+        seg.extend_from_slice(&total_len.to_le_bytes()); // vmsize
+        seg.extend_from_slice(&0u64.to_le_bytes()); // fileoff
+        seg.extend_from_slice(&total_len.to_le_bytes()); // filesize: must not exceed the real file length
+        seg.extend_from_slice(&7u32.to_le_bytes()); // maxprot: rwx
+        seg.extend_from_slice(&7u32.to_le_bytes()); // initprot: rwx
+        seg.extend_from_slice(&1u32.to_le_bytes()); // nsects
+        seg.extend_from_slice(&0u32.to_le_bytes()); // flags
+        assert_eq!(seg.len(), SEGCMD_SIZE as usize);
+
+        let mut sect = Vec::new();
+        sect.extend_from_slice(&sectname);
+        sect.extend_from_slice(&segname);
+        sect.extend_from_slice(&SECTION_ADDR.to_le_bytes()); // addr
+        sect.extend_from_slice(&(text.len() as u64).to_le_bytes()); // size
+        sect.extend_from_slice(&(section_file_off as u32).to_le_bytes()); // offset
+        sect.extend_from_slice(&0u32.to_le_bytes()); // align
+        sect.extend_from_slice(&0u32.to_le_bytes()); // reloff
+        sect.extend_from_slice(&0u32.to_le_bytes()); // nreloc
+        sect.extend_from_slice(&0u32.to_le_bytes()); // flags
+        sect.extend_from_slice(&0u32.to_le_bytes()); // reserved1
+        sect.extend_from_slice(&0u32.to_le_bytes()); // reserved2
+        sect.extend_from_slice(&0u32.to_le_bytes()); // reserved3
+        assert_eq!(sect.len(), SECTION_SIZE as usize);
+
+        let mut symtab_cmd = Vec::new();
+        symtab_cmd.extend_from_slice(&0x2u32.to_le_bytes()); // cmd: LC_SYMTAB
+        symtab_cmd.extend_from_slice(&(SYMTABCMD_SIZE as u32).to_le_bytes()); // cmdsize
+        symtab_cmd.extend_from_slice(&(symoff as u32).to_le_bytes());
+        symtab_cmd.extend_from_slice(&(nsyms as u32).to_le_bytes());
+        symtab_cmd.extend_from_slice(&(stroff as u32).to_le_bytes());
+        symtab_cmd.extend_from_slice(&(strtab.len() as u32).to_le_bytes());
+        assert_eq!(symtab_cmd.len(), SYMTABCMD_SIZE as usize);
+
+        // nlist_64: n_strx(4) n_type(1) n_sect(1) n_desc(2) n_value(8).
+        const N_SECT: u8 = 0xe;
+        const N_EXT: u8 = 0x1;
+        let mut nlists = Vec::new();
+        nlists.extend_from_slice(&0u32.to_le_bytes()); // index 0: unnamed (skipped by binary_info)
+        nlists.push(0);
+        nlists.push(0);
+        nlists.extend_from_slice(&0u16.to_le_bytes());
+        nlists.extend_from_slice(&0u64.to_le_bytes());
+        nlists.extend_from_slice(&sym_name_off.to_le_bytes()); // index 1: "my_symbol"
+        nlists.push(N_SECT | N_EXT);
+        nlists.push(1); // n_sect: the one section
+        nlists.extend_from_slice(&0u16.to_le_bytes());
+        nlists.extend_from_slice(&SECTION_ADDR.to_le_bytes());
+        assert_eq!(nlists.len(), (nsyms * nlist_size) as usize);
+
+        let mut header = Vec::new();
+        header.extend_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]); // magic: 64-bit little-endian
+        header.extend_from_slice(&(7u32 | 0x0100_0000).to_le_bytes()); // cputype: x86_64
+        header.extend_from_slice(&3u32.to_le_bytes()); // cpusubtype
+        header.extend_from_slice(&2u32.to_le_bytes()); // filetype: MH_EXECUTE
+        header.extend_from_slice(&2u32.to_le_bytes()); // ncmds
+        header.extend_from_slice(&(sizeofcmds as u32).to_le_bytes());
+        header.extend_from_slice(&0u32.to_le_bytes()); // flags
+        header.extend_from_slice(&0u32.to_le_bytes()); // reserved
+        assert_eq!(header.len(), HEADER_SIZE as usize);
+
+        let mut out = header;
+        out.extend(seg);
+        out.extend(sect);
+        out.extend(symtab_cmd);
+        out.extend_from_slice(&text);
+        out.extend_from_slice(&nlists);
+        out.extend_from_slice(&strtab);
+        out
+    }
+
+    #[test]
+    fn binary_info_reports_macho_sections_and_symbols() {
+        let bytes = build_minimal_macho64();
+        let path = write_temp_binary_info(&bytes, "macho");
+        let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal Mach-O must parse");
+        assert_eq!(info.format, crate::model::BinaryFormat::MachO);
+        assert!(info.is_64);
+        assert!(
+            info.sections.iter().any(|s| s.name == "__text"),
+            "expected the __text section: {info:?}"
+        );
+        assert!(
+            info.symbols.iter().any(|s| s.name == "my_symbol"),
+            "expected the named LC_SYMTAB entry: {info:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn binary_info_errors_gracefully_on_unrecognized_bytes() {
+        let path = write_temp_binary_info(b"not a binary at all, just plain text", "junk");
+        assert!(binary_info(&path.to_string_lossy()).is_err());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn binary_info_errors_on_a_missing_file() {
+        assert!(binary_info("Z:/does/not/exist.exe").is_err());
+    }
+
+    #[test]
+    fn binary_info_never_panics_on_truncated_real_fixtures() {
+        // Truncate each real, otherwise-valid fixture at every prefix length — a cheap, targeted
+        // panic-safety sweep (the broader adversarial battery lives in
+        // `tests/binary_data_preview_panic_safety.rs`).
+        for (tag, bytes) in [
+            ("pe-trunc", build_minimal_pe32()),
+            ("elf-trunc", build_minimal_elf64()),
+            ("macho-trunc", build_minimal_macho64()),
+        ] {
+            for cut in (0..bytes.len()).step_by(7) {
+                let path = write_temp_binary_info(&bytes[..cut], tag);
+                let _ = binary_info(&path.to_string_lossy()); // must not panic, Ok or Err both fine
+                let _ = fs::remove_file(&path);
+            }
+        }
     }
 }
