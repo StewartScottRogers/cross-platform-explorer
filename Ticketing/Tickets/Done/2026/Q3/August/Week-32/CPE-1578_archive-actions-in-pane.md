@@ -2,7 +2,7 @@
 id: CPE-1578
 title: "Archive actions in the preview pane (Extract / Extract to… / Check safety)"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Frontend
 epic: CPE-1568
