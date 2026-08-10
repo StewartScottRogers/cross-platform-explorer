@@ -4,7 +4,8 @@ The authoritative list of every app aspect that still needs a **human** to verif
 that will retire each one. The QA Architect drives the **still-manual count (MVD) toward zero** and never
 lets an automated row silently regress. Charter + rules: [README.md](README.md).
 
-**MVD (still-manual surfaces): 6** · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap; row #9 added 2026-07-29 (CPE-1129 UAT deferred the standalone-board switcher's live-browser click-through) then flipped ✅ 2026-07-31 (CPE-1168 headless click-through); **row #5 flipped ✅ 2026-08-04 (CPE-1307 — macOS `xattr` OS-interop test, confirmed on the macos-latest CI leg), 7→6**._
+**MVD (still-manual surfaces): 6 primary + 10 supplementary = 16 total** · _baseline seeded 2026-07-25; row #8 flipped ✅ (CPE-1049); row #6's download/verify sub-surface automated (CPE-1058) — row stays in MVD for the still-attended in-place binary swap; row #9 added 2026-07-29 (CPE-1129 UAT deferred the standalone-board switcher's live-browser click-through) then flipped ✅ 2026-07-31 (CPE-1168 headless click-through); **row #5 flipped ✅ 2026-08-04 (CPE-1307 — macOS `xattr` OS-interop test, confirmed on the macos-latest CI leg), 7→6**._
+_**2026-08-10 QA-Architect pass:** primary ledger **unchanged at 6** (nothing flipped, nothing added). **+5 supplementary rows** logged this shift (see "Sprint 2026-08-10" section at the foot) → supplementary still-manual 5→10, **total 11→16, delta +5**. MVD ROSE this shift and no automation retired anything, because the only CI substrate that could have retired it — `gui-smoke` — has produced **zero terminal verdicts in 800 consecutive runs** (see the diagnosis section below). Retiring ticket for the substrate: **CPE-1594**._
 
 ## Legend
 `⛰ manual` = still needs human eyes · `🔧 in progress` = automation ticket open · `✅ automated` = retired,
@@ -185,3 +186,58 @@ buildable halves; the user clears these on return / when the NAS is set up 2026-
 - **Real-NAS E2E for shipped SFTP/WebDAV/FTP (CPE-1518)** + **SMB via Windows-UNC (CPE-1504 leg)**: hardware
   (QNAP) required — inherently attended until a containerized SMB/WebDAV/FTP server is stood up in CI (future
   QA-Architect ticket candidate: a docker-samba + rclone-serve-webdav + vsftpd test rig).
+
+---
+### Sprint 2026-08-10 — new manual debt from the batch-1 dispatch wave (PRs #797–#800)
+Five new human-eyes-only surfaces, logged the same shift they shipped (charter rule 1). None has a `gui-smoke`
+spec, none is reached by any `snap()`, and — critically — **no CI run has produced a screenshot artifact in
+weeks** (see the diagnosis below), so the CPE-1148 Visual Critic cannot judge any of them without a Foreman
+running a local `tauri build` by hand. Retiring the substrate: **CPE-1594**; the per-surface specs follow it.
+
+| CPE-1586 | **Font preview: specimen rendering fidelity + glyph-grid spacing/contrast, in BOTH light and dark themes** (`FontPreview.svelte`, PR #798). The parse/metadata/copy-action layer is jsdom-covered (`preview/font.test.ts`, `PreviewPane.fontActions.test.ts`), but "does the specimen actually render the face, and is the glyph grid legible" is a pure rendering judgement the UAT tester explicitly refused to claim. **Doubly manual since CPE-1492/1493 shipped a real dark theme: `gui-smoke` has ZERO dark-theme coverage — no spec anywhere flips `data-theme`, so every visual surface in the app is verified light-only.** | ⛰ manual — logic automated, render/theme human-only | needs `font-preview.smoke.ts` + a `snap()` pair (light+dark) + artifact upload | 2026-08-10 |
+| CPE-1577 | **User-command Toolbar surface: crowding / overflow when several long-named commands are bound to the Toolbar** (`CommandBar.svelte`, PR #797). Binding logic + surface routing are jsdom-covered (`App.userCommandSurfaces.test.ts`, `CommandBar.test.ts`, `ContextMenu.test.ts`), but layout behaviour under many long labels is a reflow judgement — and per the CLAUDE.md pill/chip rule ("tick-tacks reflow") a wrapping-vs-overflow bug here is exactly the class that only shows up on screen. UAT flagged it human-eyes-only. | ⛰ manual — logic automated, layout-under-load human-only | needs a `gui-smoke` spec that seeds N long-named toolbar-bound commands and `snap()`s the bar at 2 window widths | 2026-08-10 |
+| CPE-1570/1576/1578 | **Preview action bars (JSON / image / archive / JWT), incl. the 2 new image-rotate icons** — carried over from the prior session's "Owed to the USER" queue (CHECKPOINT.md), never logged here. Declarative per-provider action wiring is unit-tested; the rendered bar (icon column alignment per the CPE-748 menu-icon rule, button crowding, disabled states) has had no eyes and no screenshot. | ⛰ manual | needs a `preview-actions.smoke.ts` snapping the bar for each provider kind | 2026-08-10 |
+| CPE-1573 | **JSON tree viewer render** (expand/collapse chevrons, indent guides, value colouring in both themes) — carried over from the prior session's visual/taste queue. Tree-building logic is unit-tested; the rendered tree is unseen. | ⛰ manual | fold a `snap("json-tree")` into the preview-actions spec above | 2026-08-10 |
+| CPE-1560 | **Trash view overlay + sidebar Trash section** (PR #795) — carried over from the prior session's visual/taste queue. Restore/Empty logic + the CPE-1559 bindings are covered; the overlay's look and the sidebar section's weight-as-a-peer-of-Drives are unseen. Known cosmetic defect already noted (folders show a file icon — `TrashEntry` has no `is_dir`) that a screenshot pass would have caught automatically. | ⛰ manual | needs a `trash.smoke.ts` (seed a trashed file, open the view, `snap()`) | 2026-08-10 |
+
+**Not new debt:** PR #800 (`binary_info`/`binary_disasm` dispatchers) is backend-only — no UI, covered by
+`cargo test` + the bindings drift guard. PR #799 (3 new docs pages) is pinned by the CPE-1571 doc-coverage
+guard + `sectionDocs.test.ts`; docs prose needs review, not *human eyes on a rendering*.
+
+---
+### 2026-08-10 — DIAGNOSIS: `gui-smoke` is not flaky, it is producing NO signal at all (→ CPE-1594)
+The crew's standing instruction is "GUI-smoke is flaky, ignore it". The evidence says something worse. Measured
+this shift against the GitHub Actions API (`repos/:owner/:repo/actions/workflows/gui-smoke.yml/runs`, 800 runs,
+2026-08-03 → 2026-08-10):
+
+- **796 `cancelled`, 4 `failure`, 0 `success`, 5 in-flight.** In the most recent 300 runs (2.5 days) there is
+  **not one single terminal verdict** — every run is `cancelled`. A job that never concludes cannot retire one
+  minute of manual testing, and cannot fail a regression either.
+- **Windows leg — 0 of 40 specs have ever executed an assertion in CI.** Raw job log (run 31409461248, job
+  93523746819): every WebDriver session dies with `session not created: DevToolsActivePort file doesn't exist`
+  — the CPE-1048 WebView2 startup crash, *unfixed*, despite the `--disable-gpu --no-sandbox
+  --disable-dev-shm-usage` mitigation in the workflow env. Each spec burns ~3 min on 1 attempt + 3×60s retries;
+  the job is killed by `timeout-minutes: 45` after roughly 7 specs (39 `DevToolsActivePort` errors logged). The
+  timeout-kill is what stamps the whole RUN `cancelled` — i.e. **the dead Windows leg is what makes the working
+  Linux leg look like a flake.** Cost: a full 45-min `windows-latest` runner (incl. a release `tauri build` +
+  two `cargo install`s) burned on every push AND every PR, for zero information — a plausible contributor to the
+  "Actions runner backlog, jobs queued 30+ min" the Foreman logged this same session.
+- **Linux leg — actually works, and is being thrown away.** Same run, job 93523746768:
+  `Spec Files: 33 passed, 7 failed, 40 total (100% completed) in 00:27:48`. It completes in ~39 min wall-clock
+  and is **82.5% green**. Its 7 failures are real, readable signal that nobody reads: `archive-browse`,
+  `archive-password`, `network`, `samples`, `saved-search`, `shred-dialog`, `transfer-panel`. Note `network`
+  fails on *"expected the permanent Network section header to render"* — that is CPE-1516's shipped surface,
+  and it may be a genuine regression sitting unnoticed on `main`. Note also the tail has **grown 3 → 7** since
+  CPE-1507 catalogued it, which is what happens when nobody is allowed to look.
+- **No screenshots ever leave CI.** `gui-smoke.yml` has **no `actions/upload-artifact` step at all** (the only
+  workflow in the repo that uploads artifacts is `model-snapshot.yml`). The 75 `snap()` calls across the specs
+  write into `gui-smoke/.screenshots/` — a gitignored directory on an ephemeral runner that is then discarded.
+  **The entire CPE-1148 "Visual Critic judges screenshots" story therefore has no CI substrate whatsoever**; it
+  only ever worked when a Foreman ran a local `tauri build` + local suite by hand. `gui-smoke/baselines/`
+  contains exactly two synthetic demo PNGs — no real app surface has ever been blessed (burndown row #3 has
+  said so since 2026-07-25 and it is still true).
+
+**Verdict:** rows #1, #2, #3 and #4 have been 🔧 "in progress" for weeks against a substrate that emits nothing.
+The fix is **not structural** — the Linux leg already runs the whole suite to completion. It is three small,
+independent workflow/harness changes (export the screenshots, ratchet the Linux leg so it can go blocking at
+33/40, stop the Windows leg poisoning the run conclusion). Filed as **CPE-1594**.
