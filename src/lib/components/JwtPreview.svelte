@@ -11,11 +11,16 @@
 
   /** The `.jwt`/`.jws` file's path. */
   export let path: string;
+  /** Reports this preview's copyable values up to `PreviewPane` (CPE-1570, epic CPE-1568), keyed to match
+   *  the `jwt` provider's declared action ids in `preview/provider.ts` — replaces the copy buttons this
+   *  component used to render inline; the pane's generic action bar renders them instead. Called
+   *  reactively whenever the decoded claims/header change (including back to "" on a fresh load/error),
+   *  so a stale value from a previous file never lingers in the action bar. */
+  export let onValues: (values: Record<string, string>) => void = () => {};
 
   let data: JwtPreviewData | null = null;
   let loading = false;
   let loadError = "";
-  let copiedKey = "";
 
   // Reload whenever the previewed file changes (mirrors DataBrowser's `loadedPath` guard).
   let loadedPath = "";
@@ -39,20 +44,13 @@
   // analysis, so pull them out here instead.
   $: payloadJson = data?.payload_json ?? "";
   $: headerJson = data?.header_json ?? "";
+  // Report the copyable values up to PreviewPane whenever they change (CPE-1570) — mirrors the ids the
+  // `jwt` provider's `actions` declare in `preview/provider.ts`.
+  $: onValues({ "copy-claims": payloadJson, "copy-header": headerJson });
 
   /** `exp`/`iat`/`nbf` claims are Unix-epoch seconds; render like Explorer's own date column. */
   function human(rawSeconds: number): string {
     return formatDate(rawSeconds * 1000) || String(rawSeconds);
-  }
-
-  async function copy(text: string, key: string) {
-    try {
-      await navigator.clipboard.writeText(text);
-      copiedKey = key;
-      setTimeout(() => { if (copiedKey === key) copiedKey = ""; }, 1500);
-    } catch {
-      /* clipboard unavailable — leave the text on screen to copy manually */
-    }
   }
 </script>
 
@@ -122,26 +120,15 @@
 
     {#if payloadJson}
       <div class="cp-section">
-        <div class="cp-title-row">
-          <span class="cp-title">Claims</span>
-          <button class="cp-copy" on:click={() => copy(payloadJson, "payload")}>
-            <Icon name={copiedKey === "payload" ? "check" : "copy"} size={12} />
-            {copiedKey === "payload" ? "Copied" : "Copy"}
-          </button>
-        </div>
+        <!-- Copy button migrated to the pane's generic action bar (CPE-1570) — see `onValues` above. -->
+        <div class="cp-title">Claims</div>
         <pre class="cp-json">{payloadJson}</pre>
       </div>
     {/if}
 
     {#if headerJson}
       <div class="cp-section">
-        <div class="cp-title-row">
-          <span class="cp-title">Raw header</span>
-          <button class="cp-copy" on:click={() => copy(headerJson, "header")}>
-            <Icon name={copiedKey === "header" ? "check" : "copy"} size={12} />
-            {copiedKey === "header" ? "Copied" : "Copy"}
-          </button>
-        </div>
+        <div class="cp-title">Raw header</div>
         <pre class="cp-json">{headerJson}</pre>
       </div>
     {/if}
@@ -160,8 +147,6 @@
   .cp-section { margin-bottom: 14px; }
   .cp-section:last-child { margin-bottom: 0; }
   .cp-title { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.03em; margin-bottom: 6px; }
-  .cp-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-  .cp-title-row .cp-title { margin-bottom: 0; }
   .cp-rows { display: grid; gap: 6px; }
   .cp-rows > div { display: flex; gap: 10px; align-items: baseline; }
   .cp-rows dt { color: var(--text-dim); width: 90px; flex: none; }
@@ -174,12 +159,6 @@
   }
   .cp-badge.danger { color: var(--danger); border: 1px solid var(--danger); background: color-mix(in srgb, var(--danger) 12%, var(--surface)); }
   .cp-sig { margin: 0; color: var(--text); }
-  .cp-copy {
-    display: inline-flex; align-items: center; gap: 4px; height: 22px; padding: 0 8px;
-    border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt);
-    color: var(--text); font-size: 11px; cursor: pointer; flex: none;
-  }
-  .cp-copy:hover { background: var(--surface); }
   .cp-json {
     margin: 0; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius);
     background: var(--surface-alt); font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px;

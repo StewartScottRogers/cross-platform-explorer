@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, waitFor, fireEvent } from "@testing-library/svelte";
+import { render, screen, waitFor } from "@testing-library/svelte";
 import JwtPreview from "./JwtPreview.svelte";
 
 // CPE-1422 (epic CPE-1417): jsdom render-spec for the JWT preview view, wiring the CPE-1418
@@ -148,18 +148,33 @@ describe("JwtPreview (CPE-1422)", () => {
     expect(container.querySelector('[data-testid="jwt-load-error"]')!.textContent).toContain("permission denied");
   });
 
-  it("copies the claims JSON to the clipboard on click", async () => {
+  it("reports the decoded claims/header up via onValues, keyed for the action bar (CPE-1570)", async () => {
+    // The inline copy buttons moved to PreviewPane's generic action bar (CPE-1570, epic CPE-1568) — this
+    // component's job now is just to report its two copyable JSON blobs, keyed to match the `jwt`
+    // provider's declared action ids (`copy-claims` / `copy-header`) in `preview/provider.ts`.
     jwtPreviewMock.mockResolvedValueOnce(ok(validToken));
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    const onValues = vi.fn();
 
-    render(JwtPreview, { path: "/x/hs256-valid.jwt" });
+    render(JwtPreview, { path: "/x/hs256-valid.jwt", onValues });
     await waitFor(() => expect(screen.getByText("HS256")).toBeTruthy());
 
-    // Two Copy buttons render (Claims, then Raw header) — the first is Claims.
-    await fireEvent.click(screen.getAllByRole("button", { name: /Copy/ })[0]);
-    expect(writeText).toHaveBeenCalledWith(validToken.payload_json);
-    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+    await waitFor(() =>
+      expect(onValues).toHaveBeenCalledWith({
+        "copy-claims": validToken.payload_json,
+        "copy-header": validToken.header_json,
+      }),
+    );
+    // No inline Copy buttons render anymore — they live in the pane's action bar instead.
+    expect(screen.queryAllByRole("button", { name: /Copy/ }).length).toBe(0);
+  });
+
+  it("reports empty values while loading/on error, so a stale action never lingers (CPE-1570)", async () => {
+    jwtPreviewMock.mockRejectedValueOnce(new Error("nope"));
+    const onValues = vi.fn();
+
+    render(JwtPreview, { path: "/x/broken.jwt", onValues });
+
+    await waitFor(() => expect(onValues).toHaveBeenCalledWith({ "copy-claims": "", "copy-header": "" }));
   });
 
   it("reloads when the previewed path changes", async () => {

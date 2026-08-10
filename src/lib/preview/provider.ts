@@ -8,6 +8,7 @@
  */
 import type { DirEntry } from "../types";
 import { categoryOf } from "../filetypes";
+import { invoke as ipcInvoke } from "../invoke";
 
 export type PreviewKind =
   | "image"
@@ -42,6 +43,52 @@ export interface ArchiveEntry {
   is_dir: boolean;
 }
 
+/**
+ * Context handed to a {@link PreviewAction}'s `enabled`/`run` (CPE-1570, epic CPE-1568). Modeled on what
+ * `PreviewPane` already threads through its own copy/edit logic, so a declared action never needs a new
+ * plumbing path of its own — it reads what the pane already has.
+ */
+export interface PreviewActionCtx {
+  /** The previewed entry the action applies to. */
+  entry: DirEntry;
+  /** The pane's current "primary" text for this preview: the raw file text for a text/json/csv/tsv
+   *  provider. Undefined for provider kinds (JWT, certificate, …) that render their own self-contained
+   *  component instead of using the pane's text pipeline — those report values via `values` below. */
+  text?: string;
+  /** The user's current selection inside the preview (the editor selection while editing, else the
+   *  window selection), when relevant to the action. */
+  selectionText?: string;
+  /** Extra named values a self-contained preview component (JWT, certificate, …) reports up for its own
+   *  actions to read, keyed by the action `id` that consumes them (e.g. a JWT preview reports
+   *  `{ "copy-claims": <claims JSON>, "copy-header": <header JSON> }`). Empty when not applicable. */
+  values: Record<string, string>;
+  /** Copy text to the clipboard — the same "best-effort, ignore if unavailable" path the pane's own Copy
+   *  menu item uses, so a copy action behaves identically to the inline buttons it replaces. */
+  copyToClipboard(text: string): Promise<void>;
+  /** The busy-tracking backend `invoke` (`src/lib/invoke.ts`) — an action that needs a backend command
+   *  MUST call through this, never `@tauri-apps/api/core` directly (CLAUDE.md busy-cursor convention). */
+  invoke: typeof ipcInvoke;
+}
+
+/**
+ * A single declarative action a provider exposes in the preview pane's generic action bar (CPE-1570,
+ * epic CPE-1568 — custom per-file-type right pane, slice 1). Providers list these instead of a preview
+ * component wiring up its own ad hoc buttons, so the pane can render + run them uniformly.
+ */
+export interface PreviewAction {
+  /** Stable id, unique within the provider's own action list. Also doubles as the key a preview
+   *  component uses in `ctx.values` for an action that copies a provider-specific value. */
+  id: string;
+  /** i18n key for the button label — resolved via `$t()`, never a raw string (CLAUDE.md i18n rule). */
+  labelKey: string;
+  /** `Icon` glyph name shown on the button. */
+  icon: string;
+  /** Whether the action is currently available; omitted means always enabled. */
+  enabled?(ctx: PreviewActionCtx): boolean;
+  /** Run the action. May be async (a clipboard write, a backend `invoke`, …). */
+  run(ctx: PreviewActionCtx): void | Promise<void>;
+}
+
 export interface PreviewProvider {
   /** Stable id. */
   id: string;
@@ -53,6 +100,17 @@ export interface PreviewProvider {
   editable: boolean;
   /** Whether this provider can preview the given entry. */
   canPreview(entry: DirEntry): boolean;
+  /** Declarative actions rendered in the pane's generic action bar (CPE-1570), filtered by `enabled(ctx)`
+   *  at render time. Omitted/empty means no action bar for this provider. */
+  actions?: PreviewAction[];
+}
+
+/** Actions a provider exposes for the given context, filtered to those currently enabled (an action with
+ *  no `enabled` guard is always shown). The single point `PreviewPane`'s generic action bar consults —
+ *  kept here, next to the type declarations, so the filtering/enablement logic is unit-testable without
+ *  mounting a component. */
+export function visibleActions(provider: PreviewProvider, ctx: PreviewActionCtx): PreviewAction[] {
+  return (provider.actions ?? []).filter((a) => !a.enabled || a.enabled(ctx));
 }
 
 const MARKDOWN_EXT = new Set(["md", "markdown"]);
@@ -316,6 +374,26 @@ export const providers: PreviewProvider[] = [
     kind: "jwt",
     editable: false,
     canPreview: (e) => !e.is_dir && JWT_EXT.has(e.extension),
+    // Worked example for the action-bar mechanism (CPE-1570, epic CPE-1568): migrated off the hard-coded
+    // inline copy buttons `JwtPreview.svelte` used to render itself. A JWT has no "file text" in the
+    // pane's usual sense (it's a structured decode, not raw source), so the component reports its two
+    // copyable JSON blobs up via `ctx.values`, keyed by these action ids.
+    actions: [
+      {
+        id: "copy-claims",
+        labelKey: "pv.action.copyClaims",
+        icon: "copy",
+        enabled: (ctx) => !!ctx.values["copy-claims"],
+        run: (ctx) => ctx.copyToClipboard(ctx.values["copy-claims"] ?? ""),
+      },
+      {
+        id: "copy-header",
+        labelKey: "pv.action.copyHeader",
+        icon: "copy",
+        enabled: (ctx) => !!ctx.values["copy-header"],
+        run: (ctx) => ctx.copyToClipboard(ctx.values["copy-header"] ?? ""),
+      },
+    ],
   },
   {
     id: "cert",
