@@ -130,6 +130,15 @@ async homeDir() : Promise<Result<string, string>> {
 }
 },
 /**
+ * Whether the OS's high-contrast / increased-contrast accessibility mode is currently ON (CPE-1546, epic
+ * CPE-1496). A one-shot read at boot (no live subscription — deferred) letting the frontend's
+ * `ContrastSetting "system"` follow the real OS state; fail-open to `false`. The synchronous Win32/Cocoa/
+ * D-Bus read runs on a blocking thread so it never stalls the main thread ([[async-all-blocking-commands]]).
+ */
+async isHighContrastActive() : Promise<boolean> {
+    return await TAURI_INVOKE("is_high_contrast_active");
+},
+/**
  * Return the parent of `path`, or null if already at a root.
  */
 async parentDir(path: string) : Promise<string | null> {

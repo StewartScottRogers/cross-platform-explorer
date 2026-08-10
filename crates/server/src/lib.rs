@@ -815,3 +815,10 @@ pub mod model_3d;
 /// (`fsutil::sha256_file`, CPE-412/737) computed in the same pass as the I/O. Pure and Tauri-free
 /// (CPE-815).
 pub mod split_join;
+
+/// One-shot OS high-contrast (increased-contrast) accessibility signal read (CPE-1546, epic CPE-1496):
+/// `is_high_contrast_active() -> bool`, `#[cfg]`-gated per platform (Windows `SPI_GETHIGHCONTRAST` /
+/// macOS `NSWorkspace.accessibilityDisplayShouldIncreaseContrast` / Linux the `org.freedesktop.appearance`
+/// portal `contrast` key over D-Bus), fail-open to `false`. Lets the frontend's `ContrastSetting "system"`
+/// (CPE-1544/1545) follow the real OS state. A boot-time query, not a live subscription (deferred).
+pub mod high_contrast;
