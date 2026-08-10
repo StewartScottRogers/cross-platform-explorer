@@ -4,7 +4,7 @@
  * them without also turning on the pane-A-only terminal/console/compress rows `canTerminal` still gates).
  */
 import { describe, it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/svelte";
+import { render, screen, fireEvent, within } from "@testing-library/svelte";
 import ContextMenu from "./ContextMenu.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -611,5 +611,45 @@ describe("ContextMenu Split file… / Join parts… (CPE-1509, parent CPE-1491)"
     expect(screen.queryByText("Split file…")).toBeNull();
     await fireEvent.click(row);
     expect(action).toHaveBeenCalledWith("join-parts");
+  });
+});
+
+describe("ContextMenu Run command ▸ (CPE-1577: Context surface wired)", () => {
+  it("hides the submenu entirely when no user commands are bound to Context", () => {
+    render(ContextMenu, { props: { ...base, userCommands: [] } });
+    expect(screen.queryByText("Run command")).toBeNull();
+  });
+
+  it("lists each bound command and dispatches uc:<id> on click", async () => {
+    const { component } = render(ContextMenu, {
+      props: {
+        ...base,
+        userCommands: [
+          { id: "uc_a", name: "Open in VS Code" },
+          { id: "uc_b", name: "Ripgrep here" },
+        ],
+      },
+    });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    const flyout = await openSubmenu("Run command");
+    expect(within(flyout).getByText("Open in VS Code")).toBeTruthy();
+    expect(within(flyout).getByText("Ripgrep here")).toBeTruthy();
+
+    await fireEvent.click(within(flyout).getByText("Ripgrep here"));
+    expect(action).toHaveBeenCalledWith("uc:uc_b");
+  });
+
+  it("Run command ▸ and Run macro ▸ coexist without colliding", async () => {
+    render(ContextMenu, {
+      props: {
+        ...base,
+        macros: ["Tag as reviewed"],
+        userCommands: [{ id: "uc_a", name: "Open in VS Code" }],
+      },
+    });
+    expect(screen.getByText("Run macro")).toBeTruthy();
+    expect(screen.getByText("Run command")).toBeTruthy();
   });
 });

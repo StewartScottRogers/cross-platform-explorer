@@ -76,6 +76,11 @@
    *  `macro:<name>` for App.svelte to run over the current selection via the dry-run confirm flow.
    *  Empty hides the "Run macro ▸" submenu entirely (no macros bound, or none saved yet). */
   export let macros: string[] = [];
+  /** User-defined commands bound to the "context" surface (CPE-783, epic CPE-711; wired CPE-1577) —
+   *  each dispatches `uc:<id>` for App.svelte to resolve + run (through the same confirm-before-launch
+   *  `RunCommandConfirm` gate the Palette surface already uses). Empty hides the "Run command ▸"
+   *  submenu entirely (no commands bound to Context, or none defined yet). */
+  export let userCommands: { id: string; name: string }[] = [];
   /** True when the single selected item (`target: "item"`) is a broken symlink (CPE-1209, epic CPE-715)
    *  — determined via `commands.linkStatus(...).broken` by the opener (App.svelte), since it needs an
    *  async check the menu itself can't do. Shows "Repair link…" only for that one case. */
@@ -391,6 +396,18 @@
         {#each macros as name}
           <button class="row" role="menuitem" on:click={() => run(`macro:${name}`)}>
             <Icon name="function" size={15} /> {name}
+          </button>
+        {/each}
+      </Submenu>
+    {/if}
+    {#if userCommands.length > 0}
+      <!-- User-defined commands bound to this surface (CPE-783, wired CPE-1577). Each runs App's
+           confirm-before-launch flow (RunCommandConfirm) over the current selection — same gate as the
+           Palette surface. -->
+      <Submenu label="Run command" icon="code">
+        {#each userCommands as c (c.id)}
+          <button class="row" role="menuitem" on:click={() => run(`uc:${c.id}`)}>
+            <Icon name="code" size={15} /> {c.name}
           </button>
         {/each}
       </Submenu>

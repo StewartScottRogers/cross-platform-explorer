@@ -15,6 +15,11 @@
   export let fileFilter = "all";
   export let foldersFirst = true;
   export let showTerminal = false;
+  /** User-defined commands bound to the "toolbar" surface (CPE-783, epic CPE-711; wired CPE-1577) —
+   *  each renders its own button here and dispatches `action`, `uc:<id>`, which App.svelte's shared
+   *  `runAction` resolves through the same confirm-before-launch flow as the Palette/Context surfaces.
+   *  Empty renders nothing extra — a toolbar with no commands bound looks exactly as it always has. */
+  export let userCommands: { id: string; name: string }[] = [];
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -166,6 +171,17 @@
   >
     <Icon name="search" />
   </button>
+
+  {#if userCommands.length > 0}
+    <!-- User-defined commands bound to the Toolbar surface (CPE-783, wired CPE-1577): one button per
+         command, running through the same confirm-before-launch flow as Context/Palette. -->
+    <span class="cmd-sep" />
+    {#each userCommands as c (c.id)}
+      <button class="cmd" title={`${c.name} (user command)`} on:click={() => dispatch("action", `uc:${c.id}`)}>
+        <Icon name="code" /> {c.name}
+      </button>
+    {/each}
+  {/if}
 
   <button
     class="cmd"
