@@ -32,7 +32,8 @@ export type Section =
   | "compare"
   | "drop-stack"
   | "appearance"
-  | "keyboard-shortcuts";
+  | "keyboard-shortcuts"
+  | "navigation-mode";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -130,6 +131,13 @@ const SECTION_DOC: Record<Section, string> = {
   // the Settings dialog), but it still earns its own doc page + registry entry per
   // [[maintain-in-app-docs-library]].
   "keyboard-shortcuts": "36-keyboard-shortcuts",
+  // CPE-1555 (epic CPE-1487, foundation slice): Navigation Mode's opt-in vim-style modal keyboard
+  // layer — the Settings toggle, on-screen NORMAL/VISUAL badge, and in-mode cheatsheet. Like
+  // keyboard-shortcuts above, not a sidebar view you switch into (it's a Settings row + a badge/
+  // overlay that only appear once the mode is on), but it still earns its own doc page + registry
+  // entry per [[maintain-in-app-docs-library]]. The indicator/cheatsheet components this ticket
+  // ships are inert until CPE-1556 mounts them; the doc page documents the feature as a whole.
+  "navigation-mode": "37-navigation-mode",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
