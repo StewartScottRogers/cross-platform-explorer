@@ -14,7 +14,7 @@
  * and the routing assertions below for proof the right command + args are used.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, within } from "@testing-library/svelte";
 import App from "./App.svelte";
 import { resetSettings } from "./lib/settings";
 import type { DirEntry, Place } from "./lib/types";
@@ -113,6 +113,15 @@ function rightClickRow(name: string) {
   fireEvent.contextMenu(row);
 }
 
+/** Scope a query to the open context-menu popup (`role="menu"`) rather than the whole document — the
+ *  single previewed archive's right-pane action bar (CPE-1578) can render buttons with the SAME label
+ *  text (Extract / Extract to…) as the context menu's own items, so an unscoped `screen.getByText(...)`
+ *  would ambiguously match both. Mirrors `App.clipboardPaneRouting.test.ts`'s own `within(await
+ *  screen.findByRole("menu"))` recipe. */
+async function ctxMenu() {
+  return within(await screen.findByRole("menu"));
+}
+
 beforeEach(() => {
   localStorage.clear();
   resetSettings();
@@ -144,8 +153,9 @@ describe("archive password — extract prompt + retry (CPE-1182/1184)", () => {
     await waitFor(() => expect(screen.getByText("secret.zip")).toBeTruthy());
 
     rightClickRow("secret.zip");
-    await waitFor(() => expect(screen.getByText("Extract")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract"));
 
     // The password dialog appears (no password known yet -> the plain queue attempt errored above).
     const field = await screen.findByTestId("password-field");
@@ -185,8 +195,9 @@ describe("archive password — extract prompt + retry (CPE-1182/1184)", () => {
     await waitFor(() => expect(screen.getByText("secret.zip")).toBeTruthy());
 
     rightClickRow("secret.zip");
-    await waitFor(() => expect(screen.getByText("Extract")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract"));
 
     const field = await screen.findByTestId("password-field");
     await fireEvent.input(field, { target: { value: "hunter2" } });
@@ -210,8 +221,9 @@ describe("archive password — extract prompt + retry (CPE-1182/1184)", () => {
     await waitFor(() => expect(screen.getByText("secret.zip")).toBeTruthy());
 
     rightClickRow("secret.zip");
-    await waitFor(() => expect(screen.getByText("Extract")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract"));
     await screen.findByTestId("password-field");
 
     await fireEvent.click(screen.getByTestId("cancel-btn"));
@@ -262,8 +274,9 @@ describe("extract to… (CPE-1183/1184)", () => {
     await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
 
     rightClickRow("bundle.zip");
-    await waitFor(() => expect(screen.getByText("Extract to…")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract to…"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract to…")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract to…"));
 
     await waitFor(() => {
       const call = invoke.mock.calls.find((c) => c[0] === "start_archive_extract");
@@ -280,8 +293,9 @@ describe("extract to… (CPE-1183/1184)", () => {
     await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
 
     rightClickRow("bundle.zip");
-    await waitFor(() => expect(screen.getByText("Extract to…")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract to…"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract to…")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract to…"));
 
     await waitFor(() => expect(openDialog).toHaveBeenCalled());
     expect(invoke.mock.calls.some((c) => c[0] === "start_archive_extract")).toBe(false);
@@ -389,8 +403,9 @@ describe("queue-routed compress/extract with progress (CPE-1184)", () => {
     await waitFor(() => expect(screen.getByText("bundle.zip")).toBeTruthy());
 
     rightClickRow("bundle.zip");
-    await waitFor(() => expect(screen.getByText("Extract")).toBeTruthy());
-    await fireEvent.click(screen.getByText("Extract"));
+    const menu = await ctxMenu();
+    await waitFor(() => expect(menu.getByText("Extract")).toBeTruthy());
+    await fireEvent.click(menu.getByText("Extract"));
     await waitFor(() => expect(invoke.mock.calls.some((c) => c[0] === "start_archive_extract")).toBe(true));
 
     emitEvent("transfer://done", {

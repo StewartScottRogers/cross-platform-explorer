@@ -62,6 +62,17 @@
   /** Open a file in the OS default handler — used by the media player's unsupported-codec fallback
    *  (CPE-1429). Wired to the `open_external` command in the app; a no-op in tests. */
   export let openExternal: (path: string) => Promise<void> | void = () => {};
+  /** Extract the previewed archive into a new subfolder next to it (CPE-1578, epic CPE-1568 slice 4) —
+   *  wired in the app to the SAME `extractHereDest`/`extractWithPasswordFallback` core the context
+   *  menu's "Extract" already uses, just entered with the previewed entry. A no-op in tests/float
+   *  preview (no app-level transfer state to reuse there). */
+  export let extractArchiveHere: (entry: DirEntry) => Promise<void> = async () => {};
+  /** Extract the previewed archive into a folder chosen from the native picker (CPE-1578) — wired to the
+   *  same path as the context menu's "Extract to…". */
+  export let extractArchiveTo: (entry: DirEntry) => Promise<void> = async () => {};
+  /** Run the archive-safety scan for the previewed archive (CPE-1578) — wired to open the SAME
+   *  `ArchiveSafetyDialog` the context menu's "Check archive safety…" opens. */
+  export let checkArchiveSafety: (entry: DirEntry) => void = () => {};
 
   /** Cap the number of CSV rows rendered so a huge sheet can't lock the pane. */
   const CSV_ROW_CAP = 200;
@@ -260,6 +271,9 @@
         invoke: ipcInvoke,
         dispatch: provider.kind === "json" ? jsonDispatch : undefined,
         showMessage: showActionMessage,
+        extractHere: extractArchiveHere,
+        extractTo: extractArchiveTo,
+        checkSafety: checkArchiveSafety,
       }
     : null;
   $: actions = actionCtx ? visibleActions(provider, actionCtx) : [];

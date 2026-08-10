@@ -227,6 +227,40 @@ describe("pickProvider", () => {
     expect(jwt.actions?.map((a) => a.labelKey)).toEqual(["pv.action.copyClaims", "pv.action.copyHeader"]);
   });
 
+  it("declares Extract/Extract to…/Check safety on the archive provider (CPE-1578)", () => {
+    const archiveProvider = providers.find((p) => p.id === "archive")!;
+    expect(archiveProvider.actions?.map((a) => a.id)).toEqual(["extract-here", "extract-to", "check-safety"]);
+    expect(archiveProvider.actions?.map((a) => a.labelKey)).toEqual([
+      "pv.action.extractHere",
+      "pv.action.extractTo",
+      "pv.action.checkSafety",
+    ]);
+  });
+
+  it("gates archive Extract/Extract to… on EXTRACT_EXTS and Check safety on ARCHIVE_SAFETY_EXTS (CPE-1578)", () => {
+    const archiveProvider = providers.find((p) => p.id === "archive")!;
+    const ctxFor = (extension: string): PreviewActionCtx => ({
+      entry: entry({ name: `a.${extension}`, extension }),
+      values: {},
+      copyToClipboard: vi.fn(async () => {}),
+      invoke: vi.fn(async () => undefined) as unknown as PreviewActionCtx["invoke"],
+      extractHere: vi.fn(async () => {}),
+      extractTo: vi.fn(async () => {}),
+      checkSafety: vi.fn(),
+    });
+    // zip: fully eligible (zip family -> both EXTRACT_EXTS and ARCHIVE_SAFETY_EXTS)
+    expect(visibleActions(archiveProvider, ctxFor("zip")).map((a) => a.id)).toEqual([
+      "extract-here",
+      "extract-to",
+      "check-safety",
+    ]);
+    // tar: extractable but not a ZIP container, so not safety-scorable (CPE-1318)
+    expect(visibleActions(archiveProvider, ctxFor("tar")).map((a) => a.id)).toEqual(["extract-here", "extract-to"]);
+    // iso/rar: browse-only — no extractor and no safety scan (CPE-1181/1318)
+    expect(visibleActions(archiveProvider, ctxFor("iso"))).toEqual([]);
+    expect(visibleActions(archiveProvider, ctxFor("rar"))).toEqual([]);
+  });
+
   it("opens an unrecognised (binary) file type in the hex view (CPE-773)", () => {
     expect(pickProvider(entry({ name: "a.qqq", extension: "qqq" })).kind).toBe("hex");
     expect(pickProvider(entry({ name: "noext", extension: "" })).kind).toBe("hex");
