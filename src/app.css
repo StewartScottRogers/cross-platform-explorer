@@ -267,6 +267,180 @@
   background: var(--bg);
 }
 
+/* ---------- Layer 1: high-contrast palette primitives (CPE-1543, epic CPE-1496) ---------- */
+/* Two independent HC primitive sets — not derived from the light/dark primitives above, since "high
+   contrast" pushes luminance and saturation to the extremes on purpose (near-black-on-white /
+   near-white-on-black, maximally-darkened or maximally-brightened accents) rather than being a
+   variant of the normal palettes. Every pairing below is asserted against the STRICTER AAA-inspired
+   bar in src/app.css.hc-contrast.test.ts (text >=7:1, UI/dim-text >=4.5:1) — well above the normal
+   dark-theme guard's AA bar (4.5:1 text / 3:1 UI, src/app.css.dark-contrast.test.ts). Inert on
+   landing: nothing sets data-theme="hc-light"/"hc-dark" yet (that's CPE-1544/1545/1546), so neither
+   block paints anything until a future theme runtime selects it. */
+:root {
+  --pal-hc-light-white: #ffffff;      /* bg, surface */
+  --pal-hc-light-gray-050: #f2f2f2;   /* surface-alt */
+  --pal-hc-light-gray-100: #e0e0e0;   /* hover */
+  --pal-hc-light-gray-150: #cccccc;   /* active */
+  --pal-hc-light-gray-300: #595959;   /* border (decorative divider) */
+  --pal-hc-light-gray-700: #1a1a1a;   /* border-strong */
+  --pal-hc-light-gray-800: #262626;   /* text-dim */
+  --pal-hc-light-gray-600: #404040;   /* text-faint */
+  --pal-hc-light-black: #000000;      /* text, dialog-border */
+
+  --pal-hc-light-blue-100: #cfe0ff;   /* selection */
+  --pal-hc-light-blue-150: #b3d1ff;   /* selection-hover */
+  --pal-hc-light-blue-900: #0043ce;   /* accent — darkened well past the normal light theme's
+                                          #0067c0 so it clears 4.5:1 against white (normal palette
+                                          only needs 3:1 as a non-text UI colour) */
+  --pal-hc-light-blue-950: #002d72;   /* accent-hover */
+
+  --pal-hc-light-red-900: #8b0000;    /* danger — darkened past the normal #c42b1c to clear 7:1 */
+  --pal-hc-light-red-950: #5c0000;    /* danger-hover */
+  --pal-hc-light-green-900: #0b6623;  /* success — darkened past the normal #3a9d4a to clear 7:1 */
+
+  /* Okabe-Ito colour-blind-safe agent set, darkened off the normal light-theme hues until each
+     clears 4.5:1 against --pal-hc-light-white (--surface) — see the hc-contrast guard test. */
+  --pal-hc-light-okabe-blue: #004c8c;
+  --pal-hc-light-okabe-vermillion: #a63a00;
+  --pal-hc-light-okabe-bluish-green: #00593f;
+  --pal-hc-light-okabe-reddish-purple: #7a2f56;
+  --pal-hc-light-okabe-orange: #8a5a00;
+  --pal-hc-light-okabe-sky-blue: #0a5a8c;
+  --pal-hc-light-purple-900: #4a2e8c; /* agent-user */
+
+  --pal-hc-dark-black: #000000;       /* bg */
+  --pal-hc-dark-gray-050: #0d0d0d;    /* surface */
+  --pal-hc-dark-gray-100: #1a1a1a;    /* surface-alt */
+  --pal-hc-dark-gray-200: #262626;    /* hover */
+  --pal-hc-dark-gray-300: #333333;    /* active */
+  --pal-hc-dark-gray-500: #808080;    /* border (decorative divider) */
+  --pal-hc-dark-gray-800: #f2f2f2;    /* border-strong */
+  --pal-hc-dark-gray-700: #d9d9d9;    /* text-dim */
+  --pal-hc-dark-gray-600: #bfbfbf;    /* text-faint */
+  --pal-hc-dark-white: #ffffff;       /* text, dialog-border */
+
+  --pal-hc-dark-blue-900: #002347;    /* selection */
+  --pal-hc-dark-blue-850: #003366;    /* selection-hover */
+  --pal-hc-dark-blue-300: #66b3ff;    /* accent — brightened well past the normal dark theme's
+                                          #3ea6ff so it clears 4.5:1 against black */
+  --pal-hc-dark-blue-200: #99ccff;    /* accent-hover */
+
+  --pal-hc-dark-red-300: #ff8080;     /* danger — brightened past the normal #ff6659 to clear 7:1 */
+  --pal-hc-dark-red-200: #ffb3b3;     /* danger-hover */
+  --pal-hc-dark-green-300: #66ff66;   /* success — brightened past the normal #6bcf7f to clear 7:1 */
+
+  /* Okabe-Ito colour-blind-safe agent set, brightened off the normal dark-theme hues until each
+     clears 4.5:1 against --pal-hc-dark-gray-050 (--surface) — see the hc-contrast guard test. */
+  --pal-hc-dark-okabe-blue: #4da6ff;
+  --pal-hc-dark-okabe-vermillion: #ff9955;
+  --pal-hc-dark-okabe-bluish-green: #33cc99;
+  --pal-hc-dark-okabe-reddish-purple: #e6a8cc;
+  --pal-hc-dark-okabe-orange: #ffcc66;
+  --pal-hc-dark-okabe-sky-blue: #99ddff;
+  --pal-hc-dark-purple-300: #b399e6; /* agent-user */
+}
+
+/* Same semantic layer as :root[data-theme="light"]/"dark" above, resolved to the hc-light palette
+   primitives just declared. High-contrast light: near-black text on pure white, a darkened accent
+   blue, and strong near-black borders — everything pushed past the normal light theme's AA bar to
+   clear the AAA-inspired guard in src/app.css.hc-contrast.test.ts. Inert on landing (CPE-1544/1545
+   wire data-theme="hc-light" live); this block only records the authored values. */
+:root[data-theme="hc-light"] {
+  color-scheme: light;
+
+  --bg: var(--pal-hc-light-white);
+  --surface: var(--pal-hc-light-white);
+  --surface-alt: var(--pal-hc-light-gray-050);
+  --hover: var(--pal-hc-light-gray-100);
+  --active: var(--pal-hc-light-gray-150);
+
+  --border: var(--pal-hc-light-gray-300);
+  --border-strong: var(--pal-hc-light-gray-700);
+  --dialog-border: var(--pal-hc-light-black);
+
+  --danger: var(--pal-hc-light-red-900);
+  --success: var(--pal-hc-light-green-900);
+  --danger-hover: var(--pal-hc-light-red-950);
+
+  --text: var(--pal-hc-light-black);
+  --text-dim: var(--pal-hc-light-gray-800);
+  --text-faint: var(--pal-hc-light-gray-600);
+
+  --accent: var(--pal-hc-light-blue-900);
+  --accent-hover: var(--pal-hc-light-blue-950);
+  --selection: var(--pal-hc-light-blue-100);
+  --selection-hover: var(--pal-hc-light-blue-150);
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --row-h: 30px;
+
+  --agent-1: var(--pal-hc-light-okabe-blue);
+  --agent-2: var(--pal-hc-light-okabe-vermillion);
+  --agent-3: var(--pal-hc-light-okabe-bluish-green);
+  --agent-4: var(--pal-hc-light-okabe-reddish-purple);
+  --agent-5: var(--pal-hc-light-okabe-orange);
+  --agent-6: var(--pal-hc-light-okabe-sky-blue);
+  --agent-user: var(--pal-hc-light-purple-900);
+  --agent-unknown: var(--text-faint);
+
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* High-contrast dark: pure white text on near-black, a brightened accent blue, and strong
+   near-white borders — same AAA-inspired bar as hc-light above. Inert on landing. */
+:root[data-theme="hc-dark"] {
+  color-scheme: dark;
+
+  --bg: var(--pal-hc-dark-black);
+  --surface: var(--pal-hc-dark-gray-050);
+  --surface-alt: var(--pal-hc-dark-gray-100);
+  --hover: var(--pal-hc-dark-gray-200);
+  --active: var(--pal-hc-dark-gray-300);
+
+  --border: var(--pal-hc-dark-gray-500);
+  --border-strong: var(--pal-hc-dark-gray-800);
+  --dialog-border: var(--pal-hc-dark-white);
+
+  --danger: var(--pal-hc-dark-red-300);
+  --success: var(--pal-hc-dark-green-300);
+  --danger-hover: var(--pal-hc-dark-red-200);
+
+  --text: var(--pal-hc-dark-white);
+  --text-dim: var(--pal-hc-dark-gray-700);
+  --text-faint: var(--pal-hc-dark-gray-600);
+
+  --accent: var(--pal-hc-dark-blue-300);
+  --accent-hover: var(--pal-hc-dark-blue-200);
+  --selection: var(--pal-hc-dark-blue-900);
+  --selection-hover: var(--pal-hc-dark-blue-850);
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --row-h: 30px;
+
+  --agent-1: var(--pal-hc-dark-okabe-blue);
+  --agent-2: var(--pal-hc-dark-okabe-vermillion);
+  --agent-3: var(--pal-hc-dark-okabe-bluish-green);
+  --agent-4: var(--pal-hc-dark-okabe-reddish-purple);
+  --agent-5: var(--pal-hc-dark-okabe-orange);
+  --agent-6: var(--pal-hc-dark-okabe-sky-blue);
+  --agent-user: var(--pal-hc-dark-purple-300);
+  --agent-unknown: var(--text-faint);
+
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
