@@ -32,6 +32,7 @@ import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
 import { parseFrecent, serializeFrecent } from "./spotlightFrecency";
 import type { Visit, ContentEmbedderConfig, CopilotConfig } from "./bindings.gen";
+import type { DropStackEntry } from "./dropStack";
 
 export const KEYS = {
   view: "cpe.view",
@@ -79,6 +80,7 @@ export const KEYS = {
   copilotBaseUrl: "cpe.copilotBaseUrl",
   copilotModel: "cpe.copilotModel",
   density: "cpe.density",
+  dropStack: "cpe.dropStack",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -211,6 +213,17 @@ const isFavoriteArray = (v: unknown): v is Favorite[] =>
       typeof (x as Favorite).name === "string" &&
       typeof (x as Favorite).is_dir === "boolean",
   );
+const isDropStackEntryArray = (v: unknown): v is DropStackEntry[] =>
+  Array.isArray(v) &&
+  v.every(
+    (x) =>
+      x &&
+      typeof x === "object" &&
+      typeof (x as DropStackEntry).path === "string" &&
+      (x as DropStackEntry).path.length > 0 &&
+      typeof (x as DropStackEntry).addedFrom === "string" &&
+      typeof (x as DropStackEntry).addedAt === "number",
+  );
 
 export const loadView = (): ViewMode => read(KEYS.view, "details", isView);
 export const saveView = (v: ViewMode) => write(KEYS.view, v);
@@ -221,6 +234,13 @@ export const saveView = (v: ViewMode) => write(KEYS.view, v);
 // App.svelte; CPE-1527/1528/1529 are what actually read it to tighten row pitch and chrome.
 export const loadDensity = (): DensityMode => read(KEYS.density, "comfortable", isDensity);
 export const saveDensity = (v: DensityMode) => write(KEYS.density, v);
+
+// Drop Stack (CPE-1530, foundation of epic CPE-1489): the persisted shelf of files/folders accumulated
+// across different folder navigations — see dropStack.ts for the reducer + reactive store this backs.
+// Empty by default (nothing shelved); a corrupt/hand-edited value degrades to [] rather than crashing,
+// same as every other array setting in this file.
+export const loadDropStack = (): DropStackEntry[] => read(KEYS.dropStack, [], isDropStackEntryArray);
+export const saveDropStack = (v: DropStackEntry[]): void => write(KEYS.dropStack, v);
 
 export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);
