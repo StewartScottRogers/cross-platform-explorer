@@ -2,7 +2,7 @@
 id: CPE-1575
 title: "Docs Tier-1 batch B: Macros + Select By… + User-defined commands pages"
 type: Task
-status: Doing
+status: Done
 priority: High
 component: Frontend
 epic: CPE-1569
