@@ -27,6 +27,7 @@ link to jump straight to that page.
 - [Declutter](23-declutter)
 - [Metadata Studio](25-metadata-studio)
 - [Drop Stack](34-drop-stack)
+- [Batch Rename](organizing-batch-rename)
 
 ## Search & Discovery
 
@@ -40,6 +41,7 @@ link to jump straight to that page.
 - [Checkpoints & Rollback](16-checkpoints)
 - [Encrypted Vaults](20-vaults)
 - [File Health](22-file-health)
+- [Undo](safety-undo)
 
 ## Previews & Media
 
@@ -55,6 +57,7 @@ link to jump straight to that page.
 - [Certificate Management](28-cert-management)
 - [Compare](32-compare)
 - [Split & Join Files](33-split-join)
+- [Link Forge (New Link…)](power-link-forge)
 
 ## Network & Remote
 
