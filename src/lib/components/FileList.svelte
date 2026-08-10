@@ -66,14 +66,12 @@
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
   export let view: ViewMode = "details";
-  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488 "compact/dense view mode"):
-  // received but NOT YET READ by any row-height/CSS logic here — this ticket only wires the prop
-  // through so CPE-1527/1528 have it to consume. "comfortable" (the default) is today's row pitch.
+  // Row/tile density (CPE-1526 wired the prop; CPE-1527 — epic CPE-1488 "compact/dense view mode" —
+  // consumes it below): "comfortable" (the default) is today's row/tile pitch, byte-identical to before
+  // this ticket; "compact" tightens the details/list row height and the icons/gallery tile pitch. See
+  // `ROW_H_COMFORTABLE`/`ROW_H_COMPACT`/`detailsRowH` in the virtualization section below — the single
+  // source of truth fed into both the CSS and the CPE-690/766 fixed-height windowing math.
   export let density: DensityMode = "comfortable";
-  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
-  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
-  // this dummy reference just satisfies the unused-export-let lint until CPE-1527/1528 read it for real.
-  const _densityRef = density;
   export let error = "";
   export let loading = false;
   export let searching = false;
@@ -465,17 +463,38 @@
   // tile pitch are measured from the live grid so they survive pane resize and view switches.
   const VIRTUALIZE_THRESHOLD = 100;
   const OVERSCAN_ROWS = 6;
+  // Row/tile pitch by density (CPE-1527, epic CPE-1488): the details/list row height is this fixed
+  // constant, not DOM-measured — it's the SAME value both the `--row-h` CSS custom property on `.rows`
+  // below (which `.row` reads via `height: var(--row-h)`, app.css) and the virtualizer's `rowH` are set
+  // from, so the CPE-690/766 fixed-height-virtualization invariant (rendered row height == the
+  // virtualizer's rowH) holds by construction — they can't drift apart. Comfortable keeps today's exact
+  // 30px pitch (app.css's `--row-h` default), so the default view stays pixel-identical.
+  const ROW_H_COMFORTABLE = 30;
+  const ROW_H_COMPACT = 22;
   let rowsEl: HTMLDivElement | undefined;
   let scrollEl: HTMLElement | null = null;
   let effScroll = 0; // px of `.rows` content scrolled above the scroller's top fold
   let viewportH = 0;
-  let rowH = 30; // measured row/tile pitch (row height, + row-gap for grids); falls back to --row-h
+  // Measured row/tile pitch (row height, + row-gap for grids). Details/list is set directly from
+  // `detailsRowH` below (never measured); icons/gallery keeps the real DOM measurement, since tile
+  // height is content-driven (icon + 2-line name + padding), all of which shrink under the
+  // `.density-compact` CSS when compact.
+  let rowH = density === "compact" ? ROW_H_COMPACT : ROW_H_COMFORTABLE;
   let cols = 1; // measured items-per-row (1 for details/list, N for the auto-fill grids)
   let rowGapPx = 0; // measured grid row-gap, to compensate the spacers' own gap inside the grid
   let rafPending = false;
 
   $: isGrid = view === "icons" || view === "gallery";
   $: virtualize = entries.length >= VIRTUALIZE_THRESHOLD;
+  $: detailsRowH = density === "compact" ? ROW_H_COMPACT : ROW_H_COMFORTABLE;
+  // Sync immediately (no measure/tick delay) so a live density toggle repaints the windowing on the very
+  // next tick — details/list pitch is fixed by density, not measured, so there's nothing to wait on.
+  $: if (!isGrid) rowH = detailsRowH;
+  // Icons/gallery tile geometry, shrunk under compact (fed to <Icon>/<ThumbnailImage> in the markup).
+  $: iconsIconSize = density === "compact" ? 28 : 40;
+  $: iconsThumbSize = density === "compact" ? 32 : 48;
+  $: galleryIconSize = density === "compact" ? 64 : 88;
+  $: galleryThumbSize = density === "compact" ? 80 : 128;
 
   $: win =
     virtualize && rowH > 0 && viewportH > 0
@@ -546,24 +565,25 @@
     viewportH = cRect.height;
     const rRect = rowsEl.getBoundingClientRect();
     effScroll = Math.max(0, cRect.top - rRect.top);
-    // First rendered tile/row (never a spacer — those are `.vspacer`).
-    const firstRow = rowsEl.querySelector<HTMLElement>(".row");
     if (isGrid) {
       const cs = getComputedStyle(rowsEl);
       // The computed `grid-template-columns` resolves `auto-fill` to concrete tracks — count them.
       cols = Math.max(1, cs.gridTemplateColumns.split(" ").filter((s) => s && s !== "none").length);
       rowGapPx = parseFloat(cs.rowGap) || 0;
+      // Tile height is content-driven (icon size + 2-line name + padding — all shrunk by the
+      // `.density-compact` CSS when compact), so keep measuring it off a real rendered tile (never a
+      // spacer — those are `.vspacer`) rather than a fixed constant.
+      const firstRow = rowsEl.querySelector<HTMLElement>(".row");
       if (firstRow) {
         const h = firstRow.getBoundingClientRect().height;
         if (h > 0) rowH = h + rowGapPx;
       }
     } else {
+      // Details/list pitch is density-fixed (see `detailsRowH` above), not measured — resynced here too
+      // so a fresh measureGeometry() call (e.g. right after mount) can't race the reactive assignment.
       cols = 1;
       rowGapPx = 0;
-      if (firstRow) {
-        const h = firstRow.getBoundingClientRect().height;
-        if (h > 0) rowH = h;
-      }
+      rowH = detailsRowH;
     }
   }
 
@@ -590,10 +610,13 @@
     };
   });
 
-  // Re-measure after the folder/view changes (rows re-laid-out) so the window is correct on the next paint.
+  // Re-measure after the folder/view/density changes (rows re-laid-out) so the window is correct on the
+  // next paint — density included (CPE-1527) so a live compact/comfortable toggle re-measures the
+  // icons/gallery tile pitch; details/list resyncs immediately via the reactive `rowH` assignment above.
   $: if (rowsEl) {
     void entries.length;
     void view;
+    void density;
     tick().then(measureGeometry);
   }
 
@@ -690,7 +713,7 @@
   </div>
 {:else}
   <!-- svelte-ignore a11y-no-static-element-interactions -->
-  <div bind:this={rowsEl} class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} style="--filelist-cols: {colTemplate}" on:contextmenu={emptyContext}>
+  <div bind:this={rowsEl} class="rows" class:grid={view === "icons" || view === "gallery"} class:gallery={view === "gallery"} class:density-compact={density === "compact"} style="--filelist-cols: {colTemplate}; --row-h: {detailsRowH}px" on:contextmenu={emptyContext}>
     {#if topPad > 0}
       <div class="vspacer" style="height: {topPad}px" aria-hidden="true" />
     {/if}
@@ -747,9 +770,9 @@
       >
         <span class="cell name">
           {#if (view === "icons" || view === "gallery") && !entry.is_dir && hasThumbnail(entry.name)}
-            <ThumbnailImage path={entry.path} size={view === "gallery" ? 128 : 48} fallback={iconFor(entry)} />
+            <ThumbnailImage path={entry.path} size={view === "gallery" ? galleryThumbSize : iconsThumbSize} fallback={iconFor(entry)} />
           {:else}
-            <Icon name={iconFor(entry)} size={view === "gallery" ? 88 : view === "icons" ? 40 : 16} />
+            <Icon name={iconFor(entry)} size={view === "gallery" ? galleryIconSize : view === "icons" ? iconsIconSize : 16} />
           {/if}
           {#if tagEntry.label}
             <span class="label-dot" style="background: {labelColor(tagEntry.label)}" title={tagEntry.label} aria-hidden="true" />
@@ -1039,6 +1062,22 @@
     gap: 10px;
   }
 
+  /* Compact density (CPE-1527, epic CPE-1488): tighter tile pitch — smaller minimum tile width and
+     gap; tile padding/icon size shrink below via `.density-compact .row.view-icons/.view-gallery` and
+     the `iconsIconSize`/`galleryIconSize`/etc. reactive sizes in the script. Comfortable (no class) is
+     completely untouched, so the default view stays pixel-identical to before this ticket. */
+  .rows.grid.density-compact {
+    gap: 4px;
+    padding: 6px;
+  }
+  .rows.grid.density-compact:not(.gallery) {
+    grid-template-columns: repeat(auto-fill, minmax(90px, 1fr));
+  }
+  .rows.grid.gallery.density-compact {
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+    gap: 6px;
+  }
+
   /* A virtualization spacer spans the full grid width so it stands in for whole tile rows
      above/below the rendered window (CPE-766); in the block list/details views grid-column is
      simply ignored and it behaves as a plain-height block (CPE-690). */
@@ -1061,6 +1100,15 @@
     padding: 12px 6px;
     text-align: center;
     overflow: hidden;
+  }
+
+  /* Compact density (CPE-1527): tighter tile padding/gap — shrinks the measured tile height that
+     `measureGeometry()` feeds the virtualizer as `rowH`, same fixed-per-view-pitch invariant
+     (CPE-690/766), just a smaller constant driven by real layout rather than a guessed number. */
+  .rows.density-compact .row.view-icons,
+  .rows.density-compact .row.view-gallery {
+    gap: 3px;
+    padding: 6px 4px;
   }
 
   .row.view-icons :global(.cell.name),

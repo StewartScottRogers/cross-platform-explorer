@@ -484,3 +484,66 @@ describe("FileList link badge (CPE-1208, epic CPE-715)", () => {
     expect(coreInvoke).not.toHaveBeenCalledWith("link_status", expect.anything());
   });
 });
+
+describe("FileList compact density (CPE-1527, epic CPE-1488)", () => {
+  // Mirrors app.css's `--row-h: 30px` default and FileList.svelte's `ROW_H_COMFORTABLE`/`ROW_H_COMPACT`
+  // constants — kept local rather than imported so this test independently pins the two values a
+  // regression would silently change.
+  const ROW_H_COMFORTABLE = 30;
+  const ROW_H_COMPACT = 22;
+
+  it("defaults to the comfortable pitch (no density prop) — pixel-identical to before this ticket", () => {
+    const { container } = render(FileList, { ...base, entries: [entry()] });
+    const rows = container.querySelector(".rows") as HTMLElement;
+    expect(rows.classList.contains("density-compact")).toBe(false);
+    expect(rows.style.getPropertyValue("--row-h")).toBe(`${ROW_H_COMFORTABLE}px`);
+  });
+
+  it("comfortable density (explicit) renders the same 30px pitch as the default", () => {
+    const { container } = render(FileList, { ...base, entries: [entry()], density: "comfortable" });
+    const rows = container.querySelector(".rows") as HTMLElement;
+    expect(rows.classList.contains("density-compact")).toBe(false);
+    expect(rows.style.getPropertyValue("--row-h")).toBe(`${ROW_H_COMFORTABLE}px`);
+  });
+
+  it("compact density sets the `--row-h` CSS custom property to the smaller pitch and flags the container", () => {
+    const { container } = render(FileList, { ...base, entries: [entry()], density: "compact" });
+    const rows = container.querySelector(".rows") as HTMLElement;
+    expect(rows.classList.contains("density-compact")).toBe(true);
+    expect(rows.style.getPropertyValue("--row-h")).toBe(`${ROW_H_COMPACT}px`);
+  });
+
+  it("compact density shrinks the icons-view icon size; comfortable keeps today's size", () => {
+    const nonImage = entry({ name: "readme.txt", path: "/x/readme.txt", extension: "txt" });
+
+    const comfortable = render(FileList, { ...base, entries: [nonImage], view: "icons", density: "comfortable" });
+    const comfySvg = comfortable.container.querySelector("svg.icon") as SVGElement;
+    expect(comfySvg.getAttribute("width")).toBe("40"); // unchanged pre-CPE-1527 icons-view size
+
+    const compact = render(FileList, { ...base, entries: [nonImage], view: "icons", density: "compact" });
+    const compactSvg = compact.container.querySelector("svg.icon") as SVGElement;
+    expect(compactSvg.getAttribute("width")).toBe("28");
+    expect(Number(compactSvg.getAttribute("width"))).toBeLessThan(Number(comfySvg.getAttribute("width")));
+  });
+
+  it("compact density shrinks the gallery-view icon size; comfortable keeps today's size", () => {
+    const nonImage = entry({ name: "readme.txt", path: "/x/readme.txt", extension: "txt" });
+
+    const comfortable = render(FileList, { ...base, entries: [nonImage], view: "gallery", density: "comfortable" });
+    const comfySvg = comfortable.container.querySelector("svg.icon") as SVGElement;
+    expect(comfySvg.getAttribute("width")).toBe("88"); // unchanged pre-CPE-1527 gallery-view size
+
+    const compact = render(FileList, { ...base, entries: [nonImage], view: "gallery", density: "compact" });
+    const compactSvg = compact.container.querySelector("svg.icon") as SVGElement;
+    expect(compactSvg.getAttribute("width")).toBe("64");
+    expect(Number(compactSvg.getAttribute("width"))).toBeLessThan(Number(comfySvg.getAttribute("width")));
+  });
+
+  it("details-view row icon size is untouched by density (only the row pitch/grid tiles change)", () => {
+    const compact = render(FileList, { ...base, entries: [entry()], view: "details", density: "compact" });
+    // Scoped to `.row` — the details header also renders an (unrelated, smaller) `svg.icon` for the
+    // column-picker button, which `container.querySelector` would otherwise match first.
+    const svg = compact.container.querySelector(".row svg.icon") as SVGElement;
+    expect(svg.getAttribute("width")).toBe("16");
+  });
+});
