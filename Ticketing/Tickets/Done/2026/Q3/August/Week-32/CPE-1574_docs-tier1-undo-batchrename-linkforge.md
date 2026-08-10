@@ -2,7 +2,7 @@
 id: CPE-1574
 title: "Docs Tier-1 batch A: Global Undo + Batch Rename + Link Forge pages"
 type: Task
-status: Doing
+status: Done
 priority: High
 component: Frontend
 epic: CPE-1569
