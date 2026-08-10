@@ -12,10 +12,20 @@ import {
   serializeKeymap,
   parseKeymap,
   normalizeChord,
+  chordFromEvent,
   isActionId,
   type Keymap,
   type ActionId,
 } from "./keymap";
+
+/** A minimal `KeyboardEvent`-shaped object, matching what `chordFromEvent`/`hotkeyFromEvent`
+ *  expect — only the fields they read. */
+function keyEvent(
+  key: string,
+  mods: { ctrl?: boolean; alt?: boolean; shift?: boolean } = {},
+): { ctrlKey: boolean; metaKey: boolean; altKey: boolean; shiftKey: boolean; key: string } {
+  return { ctrlKey: !!mods.ctrl, metaKey: false, altKey: !!mods.alt, shiftKey: !!mods.shift, key };
+}
 
 describe("keymap ACTIONS / defaultKeymap (CPE-1547)", () => {
   it("has no duplicate action ids", () => {
@@ -77,6 +87,52 @@ describe("keymap normalizeChord (CPE-1547)", () => {
   it("returns '' for a modifier-only or empty input", () => {
     expect(normalizeChord("Ctrl+Alt")).toBe("");
     expect(normalizeChord("")).toBe("");
+  });
+});
+
+// Regression coverage for a review-caught bug: 4 of 34 defaultChord values were transcribed from
+// shortcuts.ts's DISPLAY glyphs ("←"/"→"/"↑"/"Esc") instead of the real `KeyboardEvent.key` form a
+// live keypress produces ("ArrowLeft"/"ArrowRight"/"ArrowUp"/"Escape"). Round-tripping the STORED
+// string through normalizeChord (as the tests above do) can never catch that class of bug — it
+// never involves a live event. This simulates the actual live-capture path (chordFromEvent, the
+// permissive analog of macroBindings' hotkeyFromEvent that the future remap UI will use) for a
+// representative sample spanning every shape of default: Alt+Arrow-key, a bare Escape, a bare
+// function key, Shift+bare-key, and ordinary Ctrl-qualified chords — and asserts the captured
+// chord equals the registered default AND resolves back to the right action.
+describe("keymap chordFromEvent — live-keypress capture matches registered defaults (CPE-1547)", () => {
+  const cases: { id: ActionId; event: ReturnType<typeof keyEvent> }[] = [
+    { id: "back", event: keyEvent("ArrowLeft", { alt: true }) },
+    { id: "forward", event: keyEvent("ArrowRight", { alt: true }) },
+    { id: "up", event: keyEvent("ArrowUp", { alt: true }) },
+    { id: "clearSelection", event: keyEvent("Escape") },
+    { id: "refresh", event: keyEvent("F5") },
+    { id: "openItem", event: keyEvent("Enter") },
+    { id: "rename", event: keyEvent("F2") },
+    { id: "deleteToTrash", event: keyEvent("Delete") },
+    { id: "deletePermanent", event: keyEvent("Delete", { shift: true }) },
+    { id: "docsHelp", event: keyEvent("F1") },
+    { id: "shortcutsCheatSheet", event: keyEvent("?") },
+    { id: "copy", event: keyEvent("c", { ctrl: true }) },
+    { id: "contentSearch", event: keyEvent("f", { ctrl: true, shift: true }) },
+    { id: "properties", event: keyEvent("Enter", { alt: true }) },
+    { id: "toggleDetails", event: keyEvent("p", { alt: true }) },
+  ];
+
+  it.each(cases)("$id: a real keypress captures the registered defaultChord", ({ id, event }) => {
+    const def = ACTIONS.find((a) => a.id === id)!;
+    expect(chordFromEvent(event)).toBe(def.defaultChord);
+  });
+
+  it.each(cases)("$id: actionForChord resolves the captured chord back to the action", ({ id, event }) => {
+    const km = defaultKeymap();
+    expect(actionForChord(km, chordFromEvent(event))).toBe(id);
+  });
+
+  it("the 4 review-flagged actions specifically: captured chord is the event.key form, not the display glyph", () => {
+    expect(chordFromEvent(keyEvent("ArrowLeft", { alt: true }))).toBe("Alt+ArrowLeft");
+    expect(chordFromEvent(keyEvent("ArrowRight", { alt: true }))).toBe("Alt+ArrowRight");
+    expect(chordFromEvent(keyEvent("ArrowUp", { alt: true }))).toBe("Alt+ArrowUp");
+    expect(chordFromEvent(keyEvent("Escape"))).toBe("Escape");
   });
 });
 

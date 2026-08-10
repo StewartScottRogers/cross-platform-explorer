@@ -69,7 +69,7 @@ export interface ActionDef {
  * `macroBindings.ts`'s `normalizeHotkey`. Unlike `normalizeHotkey` — which rejects any combo
  * without `Ctrl`/`Alt` because it's built for USER-TYPED macro hotkeys that must never collide
  * with ordinary typing — several of the app's existing built-in actions are legitimately bound
- * to a bare function/navigation key (`F5`, `Enter`, `Esc`, `F2`, `Delete`, `?`) or `Shift+Delete`.
+ * to a bare function/navigation key (`F5`, `Enter`, `Escape`, `F2`, `Delete`, `?`) or `Shift+Delete`.
  * This tries `normalizeHotkey` first (covers every Ctrl/Alt-qualified chord identically) and
  * only falls back to a local re-derivation for the bare-key case, so a transcribed built-in
  * default is never silently dropped to `""`.
@@ -94,16 +94,64 @@ export function normalizeChord(raw: string): string {
   return [...MODIFIER_ORDER.filter((m) => mods.has(m)), key].join("+");
 }
 
+/**
+ * Canonicalize a live `KeyboardEvent`-shaped object into a chord — same shape as
+ * `macroBindings.ts`'s `hotkeyFromEvent` (builds from raw `event.key`, so arrow keys/Escape/etc.
+ * come through as `"ArrowLeft"`/`"Escape"`/... exactly as the DOM reports them, never a display
+ * glyph), but canonicalized via the permissive `normalizeChord` instead of the strict
+ * `normalizeHotkey`. That match matters: a real keypress for a bare-key built-in default (`F5`,
+ * `Enter`, `Escape`, `F2`, `Delete`, `Shift+Delete`, `F1`, `?`) must still resolve via
+ * `actionForChord` against that default, which `hotkeyFromEvent`'s stricter Ctrl/Alt-required
+ * rule can never allow (it's designed to keep user-typed MACRO hotkeys from colliding with
+ * ordinary typing — not applicable to matching an existing built-in). This is the code path a
+ * future live-capture remap UI (CPE-1549) uses to identify which built-in action a keystroke
+ * hits; `setChord` (assigning a NEW override) deliberately keeps the stricter `normalizeHotkey`
+ * rule so a freshly typed rebind still can't collide with typing.
+ */
+export function chordFromEvent(e: {
+  ctrlKey: boolean;
+  metaKey: boolean;
+  altKey: boolean;
+  shiftKey: boolean;
+  key: string;
+}): string {
+  const parts: string[] = [];
+  if (e.ctrlKey || e.metaKey) parts.push("Ctrl");
+  if (e.altKey) parts.push("Alt");
+  if (e.shiftKey) parts.push("Shift");
+  parts.push(e.key.length === 1 ? e.key.toUpperCase() : e.key);
+  return normalizeChord(parts.join("+"));
+}
+
 /** The full registry, grouped in `SHORTCUT_GROUPS` order (Navigation/Tabs/Selection/File
- *  actions/View/General). `defaultChord` values are transcribed 1:1 from that group's `keys`
- *  column, canonicalized via `normalizeChord`. Where a shortcut has a secondary alternate key
- *  (`Backspace` also does "up", `Alt+D` also does "edit address"), only the primary chord shown
- *  first in `SHORTCUT_GROUPS` is modeled — this registry tracks one fixed binding per action. */
+ *  actions/View/General). `defaultChord` values are transcribed from that group's `keys` column
+ *  in the real `KeyboardEvent.key` form a live keystroke actually produces (canonicalized via
+ *  `normalizeChord`) — NOT the display glyph shown there (`←`/`→`/`↑`/`Esc` become
+ *  `ArrowLeft`/`ArrowRight`/`ArrowUp`/`Escape`), since a chord that can never match a real
+ *  captured keypress would be useless to `actionForChord`/`findConflicts`/the future remap UI.
+ *  Where a shortcut has a secondary alternate key (`Backspace` also does "up", `Alt+D` also does
+ *  "edit address"), only the primary chord shown first in `SHORTCUT_GROUPS` is modeled — this
+ *  registry tracks one fixed binding per action. */
 export const ACTIONS: ActionDef[] = [
   // Navigation
-  { id: "back", group: "Navigation", description: "Back", defaultChord: normalizeChord("Alt+←") },
-  { id: "forward", group: "Navigation", description: "Forward", defaultChord: normalizeChord("Alt+→") },
-  { id: "up", group: "Navigation", description: "Up one folder", defaultChord: normalizeChord("Alt+↑") },
+  // NOTE: back/forward/up use the real `KeyboardEvent.key` form ("ArrowLeft"/"ArrowRight"/
+  // "ArrowUp"), NOT the "←"/"→"/"↑" glyphs shortcuts.ts displays — a live keypress captured via
+  // macroBindings.ts's hotkeyFromEvent never produces the glyph, so the stored default must match
+  // the event form for actionForChord/findConflicts to ever resolve a real keystroke (CPE-1547
+  // review). The glyph stays exactly as-is in shortcuts.ts for display.
+  { id: "back", group: "Navigation", description: "Back", defaultChord: normalizeChord("Alt+ArrowLeft") },
+  {
+    id: "forward",
+    group: "Navigation",
+    description: "Forward",
+    defaultChord: normalizeChord("Alt+ArrowRight"),
+  },
+  {
+    id: "up",
+    group: "Navigation",
+    description: "Up one folder",
+    defaultChord: normalizeChord("Alt+ArrowUp"),
+  },
   { id: "refresh", group: "Navigation", description: "Refresh", defaultChord: normalizeChord("F5") },
   {
     id: "editAddress",
@@ -159,11 +207,13 @@ export const ACTIONS: ActionDef[] = [
   },
   // Selection
   { id: "selectAll", group: "Selection", description: "Select all", defaultChord: normalizeChord("Ctrl+A") },
+  // NOTE: real KeyboardEvent.key form is "Escape", not the "Esc" shortcuts.ts displays — see the
+  // back/forward/up note above (CPE-1547 review).
   {
     id: "clearSelection",
     group: "Selection",
     description: "Clear selection",
-    defaultChord: normalizeChord("Esc"),
+    defaultChord: normalizeChord("Escape"),
   },
   // File actions
   { id: "copy", group: "File actions", description: "Copy", defaultChord: normalizeChord("Ctrl+C") },
