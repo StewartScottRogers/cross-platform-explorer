@@ -12,7 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/svelte";
 import KeyboardBindingsDialog from "./KeyboardBindingsDialog.svelte";
-import { ACTIONS, chordFor, defaultKeymap, setChord, type Keymap } from "../keymap";
+import { ACTIONS, chordFor, defaultKeymap, setChord, exportKeymap, type Keymap } from "../keymap";
 
 vi.mock("../settings", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../settings")>();
@@ -249,5 +249,89 @@ describe("KeyboardBindingsDialog capture Escape doesn't also close the dialog (C
     // A second, unarmed Escape still closes the dialog normally.
     await fireEvent.keyDown(window, { key: "Escape" });
     expect(closed).toBe(true);
+  });
+});
+
+describe("KeyboardBindingsDialog Import / Export (CPE-1550)", () => {
+  beforeEach(() => {
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } });
+  });
+
+  it("the Import / Export section is collapsed until toggled", async () => {
+    render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    expect(screen.queryByTestId("keymap-export-textarea")).toBeNull();
+
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+    expect(screen.getByTestId("keymap-export-textarea")).toBeTruthy();
+  });
+
+  it("the export textarea shows the current keymap's exportKeymap() JSON", async () => {
+    const keymap = setChord(defaultKeymap(), "newTab", "Ctrl+Alt+N");
+    render(KeyboardBindingsDialog, { keymap });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    const textarea = screen.getByTestId("keymap-export-textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe(exportKeymap(keymap));
+  });
+
+  it("'Copy to clipboard' writes the exported JSON via navigator.clipboard.writeText", async () => {
+    const keymap = defaultKeymap();
+    render(KeyboardBindingsDialog, { keymap });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    await fireEvent.click(screen.getByTestId("keymap-export-copy-btn"));
+    expect(navigator.clipboard.writeText).toHaveBeenCalledWith(exportKeymap(keymap));
+    expect(screen.getByTestId("keymap-io-note").textContent).toMatch(/Copied/);
+  });
+
+  it("importing valid pasted JSON applies it via saveKeymap and shows an applied-count summary", async () => {
+    render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    const payload = JSON.stringify({ version: 1, bindings: { copy: "Ctrl+Alt+C" } });
+    await fireEvent.input(screen.getByTestId("keymap-import-textarea"), { target: { value: payload } });
+    await fireEvent.click(screen.getByTestId("keymap-import-btn"));
+
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(saveKeymap).mock.calls[0][0];
+    expect(chordFor(saved, "copy")).toBe("Ctrl+Alt+C");
+    expect(screen.getByTestId("keymap-io-note").textContent).toMatch(/Applied 1/);
+
+    const row = screen.getByText("Copy").closest(".row") as HTMLElement;
+    expect(within(row).getByText("Ctrl+Alt+C")).toBeTruthy();
+  });
+
+  it("importing JSON with an unrecognized action id applies the rest and reports the skip count", async () => {
+    render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    const payload = JSON.stringify({ bindings: { copy: "Ctrl+Alt+C", notARealAction: "Ctrl+Alt+Z" } });
+    await fireEvent.input(screen.getByTestId("keymap-import-textarea"), { target: { value: payload } });
+    await fireEvent.click(screen.getByTestId("keymap-import-btn"));
+
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("keymap-io-note").textContent).toMatch(/Applied 1, skipped 1/);
+  });
+
+  it("importing malformed JSON shows a validation error and never calls saveKeymap", async () => {
+    render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    await fireEvent.input(screen.getByTestId("keymap-import-textarea"), {
+      target: { value: "not valid json {{{" },
+    });
+    await fireEvent.click(screen.getByTestId("keymap-import-btn"));
+
+    expect(saveKeymap).not.toHaveBeenCalled();
+    expect(screen.getByTestId("keymap-io-error")).toBeTruthy();
+  });
+
+  it("the Import button is disabled with empty/whitespace-only pasted text", async () => {
+    render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    await fireEvent.click(screen.getByTestId("keymap-io-toggle"));
+
+    expect((screen.getByTestId("keymap-import-btn") as HTMLButtonElement).disabled).toBe(true);
+    await fireEvent.input(screen.getByTestId("keymap-import-textarea"), { target: { value: "   " } });
+    expect((screen.getByTestId("keymap-import-btn") as HTMLButtonElement).disabled).toBe(true);
   });
 });

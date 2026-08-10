@@ -38,6 +38,8 @@
     resetChord,
     resetAll,
     findConflicts,
+    exportKeymap,
+    importKeymap,
     type ActionId,
     type Keymap,
   } from "../keymap";
@@ -48,6 +50,43 @@
   const dispatch = createEventDispatcher<{ close: void }>();
 
   let query = "";
+
+  // Export / Import disclosure (CPE-1550) — collapsed by default, matching MacrosDialog's
+  // showImport toggle pattern.
+  let showIO = false;
+  let importJson = "";
+  let ioNote = "";
+  let ioError = "";
+  $: exportJson = exportKeymap(keymap);
+
+  async function copyExport() {
+    try {
+      await navigator.clipboard.writeText(exportJson);
+      ioError = "";
+      ioNote = "Copied to clipboard.";
+    } catch (e) {
+      ioNote = "";
+      ioError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  function runImport() {
+    if (!importJson.trim()) return;
+    const result = importKeymap(importJson, keymap);
+    if (result.applied.length === 0 && result.rejected.length > 0) {
+      ioNote = "";
+      ioError = `Nothing applied — ${result.rejected.length} entr${result.rejected.length === 1 ? "y" : "ies"} rejected.`;
+      return;
+    }
+    pendingConflict = null;
+    applyKeymap(result.keymap);
+    ioError = "";
+    ioNote =
+      result.rejected.length > 0
+        ? `Applied ${result.applied.length}, skipped ${result.rejected.length} unrecognized.`
+        : `Applied ${result.applied.length}.`;
+    importJson = "";
+  }
 
   // How many HotkeyCaptureInput rows are currently armed (almost always 0 or 1, but tracked as a
   // count rather than a bool in case a stray double-arm ever happens). While > 0, the dialog's own
@@ -225,6 +264,57 @@
             {/each}
           </section>
         {/each}
+      {/if}
+    </div>
+
+    <div class="io-section">
+      <button
+        class="io-toggle"
+        data-testid="keymap-io-toggle"
+        aria-expanded={showIO}
+        on:click={() => (showIO = !showIO)}
+      >
+        <Icon name={showIO ? "chev-down" : "chev-right"} size={12} />
+        Import / Export
+      </button>
+      {#if showIO}
+        <div class="io-body">
+          <div class="io-col">
+            <label for="keymap-export-textarea">Export — current keymap as JSON</label>
+            <textarea
+              id="keymap-export-textarea"
+              class="io-textarea"
+              readonly
+              data-testid="keymap-export-textarea"
+              value={exportJson}
+            ></textarea>
+            <button class="btn" data-testid="keymap-export-copy-btn" on:click={copyExport}>
+              Copy to clipboard
+            </button>
+          </div>
+          <div class="io-col">
+            <label for="keymap-import-textarea">Import — paste keymap JSON</label>
+            <textarea
+              id="keymap-import-textarea"
+              class="io-textarea"
+              placeholder="Paste exported keymap JSON…"
+              bind:value={importJson}
+              data-testid="keymap-import-textarea"
+            ></textarea>
+            <button
+              class="btn primary"
+              data-testid="keymap-import-btn"
+              disabled={!importJson.trim()}
+              on:click={runImport}
+            >
+              Import
+            </button>
+          </div>
+        </div>
+        <div class="io-status">
+          {#if ioError}<span class="io-err" data-testid="keymap-io-error">{ioError}</span>
+          {:else if ioNote}<span class="io-note" data-testid="keymap-io-note">{ioNote}</span>{/if}
+        </div>
       {/if}
     </div>
   </div>
@@ -406,5 +496,63 @@
   .btn.danger:hover {
     background: var(--danger);
     color: var(--pal-white);
+  }
+  .io-section {
+    flex: 0 0 auto;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+  }
+  .io-toggle {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-dim);
+    padding: 2px 0;
+  }
+  .io-toggle:hover {
+    color: var(--text);
+  }
+  .io-body {
+    display: flex;
+    gap: 16px;
+    margin-top: 10px;
+  }
+  .io-col {
+    flex: 1 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .io-col label {
+    font-size: 11.5px;
+    color: var(--text-dim);
+  }
+  .io-textarea {
+    width: 100%;
+    height: 100px;
+    resize: vertical;
+    font: 11px/1.4 var(--mono, monospace);
+    color: var(--text);
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+  }
+  .io-textarea:read-only {
+    color: var(--text-dim);
+  }
+  .io-status {
+    min-height: 16px;
+    margin-top: 6px;
+    font-size: 11.5px;
+  }
+  .io-note {
+    color: var(--text-dim);
+  }
+  .io-err {
+    color: var(--danger);
   }
 </style>

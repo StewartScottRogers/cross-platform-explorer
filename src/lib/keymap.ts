@@ -408,6 +408,80 @@ export function serializeKeymap(keymap: Keymap): string {
 }
 
 /**
+ * Serialize a keymap for CLIPBOARD export (CPE-1550) — human-readable (pretty-printed) and
+ * wrapped in a small envelope (`{ version, bindings }`) rather than `serializeKeymap`'s bare,
+ * minified map. `serializeKeymap`/`parseKeymap` remain the settings-store's own persisted form
+ * (unversioned, minified, used on every save/load); this is the deliberately distinct
+ * user-facing "share/back up a keymap" form, versioned so a future breaking change to the
+ * envelope shape has somewhere to branch. Exports the FULL effective keymap (every action, not
+ * just overrides) — simpler to reason about than a diff against `defaultKeymap()`, and a full
+ * snapshot is portable on its own even if the registry's set of default chords drifts between
+ * versions.
+ */
+export function exportKeymap(keymap: Keymap): string {
+  return JSON.stringify({ version: 1, bindings: keymap }, null, 2);
+}
+
+/**
+ * Parse a clipboard-pasted keymap export (CPE-1550), tolerantly — same acceptance rules as
+ * `parseKeymap` (known `ActionId` + a chord that normalizes cleanly or `""`), but instead of
+ * silently dropping a bad entry, reports which action ids were actually applied vs. rejected so
+ * the import UI can show the user what happened. Accepts both `exportKeymap`'s envelope
+ * (`{ version, bindings }`) and a bare `{ actionId: chord }` map (so a hand-edited or
+ * older/foreign snippet still imports). Chord CONFLICTS are allowed through unresolved — same as
+ * every other edit path, they surface the next time `findConflicts` runs, not here. Never throws;
+ * `base` (defaults to a fresh `defaultKeymap()`) supplies every action this import doesn't touch
+ * or rejects, so the result is always a complete `Keymap`.
+ */
+export function importKeymap(
+  json: string,
+  base: Keymap = defaultKeymap(),
+): { keymap: Keymap; applied: ActionId[]; rejected: string[] } {
+  const out = { ...base };
+  const applied: ActionId[] = [];
+  const rejected: string[] = [];
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(json);
+  } catch {
+    return { keymap: out, applied, rejected: ["<malformed JSON>"] };
+  }
+
+  const bindings =
+    raw && typeof raw === "object" && !Array.isArray(raw) && "bindings" in (raw as Record<string, unknown>)
+      ? (raw as Record<string, unknown>).bindings
+      : raw;
+  if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)) {
+    return { keymap: out, applied, rejected: ["<not a keymap object>"] };
+  }
+
+  for (const [key, value] of Object.entries(bindings as Record<string, unknown>)) {
+    if (!isActionId(key)) {
+      rejected.push(key);
+      continue;
+    }
+    if (typeof value !== "string") {
+      rejected.push(key);
+      continue;
+    }
+    if (value === "") {
+      out[key] = "";
+      applied.push(key);
+      continue;
+    }
+    const normalized = normalizeChord(value);
+    if (normalized) {
+      out[key] = normalized;
+      applied.push(key);
+    } else {
+      rejected.push(key); // un-normalizable chord
+    }
+  }
+  return { keymap: out, applied, rejected };
+}
+
+/**
  * Parse a persisted keymap, tolerantly. Keeps only entries whose key is a known `ActionId` and
  * whose value normalizes to a valid chord (via `normalizeChord`, so grandfathered bare-key
  * defaults survive a round-trip) or `""`; malformed JSON, non-object JSON, an unknown/renamed
