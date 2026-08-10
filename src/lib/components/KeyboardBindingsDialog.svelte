@@ -497,6 +497,11 @@
     background: var(--danger);
     color: var(--pal-white);
   }
+  .btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--pal-white);
+  }
   .io-section {
     flex: 0 0 auto;
     margin-top: 12px;
