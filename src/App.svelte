@@ -40,6 +40,7 @@
   import BoardView from "./lib/components/BoardView.svelte";
   import { BOARD_MIN_W, BOARD_MIN_H } from "./lib/board";
   import WorkbenchView from "./lib/components/WorkbenchView.svelte";
+  import TrashView from "./lib/components/TrashView.svelte";
   import DocsView from "./lib/components/DocsView.svelte";
   import { docSlugForSection, type Section } from "./lib/sectionDocs";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
@@ -986,6 +987,9 @@
   let showBoard = false;
   /** Integrated workbench (CPE-526) — git diff of the current folder. */
   let showWorkbench = false;
+  /** Browsable Trash overlay (CPE-1560, epic CPE-1486 final slice) — opened from the Sidebar's Trash
+   *  section; only reachable when `canRestoreTrash` gates it on (Windows/Linux). */
+  let showTrash = false;
   /** Embedded terminal dock (CPE-1243, epic CPE-714) — an xterm.js pane rooted at the current folder.
    *  Mounted only while true, so a never-opened terminal costs nothing (no PTY, no dock tab, no xterm). */
   let showTerminal = false;
@@ -1009,6 +1013,7 @@
     if (compareOpen) return "compare";
     if (showWorkbench) return "workbench";
     if (showTerminal) return "terminal";
+    if (showTrash) return "trash";
     return isHome ? "home" : "explorer";
   }
   /** Every documented section + a friendly label, for per-section jump-links (palette, menus) — CPE-764. */
@@ -1023,6 +1028,7 @@
     { section: "agent-grid", label: "Agent Grid" },
     { section: "repositories", label: "Repositories" },
     { section: "swarms", label: "Swarms" },
+    { section: "trash", label: "Trash" },
   ];
 
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
@@ -6233,6 +6239,8 @@
       {discoveredShares}
       {connectionStates}
       {connectionErrors}
+      canBrowseTrash={canRestoreTrash}
+      on:openTrash={() => (showTrash = true)}
       on:networkAdd={(e) =>
         (networkForm = { x: e.detail.x, y: e.detail.y, editing: null, prefill: e.detail.prefill ?? null })}
       on:networkConnect={(e) => void onNetworkConnect(e.detail)}
@@ -6950,6 +6958,10 @@
     on:help={(e) => openDocs(e.detail)}
     on:close={() => (showWorkbench = false)}
   />
+{/if}
+
+{#if showTrash}
+  <TrashView on:help={(e) => openDocs(e.detail)} on:close={() => (showTrash = false)} />
 {/if}
 
 {#if showDocs}

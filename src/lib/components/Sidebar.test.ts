@@ -374,6 +374,54 @@ describe("Sidebar 'Discovered on your network' tier (CPE-1519)", () => {
   });
 });
 
+describe("Sidebar Trash section (CPE-1560, epic CPE-1486)", () => {
+  it("always renders the Trash header, regardless of platform gate", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [] });
+    expect(screen.getByText("Trash")).toBeTruthy();
+  });
+
+  it("shows a clickable Open Trash row when canBrowseTrash is true (Windows/Linux, the default)", () => {
+    render(Sidebar, { places: [], drives: [], favorites: [], canBrowseTrash: true });
+    const row = screen.getByText("Open Trash").closest("button") as HTMLButtonElement;
+    expect(row).toBeTruthy();
+    expect(row.disabled).toBe(false);
+  });
+
+  it("dispatches openTrash when the Open Trash row is clicked", async () => {
+    const { component } = render(Sidebar, { places: [], drives: [], favorites: [], canBrowseTrash: true });
+    const opened = vi.fn();
+    component.$on("openTrash", opened);
+
+    await fireEvent.click(screen.getByText("Open Trash"));
+    expect(opened).toHaveBeenCalledOnce();
+  });
+
+  it("shows an inert Finder message instead of Open Trash when canBrowseTrash is false (macOS)", async () => {
+    const { component } = render(Sidebar, { places: [], drives: [], favorites: [], canBrowseTrash: false });
+    expect(screen.queryByText("Open Trash")).toBeNull();
+    const row = screen.getByText("Open Finder's Trash instead").closest("button") as HTMLButtonElement;
+    expect(row).toBeTruthy();
+    expect(row.disabled).toBe(true);
+
+    const opened = vi.fn();
+    component.$on("openTrash", opened);
+    await fireEvent.click(row);
+    expect(opened).not.toHaveBeenCalled();
+  });
+
+  it("collapses and expands independently of other sections (generic sidebarSections store)", async () => {
+    const { container } = render(Sidebar, { places: [], drives: [], favorites: [], canBrowseTrash: true });
+    expect(screen.getByText("Open Trash")).toBeTruthy();
+
+    const twisty = container.querySelector('[data-section-id="trash"] .twisty') as HTMLButtonElement;
+    await fireEvent.click(twisty);
+    expect(screen.queryByText("Open Trash")).toBeNull();
+
+    await fireEvent.click(twisty);
+    expect(screen.getByText("Open Trash")).toBeTruthy();
+  });
+});
+
 describe("Sidebar density (CPE-1528)", () => {
   it("does not apply the compact class when density is comfortable (default)", () => {
     const { container } = render(Sidebar, { places: [], drives: [], favorites: [] });

@@ -80,9 +80,16 @@
   export let connectionStates: Record<string, ConnState> = {};
   /** The last connect-attempt error per connection name, for the state dot's tooltip. */
   export let connectionErrors: Record<string, string> = {};
+  /** Whether this platform can browse the OS Trash (CPE-1560, epic CPE-1486): mirrors the
+   *  Windows/Linux-only `can_restore_from_trash` gate (`trash::os_limited` isn't implemented on macOS).
+   *  True shows a clickable "Open Trash" row; false shows an inert row pointing at Finder instead, so
+   *  the Trash section is never broken/empty-looking on macOS. Defaults true so the section behaves
+   *  normally before App's startup probe resolves. */
+  export let canBrowseTrash = true;
   $: dedupedShares = dedupeShares(networkShares, connections);
   $: dedupedDiscovered = dedupeShares(discoveredShares, connections, networkShares);
   $: networkOpen = isOpen($sidebarSections, "network");
+  $: trashOpen = isOpen($sidebarSections, "trash");
 
   const dispatch = createEventDispatcher<{
     navigate: string;
@@ -118,6 +125,9 @@
     /** Right-clicking a saved-connection row (CPE-1513): App opens `NetworkConnectionMenu`
      *  (Connect/Disconnect · Edit · Forget). */
     networkContext: { x: number; y: number; conn: Connection };
+    /** Open the browsable Trash view (CPE-1560, epic CPE-1486) — only dispatched when
+     *  `canBrowseTrash` is true; the macOS row is inert and never dispatches this. */
+    openTrash: void;
   }>();
 
   // Every sidebar section's collapse state now comes from one persisted store (CPE-675), so a layout the
@@ -927,6 +937,46 @@
           <span class="label">＋ Add a connection</span>
         </button>
         <div class="nav-empty">No connections yet — add an SFTP or WebDAV server.</div>
+      {/if}
+    </div>
+  {/if}
+
+  <!-- Trash (CPE-1560, epic CPE-1486): the browsable OS Trash — deliberately NOT part of the
+       drag-reorderable section set (SECTION_IDS/omap) above, same reasoning as the reset row below: a
+       single-purpose, always-last section doesn't need to be dragged around, so it skips `sidebarOrder.ts`
+       entirely and just carries a fixed CSS order past every reorderable section but before the reset
+       row. It still uses the generic per-id `sidebarSections` store for collapse state (any string key
+       works there), matching every other section's persisted open/closed behaviour. -->
+  <div class="navigation-pane-sep" style="order:900" />
+  <div class="nav-item fav-head section-head" data-section-id="trash" style="order:900">
+    <button class="twisty" class:open={trashOpen} title={trashOpen ? "Collapse" : "Expand"} aria-expanded={trashOpen} on:click={() => toggleSection("trash")}>
+      <Icon name="chev-right" size={12} />
+    </button>
+    <Icon name="delete" />
+    <span class="label fav-title">{$t("sidebar.trash")}</span>
+  </div>
+  {#if trashOpen}
+    <div class="nav-children" style="order:900">
+      {#if canBrowseTrash}
+        <button
+          class="nav-item fav-item"
+          title={$t("trash.openTip")}
+          on:click={() => dispatch("openTrash")}
+        >
+          <span class="twisty hidden" />
+          <Icon name="delete" />
+          <span class="label">{$t("trash.open")}</span>
+        </button>
+      {:else}
+        <!-- macOS: `trash::os_limited` can't list/restore here, so rather than a broken or silently
+             empty view, the row itself explains where to go instead (Finder's own Trash). Rendered as
+             a disabled button (not a navigate) — same "visible but inert" treatment as an unsupported
+             mDNS discovery row above. -->
+        <button class="nav-item fav-item" disabled title={$t("trash.macMessage")}>
+          <span class="twisty hidden" />
+          <Icon name="delete" />
+          <span class="label">{$t("trash.macLabel")}</span>
+        </button>
       {/if}
     </div>
   {/if}
