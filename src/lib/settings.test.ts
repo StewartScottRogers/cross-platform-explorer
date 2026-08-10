@@ -5,6 +5,7 @@ import {
   loadMetaColumnsForFolder, saveMetaColumnsForFolder,
   addNetworkLocation, removeNetworkLocation,
   loadNativeBridgeEnabled, saveNativeBridgeEnabled,
+  loadNavigationModeEnabled, saveNavigationModeEnabled,
   loadSpotlightHotkeyEnabled, saveSpotlightHotkeyEnabled,
   loadSpotlightHotkeyChord, saveSpotlightHotkeyChord,
   DEFAULT_SPOTLIGHT_HOTKEY_CHORD,
@@ -91,6 +92,27 @@ describe("nativeBridgeEnabled (CPE-1177)", () => {
     expect(loadNativeBridgeEnabled()).toBe(true);
     saveNativeBridgeEnabled(false);
     expect(loadNativeBridgeEnabled()).toBe(false);
+  });
+});
+
+// CPE-1552 (epic CPE-1487): the Navigation Mode opt-in that will gate the whole opt-in vim-modal
+// keyboard layer. OFF by default so the plain explorer's fast/small/predictable core is untouched
+// unless the user turns it on. Landing this setting is inert — nothing reads it yet.
+describe("navigationModeEnabled (CPE-1552)", () => {
+  it("defaults to off", () => {
+    expect(loadNavigationModeEnabled()).toBe(false);
+  });
+
+  it("round-trips through persist", () => {
+    saveNavigationModeEnabled(true);
+    expect(loadNavigationModeEnabled()).toBe(true);
+    saveNavigationModeEnabled(false);
+    expect(loadNavigationModeEnabled()).toBe(false);
+  });
+
+  it("degrades a corrupt/invalid stored value to off rather than crashing", () => {
+    saveNavigationModeEnabled("yes" as unknown as boolean);
+    expect(loadNavigationModeEnabled()).toBe(false);
   });
 });
 

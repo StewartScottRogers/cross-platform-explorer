@@ -91,6 +91,16 @@
     settings.saveNativeBridgeEnabled(on);
   }
 
+  // Navigation Mode opt-in (CPE-1552, epic CPE-1487 "keyboard navigation mode"): OFF by default.
+  // Landing this toggle is inert — the setting persists but nothing reads it yet (a later ticket,
+  // CPE-1556, wires App.svelte's key handling to check it). Self-contained (reads/writes
+  // settings.ts directly), like the native-bridge row above.
+  let navigationModeEnabled = settings.loadNavigationModeEnabled();
+  function setNavigationModeEnabled(on: boolean) {
+    navigationModeEnabled = on;
+    settings.saveNavigationModeEnabled(on);
+  }
+
   // Encrypted vaults (CPE-1250, epic CPE-738): the DEFAULT for the create dialog's "Remember passphrase in
   // the keychain" checkbox. Off by default — a passphrase persists in the OS keychain only when the user
   // opts in. Self-contained (reads/writes settings.ts directly), like the native-bridge row above.
@@ -190,6 +200,21 @@
     </div>
     <div class="note">
       Adds Pull/Push controls to the tag editor and a read-only Native metadata section to Properties.
+      Off by default.
+    </div>
+
+    <div class="section-title">Navigation Mode</div>
+    <div class="settings-row">
+      <span>Keyboard Navigation Mode (vim-style)</span>
+      <input
+        type="checkbox"
+        checked={navigationModeEnabled}
+        data-testid="navigation-mode-toggle"
+        on:change={(e) => setNavigationModeEnabled(e.currentTarget.checked)}
+      />
+    </div>
+    <div class="note">
+      Experimental — an opt-in modal keyboard layer for navigating the file list without the mouse.
       Off by default.
     </div>
 
