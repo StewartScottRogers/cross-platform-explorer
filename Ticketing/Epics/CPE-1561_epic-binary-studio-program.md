@@ -55,6 +55,21 @@ real capability** — we ship disassemble + reassemble/patch there and say so pl
 - **CPE-1566 — Edit & rebuild** (read-write arm; per-family: .NET Cecil/Roslyn, JVM javac/ASM, native reassemble/patch).
 - **CPE-1567 — Compile anything in the pane** (toolchain detection + sandboxed compile + diagnostics).
 
+## Epic-0 spike findings (2026-08-10) — LOCKED decisions
+See Library `binary-studio-engines-delivery-2026-08-10`. Key rulings:
+- **Delivery:** ADR-0001 forbids downloaded sidecar *binaries* (the signed catalog ships JSON only). **Do NOT**
+  ship engines as catalog bundles. **Reuse the AI Console detect/install-RECIPE pattern** (`sidecar/ai-console/src/agents.rs`
+  + `agents/*.json`): catalog ships a signed *recipe* + SHA-256s; the engine is fetched by its official installer or a
+  checksum-pinned self-contained bundle. **Author an ADR note** recording this (no ADR amendment needed).
+- **Seam:** engine sidecars speak `sidecar-contract` (`sidecar/contract/src/lib.rs`), NOT `crates/contract`.
+- **Engines (license-clean):** .NET = ILSpy/ilspycmd (MIT, prefer self-contained ~18MB) + Mono.Cecil (MIT) for rebuild;
+  JVM = CFR (MIT); native disasm = iced-x86 (MIT, x86/x64, in-process) + yaxpeax-arm (0BSD); native decompile = RetDec
+  (MIT) or Ghidra (Apache-2.0). **`dotnetdll` is GPL-3 → excluded in-process**; commercial (IDA) excluded. GPL engines
+  only ever as arm's-length separate processes.
+- **CPE-1562 is all in-process pure-Rust** (goblin already a dep, hand-rolled ECMA-335 CLR reader, iced-x86) → ships
+  in the lean core path; heavy decompile engines live behind the `sidecar-platform` cargo feature (OFF by default).
+- **Fuzz:** the hand-rolled CLR reader is the top adversarial-fuzz priority (coded-index/offset parsing).
+
 ## Sequencing
 Epic 0 spike → CPE-1562 (Inspector) → CPE-1563 (.NET, the primary ask) → CPE-1564 (JVM) in parallel → CPE-1565
 (native) later/most-gated → CPE-1566 (rebuild, per-family, each after its decompile epic) → CPE-1567 (general
