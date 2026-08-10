@@ -3,18 +3,25 @@
    * Compare view (CPE-779, epic CPE-722). Two folders → a classified tree (`scan_tree` + `diffTrees` +
    * `summarizeDiff`/`flattenDiff`, with expand/collapse). Two files → a **byte compare** (`byteDiff`,
    * CPE-778, over `read_file_range`): equal / first-differing offset / differing-range count / length diff.
-   * The mode is auto-detected — folders scan, files don't — so the same two path fields drive both. Text
-   * line-diff is a follow-up (needs a line-level diff algorithm the codebase doesn't yet have).
+   * Two IMAGE files (by extension, CPE-1508) → the image-compare pane (`ImageCompareView`, backed by
+   * `diffImages`/CPE-1490's `diff_images`): side-by-side / onion-skin / pixel-diff heatmap. The mode is
+   * auto-detected — folders scan, files don't, images are recognised by extension — so the same two path
+   * fields drive all of them.
    */
   import { createEventDispatcher } from "svelte";
   import { unwrap } from "../invoke";
-  import { commands } from "../bindings.gen"; // typed client (CPE-964)
+  import { commands, type ImageDiff } from "../bindings.gen"; // typed client (CPE-964)
   import { diffTrees, summarizeDiff, flattenDiff, type CompareNode, type DiffRow } from "../treeDiff";
   import { byteDiff, type ByteDiff } from "../byteDiff";
   import { lineDiff, type LineDiffResult } from "../lineDiff";
+  import { isImage } from "../filetypes";
+  import ImageCompareView from "./ImageCompareView.svelte";
 
   export let initialLeft = "";
   export let initialRight = "";
+  /** Resolve a file path to a URL the webview can load (`convertFileSrc` in the app) — forwarded to
+   *  `ImageCompareView` for the two source images (the diff mask itself is a data: URL, no path). */
+  export let assetUrl: (path: string) => string = (p) => p;
 
   const dispatch = createEventDispatcher<{ cancel: void }>();
 
@@ -30,9 +37,10 @@
   let loading = false;
   let error = "";
   let compared = false;
-  let mode: "folder" | "file" | "text" = "folder";
+  let mode: "folder" | "file" | "text" | "image" = "folder";
   let fileDiff: ByteDiff | null = null;
   let textDiff: LineDiffResult | null = null;
+  let imageDiff: ImageDiff | null = null;
 
   async function readBytes(path: string): Promise<Uint8Array> {
     const arr = unwrap(await commands.readFileRange(path, 0, FILE_CMP_CAP));
@@ -54,6 +62,7 @@
     error = "";
     fileDiff = null;
     textDiff = null;
+    imageDiff = null;
     try {
       // Folders scan; a file makes scan_tree error ("not a folder") — fall through to the file compare.
       // scan_tree returns the generated TreeNode[]; CompareNode is assignable to it, so the cast is
@@ -70,15 +79,21 @@
       compared = true;
     } catch (folderErr) {
       try {
-        // Two files: prefer a text line-diff when both decode as UTF-8, else a byte compare.
-        const [ta, tb] = await Promise.all([readTextMaybe(left.trim()), readTextMaybe(right.trim())]);
-        if (ta !== null && tb !== null) {
-          textDiff = lineDiff(ta, tb);
-          mode = "text";
+        // Two files: an image pair (by extension, CPE-1508) gets the image-compare pane; otherwise prefer
+        // a text line-diff when both decode as UTF-8, else a byte compare.
+        if (isImage(left.trim()) && isImage(right.trim())) {
+          imageDiff = unwrap(await commands.diffImages(left.trim(), right.trim()));
+          mode = "image";
         } else {
-          const [a, b] = await Promise.all([readBytes(left.trim()), readBytes(right.trim())]);
-          fileDiff = byteDiff(a, b);
-          mode = "file";
+          const [ta, tb] = await Promise.all([readTextMaybe(left.trim()), readTextMaybe(right.trim())]);
+          if (ta !== null && tb !== null) {
+            textDiff = lineDiff(ta, tb);
+            mode = "text";
+          } else {
+            const [a, b] = await Promise.all([readBytes(left.trim()), readBytes(right.trim())]);
+            fileDiff = byteDiff(a, b);
+            mode = "file";
+          }
         }
         compared = true;
       } catch {
@@ -116,7 +131,7 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("cancel")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Compare" on:click|stopPropagation>
+  <div class="dialog" class:wide={mode === "image" && compared} role="dialog" aria-modal="true" aria-label="Compare" on:click|stopPropagation>
     <h2>Compare</h2>
 
     <div class="paths">
@@ -135,6 +150,9 @@
       </div>
     {/if}
 
+    {#if !error && !loading && compared && mode === "image" && imageDiff}
+      <ImageCompareView left={left.trim()} right={right.trim()} diff={imageDiff} {assetUrl} />
+    {:else}
     <div class="tree" data-testid="compare-tree">
       {#if error}
         <div class="err">{error}</div>
@@ -182,6 +200,7 @@
         {/each}
       {/if}
     </div>
+    {/if}
 
     <div class="actions">
       <button class="btn" on:click={() => dispatch("cancel")}>Close</button>
@@ -192,6 +211,8 @@
 <style>
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
   .dialog { width: 720px; max-width: 95vw; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
+  /* The image-compare pane (CPE-1508) needs real room for two adjacent images + zoom controls. */
+  .dialog.wide { width: 1040px; }
   h2 { font-size: 16px; margin-bottom: 12px; }
   .paths { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
   .path { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }

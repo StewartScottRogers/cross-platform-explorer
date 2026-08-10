@@ -28,7 +28,8 @@ export type Section =
   | "media-player"
   | "structured-previews"
   | "network"
-  | "split-join";
+  | "split-join"
+  | "compare";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -103,6 +104,13 @@ const SECTION_DOC: Record<Section, string> = {
   // a file's context menu), but it still earns its own doc page + registry entry per
   // [[maintain-in-app-docs-library]].
   "split-join": "33-split-join",
+  // CPE-1508 (epic CPE-722, parent CPE-1490): the Compare dialog (CPE-779's folder/text/byte compare,
+  // CPE-1508's image compare). Like network/structured-previews above, not a sidebar view you switch into
+  // (it's a modal reachable from the Tools menu / command palette / "Compare selection…"), but it still
+  // earns its own doc page + registry entry per [[maintain-in-app-docs-library]] — CPE-779 shipped the
+  // dialog without one; this ticket closes that pre-existing gap since it needs somewhere to document the
+  // new image sub-views anyway.
+  compare: "32-compare",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

@@ -991,6 +991,7 @@
   }
   /** The section the user is currently in, for F1 / the global Documents open (CPE-596). */
   function currentSection(): Section {
+    if (compareOpen) return "compare";
     if (showWorkbench) return "workbench";
     if (showTerminal) return "terminal";
     return isHome ? "home" : "explorer";
@@ -6897,6 +6898,7 @@
   <CompareDialog
     initialLeft={compareLeft}
     initialRight={compareRight}
+    assetUrl={convertFileSrc}
     on:cancel={() => (compareOpen = false)}
   />
 {/if}

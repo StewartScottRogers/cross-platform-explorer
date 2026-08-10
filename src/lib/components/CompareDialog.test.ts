@@ -11,6 +11,7 @@ let textLeft: string | Error = "";
 let textRight: string | Error = "";
 let rangeLeft: number[] | Error = [];
 let rangeRight: number[] | Error = [];
+let imageDiffResult: any | Error = null;
 
 // `commands.*` in bindings.gen.ts call `TAURI_INVOKE(cmd, args)`, which is `invoke` re-exported from
 // `./invoke`, itself wrapping `@tauri-apps/api/core`'s `invoke` — so that's the seam to mock (same
@@ -30,6 +31,10 @@ const invoke = vi.fn(async (cmd: string, args?: any) => {
     const v = args.path === "/left" ? rangeLeft : rangeRight;
     if (v instanceof Error) throw v;
     return v;
+  }
+  if (cmd === "diff_images") {
+    if (imageDiffResult instanceof Error) throw imageDiffResult;
+    return imageDiffResult;
   }
   throw new Error(`unexpected command ${cmd}`);
 });
@@ -98,6 +103,56 @@ describe("CompareDialog (CPE-1393)", () => {
     await fireEvent.click(nodes[0]);
     nodes = screen.getAllByTestId("compare-node");
     expect(nodes).toHaveLength(3);
+  });
+
+  it("image mode: two image paths call diff_images and render the image-compare pane (CPE-1508)", async () => {
+    invoke.mockClear();
+    scanTreeLeft = new Error("not a folder");
+    scanTreeRight = new Error("not a folder");
+    imageDiffResult = {
+      width: 10,
+      height: 10,
+      changedPixels: 3,
+      totalPixels: 100,
+      percentDifferent: 3,
+      bbox: { x: 1, y: 1, width: 2, height: 2 },
+      sizeMismatch: false,
+      maskPng: [137, 80, 78, 71],
+    };
+
+    render(CompareDialog, {});
+    await typePaths("/left/a.png", "/right/b.png");
+    await fireEvent.click(screen.getByTestId("compare-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("image-compare")).toBeTruthy());
+    expect(invoke).toHaveBeenCalledWith("diff_images", { a: "/left/a.png", b: "/right/b.png" });
+    // Neither the text nor the byte fallback should run for an image pair.
+    expect(invoke).not.toHaveBeenCalledWith("read_file_text", expect.anything());
+    expect(invoke).not.toHaveBeenCalledWith("read_file_range", expect.anything());
+    expect(screen.getByTestId("ic-subview-side-by-side")).toBeTruthy();
+    expect(screen.queryByTestId("ic-size-mismatch")).toBeNull();
+  });
+
+  it("image mode: shows the size-mismatch note when the backend reports differing dimensions", async () => {
+    invoke.mockClear();
+    scanTreeLeft = new Error("not a folder");
+    scanTreeRight = new Error("not a folder");
+    imageDiffResult = {
+      width: 20,
+      height: 10,
+      changedPixels: 50,
+      totalPixels: 200,
+      percentDifferent: 25,
+      bbox: null,
+      sizeMismatch: true,
+      maskPng: [1, 2, 3],
+    };
+
+    render(CompareDialog, {});
+    await typePaths("/left/a.jpg", "/right/b.jpg");
+    await fireEvent.click(screen.getByTestId("compare-btn"));
+
+    await waitFor(() => expect(screen.getByTestId("ic-size-mismatch")).toBeTruthy());
   });
 
   it("file mode (text): falls back to a line diff when scan_tree fails but both files decode as UTF-8", async () => {
