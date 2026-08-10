@@ -6,6 +6,8 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { platformActive } from "../sidecar";
   import * as settings from "../settings";
+  import { applyTheme } from "../theme";
+  import type { ThemeSetting } from "../types";
   import SidecarManager from "./SidecarManager.svelte";
   import ShellIntegration from "./ShellIntegration.svelte";
   import ScheduledSnapshots from "./ScheduledSnapshots.svelte";
@@ -30,6 +32,26 @@
   onMount(async () => {
     platformOn = await platformActive();
   });
+
+  // Appearance / theme (CPE-1536, epic CPE-1492): the visible entry point for the theme preference.
+  // "system" and "light" are the only options that ship today (CPE-1535 resolves both to "light" — no
+  // real dark palette yet, that's CPE-1493); the options list is kept as an array so adding "Dark" later
+  // is a one-line change. An inline instant control ([[prefer-inline-instant-controls]]), self-contained
+  // like the other rows on this page: reads/writes settings.ts directly and also calls applyTheme so the
+  // (currently inert) data-theme attribute updates live, same instant-apply feel as the toggles below.
+  const THEME_OPTIONS: { value: ThemeSetting; label: string }[] = [
+    { value: "system", label: "System" },
+    { value: "light", label: "Light" },
+  ];
+  let theme = settings.loadTheme();
+  function setTheme(v: ThemeSetting) {
+    theme = v;
+    settings.saveTheme(v);
+    applyTheme(v);
+  }
+  function onThemeChange(e: Event) {
+    setTheme((e.currentTarget as HTMLSelectElement).value as ThemeSetting);
+  }
 
   // Native-bridge opt-in (CPE-1177, epic CPE-717): OFF by default. When on, it reveals the OS-native
   // tag/comment Pull/Push controls in TagEditor and the read-only Native metadata section in
@@ -89,6 +111,19 @@
       <button class="settings-btn" on:click={() => dispatch("reset")}>
         Reset all settings to defaults
       </button>
+    </div>
+
+    <div class="section-title">Appearance</div>
+    <div class="settings-row">
+      <span>Theme</span>
+      <select data-testid="theme-select" value={theme} on:change={onThemeChange}>
+        {#each THEME_OPTIONS as opt (opt.value)}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+    </div>
+    <div class="note">
+      Light is the only theme today — System will follow your OS automatically once dark mode ships.
     </div>
 
     <div class="section-title">Native metadata bridge</div>
@@ -193,6 +228,15 @@
     font-size: 12px;
     color: var(--text-dim);
     margin-top: 2px;
+  }
+  .settings-row select {
+    height: 28px;
+    padding: 0 8px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
   }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
   .btn {
