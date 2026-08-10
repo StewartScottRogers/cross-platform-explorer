@@ -66,4 +66,23 @@ describe("SettingsDialog Appearance section (CPE-1536)", () => {
     // … and applied live (applyTheme stamps the dataset attribute CPE-1534's CSS layer selects on).
     expect(document.documentElement.dataset.theme).toBe("light");
   });
+
+  it("offers System, Light, and Dark as the three theme options (CPE-1541)", async () => {
+    render(SettingsDialog);
+    const select = screen.getByTestId("theme-select") as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toEqual(["system", "light", "dark"]);
+  });
+
+  it("selecting Dark persists via saveTheme and applies via applyTheme (CPE-1541)", async () => {
+    render(SettingsDialog);
+    const select = screen.getByTestId("theme-select") as HTMLSelectElement;
+
+    await fireEvent.change(select, { target: { value: "dark" } });
+
+    // Persisted (saveTheme) …
+    expect(loadTheme()).toBe("dark");
+    // … and applied live (applyTheme resolves "dark" to itself and stamps the dataset attribute).
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
 });
