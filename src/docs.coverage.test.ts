@@ -36,14 +36,12 @@ export const OTHER_USER_FACING_SURFACES: string[] = [];
  * doc — that's the case this test exists to catch.
  */
 export const KNOWN_GAPS_ALLOWLIST: string[] = [
-  "BatchRenameDialog", // only a passing "...and batch rename" mention in 03-explorer.md's operations bullet
   "ColorRulesDialog", // file coloring & labels rules editor — no page yet
   "ContentIndexSearchDialog", // local content-index semantic search — no page yet
   "FileNameSearchDialog", // recursive find-by-name — no page yet
   "InspectCryptoDialog", // dual-pane JWT/cert inspect overlay — no page yet
   "KeyboardBindingsDialog", // press-to-set rebind surface — no page yet (36-keyboard-shortcuts.md covers the read-only viewer only)
   "MacrosDialog", // macro library (record/replay rename/move/tag/convert steps) — no page yet
-  "NewLinkDialog", // "Link Forge" — symlink/hardlink creator — no page yet
   "PasswordPromptDialog", // shared masked-input modal — no page yet
   "PatternSelectDialog", // "Select by pattern" glob input — no page yet
   "RepairLinkDialog", // broken-symlink repair flow — no page yet
