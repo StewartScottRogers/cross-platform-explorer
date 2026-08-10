@@ -14,7 +14,7 @@
   import type { SavedSearch } from "../savedSearch";
   import { isValidDrop, hoverEffect } from "../dnd";
   import { sidebarSections, isOpen, toggleSection } from "../sidebarSections";
-  import { sidebarOrder, orderStyleMap, reorderSection, resetSidebarOrder } from "../sidebarOrder";
+  import { sidebarOrder, orderStyleMap, reorderSection, resetSidebarOrder, moveSection } from "../sidebarOrder";
   import {
     dedupeShares,
     hasAnyNetworkRows,
@@ -135,38 +135,92 @@
   // Drag-to-reorder a section HEADER (CPE-1520): local-only state, distinct from the file-drag
   // machinery above (`draggedPaths`/`dropPath`, which drags files from the file list onto folder
   // targets) — this drags a section id onto another section's header to reorder the sidebar itself.
+  //
+  // CPE-1525: this used to be HTML5 drag-and-drop (`draggable="true"` + `dragstart/dragover/drop` on
+  // the whole header). That's dead in the shipped app: Tauri's webview OS drag-drop handler is enabled
+  // (required for file-drop-into-window, see App.svelte's `onDragDropEvent`), and on Windows/WebView2 an
+  // enabled Tauri drag-drop handler swallows in-page HTML5 drag events before they ever fire — a known
+  // Tauri/WebView2 limitation, not fixable by flipping `dragDrop:false` (that would kill file-drop).
+  // Pointer events are NOT intercepted, so the grip now drives the reorder itself via
+  // pointerdown/move/up + `setPointerCapture`, hit-testing the header under the pointer with
+  // `elementFromPoint` (unaffected by capture — capture only retargets events, not geometry queries).
+  // The pure reducer (`sidebarOrder.ts` — `reorderSection`/`moveSection`/etc.) is unchanged; only this
+  // DOM interaction layer moved.
   let draggingSection = "";
   let dragOverSection = "";
   let dragOverBefore = true;
+  let dragActive = false; // past the movement threshold — a real drag, not a click
+  let dragStartX = 0;
+  let dragStartY = 0;
+  const SECTION_DRAG_THRESHOLD = 4; // px of pointer movement before a grip press counts as a drag
 
-  function onSectionDragStart(e: DragEvent, id: string) {
-    draggingSection = id;
-    if (e.dataTransfer) {
-      e.dataTransfer.effectAllowed = "move";
-      e.dataTransfer.setData("text/x-cpe-sidebar-section", id);
-    }
+  /** Walk up from whatever element is under (x, y) to the nearest section header carrying
+   *  `data-section-id`. Geometric hit-testing — unaffected by pointer capture. */
+  function sectionHeaderAt(x: number, y: number): HTMLElement | null {
+    let el = document.elementFromPoint(x, y) as HTMLElement | null;
+    while (el && !el.dataset.sectionId) el = el.parentElement;
+    return el;
   }
-  function onSectionDragOver(e: DragEvent, id: string) {
-    if (!draggingSection || draggingSection === id) return;
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+
+  function onGripPointerDown(e: PointerEvent, id: string) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    draggingSection = id;
+    dragActive = false;
+    dragOverSection = "";
+    dragStartX = e.clientX;
+    dragStartY = e.clientY;
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  }
+
+  function onGripPointerMove(e: PointerEvent) {
+    if (!draggingSection) return;
+    if (!dragActive) {
+      if (Math.hypot(e.clientX - dragStartX, e.clientY - dragStartY) < SECTION_DRAG_THRESHOLD) return;
+      dragActive = true;
+    }
+    const header = sectionHeaderAt(e.clientX, e.clientY);
+    const id = header?.dataset.sectionId;
+    if (!id || id === draggingSection) {
+      dragOverSection = "";
+      return;
+    }
+    const rect = header!.getBoundingClientRect();
     dragOverSection = id;
     dragOverBefore = e.clientY < rect.top + rect.height / 2;
   }
-  function onSectionDragLeave(id: string) {
-    if (dragOverSection === id) dragOverSection = "";
-  }
-  function onSectionDrop(e: DragEvent, id: string) {
+
+  function onGripPointerUp(e: PointerEvent) {
     if (!draggingSection) return;
-    e.preventDefault();
-    reorderSection(draggingSection, id, dragOverBefore);
-    draggingSection = "";
-    dragOverSection = "";
+    if (dragActive && dragOverSection) reorderSection(draggingSection, dragOverSection, dragOverBefore);
+    if ((e.currentTarget as HTMLElement).hasPointerCapture?.(e.pointerId)) {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    }
+    endSectionDrag();
   }
-  function onSectionDragEnd() {
+
+  function onGripPointerCancel() {
+    endSectionDrag();
+  }
+
+  function endSectionDrag() {
     draggingSection = "";
     dragOverSection = "";
+    dragActive = false;
+  }
+
+  /** Keyboard fallback (CPE-1525): the grip is itself a focusable, keyboard-actionable control —
+   *  ArrowUp/ArrowDown move the section one slot without any pointer drag at all (more reliable, and
+   *  accessible). Escape cancels an in-progress pointer drag. */
+  function onGripKeyDown(e: KeyboardEvent, id: string) {
+    if (e.key === "Escape" && draggingSection) {
+      e.preventDefault();
+      endSectionDrag();
+      return;
+    }
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      moveSection(id, e.key === "ArrowUp" ? -1 : 1);
+    }
   }
 
   const extOf = (name: string) => {
@@ -316,20 +370,25 @@
 
 <div class="navigation-pane" role="region" aria-label="Navigation">
   {#if sessions.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item agents-head section-head"
       class:drop-before={dragOverSection === "agents" && dragOverBefore}
       class:drop-after={dragOverSection === "agents" && !dragOverBefore}
       style="order:{omap.agents}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "agents")}
-      on:dragover={(e) => onSectionDragOver(e, "agents")}
-      on:dragleave={() => onSectionDragLeave("agents")}
-      on:drop={(e) => onSectionDrop(e, "agents")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="agents"
     >
-      <span class="section-grip" title="Drag to reorder the Agents section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "agents"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Agents section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "agents")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "agents")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={agentsOpen} title={agentsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("agents")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -367,20 +426,25 @@
     <div class="navigation-pane-sep" style="order:{omap.agents}" />
   {/if}
   {#if favorites.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item fav-head section-head"
       class:drop-before={dragOverSection === "favorites" && dragOverBefore}
       class:drop-after={dragOverSection === "favorites" && !dragOverBefore}
       style="order:{omap.favorites}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "favorites")}
-      on:dragover={(e) => onSectionDragOver(e, "favorites")}
-      on:dragleave={() => onSectionDragLeave("favorites")}
-      on:drop={(e) => onSectionDrop(e, "favorites")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="favorites"
     >
-      <span class="section-grip" title="Drag to reorder the Favorites section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "favorites"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Favorites section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "favorites")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "favorites")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={favOpen} title={favOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("favorites")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -406,20 +470,25 @@
     <div class="navigation-pane-sep" style="order:{omap.favorites}" />
   {/if}
   {#if tagList.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item fav-head section-head"
       class:drop-before={dragOverSection === "tags" && dragOverBefore}
       class:drop-after={dragOverSection === "tags" && !dragOverBefore}
       style="order:{omap.tags}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "tags")}
-      on:dragover={(e) => onSectionDragOver(e, "tags")}
-      on:dragleave={() => onSectionDragLeave("tags")}
-      on:drop={(e) => onSectionDrop(e, "tags")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="tags"
     >
-      <span class="section-grip" title="Drag to reorder the Tags section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "tags"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Tags section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "tags")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "tags")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={tagsOpen} title={tagsOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("tags")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -447,20 +516,25 @@
     <div class="navigation-pane-sep" style="order:{omap.tags}" />
   {/if}
   {#if smartFolders.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item fav-head section-head"
       class:drop-before={dragOverSection === "smart" && dragOverBefore}
       class:drop-after={dragOverSection === "smart" && !dragOverBefore}
       style="order:{omap.smart}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "smart")}
-      on:dragover={(e) => onSectionDragOver(e, "smart")}
-      on:dragleave={() => onSectionDragLeave("smart")}
-      on:drop={(e) => onSectionDrop(e, "smart")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="smart"
     >
-      <span class="section-grip" title="Drag to reorder the Smart Folders section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "smart"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Smart Folders section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "smart")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "smart")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={smartOpen} title={smartOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("smart")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -487,20 +561,25 @@
     <div class="navigation-pane-sep" style="order:{omap.smart}" />
   {/if}
   {#if savedSearches.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item fav-head section-head"
       class:drop-before={dragOverSection === "savedSearch" && dragOverBefore}
       class:drop-after={dragOverSection === "savedSearch" && !dragOverBefore}
       style="order:{omap.savedSearch}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "savedSearch")}
-      on:dragover={(e) => onSectionDragOver(e, "savedSearch")}
-      on:dragleave={() => onSectionDragLeave("savedSearch")}
-      on:drop={(e) => onSectionDrop(e, "savedSearch")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="savedSearch"
     >
-      <span class="section-grip" title="Drag to reorder the Saved Searches section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "savedSearch"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Saved Searches section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "savedSearch")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "savedSearch")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={savedSearchOpen} title={savedSearchOpen ? "Collapse" : "Expand"} on:click={() => toggleSection("savedSearch")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -526,20 +605,25 @@
     {/if}
     <div class="navigation-pane-sep" style="order:{omap.savedSearch}" />
   {/if}
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div
     class="nav-item fav-head section-head"
     class:drop-before={dragOverSection === "explore" && dragOverBefore}
     class:drop-after={dragOverSection === "explore" && !dragOverBefore}
     style="order:{omap.explore}"
-    draggable="true"
-    on:dragstart={(e) => onSectionDragStart(e, "explore")}
-    on:dragover={(e) => onSectionDragOver(e, "explore")}
-    on:dragleave={() => onSectionDragLeave("explore")}
-    on:drop={(e) => onSectionDrop(e, "explore")}
-    on:dragend={onSectionDragEnd}
+    data-section-id="explore"
   >
-    <span class="section-grip" title="Drag to reorder the Explore section"><Icon name="grip" size={12} /></span>
+    <span
+      class="section-grip"
+      class:grabbing={dragActive && draggingSection === "explore"}
+      role="button"
+      tabindex="0"
+      title="Drag to reorder the Explore section (or focus + Arrow Up/Down)"
+      on:pointerdown={(e) => onGripPointerDown(e, "explore")}
+      on:pointermove={onGripPointerMove}
+      on:pointerup={onGripPointerUp}
+      on:pointercancel={onGripPointerCancel}
+      on:keydown={(e) => onGripKeyDown(e, "explore")}
+    ><Icon name="grip" size={12} /></span>
     <button class="twisty" class:open={exploreOpen} title={exploreOpen ? "Collapse" : "Expand"} aria-expanded={exploreOpen} on:click={() => toggleSection("explore")}>
       <Icon name="chev-right" size={12} />
     </button>
@@ -577,20 +661,25 @@
   <div class="navigation-pane-sep" style="order:{omap.explore}" />
 
   {#if places.length > 0}
-    <!-- svelte-ignore a11y-no-static-element-interactions -->
     <div
       class="nav-item fav-head section-head"
       class:drop-before={dragOverSection === "places" && dragOverBefore}
       class:drop-after={dragOverSection === "places" && !dragOverBefore}
       style="order:{omap.places}"
-      draggable="true"
-      on:dragstart={(e) => onSectionDragStart(e, "places")}
-      on:dragover={(e) => onSectionDragOver(e, "places")}
-      on:dragleave={() => onSectionDragLeave("places")}
-      on:drop={(e) => onSectionDrop(e, "places")}
-      on:dragend={onSectionDragEnd}
+      data-section-id="places"
     >
-      <span class="section-grip" title="Drag to reorder the Quick Access section"><Icon name="grip" size={12} /></span>
+      <span
+        class="section-grip"
+        class:grabbing={dragActive && draggingSection === "places"}
+        role="button"
+        tabindex="0"
+        title="Drag to reorder the Quick Access section (or focus + Arrow Up/Down)"
+        on:pointerdown={(e) => onGripPointerDown(e, "places")}
+        on:pointermove={onGripPointerMove}
+        on:pointerup={onGripPointerUp}
+        on:pointercancel={onGripPointerCancel}
+        on:keydown={(e) => onGripKeyDown(e, "places")}
+      ><Icon name="grip" size={12} /></span>
       <button class="twisty" class:open={placesOpen} title={placesOpen ? "Collapse" : "Expand"} aria-expanded={placesOpen} on:click={() => toggleSection("places")}>
         <Icon name="chev-right" size={12} />
       </button>
@@ -604,20 +693,25 @@
     {#if isDrive && i === places.length}
       <div class="navigation-pane-sep" style="order:{omap.places}" />
       {#if drives.length > 0}
-        <!-- svelte-ignore a11y-no-static-element-interactions -->
         <div
           class="nav-item fav-head section-head"
           class:drop-before={dragOverSection === "drives" && dragOverBefore}
           class:drop-after={dragOverSection === "drives" && !dragOverBefore}
           style="order:{omap.drives}"
-          draggable="true"
-          on:dragstart={(e) => onSectionDragStart(e, "drives")}
-          on:dragover={(e) => onSectionDragOver(e, "drives")}
-          on:dragleave={() => onSectionDragLeave("drives")}
-          on:drop={(e) => onSectionDrop(e, "drives")}
-          on:dragend={onSectionDragEnd}
+          data-section-id="drives"
         >
-          <span class="section-grip" title="Drag to reorder the Drives section"><Icon name="grip" size={12} /></span>
+          <span
+            class="section-grip"
+            class:grabbing={dragActive && draggingSection === "drives"}
+            role="button"
+            tabindex="0"
+            title="Drag to reorder the Drives section (or focus + Arrow Up/Down)"
+            on:pointerdown={(e) => onGripPointerDown(e, "drives")}
+            on:pointermove={onGripPointerMove}
+            on:pointerup={onGripPointerUp}
+            on:pointercancel={onGripPointerCancel}
+            on:keydown={(e) => onGripKeyDown(e, "drives")}
+          ><Icon name="grip" size={12} /></span>
           <button class="twisty" class:open={drivesOpen} title={drivesOpen ? "Collapse" : "Expand"} aria-expanded={drivesOpen} on:click={() => toggleSection("drives")}>
             <Icon name="chev-right" size={12} />
           </button>
@@ -725,20 +819,25 @@
        visually quiet (CLAUDE.md's additive-mode guarantee) rather than gaining a heavier permanent
        section — this is the common case off Windows, or on Windows with network discovery off. -->
   <div class="navigation-pane-sep" style="order:{omap.drives}" />
-  <!-- svelte-ignore a11y-no-static-element-interactions -->
   <div
     class="nav-item fav-head section-head"
     class:drop-before={dragOverSection === "network" && dragOverBefore}
     class:drop-after={dragOverSection === "network" && !dragOverBefore}
     style="order:{omap.network}"
-    draggable="true"
-    on:dragstart={(e) => onSectionDragStart(e, "network")}
-    on:dragover={(e) => onSectionDragOver(e, "network")}
-    on:dragleave={() => onSectionDragLeave("network")}
-    on:drop={(e) => onSectionDrop(e, "network")}
-    on:dragend={onSectionDragEnd}
+    data-section-id="network"
   >
-    <span class="section-grip" title="Drag to reorder the Network section"><Icon name="grip" size={12} /></span>
+    <span
+      class="section-grip"
+      class:grabbing={dragActive && draggingSection === "network"}
+      role="button"
+      tabindex="0"
+      title="Drag to reorder the Network section (or focus + Arrow Up/Down)"
+      on:pointerdown={(e) => onGripPointerDown(e, "network")}
+      on:pointermove={onGripPointerMove}
+      on:pointerup={onGripPointerUp}
+      on:pointercancel={onGripPointerCancel}
+      on:keydown={(e) => onGripKeyDown(e, "network")}
+    ><Icon name="grip" size={12} /></span>
     <button class="twisty" class:open={networkOpen} title={networkOpen ? "Collapse" : "Expand"} aria-expanded={networkOpen} on:click={() => toggleSection("network")}>
       <Icon name="chev-right" size={12} />
     </button>
@@ -929,11 +1028,11 @@
   }
   .nav-item:hover .discover-add-hint { opacity: 1; }
 
-  /* Section drag-to-reorder (CPE-1520): every section header carries a grip affordance and is itself
-     the draggable element. The grip is faint until the header (or the grip itself) is hovered, matching
-     the eject/add-btn reveal-on-hover treatment above. */
-  .section-head { cursor: grab; }
-  .section-head:active { cursor: grabbing; }
+  /* Section drag-to-reorder (CPE-1520, pointer-events since CPE-1525): every section header carries a
+     grip affordance; the grip itself (not the whole header) is the pointer-events drag handle, since
+     WebView2 swallows HTML5 draggable DnD on the header but not pointer events on a child. The grip is
+     faint until the header (or the grip itself) is hovered, matching the eject/add-btn reveal-on-hover
+     treatment above. */
   .section-grip {
     flex: 0 0 auto;
     display: inline-grid;
@@ -941,8 +1040,12 @@
     margin-right: -2px;
     color: var(--text-faint);
     opacity: 0.5;
+    cursor: grab;
+    touch-action: none; /* keep the browser from turning a grip drag into a scroll/pan gesture */
   }
+  .section-grip.grabbing { cursor: grabbing; }
   .section-head:hover .section-grip { opacity: 1; }
+  .section-grip:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; border-radius: 3px; }
   /* Drop indicator: a thin accent bar at the header's top or bottom edge, showing where the dragged
      section will land relative to this one — inset so it never shifts layout. */
   .section-head.drop-before { box-shadow: inset 0 2px 0 0 var(--accent); }
