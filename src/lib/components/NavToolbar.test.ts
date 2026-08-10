@@ -34,3 +34,19 @@ describe("NavToolbar address autocomplete (CPE-361)", () => {
     expect((options[0] as HTMLOptionElement).value).toBe("C:\\repos\\app");
   });
 });
+
+describe("NavToolbar density (CPE-1528)", () => {
+  it("does not apply the compact class when density is comfortable (default)", () => {
+    const { container } = render(NavToolbar, {
+      props: { crumbs: [{ name: "C:", path: "C:\\" }], currentPath: "C:\\" },
+    });
+    expect(container.querySelector(".navbar")?.classList.contains("compact")).toBe(false);
+  });
+
+  it("applies the compact class to the root .navbar when density is compact", () => {
+    const { container } = render(NavToolbar, {
+      props: { crumbs: [{ name: "C:", path: "C:\\" }], currentPath: "C:\\", density: "compact" },
+    });
+    expect(container.querySelector(".navbar")?.classList.contains("compact")).toBe(true);
+  });
+});
