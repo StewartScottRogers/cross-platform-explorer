@@ -1824,8 +1824,8 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 // uses (Windows + Linux only — macOS has no listing/restore API, see `can_restore_from_trash_impl`).
 // Per `docs/design/SERVER-ARCHITECTURE.md`, these stay in the Tauri adapter (only the `TrashEntry` DTO
 // lives in `cpe_server::model`) since the `trash` crate itself must never become a `cpe-server` dep.
-// Handler registration + typed bindings are the NEXT slice (CPE-1559) — commands compile and are unit
-// tested here but aren't yet reachable from the frontend.
+// Typed bindings + specta export wired in CPE-1559 — these commands are reachable from the frontend
+// via bindings.gen.ts (listTrash/listTrashStream/restoreTrashItems/emptyTrash).
 
 /// Batch size for `list_trash_stream`'s channel flushes (STREAMING.md): small enough that even a tiny
 /// Trash reveals rows in one flush, big enough that a full one rarely needs more than a couple.
