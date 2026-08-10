@@ -2,7 +2,7 @@
 id: CPE-1576
 title: "Single-file image actions in the preview pane (rotate / convert / copy image)"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Frontend
 epic: CPE-1568
