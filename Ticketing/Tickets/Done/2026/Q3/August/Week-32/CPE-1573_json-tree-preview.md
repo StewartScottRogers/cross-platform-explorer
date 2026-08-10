@@ -2,7 +2,7 @@
 id: CPE-1573
 title: "JSON tree preview + actions (collapsible tree, copy path/value, format, validate)"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Frontend
 epic: CPE-1568
