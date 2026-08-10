@@ -22,6 +22,13 @@ export type DensityMode = "comfortable" | "compact";
 // prefers-color-scheme signal; "light"/"dark" are explicit overrides. See theme.ts's resolveTheme.
 export type ThemeSetting = "system" | "light" | "dark";
 
+// Contrast preference (CPE-1544, epic CPE-1496 "high contrast"): an axis ORTHOGONAL to `ThemeSetting`
+// — a user can want high contrast independent of which base theme they're on. "off" is the default
+// (no contrast boost); "high" is an explicit manual override; "system" follows the OS high-contrast
+// signal once CPE-1546 supplies one (until then it behaves identically to "off"). See theme.ts's
+// resolveContrast and the widened applyTheme that composes both axes into `hc-${base}`.
+export type ContrastSetting = "system" | "off" | "high";
+
 export interface RecentFile {
   path: string;
   name: string;

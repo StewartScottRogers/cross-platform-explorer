@@ -14,6 +14,7 @@ import {
   loadContentEmbedderConfig,
   loadDensity, saveDensity,
   loadTheme, saveTheme,
+  loadContrast, saveContrast,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -196,6 +197,34 @@ describe("theme (CPE-1535/CPE-1540)", () => {
   it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
     saveTheme("solarized" as unknown as ReturnType<typeof loadTheme>);
     expect(loadTheme()).toBe("system");
+  });
+});
+
+// CPE-1544 (epic CPE-1496 "high contrast"): the persisted contrast setting — an axis ORTHOGONAL to
+// theme. "off" is the default (no contrast boost, today's unchanged look); "high" is an explicit
+// manual override; "system" follows the OS high-contrast signal once CPE-1546 supplies one. The
+// delete-test requires an absent/corrupt stored value to degrade to "off" cleanly rather than crash
+// (mirrors the theme validator immediately above).
+describe("contrast (CPE-1544)", () => {
+  it("defaults to off with nothing saved", () => {
+    expect(loadContrast()).toBe("off");
+  });
+
+  it("round-trips high through save/load", () => {
+    saveContrast("high");
+    expect(loadContrast()).toBe("high");
+    saveContrast("off"); // reset for other tests
+  });
+
+  it("round-trips system through save/load", () => {
+    saveContrast("system");
+    expect(loadContrast()).toBe("system");
+    saveContrast("off"); // reset for other tests
+  });
+
+  it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
+    saveContrast("extreme" as unknown as ReturnType<typeof loadContrast>);
+    expect(loadContrast()).toBe("off");
   });
 });
 
