@@ -1,48 +1,62 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-09→10 (CLI, BATCHED "up to 50 batches") — 35/50 done, 7 epics complete — BUDGET-RESET HAND-OFF
-**State:** `main` @ origin `f3e3a424` (clean, 0 worktrees). Batched run 35/50 — CONTINUES; do NOT delete
-BATCH-COUNTER. **Sub-agent budget ~130/200 this session → hand off. Resume in a FRESH session: say
-"run many sprints in batches" / "resume the sprint" to continue the 35/50 run with full budget.** Lock released +
-wakeup cancelled at hand-off; the resuming session re-acquires them. Zero escaped defects across all 35 merges.
+## RUN 2026-08-10 (CLI resume, BATCHED "up to 50") — 50/50 TARGET HIT — CLEAN HAND-OFF
+**State:** `main` @ origin `c4c220d9` (clean, all merges green). Batched run reached its 50-merge target this
+session (14 tickets merged 36→50). Sub-agent budget ~124/200 → hand off to a FRESH session for headroom.
+Lock released + wakeup cancelled at hand-off; the resuming session re-acquires them. **Zero escaped defects** across
+all merges this session.
 
-### Epics COMPLETE this run (7)
-1. CPE-1488 compact/dense view (1526/1527/1528/1529) + follow-up 1538.
-2. CPE-1489 Drop Stack (1530/1532/1531/1533).
-3. CPE-1492 theme-token foundation (1534/1535/1536/1537).
-4. CPE-1493 real dark theme (1539/1540/1541/1542) — System follows OS live.
-5. CPE-1496 high-contrast a11y (1543/1544/1545/1546) — incl cross-OS Rust OS-signal (3-OS CI + drift guard green).
-6. CPE-1484 hotkey customization (1547/1548/1549/1550) + follow-up 1551 (Ctrl+Shift+F shadow fix).
-7. CPE-1487 keyboard navigation mode / vim-modal (1552/1553/1554/1555/1556) — opt-in, OFF by default (zero
-   behavior change); ON → h/j/k/l motions, v visual, d/y/p ops, : palette command-line, / search, ? cheatsheet.
-Also merged early: CPE-1524, 1509 (split/join), 1508 (image compare), 1483 (Linux drive-tile re-gate).
+### FIRST ACTION ON RESUME
+**Re-poll `gh pr checks 796` and merge PR #796 (CPE-1581 x86/x64 disassembly).** It is FULLY GAUNTLETED —
+Reviewer APPROVE (code) + UAT PASS — and awaits ONLY its 3-OS CI matrix, which sat `queued` for 30+ min in a
+GitHub Actions runner backlog (not a failure). It adds a new Cargo dep (`iced-x86 1.21.0`), so the Backend +
+Server-crates 3-OS matrix is a HARD gate — confirm those 6 jobs are green (GUI-smoke flaky, ignore), then
+`gh pr merge 796 --squash`, move CPE-1581 → Done, prune its worktree. That is batch 51.
 
-### NEXT — ready buildable work for the fresh session (well is NOT dry — it's budget-limited)
-Priority for the resume (all headless-buildable):
-1. **CPE-1486 Trash bin** — needs a RESEARCH SPIKE first: the `trash` crate v5 enumerate/restore (`os_limited::list/restore_all/purge_all`) is Windows+Linux ONLY (macOS excluded — confirmed by PM). Decide the descope (skip macOS, or write a macOS reader) via a Researcher, THEN decompose. This is the main remaining frontend-ish epic.
-2. **Hotkey handleKeydown MIGRATION** (deferred from CPE-1484): make remaps actually change key behavior by having App.svelte's handleKeydown consume the merged keymap. Genuine work; touches the hot App.svelte file — slice carefully, opt-in-safe.
-3. Small follow-ups: NavCommandLine i18n ($t) pass; keyboard-nav v2 (h=parent/l=enter dir nav, more motions).
-4. Attended/gated (NOT lights-out — queue for the USER, don't build headless): CPE-1494 native accent, CPE-1495
-   window materials, CPE-1518 QNAP E2E, network protocol epics (1502-1506/1517 need real servers).
+### Merged this session (36→50) — all via Reviewer + UAT gauntlet, 0 escaped defects
+- CPE-1557 hotkey handleKeydown migration (#780) — remaps go live.
+- **Epic CPE-1486 (browsable Trash) COMPLETE**: CPE-1558 backend (#781), CPE-1559 bindings+metadata-fix (#785), CPE-1560 UI (#795).
+- **Binary Studio (epic CPE-1561) STARTED**: CPE-1572 BinaryInfo DTO/inspector (#787); CPE-1581 disasm (#796, pending-CI merge).
+- **Per-file-type right pane (epic CPE-1568)**: CPE-1570 action-bar groundwork (#783), CPE-1573 JSON tree (#786), CPE-1576 image actions (#789), CPE-1578 archive actions (#793).
+- **Docs completeness (epic CPE-1569)**: CPE-1571 IA+guard (#782), CPE-1574 Tier-1 A (#784), CPE-1575 Tier-1 B (#788), CPE-1582 kbd reference (#792).
+- User-requested hrdrClaudeNative.cmd: CPE-1579 anchor (#790), CPE-1580 claude-opus-5 (#791), CPE-1583 folder-in-caption (#794).
 
-### Owed to the USER (async, non-blocking) — VISUAL/TASTE + attended sign-offs
-- Dark theme + hc-light/hc-dark palettes (WCAG-gated, aesthetic eye owed).
-- Compact density; image-compare pane + zoom/pan feel; split/join + Drop Stack panels; sidebar discovered-row gate.
-- Keyboard-nav mode: turn it on in Settings, try h/j/k/l/v/d/y/p/:// ? — interaction feel + indicator/cheatsheet look.
-- Real OS-high-contrast toggle test (attended). QNAP E2E (CPE-1518). Gource PR #738 review.
+### NEXT — ready buildable work for the resume (well is NOT dry — budget-limited)
+1. **Merge #796** (above) — batch 51.
+2. **Binary Studio next slices** (epic CPE-1561/1562): command dispatcher + specta bindings for `binary_info`/disasm
+   (currently crates/server only, no `#[tauri::command]` yet) → then the frontend **Binary Inspector tabbed provider**
+   (Overview/Sections/Imports/Symbols/Disasm) on the CPE-724 preview seam. Then CPE-1563 (.NET decompile via ILSpy
+   sidecar + install-recipe — see Library `binary-studio-engines-delivery-2026-08-10`). Also: hand-rolled ECMA-335
+   .NET-metadata reader (dotnetdll is GPL — must hand-roll), and yaxpeax-arm for ARM disasm.
+3. **Per-file-type pane (CPE-1568) remaining slices**: font glyph grid (slice 5), notebook .ipynb viewer (6),
+   YAML/TOML structured view (7), log viewer (8) — see Library `filetype-right-pane-coverage-2026-08-10`. All touch
+   provider.ts/PreviewPane.svelte → SERIALIZE (one at a time).
+4. **Docs (CPE-1569) Tier-2 depth**: Archives + Batch-media depth (slice 8), Properties reference page (9), Agent
+   Deck/Workbench/Repos depth (10), split Tags/Smart-folders/Saved-searches out of 03-explorer (6), promote Agent
+   Watch to own page+Section (7). See Library `docs-completeness-audit-2026-08-10`.
+5. **Bugs filed this session (Backlog, ready)**: CPE-1577 (user-command Toolbar/Context surfaces unwired),
+   CPE-1584 (`?` cheat-sheet shadowed by type-ahead). Both surfaced by the docs audit.
+
+### Owed to the USER (async, non-blocking) — VISUAL/TASTE sign-offs
+Visual glance (Visual Critic screenshots or attended) on the new GUI surfaces: preview **action bars** (JWT/JSON/
+image/archive), **JSON tree** viewer, **image action** buttons (+2 new rotate icons), **Trash view** overlay + sidebar
+section. All passed automated checks + code review; only subjective look/feel remains. Also still open: Gource PR #738
+(pre-existing, user review). Minor cosmetic: Trash rows show a file icon for folders (TrashEntry has no is_dir) — future polish.
 
 ### Lessons / tuned defaults (seed resume)
-- Merge flow: reset-to-origin → move ticket → commit → push → `git checkout -- .` (CRLF churn makes pull --rebase
-  falsely "dirty"; push still lands). frontend=sonnet ~5-12min/ticket; the App.svelte integration (1556) used opus.
-- CROSS-OS RUST: gate merge on the 3-OS Backend + Server-crates CI matrix + ubuntu drift guard (specta) + BOTH
-  Cargo.locks; pin new deps to the SHIPPED version; ignore the pre-existing GUI-smoke CPE-1181 flaky failure.
-- app is NO LONGER light-only: semantic tokens only, define new tokens in ALL [data-theme] blocks incl hc-light/hc-dark;
-  the hc-contrast + hard-coded-hex ratchet tests fail CI on a stray hex (caught workers 3x, incl a hex in a comment).
-- Some reviewer/UAT sub-agents STALL on long full-suite runs (~30min); tell them to prioritize TARGETED tests +
-  time-box the full run. When one stalls, merge on Reviewer-APPROVE + green Frontend-CI (full vitest) + Foreman diff-verify.
-- Foreman-apply trivial exactly-prescribed reviewer fixes directly (e.g. a 4-line CSS rule) + re-verify npm run check = 0 agents.
-- Inert-first slicing (mode store/logic as new files, App.svelte wiring LAST + opt-in-off-by-default) kept the
-  7300-line App.svelte safe across a whole epic; prove OFF=zero-behavior-change with a test.
-- A concurrent nightshift shares the repo — re-verify max ticket ID before filing; don't clobber worktrees.
+- **Merge flow** (worked flawlessly, 0 escaped defects, 14 merges): Worker (worktree) → parallel independent Reviewer + UAT
+  (both self-run tests + report machine-checkable verdict) → Foreman merges on APPROVE+PASS+green-CI. Frontend=sonnet
+  (~5-30min/ticket); App.svelte hot-file integration = opus for the big one (1557), sonnet fine for surgical additive wiring.
+- **CI gates**: for any Rust/dep/specta PR, gate on the 3-OS Backend + Server-crates matrix (GUI-smoke is flaky — IGNORE
+  it, CPE-1181). New Cargo dep → BOTH Cargo.locks regenerated+committed. specta struct/command → regen bindings.gen.ts +
+  verify drift guard. GitHub Actions had a runner BACKLOG this session (jobs `queued` 30+ min) — merge only after the
+  hard-gate jobs actually go green, don't merge on `queued`.
+- **STALLED-worker trap recurred**: workers/reviewers told to "verify gh pr checks after opening" get stuck in a CI
+  poll-loop (fires repeated "still polling" notifications). Their PR/verdict is already delivered — TaskStop them; the
+  Foreman owns CI verification. Prefer NOT to tell sub-agents to poll CI.
+- **Foreman-apply trivial exactly-prescribed fixes** = 0 agents (did it for CPE-1575 macros-page UAT-fail 2-line fix +
+  the 3 hrdr .cmd user requests via quick branch+PR+merge). One UAT FAIL total (CPE-1575 docs accuracy) — Foreman-fixed + re-verified, merged.
+- **Docs audit pays off**: writing docs against the real components surfaced 2 genuine shipped bugs (CPE-1577/1584).
+- A concurrent nightshift may share the repo — re-verify max ticket ID before filing; don't clobber worktrees.
 
-### To RESUME: fresh session → "resume the sprint" → continues 35/50 with full budget → start with the trash-bin spike or the hotkey handleKeydown migration.
+### To RESUME: fresh session → "resume the sprint" → re-poll+merge #796 first, then continue Binary Studio wiring / per-file-type pane / docs Tier-2 with full budget.

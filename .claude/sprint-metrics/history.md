@@ -1258,3 +1258,15 @@ budget ~145/200 spent → hand off to a fresh session; well NOT dry (ready: CPE-
 image-compare, 1509 split/join, 1524 gate-nit; then CPE-1518 QNAP attended). Lesson reinforced: brief every
 specta PR to regen bindings+lockfiles and verify the ubuntu drift-guard leg before merge; opus for
 new-dep/enum-change diffs.
+
+## Sprint 2026-08-10 (CLI resume) — BATCHED "up to 50" TARGET HIT (36→50, +#796 pending-CI)
+14 tickets merged this session, 0 escaped defects, single 2-check gauntlet throughout. Closed epic CPE-1486
+(browsable Trash: 1558 backend/1559 bindings/1560 UI). Started Binary Studio (epic CPE-1561): 1572 inspector DTO
+merged, 1581 x86/x64 disasm (iced-x86 1.21.0) fully-gauntleted awaiting CI (#796 = batch 51, merge on resume).
+Advanced per-file-type pane (CPE-1568: 1570 action-bar/1573 JSON-tree/1576 image-actions/1578 archive-actions) and
+docs completeness (CPE-1569: 1571 IA+guard/1574+1575 Tier-1 pages/1582 kbd-reference). 3 user hrdr.cmd fixes
+(1579/1580/1583). Filed 5 epics from user requests (Binary Studio CPE-1561 +children 1562-1567, per-filetype pane
+CPE-1568, docs CPE-1569) with research banked to the Library (5 new entries). Bugs found by docs audit: CPE-1577,
+CPE-1584. Tuned defaults: frontend=sonnet (opus for big App.svelte integration); gate Rust/dep/specta PRs on 3-OS
+Backend+Server-crates matrix (ignore flaky GUI-smoke); new dep → both Cargo.locks; STOP sub-agents that poll CI
+(Foreman owns CI verify); Foreman-apply trivial exactly-prescribed fixes. Budget ~124/200 → clean hand-off.
