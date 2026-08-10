@@ -71,6 +71,7 @@ link to jump straight to that page.
 - [Appearance](35-appearance)
 - [Keyboard shortcuts](36-keyboard-shortcuts)
 - [Navigation Mode](37-navigation-mode)
+- [Keyboard Shortcut Reference](input-keyboard-reference)
 
 ## Agent Workspace
 
