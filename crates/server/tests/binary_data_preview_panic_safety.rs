@@ -46,7 +46,7 @@ use common::{assert_no_panic, run_battery};
 
 use std::io::Write;
 
-use cpe_server::binary_preview::{midi_info, pe_info, torrent_info, wasm_info};
+use cpe_server::binary_preview::{binary_info, midi_info, pe_info, torrent_info, wasm_info};
 use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
 use cpe_server::rar::{rar_entries, rar_extract_entry};
@@ -105,6 +105,88 @@ fn pe_info_never_panics() {
         let r = pe_info(path);
         if b.is_empty() {
             assert!(r.is_err(), "pe_info(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn binary_info_pe_never_panics() {
+    // Same realistic minimal DOS+COFF header as `pe_info_never_panics` above (CPE-1572's
+    // `binary_info` shares the same goblin PE parse path, so the same adversarial battery applies).
+    let mut magic = vec![0u8; 64];
+    magic[0] = b'M';
+    magic[1] = b'Z';
+    magic[0x3C..0x40].copy_from_slice(&64u32.to_le_bytes());
+    magic.extend_from_slice(b"PE\0\0");
+    magic.extend_from_slice(&0x014Cu16.to_le_bytes());
+    magic.extend_from_slice(&0u16.to_le_bytes()); // NumberOfSections
+    magic.extend_from_slice(&0u32.to_le_bytes());
+    magic.extend_from_slice(&0u32.to_le_bytes());
+    magic.extend_from_slice(&0u32.to_le_bytes());
+    magic.extend_from_slice(&0u16.to_le_bytes()); // SizeOfOptionalHeader
+    magic.extend_from_slice(&0x0102u16.to_le_bytes());
+
+    let header_len = magic.len();
+    run_battery("binary_preview::binary_info(pe)", &magic, header_len, |b| {
+        let f = write_temp(b, ".exe");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = binary_info(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "binary_info(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn binary_info_elf_never_panics() {
+    // A minimal ELF64 header declaring one program header right after itself (offset 64) — enough to
+    // walk goblin past the e_ident/e_machine gate and into the program-header-table read, which is
+    // the interesting spot for crafted phnum/phoff fields (mirrors bin_arch's own ELF panic-safety
+    // coverage, but exercising goblin's full parser rather than just the architecture-sniffing path).
+    let mut magic = vec![0u8; 64];
+    magic[0..4].copy_from_slice(&[0x7F, b'E', b'L', b'F']);
+    magic[4] = 2; // EI_CLASS: 64-bit
+    magic[5] = 1; // EI_DATA: little-endian
+    magic[6] = 1; // EI_VERSION
+    magic[16..18].copy_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC
+    magic[18..20].copy_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: EM_X86_64
+    magic[20..24].copy_from_slice(&1u32.to_le_bytes()); // e_version
+    magic[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff -> right after this header
+    magic[52..54].copy_from_slice(&64u16.to_le_bytes()); // e_ehsize
+    magic[54..56].copy_from_slice(&56u16.to_le_bytes()); // e_phentsize
+    magic[56..58].copy_from_slice(&1u16.to_le_bytes()); // e_phnum: one program header to walk
+
+    let header_len = magic.len();
+    run_battery("binary_preview::binary_info(elf)", &magic, header_len, |b| {
+        let f = write_temp(b, ".so");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = binary_info(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "binary_info(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn binary_info_macho_never_panics() {
+    // A minimal thin 64-bit little-endian Mach-O header declaring one load command right after
+    // itself — walks goblin past the magic/cputype gate into the load-command walk, the interesting
+    // spot for a crafted `cmdsize`/`ncmds`.
+    let mut magic = vec![0u8; 32];
+    magic[0..4].copy_from_slice(&[0xCF, 0xFA, 0xED, 0xFE]); // magic: 64-bit little-endian
+    magic[4..8].copy_from_slice(&(7u32 | 0x0100_0000).to_le_bytes()); // cputype: x86_64
+    magic[16..20].copy_from_slice(&1u32.to_le_bytes()); // ncmds: one load command to walk
+    magic[20..24].copy_from_slice(&8u32.to_le_bytes()); // sizeofcmds: one minimal 8-byte command
+    magic.extend_from_slice(&0u32.to_le_bytes()); // load command: cmd
+    magic.extend_from_slice(&8u32.to_le_bytes()); // load command: cmdsize (itself)
+
+    let header_len = magic.len();
+    run_battery("binary_preview::binary_info(macho)", &magic, header_len, |b| {
+        let f = write_temp(b, ".dylib");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = binary_info(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "binary_info(empty file) must be Err, not a panic");
         }
     });
 }

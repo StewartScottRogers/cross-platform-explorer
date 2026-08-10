@@ -121,6 +121,83 @@ pub struct Place {
     pub kind: String,
 }
 
+/// Recognized executable/object container formats a [`BinaryInfo`] can describe (CPE-1572, epic
+/// CPE-1562 "Binary Inspector" slice 1).
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub enum BinaryFormat {
+    Pe,
+    Elf,
+    MachO,
+}
+
+/// One section/segment entry (name + virtual address/size) in a [`BinaryInfo`] listing.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinarySection {
+    pub name: String,
+    /// Virtual address: PE's RVA, ELF's `sh_addr`, Mach-O's `addr`.
+    pub address: u64,
+    /// Virtual/in-memory size in bytes.
+    pub size: u64,
+}
+
+/// One imported symbol.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinaryImport {
+    pub name: String,
+    /// Owning library/DLL/dylib, when the format ties an individual import to one (PE, Mach-O).
+    /// `None` for ELF — its dynamic-symbol table doesn't record a per-symbol source library.
+    pub library: Option<String>,
+}
+
+/// One exported symbol.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinaryExport {
+    pub name: String,
+    /// Virtual address of the export, when known.
+    pub address: Option<u64>,
+}
+
+/// One entry from a format's own symbol table (ELF `.symtab`, Mach-O's `LC_SYMTAB`). PE carries no
+/// equivalent for a typical EXE/DLL (only object files/PDBs do), so [`BinaryInfo::symbols`] is
+/// always empty for [`BinaryFormat::Pe`].
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinarySymbol {
+    pub name: String,
+    pub address: Option<u64>,
+}
+
+/// Cap on the number of entries collected into any one [`BinaryInfo`] list (sections / imports /
+/// exports / symbols). Guards against a malformed or hostile header claiming an enormous count —
+/// without this a crafted section/symbol-count field could drive an unbounded allocation/loop
+/// before the pane ever renders anything. Real-world binaries stay far below this.
+pub const MAX_BINARY_LIST_ENTRIES: usize = 4096;
+
+/// Structured summary of a PE/ELF/Mach-O binary (CPE-1572, epic CPE-1562 "Binary Inspector" slice
+/// 1): format + architecture, plus bounded Sections/Imports/Exports/Symbols tables. Populated by
+/// [`crate::binary_preview::binary_info`] via goblin, with parity across all three formats. Each
+/// list is capped at [`MAX_BINARY_LIST_ENTRIES`] and built skip-on-error per entry, so a
+/// truncated/adversarial file degrades to a partial (or empty) `BinaryInfo` rather than failing the
+/// whole parse.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinaryInfo {
+    pub format: BinaryFormat,
+    /// Human-readable CPU architecture label(s) from [`crate::bin_arch::detect_arch`] (e.g.
+    /// "x86-64", "ARM64"; a Mach-O fat/universal binary joins each slice's label with ", "). `None`
+    /// when the leading bytes didn't decode to a recognized architecture.
+    pub arch: Option<String>,
+    pub is_64: bool,
+    pub sections: Vec<BinarySection>,
+    pub imports: Vec<BinaryImport>,
+    pub exports: Vec<BinaryExport>,
+    pub symbols: Vec<BinarySymbol>,
+}
+
 /// Detailed metadata for the Properties dialog: name/size/dir + modified/created (epoch-ms) + the
 /// readonly/hidden flags. A missing/unreadable path is an `Err`.
 pub fn entry_info(path: &str) -> Result<EntryInfo, String> {
