@@ -1,14 +1,28 @@
 /**
- * Component test for the read-only keyboard shortcuts viewer (CPE-1548, epic CPE-1484). Renders
- * every `ACTIONS` entry grouped by category with its currently effective chord (via `chordFor` +
- * `formatChord`), including the "Unbound" case, and asserts the filter narrows the visible rows by
- * both description and group. Close-on-Escape and close-on-backdrop-click mirror
- * `ShortcutsDialog.svelte`'s existing pattern.
+ * Component test for the keyboard shortcuts viewer + rebind surface (CPE-1548 read-only base +
+ * CPE-1549's press-to-set capture, live conflict warning, and reset-to-default). The read-only
+ * rendering/filter/close-on-Escape describe blocks below are CPE-1548's, updated only where
+ * CPE-1549 changed the row markup (the read-only `kbd` became an interactive
+ * `HotkeyCaptureInput`, so "Unbound" is no longer literal — see that block's note). The new
+ * describe blocks cover CPE-1549: a successful rebind persists via `saveKeymap`, a colliding
+ * rebind shows a warning naming the other action and "Cancel"/"Rebind anyway" resolve it exactly
+ * one of two ways (never a silent double-binding), a per-row reset, "Reset all to defaults", and
+ * that a capture Escape-cancel doesn't also close the dialog.
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, within } from "@testing-library/svelte";
 import KeyboardBindingsDialog from "./KeyboardBindingsDialog.svelte";
-import { ACTIONS, defaultKeymap, setChord, type Keymap } from "../keymap";
+import { ACTIONS, chordFor, defaultKeymap, setChord, type Keymap } from "../keymap";
+
+vi.mock("../settings", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../settings")>();
+  return { ...actual, saveKeymap: vi.fn() };
+});
+import { saveKeymap } from "../settings";
+
+beforeEach(() => {
+  vi.mocked(saveKeymap).mockClear();
+});
 
 describe("KeyboardBindingsDialog renders every action + its chord (CPE-1548)", () => {
   it("lists every ACTIONS entry, grouped by category", async () => {
@@ -38,11 +52,16 @@ describe("KeyboardBindingsDialog renders every action + its chord (CPE-1548)", (
     expect(within(row).getByText("Alt+←")).toBeTruthy();
   });
 
-  it("shows 'Unbound' for an action whose chord is empty", async () => {
+  it("shows a 'Click to set…' capture prompt (not the passive 'Unbound' label) for an action whose chord is empty", async () => {
+    // CPE-1549 turned the read-only `kbd` into an actionable HotkeyCaptureInput — an empty chord
+    // now reads as an invitation to set one, not a static "Unbound" status the CPE-1548 version
+    // showed. formatChord's "Unbound" text still exists for other read-only surfaces; this row no
+    // longer uses it.
     const keymap: Keymap = { ...defaultKeymap(), refresh: "" };
     render(KeyboardBindingsDialog, { keymap });
     const row = screen.getByText("Refresh").closest(".row") as HTMLElement;
-    expect(within(row).getByText("Unbound")).toBeTruthy();
+    expect(within(row).getByText("Click to set…")).toBeTruthy();
+    expect(within(row).queryByText("Unbound")).toBeNull();
   });
 });
 
@@ -94,6 +113,141 @@ describe("KeyboardBindingsDialog close behavior (CPE-1548)", () => {
 
     const backdrop = container.querySelector(".backdrop") as HTMLElement;
     await fireEvent.click(backdrop);
+    expect(closed).toBe(true);
+  });
+});
+
+describe("KeyboardBindingsDialog press-to-set rebind (CPE-1549)", () => {
+  it("commits a non-colliding capture immediately and persists via saveKeymap", async () => {
+    const keymap = defaultKeymap();
+    render(KeyboardBindingsDialog, { keymap });
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-newTab"));
+    await fireEvent.keyDown(window, { key: "n", ctrlKey: true, altKey: true, shiftKey: true });
+
+    const row = screen.getByText("New tab").closest(".row") as HTMLElement;
+    expect(within(row).getByText("Ctrl+Alt+Shift+N")).toBeTruthy();
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(saveKeymap).mock.calls[0][0];
+    expect(chordFor(saved, "newTab")).toBe("Ctrl+Alt+Shift+N");
+  });
+
+  it("does not commit a chord hotkeyFromEvent rejects (bare letter, no Ctrl/Alt) — no saveKeymap call", async () => {
+    const keymap = defaultKeymap();
+    render(KeyboardBindingsDialog, { keymap });
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-newTab"));
+    await fireEvent.keyDown(window, { key: "n" });
+
+    expect(saveKeymap).not.toHaveBeenCalled();
+    expect(screen.getByText("Needs Ctrl or Alt…")).toBeTruthy();
+  });
+});
+
+describe("KeyboardBindingsDialog live conflict warning (CPE-1549)", () => {
+  function renderWithConflictSetup() {
+    // "Copy" defaults to Ctrl+C. Rebinding "Cut" (default Ctrl+X) to Ctrl+C collides with it.
+    const keymap = defaultKeymap();
+    return render(KeyboardBindingsDialog, { keymap });
+  }
+
+  it("shows an inline warning naming the colliding action instead of silently applying the rebind", async () => {
+    renderWithConflictSetup();
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-cut"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+
+    expect(screen.getByTestId("keyboard-binding-conflict-cut")).toBeTruthy();
+    const conflict = screen.getByTestId("keyboard-binding-conflict-cut");
+    expect(within(conflict).getByText(/Copy/)).toBeTruthy();
+    // Not persisted yet — still pending user confirmation.
+    expect(saveKeymap).not.toHaveBeenCalled();
+  });
+
+  it("'Cancel' leaves both bindings unchanged and dismisses the warning", async () => {
+    renderWithConflictSetup();
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-cut"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await fireEvent.click(screen.getByTestId("keyboard-binding-conflict-cancel-cut"));
+
+    expect(screen.queryByTestId("keyboard-binding-conflict-cut")).toBeNull();
+    expect(saveKeymap).not.toHaveBeenCalled();
+    const cutRow = screen.getByText("Cut").closest(".row") as HTMLElement;
+    const copyRow = screen.getByText("Copy").closest(".row") as HTMLElement;
+    expect(within(cutRow).getByText("Ctrl+X")).toBeTruthy(); // still the original default
+    expect(within(copyRow).getByText("Ctrl+C")).toBeTruthy(); // untouched
+  });
+
+  it("'Rebind anyway' applies the new chord and unbinds the other action — never a silent double-binding", async () => {
+    renderWithConflictSetup();
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-cut"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await fireEvent.click(screen.getByTestId("keyboard-binding-conflict-rebind-cut"));
+
+    expect(screen.queryByTestId("keyboard-binding-conflict-cut")).toBeNull();
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(saveKeymap).mock.calls[0][0];
+    expect(chordFor(saved, "cut")).toBe("Ctrl+C");
+    expect(chordFor(saved, "copy")).toBe(""); // the loser is unbound, not silently sharing the chord
+
+    const cutRow = screen.getByText("Cut").closest(".row") as HTMLElement;
+    const copyRow = screen.getByText("Copy").closest(".row") as HTMLElement;
+    expect(within(cutRow).getByText("Ctrl+C")).toBeTruthy();
+    expect(within(copyRow).getByText("Click to set…")).toBeTruthy();
+  });
+});
+
+describe("KeyboardBindingsDialog reset (CPE-1549)", () => {
+  it("per-row Reset restores an override back to the built-in default and persists it", async () => {
+    const keymap = setChord(defaultKeymap(), "newTab", "Ctrl+Alt+N");
+    render(KeyboardBindingsDialog, { keymap });
+
+    await fireEvent.click(screen.getByTestId("keyboard-binding-reset-newTab"));
+
+    const row = screen.getByText("New tab").closest(".row") as HTMLElement;
+    expect(within(row).getByText("Ctrl+T")).toBeTruthy(); // built-in default
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(saveKeymap).mock.calls[0][0];
+    expect(chordFor(saved, "newTab")).toBe("Ctrl+T");
+  });
+
+  it("'Reset all to defaults' restores every action and persists the fresh default map", async () => {
+    let keymap = setChord(defaultKeymap(), "newTab", "Ctrl+Alt+N");
+    keymap = setChord(keymap, "closeTab", "Ctrl+Alt+W");
+    render(KeyboardBindingsDialog, { keymap });
+
+    await fireEvent.click(screen.getByTestId("keyboard-bindings-reset-all"));
+
+    const newTabRow = screen.getByText("New tab").closest(".row") as HTMLElement;
+    const closeTabRow = screen.getByText("Close tab").closest(".row") as HTMLElement;
+    expect(within(newTabRow).getByText("Ctrl+T")).toBeTruthy();
+    expect(within(closeTabRow).getByText("Ctrl+W")).toBeTruthy();
+    expect(saveKeymap).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(saveKeymap).mock.calls[0][0];
+    expect(saved).toEqual(defaultKeymap());
+  });
+});
+
+describe("KeyboardBindingsDialog capture Escape doesn't also close the dialog (CPE-1549)", () => {
+  it("Escape while armed cancels the capture only — the dialog stays open", async () => {
+    const { component } = render(KeyboardBindingsDialog, { keymap: defaultKeymap() });
+    let closed = false;
+    component.$on("close", () => (closed = true));
+
+    await fireEvent.click(screen.getByTestId("hotkey-capture-newTab"));
+    expect(screen.getByText("Press a key…")).toBeTruthy();
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(closed).toBe(false);
+    expect(screen.queryByText("Press a key…")).toBeNull();
+    const row = screen.getByText("New tab").closest(".row") as HTMLElement;
+    expect(within(row).getByText("Ctrl+T")).toBeTruthy(); // unchanged
+
+    // A second, unarmed Escape still closes the dialog normally.
+    await fireEvent.keyDown(window, { key: "Escape" });
     expect(closed).toBe(true);
   });
 });

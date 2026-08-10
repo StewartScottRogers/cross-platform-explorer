@@ -1,16 +1,47 @@
 <script lang="ts">
   /**
-   * Keyboard shortcuts VIEWER (CPE-1548, epic CPE-1484 "hotkey customization"). Read-only —
-   * remapping/reset controls land in CPE-1549 onto this same file. Mirrors
-   * `ShortcutsDialog.svelte`'s backdrop/dialog/Escape/click-away structure and grouped-column
-   * layout (the same visual language as the "?" cheat sheet), but is driven by `keymap.ts`'s live
-   * `ACTIONS` registry + the caller-supplied effective `keymap` (via `chordFor`/`formatChord`)
-   * instead of the static `SHORTCUT_GROUPS` table, so it reflects real user overrides once CPE-1549
-   * lands. `ShortcutsDialog.svelte` itself is untouched and stays as the quick "?" reference.
+   * Keyboard shortcuts VIEWER + REBIND surface (CPE-1548 read-only base + CPE-1549's press-to-set
+   * capture, live conflict warning, and reset-to-default — both epic CPE-1484 "hotkey
+   * customization"). Mirrors `ShortcutsDialog.svelte`'s backdrop/dialog/Escape/click-away structure
+   * and grouped-column layout (the same visual language as the "?" cheat sheet), but is driven by
+   * `keymap.ts`'s live `ACTIONS` registry + a locally-owned, self-persisting `keymap` (seeded from
+   * the caller-supplied prop) instead of the static `SHORTCUT_GROUPS` table. `ShortcutsDialog.svelte`
+   * itself is untouched and stays as the quick "?" reference.
+   *
+   * Self-managing like every other Settings sub-dialog (`SpotlightHotkeySettings`,
+   * `MacrosDialog`'s per-row hotkey field): every accepted rebind/reset calls `saveKeymap`
+   * immediately — no separate Save/Cancel/Apply — matching the app's existing immediate-persist
+   * Settings pattern. The `keymap` prop is a one-shot seed (`SettingsDialog` passes
+   * `settings.loadKeymap()` un-bound), not a two-way binding; this component owns mutation +
+   * persistence of its own local copy from there.
+   *
+   * Conflict handling: a rebind that would leave the new chord shared with another action is never
+   * applied silently. `findConflicts` (CPE-1547) runs against the candidate keymap; a collision
+   * shows an inline "Rebind anyway" / "Cancel" choice naming the other action. "Rebind anyway"
+   * applies the new chord AND unbinds the other action (`setChord(..., "")`) — two actions never
+   * silently share one chord. "Cancel" discards the candidate; both bindings stay exactly as they
+   * were.
+   *
+   * NOT LIVE YET: `App.svelte`'s `handleKeydown` does not consult this keymap — that migration is
+   * deliberately deferred to a future ticket (see the epic brief). A remap made here is saved and
+   * survives restart, but doesn't change what the key actually does until that migration lands;
+   * the note below the search bar says so.
    */
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
-  import { ACTIONS, chordFor, formatChord, type Keymap } from "../keymap";
+  import HotkeyCaptureInput from "./HotkeyCaptureInput.svelte";
+  import {
+    ACTIONS,
+    chordFor,
+    formatChord,
+    setChord,
+    resetChord,
+    resetAll,
+    findConflicts,
+    type ActionId,
+    type Keymap,
+  } from "../keymap";
+  import { saveKeymap } from "../settings";
 
   export let keymap: Keymap;
 
@@ -18,12 +49,78 @@
 
   let query = "";
 
+  // How many HotkeyCaptureInput rows are currently armed (almost always 0 or 1, but tracked as a
+  // count rather than a bool in case a stray double-arm ever happens). While > 0, the dialog's own
+  // Escape-to-close handler stands down so cancelling a capture doesn't also close the dialog —
+  // see HotkeyCaptureInput's `armchange` doc comment. This listener is registered before any row's
+  // (it appears earlier in the template), so it always observes the pre-cancel count for the same
+  // Escape keydown.
+  let capturingCount = 0;
+  function handleArmChange(isArmed: boolean) {
+    capturingCount = Math.max(0, capturingCount + (isArmed ? 1 : -1));
+  }
+
+  interface PendingConflict {
+    id: ActionId;
+    chord: string;
+    collidingId: ActionId;
+    collidingDescription: string;
+  }
+  let pendingConflict: PendingConflict | null = null;
+
+  function applyKeymap(next: Keymap) {
+    keymap = next;
+    saveKeymap(keymap);
+  }
+
+  /** A capture input committed a new chord for `id`. Applies it immediately unless the resulting
+   *  keymap now has a conflict touching `id`, in which case it's held as `pendingConflict` for the
+   *  user to confirm or cancel — never applied silently. */
+  function handleSet(id: ActionId, rawChord: string) {
+    const candidate = setChord(keymap, id, rawChord);
+    const chord = chordFor(candidate, id);
+    const conflict = findConflicts(candidate).find((c) => c.ids.includes(id));
+    if (conflict) {
+      const collidingId = conflict.ids.find((x) => x !== id)!;
+      const collidingDescription = ACTIONS.find((a) => a.id === collidingId)?.description ?? collidingId;
+      pendingConflict = { id, chord, collidingId, collidingDescription };
+      return;
+    }
+    pendingConflict = null;
+    applyKeymap(candidate);
+  }
+
+  function confirmRebind() {
+    if (!pendingConflict) return;
+    const { id, chord, collidingId } = pendingConflict;
+    let next = setChord(keymap, id, chord);
+    next = setChord(next, collidingId, ""); // never let two actions silently share a chord
+    pendingConflict = null;
+    applyKeymap(next);
+  }
+
+  function cancelRebind() {
+    pendingConflict = null;
+  }
+
+  function reset(id: ActionId) {
+    if (pendingConflict && (pendingConflict.id === id || pendingConflict.collidingId === id)) {
+      pendingConflict = null;
+    }
+    applyKeymap(resetChord(keymap, id));
+  }
+
+  function resetAllToDefaults() {
+    pendingConflict = null;
+    applyKeymap(resetAll());
+  }
+
   // Group order follows ACTIONS' registry order (Navigation/Tabs/Selection/File actions/View/
   // General), same as ShortcutsDialog's SHORTCUT_GROUPS order — no separate sort needed.
   $: groups = (() => {
     const q = query.trim().toLowerCase();
     const order: string[] = [];
-    const byGroup = new Map<string, { description: string; chord: string }[]>();
+    const byGroup = new Map<string, { id: ActionId; description: string; chord: string }[]>();
     for (const action of ACTIONS) {
       const chord = chordFor(keymap, action.id);
       if (q && !action.description.toLowerCase().includes(q) && !action.group.toLowerCase().includes(q)) {
@@ -33,13 +130,13 @@
         byGroup.set(action.group, []);
         order.push(action.group);
       }
-      byGroup.get(action.group)!.push({ description: action.description, chord });
+      byGroup.get(action.group)!.push({ id: action.id, description: action.description, chord });
     }
     return order.map((title) => ({ title, items: byGroup.get(title)! }));
   })();
 </script>
 
-<svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("close")} />
+<svelte:window on:keydown={(e) => e.key === "Escape" && capturingCount === 0 && dispatch("close")} />
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("close")}>
@@ -69,6 +166,15 @@
         spellcheck="false"
         autocomplete="off"
       />
+      <button class="reset-all" data-testid="keyboard-bindings-reset-all" on:click={resetAllToDefaults}>
+        <Icon name="refresh" size={12} />
+        Reset all to defaults
+      </button>
+    </div>
+
+    <div class="livenote">
+      Rebinding here saves your choice, but shortcuts don't use it yet — that wiring is coming in a
+      future update. For now every key still does what it always did.
     </div>
 
     <div class="groups" data-testid="keyboard-bindings-groups">
@@ -78,11 +184,44 @@
         {#each groups as group (group.title)}
           <section>
             <h3>{group.title}</h3>
-            {#each group.items as item (item.description)}
+            {#each group.items as item (item.id)}
               <div class="row">
                 <span class="desc">{item.description}</span>
-                <kbd class:unbound={!item.chord}>{formatChord(item.chord)}</kbd>
+                <HotkeyCaptureInput
+                  display={item.chord ? formatChord(item.chord) : ""}
+                  testId="hotkey-capture-{item.id}"
+                  on:set={(e) => handleSet(item.id, e.detail)}
+                  on:armchange={(e) => handleArmChange(e.detail)}
+                />
+                <button
+                  class="reset-row"
+                  title="Reset to default"
+                  aria-label="Reset {item.description} to default"
+                  data-testid="keyboard-binding-reset-{item.id}"
+                  on:click={() => reset(item.id)}
+                >
+                  <Icon name="refresh" size={12} />
+                </button>
               </div>
+              {#if pendingConflict && pendingConflict.id === item.id}
+                <div class="conflict" data-testid="keyboard-binding-conflict-{item.id}">
+                  <Icon name="ban" size={13} />
+                  <span
+                    >This chord is already used by <strong>{pendingConflict.collidingDescription}</strong
+                    >.</span
+                  >
+                  <button
+                    class="btn danger"
+                    data-testid="keyboard-binding-conflict-rebind-{item.id}"
+                    on:click={confirmRebind}>Rebind anyway</button
+                  >
+                  <button
+                    class="btn"
+                    data-testid="keyboard-binding-conflict-cancel-{item.id}"
+                    on:click={cancelRebind}>Cancel</button
+                  >
+                </div>
+              {/if}
             {/each}
           </section>
         {/each}
@@ -101,7 +240,7 @@
     z-index: 200;
   }
   .dialog {
-    width: 720px;
+    width: 860px;
     max-width: 92vw;
     max-height: 86vh;
     display: flex;
@@ -145,6 +284,34 @@
     font: inherit;
     outline: none;
   }
+  .reset-all {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    flex: 0 0 auto;
+    height: 24px;
+    padding: 0 8px;
+    font-size: 11.5px;
+    color: var(--text-dim);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius);
+    white-space: nowrap;
+  }
+  .reset-all:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+  .livenote {
+    font-size: 11.5px;
+    color: var(--text-dim);
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    margin-bottom: 12px;
+    flex: 0 0 auto;
+  }
   .groups {
     overflow-y: auto;
     columns: 2;
@@ -172,26 +339,72 @@
   .row {
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 28px;
+    gap: 8px;
+    min-height: 30px;
   }
-  .desc { color: var(--text); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  kbd {
-    margin-left: auto;
-    flex: none;
-    font-family: ui-monospace, monospace;
-    font-size: 11.5px;
+  .desc {
+    color: var(--text);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: auto;
+  }
+  .reset-row {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    color: var(--text-dim);
+    border-radius: var(--radius);
+  }
+  .reset-row:hover {
+    background: var(--active);
+    color: var(--text);
+  }
+  .conflict {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 10px;
+    margin: 2px 0 8px;
+    padding: 6px 8px;
+    font-size: 12px;
     color: var(--text);
     background: var(--surface-alt);
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+  }
+  .conflict :global(.icon) {
+    color: var(--danger);
+    flex: 0 0 auto;
+  }
+  .conflict span {
+    flex: 1 1 auto;
+    min-width: 140px;
+  }
+  .btn {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 8px;
+    font-size: 11.5px;
+    color: var(--text);
+    background: var(--surface);
     border: 1px solid var(--border-strong);
-    border-bottom-width: 2px;
-    border-radius: 5px;
-    padding: 2px 7px;
+    border-radius: var(--radius);
     white-space: nowrap;
   }
-  kbd.unbound {
-    color: var(--text-dim);
-    font-style: italic;
-    border-style: dashed;
+  .btn:hover {
+    border-color: var(--accent);
+  }
+  .btn.danger {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+  .btn.danger:hover {
+    background: var(--danger);
+    color: var(--pal-white);
   }
 </style>
