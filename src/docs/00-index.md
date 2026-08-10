@@ -28,6 +28,9 @@ link to jump straight to that page.
 - [Metadata Studio](25-metadata-studio)
 - [Drop Stack](34-drop-stack)
 - [Batch Rename](organizing-batch-rename)
+- [Macros](organizing-macros)
+- [Select By…](organizing-select-by)
+- [User-Defined Commands](organizing-user-commands)
 
 ## Search & Discovery
 
