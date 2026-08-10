@@ -8,24 +8,25 @@ categoryOrder: 2
 # Appearance
 
 Settings has an **Appearance** section with a **Theme** control — this is where the app's colour theme
-lives, today and as more themes ship later.
+lives.
 
 ## The Theme control
 
-Open **Settings → Appearance** and you'll find a **Theme** dropdown with two options:
+Open **Settings → Appearance** and you'll find a **Theme** dropdown with three options:
 
-- **System** — follow the operating system's theme.
-- **Light** — always use the light theme.
+- **System** — follow the operating system's light/dark setting.
+- **Light** — always use the light theme, regardless of the OS.
+- **Dark** — always use the dark theme, regardless of the OS.
 
-Right now both options look identical: the app only has a light palette, so **System** resolves to
-**Light** until a real dark palette exists. Choosing either one is safe and instant — there's no
-separate "Save" step, the choice applies immediately and persists across restarts, the same as every
-other row on the Settings page.
+**System** tracks your OS preference live: if you flip your OS between light and dark mode while the
+app is open, the app follows along immediately — no restart needed. Choosing **Light** or **Dark**
+pins the app to that theme explicitly, unaffected by whatever the OS is set to.
 
-## What's coming
+Choosing any of the three is safe and instant — there's no separate "Save" step, the choice applies
+immediately and persists across restarts, the same as every other row on the Settings page.
 
-This control is the foundation for OS-following dark mode. Once a dark palette ships, **System** will
-automatically switch between light and dark to match your OS setting, and a **Dark** option will appear
-alongside **Light** for picking it explicitly regardless of the OS. Nothing about how you use the
-control today will change — it already lives in the right place and behaves the right way; it just has
-more to choose from later.
+## What's next
+
+Theme is the first slice of the broader appearance program. Native accent colour, window materials,
+and a high-contrast option are still to come — this page will grow to cover them as they ship. Nothing
+about how the Theme control works today will change underneath them.
