@@ -136,10 +136,12 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
 - **RAR can only give you back an uncompressed (STORE) entry**, one file at a time via "open" or Alt-drag —
   a genuinely compressed RAR entry refuses with a clear error rather than corrupting output.
 - **"Check archive safety…" is ZIP-family only** and never gates Extract — see *Safety limits* above.
-- **A password-protected ZIP can't be safety-checked today.** Because the safety scan needs to read every
-  entry's size metadata and an encrypted entry can't be read without its password, checking safety on a
-  password-protected archive currently can't score it — this is a known gap, tracked separately, rather
-  than a limitation you need to work around.
+- **A password-protected ZIP can't be safety-checked today — and the result looks reassuring anyway.**
+  The safety scan needs to read every entry's size metadata, and an encrypted entry can't be read without
+  its password. The scan skips those entries silently, so it finishes having examined *nothing* and reports
+  the same green **"No zip-bomb risk detected"** banner you'd get for a genuinely safe archive. **Treat a
+  clean safety result on a password-protected archive as "not checked", not as "safe."** This is a known
+  bug, tracked separately.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit is fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
   a very large archive's listing has no built-in ceiling.
