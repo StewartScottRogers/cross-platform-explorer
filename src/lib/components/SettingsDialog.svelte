@@ -14,6 +14,7 @@
   import SpotlightHotkeySettings from "./SpotlightHotkeySettings.svelte";
   import ContentEmbedderSettings from "./ContentEmbedderSettings.svelte";
   import CopilotSettings from "./CopilotSettings.svelte";
+  import KeyboardBindingsDialog from "./KeyboardBindingsDialog.svelte";
 
   export let showHidden = false;
   export let showDetails = true;
@@ -73,6 +74,11 @@
   function onContrastChange(e: Event) {
     setContrast((e.currentTarget as HTMLSelectElement).value as ContrastSetting);
   }
+
+  // Keyboard shortcuts viewer (CPE-1548, epic CPE-1484 "hotkey customization"): opens the
+  // read-only KeyboardBindingsDialog over keymap.ts's live registry. Entirely local — like every
+  // other Settings sub-dialog, App.svelte doesn't orchestrate this one either.
+  let showKeyboardDialog = false;
 
   // Native-bridge opt-in (CPE-1177, epic CPE-717): OFF by default. When on, it reveals the OS-native
   // tag/comment Pull/Push controls in TagEditor and the read-only Native metadata section in
@@ -158,6 +164,19 @@
       System follows the OS accessibility high-contrast signal once available, High always forces it,
       Off never does.
     </div>
+
+    <div class="section-title">Keyboard shortcuts</div>
+    <div class="settings-row">
+      <button class="settings-btn" data-testid="keyboard-shortcuts-btn" on:click={() => (showKeyboardDialog = true)}>
+        Customize shortcuts…
+      </button>
+    </div>
+    <div class="note">
+      View every built-in action and its current shortcut, searchable by name.
+    </div>
+    {#if showKeyboardDialog}
+      <KeyboardBindingsDialog keymap={settings.loadKeymap()} on:close={() => (showKeyboardDialog = false)} />
+    {/if}
 
     <div class="section-title">Native metadata bridge</div>
     <div class="settings-row">

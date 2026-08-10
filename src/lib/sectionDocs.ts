@@ -31,7 +31,8 @@ export type Section =
   | "split-join"
   | "compare"
   | "drop-stack"
-  | "appearance";
+  | "appearance"
+  | "keyboard-shortcuts";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -123,6 +124,12 @@ const SECTION_DOC: Record<Section, string> = {
   // you switch into (it's a row on the Settings dialog), but it still earns its own doc page + registry
   // entry per [[maintain-in-app-docs-library]].
   appearance: "35-appearance",
+  // CPE-1548 (epic CPE-1484, foundation slice): the Settings → Keyboard shortcuts viewer dialog — a
+  // read-only, searchable list of every built-in action + its current chord, driven by keymap.ts's
+  // live registry. Like appearance above, not a sidebar view you switch into (it's a row + button on
+  // the Settings dialog), but it still earns its own doc page + registry entry per
+  // [[maintain-in-app-docs-library]].
+  "keyboard-shortcuts": "36-keyboard-shortcuts",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

@@ -375,6 +375,33 @@ export function findConflicts(keymap: Keymap): { chord: string; ids: ActionId[] 
   return out;
 }
 
+/** Display glyphs for a handful of keys whose real `KeyboardEvent.key` form reads awkwardly in a
+ *  UI list (`ArrowLeft` vs. `←`, `Escape` vs. `Esc`) — the same substitutions
+ *  `shortcuts.ts`'s static `SHORTCUT_GROUPS` table already uses for its `keys` column. Purely
+ *  cosmetic: the canonical/stored chord form (what `chordFor`/`actionForChord`/`normalizeChord`
+ *  operate on) is untouched by this map. */
+const KEY_DISPLAY: Record<string, string> = {
+  ArrowLeft: "←",
+  ArrowRight: "→",
+  ArrowUp: "↑",
+  ArrowDown: "↓",
+  Escape: "Esc",
+  Delete: "Del",
+};
+
+/** Friendly display form of a chord for a read-only viewer (CPE-1548): substitutes the handful of
+ *  keys in `KEY_DISPLAY` for a nicer glyph and renders an unbound (`""`) chord as `"Unbound"`.
+ *  Every other key/modifier passes through unchanged — this is purely presentational and must
+ *  never be fed back into `setChord`/`actionForChord`, which expect the canonical event-derived
+ *  form `chordFor` returns. */
+export function formatChord(chord: string): string {
+  if (!chord) return "Unbound";
+  const parts = chord.split("+");
+  const key = parts[parts.length - 1];
+  const mods = parts.slice(0, -1);
+  return [...mods, KEY_DISPLAY[key] ?? key].join("+");
+}
+
 /** Serialize a keymap for the settings store. */
 export function serializeKeymap(keymap: Keymap): string {
   return JSON.stringify(keymap);
