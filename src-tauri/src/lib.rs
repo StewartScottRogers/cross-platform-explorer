@@ -1833,18 +1833,41 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 const TRASH_LIST_BATCH: usize = 256;
 
 /// Maps one `trash::TrashItem` to the cross-platform-safe `cpe_server::model::TrashEntry`, skipping
-/// (never failing) an item whose id/name/path can't round-trip through UTF-8 or whose per-item metadata
-/// lookup errors — mirrors `list_dir`'s "skip unreadable entries rather than fail the whole listing" rule.
+/// (never failing) an item whose id/name/path can't round-trip through UTF-8 — mirrors `list_dir`'s
+/// "skip unreadable entries rather than fail the whole listing" rule. A per-item metadata-lookup
+/// failure, by contrast, does NOT skip the entry: `TrashEntry.size` is `Option<u64>` specifically so a
+/// failed lookup can degrade to `size: None` while the id/name/original_path/time_deleted (still valid
+/// and enough to restore or purge the item) are kept (CPE-1559 review fix on CPE-1558).
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 fn trash_item_to_entry(item: &trash::TrashItem) -> Option<cpe_server::model::TrashEntry> {
-    let id = item.id.to_str()?.to_string();
-    let name = item.name.to_str()?.to_string();
-    let original_parent = item.original_parent.to_str()?.to_string();
-    let size = match trash::os_limited::metadata(item) {
-        Ok(meta) => meta.size.size(),
-        Err(_) => return None,
-    };
-    Some(cpe_server::model::trash_entry(id, name, original_parent, item.time_deleted, size))
+    let size = trash::os_limited::metadata(item).ok().and_then(|meta| meta.size.size());
+    trash_entry_from_fields(
+        item.id.to_str(),
+        item.name.to_str(),
+        item.original_parent.to_str(),
+        item.time_deleted,
+        size,
+    )
+}
+
+/// Pure id/name/path-validation half of [`trash_item_to_entry`], split out so the skip-vs-degrade
+/// behaviour is unit-testable without touching the real OS trash (constructing a `trash::TrashItem`
+/// whose metadata lookup reliably fails would depend on OS-specific plumbing).
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn trash_entry_from_fields(
+    id: Option<&str>,
+    name: Option<&str>,
+    original_parent: Option<&str>,
+    time_deleted: i64,
+    size: Option<u64>,
+) -> Option<cpe_server::model::TrashEntry> {
+    Some(cpe_server::model::trash_entry(
+        id?.to_string(),
+        name?.to_string(),
+        original_parent?.to_string(),
+        time_deleted,
+        size,
+    ))
 }
 
 /// One shared "walker" over the already-materialized `list()` result: maps + skips-on-error, then
@@ -11865,7 +11888,13 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     // drift guard (CPE-813), which regenerates on Linux. Callers use raw `invoke` for these.
     // `discover_network_mdns` (CPE-1523) is, by contrast, INCLUDED — mDNS/DNS-SD behaves identically on
     // every OS (not `#[cfg(windows)]`-gated), so its binding is safe to generate uniformly.
-    let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
+    // `collect_commands!` (below) is a plain `macro_rules!`, unlike `tauri::generate_handler!` (a real
+    // proc macro) — it can't take a per-entry `#[cfg(...)]` the way the `generate_handler!` call above
+    // does for these same four commands (CPE-1559). Splice the OS-gated trash commands in via a local
+    // wrapper macro instead of duplicating this ~280-command list across two `#[cfg]` branches.
+    macro_rules! specta_commands {
+        ($($trash:ident),* $(,)?) => {
+            collect_commands![
         list_dir,
         find_project_root,
         board_cards,
@@ -11952,6 +11981,11 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         delete_permanent,
         can_restore_from_trash,
         restore_from_trash,
+        // `list_trash`/`list_trash_stream`/`restore_trash_items`/`empty_trash` only exist under
+        // `#[cfg(any(windows, linux))]` (CPE-1558, no macOS equivalent). Spliced in by the
+        // `specta_commands!` caller below so this list still compiles wherever `export_bindings` is
+        // built, instead of hard-coding them here and breaking a macOS build.
+        $($trash,)*
         shred_paths,
         copy_entries,
         move_entries,
@@ -12141,7 +12175,14 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         connections_list,
         connections_upsert,
         connections_remove,
-    ])
+            ]
+        };
+    }
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    let trash_commands = specta_commands!(list_trash, list_trash_stream, restore_trash_items, empty_trash);
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    let trash_commands = specta_commands!();
+    let builder = Builder::<tauri::Wry>::new().commands(trash_commands)
     // CPE-1110: export the replay projection types that no command *returns* but the frontend fold
     // (`src/lib/replayFold.ts`) reconstructs client-side — `ReplayEntry` (a `children_at` row) and
     // `FsNode` (a folded path's last-touch state) — so the TS fold shares one contract with Rust.
@@ -12191,12 +12232,16 @@ mod tests {
             "runCommand", "createDir", "createFile", "writeFileText", "renameEntry", "canRestoreFromTrash",
             "listDir", "entryInfo", "deleteToTrash", "deletePermanent", "copyEntries", "moveEntries", "moveExact",
             "spotlightSearch", "spotlightFrecent",
+            // CPE-1559 (epic CPE-1486 slice 2): the trash browse/restore/empty commands (CPE-1558) must be
+            // reachable through the typed client too, not just `generate_handler!`.
+            "listTrash", "listTrashStream", "restoreTrashItems", "emptyTrash",
         ] {
             assert!(src.contains(cmd), "typed client should expose `{cmd}`");
         }
         // The cross-crate cpe-server types now flow into the generated client.
         assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
             "cpe-server types should be exported into the typed client");
+        assert!(src.contains("TrashEntry"), "TrashEntry DTO should be exported into the typed client");
     }
 
     // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------
@@ -12813,6 +12858,41 @@ mod tests {
         let just_b = select_trash_targets(all, Some(&["b".to_string()]));
         assert_eq!(just_b.len(), 1);
         assert_eq!(just_b[0].id.to_string_lossy(), "b");
+    }
+
+    // CPE-1559 review fix on CPE-1558: `trash_item_to_entry` must DEGRADE (keep the entry with
+    // `size: None`) rather than DROP the entry when the per-item metadata lookup fails — only a
+    // genuinely unusable id/name/original_parent (non-UTF-8) should skip the entry. These two tests
+    // exercise the pure `trash_entry_from_fields` half directly, so they never touch the real OS trash.
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn trash_entry_from_fields_degrades_to_none_size_when_metadata_lookup_failed() {
+        let entry = trash_entry_from_fields(
+            Some("id-1"),
+            Some("file.txt"),
+            Some("/home/user"),
+            42,
+            None, // stands in for a failed `trash::os_limited::metadata` lookup
+        )
+        .expect("valid utf-8 id/name/parent must still produce an entry even without a size");
+        assert_eq!(entry.id, "id-1");
+        assert_eq!(entry.size, None);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn trash_entry_from_fields_skips_only_when_a_field_is_not_utf8() {
+        // A `None` field stands in for `OsStr::to_str()` failing on non-UTF-8 content — the one case
+        // that should genuinely skip the entry, unlike a metadata-lookup failure (`size: None` above).
+        assert!(trash_entry_from_fields(None, Some("file.txt"), Some("/home/user"), 42, Some(10)).is_none());
+        assert!(trash_entry_from_fields(Some("id-1"), None, Some("/home/user"), 42, Some(10)).is_none());
+        assert!(trash_entry_from_fields(Some("id-1"), Some("file.txt"), None, 42, Some(10)).is_none());
+        // Sanity check: all-valid fields with a real size still produces an entry (not accidentally
+        // caught by the `?` chain above).
+        assert!(
+            trash_entry_from_fields(Some("id-1"), Some("file.txt"), Some("/home/user"), 42, Some(10)).is_some()
+        );
     }
 
     #[cfg(any(target_os = "windows", target_os = "linux"))]
