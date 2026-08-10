@@ -33,7 +33,8 @@ export type Section =
   | "drop-stack"
   | "appearance"
   | "keyboard-shortcuts"
-  | "navigation-mode";
+  | "navigation-mode"
+  | "trash";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -138,6 +139,11 @@ const SECTION_DOC: Record<Section, string> = {
   // entry per [[maintain-in-app-docs-library]]. The indicator/cheatsheet components this ticket
   // ships are inert until CPE-1556 mounts them; the doc page documents the feature as a whole.
   "navigation-mode": "37-navigation-mode",
+  // CPE-1560 (epic CPE-1486, final slice): the browsable Trash — the Sidebar's own Trash section
+  // (gated on the Windows/Linux-only `can_restore_from_trash` availability probe, with a Finder
+  // pointer on macOS) + `TrashView`'s listing and Restore/Empty actions. Like navigation-mode above,
+  // it earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
+  trash: "38-trash",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

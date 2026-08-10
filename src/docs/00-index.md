@@ -45,6 +45,7 @@ link to jump straight to that page.
 - [Encrypted Vaults](20-vaults)
 - [File Health](22-file-health)
 - [Undo](safety-undo)
+- [Trash](38-trash)
 
 ## Previews & Media
 
