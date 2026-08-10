@@ -2,7 +2,7 @@
 id: CPE-1487
 title: "EPIC: Keyboard Navigation Mode — opt-in vim-modal layer (out-TUI the TUIs)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -11,7 +11,11 @@ closed:
 ---
 
 > **Filed 2026-08-08 (sprint PM, competitive-landscape pass — TUI survey; see research-library
-> `competitive-file-managers-2026-08-08`).** Dormant brief — decompose on `/ticketing-epic activate CPE-1487`.
+> `competitive-file-managers-2026-08-08`).** Activated + decomposed 2026-08-10 (sprint PM bench-refill
+> pass, now unblocked by CPE-1484 shipping). Children: CPE-1552 (mode-state reducer + Settings toggle,
+> foundation), CPE-1553 (motion → selection-engine bridge), CPE-1554 (`:` command-line bridge into
+> Command Palette verbs), CPE-1555 (mode indicator + cheatsheet + docs page), CPE-1556 (App.svelte
+> integration — single opt-in-gated wiring point, dispatched last). 0 of 5 children Done.
 
 ## Why (THE biggest keyboard-first differentiator TUIs have that CPE lacks)
 Every vim-descended TUI surveyed (ranger, vifm, nnn, lf, felix, xplr) is loved for one thing above all: **you
