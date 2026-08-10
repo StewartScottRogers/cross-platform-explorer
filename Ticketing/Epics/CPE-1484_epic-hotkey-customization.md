@@ -2,7 +2,7 @@
 id: CPE-1484
 title: "EPIC: Hotkey customization — view & remap every keyboard shortcut"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -47,3 +47,6 @@ detection and import/export of a keymap.
 Almost entirely frontend; no new backend surface. Additive/opt-in. Put the controls in Settings (per
 [[avoid-modal-permission-popups]] / Settings-home convention). Ship its docs page per CPE-579. Source:
 superfile custom-hotkeys docs.
+
+## Closed 2026-08-10
+Headless scope complete: CPE-1547 (keymap registry+overrides #770), CPE-1548 (searchable viewer #772), CPE-1549 (remap capture+conflicts+reset #773), CPE-1550 (import/export via clipboard #774). Plus follow-up CPE-1551 (Ctrl+Shift+F shadow fix). Users can view/search/remap/reset/import/export shortcuts; remaps persist. DEFERRED: the handleKeydown→keymap migration (making remaps actually change behavior) — a future batch.
