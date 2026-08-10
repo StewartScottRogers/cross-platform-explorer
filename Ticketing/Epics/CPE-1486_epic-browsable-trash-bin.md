@@ -2,12 +2,12 @@
 id: CPE-1486
 title: "EPIC: Browsable in-app Trash bin — list / restore / empty"
 type: Task
-status: In Progress
+status: Done
 priority: Low
 component: Multiple
 tags: [epic]
 created: 2026-08-08
-closed:
+closed: 2026-08-10
 ---
 
 > **Filed 2026-08-08 (sprint PM, from the superfile reference pass — see [[superfile-pm-reference]]).**

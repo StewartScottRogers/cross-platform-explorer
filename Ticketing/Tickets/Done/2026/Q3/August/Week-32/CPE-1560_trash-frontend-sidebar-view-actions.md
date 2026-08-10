@@ -2,7 +2,7 @@
 id: CPE-1560
 title: "Trash frontend: sidebar section + TrashView + Restore/Empty actions + docs"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Frontend
 epic: CPE-1486
