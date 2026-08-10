@@ -2,7 +2,7 @@
 id: CPE-1489
 title: "EPIC: Drop Stack — cross-navigation multi-source file basket (a GUI-only superpower)"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic]
@@ -54,3 +54,6 @@ Dispatch order: 1530 → {1531 ∥ 1532} → 1533. Not decomposed further — ho
 drag-onto-tray from the original "rough slices" are left for a follow-up ticket once this core loop
 (add → view → move/copy-all) is proven; CPE-1531 binds a fixed default hotkey now rather than blocking on
 the dormant CPE-1484 epic.
+
+## Closed 2026-08-09
+All four children merged: CPE-1530 (store #753), CPE-1532 (panel #754), CPE-1531 (add entry points #755), CPE-1533 (move/copy-all #758). Drop Stack fully functional. Follow-up CPE-1538 filed (Move-all double-click re-entrancy guard). Visual sign-off owed.
