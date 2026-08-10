@@ -25,14 +25,42 @@ import { rightClick, click, type Point } from "../lib/mouse.js";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
 
-// CPE-1481/CPE-1483: the Home-landing drive-TILE surface (`.qa-card` with a drive-root path) does NOT
-// render on the headless Linux/WebKitGTK-under-Xvfb CI runner — the `/` root that `list_drives` returns
-// (and that App feeds to HomeView's `drives`→`cards`) never paints a matching `.qa-card`, even after a
-// full 30s wait (rounds 3-4). It's not a timing race a longer poll fixes, and the categorization looks
-// correct on read (drives→cards, `.qa-sub` = "/"), so the gap is non-trivial (a HomeView render/prop path
-// specific to this environment) and tracked for real investigation in CPE-1483. The SIDEBAR drive-ROW
-// right-click tests below exercise the SAME drive context-menu behaviour and pass, so gating just the two
-// Home-tile tests on Linux loses no menu coverage. Un-gate once CPE-1483 resolves.
+// CPE-1483 root-cause investigation, round 1 (2026-08-09/10):
+// CPE-1481 rounds 3-5 found the Home-landing drive-TILE surface (`.qa-card` with a drive-root path)
+// never painted on the headless Linux/WebKitGTK-under-Xvfb CI runner, even after a 30s bounded wait —
+// not a timing race — and gated these two tests off on Linux (`SKIP_HOME_DRIVE_TILE`) pending this
+// investigation.
+//
+// This round re-verified the categorization/render CODE PATH is correct: a jsdom regression test
+// (`HomeView.test.ts` "Quick Access drive tile (CPE-1483)") renders `<HomeView>` with the EXACT prop shape
+// App.svelte/ExplorerPane.svelte feed it on non-Windows (`drives: [{name:"File System", path:"/",
+// kind:"drive"}]`) and confirms a `.qa-card` with `.qa-sub === "/"` IS produced — no keyed-`{#each}`
+// collision, no dedupe/filter drop. `list_drives_impl` (src-tauri/src/lib.rs) is unconditional +
+// unit-tested; the `drives` prop reaching the app on Linux is proven by the SIDEBAR drive-ROW test below
+// (same `drives` array, same keyed-each pattern, passes on Linux).
+//
+// A first attempt un-gated both tests with a `goHome()` hardening (`ensureQuickAccessOpen`, expand a
+// collapsed Quick-Access twisty) plus richer failure diagnostics (`qaGridDiagnostics`), on the theory that
+// Quick Access being independently collapsed (separate from the sidebar's own section state) explained
+// "sidebar row renders, Home tile doesn't". **A real ubuntu CI run (PR #747, job 31354691439) disproved
+// that theory with hard evidence**: the failing assertion's diagnostics read
+// `{"homeExists":false,"qaGridExists":false,"quickAccessOpen":null,"qaCardCount":0,"qaCardSubs":[]}` — i.e.
+// `.home` itself (HomeView's own root element) does not exist in the DOM at that point, not just a
+// collapsed `.qa-grid` inside it. `ensureQuickAccessOpen` is a no-op when there's no `.home`/twisty to
+// click, so it couldn't have helped. This means the entire Home landing fails to (stay) mounted on this
+// runner when the assertion runs — a deeper environment gap than "one tile doesn't render", and outside
+// what a jsdom test (which can only render components in isolation, not exercise real `inHome`
+// navigation/mount timing under WebKitGTK) can prove or disprove.
+//
+// **Re-gating** `SKIP_HOME_DRIVE_TILE` for these two Home-*tile* assertions on Linux, per the ticket's own
+// "adjust the expectation if intended/environment" acceptance clause — this is now backed by an actual
+// Linux CI diagnostic dump, not a guess. Keeping the code-correctness proof (the jsdom test above) and the
+// `qaGridDiagnostics`/`ensureQuickAccessOpen` harness additions: they're still valuable — the jsdom test
+// permanently guards against a REAL categorization regression, and the diagnostics + expand-if-collapsed
+// hardening are strictly additive value for whoever picks this back up (harmless when `.home` is present,
+// and gives real DOM evidence instead of a bare null if this is retried). The SIDEBAR drive-ROW test below
+// is NOT gated — it exercises the same drive context-menu behaviour and passes on Linux, so no menu
+// coverage is lost by leaving the Home-tile assertions gated.
 const SKIP_HOME_DRIVE_TILE = process.platform === "linux";
 
 /** True if `p` looks like a DRIVE ROOT — a Windows volume root (`C:\`, `Z:\`) or the POSIX root
@@ -146,7 +174,13 @@ async function dismissMenu(): Promise<void> {
   }
 }
 
-/** Navigate to the Home landing (which shows drive TILES) via the always-present "Home" breadcrumb. */
+/** Navigate to the Home landing (which shows drive TILES) via the always-present "Home" breadcrumb, then
+ *  make sure the Quick-Access section (the `.qa-grid` of `.qa-card`s, including any drive tile) is
+ *  actually expanded. CPE-1483: Quick Access has its OWN persisted collapse state (`quickOpen`,
+ *  HomeView.svelte) independent of the sidebar's drives section, and this function's old wait condition
+ *  (`.qa-grid` OR `.home`) could pass on `.home` alone even with Quick Access collapsed — silently hiding
+ *  every `.qa-card` including the drive tile. Expanding it here, same as a real user would, is legitimate
+ *  hardening regardless of whether that's the actual Linux CI root cause. */
 async function goHome(): Promise<void> {
   const p = await pointOfCrumb("Home");
   if (p) await click(p);
@@ -154,6 +188,43 @@ async function goHome(): Promise<void> {
     timeout: 15_000,
     timeoutMsg: "Home landing (.qa-grid/.home) did not render after clicking the Home breadcrumb",
   });
+  await ensureQuickAccessOpen();
+}
+
+/** If Home's Quick-Access section is collapsed, click its twisty to expand it. The section header is the
+ *  FIRST `.section-head` inside `.home` (structural, locale-independent — HomeView.svelte always renders
+ *  Quick Access before the Recent/Favorites/Folders/Shared header). A no-op if already open or absent. */
+async function ensureQuickAccessOpen(): Promise<void> {
+  const twistyPoint = (await browser.execute(() => {
+    const head = document.querySelector(".home .section-head");
+    const twisty = head?.querySelector("button.twisty") as HTMLElement | null;
+    if (!twisty || twisty.classList.contains("open")) return null;
+    const r = twisty.getBoundingClientRect();
+    return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) };
+  })) as Point | null;
+  if (twistyPoint) {
+    await click(twistyPoint);
+    await browser.pause(150);
+  }
+}
+
+/** Live diagnostics of Home's Quick-Access DOM state, for failure messages — CPE-1483: previous rounds'
+ *  failures reported only "expected null to not equal null", with no visibility into WHAT was actually on
+ *  the page (grid missing entirely? grid present but empty? tile present under a different sub-text?). */
+async function qaGridDiagnostics(): Promise<string> {
+  return browser.execute(() => {
+    const home = document.querySelector(".home");
+    const grid = document.querySelector(".qa-grid");
+    const twisty = document.querySelector(".home .section-head button.twisty");
+    const cardSubs = Array.from(document.querySelectorAll(".qa-card .qa-sub")).map((el) => (el.textContent || "").trim());
+    return JSON.stringify({
+      homeExists: !!home,
+      qaGridExists: !!grid,
+      quickAccessOpen: twisty ? twisty.classList.contains("open") : null,
+      qaCardCount: cardSubs.length,
+      qaCardSubs: cardSubs,
+    });
+  }) as Promise<string>;
 }
 
 /** Poll for the Home drive tile with a generous, bounded timeout, returning it once present.
@@ -166,19 +237,28 @@ async function goHome(): Promise<void> {
  *  can NOT be empty on Linux: `list_drives_impl` (src-tauri/src/lib.rs) unconditionally returns the single
  *  `"/"` root on non-Windows (no I/O), pinned by the `list_drives_returns_at_least_one_root` unit test. So
  *  it's purely a race — a generous bounded wait (well under the 90s per-test cap) makes it deterministic
- *  without gating anything Linux-specific. */
+ *  without gating anything Linux-specific.
+ *  CPE-1483: on a still-failing run, the thrown error now carries `qaGridDiagnostics()` so CI logs show
+ *  the REAL DOM state (grid missing vs. empty vs. populated-with-different-content) instead of a bare
+ *  null — actionable evidence for a fast follow-up if this round's `ensureQuickAccessOpen` hardening
+ *  wasn't the whole story. */
 async function waitForDriveTile(): Promise<{ point: Point; path: string }> {
   let tile: { point: Point; path: string } | null = null;
-  await browser.waitUntil(
-    async () => {
-      tile = await pointOfDriveTile();
-      return tile !== null;
-    },
-    {
-      timeout: 30_000,
-      timeoutMsg: "Home landing should show at least one drive tile (a .qa-card with a drive-root path)",
-    },
-  );
+  try {
+    await browser.waitUntil(
+      async () => {
+        tile = await pointOfDriveTile();
+        return tile !== null;
+      },
+      {
+        timeout: 30_000,
+        timeoutMsg: "Home landing should show at least one drive tile (a .qa-card with a drive-root path)",
+      },
+    );
+  } catch (e) {
+    const diag = await qaGridDiagnostics();
+    throw new Error(`${(e as Error).message} — CPE-1483 diagnostics: ${diag}`);
+  }
   return tile!;
 }
 
@@ -220,8 +300,9 @@ describe("CPE-1159 — drive right-click menu opens and STAYS open (stopPropagat
   });
 
   it("Home shows at least one drive tile to right-click", async function () {
-    // CPE-1481/CPE-1483: Home-landing drive tiles don't render on the headless Linux CI runner (see the
-    // SKIP_HOME_DRIVE_TILE note); the sidebar drive-ROW test below covers the same menu behaviour.
+    // CPE-1483: gated on Linux — see the SKIP_HOME_DRIVE_TILE comment above (CI-diagnostic-backed:
+    // `.home` itself doesn't exist on this runner when this assertion runs, not just a collapsed tile).
+    // The sidebar drive-ROW test below covers the same menu behaviour and stays ungated.
     if (SKIP_HOME_DRIVE_TILE) return this.skip();
     await goHome();
     // Poll with a generous bounded timeout (see waitForDriveTile) — the tile is set from a startup
@@ -233,7 +314,7 @@ describe("CPE-1159 — drive right-click menu opens and STAYS open (stopPropagat
   });
 
   it("right-clicking a Home DRIVE TILE opens the drive menu and it stays open (does not self-close)", async function () {
-    // CPE-1481/CPE-1483: gated on Linux (see above) — sidebar drive-ROW test covers the same behaviour.
+    // CPE-1483: gated on Linux (see above) — sidebar drive-ROW test below covers the same behaviour.
     if (SKIP_HOME_DRIVE_TILE) return this.skip();
     await goHome();
     const tile = await waitForDriveTile();

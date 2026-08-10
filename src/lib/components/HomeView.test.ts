@@ -36,6 +36,38 @@ describe("HomeView layout persistence (CPE-573)", () => {
   });
 });
 
+describe("HomeView Quick Access drive tile (CPE-1483)", () => {
+  // Pins the CPE-1483 root-cause finding: given the exact props App.svelte/ExplorerPane.svelte feed
+  // HomeView (`places` from `specialFolders`, `drives` from `listDrives`), the POSIX single-root drive
+  // DOES render as a `.qa-card` with `.qa-sub` === "/" — the categorization/keyed-`{#each}` logic itself
+  // is correct. The Linux gui-smoke gap this ticket investigated is therefore an environment-specific
+  // (headless WebKitGTK-under-Xvfb CI) issue, not a code bug reproducible here — see the ticket's Notes.
+  it("renders the POSIX root ('/') drive as a .qa-card, expanded by default", () => {
+    const { container } = render(HomeView, {
+      places: [],
+      drives: [{ name: "File System", path: "/", kind: "drive" }],
+      pins: [],
+      recents: [],
+      favorites: [],
+    });
+    const cards = Array.from(container.querySelectorAll(".qa-card"));
+    expect(cards).toHaveLength(1);
+    expect(cards[0].querySelector(".qa-sub")?.textContent).toBe("/");
+  });
+
+  it("renders a Windows drive tile alongside quick-access places without a key collision", () => {
+    const { container } = render(HomeView, {
+      places: [{ name: "Documents", path: "C:\\Users\\me\\Documents", kind: "documents" }],
+      drives: [{ name: "Local Disk (C:)", path: "C:\\", kind: "drive" }],
+      pins: [],
+      recents: [],
+      favorites: [],
+    });
+    const subs = Array.from(container.querySelectorAll(".qa-card .qa-sub")).map((el) => el.textContent);
+    expect(subs).toEqual(["C:\\Users\\me\\Documents", "C:\\"]);
+  });
+});
+
 describe("HomeView Favorites tab (CPE-338)", () => {
   it("lists starred items and routes folder→navigate, file→openFile", async () => {
     const { component } = render(HomeView, { places: [], drives: [], pins: [], recents: [], favorites });
