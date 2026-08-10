@@ -35,7 +35,8 @@ previewed before anything happens and can be undone as a single step afterward.
   - A **hotkey** typed into the macro's row in the library — any combo that includes **Ctrl** or **Alt**
     (a Shift-only or bare-letter combo is rejected, since it would collide with ordinary typing or
     type-ahead find). A macro hotkey is checked **last**, after every built-in shortcut, so it can never
-    shadow one. See the **Macros** section of [Keyboard shortcuts](36-keyboard-shortcuts).
+    shadow one. Macro hotkeys follow the same Ctrl/Alt rule as the built-in shortcuts (see
+    [Keyboard shortcuts](36-keyboard-shortcuts)).
   - A **brand-new macro isn't exposed anywhere** until you check at least one of Menu/Palette or give it
     a hotkey — saving it alone doesn't make it runnable from any surface.
 
@@ -88,10 +89,11 @@ Starting a macro (from any of the three run surfaces above) always goes through 
    selected item, in step order.
 3. **Result + Undo** — after a successful run, the dialog shows *"Applied N steps to `<count>`
    item(s)"* and an **Undo** button. Clicking it reverses the **entire run** in one action — this is a
-   **separate** undo from the app-wide **Ctrl+Z** stack (see [Undo](safety-undo)); once you close this
-   dialog, that one-click "undo this run" option is gone (though a rename/move it performed may still
-   be reachable via the regular undo stack — see *Limits* below). **Close** dismisses the dialog either
-   way.
+   **separate** undo from the app-wide **Ctrl+Z** stack (see [Undo](safety-undo)): a macro run is applied
+   as one backend operation and is **never** placed on the Ctrl+Z stack. So once you close this dialog,
+   that one-click "undo this run" option is gone and there is **no fallback** — Ctrl+Z will not reverse
+   it. If you want a safety net, take a **Checkpoint** first (see *Limits* below). **Close** dismisses the
+   dialog either way.
 
 ## Worked example
 
