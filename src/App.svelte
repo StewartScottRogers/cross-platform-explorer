@@ -43,6 +43,14 @@
   import DocsView from "./lib/components/DocsView.svelte";
   import { docSlugForSection, type Section } from "./lib/sectionDocs";
   import CommandPalette from "./lib/components/CommandPalette.svelte";
+  // Navigation Mode (CPE-1556, epic CPE-1487 — opt-in vim-modal layer over the file list). All four
+  // building blocks below landed inert in CPE-1552-1555; this file is the single, Settings-gated
+  // integration point that makes them reachable.
+  import NavCommandLine from "./lib/components/NavCommandLine.svelte";
+  import NavModeIndicator from "./lib/components/NavModeIndicator.svelte";
+  import NavCheatsheet from "./lib/components/NavCheatsheet.svelte";
+  import { initialNavState, reduceNavKey, type NavState, type NavIntent } from "./lib/navMode";
+  import { applyNavIntent, type NavLayout } from "./lib/navMotion";
   import UserCommandsDialog from "./lib/components/UserCommandsDialog.svelte";
   import RunCommandConfirm from "./lib/components/RunCommandConfirm.svelte";
   import { commandsForSurface, resolveCommand, type UserCommand } from "./lib/userCommands";
@@ -1015,6 +1023,23 @@
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is
   // duplicated; `enabled` closures read live state so context-invalid commands grey out.
   let paletteOpen = false;
+  // Navigation Mode (CPE-1556, epic CPE-1487): an opt-in vim-modal layer over the file list. `enabled`
+  // defaults to FALSE (loadNavigationModeEnabled) so a fresh install behaves exactly as before; it's
+  // re-read whenever the Settings dialog closes (see the SettingsDialog mount). `navState` holds the
+  // current mode + pending chord/count; it's reset on every tab/pane switch (reactive block below) so a
+  // half-typed `g`/count or a lingering visual mode never leaks across panes.
+  let navigationModeEnabled = settings.loadNavigationModeEnabled();
+  let navState: NavState = initialNavState();
+  let navCommandLineOpen = false;
+  let navCheatsheetOpen = false;
+  let navContextKey = "";
+  $: {
+    const key = `${activeId}:${activePane}`;
+    if (key !== navContextKey) {
+      navContextKey = key;
+      navState = initialNavState();
+    }
+  }
   // Spotlight overlay (CPE-1216, epic CPE-704): a global quick-launch overlay sectioned across
   // actions/folders/files/recents. Opened by the backend `spotlight:open` Tauri event (CPE-1215's OS
   // hotkey, listened for below) AND the in-app "Spotlight (search everywhere)…" palette command, so
@@ -3163,6 +3188,40 @@
     showNotice(message, true);
   }
 
+  /**
+   * Navigation Mode (CPE-1556, epic CPE-1487): map a resolved `NavIntent` onto the app's EXISTING
+   * handlers — no new file-op or motion logic lives here, only wiring. `motion` drives CPE-1553's
+   * selection bridge (`applyNavIntent`) against whichever pane the modal layer is acting on; the `op`s
+   * reuse the very same `doCopy`/`doCut`/`doPaste` the Ctrl+C/Ctrl+X/Ctrl+V branches call (vim maps
+   * `d`=cut, `y`=copy, `p`=paste — delete-into-register semantics); `startFilter` reuses the toolbar's
+   * existing filter entry point (exactly what Ctrl+F focuses — no second filter UI); `startCommand`
+   * opens the `:` command line. `enterVisual`/`exitVisual`/`none` need no side effect here — the caller
+   * already applied the new mode/buffers to `navState` via `reduceNavKey`. Called only from the
+   * `handleKeydown` guard, which never fires when `navigationModeEnabled` is off. */
+  function dispatchNavIntent(intent: NavIntent, inPaneB: boolean) {
+    switch (intent.kind) {
+      case "motion": {
+        const p = paneStateFor(inPaneB);
+        const cols = currentGridCols();
+        const layout: NavLayout = cols > 1 ? "grid" : "list";
+        p.setSelection(applyNavIntent(intent, p.selection, p.visible.length, navState.mode, layout, cols));
+        break;
+      }
+      case "op":
+        if (intent.op === "yank") doCopy(inPaneB);
+        else if (intent.op === "delete") doCut(inPaneB);
+        else void doPaste(inPaneB); // "paste" — async, mirrors the Ctrl+V branch's fire-and-forget
+        break;
+      case "startFilter":
+        navToolbar?.focusSearch(); // same entry point Ctrl+F drives — do not build a second filter UI
+        break;
+      case "startCommand":
+        navCommandLineOpen = true;
+        break;
+      // enterVisual / exitVisual / none: mode + buffers were already updated by reduceNavKey in the caller.
+    }
+  }
+
   /** `inPaneB` (CPE-1380): Ctrl+C/context-menu-copy must stage whichever pane's selection is actually
    *  targeted — `handleKeydown` passes the live active pane (`activePaneState`'s routing), a context-menu
    *  invocation passes `ctx.inPaneB` (menu-open-time, same reasoning as `askDelete`'s override). Defaults
@@ -4984,6 +5043,32 @@
       return;
     }
 
+    // --- Navigation Mode (CPE-1556, epic CPE-1487): opt-in vim-modal layer over the file list. ---
+    // The VERY FIRST condition is the Settings gate: when `navigationModeEnabled` is FALSE (the default),
+    // this whole branch short-circuits and every line below it runs EXACTLY as it does today — zero
+    // behavior change with the mode off. Reaching here already means the file list has focus: the
+    // INPUT/TEXTAREA, rename, confirm, and quick-look guards above have all returned, so typing in a field
+    // is never intercepted. V1's grammar is unmodified single keys only, so any Ctrl/Alt/Meta chord
+    // (Ctrl+C, Ctrl+F, Alt+Arrow, …) is deliberately left to fall through to its existing handler below;
+    // the modal layer only ever consumes bare keys.
+    if (navigationModeEnabled && !navCommandLineOpen && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      // `?` opens the Navigation Mode cheatsheet (discoverability affordance — a one-line addition, no
+      // new toolbar button, per the fast/small/predictable tiebreaker).
+      if (event.key === "?") { event.preventDefault(); navCheatsheetOpen = true; return; }
+      const { state, intent } = reduceNavKey(navState, event.key);
+      navState = state;
+      if (intent.kind !== "none") {
+        event.preventDefault();
+        dispatchNavIntent(intent, dualPane && activePane === 1);
+        return;
+      }
+      // A pending chord/count (a bare `g`, or a digit count mid-entry) is buffered but hasn't resolved to
+      // an intent yet: swallow the key so it doesn't also type-ahead, and keep waiting for the rest.
+      if (state.pendingChord !== "" || state.pendingCount !== "") { event.preventDefault(); return; }
+      // Otherwise the key means nothing to the mode (e.g. an unmapped letter) — fall through so today's
+      // handlers (type-ahead find, etc.) still run, matching the surveyed TUIs' "unmapped keys pass".
+    }
+
     const ctrl = event.ctrlKey || event.metaKey;
     // CPE-1370: the pane keyboard nav/destructive keys below act on — pane B only in dual-pane mode
     // with pane B focused, pane A otherwise. Computed once up front so every case below reads/writes
@@ -6684,7 +6769,7 @@
     on:setDetails={(e) => { showDetails = e.detail; settings.saveShowDetails(showDetails); }}
     on:reset={resetAllSettings}
     on:openConsole={() => openAiConsole()}
-    on:close={() => (showSettings = false)}
+    on:close={() => { showSettings = false; navigationModeEnabled = settings.loadNavigationModeEnabled(); }}
   />
 {/if}
 
@@ -6885,6 +6970,25 @@
 
 {#if paletteOpen}
   <CommandPalette commands={paletteCommands} on:close={() => (paletteOpen = false)} />
+{/if}
+
+<!-- Navigation Mode (CPE-1556, epic CPE-1487): all three surfaces are mounted ONLY when the opt-in
+     Settings toggle is on, so a fresh install renders none of them (zero behavior change with the mode
+     off). The mode badge always shows the current NORMAL/VISUAL state + pending chord/count; the `:`
+     command line mounts on the `startCommand` intent and dispatches the chosen palette Command; the
+     cheatsheet opens on `?` in the modal layer. -->
+{#if navigationModeEnabled}
+  <NavModeIndicator mode={navState.mode} pendingCount={navState.pendingCount} pendingChord={navState.pendingChord} />
+  {#if navCommandLineOpen}
+    <div class="nav-command-line-anchor">
+      <NavCommandLine
+        commands={paletteCommands}
+        on:run={(e) => { navCommandLineOpen = false; e.detail.run(); }}
+        on:cancel={() => (navCommandLineOpen = false)}
+      />
+    </div>
+  {/if}
+  <NavCheatsheet open={navCheatsheetOpen} on:close={() => (navCheatsheetOpen = false)} />
 {/if}
 
 {#if spotlightOpen}
@@ -7214,6 +7318,18 @@
 {/if}
 
 <style>
+  /* Navigation Mode (CPE-1556): dock the `:` command line at the bottom-centre of the window, above
+     everything, so it reads like a vim status-line prompt. Width-capped + centred; the component owns
+     its own surface/border/shadow (all theme tokens). */
+  .nav-command-line-anchor {
+    position: fixed;
+    left: 50%;
+    bottom: 40px;
+    transform: translateX(-50%);
+    width: min(560px, 92vw);
+    z-index: 210;
+  }
+
   /* Dual-pane (CPE-677): the focused pane gets an accent inset ring so it's clear which pane the
      toolbar/keyboard acts on. The ::after is pointer-events:none so it never blocks clicks. */
   .pane-col {
