@@ -2,7 +2,7 @@
 id: CPE-1484
 title: "EPIC: Hotkey customization — view & remap every keyboard shortcut"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -11,7 +11,18 @@ closed:
 ---
 
 > **Filed 2026-08-08 (sprint PM, from the superfile reference pass — see [[superfile-pm-reference]]).**
-> **Dormant brief — not decomposed until activated** via `/ticketing-epic activate CPE-1484`.
+> **Activated 2026-08-10 (sprint PM, bench refill)** — decomposed into four children:
+> - CPE-1547 — keymap action registry + persisted override store (foundation, inert plumbing)
+> - CPE-1548 — Settings → Keyboard shortcuts viewer dialog (read-only, searchable)
+> - CPE-1549 — press-to-set remap capture + live conflict warning + reset-to-default
+> - CPE-1550 — import/export keymap via clipboard JSON
+>
+> Migrating `App.svelte`'s hardcoded `handleKeydown` branches to actually consult the new store is
+> deliberately deferred to a **future** batch (not one of the four above) — it's the bulk of the work per
+> this brief's own notes, and doing it now would mean multiple tickets editing the same 7300-line handler
+> concurrently. CPE-1547-1550 ship the full view/remap/import-export surface as an opt-in layer with zero
+> effect on the default (unmigrated) key-handling path, matching PURPOSE.md's "zero cost to the core when
+> using defaults."
 
 ## Why (the #1 genuine gap superfile surfaced)
 superfile ships fully-remappable hotkeys (`hotkeys.toml`, https://superfile.dev/configure/custom-hotkeys/).
