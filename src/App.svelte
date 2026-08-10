@@ -191,6 +191,7 @@
     emptyClipboard, stage, isEmpty as clipEmpty, canPaste as clipCanPaste,
     type Clipboard,
   } from "./lib/clipboard";
+  import { initDropStack, addToDropStack } from "./lib/dropStack";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
   import { isExecutable, iconFor, sameTypeIndices, isImage } from "./lib/filetypes";
   import QuickLook from "./lib/components/QuickLook.svelte";
@@ -1042,6 +1043,7 @@
     { id: "file.newLink", group: $t("palette.groupFile"), label: $t("palette.newLink"), keywords: "symlink hardlink shortcut", run: () => (newLinkDialogFor = currentPath), enabled: inFolder },
     { id: "file.copy", group: $t("palette.groupFile"), label: $t("palette.copy"), shortcut: "Ctrl+C", run: doCopy, enabled: hasSelection },
     { id: "file.cut", group: $t("palette.groupFile"), label: $t("palette.cut"), shortcut: "Ctrl+X", run: doCut, enabled: hasSelection },
+    { id: "file.addDropStack", group: $t("palette.groupFile"), label: "Add to Drop Stack", keywords: "shelf stack collect gather move copy later", shortcut: "Ctrl+Shift+D", run: () => doAddToDropStack(), enabled: hasSelection },
     { id: "file.paste", group: $t("palette.groupFile"), label: $t("palette.paste"), shortcut: "Ctrl+V", run: doPaste, enabled: inFolder },
     { id: "file.copyPath", group: $t("palette.groupFile"), label: $t("palette.copyPath"), shortcut: "Ctrl+Shift+C", run: doCopyPath, enabled: hasSelection },
     { id: "file.copyName", group: $t("palette.groupFile"), label: $t("palette.copyName"), run: doCopyName, enabled: hasSelection },
@@ -3169,6 +3171,21 @@
     showNotice(`Cut ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
   }
 
+  /** Add the pane's current selection to the Drop Stack (CPE-1531, epic CPE-1489) — the persistent
+   *  cross-folder "shelf" whose store/persistence landed in CPE-1530. Same pane-aware, archive-gated
+   *  shape as `doCopy`/`doCut` above (CPE-1380): a context-menu invocation targets whichever pane the
+   *  menu was opened OVER via `inPaneB`, and pane A is blocked while browsing inside an archive (an
+   *  archive member has no real on-disk path to shelve). `addedFrom` is the pane's own current folder,
+   *  same source-dir reasoning as `copyMoveToFolder`'s `srcDir`. */
+  function doAddToDropStack(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
+    const from = inPaneB ? paneBPath : currentPath;
+    addToDropStack(pane.selectedEntries.map((e) => e.path), from);
+    const n = pane.selectedEntries.length;
+    showNotice(`Added ${n} item${n === 1 ? "" : "s"} to the Drop Stack.`);
+  }
+
   /** Browse to a folder via the native picker and navigate there (CPE-366) — avoids
       hand-typing a deep path in the address bar. */
   async function browseForFolder() {
@@ -4230,6 +4247,7 @@
       // whichever pane the menu was opened OVER, same as every other pane-routed case in this switch.
       case "cut": doCut(inPaneB); break;
       case "copy": doCopy(inPaneB); break;
+      case "add-drop-stack": doAddToDropStack(inPaneB); break;
       case "paste": doPaste(inPaneB); break;
       case "duplicate": doDuplicate(inPaneB); break;
       // Compress/extract/archive-safety/shred/vault-create are pane-routed (CPE-1386, extending
@@ -4899,6 +4917,13 @@
     if (ctrl && event.key.toLowerCase() === "c") { event.preventDefault(); doCopy(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "x") { event.preventDefault(); doCut(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "v") { event.preventDefault(); doPaste(inPaneB); return; }
+    // Add to Drop Stack (CPE-1531, epic CPE-1489): fixed default hotkey, same as every other current
+    // built-in shortcut (Ctrl+Shift+N/O/T/F/P/C above) — not routed through the macro-hotkey system
+    // (that's for user-saved macros only, matched last below). Becomes user-remappable for free once
+    // CPE-1484 (hotkey customization) ships. Checked BEFORE plain Ctrl+D (duplicate) below — same
+    // Ctrl+Shift+<key>-before-Ctrl+<key> ordering as Ctrl+Shift+C vs Ctrl+C above, since `event.key`
+    // is "d" regardless of Shift and the bare Ctrl+D check doesn't itself exclude Shift.
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "d") { event.preventDefault(); doAddToDropStack(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "d") { event.preventDefault(); doDuplicate(inPaneB); return; }
     if (ctrl && event.key.toLowerCase() === "z") { event.preventDefault(); undo(); return; }
 
@@ -5550,6 +5575,10 @@
     // Transfer manager (CPE-613): consume progress events, and on completion refresh the current
     // folder (a copy may have landed here) + report the outcome. Idle until a transfer starts.
     initTransfers().catch(() => {});
+    // Drop Stack (CPE-1530/1531): hydrate the reactive store from settings.json BEFORE any "Add to
+    // Drop Stack" action can fire — otherwise a first add would overwrite a persisted stack with just
+    // the new entries instead of appending to it (the store starts empty until loaded). Idempotent/sync.
+    initDropStack();
     // Tag store (CPE-636): load persisted tags/labels once so rows can show chips + tints. Idle
     // (empty) until something is actually tagged, so the plain explorer is unaffected.
     initTags().catch(() => {});

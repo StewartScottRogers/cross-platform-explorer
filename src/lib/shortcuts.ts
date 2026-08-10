@@ -65,6 +65,7 @@ export const SHORTCUT_GROUPS: ShortcutGroup[] = [
       { keys: "Ctrl+X", description: "Cut" },
       { keys: "Ctrl+V", description: "Paste" },
       { keys: "Ctrl+D", description: "Duplicate" },
+      { keys: "Ctrl+Shift+D", description: "Add to Drop Stack" },
       { keys: "Ctrl+Z", description: "Undo" },
       { keys: "F2", description: "Rename" },
       { keys: "Delete", description: "Delete to Recycle Bin / Trash" },
