@@ -112,7 +112,7 @@
   import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
   import DropStackPanel from "./lib/components/DropStackPanel.svelte";
-  import { initDropStack, addToDropStack } from "./lib/dropStack";
+  import { initDropStack, addToDropStack, dropStackEntries, removeFromDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
@@ -1290,6 +1290,17 @@
    *  pane A) once that specific transfer finishes. Every other copy source (drag-drop, Home copy, quick
    *  actions, a pane-A "Copy to…") never adds an id here and keeps refreshing pane A exactly as before. */
   const pasteCopyPaneB = new Set<number>();
+  /** CPE-1533 (epic CPE-1489 finale): a Drop-Stack "Copy all here" awaiting the CPE-624 conflict choice
+   *  — a Drop-Stack-flavoured twin of `pendingCopy` above, kept separate because `resolveCopyConflict`
+   *  is wired to clipboard-paste's pane routing (`inPaneB`), which the (single, pane-less) Drop Stack
+   *  panel has no equivalent of. */
+  let pendingDropStackCopy: { sources: string[]; count: number } | null = null;
+  /** CPE-1533: transfer ids for an in-flight Drop-Stack "Copy all here", mapped to the exact paths that
+   *  transfer captured — consumed by the shared `transfer://done` listener below so it can clear just
+   *  those paths off the Drop Stack once the transfer finishes cleanly. `TransferReport` only carries
+   *  aggregate counts (no per-path result, see transfers.ts), so a partial failure leaves the whole
+   *  captured batch shelved rather than guessing which paths actually landed. */
+  const dropStackTransferOps = new Map<number, string[]>();
   // Agent Watch view (CPE-399): the Project folder currently being watched (or ""), and the
   // teardown for its activity listener. Watching turns on only while the explorer is inside a
   // running agent's project, and off the moment it leaves — off means off (AGENT-WATCH.md).
@@ -2783,6 +2794,11 @@
   $: totalCount = ((isHome && !smartFolder && !structuredSearch) || archive) ? itemCount : shown.length;
   $: pasteCheck = clipCanPaste(clipboard, isHome ? "" : currentPath);
   $: cutPaths = clipboard.mode === "cut" ? clipboard.paths : [];
+  // CPE-1533: a pure (no-notice) mirror of doPaste's `isHome || blockedInArchive()` guard, so the Drop
+  // Stack panel's Move-all/Copy-all buttons can be disabled up front rather than firing and eating a
+  // silent no-op — `blockedInArchive()` itself has notice side effects, so it's called for real inside
+  // the click handlers below, not here.
+  $: dropStackDestBlocked = isHome || !!archive || !!smartFolder || !!structuredSearch || replayOverlayEntries !== null;
   // CPE-1380: the shared `<ContextMenu>`'s "Paste" row must reflect whichever pane it was opened OVER
   // (`ctxInPaneB`), not always pane A's `pasteCheck` — a paste-into-itself/self-descendant refusal (or a
   // plain empty clipboard) has to be evaluated against pane B's OWN folder when the menu is over pane B.
@@ -3412,6 +3428,82 @@
       // as above) rather than leaving the user's selection silently gone and forcing a re-cut.
       if (clipEmpty(clipboard)) clipboard = stage(sources, "cut");
     }
+  }
+
+  /** CPE-1533 (epic CPE-1489 finale): "Move all here"/"Copy all here" — everything currently shelved on
+   *  the Drop Stack (CPE-1530), regardless of which folder each item was picked up from (that's the
+   *  whole point of the stack, see dropStack.ts's doc comment), targeted at the CURRENT folder. There's
+   *  no pane-B equivalent — CPE-1532's panel is one global dock, not pane-scoped — so these mirror only
+   *  `doPaste`'s pane-A guard (`isHome || blockedInArchive()`), never the `inPaneB` branch.
+   *
+   *  "Move all" reuses the SAME synchronous move path `doPaste`'s cut branch uses (instant same-volume
+   *  rename + undo support via `moveEntries`, which resolves with one `OpResult` PER source, index-
+   *  aligned with `sources`) rather than the async transfer queue — so a partial failure can precisely
+   *  clear only the paths that actually moved and leave the rest shelved for a retry. */
+  async function doDropStackMoveAll() {
+    if (isHome || blockedInArchive()) return;
+    const sources = $dropStackEntries.map((e) => e.path);
+    if (sources.length === 0) return;
+    try {
+      const results = await commands.moveEntries(sources, currentPath);
+      reportResults(results, "Moved");
+      const moves = results
+        .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
+        .filter((m) => m.ok)
+        .map(({ from, to }) => ({ from, to }));
+      if (moves.length > 0) {
+        undoStack = pushUndo(undoStack, {
+          kind: "move",
+          moves,
+          label: `Move ${moves.length} item${moves.length === 1 ? "" : "s"}`,
+        });
+        retagMoves(moves); // tags follow the moved files (CPE-657)
+      }
+      // Mirrors doPaste's `unmoved` handling (CPE-1385 review): only the paths that actually moved come
+      // off the stack — a permission-denied/locked/dropped-network-share item among the batch stays
+      // shelved instead of silently vanishing.
+      sources.forEach((p, i) => { if (results[i]?.ok) removeFromDropStack(p); });
+      await loadPath(currentPath);
+    } catch (e) {
+      showNotice(String(e), true);
+      // Nothing moved at all (IPC/backend rejection) — leave the whole batch shelved.
+    }
+  }
+
+  /** "Copy all here" — routed through the transfer queue (CPE-613), same as `doPaste`'s copy branch:
+   *  progress shows in the operations panel, the shared `transfer://done` listener does the refresh +
+   *  notice, and a name collision against the destination pauses for the same CPE-624 conflict dialog
+   *  (`pendingDropStackCopy`). Unlike the move path above, `TransferReport` is aggregate-only counts (no
+   *  per-path result — see transfers.ts), so `dropStackTransferOps` (consumed by the `transfer://done`
+   *  listener below) only clears the captured paths off the stack on a clean, uncancelled, all-
+   *  transferred finish; a partial failure leaves the whole batch shelved rather than guessing which
+   *  paths landed. */
+  async function doDropStackCopyAll() {
+    if (isHome || blockedInArchive()) return;
+    const sources = $dropStackEntries.map((e) => e.path);
+    if (sources.length === 0) return;
+    const collisions = collidingNames(sources, entries.map((e) => e.name));
+    if (collisions.length > 0) {
+      pendingDropStackCopy = { sources, count: collisions.length };
+      return; // the conflict dialog resumes via startDropStackCopy
+    }
+    await startDropStackCopy(sources, "keepboth");
+  }
+
+  async function startDropStackCopy(sources: string[], policy: ConflictPolicy) {
+    try {
+      const id = await startTransfer(sources, currentPath, "copy", policy);
+      dropStackTransferOps.set(id, sources);
+    } catch (e) {
+      showNotice(String(e), true);
+    }
+  }
+
+  /** The conflict dialog's choice for a pending Drop-Stack copy (CPE-624/CPE-1533). */
+  function resolveDropStackCopyConflict(policy: ConflictPolicy) {
+    const p = pendingDropStackCopy;
+    pendingDropStackCopy = null;
+    if (p) startDropStackCopy(p.sources, policy);
   }
 
   /** Fetch a text file's contents for the preview pane (size-capped backend). */
@@ -5619,6 +5711,17 @@
         Promise.resolve(pending.onSuccess()).then(() => refreshBatchApplyTarget(pending.dir)).catch(() => {});
         return;
       }
+      // CPE-1533: a Drop-Stack "Copy all here" is tagged in `dropStackTransferOps` with the exact paths
+      // it captured — on a clean, uncancelled, all-transferred finish those paths come off the Drop
+      // Stack. `TransferReport` has no per-path result (aggregate counts only), so a partial
+      // failure/skip/cancel leaves the whole captured batch shelved rather than guessing which landed.
+      const dropStackPaths = dropStackTransferOps.get(r.id);
+      if (dropStackPaths) {
+        dropStackTransferOps.delete(r.id);
+        if (!r.cancelled && r.failed === 0 && r.skipped === 0) {
+          dropStackPaths.forEach((p) => removeFromDropStack(p));
+        }
+      }
       // CPE-1380/CPE-1384: a clipboard-paste copy OR a "Copy to…" that targeted pane B is tagged in
       // `pasteCopyPaneB` (by `startCopyWithPolicy` / `copyMoveToFolder`) — refresh pane B for it, PLUS
       // pane A too when pane A happens to mirror the same folder (both-can-match, same reasoning as
@@ -6702,7 +6805,11 @@
 {/if}
 
 <TransferPanel />
-<DropStackPanel />
+<DropStackPanel
+  canTransfer={!dropStackDestBlocked}
+  on:moveAll={doDropStackMoveAll}
+  on:copyAll={doDropStackCopyAll}
+/>
 
 {#if quickLook}
   <QuickLook
@@ -6740,6 +6847,14 @@
     count={pendingCopy.count}
     on:choose={(e) => resolveCopyConflict(e.detail)}
     on:cancel={() => (pendingCopy = null)}
+  />
+{/if}
+
+{#if pendingDropStackCopy}
+  <TransferConflictDialog
+    count={pendingDropStackCopy.count}
+    on:choose={(e) => resolveDropStackCopyConflict(e.detail)}
+    on:cancel={() => (pendingDropStackCopy = null)}
   />
 {/if}
 
