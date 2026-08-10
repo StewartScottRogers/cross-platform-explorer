@@ -20,6 +20,7 @@ import { render } from "@testing-library/svelte";
 import { tick } from "svelte";
 import FileList from "./FileList.svelte";
 import { emptySelection } from "../selection";
+import { windowRange } from "../virtualize";
 import type { DirEntry } from "../types";
 
 // The component tree imports Tauri APIs transitively; stub them so jsdom can render without a Tauri
@@ -132,5 +133,79 @@ describe("FileList windowed rendering — regression guard (CPE-691, epic CPE-68
     // guards against windowing kicking in where it shouldn't (a small-folder regression), mirroring
     // CPE-690's "common case pays nothing" acceptance criterion.
     expect(scrollPane.querySelectorAll(".row").length).toBe(N);
+  });
+});
+
+/**
+ * Compact-density windowing invariant (CPE-1527, epic CPE-1488): FileList.svelte's details/list `rowH`
+ * is fixed per density (`ROW_H_COMFORTABLE = 30` / `ROW_H_COMPACT = 22`), not DOM-measured — see the
+ * comment on that declaration. That means the `.filelist-pane`/`.row` geometry stub above (which always
+ * reports a flat 30px `.row` height, real layout or not) has NO bearing on the details-view window these
+ * tests exercise; what's under test is that the component's *own* internal `rowH` genuinely switches
+ * with the `density` prop and that the CPE-690/766 windowing math (`windowRange`, imported directly
+ * below — the exact function FileList.svelte's `win` reactive statement calls) is recomputed from it, not
+ * silently left at the comfortable pitch.
+ */
+describe("FileList compact density — virtualization invariant (CPE-1527, epic CPE-1488)", () => {
+  const ROW_H_COMFORTABLE = 30; // must track FileList.svelte's ROW_H_COMFORTABLE / app.css's --row-h
+  const ROW_H_COMPACT = 22; // must track FileList.svelte's ROW_H_COMPACT
+  const OVERSCAN_ROWS = 6; // must track FileList.svelte's OVERSCAN_ROWS
+  const N = 5000;
+
+  it("compact density renders exactly the windowRange(rowH=22) slice — more rows than comfortable for the identical viewport", async () => {
+    stubGeometry();
+    const scrollPane = document.createElement("div");
+    scrollPane.className = "filelist-pane";
+    document.body.appendChild(scrollPane);
+
+    render(FileList, { target: scrollPane, props: { ...base, entries: makeEntries(N), density: "compact" } });
+    await tick();
+    await tick();
+    await tick();
+
+    const renderedRows = scrollPane.querySelectorAll(".row").length;
+    const compactExpected = windowRange(0, VIEWPORT_HEIGHT, ROW_H_COMPACT, N, 1, OVERSCAN_ROWS);
+    expect(renderedRows).toBe(compactExpected.end - compactExpected.start);
+
+    // The whole point of a tighter pitch: strictly more rows fit the same 600px viewport than comfortable.
+    const comfortableExpected = windowRange(0, VIEWPORT_HEIGHT, ROW_H_COMFORTABLE, N, 1, OVERSCAN_ROWS);
+    expect(renderedRows).toBeGreaterThan(comfortableExpected.end - comfortableExpected.start);
+  });
+
+  it("comfortable density renders exactly the windowRange(rowH=30) slice — no regression from CPE-1527", async () => {
+    stubGeometry();
+    const scrollPane = document.createElement("div");
+    scrollPane.className = "filelist-pane";
+    document.body.appendChild(scrollPane);
+
+    render(FileList, { target: scrollPane, props: { ...base, entries: makeEntries(N), density: "comfortable" } });
+    await tick();
+    await tick();
+    await tick();
+
+    const renderedRows = scrollPane.querySelectorAll(".row").length;
+    const expected = windowRange(0, VIEWPORT_HEIGHT, ROW_H_COMFORTABLE, N, 1, OVERSCAN_ROWS);
+    expect(renderedRows).toBe(expected.end - expected.start);
+  });
+
+  it("bottom spacer height (padBottom) is computed from the density's own rowH — proves the pitch drives the windowing math itself, not just the visible row count", async () => {
+    stubGeometry();
+    const scrollPane = document.createElement("div");
+    scrollPane.className = "filelist-pane";
+    document.body.appendChild(scrollPane);
+
+    render(FileList, { target: scrollPane, props: { ...base, entries: makeEntries(N), density: "compact" } });
+    await tick();
+    await tick();
+    await tick();
+
+    const spacers = scrollPane.querySelectorAll<HTMLElement>(".vspacer");
+    const bottomSpacer = spacers[spacers.length - 1];
+    const expected = windowRange(0, VIEWPORT_HEIGHT, ROW_H_COMPACT, N, 1, OVERSCAN_ROWS);
+    expect(bottomSpacer.style.height).toBe(`${expected.padBottom}px`);
+    // Sanity: that padBottom is NOT what the comfortable pitch would have produced (would silently pass
+    // a broken "always comfortable" implementation otherwise).
+    const comfortableExpected = windowRange(0, VIEWPORT_HEIGHT, ROW_H_COMFORTABLE, N, 1, OVERSCAN_ROWS);
+    expect(expected.padBottom).not.toBe(comfortableExpected.padBottom);
   });
 });
