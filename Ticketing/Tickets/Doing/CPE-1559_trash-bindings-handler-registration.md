@@ -2,7 +2,7 @@
 id: CPE-1559
 title: "Trash: register commands in generate_handler! + regen specta bindings + Cargo.locks"
 type: Task
-status: Backlog
+status: Doing
 priority: Medium
 component: Backend
 epic: CPE-1486
