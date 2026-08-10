@@ -7,8 +7,9 @@
  * behavior. Chord parsing/formatting reuses `macroBindings.ts`'s `normalizeHotkey` rather than
  * re-deriving it.
  *
- * INERT: nothing calls these APIs yet. `handleKeydown` is untouched, so this ships with zero
- * behavior change. Pure logic, mirroring `macroBindings.ts`'s shape — no DOM, no Tauri invoke.
+ * LIVE (CPE-1557): `App.svelte`'s `handleKeydown` resolves keystrokes through this registry via
+ * `actionForChord`/`chordFromEvent`, so user remaps change key behavior. Pure logic, mirroring
+ * `macroBindings.ts`'s shape — no DOM, no Tauri invoke.
  */
 import { normalizeHotkey } from "./macroBindings";
 
