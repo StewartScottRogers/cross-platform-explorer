@@ -6147,6 +6147,34 @@ async fn discover_network_windows() -> Vec<cpe_server::net_share::NetShare> {
     Vec::new()
 }
 
+// ---- Cross-platform mDNS/DNS-SD network discovery (CPE-1523, epic CPE-1517) -----------------------
+//
+// The cross-platform complement to `discover_network_windows` above: mDNS/DNS-SD is the ONLY discovery
+// path on macOS/Linux, and on Windows it's a superset — it surfaces sftp/webdav/ftp/nfs hosts WNet's
+// SMB-only neighborhood never sees. All the browse/resolve/map/dedup logic lives in the Tauri-free
+// `cpe_mdns` crate (mirroring `cpe_server::net_share`'s pure/impure split); this command is the thin
+// one-line dispatcher CLAUDE.md's server-architecture convention calls for.
+
+/// How long [`discover_network_mdns`] waits for mDNS/DNS-SD responders to answer before returning
+/// whatever it has collected so far — matches [`DISCOVERY_TIMEOUT`], the WNet tier's own bound.
+const MDNS_DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Cross-platform mDNS/DNS-SD LAN discovery (CPE-1523): browses for smb/sftp/webdav/webdavs/ftp/nfs
+/// service advertisements and returns them as [`NetShare`](cpe_server::net_share::NetShare) rows
+/// (`kind: "discovered"`), uniform with `discover_network_windows`'s WNet rows. Unlike that command,
+/// this one is identical on every OS — **not** `#[cfg(windows)]`-gated — so it's a normal
+/// `generate_handler!` entry AND included in the typed specta bindings (see `export_bindings` below).
+/// Async + `spawn_blocking`: `cpe_mdns::discover` blocks the calling thread for up to
+/// [`MDNS_DISCOVERY_TIMEOUT`] polling the daemon's receivers, so it must run off the async executor's
+/// thread exactly like `discover_network_windows_impl` does for its WNet walk.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn discover_network_mdns() -> Vec<cpe_server::net_share::NetShare> {
+    tauri::async_runtime::spawn_blocking(|| cpe_mdns::discover(MDNS_DISCOVERY_TIMEOUT))
+        .await
+        .unwrap_or_default()
+}
+
 /// Free + total bytes on the volume containing `path`, for the status bar (CPE-403).
 #[derive(serde::Serialize)]
 #[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
@@ -10798,6 +10826,7 @@ pub fn run() {
             list_network_shares,
             disconnect_network_share,
             discover_network_windows,
+            discover_network_mdns,
             disk_space,
             special_folders,
             create_dir,
@@ -11617,6 +11646,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
     // CPE-1519) — even where a same-shaped stub exists on the rest, the ACTUAL behavior is one
     // platform's, so including them would make `bindings.gen.ts` semantics OS-dependent and risk the
     // drift guard (CPE-813), which regenerates on Linux. Callers use raw `invoke` for these.
+    // `discover_network_mdns` (CPE-1523) is, by contrast, INCLUDED — mDNS/DNS-SD behaves identically on
+    // every OS (not `#[cfg(windows)]`-gated), so its binding is safe to generate uniformly.
     let builder = Builder::<tauri::Wry>::new().commands(collect_commands![
         list_dir,
         find_project_root,
@@ -11634,6 +11665,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         list_drives,
         list_network_shares,
         disconnect_network_share,
+        discover_network_mdns,
         disk_space,
         special_folders,
         create_dir,

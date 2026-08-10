@@ -1,0 +1,22 @@
+[package]
+name = "cpe-mdns"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "mDNS/DNS-SD LAN discovery for the Cross-Platform Explorer (CPE-1523, epic CPE-1517): the cross-platform complement to the Windows-native WNet discovery (CPE-1519) — finds smb/sftp/webdav/ftp/nfs hosts advertising over Bonjour/Avahi/mDNS on every OS, surfaced as `NetShare` rows in the same 'discovered' tier."
+license = "MIT"
+
+# The cross-platform half of LAN discovery (CPE-1517). Depends on cpe-server for the shared `NetShare`
+# row type + `net_share::dedup_key`. Standalone (out of any workspace), like the sibling crates
+# (cpe-ftp/cpe-webdav/cpe-sftp) — this repo has no root Cargo.toml workspace; each provider crate is a
+# separate, independently-locked package the app path-deps into.
+
+[dependencies]
+cpe-server = { path = "../server" }
+# Pure-Rust mDNS/DNS-SD responder+browser: its own daemon thread, no async-runtime coupling, no native
+# Bonjour SDK needed (unlike `zeroconf`/`astro-dnssd`, which need Bonjour installed on Windows). Chosen
+# over `simple-mdns` (less battle-tested) — see research entry mdns-discovery-dependency-2026-08-09.
+# Self-describes as "beta"; fine for the mainstream RFC 6762/6763 path this crate uses.
+mdns-sd = "0.20"
+
+[dev-dependencies]

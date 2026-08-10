@@ -66,6 +66,11 @@ cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "vid
 # explorer's local hot path never touches it — the command fast-path routes local straight to the local
 # backend as before (PURPOSE.md).
 cpe-vfs = { path = "../crates/vfs" }
+# Cross-platform mDNS/DNS-SD LAN discovery (CPE-1523, epic CPE-1517): the complement to the Windows-only
+# WNet walk above — mDNS is the ONLY discovery path on macOS/Linux, and a superset on Windows too
+# (surfaces sftp/webdav/ftp/nfs hosts WNet's SMB-only neighborhood never sees). Not feature-gated (like
+# `cpe-vfs` above): `discover_network_mdns` is a normal, always-on command, not opt-in sidecar code.
+cpe-mdns = { path = "../crates/mdns" }
 # (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);

@@ -21,7 +21,7 @@ export type ConnState = "connected" | "disconnected" | "error";
 
 /** Default port per scheme — mirrors `cpe_server::connections::default_port` in Rust exactly, so a profile
  *  on the default port omits it from its location string on both sides. */
-const DEFAULT_PORTS: Record<string, number> = { sftp: 22, ssh: 22, smb: 445, webdav: 80, davs: 443 };
+const DEFAULT_PORTS: Record<string, number> = { sftp: 22, ssh: 22, smb: 445, webdav: 80, davs: 443, ftp: 21 };
 
 /** The `scheme://user@host[:port]/path` a saved connection navigates to — re-derives what Rust's
  *  `Connection::location()` computes, so the sidebar can build the URI to navigate to (or preview it in the
@@ -109,7 +109,7 @@ export function hasAnyNetworkRows(
  *  rather than reject the very row it just offered to add. Saving an `smb` connection profile is honest
  *  about today's limits — there's no generic-remote SMB client yet (`Scheme::Smb` routes to a "not
  *  connected" message in `fs_route.rs`), matching the ticket's "don't build new SMB browsing" scope. */
-export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb"] as const;
+export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb", "ftp"] as const;
 
 /** Raw text fields from the add/edit form — everything is a string (even port), matching what an `<input>`
  *  actually hands back, so `buildConnection` owns all the parsing/validation in one pure place. */
@@ -158,7 +158,7 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
   const scheme = input.scheme.trim().toLowerCase();
   if (!name) return "Give the connection a name.";
   if (!(SUPPORTED_SCHEMES as readonly string[]).includes(scheme)) {
-    return `Unsupported protocol "${input.scheme}" — choose sftp, webdav, or smb.`;
+    return `Unsupported protocol "${input.scheme}" — choose sftp, webdav, smb, or ftp.`;
   }
   if (!host) return "Host is required.";
 
@@ -191,21 +191,81 @@ function parseUncPath(path: string): { host: string; share: string } | null {
   return { host, share };
 }
 
-/** Map a discovered share (`kind: "discovered"`, a WNet-found `\\server\share`) to a pre-filled
- *  "＋ Add a connection" form: scheme `smb`, host = the server, path = `/share` (so the saved connection's
- *  `location()` round-trips back through `parse_share`/`location.rs` to the same host+share) — one click
- *  from a discovered row to a ready-to-save connection, needing only a name (and credentials, if the share
- *  isn't anonymous). Falls back to a blank `smb` form when `share.path` isn't parseable UNC (shouldn't
- *  happen for a real backend row — see `parseUncPath` — but never throws either way). Pure. */
+/** Split a `scheme://host[:port]` address (no UNC involved) into its parts — the shape `cpe-mdns`'s
+ *  `map_mdns_service` emits via `NetworkShare::to_url()` (CPE-1523: sftp/webdav/davs/ftp/nfs rows, the
+ *  port folded into the authority and omitted when it's the scheme's default). `null` when the string
+ *  isn't `scheme://…`-shaped, or the authority has no host at all. Doesn't validate the scheme itself —
+ *  the caller/`buildConnection` does that (an unsupported scheme, e.g. `nfs`, still parses fine here; it
+ *  just won't validate as a savable connection yet). Pure. */
+function parseSchemeAuthority(path: string): { scheme: string; host: string; port: string } | null {
+  const m = /^([a-z][a-z0-9+.-]*):\/\/([^/]+)/i.exec(path.trim());
+  if (!m) return null;
+  const scheme = m[1].toLowerCase();
+  const authority = m[2];
+  const colonIdx = authority.lastIndexOf(":");
+  if (colonIdx <= 0) return authority ? { scheme, host: authority, port: "" } : null;
+  const host = authority.slice(0, colonIdx);
+  const port = authority.slice(colonIdx + 1);
+  if (!host || !/^\d+$/.test(port)) return host ? { scheme, host, port: "" } : null;
+  return { scheme, host, port };
+}
+
+/** Map a discovered share (`kind: "discovered"`) to a pre-filled "＋ Add a connection" form — one click
+ *  from a discovered row to a ready-to-save connection, needing only a name (and credentials, if the
+ *  share isn't anonymous). Two source shapes (CPE-1519 tier 3 + CPE-1523's mDNS rows share this tier):
+ *  - a WNet-found `\\server\share` UNC → scheme `smb`, host = the server, path = `/share` (so the saved
+ *    connection's `location()` round-trips back through `parse_share`/`location.rs` to the same
+ *    host+share);
+ *  - an mDNS-resolved `scheme://host[:port]` address (CPE-1523) → that scheme/host/port verbatim, name
+ *    from the row's own label (its TXT friendly-name-or-hostname, already resolved server-side in
+ *    `map_mdns_service`) so the prefilled name matches what the row displayed.
+ *  Falls back to a blank `smb` form when `share.path` matches neither shape (shouldn't happen for a real
+ *  backend row, but never throws either way). Pure. */
 export function discoveredShareToFormInput(share: NetShare): ConnectionFormInput {
   const blank = blankConnectionForm();
-  const parsed = parseUncPath(share.path);
-  if (!parsed) return { ...blank, scheme: "smb" };
-  return {
-    ...blank,
-    scheme: "smb",
-    name: parsed.share ? `${parsed.host}-${parsed.share}` : parsed.host,
-    host: parsed.host,
-    path: parsed.share ? `/${parsed.share}` : "",
-  };
+
+  const unc = parseUncPath(share.path);
+  if (unc) {
+    return {
+      ...blank,
+      scheme: "smb",
+      name: unc.share ? `${unc.host}-${unc.share}` : unc.host,
+      host: unc.host,
+      path: unc.share ? `/${unc.share}` : "",
+    };
+  }
+
+  const authority = parseSchemeAuthority(share.path);
+  if (authority) {
+    return {
+      ...blank,
+      scheme: authority.scheme,
+      name: share.name.trim() || authority.host,
+      host: authority.host,
+      port: authority.port,
+    };
+  }
+
+  return { ...blank, scheme: "smb" };
+}
+
+// ---- Cross-platform discovery merge (CPE-1523) -----------------------------------------------------
+
+/** Merge the WNet tier's Windows-only discovered rows with the cross-platform mDNS tier's, deduping by
+ *  path (same case/slash-insensitive key `isDuplicateShare` uses) so a host both tiers happen to surface
+ *  — e.g. a Windows box's WNet neighborhood AND its own mDNS SMB advertisement — collapses to one row
+ *  rather than showing twice. `windows` rows win a duplicate (listed/kept first): WNet's UNC form is the
+ *  more directly-connectable address for the smb rows both tiers can produce. Pure — mirrors
+ *  `cpe_server::net_share::flatten_discovered`'s "first occurrence wins" dedup on the Rust side, and is
+ *  the single merge point `loadDiscovered` calls after its `Promise.all`. */
+export function mergeDiscovered(windows: NetShare[], mdns: NetShare[]): NetShare[] {
+  const seen = new Set<string>();
+  const out: NetShare[] = [];
+  for (const share of [...windows, ...mdns]) {
+    const key = shareDedupKey(share.path);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(share);
+  }
+  return out;
 }
