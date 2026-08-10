@@ -34,14 +34,15 @@
   });
 
   // Appearance / theme (CPE-1536, epic CPE-1492): the visible entry point for the theme preference.
-  // "system" and "light" are the only options that ship today (CPE-1535 resolves both to "light" — no
-  // real dark palette yet, that's CPE-1493); the options list is kept as an array so adding "Dark" later
-  // is a one-line change. An inline instant control ([[prefer-inline-instant-controls]]), self-contained
-  // like the other rows on this page: reads/writes settings.ts directly and also calls applyTheme so the
-  // (currently inert) data-theme attribute updates live, same instant-apply feel as the toggles below.
+  // System / Light / Dark (CPE-1541 added Dark, once CPE-1539's palette + CPE-1540's resolveTheme
+  // widening both landed). Kept as an array so it stays a one-line change to extend further. An inline
+  // instant control ([[prefer-inline-instant-controls]]), self-contained like the other rows on this
+  // page: reads/writes settings.ts directly and also calls applyTheme so the data-theme attribute
+  // updates live, same instant-apply feel as the toggles below.
   const THEME_OPTIONS: { value: ThemeSetting; label: string }[] = [
     { value: "system", label: "System" },
     { value: "light", label: "Light" },
+    { value: "dark", label: "Dark" },
   ];
   let theme = settings.loadTheme();
   function setTheme(v: ThemeSetting) {
@@ -123,7 +124,7 @@
       </select>
     </div>
     <div class="note">
-      Light is the only theme today — System will follow your OS automatically once dark mode ships.
+      Choose Light or Dark, or System to follow your OS automatically.
     </div>
 
     <div class="section-title">Native metadata bridge</div>
