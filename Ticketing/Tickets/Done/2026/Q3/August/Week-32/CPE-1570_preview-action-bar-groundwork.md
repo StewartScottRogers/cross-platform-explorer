@@ -2,7 +2,7 @@
 id: CPE-1570
 title: "Preview action-bar groundwork: declarative per-provider actions + generic action bar in PreviewPane"
 type: Task
-status: Doing
+status: Done
 priority: High
 component: Frontend
 epic: CPE-1568
