@@ -41,16 +41,17 @@ export const KNOWN_GAPS_ALLOWLIST: string[] = [
   "FileNameSearchDialog", // recursive find-by-name — no page yet
   "InspectCryptoDialog", // dual-pane JWT/cert inspect overlay — no page yet
   "KeyboardBindingsDialog", // press-to-set rebind surface — no page yet (36-keyboard-shortcuts.md covers the read-only viewer only)
-  "MacrosDialog", // macro library (record/replay rename/move/tag/convert steps) — no page yet
   "PasswordPromptDialog", // shared masked-input modal — no page yet
-  "PatternSelectDialog", // "Select by pattern" glob input — no page yet
+  // CPE-1575: real, current gap — organizing-select-by.md documents the feature in prose ("Select by
+  // pattern…"), but the guard's PascalCase word-order check derives "pattern[\s-]*select" from this
+  // class name, and no natural phrasing of "select by pattern" puts those words in that order. Not a
+  // content gap; kept allowlisted purely because the mechanical name-order check can't see it.
+  "PatternSelectDialog",
   "RepairLinkDialog", // broken-symlink repair flow — no page yet
-  "SelectByDialog", // only a passing "Select by…" mention in 03-explorer.md's saved-searches bullet
   "SessionHistoryDialog", // Agent Watch session-history browser + export — no page yet
   "ShredConfirmDialog", // secure-delete (shred) confirmation — no page yet
   "SignCertDialog", // CA-signed certificate issuance — 28-cert-management.md covers create, not sign, by name
   "TransferConflictDialog", // copy/move conflict resolution (Replace/Skip/Keep both) — no page yet
-  "UserCommandsDialog", // user-defined templated commands manager — no page yet
   "VaultCreateDialog", // vault creation form — 20-vaults.md covers the feature but not this component name
   "WatchRulesDialog", // watched-folder trigger→action rules editor — no page yet
   "WorkspacesDialog", // saved window/tab-layout switcher — no page yet
