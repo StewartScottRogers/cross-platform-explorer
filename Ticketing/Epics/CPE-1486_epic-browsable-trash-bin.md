@@ -2,7 +2,7 @@
 id: CPE-1486
 title: "EPIC: Browsable in-app Trash bin — list / restore / empty"
 type: Task
-status: Proposed
+status: In Progress
 priority: Low
 component: Multiple
 tags: [epic]
