@@ -1,8 +1,8 @@
 ---
 title: Network Connections
 order: 31
-category: Explorer
-categoryOrder: 2
+category: Network & Remote
+categoryOrder: 8
 ---
 
 # Network Connections

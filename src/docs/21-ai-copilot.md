@@ -1,8 +1,8 @@
 ---
 title: AI File Copilot
 order: 21
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # AI File Copilot

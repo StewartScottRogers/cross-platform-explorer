@@ -1,8 +1,8 @@
 ---
 title: Metadata Studio
 order: 25
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # Metadata Studio

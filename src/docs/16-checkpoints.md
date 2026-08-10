@@ -1,8 +1,8 @@
 ---
 title: Checkpoints & Rollback
 order: 16
-category: Explorer
-categoryOrder: 2
+category: Safety & Recovery
+categoryOrder: 5
 ---
 
 # Checkpoints & Rollback

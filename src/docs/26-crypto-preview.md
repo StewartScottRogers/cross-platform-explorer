@@ -1,8 +1,8 @@
 ---
 title: JWT & Certificate Preview
 order: 26
-category: Explorer
-categoryOrder: 2
+category: Previews & Media
+categoryOrder: 6
 ---
 
 # JWT & Certificate Preview

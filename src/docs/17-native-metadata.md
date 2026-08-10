@@ -1,8 +1,8 @@
 ---
 title: Native Metadata Bridge
 order: 17
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # Native Metadata Bridge

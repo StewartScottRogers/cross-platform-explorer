@@ -1,8 +1,8 @@
 ---
 title: Appearance
 order: 35
-category: Explorer
-categoryOrder: 2
+category: Appearance & Input
+categoryOrder: 9
 ---
 
 # Appearance

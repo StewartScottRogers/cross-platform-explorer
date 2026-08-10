@@ -1,8 +1,8 @@
 ---
 title: Agent Board
 order: 6
-category: Agent Deck
-categoryOrder: 3
+category: Agent Workspace
+categoryOrder: 10
 ---
 
 # Agent Board

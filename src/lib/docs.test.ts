@@ -68,9 +68,10 @@ describe("docs library (CPE-536)", () => {
     expect(DOCS.every((d) => d.category !== "General")).toBe(true);
   });
 
-  it("the real bundled library is present + ordered (Overview first)", () => {
+  it("the real bundled library is present + ordered (Index first, CPE-1571)", () => {
     expect(DOCS.length).toBeGreaterThanOrEqual(8);
-    expect(DOCS[0].title).toBe("Overview");
+    expect(DOCS[0].title).toBe("Index");
+    expect(DOCS[1].title).toBe("Overview");
     // Every doc has a title + non-empty content.
     expect(DOCS.every((d) => d.title && d.content.length > 40)).toBe(true);
     // Orders are non-decreasing.

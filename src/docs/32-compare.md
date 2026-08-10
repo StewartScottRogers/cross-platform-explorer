@@ -1,8 +1,8 @@
 ---
 title: Compare
 order: 32
-category: Explorer
-categoryOrder: 2
+category: Power Tools
+categoryOrder: 7
 ---
 
 # Compare

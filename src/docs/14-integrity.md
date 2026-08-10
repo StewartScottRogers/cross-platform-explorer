@@ -1,8 +1,8 @@
 ---
 title: Integrity Guard (Bitrot Detection)
 order: 14
-category: Explorer
-categoryOrder: 2
+category: Safety & Recovery
+categoryOrder: 5
 ---
 
 # Integrity Guard — Catching Silent Corruption

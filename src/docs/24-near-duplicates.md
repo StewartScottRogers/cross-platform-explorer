@@ -1,8 +1,8 @@
 ---
 title: Near-Duplicate Documents & Folders
 order: 24
-category: Explorer
-categoryOrder: 2
+category: Search & Discovery
+categoryOrder: 4
 ---
 
 # Near-Duplicate Documents & Folders
