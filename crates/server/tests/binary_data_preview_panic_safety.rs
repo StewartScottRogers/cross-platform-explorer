@@ -46,7 +46,7 @@ use common::{assert_no_panic, run_battery};
 
 use std::io::Write;
 
-use cpe_server::binary_preview::{binary_info, midi_info, pe_info, torrent_info, wasm_info};
+use cpe_server::binary_preview::{binary_info, disassemble, midi_info, pe_info, torrent_info, wasm_info};
 use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
 use cpe_server::rar::{rar_entries, rar_extract_entry};
@@ -249,6 +249,21 @@ fn torrent_info_never_panics() {
             assert!(r.is_err(), "torrent_info(empty file) must be Err, not a panic");
         }
     });
+}
+
+#[test]
+fn disassemble_never_panics() {
+    // A real x64 function prologue/epilogue as "magic" — push rbp; mov rbp,rsp; pop rbp; ret — so the
+    // battery's truncation/garbage/overflow mutations actually walk iced-x86's real instruction-decode
+    // loop (CPE-1581) instead of only ever seeing one or two garbage bytes. `disassemble` takes raw
+    // bytes directly (no file path involved), so — like `thumb_font::render_glyph_sheet` above — this
+    // batteries it directly rather than through the `write_temp` path seam the rest of this file uses.
+    let magic: [u8; 6] = [0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3];
+    for bitness in [32u32, 64] {
+        run_battery(&format!("binary_preview::disassemble(x{bitness})"), &magic, magic.len(), |b| {
+            let _ = disassemble(b, 0x1000, bitness); // must not panic, any (possibly empty) Vec is fine
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

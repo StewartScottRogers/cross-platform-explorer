@@ -8,8 +8,8 @@ use std::fs;
 
 use crate::bin_arch::{self, BinaryArch};
 use crate::model::{
-    BinaryExport, BinaryFormat, BinaryImport, BinaryInfo, BinarySection, BinarySymbol,
-    MAX_BINARY_LIST_ENTRIES,
+    BinaryExport, BinaryFormat, BinaryImport, BinaryInfo, BinaryInstruction, BinarySection,
+    BinarySymbol, MAX_BINARY_LIST_ENTRIES, MAX_DISASM_INSTRUCTIONS,
 };
 
 /// Classic hex + ASCII dump of the first `max` bytes (CPE-214). Reads at most `max` bytes so a multi-GB
@@ -137,14 +137,90 @@ pub fn binary_info(path: &str) -> Result<BinaryInfo, String> {
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
     let arch = bin_arch::detect_arch(&bytes).map(arch_label);
     match goblin::Object::parse(&bytes).map_err(|e| e.to_string())? {
-        goblin::Object::PE(pe) => Ok(pe_binary_info(&pe, arch)),
-        goblin::Object::Elf(elf) => Ok(elf_binary_info(&elf, arch)),
+        goblin::Object::PE(pe) => Ok(pe_binary_info(&pe, &bytes, arch)),
+        goblin::Object::Elf(elf) => Ok(elf_binary_info(&elf, &bytes, arch)),
         goblin::Object::Mach(mach) => Ok(mach_binary_info(&mach, arch)),
         _ => Err("not a PE, ELF, or Mach-O binary".to_string()),
     }
 }
 
-fn pe_binary_info(pe: &goblin::pe::PE, arch: Option<String>) -> BinaryInfo {
+/// x86/x64 machine-code disassembly (CPE-1581, epic CPE-1562 "Binary Inspector" slice 2): decodes
+/// `code` (a code section's raw bytes, starting at virtual address `base_address`) via iced-x86 into
+/// a bounded, streamable instruction list. `bitness` must be 32 or 64 (any other value decodes
+/// nothing, returning an empty list — callers only pass 32/64, gated by [`x86_bitness_from_machine`]
+/// below).
+///
+/// Never panics and never errors: iced-x86's decoder treats undecodable bytes as a single invalid
+/// instruction and always advances at least one byte, so malformed or truncated code degrades to a
+/// run of `(bad)`-formatted entries rather than looping forever or panicking — exactly the
+/// skip-on-error contract [`binary_info`] already holds for its other lists. Decoding stops early at
+/// [`MAX_DISASM_INSTRUCTIONS`] so a huge code section can't blow up memory/time.
+pub fn disassemble(code: &[u8], base_address: u64, bitness: u32) -> Vec<BinaryInstruction> {
+    use iced_x86::{Decoder, DecoderOptions, Formatter, Instruction, NasmFormatter};
+
+    if bitness != 16 && bitness != 32 && bitness != 64 {
+        return Vec::new();
+    }
+
+    let mut decoder = Decoder::with_ip(bitness, code, base_address, DecoderOptions::NONE);
+    let mut formatter = NasmFormatter::new();
+    let mut instr = Instruction::default();
+    let mut text = String::new();
+    let mut out = Vec::new();
+
+    while decoder.can_decode() && out.len() < MAX_DISASM_INSTRUCTIONS {
+        let start = decoder.position();
+        decoder.decode_out(&mut instr);
+        let end = decoder.position();
+        let raw = code.get(start..end).unwrap_or(&[]);
+
+        text.clear();
+        formatter.format(&instr, &mut text);
+
+        out.push(BinaryInstruction {
+            address: instr.ip(),
+            bytes: raw.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "),
+            text: text.clone(),
+        });
+    }
+    out
+}
+
+/// Bitness iced-x86 should decode with for a PE `Machine` / ELF `e_machine` / Mach-O `cputype` value —
+/// `None` for anything other than x86 (32-bit) or x64 (64-bit) this slice handles (ARM etc. are a
+/// future slice, per the ticket; disasm stays empty rather than erroring for them).
+fn x86_bitness_from_machine(is_x64: bool, is_x86_32: bool) -> Option<u32> {
+    if is_x64 {
+        Some(64)
+    } else if is_x86_32 {
+        Some(32)
+    } else {
+        None
+    }
+}
+
+/// Locate the PE's code section — by name (`.text`, the conventional code section) first, falling
+/// back to whichever section contains the entry point RVA (some linkers/obfuscators don't name the
+/// code section `.text`) — and return its raw file bytes plus its virtual address. `None` when no
+/// section matches, or its `pointer_to_raw_data`/`size_of_raw_data` fall outside the file (a
+/// truncated/malformed PE): the disasm list is simply left empty in that case, not an error.
+fn pe_code_section<'a>(pe: &goblin::pe::PE, bytes: &'a [u8]) -> Option<(&'a [u8], u64)> {
+    let entry_rva = pe.entry as u32;
+    let section = pe
+        .sections
+        .iter()
+        .find(|s| String::from_utf8_lossy(&s.name).trim_end_matches('\0').eq_ignore_ascii_case(".text"))
+        .or_else(|| {
+            pe.sections
+                .iter()
+                .find(|s| entry_rva >= s.virtual_address && entry_rva < s.virtual_address.wrapping_add(s.virtual_size))
+        })?;
+    let start = section.pointer_to_raw_data as usize;
+    let end = start.checked_add(section.size_of_raw_data as usize)?;
+    Some((bytes.get(start..end)?, section.virtual_address as u64))
+}
+
+fn pe_binary_info(pe: &goblin::pe::PE, bytes: &[u8], arch: Option<String>) -> BinaryInfo {
     let sections = pe
         .sections
         .iter()
@@ -170,6 +246,12 @@ fn pe_binary_info(pe: &goblin::pe::PE, arch: Option<String>) -> BinaryInfo {
             address: Some(e.rva as u64),
         })
         .collect();
+    let disasm = x86_bitness_from_machine(
+        pe.header.coff_header.machine == 0x8664, // IMAGE_FILE_MACHINE_AMD64
+        pe.header.coff_header.machine == 0x014C, // IMAGE_FILE_MACHINE_I386
+    )
+    .and_then(|bitness| pe_code_section(pe, bytes).map(|(code, addr)| disassemble(code, addr, bitness)))
+    .unwrap_or_default();
     BinaryInfo {
         format: BinaryFormat::Pe,
         arch,
@@ -179,10 +261,24 @@ fn pe_binary_info(pe: &goblin::pe::PE, arch: Option<String>) -> BinaryInfo {
         exports,
         // A PE EXE/DLL image carries no equivalent symbol table (see `BinarySymbol`'s doc comment).
         symbols: Vec::new(),
+        disasm,
     }
 }
 
-fn elf_binary_info(elf: &goblin::elf::Elf, arch: Option<String>) -> BinaryInfo {
+/// Locate the ELF's code section — the first section header with `SHF_EXECINSTR` set (its
+/// `sh_flags` per the ELF spec; there is no dedicated "the" code section name convention the way PE
+/// has `.text` by default, though `.text` is what most toolchains call it) — and return its raw
+/// file bytes plus its virtual address. `None` when no section is executable, or its
+/// `sh_offset`/`sh_size` fall outside the file (truncated/malformed ELF): the disasm list is simply
+/// left empty in that case, not an error.
+fn elf_code_section<'a>(elf: &goblin::elf::Elf, bytes: &'a [u8]) -> Option<(&'a [u8], u64)> {
+    let sh = elf.section_headers.iter().find(|sh| sh.is_executable())?;
+    let start = usize::try_from(sh.sh_offset).ok()?;
+    let end = start.checked_add(usize::try_from(sh.sh_size).ok()?)?;
+    Some((bytes.get(start..end)?, sh.sh_addr))
+}
+
+fn elf_binary_info(elf: &goblin::elf::Elf, bytes: &[u8], arch: Option<String>) -> BinaryInfo {
     let sections = elf
         .section_headers
         .iter()
@@ -228,6 +324,13 @@ fn elf_binary_info(elf: &goblin::elf::Elf, arch: Option<String>) -> BinaryInfo {
         })
         .collect();
 
+    let disasm = x86_bitness_from_machine(
+        elf.header.e_machine == goblin::elf::header::EM_X86_64,
+        elf.header.e_machine == goblin::elf::header::EM_386,
+    )
+    .and_then(|bitness| elf_code_section(elf, bytes).map(|(code, addr)| disassemble(code, addr, bitness)))
+    .unwrap_or_default();
+
     BinaryInfo {
         format: BinaryFormat::Elf,
         arch,
@@ -236,6 +339,7 @@ fn elf_binary_info(elf: &goblin::elf::Elf, arch: Option<String>) -> BinaryInfo {
         imports,
         exports,
         symbols,
+        disasm,
     }
 }
 
@@ -259,19 +363,38 @@ fn mach_binary_info(mach: &goblin::mach::Mach, arch: Option<String>) -> BinaryIn
                 imports: Vec::new(),
                 exports: Vec::new(),
                 symbols: Vec::new(),
+                disasm: Vec::new(),
             }
         }
     }
 }
 
 fn macho_binary_info(macho: &goblin::mach::MachO, arch: Option<String>) -> BinaryInfo {
+    use goblin::mach::constants::cputype::{CPU_TYPE_X86, CPU_TYPE_X86_64};
+
+    let is_x86 = x86_bitness_from_machine(
+        macho.header.cputype == CPU_TYPE_X86_64,
+        macho.header.cputype == CPU_TYPE_X86,
+    );
+
     let mut sections = Vec::new();
+    let mut disasm = Vec::new();
     'segs: for section_iter in macho.segments.sections() {
         for entry in section_iter {
             if sections.len() >= MAX_BINARY_LIST_ENTRIES {
                 break 'segs;
             }
-            if let Ok((sect, _data)) = entry {
+            if let Ok((sect, data)) = entry {
+                // The Mach-O code section is conventionally named `__text` inside the `__TEXT`
+                // segment; disassemble it once we've located it (skip-on-error: an unreadable
+                // section, e.g. one truncated by a malformed/hostile file, just leaves disasm empty).
+                if disasm.is_empty() {
+                    if let Some(bitness) = is_x86 {
+                        if sect.name().unwrap_or("") == "__text" {
+                            disasm = disassemble(data, sect.addr, bitness);
+                        }
+                    }
+                }
                 sections.push(BinarySection {
                     name: sect.name().unwrap_or("").to_string(),
                     address: sect.addr,
@@ -317,6 +440,7 @@ fn macho_binary_info(macho: &goblin::mach::MachO, arch: Option<String>) -> Binar
         imports,
         exports,
         symbols,
+        disasm,
     }
 }
 
@@ -429,6 +553,85 @@ mod tests {
         let d = std::env::temp_dir().join(format!("cpe-binprev-{}-{}-{}", tag, std::process::id(), n));
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // disassemble (CPE-1581): x86/x64 machine-code decoding via iced-x86
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn disassemble_decodes_a_known_x64_prologue_and_epilogue() {
+        // push rbp; mov rbp,rsp; pop rbp; ret — a real, unambiguous x64 instruction sequence, not a
+        // hollow/all-nop fixture, so this actually proves iced-x86's decode + NASM formatting.
+        let code: [u8; 6] = [0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3];
+        let instrs = disassemble(&code, 0x1000, 64);
+        assert_eq!(instrs.len(), 4, "expected 4 decoded instructions: {instrs:?}");
+
+        assert_eq!(instrs[0].address, 0x1000);
+        assert_eq!(instrs[0].bytes, "55");
+        let t0 = instrs[0].text.to_lowercase();
+        assert!(t0.contains("push") && t0.contains("rbp"), "expected push rbp, got {t0:?}");
+
+        assert_eq!(instrs[1].address, 0x1001);
+        assert_eq!(instrs[1].bytes, "48 89 e5");
+        let t1 = instrs[1].text.to_lowercase();
+        assert!(t1.contains("mov") && t1.contains("rbp") && t1.contains("rsp"), "expected mov rbp,rsp, got {t1:?}");
+
+        assert_eq!(instrs[2].address, 0x1004);
+        assert_eq!(instrs[2].bytes, "5d");
+        let t2 = instrs[2].text.to_lowercase();
+        assert!(t2.contains("pop") && t2.contains("rbp"), "expected pop rbp, got {t2:?}");
+
+        assert_eq!(instrs[3].address, 0x1005);
+        assert_eq!(instrs[3].bytes, "c3");
+        assert_eq!(instrs[3].text.to_lowercase(), "ret");
+    }
+
+    #[test]
+    fn disassemble_decodes_x86_32bit_too() {
+        // add eax, ebx (0x01 0xD8) then ret (0xC3) — a distinct real x86 (32-bit) sequence, proving
+        // the 32-bit decode path independently of the x64 test above.
+        let code: [u8; 3] = [0x01, 0xD8, 0xC3];
+        let instrs = disassemble(&code, 0x400000, 32);
+        assert_eq!(instrs.len(), 2, "expected 2 decoded instructions: {instrs:?}");
+        let t0 = instrs[0].text.to_lowercase();
+        assert!(t0.contains("add") && t0.contains("eax") && t0.contains("ebx"), "got {t0:?}");
+        assert_eq!(instrs[1].text.to_lowercase(), "ret");
+    }
+
+    #[test]
+    fn disassemble_returns_empty_for_a_non_x86_bitness() {
+        // Only 16/32/64-bit x86 modes are meaningful to iced-x86; any other value (e.g. an
+        // unsupported architecture's own "bitness" concept) must yield an empty list, not an error
+        // or a panic (CPE-1581's "non-x86 input yields no disasm without erroring").
+        let code: [u8; 6] = [0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3];
+        assert!(disassemble(&code, 0x1000, 0).is_empty());
+        assert!(disassemble(&code, 0x1000, 8).is_empty());
+        assert!(disassemble(&code, 0x1000, 65).is_empty());
+    }
+
+    #[test]
+    fn disassemble_caps_at_max_disasm_instructions() {
+        // MAX_DISASM_INSTRUCTIONS-many `nop`s plus a few thousand extra must decode to exactly the
+        // cap, not more — guards against a huge/hostile code section blowing up memory/time.
+        let code = vec![0x90u8; MAX_DISASM_INSTRUCTIONS + 5_000];
+        let instrs = disassemble(&code, 0, 64);
+        assert_eq!(instrs.len(), MAX_DISASM_INSTRUCTIONS);
+    }
+
+    #[test]
+    fn disassemble_never_panics_on_truncated_or_malformed_bytes() {
+        // A quick in-module sweep (the full adversarial battery lives in
+        // `tests/binary_data_preview_panic_safety.rs`): truncating a real instruction mid-encoding,
+        // and a run of the 0x0F "needs a second opcode byte" prefix with nothing after it, must
+        // decode to a graceful `(bad)`-shaped instruction rather than panicking or looping forever.
+        let real: [u8; 6] = [0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3];
+        for cut in 0..=real.len() {
+            let _ = disassemble(&real[..cut], 0x1000, 64);
+        }
+        let _ = disassemble(&[0x0F], 0x1000, 64);
+        let _ = disassemble(&[0x0F; 32], 0x1000, 64);
+        let _ = disassemble(&[], 0x1000, 64);
     }
 
     #[test]
@@ -710,6 +913,12 @@ mod tests {
     /// `.dynsym`/`.dynstr` plus a `DT_HASH` table (`nchain` alone drives goblin's dynamic-symbol
     /// count when no relocations reference a symbol index).
     fn build_minimal_elf64() -> Vec<u8> {
+        build_minimal_elf64_with_machine(0x3E) // EM_X86_64
+    }
+
+    /// Same fixture as [`build_minimal_elf64`], parameterized on `e_machine` (CPE-1581) so a
+    /// non-x86 test double (e.g. AArch64) can reuse the same real, otherwise-valid ELF64 shape.
+    fn build_minimal_elf64_with_machine(machine: u16) -> Vec<u8> {
         fn push_name(table: &mut Vec<u8>, s: &str) -> u32 {
             let off = table.len() as u32;
             table.extend_from_slice(s.as_bytes());
@@ -726,12 +935,26 @@ mod tests {
             b.extend_from_slice(&size.to_le_bytes());
             b
         }
-        fn shdr64(name: u32, typ: u32, offset: u64, size: u64, link: u32, info: u32, entsize: u64) -> Vec<u8> {
+        // `flags`/`addr` default to 0 via the `shdr64` wrapper below for every section except
+        // `.text`, which CPE-1581's disasm test needs marked `SHF_EXECINSTR`/`SHF_ALLOC` with a real
+        // virtual address so `elf_code_section` (`binary_preview.rs`) can find and disassemble it.
+        #[allow(clippy::too_many_arguments)] // test-only fixture builder, mirrors shdr64 below
+        fn shdr64_ex(
+            name: u32,
+            typ: u32,
+            offset: u64,
+            size: u64,
+            link: u32,
+            info: u32,
+            entsize: u64,
+            flags: u64,
+            addr: u64,
+        ) -> Vec<u8> {
             let mut b = Vec::with_capacity(64);
             b.extend_from_slice(&name.to_le_bytes());
             b.extend_from_slice(&typ.to_le_bytes());
-            b.extend_from_slice(&0u64.to_le_bytes()); // sh_flags
-            b.extend_from_slice(&0u64.to_le_bytes()); // sh_addr
+            b.extend_from_slice(&flags.to_le_bytes()); // sh_flags
+            b.extend_from_slice(&addr.to_le_bytes()); // sh_addr
             b.extend_from_slice(&offset.to_le_bytes());
             b.extend_from_slice(&size.to_le_bytes());
             b.extend_from_slice(&link.to_le_bytes());
@@ -739,6 +962,9 @@ mod tests {
             b.extend_from_slice(&1u64.to_le_bytes()); // sh_addralign
             b.extend_from_slice(&entsize.to_le_bytes());
             b
+        }
+        fn shdr64(name: u32, typ: u32, offset: u64, size: u64, link: u32, info: u32, entsize: u64) -> Vec<u8> {
+            shdr64_ex(name, typ, offset, size, link, info, entsize, 0, 0)
         }
         fn phdr64(p_type: u32, offset: u64, filesz: u64, memsz: u64) -> Vec<u8> {
             let mut b = Vec::with_capacity(56);
@@ -770,7 +996,9 @@ mod tests {
         let dyn_export_off = push_name(&mut dynstr, "exported_fn");
         let dyn_import_off = push_name(&mut dynstr, "imported_fn");
 
-        let text: Vec<u8> = vec![0x90; 8];
+        // A real x86-64 function prologue/epilogue (push rbp; mov rbp,rsp; pop rbp; ret) rather than
+        // plain NOPs, so CPE-1581's disasm test gets a substantive, non-hollow decode.
+        let text: Vec<u8> = vec![0x55, 0x48, 0x89, 0xE5, 0x5D, 0xC3];
 
         let mut symtab_data = sym64(0, 0, 0, 0, 0); // mandatory null symbol
         symtab_data.extend(sym64(sym_name_off, stinfo(STB_GLOBAL, STT_FUNC), 1, 0x1000, 8));
@@ -837,7 +1065,18 @@ mod tests {
         let mut shdrs = Vec::new();
         shdrs.extend(shdr64(0, SHT_NULL, 0, 0, 0, 0, 0)); // index 0: mandatory null section
         shdrs.extend(shdr64(off_shstrtab, SHT_STRTAB, shstrtab_off, shstrtab.len() as u64, 0, 0, 0));
-        shdrs.extend(shdr64(off_text, SHT_PROGBITS, text_off, text.len() as u64, 0, 0, 0));
+        const SHF_ALLOC_EXECINSTR: u64 = 0x6; // SHF_ALLOC (0x2) | SHF_EXECINSTR (0x4)
+        shdrs.extend(shdr64_ex(
+            off_text,
+            SHT_PROGBITS,
+            text_off,
+            text.len() as u64,
+            0,
+            0,
+            0,
+            SHF_ALLOC_EXECINSTR,
+            text_off, // identity-mapped, matching this fixture's own convention elsewhere
+        ));
         shdrs.extend(shdr64(off_strtab, SHT_STRTAB, strtab_off, strtab.len() as u64, 0, 0, 0));
         shdrs.extend(shdr64(off_symtab, SHT_SYMTAB, symtab_off, symtab_data.len() as u64, 3, 1, 24));
 
@@ -849,7 +1088,7 @@ mod tests {
         ehdr.push(0); // EI_OSABI
         ehdr.extend_from_slice(&[0u8; 8]); // EI_ABIVERSION + padding
         ehdr.extend_from_slice(&2u16.to_le_bytes()); // e_type: ET_EXEC
-        ehdr.extend_from_slice(&0x3Eu16.to_le_bytes()); // e_machine: EM_X86_64
+        ehdr.extend_from_slice(&machine.to_le_bytes()); // e_machine
         ehdr.extend_from_slice(&1u32.to_le_bytes()); // e_version
         ehdr.extend_from_slice(&0x1000u64.to_le_bytes()); // e_entry
         ehdr.extend_from_slice(&EHDR_SIZE.to_le_bytes()); // e_phoff
@@ -907,6 +1146,31 @@ mod tests {
             info.symbols.iter().any(|s| s.name == "local_fn" && s.address == Some(0x1000)),
             "expected the .symtab entry: {info:?}"
         );
+        // CPE-1581: the `.text` section carries a real push-rbp/mov/pop-rbp/ret prologue+epilogue and
+        // is marked SHF_EXECINSTR — `elf_binary_info` must find it via `elf_code_section` and
+        // disassemble it, end to end through `binary_info`.
+        assert_eq!(info.disasm.len(), 4, "expected 4 decoded instructions: {info:?}");
+        assert!(
+            info.disasm[0].text.to_lowercase().contains("push") && info.disasm[0].text.to_lowercase().contains("rbp"),
+            "expected a push rbp: {:?}",
+            info.disasm[0]
+        );
+        assert!(
+            info.disasm.last().unwrap().text.to_lowercase().contains("ret"),
+            "expected the last instruction to be a ret: {info:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn binary_info_leaves_disasm_empty_for_a_non_x86_architecture() {
+        // Same fixture shape (real .text/SHF_EXECINSTR code section) but declaring AArch64
+        // (EM_AARCH64 = 0xB7) instead of x86-64 — ARM disassembly is a future slice (yaxpeax-arm),
+        // so `binary_info` must report an empty `disasm`, never an error, for it (CPE-1581).
+        let bytes = build_minimal_elf64_with_machine(0xB7);
+        let path = write_temp_binary_info(&bytes, "elf-arm64");
+        let info = binary_info(&path.to_string_lossy()).expect("a well-formed ELF64 must still parse");
+        assert!(info.disasm.is_empty(), "expected no disasm for a non-x86 architecture: {info:?}");
         let _ = fs::remove_file(&path);
     }
 
@@ -1029,6 +1293,17 @@ mod tests {
         assert!(
             info.symbols.iter().any(|s| s.name == "my_symbol"),
             "expected the named LC_SYMTAB entry: {info:?}"
+        );
+        // CPE-1581: the `__text` section is 8 real NOP bytes at an x86-64 cputype — `macho_binary_info`
+        // must locate it (by name, within the segment/section walk) and disassemble it end to end.
+        assert_eq!(info.disasm.len(), 8, "expected 8 decoded nop instructions: {info:?}");
+        assert!(
+            info.disasm.iter().all(|i| i.text.to_lowercase() == "nop"),
+            "expected every decoded instruction to be a nop: {info:?}"
+        );
+        assert!(
+            info.disasm.iter().all(|i| i.bytes == "90"),
+            "expected every instruction's raw bytes to be a single 0x90: {info:?}"
         );
         let _ = fs::remove_file(&path);
     }

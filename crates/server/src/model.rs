@@ -177,6 +177,26 @@ pub struct BinarySymbol {
 /// before the pane ever renders anything. Real-world binaries stay far below this.
 pub const MAX_BINARY_LIST_ENTRIES: usize = 4096;
 
+/// One decoded machine-code instruction (CPE-1581, epic CPE-1562 "Binary Inspector" slice 2).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct BinaryInstruction {
+    /// Virtual address of this instruction's first byte.
+    pub address: u64,
+    /// The instruction's raw encoded bytes, as lowercase hex (e.g. "48 89 e5" — space-separated
+    /// byte pairs, matching the conventional disassembler-listing look).
+    pub bytes: String,
+    /// Formatted mnemonic + operands (e.g. "mov rbp, rsp"), via iced-x86's NASM-style formatter.
+    pub text: String,
+}
+
+/// Cap on the number of instructions decoded into one [`BinaryInfo::disasm`] list. Guards against a
+/// huge or hostile code section driving an unbounded decode loop before the pane ever renders
+/// anything — mirrors [`MAX_BINARY_LIST_ENTRIES`]'s role for the other bounded lists. Chosen well
+/// above what a single preview view usefully shows; a real disassembly UI would page/stream past
+/// this (out of scope this slice — see [`crate::binary_preview::disassemble`]'s doc comment).
+pub const MAX_DISASM_INSTRUCTIONS: usize = 2048;
+
 /// Structured summary of a PE/ELF/Mach-O binary (CPE-1572, epic CPE-1562 "Binary Inspector" slice
 /// 1): format + architecture, plus bounded Sections/Imports/Exports/Symbols tables. Populated by
 /// [`crate::binary_preview::binary_info`] via goblin, with parity across all three formats. Each
@@ -196,6 +216,10 @@ pub struct BinaryInfo {
     pub imports: Vec<BinaryImport>,
     pub exports: Vec<BinaryExport>,
     pub symbols: Vec<BinarySymbol>,
+    /// x86/x64 disassembly of the format's code section (CPE-1581), capped at
+    /// [`MAX_DISASM_INSTRUCTIONS`]. Empty (never an error) for a non-x86/x64 architecture, a format
+    /// with no locatable code section, or a code section iced-x86 can't decode from.
+    pub disasm: Vec<BinaryInstruction>,
 }
 
 /// Detailed metadata for the Properties dialog: name/size/dir + modified/created (epoch-ms) + the
