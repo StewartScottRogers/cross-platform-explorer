@@ -172,12 +172,11 @@ describe("density (CPE-1526)", () => {
   });
 });
 
-// CPE-1535 (foundation slice of epic CPE-1492 "light/dark theme"): the persisted theme setting.
-// "system" is the default and today resolves to "light" only (see theme.ts's resolveTheme) — this
-// ticket has zero visible effect until CPE-1534's CSS + CPE-1493's dark palette land; the delete-test
-// requires an absent/corrupt stored value to degrade to "system" cleanly rather than crash (mirrors
-// the density validator immediately above).
-describe("theme (CPE-1535)", () => {
+// CPE-1535/CPE-1540 (epic CPE-1492 "light/dark theme"): the persisted theme setting. "system" is the
+// default and resolves live against the OS prefers-color-scheme signal (see theme.ts's resolveTheme);
+// "light" and "dark" are explicit overrides. The delete-test requires an absent/corrupt stored value to
+// degrade to "system" cleanly rather than crash (mirrors the density validator immediately above).
+describe("theme (CPE-1535/CPE-1540)", () => {
   it("defaults to system with nothing saved", () => {
     expect(loadTheme()).toBe("system");
   });
@@ -185,6 +184,12 @@ describe("theme (CPE-1535)", () => {
   it("round-trips light through save/load", () => {
     saveTheme("light");
     expect(loadTheme()).toBe("light");
+    saveTheme("system"); // reset for other tests
+  });
+
+  it("round-trips dark through save/load", () => {
+    saveTheme("dark");
+    expect(loadTheme()).toBe("dark");
     saveTheme("system"); // reset for other tests
   });
 

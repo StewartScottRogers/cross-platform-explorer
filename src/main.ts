@@ -6,7 +6,7 @@ import AgentBoardApp from "./lib/components/AgentBoardApp.svelte";
 import AgentCardApp from "./lib/components/AgentCardApp.svelte";
 import { bootMode } from "./lib/bootMode";
 import { initSettings, loadTheme } from "./lib/settings";
-import { applyTheme } from "./lib/theme";
+import { applyTheme, watchSystemTheme } from "./lib/theme";
 
 const target = document.getElementById("app")!;
 
@@ -25,6 +25,7 @@ async function bootstrap(): Promise<void> {
   // board window loads it too so it picks up the theme.
   await initSettings().catch(() => {});
   applyTheme(loadTheme()); // stamp dataset.theme before mount, avoiding a flash (CPE-1535)
+  watchSystemTheme(() => applyTheme(loadTheme())); // live-follow OS light/dark flips (CPE-1540)
   if (mode === "board") {
     new AgentBoardApp({ target });
     return;
