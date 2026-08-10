@@ -15,6 +15,8 @@ import {
   chordFromEvent,
   formatChord,
   isActionId,
+  exportKeymap,
+  importKeymap,
   type Keymap,
   type ActionId,
 } from "./keymap";
@@ -334,5 +336,86 @@ describe("keymap formatChord (CPE-1548)", () => {
     for (const a of ACTIONS) formatChord(a.defaultChord);
     const after = ACTIONS.map((a) => a.defaultChord);
     expect(after).toEqual(before);
+  });
+});
+
+describe("keymap exportKeymap / importKeymap (CPE-1550)", () => {
+  it("exportKeymap wraps the full keymap in a versioned envelope", () => {
+    const km = defaultKeymap();
+    const json = exportKeymap(km);
+    const parsed = JSON.parse(json);
+    expect(parsed.version).toBe(1);
+    expect(parsed.bindings).toEqual(km);
+  });
+
+  it("round-trips a default keymap: import(export(km)).keymap === km, every action applied", () => {
+    const km = defaultKeymap();
+    const result = importKeymap(exportKeymap(km));
+    expect(result.keymap).toEqual(km);
+    expect(result.rejected).toEqual([]);
+    expect(result.applied.sort()).toEqual(ACTIONS.map((a) => a.id).sort());
+  });
+
+  it("round-trips an overridden keymap", () => {
+    let km = defaultKeymap();
+    km = setChord(km, "copy", "Ctrl+Alt+C");
+    km = setChord(km, "rename", "Ctrl+Alt+R");
+    const result = importKeymap(exportKeymap(km));
+    expect(result.keymap).toEqual(km);
+    expect(result.rejected).toEqual([]);
+  });
+
+  it("also accepts a bare { actionId: chord } map, not just the exportKeymap envelope", () => {
+    const bare = JSON.stringify({ copy: "Ctrl+Alt+C" });
+    const result = importKeymap(bare, defaultKeymap());
+    expect(result.applied).toEqual(["copy"]);
+    expect(result.rejected).toEqual([]);
+    expect(result.keymap.copy).toBe("Ctrl+Alt+C");
+  });
+
+  it("reports malformed JSON as rejected, not thrown, and leaves base untouched", () => {
+    const base = defaultKeymap();
+    const result = importKeymap("not json at all {{{", base);
+    expect(result.applied).toEqual([]);
+    expect(result.rejected.length).toBeGreaterThan(0);
+    expect(result.keymap).toEqual(base);
+  });
+
+  it("reports non-object JSON (array/number) as rejected", () => {
+    const base = defaultKeymap();
+    expect(importKeymap("42", base).rejected.length).toBeGreaterThan(0);
+    expect(importKeymap(JSON.stringify(["a", "b"]), base).rejected.length).toBeGreaterThan(0);
+  });
+
+  it("rejects an unknown/renamed action id, keeping it out of applied, without throwing", () => {
+    const payload = JSON.stringify({ bindings: { copy: "Ctrl+Alt+C", notARealAction: "Ctrl+Alt+Z" } });
+    const result = importKeymap(payload, defaultKeymap());
+    expect(result.applied).toContain("copy");
+    expect(result.rejected).toContain("notARealAction");
+    expect("notARealAction" in result.keymap).toBe(false);
+  });
+
+  it("rejects an un-normalizable chord, keeping the base default for that action", () => {
+    const payload = JSON.stringify({ bindings: { copy: "Ctrl+Alt" } }); // modifier-only, invalid
+    const base = defaultKeymap();
+    const result = importKeymap(payload, base);
+    expect(result.rejected).toContain("copy");
+    expect(result.keymap.copy).toBe(base.copy);
+  });
+
+  it("applies an explicit '' (unbind) entry rather than rejecting it", () => {
+    const payload = JSON.stringify({ bindings: { copy: "" } });
+    const result = importKeymap(payload, defaultKeymap());
+    expect(result.applied).toContain("copy");
+    expect(result.keymap.copy).toBe("");
+  });
+
+  it("a partial import leaves untouched actions at the supplied base's value", () => {
+    let base = defaultKeymap();
+    base = setChord(base, "cut", "Ctrl+Alt+X");
+    const payload = JSON.stringify({ bindings: { copy: "Ctrl+Alt+C" } });
+    const result = importKeymap(payload, base);
+    expect(result.keymap.copy).toBe("Ctrl+Alt+C");
+    expect(result.keymap.cut).toBe("Ctrl+Alt+X"); // preserved from base, not reset to default
   });
 });
