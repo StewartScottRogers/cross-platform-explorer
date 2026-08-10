@@ -59,7 +59,8 @@ file shows a **Native metadata** section below the usual details:
 
 Properties is read-mostly for native metadata: **Pull** is the only write the dialog itself performs
 (into the app's *own* store, not back out to the OS). Pushing the app's tags out to the native store
-is the tag editor's job — see below.
+is the tag editor's job — see below. See [Properties](explorer-properties) for every other field the
+dialog shows besides this section.
 
 ## Tag editor → Pull / Push
 

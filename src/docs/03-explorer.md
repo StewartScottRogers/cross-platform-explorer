@@ -133,11 +133,13 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   **Compress with password…** to set a password that protects the archive (AES-256) — you'll need it
   again to open the archive later. A `.zip`/`.tar.gz`/`.tar`/`.tgz`/`.7z` file can be browsed like a
   folder (double-click to look inside, read-only) or unpacked: **Extract** drops its contents into a new
-  subfolder right there, and **Extract to…** lets you pick any destination folder instead. Opening or
+  subfolder right there, and **Extract to…** lets you pick any destination folder instead. `.iso` and
+  `.rar` files can be browsed the same read-only way too, but have no Extract action. Opening or
   extracting a password-protected archive prompts for its password; a wrong password re-prompts rather
   than failing silently. Compress and extract run through the same transfer queue as copy/move: a large
   archive shows live progress in the bottom-corner operations panel and stays cancellable instead of
-  freezing the window.
+  freezing the window. See [Archives](explorer-archives) for the full format matrix, safety checks, and
+  limits.
 - **Batch media** — right-click 2+ selected image files and choose **Batch media…** to queue an ordered
   list of edits (resize, **compress**, convert, rotate, flip, **watermark**, rename, strip metadata) and run
   them across every file at once. Pick an operation and its settings, then click **+ Add** to put it on the
@@ -147,7 +149,8 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   watermark.) Non-image or un-decodable files (e.g. a corrupt or placeholder image) are **skipped**: after the
   run the dialog stays open and lists each skipped file with the reason, so nothing is silently dropped. Runs
   **non-destructively** by default (writes new files alongside the originals)
-  and shows a live progress bar while it applies.
+  and shows a live progress bar while it applies. See [Batch Media](explorer-batch-media) for every
+  operation's options, output naming, and failure handling.
 - **Drag and drop** — drag any selection onto a folder row or a sidebar place/drive to move or copy it.
   The action follows the OS convention: dropping **within the same drive moves**, **across drives copies**,
   and you can force it with a modifier — hold **Ctrl** to copy, **Shift** to move. Dragging more than one
@@ -197,10 +200,11 @@ jump back to one by name. It's the fastest way to reach anything without hunting
 
 ## Details & properties
 
-The details pane and the Properties dialog show size, dates, type, and (where relevant) checksums and
-duplicate detection. For image files the Properties dialog also shows **dimensions** and any embedded
+The details pane and the Properties dialog show size, dates, type, and (where relevant) an on-demand
+SHA-256 checksum. For image files the Properties dialog also shows **dimensions** and any embedded
 **EXIF** — camera, lens, date taken, ISO, aperture, exposure, and focal length — omitting whatever the
-photo doesn't carry.
+photo doesn't carry. Properties is the deeper of the two — see [Properties](explorer-properties) for every
+field it shows, where each one comes from, and exactly how it differs from this details pane.
 
 ## Organizing a folder
 
