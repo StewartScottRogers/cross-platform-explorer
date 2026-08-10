@@ -14,7 +14,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/svelte";
 import SettingsDialog from "./SettingsDialog.svelte";
-import { loadTheme, saveTheme, resetSettings } from "../settings";
+import { loadTheme, saveTheme, loadContrast, saveContrast, resetSettings } from "../settings";
 
 const { invoke, Channel } = vi.hoisted(() => ({
   invoke: vi.fn(async (_cmd?: string, _args?: unknown) => null as unknown),
@@ -84,5 +84,70 @@ describe("SettingsDialog Appearance section (CPE-1536)", () => {
     expect(loadTheme()).toBe("dark");
     // … and applied live (applyTheme resolves "dark" to itself and stamps the dataset attribute).
     expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+});
+
+describe("SettingsDialog Appearance section — Contrast control (CPE-1545)", () => {
+  it("the contrast select shows the persisted value on mount", async () => {
+    saveContrast("high");
+    render(SettingsDialog);
+    const select = screen.getByTestId("contrast-select") as HTMLSelectElement;
+    expect(select.value).toBe("high");
+  });
+
+  it("defaults to off when nothing was persisted yet", async () => {
+    render(SettingsDialog);
+    const select = screen.getByTestId("contrast-select") as HTMLSelectElement;
+    expect(select.value).toBe("off");
+    expect(loadContrast()).toBe("off");
+  });
+
+  it("offers Off, System, and High as the three contrast options", async () => {
+    render(SettingsDialog);
+    const select = screen.getByTestId("contrast-select") as HTMLSelectElement;
+    const values = Array.from(select.options).map((o) => o.value);
+    expect(values).toEqual(["off", "system", "high"]);
+  });
+
+  it("selecting High persists via saveContrast and composes hc- into dataset.theme", async () => {
+    saveTheme("dark");
+    render(SettingsDialog);
+    const select = screen.getByTestId("contrast-select") as HTMLSelectElement;
+
+    await fireEvent.change(select, { target: { value: "high" } });
+
+    // Persisted (saveContrast) …
+    expect(loadContrast()).toBe("high");
+    // … and applied live (applyTheme composes the hc- prefix onto the current base theme).
+    expect(document.documentElement.dataset.theme).toBe("hc-dark");
+  });
+
+  it("switching back to Off drops the hc- prefix from dataset.theme", async () => {
+    saveTheme("dark");
+    saveContrast("high");
+    render(SettingsDialog);
+    const select = screen.getByTestId("contrast-select") as HTMLSelectElement;
+    expect(select.value).toBe("high");
+
+    // The dialog itself doesn't stamp dataset.theme on mount (that's main.ts's bootstrap job) — drive
+    // it to "hc-dark" via a real change first, same as production use, before checking it drops.
+    await fireEvent.change(select, { target: { value: "high" } });
+    expect(document.documentElement.dataset.theme).toBe("hc-dark");
+
+    await fireEvent.change(select, { target: { value: "off" } });
+
+    expect(loadContrast()).toBe("off");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it("changing the theme select keeps the current contrast composed (hc- survives a theme switch)", async () => {
+    saveContrast("high");
+    render(SettingsDialog);
+    const themeSelect = screen.getByTestId("theme-select") as HTMLSelectElement;
+
+    await fireEvent.change(themeSelect, { target: { value: "dark" } });
+
+    expect(loadTheme()).toBe("dark");
+    expect(document.documentElement.dataset.theme).toBe("hc-dark");
   });
 });
