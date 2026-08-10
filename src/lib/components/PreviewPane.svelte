@@ -1,7 +1,7 @@
 <script lang="ts">
   import { tick, onDestroy } from "svelte";
   import type { DirEntry } from "../types";
-  import { pickProvider, mediaType, type ArchiveEntry } from "../preview/provider";
+  import { pickProvider, mediaType, visibleActions, type ArchiveEntry, type PreviewAction, type PreviewActionCtx } from "../preview/provider";
   import { parseCsv } from "../preview/csv";
   import { highlightForFile, ensureLanguageForName, languageForName, splitHighlightedIntoLines } from "../preview/highlight";
   import { renderMarkdown } from "../preview/markdown";
@@ -30,7 +30,7 @@
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
-  import { unwrap } from "../invoke";
+  import { unwrap, invoke as ipcInvoke } from "../invoke";
 
   /** The single selected entry to preview, or null. */
   export let entry: DirEntry | null = null;
@@ -139,6 +139,53 @@
   let fontReqId = 0;
   const FONT_SAMPLE = "The quick brown fox jumps over the lazy dog";
   const FONT_SIZES = [12, 18, 24, 36, 48];
+
+  // ---- generic provider action bar (CPE-1570, epic CPE-1568) ----
+  // Providers declare `actions` in `preview/provider.ts`; this renders them uniformly instead of each
+  // preview component wiring up its own ad hoc buttons. A self-contained preview component (JWT,
+  // certificate, …) that doesn't use the pane's own text pipeline reports its copyable values up via a
+  // per-kind `values` bag, keyed to match its provider's declared action ids (see JwtPreview's `onValues`).
+  let jwtValues: Record<string, string> = {};
+  /** A stable function reference for `JwtPreview`'s `onValues` prop — an inline arrow literal would get a
+   *  new identity every time this component re-renders, which would re-trigger JwtPreview's own reactive
+   *  `$: onValues(...)` statement (it depends on the prop) on every unrelated update, looping forever. */
+  function onJwtValues(v: Record<string, string>) {
+    jwtValues = v;
+  }
+
+  async function copyToClipboard(value: string): Promise<void> {
+    try {
+      await navigator.clipboard.writeText(value);
+    } catch {
+      /* clipboard unavailable — ignore, same as the pane's existing Copy menu item (menuCopy below) */
+    }
+  }
+
+  let actionCtx: PreviewActionCtx | null = null;
+  $: actionCtx = entry
+    ? {
+        entry,
+        text: needsText ? text : undefined,
+        values: provider.kind === "jwt" ? jwtValues : {},
+        copyToClipboard,
+        invoke: ipcInvoke,
+      }
+    : null;
+  $: actions = actionCtx ? visibleActions(provider, actionCtx) : [];
+
+  let lastActionId = "";
+  let lastActionTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Run a declared action, then briefly swap its icon to a checkmark so the click has visible feedback
+   *  (mirrors the "Copied" flash the inline copy buttons used to show). */
+  async function runAction(action: PreviewAction) {
+    if (!actionCtx) return;
+    await action.run(actionCtx);
+    lastActionId = action.id;
+    if (lastActionTimer !== undefined) clearTimeout(lastActionTimer);
+    lastActionTimer = setTimeout(() => {
+      lastActionId = "";
+    }, 1500);
+  }
 
   // 3D-model geometry summary (CPE-1334): independent of `provider.kind` — see MODEL_EXTS above.
   // `modelInfo` stays null (never an error state) whenever the backend can't parse the file, so a
@@ -366,6 +413,7 @@
 
   onDestroy(() => {
     if (pdfLoadTimer !== undefined) clearTimeout(pdfLoadTimer);
+    if (lastActionTimer !== undefined) clearTimeout(lastActionTimer);
   });
 
   async function loadDicomTagsFor(e: DirEntry) {
@@ -860,6 +908,18 @@
 
 <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
 <aside class="preview" on:contextmenu={openTextMenu} on:scroll={handlePreviewScroll}>
+  {#if actions.length > 0}
+    <!-- Generic provider action bar (CPE-1570, epic CPE-1568): renders whatever the current provider
+         declares in `actions`, styled like `.preview-edit-bar` per MENUS.md (theme-only colors). -->
+    <div class="preview-action-bar" data-testid="preview-action-bar">
+      {#each actions as action (action.id)}
+        <button class="editbtn actionbtn" on:click={() => runAction(action)} title={$t(action.labelKey)}>
+          <Icon name={lastActionId === action.id ? "check" : action.icon} size={14} />
+          {$t(action.labelKey)}
+        </button>
+      {/each}
+    </div>
+  {/if}
   {#if modelInfo}
     <div class="model-info" data-testid="model-info-section">
       <div class="model-info-title">{$t("pv.model.title")}</div>
@@ -1010,7 +1070,7 @@
   {:else if provider.kind === "vcard" && entry}
     <VcardPreview path={entry.path} />
   {:else if provider.kind === "jwt" && entry}
-    <JwtPreview path={entry.path} />
+    <JwtPreview path={entry.path} onValues={onJwtValues} />
   {:else if provider.kind === "cert" && entry}
     <CertPreview path={entry.path} />
   {:else if provider.kind === "folder" && entry}
@@ -1385,7 +1445,10 @@
   }
   .text-ctx button:disabled { opacity: 0.4; cursor: default; }
   .text-ctx-sep { height: 1px; background: var(--border); margin: 4px 6px; }
-  .preview-edit-bar {
+  /* Generic provider action bar (CPE-1570, epic CPE-1568): same shape as the edit bar it sits beside —
+     item text stays `var(--text)` (inherited via .editbtn, no hard-coded colour) per MENUS.md. */
+  .preview-edit-bar,
+  .preview-action-bar {
     display: flex;
     gap: 6px;
     align-items: center;
@@ -1398,6 +1461,12 @@
     border: 1px solid var(--border-strong);
     border-radius: var(--radius);
     font-size: 12px;
+  }
+  /* Action-bar buttons pair an Icon glyph with their label (the plain edit-bar buttons are text-only). */
+  .actionbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
   .editbtn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
   .editbtn:disabled { opacity: 0.5; }

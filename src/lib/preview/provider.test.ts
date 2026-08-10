@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { pickProvider, mediaType } from "./provider";
+import { describe, it, expect, vi } from "vitest";
+import { pickProvider, mediaType, visibleActions, providers, type PreviewAction, type PreviewActionCtx, type PreviewProvider } from "./provider";
 import type { DirEntry } from "../types";
 
 const entry = (over: Partial<DirEntry>): DirEntry => ({
@@ -221,6 +221,12 @@ describe("pickProvider", () => {
     expect(pickProvider(undefined).kind).toBe("none");
   });
 
+  it("declares two copy actions on the jwt provider, gated on the claims/header values (CPE-1570)", () => {
+    const jwt = providers.find((p) => p.id === "jwt")!;
+    expect(jwt.actions?.map((a) => a.id)).toEqual(["copy-claims", "copy-header"]);
+    expect(jwt.actions?.map((a) => a.labelKey)).toEqual(["pv.action.copyClaims", "pv.action.copyHeader"]);
+  });
+
   it("opens an unrecognised (binary) file type in the hex view (CPE-773)", () => {
     expect(pickProvider(entry({ name: "a.qqq", extension: "qqq" })).kind).toBe("hex");
     expect(pickProvider(entry({ name: "noext", extension: "" })).kind).toBe("hex");
@@ -244,5 +250,66 @@ describe("pickProvider", () => {
     for (const ext of ["dmg", "cab"]) {
       expect(pickProvider(entry({ name: `a.${ext}`, extension: ext })).kind).toBe("hex");
     }
+  });
+});
+
+// CPE-1570 (epic CPE-1568): the declarative per-provider actions mechanism — filtering/enablement logic,
+// independent of any component mounting (the component-level render→run path is covered by
+// PreviewPane.jwtActions.test.ts's worked example).
+describe("visibleActions (CPE-1570)", () => {
+  const baseCtx = (over: Partial<PreviewActionCtx> = {}): PreviewActionCtx => ({
+    entry: entry({}),
+    values: {},
+    copyToClipboard: vi.fn(async () => {}),
+    invoke: vi.fn(async () => undefined) as unknown as PreviewActionCtx["invoke"],
+    ...over,
+  });
+
+  const fakeProvider = (actions: PreviewAction[]): PreviewProvider => ({
+    id: "fake",
+    label: "Fake",
+    kind: "text",
+    editable: false,
+    canPreview: () => true,
+    actions,
+  });
+
+  it("shows an action that declares no `enabled` guard unconditionally", () => {
+    const provider = fakeProvider([{ id: "a", labelKey: "k.a", icon: "copy", run: () => {} }]);
+    expect(visibleActions(provider, baseCtx()).map((a) => a.id)).toEqual(["a"]);
+  });
+
+  it("filters out an action whose `enabled(ctx)` returns false", () => {
+    const provider = fakeProvider([
+      { id: "on", labelKey: "k.on", icon: "copy", enabled: () => true, run: () => {} },
+      { id: "off", labelKey: "k.off", icon: "copy", enabled: () => false, run: () => {} },
+    ]);
+    expect(visibleActions(provider, baseCtx()).map((a) => a.id)).toEqual(["on"]);
+  });
+
+  it("re-evaluates `enabled(ctx)` against the values the ctx carries (JWT-style gating)", () => {
+    const provider = fakeProvider([
+      { id: "copy-x", labelKey: "k.x", icon: "copy", enabled: (ctx) => !!ctx.values["copy-x"], run: () => {} },
+    ]);
+    expect(visibleActions(provider, baseCtx({ values: {} })).map((a) => a.id)).toEqual([]);
+    expect(visibleActions(provider, baseCtx({ values: { "copy-x": "hello" } })).map((a) => a.id)).toEqual([
+      "copy-x",
+    ]);
+  });
+
+  it("returns an empty array for a provider with no declared actions", () => {
+    const provider = fakeProvider([]);
+    expect(visibleActions(provider, baseCtx())).toEqual([]);
+    const { actions: _actions, ...noActionsField } = provider as PreviewProvider & { actions?: unknown };
+    expect(visibleActions(noActionsField as PreviewProvider, baseCtx())).toEqual([]);
+  });
+
+  it("runs the action's `run(ctx)` with the same ctx it was filtered against", async () => {
+    const run = vi.fn();
+    const provider = fakeProvider([{ id: "a", labelKey: "k.a", icon: "copy", run }]);
+    const ctx = baseCtx({ values: { a: "value" } });
+    const [action] = visibleActions(provider, ctx);
+    await action.run(ctx);
+    expect(run).toHaveBeenCalledWith(ctx);
   });
 });
