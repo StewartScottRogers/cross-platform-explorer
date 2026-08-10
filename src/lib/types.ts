@@ -13,6 +13,11 @@ export type SortKey = "name" | "modified" | "type" | "size" | (string & {});
 export type SortDir = "asc" | "desc";
 export type ViewMode = "details" | "list" | "icons" | "gallery";
 
+// Row/chrome density (CPE-1526, epic CPE-1488): "comfortable" is today's unchanged spacing (the
+// default); "compact" tightens row pitch and chrome once CPE-1527/1528/1529 consume it. This ticket
+// only models + threads the value — no renderer reads it yet.
+export type DensityMode = "comfortable" | "compact";
+
 export interface RecentFile {
   path: string;
   name: string;
