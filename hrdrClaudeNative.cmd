@@ -282,7 +282,11 @@ REM  label is display-only. PowerShell parses herdr's JSON API output for the co
 set "CLAUDE_COUNT=0"
 for /f "usebackq delims=" %%N in (`powershell -NoProfile -Command "@((& '%HERDR%' agent list | ConvertFrom-Json).result.agents | Where-Object { $_.agent -eq 'claude' }).Count"`) do set "CLAUDE_COUNT=%%N"
 set /a LABEL_N=CLAUDE_COUNT+1
-if "%LABEL_N%"=="1" (set "AGENT_LABEL=Claude") else (set "AGENT_LABEL=Claude %LABEL_N%")
+REM  Put the containing folder's name in the tab caption so Claude tabs opened on
+REM  different checkouts/folders are easy to tell apart. %%~nxI is the last path
+REM  component of REPO_DIR (the tab's --cwd), i.e. the folder name.
+for %%I in ("%REPO_DIR%") do set "REPO_NAME=%%~nxI"
+if "%LABEL_N%"=="1" (set "AGENT_LABEL=Claude - %REPO_NAME%") else (set "AGENT_LABEL=Claude %LABEL_N% - %REPO_NAME%")
 
 REM  Create the pane that will host Claude. Newer herdr (protocol 17+) redesigned
 REM  the launch flow: `agent start` now attaches to an EXISTING pane by id, and the
