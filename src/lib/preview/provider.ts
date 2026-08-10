@@ -9,6 +9,7 @@
 import type { DirEntry } from "../types";
 import { categoryOf } from "../filetypes";
 import { invoke as ipcInvoke } from "../invoke";
+import { formatJson, parseJson } from "./jsonTree";
 
 export type PreviewKind =
   | "image"
@@ -68,6 +69,16 @@ export interface PreviewActionCtx {
   /** The busy-tracking backend `invoke` (`src/lib/invoke.ts`) — an action that needs a backend command
    *  MUST call through this, never `@tauri-apps/api/core` directly (CLAUDE.md busy-cursor convention). */
   invoke: typeof ipcInvoke;
+  /** Send an imperative command to the currently mounted self-contained preview component (e.g. the JSON
+   *  tree's collapse-all/expand-all, CPE-1573) — the counterpart to `values`: that reports data UP from
+   *  the component to an action, this sends a command DOWN into it. Undefined when the current
+   *  provider's view has no commands to receive — `values`/`copyToClipboard` cover simple
+   *  read-and-copy actions on their own (see the `jwt` provider above). */
+  dispatch?(commandId: string): void;
+  /** Show a short transient status message next to the action bar (e.g. the JSON Validate action's parse
+   *  result, CPE-1573). Takes an i18n key + params rather than pre-rendered text — `run()` lives in this
+   *  framework-free module, so `PreviewPane` (which has `$t`) resolves the actual string. */
+  showMessage?(key: string, params?: Record<string, string | number>): void;
 }
 
 /**
@@ -308,6 +319,65 @@ export const providers: PreviewProvider[] = [
     kind: "json",
     editable: true,
     canPreview: (e) => !e.is_dir && e.extension === "json",
+    // JSON tree + actions (CPE-1573, epic CPE-1568): `JsonTree.svelte` reports the currently focused
+    // node's copy-path/copy-value up via `ctx.values` (mirrors the jwt provider's `onValues` pattern
+    // above); Collapse/Expand all reach back INTO the tree via `ctx.dispatch` instead, since there's no
+    // "value" to report for those. Format/Validate operate on `ctx.text` directly — json is a
+    // `needsText` provider, so the pane's raw file text is always available here.
+    actions: [
+      {
+        id: "copy-value",
+        labelKey: "pv.action.copyValue",
+        icon: "copy",
+        // Falls back to the whole document when no node is focused yet, so the action is usable the
+        // moment the file loads, not just after the user clicks into the tree.
+        enabled: (ctx) => !!(ctx.values["copy-value"] || ctx.text),
+        run: (ctx) => ctx.copyToClipboard(ctx.values["copy-value"] ?? ctx.text ?? ""),
+      },
+      {
+        id: "copy-path",
+        labelKey: "pv.action.copyPath",
+        icon: "copy",
+        enabled: (ctx) => !!ctx.values["copy-path"],
+        run: (ctx) => ctx.copyToClipboard(ctx.values["copy-path"] ?? ""),
+      },
+      {
+        id: "format",
+        labelKey: "pv.action.format",
+        icon: "code",
+        run: async (ctx) => {
+          const result = formatJson(ctx.text ?? "");
+          if (result.ok) {
+            await ctx.copyToClipboard(result.text);
+            ctx.showMessage?.("pv.json.copiedFormatted");
+          } else {
+            ctx.showMessage?.("pv.json.formatError", { error: result.error });
+          }
+        },
+      },
+      {
+        id: "collapse-all",
+        labelKey: "pv.action.collapseAll",
+        icon: "chev-up",
+        run: (ctx) => ctx.dispatch?.("collapse-all"),
+      },
+      {
+        id: "expand-all",
+        labelKey: "pv.action.expandAll",
+        icon: "chev-down",
+        run: (ctx) => ctx.dispatch?.("expand-all"),
+      },
+      {
+        id: "validate",
+        labelKey: "pv.action.validate",
+        icon: "info",
+        run: (ctx) => {
+          const result = parseJson(ctx.text ?? "");
+          if (result.ok) ctx.showMessage?.("pv.json.valid");
+          else ctx.showMessage?.("pv.json.invalid", { error: result.error });
+        },
+      },
+    ],
   },
   {
     id: "csv",

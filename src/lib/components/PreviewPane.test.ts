@@ -102,16 +102,33 @@ describe("PreviewPane", () => {
     expect(frame!.getAttribute("src")).toBe("asset://C:\\d\\doc.pdf");
   });
 
-  it("pretty-prints JSON", async () => {
+  it("shows a JSON file as a collapsible tree by default (CPE-1573)", async () => {
+    try { localStorage.removeItem("cpe.jsonTreeView"); } catch { /* ignore */ }
     const loadText = vi.fn(async () => '{"a":1}');
     const { container } = render(PreviewPane, {
       entry: entry({ name: "d.json", path: "C:\\d\\d.json", extension: "json" }),
       loadText,
     });
+    await waitFor(() => expect(container.querySelector('[data-testid="json-tree-root"]')).toBeTruthy());
+  });
+
+  it("pretty-prints JSON in the Raw view toggled from the tree (CPE-1573)", async () => {
+    try { localStorage.removeItem("cpe.jsonTreeView"); } catch { /* ignore */ }
+    const loadText = vi.fn(async () => '{"a":1}');
+    const { container } = render(PreviewPane, {
+      entry: entry({ name: "d.json", path: "C:\\d\\d.json", extension: "json" }),
+      loadText,
+    });
+    await waitFor(() => expect(container.querySelector('[data-testid="json-tree-root"]')).toBeTruthy());
+
+    const rawBtn = await waitFor(() => screen.getByRole("button", { name: "Raw" }));
+    await fireEvent.click(rawBtn);
+
     await waitFor(() => {
       const pre = container.querySelector(".preview-text");
       expect(pre?.textContent).toContain('"a": 1'); // note the space — pretty-printed
     });
+    try { localStorage.removeItem("cpe.jsonTreeView"); } catch { /* ignore */ }
   });
 
   it("renders a CSV as a table", async () => {
