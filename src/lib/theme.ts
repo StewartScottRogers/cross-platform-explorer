@@ -38,12 +38,13 @@ export function resolveTheme(pref: ThemeSetting): ResolvedTheme {
 /**
  * Resolve a persisted contrast preference to whether the high-contrast variant should apply.
  * `"high"` is an unconditional manual override (`true`); `"off"` is an unconditional override
- * (`false`); `"system"` follows the OS high-contrast signal — but until CPE-1546 wires up the real
- * read, there's no signal to follow, so `"system"` returns the `osHighContrastActive` argument, which
- * defaults to `false`. That default is the single extension point CPE-1546 plugs into: once it can
- * read the real OS state, it passes that value through here instead of leaving the default in place.
- * Mirrors how `resolveTheme`'s `"system"` branch is structured — one pure, synchronous resolution
- * function per axis.
+ * (`false`); `"system"` follows the OS high-contrast signal — the `osHighContrastActive` argument.
+ * CPE-1546 supplies that argument for real: `main.ts` reads the OS state once at boot via
+ * `highContrastSignal.ts`'s `queryOsHighContrast()` (backed by the `is_high_contrast_active` Rust
+ * command) and passes it through here, so a persisted `"system"` contrast preference resolves to the
+ * actual OS accessibility state. The argument still defaults to `false` so every call site that doesn't
+ * pass it (and any older/non-Tauri context where the read fails open) behaves exactly as before. Mirrors
+ * how `resolveTheme`'s `"system"` branch is structured — one pure, synchronous resolution function per axis.
  */
 export function resolveContrast(pref: ContrastSetting, osHighContrastActive = false): boolean {
   if (pref === "high") return true;

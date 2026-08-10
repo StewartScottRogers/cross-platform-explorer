@@ -5666,6 +5666,18 @@ fn home_dir_impl() -> Result<String, String> {
         .ok_or_else(|| "could not determine home directory".to_string())
 }
 
+/// Whether the OS's high-contrast / increased-contrast accessibility mode is currently ON (CPE-1546, epic
+/// CPE-1496). A one-shot read at boot (no live subscription — deferred) letting the frontend's
+/// `ContrastSetting "system"` follow the real OS state; fail-open to `false`. The synchronous Win32/Cocoa/
+/// D-Bus read runs on a blocking thread so it never stalls the main thread ([[async-all-blocking-commands]]).
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn is_high_contrast_active() -> bool {
+    tauri::async_runtime::spawn_blocking(cpe_server::high_contrast::is_high_contrast_active)
+        .await
+        .unwrap_or(false)
+}
+
 /// Return the parent of `path`, or null if already at a root.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -10821,6 +10833,7 @@ pub fn run() {
             board_directive,
             workbench_diff,
             home_dir,
+            is_high_contrast_active,
             parent_dir,
             list_drives,
             list_network_shares,
@@ -11661,6 +11674,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         board_directive,
         workbench_diff,
         home_dir,
+        is_high_contrast_active,
         parent_dir,
         list_drives,
         list_network_shares,

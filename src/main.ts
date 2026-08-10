@@ -7,6 +7,7 @@ import AgentCardApp from "./lib/components/AgentCardApp.svelte";
 import { bootMode } from "./lib/bootMode";
 import { initSettings, loadTheme, loadContrast } from "./lib/settings";
 import { applyTheme, watchSystemTheme } from "./lib/theme";
+import { queryOsHighContrast } from "./lib/highContrastSignal";
 
 const target = document.getElementById("app")!;
 
@@ -25,7 +26,12 @@ async function bootstrap(): Promise<void> {
   // board window loads it too so it picks up the theme.
   await initSettings().catch(() => {});
   applyTheme(loadTheme(), loadContrast()); // stamp dataset.theme before mount, avoiding a flash (CPE-1535); contrast persists across restarts too (CPE-1545)
-  watchSystemTheme(() => applyTheme(loadTheme(), loadContrast())); // live-follow OS light/dark flips (CPE-1540)
+  // One-shot read of the OS high-contrast signal (CPE-1546): a fast, fail-open-to-false query so a persisted
+  // `"system"` contrast preference follows the real OS state from first paint. Re-stamp with the signal, and
+  // carry it into the light/dark watcher so an OS theme flip keeps honouring high contrast.
+  const osHighContrastActive = await queryOsHighContrast();
+  applyTheme(loadTheme(), loadContrast(), osHighContrastActive);
+  watchSystemTheme(() => applyTheme(loadTheme(), loadContrast(), osHighContrastActive)); // live-follow OS light/dark flips (CPE-1540)
   if (mode === "board") {
     new AgentBoardApp({ target });
     return;

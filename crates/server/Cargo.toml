@@ -156,6 +156,24 @@ time = { version = "0.3", features = ["std"] }
 [target.'cfg(unix)'.dependencies]
 xattr = "1"
 
+# One-shot OS high-contrast accessibility signal read (CPE-1546, epic CPE-1496). macOS reads
+# `NSWorkspace.accessibilityDisplayShouldIncreaseContrast` — same objc2 family the app already trusts
+# (objc2-image-io/objc2-core-graphics in src-tauri); only the two `NSWorkspace`/`NSAccessibility` type
+# features the read names are enabled (objc2 gates every type behind a feature). Both getters are safe.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3", features = ["NSWorkspace", "NSAccessibility"] }
+
+# Linux high-contrast read (CPE-1546): a one-shot, timeout-bounded, blocking D-Bus read of the
+# `org.freedesktop.appearance` `contrast` key over `xdg-desktop-portal`'s `org.freedesktop.portal.Settings`
+# interface. `zbus` is pure-Rust D-Bus (no libdbus / no C build tooling) — the same crate the repo already
+# trusts transitively for the Linux keyring (`keyring`'s `sync-secret-service`, src-tauri/Cargo.toml).
+# The `zbus::blocking` API (default `blocking-api` feature over the default `async-io` runtime) gives the
+# synchronous one-shot form (no async event loop). Pinned to 5.17 so the standalone `crates/server` build
+# resolves the SAME zbus 5.17.0 the shipped app (src-tauri/Cargo.lock) already pins via keyring — no
+# 5.17→5.19 drift between the two lockfiles / CI legs.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5.17"
+
 # Windows registry access for the shell-citizen integration — writing/removing the "Open in CPE"
 # context-menu entries under HKCU (CPE-1020, epic CPE-712). Windows-only; same version the app adapter
 # already uses. The registration *decision* is pure (`shell_menu::windows_shell_plan`); this only applies it.
@@ -165,6 +183,15 @@ xattr = "1"
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
 junction = "1"
+# One-shot OS high-contrast read (CPE-1546, epic CPE-1496): `SystemParametersInfoW(SPI_GETHIGHCONTRAST)`
+# reads `HCF_HIGHCONTRASTON` from `HIGHCONTRASTW`. Same `windows` 0.56 the app adapter already pulls in
+# (src-tauri/Cargo.toml) — feature-unified to a single crate in the shipped tree, no second `windows`.
+# Only the two Win32 feature groups the read names are enabled.
+windows = { version = "0.56", features = [
+    "Win32_Foundation",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # The ticket-directives MCP server (CPE-962): a stdio MCP server an external agent launches to
 # list/reply to Agent Board directives. `ticket-mcp <repo-root>`.

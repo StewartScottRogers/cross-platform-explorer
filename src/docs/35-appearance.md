@@ -31,8 +31,10 @@ Right below Theme, a **Contrast** dropdown offers three options, independent of 
 choice:
 
 - **Off** — always use the normal colour palette.
-- **System** — follow the operating system's high-contrast accessibility setting (support for reading
-  the live OS signal is still to come — until then this behaves like Off).
+- **System** — read the operating system's high-contrast accessibility state once at startup and match
+  it (Windows high contrast, macOS "Increase contrast", or the Linux desktop's high-contrast setting).
+  It's a one-shot check at launch, not live tracking yet — flipping the OS setting while the app is
+  running won't take effect until the next launch; if the OS signal can't be read, System behaves like Off.
 - **High** — always switch to the AAA high-contrast palette, regardless of the OS.
 
 Like Theme, Contrast applies immediately and persists across restarts — no separate "Save" step, and
