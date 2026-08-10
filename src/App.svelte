@@ -5007,11 +5007,14 @@
 
     if (ctrl && event.key.toLowerCase() === "l") { event.preventDefault(); editingPath = true; return; }
     if (event.altKey && event.key.toLowerCase() === "d") { event.preventDefault(); editingPath = true; return; }
+    // Ctrl+Shift+F (contentSearch) must be checked BEFORE the unguarded Ctrl+F (focusSearch) below —
+    // same shift-variant-first convention as the Ctrl+Shift+D/Ctrl+D and Ctrl+Shift+C/Ctrl+C pairs
+    // further down, otherwise Ctrl+Shift+F never reaches this branch (CPE-1551).
+    if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
     if (ctrl && event.key.toLowerCase() === "f") { event.preventDefault(); navToolbar?.focusSearch(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "n") { event.preventDefault(); newFolder(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "o") { event.preventDefault(); popOutPreview(); return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "t") { event.preventDefault(); reopenClosedTab(); return; }
-    if (ctrl && event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); if (!isHome && !archive) contentSearchOpen = true; return; }
     if (ctrl && event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); paletteOpen = true; return; } // command palette (CPE-602)
     if (ctrl && !event.shiftKey && event.key.toLowerCase() === "p") { event.preventDefault(); if (!isHome && !archive) fileSearchOpen = true; return; } // find files by name (CPE-603)
     if (ctrl && !event.shiftKey && event.key.toLowerCase() === "k") { event.preventDefault(); instantSearchOpen = true; return; } // Instant Search — cross-volume index (CPE-1139); free binding, works anywhere (incl. Home)

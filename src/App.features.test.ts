@@ -583,3 +583,32 @@ describe("find files by name (CPE-603)", () => {
     await waitFor(() => expect(screen.getAllByText("alpha.md").length).toBeGreaterThan(1));
   });
 });
+
+describe("Ctrl+Shift+F vs Ctrl+F ordering (CPE-1551)", () => {
+  it("Ctrl+Shift+F opens content search, not the folder search box", async () => {
+    mockBackend([file("alpha.md", "md")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "F", ctrlKey: true, shiftKey: true });
+
+    // The content-search overlay (ContentSearchDialog) is open...
+    await screen.findByPlaceholderText("Text to find inside files");
+    // ...and it did NOT merely focus the plain folder-name search box instead (the toolbar's
+    // search <input>; disambiguated from the dialog's own "Search options" docs button, which
+    // also matches /^Search/ once the overlay is open).
+    expect(document.activeElement).not.toBe(screen.getByLabelText(/^Search/, { selector: "input" }));
+  });
+
+  it("plain Ctrl+F still focuses the folder search box (content search stays closed)", async () => {
+    mockBackend([file("alpha.md", "md")]);
+    await enterDrive();
+    await waitFor(() => expect(screen.getByText("alpha.md")).toBeTruthy());
+
+    await fireEvent.keyDown(window, { key: "f", ctrlKey: true });
+
+    const box = screen.getByLabelText(/^Search/, { selector: "input" });
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    expect(screen.queryByPlaceholderText("Text to find inside files")).toBeNull();
+  });
+});
