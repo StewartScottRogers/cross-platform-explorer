@@ -239,3 +239,61 @@ describe("App — Drop Stack Move-all/Copy-all (CPE-1533)", () => {
     expect(screen.queryByText("Copy all here")).toBeNull();
   });
 });
+
+describe("App — doDropStackMoveAll is re-entrancy-safe against a double-fire click (CPE-1538, CPE-1385 parity)", () => {
+  it("two rapid 'Move all here' clicks call moveEntries EXACTLY ONCE, not twice", async () => {
+    await bootWithShelvedItems();
+
+    // Swap in a move_entries handler backed by a promise WE control, so the assertion below can prove
+    // the guard fires before the first click's moveEntries even resolves — not just "eventually settles
+    // at 1" (same technique as App.clipboardPaneRouting.test.ts's CPE-1385 doPaste guard test).
+    let resolveMove!: (v: { path: string; ok: boolean; error: string }[]) => void;
+    const movePromise = new Promise<{ path: string; ok: boolean; error: string }[]>((res) => { resolveMove = res; });
+    invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
+      const listingFor = (path: unknown) => disks[path as string] ?? [];
+      switch (cmd) {
+        case "special_folders": return [];
+        case "list_drives": return drives;
+        case "home_dir": return "C:\\Users\\t";
+        case "can_restore_from_trash": return true;
+        case "list_dir": return listingFor(args.path);
+        case "list_dir_stream": {
+          const ch = args.onEntry as { onmessage: (b: unknown) => void };
+          const data = listingFor(args.path);
+          ch.onmessage(data);
+          return data.length;
+        }
+        case "parent_dir": return null;
+        case "read_file_text": return "";
+        case "move_entries": {
+          const paths = args.paths as string[];
+          const dest = args.dest as string;
+          moveEntriesCalls.push({ paths, dest });
+          return movePromise; // stays pending until we resolve it below
+        }
+        default: return null;
+      }
+    });
+
+    // Two rapid clicks, NOT awaited between them: `fireEvent.click` dispatches synchronously and
+    // `doDropStackMoveAll` is invoked fire-and-forget from the button handler, so this reproduces the
+    // exact CPE-1538 window — both calls run their synchronous prefix back-to-back, before either's
+    // `await commands.moveEntries(...)` has a chance to settle.
+    fireEvent.click(screen.getByText("Move all here"));
+    fireEvent.click(screen.getByText("Move all here"));
+
+    // Let any already-queued microtasks flush WITHOUT resolving `movePromise` — proves the second click
+    // no-op'd via the `dropStackMoveInFlight` guard rather than merely "not yet reached" moveEntries.
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(moveEntriesCalls.length).toBe(1); // NOT 2 — the sync in-flight-flag guard did its job
+
+    resolveMove([
+      { path: `${PATH_A}\\one.txt`, ok: true, error: "" },
+      { path: `${PATH_A}\\two.txt`, ok: true, error: "" },
+    ]);
+    await waitFor(() => expect(get(dropStackEntries)).toHaveLength(0)); // the single move completed + cleared the stack
+  });
+});
