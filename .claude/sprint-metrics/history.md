@@ -1244,3 +1244,17 @@ wall). Hand off: resume in a FRESH session → build CPE-1523 first. Lessons rei
 drift-guard CI leg before merging specta PRs; Foreman-apply mechanical fixes = 0 agents; cargo at
 %USERPROFILE%\.cargo\bin\cargo.exe for own shells. Queue: CPE-1523; CPE-1518 QNAP E2E (attended, now covers WNet
 + mDNS + SFTP/WebDAV/FTP); epics CPE-1504/1500. Owed to user: Gource PR #738 review, sidebar visual sign-off.
+
+## Sprint 2026-08-09 (CLI) — batch 23 (BATCHED run "run many sprints in batches", 23/40)
+Shipped **CPE-1523 (#743)** — cross-platform **mDNS/DNS-SD LAN discovery** (epic CPE-1517 slice 1): new
+`crates/mdns` (`cpe-mdns` + `mdns-sd` 0.20.3), pure `map_mdns_service` 6-scheme table + bounded `discover()`,
+`discover_network_mdns` specta command, frontend `mergeDiscovered` running WNet+mDNS in parallel into the
+existing Discovered tier (Sidebar.svelte unchanged). Opus reviewer cleared the dep audit (only mdns-sd + flume/
+if-addrs/socket-pktinfo + libc patch — no bloat/dup) and the `ShareProtocol` Webdav/Davs enum blast-radius
+(all matches exhaustive/catch-all). Full suite 2641 green; **the batch-21 bindings-drift trap did NOT recur** —
+worker regenerated bindings + both Cargo.lock and verified clean, ubuntu Backend drift-guard confirmed green
+pre-merge. Filed CPE-1524 (nfs discovered-row ＋Add gate nit). **Batched run continues 23/40** — same-session
+budget ~145/200 spent → hand off to a fresh session; well NOT dry (ready: CPE-1483 Linux-root-drive-tile, 1508
+image-compare, 1509 split/join, 1524 gate-nit; then CPE-1518 QNAP attended). Lesson reinforced: brief every
+specta PR to regen bindings+lockfiles and verify the ubuntu drift-guard leg before merge; opus for
+new-dep/enum-change diffs.

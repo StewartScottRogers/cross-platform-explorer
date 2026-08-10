@@ -1,53 +1,42 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-09 (CLI) — batch 22 WRAPPED (budget hand-off, NOT a stop — resume in a fresh session)
-**State:** `main` @ origin `35ec186d` (clean, backend CI green, 0 worktrees). Lock released, wakeup cancelled.
-Budget ~140/200 in THIS session (the user resumed in-session, so the cap did NOT reset) — stopping at the reset
-line because the next ready ticket (CPE-1523) is a new-crate + new-dep + bindings job that needs full budget
-headroom. **Resume in a genuinely fresh session (or raise `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION`).**
+## RUN 2026-08-09 (CLI, BATCHED "run many sprints in batches") — batch 23 done, budget hand-off (NOT a stop)
+**State:** `main` @ origin `317f23f3` (clean, 0 worktrees; #743 merged with all Backend/Frontend CI incl the
+ubuntu drift-guard green). Lock released, wakeup cancelled. **Batched run 23/40 — CONTINUES; do NOT delete
+BATCH-COUNTER.** Same-session sub-agent budget ~145/200 spent → hand off. **Resume in a genuinely FRESH session:
+say "run many sprints in batches" (or "resume the sprint") to continue the 23/40 run with full budget.**
 
-### Shipped/done this batch (22)
-- **CPE-1521 (#742)** — WNet discovery outer-pagination loop hardened (`WNET_MAX_TOTAL_ENTRIES=4096` cumulative
-  + iteration cap, partial-results semantics) — closes the opus-review follow-up from CPE-1519. Merged, backend
-  CI green. Reviewer+UAT passed.
-- **Epic CPE-1517 (LAN discovery) ACTIVATED + decomposed.** Dep decided: **`mdns-sd`** (pure-Rust, no native
-  Bonjour SDK, permissive, maintained) — see research [[mdns-discovery-dependency-2026-08-09]]. Windows-native
-  leg already shipped (CPE-1519).
+### Shipped this batch (23)
+- **CPE-1523 (#743)** — **cross-platform mDNS/DNS-SD LAN discovery** (slice 1 of epic CPE-1517). New crate
+  `crates/mdns` (`cpe-mdns`, dep `mdns-sd` 0.20.3), pure `map_mdns_service` (6-scheme table) + bounded
+  `discover()`, `discover_network_mdns` command (cross-platform, IN specta bindings), frontend `mergeDiscovered`
+  runs WNet+mDNS in parallel and dedupes into the existing Discovered tier (Sidebar.svelte unchanged). Opus dep
+  audit + enum-blast-radius clean; UAT + CI green; bindings + both Cargo.lock done right (drift-guard passed).
+  Live-LAN resolve owed (QNAP, CPE-1518). Filed follow-up **CPE-1524** (gate ＋Add on unsavable discovered
+  schemes — the nfs:// nit).
 
-### NEXT TICKET — ready to build first in the fresh session
-**CPE-1523** (`Ticketing/Tickets/Backlog/CPE-1523_mdns-discovery-slice1.md`) — mDNS slice 1, FULLY SPECIFIED:
-- New crate **`crates/mdns` (`cpe-mdns`)** (path-dep on cpe-server + `mdns-sd`), mirroring cpe-ftp/webdav/sftp.
-  Pure `map_mdns_service(...)→Option<NetShare>` (table: _smb→smb:445, _sftp-ssh→sftp:22, _webdav→webdav:80,
-  _webdavs→davs:443, _ftp→ftp:21, _nfs→nfs:2049; else None) + impure `discover(timeout)→Vec<NetShare>`
-  (browse 6 types, ~6s bound, dedup via `net_share::dedup_key`→make pub).
-- Command **`discover_network_mdns`** (cross-platform, NOT cfg-gated, INCLUDED in specta bindings — unlike the
-  per-OS `discover_network_windows`). `App.svelte loadDiscovered()`: run WNet + mDNS in parallel, merge+dedupe
-  (pure TS helper, unit-tested). Tier-3 UI already renders it → no Sidebar change.
-- **Chores (don't skip):** regen `bindings.gen.ts` (new specta command), regen root + src-tauri `Cargo.lock`
-  ([[multiple-independent-cargo-locks]]), add the workspace member. **⚠ VERIFY the ubuntu Backend drift-guard
-  CI leg is GREEN before merging** (batch-21 bit us here).
-- **Folded fixes:** extend `discoveredShareToFormInput` for `scheme://host[:port]` paths; add `ftp` to
-  `SUPPORTED_SCHEMES` (cpe-ftp ships).
-- Note: touches `src-tauri/src/lib.rs` — serialize vs anything else editing that file.
-
-### Rest of the queue (priority order)
-1. CPE-1523 (above) — the one ready buildable ticket.
-2. **CPE-1518** — QNAP TS-133 E2E (ATTENDED, needs the NAS — from 2026-08-10 — + user LAN). Now covers BOTH the
-   WNet discovery AND the mDNS discovery + shipped SFTP/WebDAV/FTP. See [[qnap-nas-test-target]].
-3. Epics: CPE-1504 (SMB — crate-risk; Windows-UNC leg testable vs QNAP), CPE-1500 (OS-mount), CPE-1517 later
-   slices (SSDP/UPnP v3).
+### NEXT — ready buildable work for the fresh session (well is NOT dry — it's budget-limited)
+Priority order (all frontend, headless-buildable, visual sign-off owed):
+1. **CPE-1483** — Linux: Home landing doesn't render `/` root as a drive tile (bug; frontend/GUI).
+2. **CPE-1508** — Image compare view (side-by-side / onion-skin / pixel-diff heatmap). Meaty frontend.
+3. **CPE-1509** — File split/join dialog + context-menu entries (consumes the CPE-1491 backend).
+4. **CPE-1524** — small: gate ＋Add on discovered rows whose scheme isn't savable yet (nfs). Good quick batch.
+Then **CPE-1518** (QNAP E2E — ATTENDED, needs the NAS from 2026-08-10; now covers SFTP/WebDAV/FTP + WNet AND
+mDNS discovery). Epics for later: CPE-1504 (SMB), CPE-1500 (OS-mount), CPE-1517 v2/v3 (SSDP/UPnP).
 
 ### Owed to the USER (async, non-blocking)
-- Review/merge **Gource PR #738** (then run the workflow once to populate the `gource` branch).
-- **Visual sign-off** on the sidebar changes (permanent Network section CPE-1516 + drag-reorder CPE-1520 +
-  Discovered tier CPE-1519fe) — jsdom-tested only, not pixel-verified.
-- **QNAP E2E** (CPE-1518) once the NAS is up — the first real-hardware test of the whole Network feature.
+- Review/merge **Gource PR #738** (then run the workflow once).
+- **Visual sign-off** on the sidebar: permanent Network section (CPE-1516) + drag-reorder (CPE-1520) +
+  Discovered tier now cross-platform (CPE-1519fe + CPE-1523). jsdom-tested only.
+- **QNAP E2E** (CPE-1518) once the NAS is up — real-hardware test of the whole Network feature incl. both
+  discovery paths.
 
 ### Tuned defaults / lessons (seed next run)
-frontend=sonnet 2-wide ~20-35m; unsafe-FFI=opus reviewer (safe-Rust follow-ups=sonnet); Foreman-apply
-mechanical fixes (bindings regen) = 0 agents. **Verify the ubuntu Backend drift-guard CI leg before merging ANY
-specta/backend PR** — Windows-local gauntlet + the drift unit-test both pass while the CI shell-step fails
+frontend=sonnet 2-wide ~20-35m (a new-crate+dep+bindings ticket like CPE-1523 took ~1h — budget one heavy
+ticket accordingly); new-dep/enum-change/specta diffs = OPUS adversarial reviewer (dep audit + enum
+blast-radius). **The batch-21 bindings-drift trap did NOT recur** — the CPE-1523 worker regenerated
+`bindings.gen.ts` + both Cargo.lock and verified `git diff --exit-code` clean before pushing; the ubuntu
+Backend drift-guard CI leg was confirmed green before merge. Keep briefing that explicitly for any specta PR
 ([[regen-specta-bindings-on-struct-change]]). `cargo` NOT on non-interactive shell PATH →
-`%USERPROFILE%\.cargo\bin\cargo.exe` (workers have it on PATH; my own Bash/PowerShell tools don't). Z: drive
-I/O-saturates under concurrent cargo builds; GitHub API intermittently slow → background git/gh + Read `.output`
-files, don't hammer.
+`%USERPROFILE%\.cargo\bin\cargo.exe` (workers have it). Z: I/O-saturates under concurrent cargo builds; GitHub
+API slow → background git/gh + Read `.output` files.
