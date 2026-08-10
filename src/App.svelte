@@ -88,6 +88,10 @@
   import CreateCertDialog from "./lib/components/CreateCertDialog.svelte";
   import SignCertDialog from "./lib/components/SignCertDialog.svelte";
   import InspectCryptoDialog from "./lib/components/InspectCryptoDialog.svelte";
+  import SplitFileDialog from "./lib/components/SplitFileDialog.svelte";
+  import JoinPartsDialog from "./lib/components/JoinPartsDialog.svelte";
+  import { canSplitFile, canJoinFile } from "./lib/splitJoin";
+  import type { SplitManifest } from "./lib/bindings.gen";
   import {
     vaults,
     unlockVault,
@@ -748,6 +752,13 @@
    *  the overlay reuses JwtPreview/CertPreview to decode the file anyway. `path` is snapshot from the
    *  clicked pane's selection; `kind` picks the viewer. */
   let cryptoInspectFor: { path: string; kind: "jwt" | "cert" } | null = null;
+  /** Path + pane/dir context for an open `SplitFileDialog` (CPE-1509, parent CPE-1491), or null when
+   *  closed. `dir` is SNAPSHOT at open time (mirrors `certCreateFor`) so `onSplitDone`'s refresh targets
+   *  the pane that was showing the file when the dialog opened, not wherever it's navigated to since. */
+  let splitFileFor: { path: string; dir: string; inPaneB: boolean } | null = null;
+  /** Path + pane/dir context for an open `JoinPartsDialog` (CPE-1509), or null when closed. Same
+   *  snapshot reasoning as `splitFileFor`. */
+  let joinPartsFor: { path: string; dir: string; inPaneB: boolean } | null = null;
   // The drive root + display name for an open "drive" context menu (CPE-1158). All drive-menu actions
   // target this path, so the menu works identically from a Home tile and a sidebar row — and from Home,
   // where there is no FileList selection to piggy-back on.
@@ -2502,6 +2513,61 @@
     return idx < 0 ? path : path.slice(idx + 1);
   }
 
+  // ---- File split/join (CPE-1509, parent CPE-1491) ---------------------------------------------
+  // SplitFileDialog / JoinPartsDialog wired behind the pane-aware context menu, same `inPaneB` pattern
+  // as the certificate dialogs above: a context-menu invocation targets whichever pane the menu was
+  // opened OVER.
+
+  /** Open SplitFileDialog (CPE-1509): "Split file…" on a single selected non-empty regular file.
+   *  `dir` (the pane's displayed folder at open time) is SNAPSHOT, mirroring `askCertCreate` — the
+   *  dialog's own output-folder field defaults elsewhere and can differ from `dir` entirely, so
+   *  `onSplitFileDone` refreshes off the dialog's ACTUAL `outDir`, not this snapshot. */
+  function askSplitFile(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const entry = pane.selectedEntries[0];
+    if (!entry) return;
+    const dir = inPaneB ? paneBPath : currentPath;
+    splitFileFor = { path: entry.path, dir, inPaneB };
+  }
+
+  /** Open JoinPartsDialog (CPE-1509): "Join parts…" on a selected `.NNN` part or manifest file. */
+  function askJoinParts(inPaneB = false) {
+    const pane = paneStateFor(inPaneB);
+    const entry = pane.selectedEntries[0];
+    if (!entry) return;
+    const dir = inPaneB ? paneBPath : currentPath;
+    joinPartsFor = { path: entry.path, dir, inPaneB };
+  }
+
+  /** `SplitFileDialog`'s `split` handler: refresh whichever pane(s) currently show the manifest's ACTUAL
+   *  output folder (the dialog's own field, which the user may have Browse'd elsewhere — not necessarily
+   *  `splitFileFor.dir`, the source file's folder). */
+  async function onSplitFileDone(detail: { manifest: SplitManifest; outDir: string }) {
+    const target = splitFileFor;
+    splitFileFor = null;
+    if (!target) return;
+    const norm = normalizePath(detail.outDir);
+    if (norm === normalizePath(currentPath)) await loadPath(currentPath, true);
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
+    const n = detail.manifest.part_count;
+    showNotice(`Split "${baseName(target.path)}" into ${n} part${n === 1 ? "" : "s"}.`);
+  }
+
+  /** `JoinPartsDialog`'s `joined` handler: `outPath`'s full path — refresh whichever pane(s) currently
+   *  show its containing folder and select the newly-joined file. */
+  async function onJoinPartsDone(outPath: string) {
+    const target = joinPartsFor;
+    joinPartsFor = null;
+    if (!target) return;
+    const norm = normalizePath(parentOfPath(outPath));
+    if (norm === normalizePath(currentPath)) {
+      pendingSelectPath = outPath;
+      await loadPath(currentPath, true);
+    }
+    if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
+    showNotice(`Joined into "${baseName(outPath)}".`);
+  }
+
   async function openRecent(path: string) {
     try {
       unwrap(await commands.openExternal(path));
@@ -4189,6 +4255,9 @@
       case "cert-sign-as-ca": if (pane.selectedEntries[0]) askCertSign(inPaneB, { caCertPath: pane.selectedEntries[0].path }); break;
       case "cert-inspect": inspectCryptoFile(inPaneB); break;
       case "jwt-inspect": inspectCryptoFile(inPaneB); break;
+      // File split/join (CPE-1509, parent CPE-1491) — same pane-routed reasoning as cert-* above.
+      case "split-file": askSplitFile(inPaneB); break;
+      case "join-parts": askJoinParts(inPaneB); break;
       case "properties": openProperties(pane.selectedEntries); break;
       case "metadataStudio": openMetadataStudio(); break;
       case "tags": if (pane.selectedEntries.length >= 1) tagEditorFor = [...pane.selectedEntries]; break;
@@ -6221,6 +6290,8 @@
     certFileKind={ctxPane.selectedEntries.length === 1 ? certKindOf(ctxPane.selectedEntries[0]) : ""}
     jwtSelected={ctxPane.selectedEntries.length === 1 && isJwtFile(ctxPane.selectedEntries[0])}
     certCreateEligible={ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)}
+    splitEligible={ctxPane.selectedEntries.length === 1 && canSplitFile(ctxPane.selectedEntries[0])}
+    joinEligible={ctxPane.selectedEntries.length === 1 && canJoinFile(ctxPane.selectedEntries[0])}
     {view}
     {sortKey}
     {sortDir}
@@ -6311,6 +6382,24 @@
     path={cryptoInspectFor.path}
     kind={cryptoInspectFor.kind}
     on:close={() => (cryptoInspectFor = null)}
+  />
+{/if}
+
+{#if splitFileFor}
+  <SplitFileDialog
+    path={splitFileFor.path}
+    on:split={(e) => onSplitFileDone(e.detail)}
+    on:error={(e) => showNotice(e.detail, true)}
+    on:close={() => (splitFileFor = null)}
+  />
+{/if}
+
+{#if joinPartsFor}
+  <JoinPartsDialog
+    path={joinPartsFor.path}
+    on:joined={(e) => onJoinPartsDone(e.detail)}
+    on:error={(e) => showNotice(e.detail, true)}
+    on:close={() => (joinPartsFor = null)}
   />
 {/if}
 

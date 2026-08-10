@@ -105,6 +105,12 @@
    *  eject" item to the drive menu. Fixed/system/network drives never set this, so they can't be ejected
    *  from the menu any more than from the sidebar's inline button. */
   export let driveEjectable = false;
+  /** True when a SINGLE, non-empty, regular file is selected (CPE-1509, parent CPE-1491) — enables
+   *  "Split file…", which opens `SplitFileDialog`. */
+  export let splitEligible = false;
+  /** True when a SINGLE regular file is selected that's either a `.split-manifest.json` or one of its
+   *  numbered `.NNN` parts (CPE-1509) — enables "Join parts…", which opens `JoinPartsDialog`. */
+  export let joinEligible = false;
 
   const dispatch = createEventDispatcher<{
     action: string;
@@ -289,6 +295,19 @@
            treatment lives in the dialog, not this menu row. -->
       <button class="row" role="menuitem" on:click={() => run("archive-safety")}>
         <Icon name="archive" size={15} /> {$t('ctx.archiveSafety')}
+      </button>
+    {/if}
+    {#if splitEligible}
+      <!-- Split file… (CPE-1509, parent CPE-1491): chunks a non-empty regular file into fixed-size
+           numbered parts + a small manifest. Leading icon + theme-var text (MENUS.md). -->
+      <button class="row" role="menuitem" on:click={() => run("split-file")}>
+        <Icon name="cut" size={15} /> Split file…
+      </button>
+    {/if}
+    {#if joinEligible}
+      <!-- Join parts… (CPE-1509): rejoins a manifest's numbered parts back into the original file. -->
+      <button class="row" role="menuitem" on:click={() => run("join-parts")}>
+        <Icon name="link" size={15} /> Join parts…
       </button>
     {/if}
     {#if compressible}
