@@ -48,7 +48,7 @@ REM
 REM  CUSTOMISING THE MODEL
 REM  ---------------------
 REM      setx CLAUDE_MODEL "claude-sonnet-5"
-REM  (default below is claude-opus-4-8, the latest and most capable model)
+REM  (default below is claude-opus-5, the latest and most capable model)
 REM
 REM  IMPLEMENTATION NOTE
 REM  -------------------
@@ -61,7 +61,7 @@ REM ============================================================================
 REM -----------------------------------------------------------------------------
 REM  Configuration
 REM -----------------------------------------------------------------------------
-if not defined CLAUDE_MODEL set "CLAUDE_MODEL=claude-opus-4-8"
+if not defined CLAUDE_MODEL set "CLAUDE_MODEL=claude-opus-5"
 set "REPO_URL=https://github.com/StewartScottRogers/cross-platform-explorer.git"
 set "DEFAULT_REPO_DIR=%USERPROFILE%\cross-platform-explorer"
 
