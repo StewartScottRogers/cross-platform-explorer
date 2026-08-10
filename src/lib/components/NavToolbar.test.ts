@@ -50,3 +50,35 @@ describe("NavToolbar density (CPE-1528)", () => {
     expect(container.querySelector(".navbar")?.classList.contains("compact")).toBe(true);
   });
 });
+
+describe("NavToolbar density toggle (CPE-1529)", () => {
+  it("is not pressed when density is comfortable (default) and dispatches 'compact' on click", async () => {
+    const { component } = render(NavToolbar, {
+      props: { crumbs: [{ name: "C:", path: "C:\\" }], currentPath: "C:\\" },
+    });
+    const toggle = screen.getByRole("button", { name: /switch to compact density/i });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+
+    const density = vi.fn();
+    component.$on("density", density);
+    await fireEvent.click(toggle);
+
+    expect(density).toHaveBeenCalledTimes(1);
+    expect(density.mock.calls[0][0].detail).toBe("compact");
+  });
+
+  it("is pressed when density is compact and dispatches 'comfortable' on click", async () => {
+    const { component } = render(NavToolbar, {
+      props: { crumbs: [{ name: "C:", path: "C:\\" }], currentPath: "C:\\", density: "compact" },
+    });
+    const toggle = screen.getByRole("button", { name: /switch to comfortable density/i });
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+
+    const density = vi.fn();
+    component.$on("density", density);
+    await fireEvent.click(toggle);
+
+    expect(density).toHaveBeenCalledTimes(1);
+    expect(density.mock.calls[0][0].detail).toBe("comfortable");
+  });
+});

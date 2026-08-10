@@ -196,6 +196,11 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 }
 .docsbtn-label { line-height: 1; }
 
+/* Density toggle pressed state (CPE-1529): tints the icon accent colour when compact is active, same
+   convention as `.cmd.on` in the command bar (an active/pressed toolbar toggle reads via accent colour,
+   not a second glyph). Comfortable (the default) renders identically to a plain `.iconbtn`. */
+.iconbtn.on { color: var(--accent); }
+
 /* Compact density (CPE-1528): tighter toolbar chrome driven by NavToolbar.svelte's `.compact` class
    (density === "compact"). Buttons that already carry only an icon (back/forward/up/refresh/disk/
    browse) just shrink; the Docs button's text label hides so it collapses to icon-only like its

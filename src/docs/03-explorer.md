@@ -14,6 +14,10 @@ The explorer is the core of the app and is tuned to stay **fast, small, and pred
 - **Address bar** — type or paste a path; press Enter to go.
 - **Back / Forward / Up** — move through history and up the tree.
 - **Tabs** — Ctrl+T opens a new tab; each tab remembers its own folder and history.
+- **Density** — the rows icon near the right end of the toolbar toggles between **Comfortable** (the
+  default) and **Compact**, tightening row height and padding across the tab strip, sidebar, and toolbar
+  itself so more fits on screen. It takes effect **instantly** (no dialog, nothing to apply) and the
+  button reflects whichever mode is active. Your choice persists across restarts.
 - **Sidebar** — Home, Favorites (pin folders you use often), and drives with free-space bars. Each
   section (Explore, Quick access, Drives, Favorites, Tags, Smart Folders, Saved Searches, Network,
   Agents) has a header you can click to **collapse** it and reclaim vertical space; your choices persist
