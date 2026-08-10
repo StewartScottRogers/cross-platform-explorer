@@ -330,4 +330,46 @@ describe("Sidebar 'Discovered on your network' tier (CPE-1519)", () => {
     const detail = added.mock.calls[0][0];
     expect(detail.prefill).toMatchObject({ scheme: "smb", host: "qnap", path: "/media" });
   });
+
+  it("CPE-1524: gates the ＋Add affordance on an mDNS nfs:// row — visible, disabled, no networkAdd on click", async () => {
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [],
+      discoveredShares: [{ name: "nas", path: "nfs://nas.local", kind: "discovered" }],
+    });
+    const added = vi.fn();
+    component.$on("networkAdd", (e) => added(e.detail));
+
+    const row = screen.getByText("nas").closest("button") as HTMLButtonElement;
+    expect(row).toBeTruthy();
+    expect(row.disabled).toBe(true);
+    expect(row.title).toMatch(/NFS isn't supported yet/);
+
+    await fireEvent.click(row);
+    expect(added).not.toHaveBeenCalled();
+  });
+
+  it("a savable mDNS row (e.g. sftp://) keeps the ＋Add affordance enabled and dispatches networkAdd", async () => {
+    const { component } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      connections: [],
+      networkShares: [],
+      discoveredShares: [{ name: "nas-sftp", path: "sftp://nas.local", kind: "discovered" }],
+    });
+    const added = vi.fn();
+    component.$on("networkAdd", (e) => added(e.detail));
+
+    const row = screen.getByText("nas-sftp").closest("button") as HTMLButtonElement;
+    expect(row.disabled).toBe(false);
+
+    await fireEvent.click(row);
+    expect(added).toHaveBeenCalledOnce();
+    const detail = added.mock.calls[0][0];
+    expect(detail.prefill).toMatchObject({ scheme: "sftp", host: "nas.local" });
+  });
 });

@@ -10,6 +10,7 @@ import {
   blankConnectionForm,
   formFromConnection,
   buildConnection,
+  isSavableScheme,
   discoveredShareToFormInput,
   mergeDiscovered,
   type ConnectionFormInput,
@@ -285,6 +286,24 @@ describe("network (CPE-1513)", () => {
     it("editing (same name) is allowed — upsert-by-name IS how Edit works", () => {
       const c = buildConnection(input({ name: "prod", host: "new-host.example.com" }));
       expect(c).toMatchObject({ name: "prod", host: "new-host.example.com" });
+    });
+  });
+
+  describe("isSavableScheme (CPE-1524: gate the discovered-row ＋Add affordance on unsavable schemes)", () => {
+    it("flags nfs as not savable — mDNS browses _nfs._tcp but no NFS provider exists yet", () => {
+      expect(isSavableScheme("nfs")).toBe(false);
+    });
+
+    it("flags every SUPPORTED_SCHEMES entry as savable", () => {
+      expect(isSavableScheme("sftp")).toBe(true);
+      expect(isSavableScheme("webdav")).toBe(true);
+      expect(isSavableScheme("ftp")).toBe(true);
+      expect(isSavableScheme("smb")).toBe(true);
+    });
+
+    it("is case/whitespace-tolerant, matching a raw discovered-row scheme", () => {
+      expect(isSavableScheme(" SFTP ")).toBe(true);
+      expect(isSavableScheme("NFS")).toBe(false);
     });
   });
 

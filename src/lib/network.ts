@@ -111,6 +111,17 @@ export function hasAnyNetworkRows(
  *  connected" message in `fs_route.rs`), matching the ticket's "don't build new SMB browsing" scope. */
 export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb", "ftp"] as const;
 
+/** Whether `scheme` is one of `SUPPORTED_SCHEMES` — the single check gating whether a "＋ Add a
+ *  connection" affordance can actually save. Case/whitespace-tolerant, matching how `buildConnection`
+ *  normalizes its own `scheme` field. Pure — shared by `buildConnection`'s validation and the
+ *  "Discovered on your network" tier's add-affordance gate (CPE-1524: an mDNS `nfs://` row parses fine
+ *  but has no savable scheme yet), so when a provider lands (e.g. NFS via CPE-1505) and joins
+ *  `SUPPORTED_SCHEMES`, every gate built on this helper opens automatically — no per-scheme
+ *  special-casing. */
+export function isSavableScheme(scheme: string): boolean {
+  return (SUPPORTED_SCHEMES as readonly string[]).includes(scheme.trim().toLowerCase());
+}
+
 /** Raw text fields from the add/edit form — everything is a string (even port), matching what an `<input>`
  *  actually hands back, so `buildConnection` owns all the parsing/validation in one pure place. */
 export interface ConnectionFormInput {
@@ -157,7 +168,7 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
   const host = input.host.trim();
   const scheme = input.scheme.trim().toLowerCase();
   if (!name) return "Give the connection a name.";
-  if (!(SUPPORTED_SCHEMES as readonly string[]).includes(scheme)) {
+  if (!isSavableScheme(scheme)) {
     return `Unsupported protocol "${input.scheme}" — choose sftp, webdav, smb, or ftp.`;
   }
   if (!host) return "Host is required.";
