@@ -1,8 +1,8 @@
 ---
 title: Split & Join Files
 order: 33
-category: Explorer
-categoryOrder: 2
+category: Power Tools
+categoryOrder: 7
 ---
 
 # Split & Join Files

@@ -1,8 +1,8 @@
 ---
 title: Certificate Management
 order: 28
-category: Explorer
-categoryOrder: 2
+category: Power Tools
+categoryOrder: 7
 ---
 
 # Certificate Management

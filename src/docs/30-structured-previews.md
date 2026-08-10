@@ -1,8 +1,8 @@
 ---
 title: Structured File Previews
 order: 30
-category: Explorer
-categoryOrder: 2
+category: Previews & Media
+categoryOrder: 6
 ---
 
 # Structured File Previews

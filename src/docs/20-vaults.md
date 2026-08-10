@@ -1,8 +1,8 @@
 ---
 title: Encrypted Vaults
 order: 20
-category: Explorer
-categoryOrder: 2
+category: Safety & Recovery
+categoryOrder: 5
 ---
 
 # Encrypted Vaults

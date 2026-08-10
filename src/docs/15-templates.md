@@ -1,8 +1,8 @@
 ---
 title: Folder Templates
 order: 15
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # Folder Templates — Scaffold the Same Structure in One Click

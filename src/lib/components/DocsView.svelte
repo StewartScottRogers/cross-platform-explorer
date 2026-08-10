@@ -34,8 +34,33 @@
   // searching (see the `{@const expanded}` in the TOC) so a match is never hidden behind a collapsed header.
   const toggle = (name: string) => (collapsed = { ...collapsed, [name]: !collapsed[name] });
 
+  // Select a doc, opening its category if collapsed and scrolling its TOC entry into view — shared by
+  // a direct TOC click and an in-content cross-link (CPE-1571's Index page links, plus the handful of
+  // pre-existing `[text](NN-slug)` cross-references other pages already used without anywhere to land).
+  async function selectDoc(d: Doc) {
+    selected = d;
+    collapsed = { ...collapsed, [d.category]: false };
+    await tick();
+    itemEls[d.slug]?.scrollIntoView({ block: "nearest" });
+  }
+
   async function render(doc: Doc | null) {
     html = doc ? await renderMarkdown(doc.content) : "";
+  }
+
+  // A rendered doc's body may link to another bundled doc by bare slug (`[Overview](01-overview)`) —
+  // intercept those and switch the viewer instead of letting the webview attempt a real navigation.
+  // Anything that isn't a bare `word-chars-and-hyphens` href (http(s) links, mailto, `#anchors`) falls
+  // through untouched.
+  function onContentClick(e: MouseEvent) {
+    const a = (e.target as HTMLElement)?.closest?.("a");
+    if (!a) return;
+    const href = a.getAttribute("href") || "";
+    if (!/^[a-z0-9-]+$/i.test(href)) return;
+    const target = DOCS.find((d) => d.slug === href);
+    if (!target) return;
+    e.preventDefault();
+    void selectDoc(target);
   }
 
   // Deep-link (CPE-596/763): opened on a specific section, scroll its TOC item into view so "open into
@@ -84,7 +109,7 @@
                     class="toc-item"
                     class:sel={selected?.slug === d.slug}
                     bind:this={itemEls[d.slug]}
-                    on:click={() => (selected = d)}
+                    on:click={() => selectDoc(d)}
                   >
                     {d.title}
                   </div>
@@ -94,7 +119,8 @@
           {/each}
           {#if results.length === 0}<div class="toc-empty">No matches.</div>{/if}
         </aside>
-        <section class="docs-content">
+        <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
+        <section class="docs-content" on:click={onContentClick}>
           {#if selected}
             <!-- Markdown is sanitized by renderMarkdown (marked + DOMPurify). -->
             <div class="md">{@html html}</div>

@@ -1,8 +1,8 @@
 ---
 title: Sidecar Apps — Health & Recovery
 order: 13
-category: Agent Deck
-categoryOrder: 3
+category: Agent Workspace
+categoryOrder: 10
 ---
 
 # Sidecar Apps — Health & Recovery

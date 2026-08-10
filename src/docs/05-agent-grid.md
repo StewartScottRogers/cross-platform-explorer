@@ -1,8 +1,8 @@
 ---
 title: Agent Grid
 order: 5
-category: Agent Deck
-categoryOrder: 3
+category: Agent Workspace
+categoryOrder: 10
 ---
 
 # Agent Grid

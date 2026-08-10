@@ -1,8 +1,8 @@
 ---
 title: Searching for Files
 order: 12
-category: Explorer
-categoryOrder: 2
+category: Search & Discovery
+categoryOrder: 4
 ---
 
 # Searching for Files

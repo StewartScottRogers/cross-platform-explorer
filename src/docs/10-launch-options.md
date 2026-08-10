@@ -1,8 +1,8 @@
 ---
 title: Launch options
 order: 10
-category: Getting started
-categoryOrder: 1
+category: Reference
+categoryOrder: 12
 ---
 
 # Launch options — window geometry

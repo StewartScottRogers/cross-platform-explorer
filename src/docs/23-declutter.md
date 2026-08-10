@@ -1,8 +1,8 @@
 ---
 title: Declutter
 order: 23
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # Declutter

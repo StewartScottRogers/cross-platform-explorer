@@ -1,8 +1,8 @@
 ---
 title: Keyboard shortcuts
 order: 36
-category: Explorer
-categoryOrder: 2
+category: Appearance & Input
+categoryOrder: 9
 ---
 
 # Keyboard shortcuts

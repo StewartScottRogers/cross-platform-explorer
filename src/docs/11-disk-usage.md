@@ -1,8 +1,8 @@
 ---
 title: Disk usage & Space analyzer
 order: 11
-category: Explorer
-categoryOrder: 2
+category: Power Tools
+categoryOrder: 7
 ---
 
 # Disk usage & Space analyzer

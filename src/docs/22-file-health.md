@@ -1,8 +1,8 @@
 ---
 title: File Health
 order: 22
-category: Explorer
-categoryOrder: 2
+category: Safety & Recovery
+categoryOrder: 5
 ---
 
 # File Health

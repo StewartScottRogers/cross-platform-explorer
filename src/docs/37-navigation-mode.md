@@ -1,8 +1,8 @@
 ---
 title: Navigation Mode
 order: 37
-category: Explorer
-categoryOrder: 2
+category: Appearance & Input
+categoryOrder: 9
 ---
 
 # Navigation Mode

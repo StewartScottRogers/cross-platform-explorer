@@ -1,8 +1,8 @@
 ---
 title: Swarms
 order: 9
-category: Agent Deck
-categoryOrder: 3
+category: Agent Workspace
+categoryOrder: 10
 ---
 
 # Swarms

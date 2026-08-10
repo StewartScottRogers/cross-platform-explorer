@@ -1,8 +1,8 @@
 ---
 title: Finding Similar Images
 order: 18
-category: Explorer
-categoryOrder: 2
+category: Search & Discovery
+categoryOrder: 4
 ---
 
 # Finding Similar Images

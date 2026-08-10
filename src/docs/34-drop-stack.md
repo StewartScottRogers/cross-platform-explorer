@@ -1,8 +1,8 @@
 ---
 title: Drop Stack
 order: 34
-category: Explorer
-categoryOrder: 2
+category: Organizing & Tagging
+categoryOrder: 3
 ---
 
 # Drop Stack

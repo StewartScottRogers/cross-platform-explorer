@@ -1,8 +1,8 @@
 ---
 title: Terminal
 order: 19
-category: Explorer
-categoryOrder: 2
+category: Power Tools
+categoryOrder: 7
 ---
 
 # Terminal

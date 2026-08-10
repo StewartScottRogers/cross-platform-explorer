@@ -1,8 +1,8 @@
 ---
 title: Folder Preview (Peek)
 order: 27
-category: Explorer
-categoryOrder: 2
+category: Previews & Media
+categoryOrder: 6
 ---
 
 # Folder Preview (Peek)
