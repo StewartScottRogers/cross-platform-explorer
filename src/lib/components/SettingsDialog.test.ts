@@ -17,7 +17,7 @@ import SettingsDialog from "./SettingsDialog.svelte";
 import { loadTheme, saveTheme, resetSettings } from "../settings";
 
 const { invoke, Channel } = vi.hoisted(() => ({
-  invoke: vi.fn(async () => null),
+  invoke: vi.fn(async (_cmd?: string, _args?: unknown) => null as unknown),
   Channel: class {
     onmessage: (batch: unknown) => void = () => {};
   },
@@ -29,7 +29,7 @@ beforeEach(() => {
   localStorage.clear();
   resetSettings();
   invoke.mockReset();
-  invoke.mockImplementation(async (cmd: string) => {
+  invoke.mockImplementation(async (cmd?: string) => {
     // ScheduledSnapshots (mounted unconditionally on this dialog) expects an array back from its
     // unguarded onMount load — everything else here is wrapped in try/catch by its owning component and
     // tolerates a bare `null`.
