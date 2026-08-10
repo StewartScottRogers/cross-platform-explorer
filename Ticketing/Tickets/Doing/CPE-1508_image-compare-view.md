@@ -120,3 +120,38 @@ CPE-1490's module, not reimplemented client-side. Epic CPE-722; parent CPE-1490.
     headless; per the ticket's own Verify section that's expected, deferred to gui-smoke + the Foreman's
     UAT/Visual-Critic legs. No backend changes were made or needed (`diff_images` already shipped in
     CPE-1490); did not touch `crates/server`.
+- 2026-08-09 (PR #746 review fixes): independent reviewer caught two real bugs in the zoom/pan wiring,
+  both fixed on the same branch/worktree.
+  - **Bug A — heatmap "Zoom to changed region" was a no-op.** `zoomToChangedRegion` guarded on
+    `!viewportEl`, but `viewportEl` (`bind:this`) was only ever wired on the side-by-side left pane and
+    the onion-skin container — never in the heatmap branch, so it was `undefined` (Svelte clears a
+    `bind:this` target on unmount) every time the button was actually clickable. Fixed by binding
+    `viewportEl` on the new `.ic-heat-img-wrap` too, and wiring the same `on:wheel`/pointer handlers there
+    so heatmap gets wheel-zoom + drag-pan like the other two sub-views. Also: the heatmap `<img>` never
+    had `style={transformStyle}`, so even a correct zoom state wouldn't have moved it — fixed by wrapping
+    the image AND the `.ic-bbox` highlight in one new `.ic-heat-canvas` div and applying the transform to
+    that shared container (not to each element separately — they have different pre-transform origins,
+    the letterboxed/centered image vs. the percent-positioned bbox, so transforming them independently
+    would have scaled them apart from each other instead of together). `.ic-heat-canvas` sizes via
+    `aspect-ratio: {diff.width} / {diff.height}` + `max-width/max-height: 100%` (the modern CSS letterbox
+    pattern) since it's a plain div, not an image with its own intrinsic size. Also stopped hiding the
+    zoom toolbar for heatmap (`{#if subView !== "heatmap"}` removed) so Reset is reachable after a jump.
+  - **Bug B — wheel-zoom cursor-anchoring was wrong for the right side-by-side pane.** `onWheel` computed
+    its anchor from the shared `viewportEl` (bound only to the LEFT pane), so zooming over the right pane
+    anchored against the left pane's rect — off by ~one pane width. Fixed by reading
+    `(e.currentTarget as HTMLElement).getBoundingClientRect()` directly in `onWheel` instead (every pane
+    wires `on:wheel={onWheel}` itself, so `currentTarget` is always the exact hovered element); kept
+    `viewportEl` only for the button-triggered (no cx/cy) zoom-in/out center fallback in `zoomBy`.
+  - **New test file `src/lib/components/ImageCompareView.test.ts`** (3 tests, direct component tests, no
+    backend mocking needed since `diff` is passed in as a prop): (1) *heatmap zoom-to-region actually
+    changes zoom state* — clicks `ic-subview-heatmap` then `ic-zoom-to-bbox` with a real `bbox`, asserts
+    `ic-zoom-pct` moves off `"100%"` and `ic-heat-canvas`'s `transform: scale(...)` reflects it (stubs
+    `clientWidth`/`clientHeight` on the bound wrap since jsdom does no real layout); (2) *Reset is
+    reachable from heatmap* — zooms via the button then clicks "Reset zoom", asserts back to `"100%"`;
+    (3) *wheel-zoom anchors on the actually-hovered pane* — stubs distinct `getBoundingClientRect()` rects
+    on the left (x=0) and right (x=500) panes, wheels over the right pane, and asserts the resulting pan
+    stays small (~-33px, consistent with anchoring 200px into the 400px-wide right pane) rather than the
+    ~3.5x-larger pan (~-117px) the bug would have produced by anchoring against the left pane's rect.
+  - **Re-verified:** `npm run check` — 0 errors/0 warnings. `npx vitest run` (full suite) — 235 files /
+    2659 tests, all green (up from 234/2656 pre-fix, +1 file/+3 tests for the new regression coverage; no
+    other collateral change). Pushed to the existing `cpe-1508` branch — PR #746 updates in place.

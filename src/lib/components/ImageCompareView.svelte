@@ -70,9 +70,15 @@
 
   function onWheel(e: WheelEvent) {
     e.preventDefault();
-    const rect = viewportEl?.getBoundingClientRect();
-    const cx = rect ? e.clientX - rect.left : undefined;
-    const cy = rect ? e.clientY - rect.top : undefined;
+    // Anchor on the pane actually under the cursor — NOT the shared `viewportEl` ref, which in
+    // side-by-side is only ever bound to the LEFT pane. Both panes share this same handler, so
+    // anchoring off `viewportEl` made wheel-zooming over the right pane compute the cursor position
+    // against the left pane's rect (offset by ~one pane width). `currentTarget` is always the exact
+    // element the listener is attached to, so this works correctly for every pane/view that wires
+    // `on:wheel={onWheel}` directly (side-by-side's two panes, onion-skin's stack, the heatmap wrap).
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
     zoomBy(e.deltaY < 0 ? 1.2 : 1 / 1.2, cx, cy);
   }
 
@@ -162,14 +168,14 @@
       </div>
     {/if}
 
-    {#if subView !== "heatmap"}
-      <div class="ic-zoom-ctl">
-        <button class="btn" title="Zoom out" on:click={() => zoomBy(1 / 1.2)}>−</button>
-        <span class="ic-zoom-pct" data-testid="ic-zoom-pct">{Math.round(zoom * 100)}%</span>
-        <button class="btn" title="Zoom in" on:click={() => zoomBy(1.2)}>+</button>
-        <button class="btn" title="Reset zoom" on:click={resetView}>Reset</button>
-      </div>
-    {/if}
+    <!-- Zoom controls apply to every sub-view, including heatmap (the heatmap's own "Zoom to changed
+         region" jumps the zoom/pan without any other way back out, so Reset must stay reachable). -->
+    <div class="ic-zoom-ctl">
+      <button class="btn" title="Zoom out" on:click={() => zoomBy(1 / 1.2)}>−</button>
+      <span class="ic-zoom-pct" data-testid="ic-zoom-pct">{Math.round(zoom * 100)}%</span>
+      <button class="btn" title="Zoom in" on:click={() => zoomBy(1.2)}>+</button>
+      <button class="btn" title="Reset zoom" on:click={resetView}>Reset</button>
+    </div>
   </div>
 
   {#if subView === "side-by-side"}
@@ -214,15 +220,35 @@
     </div>
   {:else}
     <div class="ic-heat">
-      <div class="ic-heat-img-wrap">
-        <img class="ic-heat-img" src={maskSrc} alt="Diff heatmap" draggable="false" data-testid="ic-heatmap-img" />
-        {#if bboxRect}
-          <div
-            class="ic-bbox"
-            data-testid="ic-bbox"
-            style="left: {bboxRect.left}%; top: {bboxRect.top}%; width: {bboxRect.width}%; height: {bboxRect.height}%;"
-          ></div>
-        {/if}
+      <!-- svelte-ignore a11y-no-static-element-interactions -->
+      <div
+        class="ic-heat-img-wrap"
+        bind:this={viewportEl}
+        on:wheel={onWheel}
+        on:pointerdown={onPointerDown}
+        on:pointermove={onPointerMove}
+        on:pointerup={onPointerUp}
+        on:pointercancel={onPointerUp}
+      >
+        <!-- The image + bbox highlight share ONE transformed container so "Zoom to changed region"
+             (and manual zoom/pan) move them together — applying the same transform string to each
+             independently would scale them from their own, DIFFERENT origins (the img is letterboxed
+             and centered inside the wrap, the bbox is positioned by percent from the wrap's corner)
+             and they'd visibly drift apart under zoom. -->
+        <div
+          class="ic-heat-canvas"
+          style="{transformStyle} aspect-ratio: {diff.width} / {diff.height};"
+          data-testid="ic-heat-canvas"
+        >
+          <img class="ic-heat-img" src={maskSrc} alt="Diff heatmap" draggable="false" data-testid="ic-heatmap-img" />
+          {#if bboxRect}
+            <div
+              class="ic-bbox"
+              data-testid="ic-bbox"
+              style="left: {bboxRect.left}%; top: {bboxRect.top}%; width: {bboxRect.width}%; height: {bboxRect.height}%;"
+            ></div>
+          {/if}
+        </div>
       </div>
       <div class="ic-heat-stats" data-testid="ic-heat-stats">
         <div class="ic-stat"><span class="ic-stat-k">Difference</span><span class="ic-stat-v">{formatPercentDifferent(diff.percentDifferent)}</span></div>
@@ -372,11 +398,27 @@
     overflow: hidden;
     display: grid;
     place-items: center;
-    background: #000;
+    background: repeating-conic-gradient(var(--surface-alt) 0% 25%, var(--surface) 0% 50%) 50% / 16px 16px;
+    cursor: grab;
+    touch-action: none;
   }
-  .ic-heat-img {
+  .ic-heat-img-wrap:active {
+    cursor: grabbing;
+  }
+  /* The image + its bbox overlay share this box so a shared `transform` (zoom/pan, incl. "Zoom to
+     changed region") moves them together — see the template comment above. `aspect-ratio` (set inline,
+     data-driven from `ImageDiff.width`/`height`) plus `max-width/max-height: 100%` is the standard
+     replacement for the old img-only "shrink to fit, preserve aspect ratio" trick, letting a plain div
+     letterbox correctly without an explicit width/height. */
+  .ic-heat-canvas {
+    position: relative;
     max-width: 100%;
     max-height: 100%;
+  }
+  .ic-heat-img {
+    display: block;
+    width: 100%;
+    height: 100%;
   }
   .ic-bbox {
     position: absolute;
