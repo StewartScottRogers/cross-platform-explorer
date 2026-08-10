@@ -203,13 +203,60 @@
     }
   }
 
+  /** Copy an already-resolved image URL to the OS clipboard as real image bytes (CPE-1576, epic
+   *  CPE-1568): fetches the URL — works for both the `asset://` protocol a native image uses and a
+   *  `data:` URL decoded-image/raw-image/heic already hold — and writes the resulting blob via the
+   *  Clipboard API's image `write`, mirroring `copyToClipboard`'s own "best-effort, ignore if
+   *  unavailable" convention so a click never throws even where image-clipboard support is missing. */
+  async function copyImageToClipboard(url: string): Promise<void> {
+    if (!url) return;
+    try {
+      const resp = await fetch(url);
+      const blob = await resp.blob();
+      await navigator.clipboard.write([new ClipboardItem({ [blob.type || "image/png"]: blob })]);
+    } catch {
+      /* image bytes unavailable, or the webview has no image-clipboard support — ignore */
+    }
+  }
+
+  /** Resolve `titleKey` through i18n, then hand it to the OS-native `window.prompt` (CPE-1576's Convert
+   *  action) — the bridge `PreviewActionCtx.promptText` needs since `run()` lives in the framework-free
+   *  `preview/provider.ts` module without `$t`, mirroring `showActionMessage`'s own key-resolution split. */
+  function promptText(titleKey: string, defaultValue?: string): string | null {
+    return window.prompt(get(t)(titleKey), defaultValue);
+  }
+
+  /** The currently resolved image URL for the previewed entry, across whichever image-kind provider
+   *  matched (CPE-1576): the pane's own `<img src>` — `assetUrl` for a natively-rendered image, else
+   *  the already-decoded `data:` URL for decoded-image/raw-image/heic. Reported to the action bar via
+   *  `ctx.values["copy-image"]` below, per the CPE-1570 `values` convention (mirrors jwt/json's own
+   *  copyable bags), keyed to match `imageActions`' "copy-image" action id in `preview/provider.ts`.
+   *  Empty when nothing has resolved yet (still loading, or a raw/heic file the platform couldn't
+   *  decode) — the action's own `enabled` gate reads emptiness as "nothing to copy". */
+  $: imageCopyUrl =
+    provider.kind === "image" && entry
+      ? assetUrl(entry.path)
+      : provider.kind === "decoded-image" && imgState === "idle"
+        ? imgUrl
+        : provider.kind === "raw-image" && rawImgState === "idle"
+          ? rawImgUrl
+          : provider.kind === "heic" && heicImgState === "idle"
+            ? heicImgUrl
+            : "";
+
   let actionCtx: PreviewActionCtx | null = null;
   $: actionCtx = entry
     ? {
         entry,
         text: needsText ? text : undefined,
-        values: provider.kind === "jwt" ? jwtValues : provider.kind === "json" ? jsonValues : {},
+        values:
+          provider.kind === "jwt" ? jwtValues
+          : provider.kind === "json" ? jsonValues
+          : imageCopyUrl ? { "copy-image": imageCopyUrl }
+          : {},
         copyToClipboard,
+        copyImageToClipboard,
+        promptText,
         invoke: ipcInvoke,
         dispatch: provider.kind === "json" ? jsonDispatch : undefined,
         showMessage: showActionMessage,

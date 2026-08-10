@@ -148,6 +148,15 @@
   {:else if name === "refresh"}
     <path d="M20 12a8 8 0 1 1-2.3-5.6" />
     <path d="M20 4v5h-5" />
+  {:else if name === "rotate-left"}
+    <!-- Rotate counter-clockwise (CPE-1576): a single-file image action mirroring `refresh`'s circular
+         arrow, curled the other way with its arrowhead at top-left. -->
+    <path d="M4 12a8 8 0 1 0 2.3-5.6" />
+    <path d="M4 4v5h5" />
+  {:else if name === "rotate-right"}
+    <!-- Rotate clockwise (CPE-1576): mirror of `rotate-left`, arrowhead at top-right. -->
+    <path d="M20 12a8 8 0 1 0-2.3-5.6" />
+    <path d="M20 4v5h-5" />
   {:else if name === "chev-right"}
     <path d="M9 5l7 7-7 7" />
   {:else if name === "chev-down"}

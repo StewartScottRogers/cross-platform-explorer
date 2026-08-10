@@ -8,8 +8,9 @@
  */
 import type { DirEntry } from "../types";
 import { categoryOf } from "../filetypes";
-import { invoke as ipcInvoke } from "../invoke";
+import { invoke as ipcInvoke, createChannel } from "../invoke";
 import { formatJson, parseJson } from "./jsonTree";
+import type { BatchJob, BatchReport, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
 
 export type PreviewKind =
   | "image"
@@ -66,6 +67,18 @@ export interface PreviewActionCtx {
   /** Copy text to the clipboard — the same "best-effort, ignore if unavailable" path the pane's own Copy
    *  menu item uses, so a copy action behaves identically to the inline buttons it replaces. */
   copyToClipboard(text: string): Promise<void>;
+  /** Copy an already-resolved image URL (the pane's own `assetUrl`, or a decoded/raw/heic data: URL) to
+   *  the OS clipboard as real image bytes — the image-preview counterpart to `copyToClipboard`, which
+   *  only handles text (CPE-1576, epic CPE-1568). Best-effort, same "ignore if unavailable" convention.
+   *  Optional: only wired when the pane has an image URL to offer (see the `values["copy-image"]` bag
+   *  the image providers' Copy image action reads below). */
+  copyImageToClipboard?(url: string): Promise<void>;
+  /** Prompt the user for a short text value (e.g. Convert's target format) via the OS-native
+   *  `window.prompt`, resolving `titleKey` through i18n first — `run()` lives in this framework-free
+   *  module without `$t`, so the label resolution has to happen on the `PreviewPane` side, mirroring
+   *  `showMessage`'s split. Returns `null` on cancel, exactly like `window.prompt` itself. Optional: only
+   *  actions that need free-text input (Convert) wire it. */
+  promptText?(titleKey: string, defaultValue?: string): string | null;
   /** The busy-tracking backend `invoke` (`src/lib/invoke.ts`) — an action that needs a backend command
    *  MUST call through this, never `@tauri-apps/api/core` directly (CLAUDE.md busy-cursor convention). */
   invoke: typeof ipcInvoke;
@@ -166,6 +179,98 @@ const DATA_GRID_EXT = new Set([
 ]);
 
 /**
+ * Extensions the batch-media backend's encoder can actually re-encode (CPE-1093) — mirrors
+ * `batchMedia.ts`'s `BATCH_MEDIA_EXTS` exactly (kept as a separate literal rather than an import: that
+ * module is UI-selection-shaped (`{name, is_dir}[]`), this just needs the bare extension against one
+ * previewed `DirEntry`). Gates Rotate/Convert below — a format the encoder can't write (svg, avif, a
+ * raw/HEIC original, …) simply doesn't offer those two actions rather than sending a call the backend
+ * would skip anyway.
+ */
+const BATCH_MEDIA_WRITABLE_EXT = new Set(["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"]);
+
+/** Whether the batch-media encoder can re-encode this entry (see {@link BATCH_MEDIA_WRITABLE_EXT}). */
+function canWriteBatchMedia(entry: DirEntry): boolean {
+  return BATCH_MEDIA_WRITABLE_EXT.has(entry.extension);
+}
+
+/**
+ * Run a single-file batch-media op through the EXISTING CPE-1093 backend (`batch_media_plan` +
+ * `batch_media_execute_stream`) — the same two commands the multi-select Batch-Media dialog's Apply
+ * button calls, given a one-file `inputs`/`items` list instead of a whole selection (CPE-1576, epic
+ * CPE-1568: the batch-media backend has no ≥2 gate of its own — that gate lives in `App.svelte`'s
+ * `beginBatchMedia`, which this path never goes through). `non_destructive: true` reuses the dialog's
+ * own default: the write lands at a collision-safe suffixed path, never overwriting the previewed file.
+ * No dedicated progress channel is rendered here (unlike the dialog) — `onResult`/`createChannel` is
+ * still required by the command's signature, so a channel is created and simply left unread.
+ */
+async function runImageOp(
+  ctx: PreviewActionCtx,
+  op: MediaOp,
+  doneKey: string,
+  failKey: string,
+): Promise<void> {
+  const job: BatchJob = { ops: [op], non_destructive: true };
+  try {
+    const planned = await ctx.invoke<PlannedItem[]>("batch_media_plan", { job, inputs: [ctx.entry.path] });
+    const onResult = createChannel<OpResult[]>();
+    const report = await ctx.invoke<BatchReport>("batch_media_execute_stream", { items: planned, job, onResult });
+    if (report.skipped.length > 0) {
+      ctx.showMessage?.(failKey, { error: report.skipped[0][1] });
+    } else {
+      ctx.showMessage?.(doneKey);
+    }
+  } catch (e) {
+    ctx.showMessage?.(failKey, { error: String(e) });
+  }
+}
+
+/**
+ * Rotate/Convert/Copy image actions (CPE-1576, epic CPE-1568 slice 3): the single-file counterpart to
+ * the Batch-Media dialog (CPE-1093), which only activates on a ≥2-file selection. Rotate/Convert reuse
+ * that SAME backend via {@link runImageOp} — no new backend, same non-destructive/collision-safe write
+ * behavior. Copy image needs no backend at all: it copies whichever already-resolved preview URL
+ * `PreviewPane` reports via `ctx.values["copy-image"]` (its own `<img src>` — native `assetUrl` or a
+ * decoded/raw/heic data: URL) straight to the OS clipboard as image bytes via `ctx.copyImageToClipboard`.
+ * Shared across all four image-kind providers below (`image`/`decoded-image`/`raw-image`/`heic`) since
+ * none of this depends on which one matched.
+ */
+const imageActions: PreviewAction[] = [
+  {
+    id: "rotate-left",
+    labelKey: "pv.action.rotateLeft",
+    icon: "rotate-left",
+    enabled: (ctx) => canWriteBatchMedia(ctx.entry),
+    run: (ctx) => runImageOp(ctx, { op: "rotate", degrees: 270 }, "pv.image.rotated", "pv.image.opFailed"),
+  },
+  {
+    id: "rotate-right",
+    labelKey: "pv.action.rotateRight",
+    icon: "rotate-right",
+    enabled: (ctx) => canWriteBatchMedia(ctx.entry),
+    run: (ctx) => runImageOp(ctx, { op: "rotate", degrees: 90 }, "pv.image.rotated", "pv.image.opFailed"),
+  },
+  {
+    id: "convert",
+    labelKey: "pv.action.convertImage",
+    icon: "refresh",
+    enabled: (ctx) => canWriteBatchMedia(ctx.entry),
+    run: async (ctx) => {
+      const raw = ctx.promptText?.("pv.image.convertPrompt", "png") ?? null;
+      const ext = raw?.trim().replace(/^\.+/, "").toLowerCase();
+      if (!ext) return;
+      await runImageOp(ctx, { op: "convert", to_ext: ext }, "pv.image.converted", "pv.image.opFailed");
+    },
+  },
+  {
+    id: "copy-image",
+    labelKey: "pv.action.copyImage",
+    icon: "copy",
+    enabled: (ctx) => !!ctx.values["copy-image"],
+    run: (ctx) => ctx.copyImageToClipboard?.(ctx.values["copy-image"] ?? ""),
+  },
+];
+
+/**
  * Images the webview can't render natively — decoded to PNG by the
  * read_image_data_url backend and shown via a data URL. CPE-099/101.
  */
@@ -256,6 +361,8 @@ export const providers: PreviewProvider[] = [
     kind: "decoded-image",
     editable: false,
     canPreview: (e) => !e.is_dir && DECODED_IMAGE_EXT.has(e.extension),
+    // Single-file Rotate/Convert/Copy image actions (CPE-1576) — see `imageActions`'s own doc comment.
+    actions: imageActions,
   },
   // Must also precede the native image provider: cr2/nef/arw categorise as images but the webview
   // can't decode raw sensor data — route to the embedded-JPEG-extraction backend instead.
@@ -265,6 +372,9 @@ export const providers: PreviewProvider[] = [
     kind: "raw-image",
     editable: false,
     canPreview: (e) => !e.is_dir && RAW_EXT.has(e.extension),
+    // Rotate/Convert gate themselves off via `canWriteBatchMedia` (the encoder can't re-encode raw
+    // sensor formats) — only Copy image (of the extracted embedded preview) is actually enabled here.
+    actions: imageActions,
   },
   // .dcm isn't recognised as an image category at all today (falls to hex otherwise) — this must
   // still precede the generic image/hex providers so it gets its own decode+tags rendering.
@@ -283,6 +393,9 @@ export const providers: PreviewProvider[] = [
     kind: "heic",
     editable: false,
     canPreview: (e) => !e.is_dir && HEIC_EXT.has(e.extension),
+    // Same as raw-image above: Rotate/Convert gate off (HEIC isn't encoder-writable), Copy image (of
+    // the platform-decoded preview) is the one that's actually enabled.
+    actions: imageActions,
   },
   {
     id: "image",
@@ -290,6 +403,7 @@ export const providers: PreviewProvider[] = [
     kind: "image",
     editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "image",
+    actions: imageActions,
   },
   // Temporal media (CPE-1429, epic CPE-720): audio + video play in the pane's native <audio>/<video>
   // element behind a custom themed transport (MediaPlayer.svelte). One `media` kind covers both —
