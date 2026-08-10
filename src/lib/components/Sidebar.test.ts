@@ -373,3 +373,20 @@ describe("Sidebar 'Discovered on your network' tier (CPE-1519)", () => {
     expect(detail.prefill).toMatchObject({ scheme: "sftp", host: "nas.local" });
   });
 });
+
+describe("Sidebar density (CPE-1528)", () => {
+  it("does not apply the compact class when density is comfortable (default)", () => {
+    const { container } = render(Sidebar, { places: [], drives: [], favorites: [] });
+    expect(container.querySelector(".navigation-pane")?.classList.contains("compact")).toBe(false);
+  });
+
+  it("applies the compact class to the root .navigation-pane when density is compact", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      density: "compact",
+    });
+    expect(container.querySelector(".navigation-pane")?.classList.contains("compact")).toBe(true);
+  });
+});

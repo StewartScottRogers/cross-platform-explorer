@@ -6,14 +6,12 @@
 
   export let tabs: { id: number; title: string }[] = [];
   export let activeId: number;
-  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): received but not yet read —
-  // this ticket only wires the prop through for CPE-1528 to consume later. "comfortable" (the
-  // default) leaves the tab strip unchanged.
+  // Row/chrome density (CPE-1526 threaded the prop, CPE-1528 consumes it): "compact" applies the
+  // `.compact` CSS class on the root `.tabbar` (see app.css's "Compact density (CPE-1528)" rules) —
+  // a thinner strip/pitch that still honors TABS.md's accent-top-bar active tab + recessed-chip
+  // inactive tabs (unchanged box-shadow/border rules, just shrunk). "comfortable" (the default)
+  // renders pixel-identical to before this ticket.
   export let density: DensityMode = "comfortable";
-  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
-  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
-  // this dummy reference just satisfies the unused-export-let lint until CPE-1528 reads density for real.
-  const _densityRef = density;
 
   const dispatch = createEventDispatcher<{
     select: number; close: number; new: void;
@@ -21,7 +19,7 @@
   }>();
 </script>
 
-<div class="tabbar">
+<div class="tabbar" class:compact={density === "compact"}>
   {#each tabs as tab (tab.id)}
     <button
       class="tab"

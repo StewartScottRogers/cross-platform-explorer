@@ -28,14 +28,12 @@
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
-  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): received but not yet read —
-  // this ticket only wires the prop through for CPE-1528/1529 to consume later. "comfortable" (the
-  // default) leaves the sidebar unchanged.
+  // Row/chrome density (CPE-1526 threaded the prop, CPE-1528 consumes it): "compact" applies the
+  // `.compact` CSS class on the root `.navigation-pane` (see app.css's "Compact density (CPE-1528)"
+  // rules) — tighter row height/padding for places/pins/drives/sections without clipping icons or
+  // labels. "comfortable" (the default) renders pixel-identical to before this ticket. CPE-1529
+  // will add the toggle control that flips this prop; this ticket only consumes it.
   export let density: DensityMode = "comfortable";
-  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
-  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
-  // this dummy reference just satisfies the unused-export-let lint until CPE-1528/1529 read it for real.
-  const _densityRef = density;
   /** User-starred files and folders, shown in the quick-access section (CPE-340). */
   export let favorites: Favorite[] = [];
   /** Live coding-agent sessions from the Agent Deck (Agent Watch, CPE-397). Each row
@@ -377,7 +375,7 @@
     !isHome && (p === currentPath || (selectedPath !== "" && p === selectedPath));
 </script>
 
-<div class="navigation-pane" role="region" aria-label="Navigation">
+<div class="navigation-pane" role="region" aria-label="Navigation" class:compact={density === "compact"}>
   {#if sessions.length > 0}
     <div
       class="nav-item agents-head section-head"

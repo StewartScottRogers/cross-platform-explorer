@@ -6,14 +6,12 @@
   import { t } from "../i18n";
 
   export let crumbs: PathSegment[] = [];
-  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): received but not yet read —
-  // this ticket only wires the prop through for CPE-1528 to consume later. "comfortable" (the
-  // default) leaves the toolbar unchanged.
+  // Row/chrome density (CPE-1526 threaded the prop, CPE-1528 consumes it): "compact" applies the
+  // `.compact` CSS class on the root `.navbar` (see app.css's "Compact density (CPE-1528)" rules) —
+  // tighter control padding + icon-only buttons (the Docs button's text label hides; every button
+  // still carries its `title`/`aria-label` so it stays reachable/labelled for accessibility).
+  // "comfortable" (the default) renders pixel-identical to before this ticket.
   export let density: DensityMode = "comfortable";
-  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
-  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
-  // this dummy reference just satisfies the unused-export-let lint until CPE-1528 reads density for real.
-  const _densityRef = density;
   export let canBack = false;
   export let canForward = false;
   export let search = "";
@@ -81,7 +79,7 @@
   }
 </script>
 
-<div class="navbar">
+<div class="navbar" class:compact={density === "compact"}>
   <button class="iconbtn" title="{$t('nav.back')} (Alt+Left)" disabled={!canBack} on:click={() => dispatch("back")}>
     <Icon name="back" />
   </button>
@@ -195,4 +193,7 @@
     border-radius: var(--radius);
     outline: none;
   }
+  /* Compact density (CPE-1528): the address-edit input mirrors the compact `.address`/`.search`
+     height set globally in app.css, so it doesn't stick out taller than its siblings. */
+  .navbar.compact .pathedit { height: 26px; font-size: 11.5px; }
 </style>
