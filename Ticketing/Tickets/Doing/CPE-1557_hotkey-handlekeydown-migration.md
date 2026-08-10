@@ -2,7 +2,7 @@
 id: CPE-1557
 title: "Wire handleKeydown to the persisted keymap so remaps actually change key behavior"
 type: Task
-status: Backlog
+status: Doing
 priority: High
 component: Frontend
 epic: CPE-1484
