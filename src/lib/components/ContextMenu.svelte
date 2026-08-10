@@ -261,6 +261,14 @@
     <button class="row" role="menuitem" on:click={() => run("copy-name")}>
       <Icon name="rename" size={15} /> {$t('ctx.copyName')}
     </button>
+    <!-- Add to Drop Stack (CPE-1531, epic CPE-1489): shelves the selection into the persistent
+         cross-folder stack (CPE-1530's store) for a later move/copy-all (CPE-1533). Always offered on
+         the item menu — same as Duplicate/Copy as path/Copy name above — since this menu only opens
+         with a selection; `doAddToDropStack` (App.svelte) applies the same archive gate as Copy/Cut. -->
+    <button class="row" role="menuitem" on:click={() => run("add-drop-stack")}>
+      <Icon name="layers" size={15} /> Add to Drop Stack
+      <span class="hint">Ctrl+Shift+D</span>
+    </button>
     {#if selectionCount > 1}
       <button class="row" role="menuitem" on:click={() => run("batch-rename")}>
         <Icon name="rename" size={15} /> {$t('ctx.rename')}

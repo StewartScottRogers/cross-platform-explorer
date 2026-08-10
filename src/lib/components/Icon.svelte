@@ -210,6 +210,12 @@
     <circle cx="15" cy="6" r="1.4" fill="currentColor" stroke="none" />
     <circle cx="15" cy="12" r="1.4" fill="currentColor" stroke="none" />
     <circle cx="15" cy="18" r="1.4" fill="currentColor" stroke="none" />
+  {:else if name === "layers"}
+    <!-- Stacked layers (CPE-1531, epic CPE-1489): the "Add to Drop Stack" menu row — a shelf of items
+         accumulated across folders. Monochrome via currentColor, like the other toolbar/ui glyphs. -->
+    <path d="M12 3.5l8 4.5-8 4.5-8-4.5z" />
+    <path d="M4 12l8 4.5 8-4.5" />
+    <path d="M4 16.5l8 4.5 8-4.5" />
   {:else if name === "details"}
     <rect x="3" y="5" width="18" height="14" rx="2" />
     <path d="M14 5v14" />
