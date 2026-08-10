@@ -168,6 +168,105 @@
   background: var(--bg);
 }
 
+/* ---------- Layer 1: dark palette primitives (CPE-1539, epic CPE-1493) ---------- */
+/* Fluent/Win11-dark-inspired neutrals + a lightened accent/agent set re-derived (not just
+   inverted) so every pairing clears WCAG contrast against the dark --bg/--surface below — see
+   src/app.css.dark-contrast.test.ts for the guard math. Declared on its own :root block (CSS
+   custom properties don't nest under an attribute selector for the primitive layer) so it's
+   always available once :root[data-theme="dark"] below references it. */
+:root {
+  --pal-dark-gray-900: #202020; /* window bg */
+  --pal-dark-gray-850: #262626; /* surface-alt */
+  --pal-dark-gray-800: #2b2b2b; /* surface */
+  --pal-dark-gray-750: #333333; /* hover */
+  --pal-dark-gray-700: #3d3d3d; /* active */
+  --pal-dark-gray-650: #3f3f3f; /* border (subtle, decorative — not asserted for 3:1, mirrors the
+                                     light theme's --pal-gray-250 vs --pal-white being a soft divider) */
+  --pal-dark-gray-500: #767676; /* border-strong — re-derived to clear 3:1 against both --bg and
+                                     --surface (a flat #5c5c5c/#7a7a7a inversion of the light gray-400
+                                     under-contrasts here) */
+  --pal-dark-gray-400: #8f8f8f; /* dialog-border — crisp edge over a dimmed backdrop on a dark bg;
+                                     re-derived per the light theme's --dialog-border reasoning, not
+                                     an inverted light value */
+  --pal-dark-gray-300: #9c9c9c; /* text-faint */
+  --pal-dark-gray-200: #c5c5c5; /* text-dim */
+  --pal-dark-gray-100: #f3f3f3; /* text */
+
+  --pal-dark-blue-900: #0f3550; /* selection */
+  --pal-dark-blue-850: #123f5e; /* selection-hover */
+  --pal-dark-blue-400: #3ea6ff; /* accent — lighter than the light theme's #0067c0, which
+                                     under-contrasts on a dark surface */
+  --pal-dark-blue-300: #60cdff; /* accent-hover */
+
+  --pal-dark-red-400: #ff6659;  /* danger */
+  --pal-dark-red-300: #ff8a80;  /* danger-hover */
+  --pal-dark-green-400: #6bcf7f; /* success */
+
+  /* Okabe-Ito colour-blind-safe agent set, lightened off the light-theme base hues until each
+     clears 3:1 against --pal-dark-gray-800 (--surface) — see the dark-contrast guard test. */
+  --pal-dark-okabe-blue: #4095c5;
+  --pal-dark-okabe-vermillion: #e08640;
+  --pal-dark-okabe-bluish-green: #40b696;
+  --pal-dark-okabe-reddish-purple: #d99bbd;
+  --pal-dark-okabe-orange: #ecb740;
+  --pal-dark-okabe-sky-blue: #80c7ef;
+  --pal-dark-purple-500: #907bcc; /* agent-user */
+}
+
+/* Same semantic layer as :root[data-theme="light"] above, resolved to the dark palette primitives
+   just declared. Inert on landing — nothing sets data-theme="dark" yet (that's CPE-1540), so this
+   block paints nothing until a future theme runtime selects it. Every WCAG-relevant pairing below
+   is asserted by src/app.css.dark-contrast.test.ts (AA: >=4.5:1 body text, >=3:1 secondary
+   text/non-text UI), which is the binding acceptance gate for these hexes — the final *aesthetic*
+   pass (does it look good, not just measure well) is queued as an attended visual sign-off once
+   CPE-1540/1541 wire data-theme="dark" live; don't read contrast-green as taste-approved. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --bg: var(--pal-dark-gray-900);
+  --surface: var(--pal-dark-gray-800);
+  --surface-alt: var(--pal-dark-gray-850);
+  --hover: var(--pal-dark-gray-750);
+  --active: var(--pal-dark-gray-700);
+
+  --border: var(--pal-dark-gray-650);
+  --border-strong: var(--pal-dark-gray-500);
+  --dialog-border: var(--pal-dark-gray-400);
+
+  --danger: var(--pal-dark-red-400);
+  --success: var(--pal-dark-green-400);
+  --danger-hover: var(--pal-dark-red-300);
+
+  --text: var(--pal-dark-gray-100);
+  --text-dim: var(--pal-dark-gray-200);
+  --text-faint: var(--pal-dark-gray-300);
+
+  --accent: var(--pal-dark-blue-400);
+  --accent-hover: var(--pal-dark-blue-300);
+  --selection: var(--pal-dark-blue-900);
+  --selection-hover: var(--pal-dark-blue-850);
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --row-h: 30px;
+
+  --agent-1: var(--pal-dark-okabe-blue);
+  --agent-2: var(--pal-dark-okabe-vermillion);
+  --agent-3: var(--pal-dark-okabe-bluish-green);
+  --agent-4: var(--pal-dark-okabe-reddish-purple);
+  --agent-5: var(--pal-dark-okabe-orange);
+  --agent-6: var(--pal-dark-okabe-sky-blue);
+  --agent-user: var(--pal-dark-purple-500);
+  --agent-unknown: var(--text-faint);
+
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
 body {
