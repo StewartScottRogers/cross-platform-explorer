@@ -2,7 +2,7 @@
 id: CPE-1493
 title: "EPIC: OS light/dark detection + real dark palette (follow the system theme)"
 type: Task
-status: Proposed
+status: In Progress
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -10,8 +10,9 @@ created: 2026-08-08
 closed:
 ---
 
-> **Filed 2026-08-08 (sprint PM, theme-engine research pass).** Dormant brief — decompose on
-> `/ticketing-epic activate CPE-1493`. **Depends on CPE-1492 (token foundation). Epic #2 of 5.**
+> **Filed 2026-08-08 (sprint PM, theme-engine research pass).** Activated 2026-08-09 (sprint PM, bench
+> refill) — decomposed into child tickets below. **Depends on CPE-1492 (token foundation, shipped
+> 2026-08-09). Epic #2 of 5.**
 
 ## Why
 The visible payoff of the theme engine: the app **follows the OS light/dark preference** and can be manually
@@ -36,3 +37,22 @@ both. No new heavy deps (Tauri event is built-in; `dark-light` only if needed).
 ## Notes
 Frontend-heavy (palette authoring + QA); ~1 line of Rust/config if any. This is where "the app has a dark mode"
 becomes true. Ship docs per CPE-579.
+
+## Child tickets (activated 2026-08-09, sprint PM bench refill)
+1. **CPE-1539** — Author the dark Layer-1/Layer-2 palette in `app.css`
+   (`:root[data-theme="dark"]`) + a WCAG contrast guard test. Inert alone (nothing sets
+   `data-theme="dark"` yet). *(independent; parallel with 1540)*
+2. **CPE-1540** — `theme.ts`: `resolveTheme` honors `prefers-color-scheme` for `"system"` + adds
+   explicit `"dark"` + a `watchSystemTheme` live-update subscription wired into `main.ts`. Chose
+   `matchMedia` over Tauri's `onThemeChanged` (avoids the Linux flakiness the brief calls out and needs
+   no new capability). *(independent; parallel with 1539)*
+3. **CPE-1541** — Settings → Appearance: add the "Dark" option to `THEME_OPTIONS` + refresh the note
+   copy. *(prereq: 1540 — needs the widened `ThemeSetting`)*
+4. **CPE-1542** — Update `35-appearance.md` for the shipped System/Light/Dark control (no
+   `sectionDocs.ts` change — the `appearance` section is already registered). *(prereq: 1541)*
+
+Dispatch order: {1539 ∥ 1540} → 1541 → 1542. Actual dark-palette *aesthetics* (not just WCAG contrast
+compliance) is genuinely subjective — CPE-1539 lands on contrast-test-green and explicitly queues an
+attended visual sign-off pass once 1539+1540 are both live, rather than treating headless contrast
+math as a stand-in for taste. CPE-1494/1495/1496 (native accent, window materials, theme-picker a11y)
+remain the follow-up epics, sequenced after this one per the program's own dependency chain.
