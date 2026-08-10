@@ -27,7 +27,8 @@ export type Section =
   | "cert-management"
   | "media-player"
   | "structured-previews"
-  | "network";
+  | "network"
+  | "split-join";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -97,6 +98,11 @@ const SECTION_DOC: Record<Section, string> = {
   // sidebar section + its add/edit/connect popovers), but it still earns its own doc page + registry
   // entry per [[maintain-in-app-docs-library]].
   network: "31-network",
+  // CPE-1509 (parent CPE-1491): the Split file… / Join parts… dialogs + their context-menu entries. Like
+  // network/media-player above, not a sidebar view you switch into (it's a pair of dialogs reachable from
+  // a file's context menu), but it still earns its own doc page + registry entry per
+  // [[maintain-in-app-docs-library]].
+  "split-join": "33-split-join",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */

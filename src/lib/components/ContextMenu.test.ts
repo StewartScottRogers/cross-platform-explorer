@@ -581,3 +581,35 @@ describe("ContextMenu Securely delete… (CPE-1240, epic CPE-738)", () => {
     expect(action).toHaveBeenCalledWith("shred");
   });
 });
+
+describe("ContextMenu Split file… / Join parts… (CPE-1509, parent CPE-1491)", () => {
+  it("hides both rows by default", () => {
+    render(ContextMenu, { props: { ...base } });
+    expect(screen.queryByText("Split file…")).toBeNull();
+    expect(screen.queryByText("Join parts…")).toBeNull();
+  });
+
+  it("shows 'Split file…' and dispatches split-file when splitEligible", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, splitEligible: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    const row = screen.getByText("Split file…");
+    expect(row).toBeTruthy();
+    expect(screen.queryByText("Join parts…")).toBeNull();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("split-file");
+  });
+
+  it("shows 'Join parts…' and dispatches join-parts when joinEligible", async () => {
+    const { component } = render(ContextMenu, { props: { ...base, joinEligible: true } });
+    const action = vi.fn();
+    component.$on("action", (e) => action(e.detail));
+
+    const row = screen.getByText("Join parts…");
+    expect(row).toBeTruthy();
+    expect(screen.queryByText("Split file…")).toBeNull();
+    await fireEvent.click(row);
+    expect(action).toHaveBeenCalledWith("join-parts");
+  });
+});
