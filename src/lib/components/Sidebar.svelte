@@ -21,6 +21,7 @@
     stateOf,
     stateTitle,
     discoveredShareToFormInput,
+    isSavableScheme,
     type ConnState,
   } from "../network";
   import type { ConnectionFormInput } from "../network";
@@ -884,17 +885,27 @@
         <!-- "Discovered on your network" tier (CPE-1519): a Windows WNet-found `\\server\share` the user
              hasn't connected to yet. There's no generic SMB client to browse it directly yet (scope stays
              discovery + pre-filled add this slice — see network.ts's SUPPORTED_SCHEMES doc), so the whole
-             row's action is the one-click "＋ Add a connection" pre-fill rather than a navigate. -->
+             row's action is the one-click "＋ Add a connection" pre-fill rather than a navigate.
+             CPE-1524: an mDNS row can carry a scheme discovery can see but no provider can save yet (e.g.
+             `nfs://` — no NFS provider until CPE-1505). The row stays visible either way; only the add
+             affordance gates on `isSavableScheme`, so it opens automatically once a provider lands. -->
+        {@const prefill = discoveredShareToFormInput(s)}
+        {@const savable = isSavableScheme(prefill.scheme)}
         <button
           class="nav-item fav-item"
-          title={`${s.path} — discovered on your network; click to add it as a connection`}
-          on:click={(e) => dispatch("networkAdd", { x: e.clientX, y: e.clientY, prefill: discoveredShareToFormInput(s) })}
+          disabled={!savable}
+          title={savable
+            ? `${s.path} — discovered on your network; click to add it as a connection`
+            : `${s.path} — discovered on your network; ${prefill.scheme.toUpperCase()} isn't supported yet`}
+          on:click={(e) => savable && dispatch("networkAdd", { x: e.clientX, y: e.clientY, prefill })}
         >
           <span class="twisty hidden" />
           <span class="state-dot state-discovered" aria-hidden="true" title="Discovered — not yet added" />
           <Icon name="globe" />
           <span class="label">{s.name}</span>
-          <span class="discover-add-hint" aria-hidden="true"><Icon name="plus" size={11} /></span>
+          {#if savable}
+            <span class="discover-add-hint" aria-hidden="true"><Icon name="plus" size={11} /></span>
+          {/if}
         </button>
       {/each}
       {#if !hasAnyNetworkRows(connections, dedupedShares, dedupedDiscovered)}
