@@ -7,7 +7,7 @@
   import { platformActive } from "../sidecar";
   import * as settings from "../settings";
   import { applyTheme } from "../theme";
-  import type { ThemeSetting } from "../types";
+  import type { ThemeSetting, ContrastSetting } from "../types";
   import SidecarManager from "./SidecarManager.svelte";
   import ShellIntegration from "./ShellIntegration.svelte";
   import ScheduledSnapshots from "./ScheduledSnapshots.svelte";
@@ -48,10 +48,30 @@
   function setTheme(v: ThemeSetting) {
     theme = v;
     settings.saveTheme(v);
-    applyTheme(v);
+    applyTheme(v, contrast);
   }
   function onThemeChange(e: Event) {
     setTheme((e.currentTarget as HTMLSelectElement).value as ThemeSetting);
+  }
+
+  // Contrast (CPE-1545, epic CPE-1496): the visible entry point for the orthogonal high-contrast axis
+  // CPE-1544 laid down as inert plumbing (ContrastSetting/loadContrast/saveContrast, and applyTheme
+  // widened to compose `hc-${base}`). Off / System / High, independent of the Theme choice above — same
+  // inline-instant-control shape as the theme select ([[prefer-inline-instant-controls]]): reads/writes
+  // settings.ts directly and calls applyTheme so dataset.theme updates live.
+  const CONTRAST_OPTIONS: { value: ContrastSetting; label: string }[] = [
+    { value: "off", label: "Off" },
+    { value: "system", label: "System" },
+    { value: "high", label: "High" },
+  ];
+  let contrast = settings.loadContrast();
+  function setContrast(v: ContrastSetting) {
+    contrast = v;
+    settings.saveContrast(v);
+    applyTheme(theme, v);
+  }
+  function onContrastChange(e: Event) {
+    setContrast((e.currentTarget as HTMLSelectElement).value as ContrastSetting);
   }
 
   // Native-bridge opt-in (CPE-1177, epic CPE-717): OFF by default. When on, it reveals the OS-native
@@ -125,6 +145,18 @@
     </div>
     <div class="note">
       Choose Light or Dark, or System to follow your OS automatically.
+    </div>
+    <div class="settings-row">
+      <span>Contrast</span>
+      <select data-testid="contrast-select" value={contrast} on:change={onContrastChange}>
+        {#each CONTRAST_OPTIONS as opt (opt.value)}
+          <option value={opt.value}>{opt.label}</option>
+        {/each}
+      </select>
+    </div>
+    <div class="note">
+      System follows the OS accessibility high-contrast signal once available, High always forces it,
+      Off never does.
     </div>
 
     <div class="section-title">Native metadata bridge</div>
