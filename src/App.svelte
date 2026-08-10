@@ -3440,10 +3440,22 @@
    *  rename + undo support via `moveEntries`, which resolves with one `OpResult` PER source, index-
    *  aligned with `sources`) rather than the async transfer queue — so a partial failure can precisely
    *  clear only the paths that actually moved and leave the rest shelved for a retry. */
+  // CPE-1538 (doPaste's CPE-1385 fix, parity review of CPE-1533): a fast double-click on "Move all here"
+  // dispatches two doDropStackMoveAll calls back-to-back, both reading the same non-empty
+  // $dropStackEntries before either's `await commands.moveEntries(...)` settles — a double-move. doPaste
+  // guards its cut branch by synchronously CLEARING the clipboard before the await; the Drop Stack can't
+  // do that the same way because a partial failure needs to re-shelve only the specific un-moved entries
+  // (see the per-item handling below) — clearing eagerly would lose each entry's original `addedFrom`/
+  // `addedAt` for anything that has to come back. So this uses the ticket's other sanctioned option: a
+  // synchronous in-flight FLAG (same pattern as `reconcileInFlight` above), set before the first `await`
+  // and released in `finally` — a second click within the same tick just no-ops.
+  let dropStackMoveInFlight = false;
   async function doDropStackMoveAll() {
     if (isHome || blockedInArchive()) return;
+    if (dropStackMoveInFlight) return;
     const sources = $dropStackEntries.map((e) => e.path);
     if (sources.length === 0) return;
+    dropStackMoveInFlight = true;
     try {
       const results = await commands.moveEntries(sources, currentPath);
       reportResults(results, "Moved");
@@ -3467,6 +3479,8 @@
     } catch (e) {
       showNotice(String(e), true);
       // Nothing moved at all (IPC/backend rejection) — leave the whole batch shelved.
+    } finally {
+      dropStackMoveInFlight = false;
     }
   }
 
@@ -3477,7 +3491,15 @@
    *  per-path result — see transfers.ts), so `dropStackTransferOps` (consumed by the `transfer://done`
    *  listener below) only clears the captured paths off the stack on a clean, uncancelled, all-
    *  transferred finish; a partial failure leaves the whole batch shelved rather than guessing which
-   *  paths landed. */
+   *  paths landed.
+   *
+   *  CPE-1538 review: deliberately NOT given the move path's re-entrancy guard. A double-click here
+   *  double-fires `startTransfer` the same way two rapid `doPaste` copies do — and `doPaste`'s own copy
+   *  branch is exempt from CPE-1385's guard for the same reason (see its comment): copy doesn't destroy
+   *  the source, so the worst case is a redundant transfer / an extra "(2)"-suffixed duplicate via the
+   *  keepboth conflict policy, not data loss or a spurious failure notice. Guarding it anyway would mean
+   *  losing entries' original `addedFrom`/`addedAt` on the same re-shelve problem `doDropStackMoveAll`'s
+   *  comment above describes, for no correctness upside. */
   async function doDropStackCopyAll() {
     if (isHome || blockedInArchive()) return;
     const sources = $dropStackEntries.map((e) => e.path);
