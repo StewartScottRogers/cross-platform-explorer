@@ -1023,6 +1023,54 @@ async restoreFromTrash(paths: string[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("restore_from_trash", { paths });
 },
 /**
+ * Collect-to-vec Trash listing, for tests and any caller that wants the whole list at once.
+ */
+async listTrash() : Promise<Result<TrashEntry[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_trash") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Streamed Trash listing (STREAMING.md): flushes batches over `on_entry` as they're mapped so a large
+ * Trash paints immediately instead of blocking on one big `Vec`. `os_limited::list()` already hands
+ * back everything at once (there's no lazy walk to interrupt), so — like `metadata_column_cells`'s
+ * visible-window batches — this has no cancel registry; a listing is bounded by what's literally
+ * sitting in the Recycle Bin.
+ */
+async listTrashStream(onEntry: TAURI_CHANNEL<TrashEntry[]>) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("list_trash_stream", { onEntry }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Restore specific Trash items by id (as returned by `list_trash`/`list_trash_stream`). Restores
+ * **one item at a time** — rather than a single `restore_all(matched)` batch call — so a
+ * `RestoreCollision`/`RestoreTwins` on one item is reported against just that item and doesn't abort
+ * (or falsely blame) the rest of the selection, mirroring `restore_from_trash_impl`'s per-item
+ * target-exists check.
+ */
+async restoreTrashItems(ids: string[]) : Promise<OpResult[]> {
+    return await TAURI_INVOKE("restore_trash_items", { ids });
+},
+/**
+ * Empty the Trash: purge everything (`ids: None`) or just the given items (`ids: Some`). Purging is
+ * permanent — the UI must confirm before calling this with `None`.
+ */
+async emptyTrash(ids: string[] | null) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("empty_trash", { ids }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Securely delete (shred) entries: overwrite each file's bytes pass-by-pass per `scheme`, then remove
  * it. **Never** routed through the Recycle Bin / Trash — that would defeat the point, since the whole
  * reason to shred instead of `delete_permanent` is that ordinary deletion (trashed OR permanent) still
@@ -5290,6 +5338,33 @@ export type ThumbResult = { path: string; target_px: number; data_url: string | 
  * Whether a batch copies or moves its sources.
  */
 export type TransferKind = "copy" | "move"
+/**
+ * One item sitting in the OS Recycle Bin / Trash (epic CPE-1486, slice 1: browsable in-app Trash).
+ * 
+ * This DTO is deliberately `trash`-crate-free: the crate's `os_limited` listing API only exists on
+ * Windows + Linux (see `docs/design/SERVER-ARCHITECTURE.md`), so the adapter in `src-tauri/src/lib.rs`
+ * owns the `trash` dependency and maps its `TrashItem`/metadata into this plain, cross-platform-safe
+ * struct via [`trash_entry`].
+ */
+export type TrashEntry = { 
+/**
+ * Platform-specific identifier of the trashed item (Windows: `IShellItem` display name; Linux: the
+ * `.trashinfo` path) — opaque to the frontend, round-tripped back for restore/purge.
+ */
+id: string; name: string; 
+/**
+ * Full original path (parent + name) the item was trashed from.
+ */
+original_path: string; 
+/**
+ * Unix seconds since epoch when the item was moved to the trash.
+ */
+time_deleted: number; 
+/**
+ * Size in bytes, when known. `None` for a directory (the `trash` crate reports a directory's own
+ * trash-metadata as an entry count, not a byte size) or when metadata couldn't be read for this item.
+ */
+size: number | null }
 /**
  * One node of a scanned tree (CPE-779). Serialized camelCase to match the frontend `CompareNode`
  * (`isDir`).
