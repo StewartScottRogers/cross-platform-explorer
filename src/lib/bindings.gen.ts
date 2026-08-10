@@ -169,6 +169,19 @@ async disconnectNetworkShare(path: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Cross-platform mDNS/DNS-SD LAN discovery (CPE-1523): browses for smb/sftp/webdav/webdavs/ftp/nfs
+ * service advertisements and returns them as [`NetShare`](cpe_server::net_share::NetShare) rows
+ * (`kind: "discovered"`), uniform with `discover_network_windows`'s WNet rows. Unlike that command,
+ * this one is identical on every OS — **not** `#[cfg(windows)]`-gated — so it's a normal
+ * `generate_handler!` entry AND included in the typed specta bindings (see `export_bindings` below).
+ * Async + `spawn_blocking`: `cpe_mdns::discover` blocks the calling thread for up to
+ * [`MDNS_DISCOVERY_TIMEOUT`] polling the daemon's receivers, so it must run off the async executor's
+ * thread exactly like `discover_network_windows_impl` does for its WNet walk.
+ */
+async discoverNetworkMdns() : Promise<NetShare[]> {
+    return await TAURI_INVOKE("discover_network_mdns");
+},
+/**
  * Report free/total space on the volume that holds `path` (CPE-403). `free` is what's available to
  * the user (respects quotas). Non-fatal: returns an error string the frontend degrades on rather
  * than surfacing — a status-bar nicety must never break navigation.

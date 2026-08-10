@@ -18,9 +18,9 @@ the Network section itself.
 
 1. Click **＋ Add a connection** in the Network section body (shown when nothing's saved yet), or the
    **+** button on the Network section header once you have a connection or two already.
-2. Fill in the form: a **name** for the connection, the **protocol** (SFTP or WebDAV to start — SMB is
-   also selectable, mainly so a **Discovered on your network** row below can pre-fill it for you), the
-   **host**, and optionally a **user**, **port**, and a starting **remote path**.
+2. Fill in the form: a **name** for the connection, the **protocol** (SFTP, WebDAV, or FTP to start —
+   SMB is also selectable, mainly so a **Discovered on your network** row below can pre-fill it for
+   you), the **host**, and optionally a **user**, **port**, and a starting **remote path**.
 3. Choose how it authenticates — a **password** or a **key file** (with **Browse…** to pick the key).
 4. Click **Add**. The connection is saved (no password/passphrase is stored yet — see below) and
    appears as a row under Network.
@@ -54,26 +54,37 @@ system already has mapped or mounted (the same list as Home's **Shared** tab), s
 duplicate a saved connection. Click one to browse it; manage disconnecting or removing it from the
 Shared tab.
 
-## Discovered on your network (Windows)
+## Discovered on your network
 
-On Windows, a third tier — **Discovered on your network** — lists servers and shares Windows itself
-has found on your local network (the same neighborhood Windows Explorer's **Network** folder shows),
-skipping any that duplicate a saved connection or an already-mapped share above it.
+A third tier — **Discovered on your network** — lists servers and shares found on your local network,
+skipping any that duplicate a saved connection or an already-mapped share above it. This tier is
+**cross-platform**: it combines two independent scans that run in parallel every time it loads —
+
+- **Windows-native discovery** (Windows only) — the same neighborhood Windows Explorer's **Network**
+  folder shows (SMB servers/shares only).
+- **mDNS/DNS-SD discovery** (every OS — macOS, Linux, and Windows too) — a local-network broadcast scan
+  that finds SMB, SFTP, WebDAV/WebDAVS, FTP, and NFS servers advertising themselves over
+  Bonjour/Avahi/mDNS. On macOS and Linux this is the *only* discovery mechanism; on Windows it's a
+  **superset** of the native scan — it can surface SFTP/WebDAV/FTP/NFS hosts the SMB-only Windows scan
+  never sees. A host found by both scans appears once, not twice.
 
 A discovered row isn't connected to anything yet — click it to open the **＋ Add a connection** form,
-pre-filled with that server as the host and its share as the path (protocol **SMB**), so you only need
-to fill in a name and, if the share isn't open, credentials.
+pre-filled with that server as the host (and, for a Windows-discovered SMB share, its share as the
+path). SFTP/WebDAV/FTP rows found via mDNS pre-fill their actual protocol and port; you only need to
+fill in a name and, if the server isn't open, credentials. NFS rows are informational only for now —
+there's no NFS client yet, so an NFS row can't be turned into a saved connection.
 
 **Caveats, honestly:**
 
-- This only shows what **Windows itself has already discovered** — it needs the OS's own **Network
-  discovery** setting turned on, and the device has to be advertising itself (most modern NAS boxes and
-  Windows PCs do this automatically). A device that isn't discoverable in Windows Explorer's Network
-  folder won't appear here either — this tier has the same reach, and the same gaps, as Explorer's.
-- It's Windows-only. On macOS and Linux this tier is simply absent; those platforms get network
-  discovery through a different mechanism.
-- The scan is bounded to a few seconds, so a slow or unreachable segment of the network can't hang the
-  app — it just means fewer results that round.
+- Both scans only show what's **already broadcasting** — the Windows scan needs the OS's own **Network
+  discovery** setting turned on; the mDNS scan needs the target device to be advertising itself over
+  mDNS (most modern NAS boxes do this automatically, but not every server does). A device that isn't
+  advertising itself won't appear here either way.
+- Each scan is bounded to a few seconds, so a slow or unreachable segment of the network can't hang the
+  app — it just means fewer results that round. The two scans run independently: if one fails or finds
+  nothing (e.g. mDNS on a network that blocks multicast), the other's results still show.
+- On first use, some operating systems' firewalls prompt to allow the app multicast/network access —
+  that's a one-time OS-level dialog outside the app's control, not something the app itself asks for.
 
 ## Limits
 

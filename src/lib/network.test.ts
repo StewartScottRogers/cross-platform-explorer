@@ -11,6 +11,7 @@ import {
   formFromConnection,
   buildConnection,
   discoveredShareToFormInput,
+  mergeDiscovered,
   type ConnectionFormInput,
 } from "./network";
 import type { Connection, NetShare } from "./types";
@@ -227,7 +228,7 @@ describe("network (CPE-1513)", () => {
     });
 
     it("rejects an unsupported scheme", () => {
-      expect(buildConnection(input({ scheme: "ftp" }))).toMatch(/Unsupported protocol/);
+      expect(buildConnection(input({ scheme: "s3" }))).toMatch(/Unsupported protocol/);
     });
 
     it("accepts smb (CPE-1519: a discovered share's pre-filled scheme)", () => {
@@ -240,6 +241,19 @@ describe("network (CPE-1513)", () => {
         user: "",
         auth: { kind: "password" },
         path: "/media",
+      });
+    });
+
+    it("accepts ftp (CPE-1523: cpe-ftp ships, so a discovered _ftp._tcp mDNS row must validate)", () => {
+      const c = buildConnection(input({ name: "nas-ftp", scheme: "ftp" }));
+      expect(c).toEqual({
+        name: "nas-ftp",
+        scheme: "ftp",
+        host: "host.example.com",
+        port: 21,
+        user: "",
+        auth: { kind: "password" },
+        path: undefined,
       });
     });
 
@@ -309,6 +323,77 @@ describe("network (CPE-1513)", () => {
     it("falls back to a blank smb form for a non-UNC path (defensive; shouldn't occur post-backend-filter)", () => {
       const share: NetShare = { name: "junk", path: "not-a-unc-path", kind: "discovered" };
       expect(discoveredShareToFormInput(share)).toEqual({ ...blankConnectionForm(), scheme: "smb" });
+    });
+
+    // ── CPE-1523: mDNS `scheme://host[:port]` rows (sftp/webdav/davs/ftp/nfs — not UNC) ──────────────
+
+    it("maps an mDNS sftp row (no port — default omitted by the backend) to scheme+host, name from the row", () => {
+      const share: NetShare = { name: "Office QNAP", path: "sftp://qnap.local", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toEqual({
+        name: "Office QNAP",
+        scheme: "sftp",
+        host: "qnap.local",
+        port: "",
+        user: "",
+        authKind: "password",
+        keyPath: "",
+        path: "",
+      });
+    });
+
+    it("carries a non-default port through from an mDNS row", () => {
+      const share: NetShare = { name: "nas.local", path: "sftp://nas.local:2222", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toMatchObject({ host: "nas.local", port: "2222" });
+    });
+
+    it("maps an mDNS webdav/davs row", () => {
+      expect(discoveredShareToFormInput({ name: "nas", path: "webdav://nas.local", kind: "discovered" })).toMatchObject(
+        { scheme: "webdav", host: "nas.local" },
+      );
+      expect(discoveredShareToFormInput({ name: "nas", path: "davs://nas.local", kind: "discovered" })).toMatchObject({
+        scheme: "davs",
+        host: "nas.local",
+      });
+    });
+
+    it("maps an mDNS ftp row and it builds a valid connection one click later (CPE-1523: cpe-ftp ships)", () => {
+      const share: NetShare = { name: "nas.local", path: "ftp://nas.local", kind: "discovered" };
+      const c = buildConnection(discoveredShareToFormInput(share));
+      expect(c).toMatchObject({ scheme: "ftp", host: "nas.local", port: 21 });
+    });
+
+    it("falls back to the host when the row has a blank name", () => {
+      const share: NetShare = { name: "   ", path: "sftp://qnap.local", kind: "discovered" };
+      expect(discoveredShareToFormInput(share)).toMatchObject({ name: "qnap.local" });
+    });
+  });
+
+  describe("mergeDiscovered (CPE-1523: WNet tier + mDNS tier → one deduplicated 'Discovered' list)", () => {
+    it("concatenates both tiers, WNet first, when there's no overlap", () => {
+      const windows: NetShare[] = [{ name: "\\\\qnap\\media", path: "\\\\qnap\\media", kind: "discovered" }];
+      const mdns: NetShare[] = [{ name: "nas.local", path: "sftp://nas.local", kind: "discovered" }];
+      expect(mergeDiscovered(windows, mdns)).toEqual([...windows, ...mdns]);
+    });
+
+    it("drops an mDNS row that duplicates a WNet row's path, keeping the WNet (UNC) one", () => {
+      const windows: NetShare[] = [{ name: "\\\\QNAP\\media", path: "\\\\QNAP\\media", kind: "discovered" }];
+      // Same path, different case/trailing-slash — still a duplicate by `shareDedupKey`'s rules.
+      const mdns: NetShare[] = [{ name: "qnap dup", path: "\\\\qnap\\media\\", kind: "discovered" }];
+      const merged = mergeDiscovered(windows, mdns);
+      expect(merged).toHaveLength(1);
+      expect(merged[0]).toEqual(windows[0]);
+    });
+
+    it("dedupes within a single tier too, keeping the first occurrence", () => {
+      const mdns: NetShare[] = [
+        { name: "first", path: "sftp://nas.local", kind: "discovered" },
+        { name: "second (dup)", path: "sftp://nas.local", kind: "discovered" },
+      ];
+      expect(mergeDiscovered([], mdns)).toEqual([mdns[0]]);
+    });
+
+    it("both tiers empty is empty, not a hang", () => {
+      expect(mergeDiscovered([], [])).toEqual([]);
     });
   });
 });

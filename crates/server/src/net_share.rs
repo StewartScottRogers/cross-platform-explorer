@@ -1,11 +1,13 @@
 //! Network-share address parser (pure model) — CPE-1024, epic CPE-716. Turns a user-typed share
-//! address (`smb://…`, `nfs://…`, `ftp://…`, `sftp://…`, or a Windows UNC path) into a normalized
-//! [`NetworkShare`], so the future "connect to server" dialog and the mount glue share one tested
-//! understanding of an address. No network or mount I/O here — hand-rolled parsing only, no new
-//! dependencies (lean-core: do not pull a URL crate for this).
+//! address (`smb://…`, `nfs://…`, `ftp://…`, `sftp://…`, `webdav://…`, `davs://…`, or a Windows UNC
+//! path) into a normalized [`NetworkShare`], so the future "connect to server" dialog and the mount glue
+//! share one tested understanding of an address. No network or mount I/O here — hand-rolled parsing
+//! only, no new dependencies (lean-core: do not pull a URL crate for this).
 
 /// The protocol a parsed share address uses. A Windows UNC path (`\\host\share`) is normalized to
-/// [`ShareProtocol::Smb`] — UNC *is* SMB.
+/// [`ShareProtocol::Smb`] — UNC *is* SMB. `Webdav`/`Davs` (CPE-1523) match the scheme words
+/// `crate::connections`/`crate::location` already use for saved WebDAV connections (plain vs.
+/// TLS-secured).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 #[serde(rename_all = "snake_case")]
@@ -14,6 +16,8 @@ pub enum ShareProtocol {
     Nfs,
     Ftp,
     Sftp,
+    Webdav,
+    Davs,
 }
 
 impl ShareProtocol {
@@ -23,6 +27,8 @@ impl ShareProtocol {
             ShareProtocol::Nfs => "nfs",
             ShareProtocol::Ftp => "ftp",
             ShareProtocol::Sftp => "sftp",
+            ShareProtocol::Webdav => "webdav",
+            ShareProtocol::Davs => "davs",
         }
     }
 }
@@ -77,7 +83,7 @@ fn split_host_share_path(rest: &str) -> Result<(String, String, String), String>
 
 /// Parse a user-typed network-share address into a [`NetworkShare`].
 ///
-/// Accepts `smb://`, `nfs://`, `ftp://`, `sftp://` URLs and Windows UNC paths
+/// Accepts `smb://`, `nfs://`, `ftp://`, `sftp://`, `webdav://`, `davs://` URLs and Windows UNC paths
 /// (`\\host\share\sub`, back- or forward-slashed) — UNC is normalized to `Smb`. A host is always
 /// required; empty input, a scheme with no host, and an unrecognized scheme all return `Err`.
 pub fn parse_share(input: &str) -> Result<NetworkShare, String> {
@@ -94,6 +100,8 @@ pub fn parse_share(input: &str) -> Result<NetworkShare, String> {
             "nfs" => ShareProtocol::Nfs,
             "ftp" => ShareProtocol::Ftp,
             "sftp" => ShareProtocol::Sftp,
+            "webdav" => ShareProtocol::Webdav,
+            "davs" => ShareProtocol::Davs,
             other => return Err(format!("unknown network share scheme: {other}")),
         };
         let (host, share, path) = split_host_share_path(rest)?;
@@ -260,8 +268,10 @@ pub fn user_share(input: &str) -> Option<NetShare> {
 }
 
 /// Normalize a path to a dedup key: trimmed, trailing slashes dropped, lowercased (share paths are
-/// case-insensitive on Windows and treating them so cross-platform is harmless here).
-fn dedup_key(path: &str) -> String {
+/// case-insensitive on Windows and treating them so cross-platform is harmless here). `pub` (CPE-1523)
+/// so `cpe-mdns`'s impure `discover()` can dedup its resolved rows with the exact same key the rest of
+/// the Shared-tab pipeline (`combine_shares`/`flatten_discovered`) uses.
+pub fn dedup_key(path: &str) -> String {
     path.trim().trim_end_matches(['/', '\\']).to_ascii_lowercase()
 }
 
@@ -404,6 +414,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_webdav_and_davs_urls() {
+        // CPE-1523: added alongside the mDNS discovery table's webdav/davs mapping.
+        let webdav = parse_share("webdav://myserver/dav/path").unwrap();
+        assert_eq!(webdav.protocol, ShareProtocol::Webdav);
+        assert_eq!(webdav.host, "myserver");
+        assert_eq!(webdav.share, "dav");
+        assert_eq!(webdav.path, "/path");
+
+        let davs = parse_share("davs://myserver/dav").unwrap();
+        assert_eq!(davs.protocol, ShareProtocol::Davs);
+        assert_eq!(davs.host, "myserver");
+    }
+
+    #[test]
     fn parses_host_only_with_no_share() {
         let s = parse_share("ftp://myserver").unwrap();
         assert_eq!(s.host, "myserver");
@@ -442,6 +466,12 @@ mod tests {
     fn round_trips_smb_via_to_url() {
         let s = parse_share("smb://myserver/share/sub/dir").unwrap();
         assert_eq!(s.to_url(), "smb://myserver/share/sub/dir");
+    }
+
+    #[test]
+    fn round_trips_davs_via_to_url() {
+        let s = parse_share("davs://myserver/dav/sub").unwrap();
+        assert_eq!(s.to_url(), "davs://myserver/dav/sub");
     }
 
     #[test]

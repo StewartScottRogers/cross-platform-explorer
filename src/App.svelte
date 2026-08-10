@@ -62,6 +62,7 @@
     secretAlwaysRequired,
     formFromConnection,
     blankConnectionForm,
+    mergeDiscovered,
     type ConnState,
     type ConnectionFormInput,
   } from "./lib/network";
@@ -4406,21 +4407,29 @@
     }
   }
 
-  /** Load the sidebar's "Discovered on your network" tier (CPE-1519): Windows-native WNet enumeration of
-   *  the same network neighborhood Explorer shows. `discover_network_windows` is deliberately excluded
-   *  from the typed specta bindings (its behavior is Windows-only, like `set_file_attribute` — see
-   *  CLAUDE.md), so this calls it via the raw `invoke`, not `commands.*`. Bounded (~6s) backend-side, and
-   *  on non-Windows it's a compiled no-op stub returning `[]` immediately, so this can never hang startup.
-   *  A failure (or the non-Windows/nothing-discovered case) degrades to an empty tier, never an error —
-   *  the section simply doesn't grow a third tier, exactly like it doesn't grow tier 2 rows when there are
-   *  no OS shares. */
+  /** Load the sidebar's "Discovered on your network" tier: the Windows-native WNet enumeration of the
+   *  same network neighborhood Explorer shows (CPE-1519) MERGED with the cross-platform mDNS/DNS-SD
+   *  browse (CPE-1523) — the two run in parallel (neither backend call waits on the other) and are
+   *  combined + deduplicated by `mergeDiscovered` (pure, unit-tested in `network.test.ts`).
+   *  `discover_network_windows` is deliberately excluded from the typed specta bindings (its behavior is
+   *  Windows-only, like `set_file_attribute` — see CLAUDE.md), so it's called via the raw `invoke`, not
+   *  `commands.*`; `discover_network_mdns` behaves identically on every OS, so it IS a typed
+   *  `commands.discoverNetworkMdns()` call. Both are bounded (~6s) backend-side, and each degrades to `[]`
+   *  independently on failure (a dead/absent mDNS daemon never blanks out the WNet rows, and vice versa)
+   *  — so a total failure of both simply leaves the tier empty, exactly like it doesn't grow tier 2 rows
+   *  when there are no OS shares. */
   async function loadDiscovered(): Promise<void> {
-    try {
-      discoveredShares = (await invoke<NetShare[]>("discover_network_windows")) ?? [];
-    } catch (e) {
-      console.debug("discover_network_windows failed:", e);
-      discoveredShares = [];
-    }
+    const [windows, mdns] = await Promise.all([
+      invoke<NetShare[]>("discover_network_windows").catch((e) => {
+        console.debug("discover_network_windows failed:", e);
+        return [] as NetShare[];
+      }),
+      commands.discoverNetworkMdns().catch((e) => {
+        console.debug("discover_network_mdns failed:", e);
+        return [] as NetShare[];
+      }),
+    ]);
+    discoveredShares = mergeDiscovered(windows ?? [], mdns ?? []);
   }
 
   /** Add a user-typed network location (CPE-1163): persist it, then reload so it appears (the backend
