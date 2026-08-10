@@ -2,7 +2,7 @@
 id: CPE-1569
 title: "EPIC: Documentation completeness — audit + massively expand in-app docs to cover EVERY feature"
 type: Task
-status: Proposed
+status: In Progress
 priority: High
 component: Frontend
 tags: [epic]
@@ -44,6 +44,28 @@ per feature); (4) a prioritized slice list — batches of pages grouped by featu
 buildable child ticket; (5) any tooling gaps (search across docs, an index/TOC page, screenshot capture via
 the gui-smoke harness, a lint/guard that flags a shipped feature with no deep page). Child tickets filed once
 the spike returns and the epic is activated.
+
+## Spike-locked plan (2026-08-10) — see Library `docs-completeness-audit-2026-08-10`
+Good news: the pipeline already has **category frontmatter + collapsible TOC + full-text search** (CPE-763) — this is
+expansion, not re-architecture. Real **MISSING** pages (Tier 1): Global Undo, Batch Rename, Macros (CPE-739), Link
+Forge (CPE-715), Select-by, User-defined commands (CPE-711), a keyboard-shortcut **reference** (36-* only covers the
+rebind dialog). **THIN** (Tier 2): Archives, Batch media, Agent Watch (buried, not a Section), Properties, Tags/Smart-
+folders/Saved-searches, Workbench, Repos, Agent Deck. Adopt the 10-point **quality rubric** + the "Honest limits"
+closing-section house style. Verify against `src/lib/components/`, NOT epic titles (found stale "unbuilt" work-logs for shipped features).
+
+**Child slices (decompose just-in-time; slice 1+2 filed as CPE-1571):**
+1+2. **CPE-1571** — IA groundwork (category frontmatter across 37 pages + Index/TOC page) **+** the dialog-doc guard
+   test + extended F1 registry for non-Section dialogs. *Foundational; land before content.*
+3. Tier-1 batch A: Undo + Batch Rename + Link Forge pages.
+4. Tier-1 batch B: Macros + Select-by + User-defined commands pages.
+5. Keyboard-shortcut **reference** page (every action + what it does).
+6. Split Tags / Smart-folders / Saved-searches out of `03-explorer.md` into own deep pages.
+7. Promote Agent Watch to its own page + Section/contextual help.
+8. Archives + Batch-media depth pass. 9. Properties reference page. 10. Agent Deck/Workbench/Repos depth.
+11. Spotlight hotkey + Terminal shortcuts (small). 12. Screenshot pass via gui-smoke (last, GUI).
+
+Numbering: keep existing `NN-*.md` filenames; NEW pages use category-prefixed slugs (`docs.ts` sorts by frontmatter
+`order`, not filename). Every new/expanded page updates `sectionDocs.ts` where it maps to a Section (guard-tested).
 
 ## Constraints
 - Follow CPE-579: every new page gets its `sectionDocs.ts` entry where it maps to a section; keep
