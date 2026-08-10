@@ -112,7 +112,7 @@
   import type { ResultKind } from "./lib/bindings.gen";
   import TransferPanel from "./lib/components/TransferPanel.svelte";
   import DropStackPanel from "./lib/components/DropStackPanel.svelte";
-  import { initDropStack } from "./lib/dropStack";
+  import { initDropStack, addToDropStack } from "./lib/dropStack";
   import TerminalPanel from "./lib/components/TerminalPanel.svelte";
   import TransferConflictDialog from "./lib/components/TransferConflictDialog.svelte";
   import { initTransfers, startTransfer, startArchiveCompress, startArchiveExtract, collidingNames, type TransferReport, type ConflictPolicy } from "./lib/transfers";
@@ -191,7 +191,6 @@
     emptyClipboard, stage, isEmpty as clipEmpty, canPaste as clipCanPaste,
     type Clipboard,
   } from "./lib/clipboard";
-  import { initDropStack, addToDropStack } from "./lib/dropStack";
   import { detectContexts, type FolderAction } from "./lib/folderContext";
   import { isExecutable, iconFor, sameTypeIndices, isImage } from "./lib/filetypes";
   import QuickLook from "./lib/components/QuickLook.svelte";
@@ -5575,15 +5574,14 @@
     // Transfer manager (CPE-613): consume progress events, and on completion refresh the current
     // folder (a copy may have landed here) + report the outcome. Idle until a transfer starts.
     initTransfers().catch(() => {});
-    // Drop Stack (CPE-1530/1531): hydrate the reactive store from settings.json BEFORE any "Add to
-    // Drop Stack" action can fire — otherwise a first add would overwrite a persisted stack with just
-    // the new entries instead of appending to it (the store starts empty until loaded). Idempotent/sync.
-    initDropStack();
     // Tag store (CPE-636): load persisted tags/labels once so rows can show chips + tints. Idle
     // (empty) until something is actually tagged, so the plain explorer is unaffected.
     initTags().catch(() => {});
-    // Drop Stack (CPE-1530/1532): load the persisted shelf once so the panel shows what survived a
-    // restart, not just items added this session. Idle (empty) until something is shelved.
+    // Drop Stack (CPE-1530/1531/1532): hydrate the reactive store from settings.json once, BEFORE any
+    // "Add to Drop Stack" action can fire and before the panel first renders — otherwise a first add
+    // would overwrite a persisted stack with just the new entries instead of appending to it (the store
+    // starts empty until loaded), and the panel would show an empty shelf until something new landed.
+    // Idle (empty) until something is shelved. Idempotent/sync — safe to call once here.
     initDropStack();
     listen<TransferReport>("transfer://done", (e) => {
       const r = e.payload;
