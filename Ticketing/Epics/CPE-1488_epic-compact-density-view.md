@@ -2,7 +2,7 @@
 id: CPE-1488
 title: "EPIC: Compact / dense view mode — TUI-grade information density"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Frontend
 tags: [epic]
@@ -51,3 +51,6 @@ tickets, sequenced by a single foundation ticket then two parallel consumers the
    1526; parallel with 1527)*
 4. **CPE-1529** — Instant density toggle control (in `NavToolbar.svelte`) + docs update
    (`src/docs/03-explorer.md`). *(prereq: 1526; sequence after 1528 — both touch NavToolbar.svelte)*
+
+## Closed 2026-08-09
+All four children merged: CPE-1526 (foundation #749), CPE-1528 (chrome #750), CPE-1527 (FileList rows #751), CPE-1529 (toggle+docs #752). Compact density is fully user-drivable via the toolbar toggle. Visual sign-off of the compact look owed to the user (queued).
