@@ -2,7 +2,7 @@
 id: CPE-1582
 title: "Docs: keyboard-shortcut reference page (every action + what it does)"
 type: Task
-status: Doing
+status: Done
 priority: Medium
 component: Frontend
 epic: CPE-1569
