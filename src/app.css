@@ -1,19 +1,64 @@
-/* Windows 11 File Explorer — light theme tokens */
+/* Windows 11 File Explorer — theme tokens (CPE-1534, epic CPE-1492 theme-token foundation).
+   Two layers:
+     Layer 1 = PALETTE  — raw colour primitives, named, no meaning attached to them.
+     Layer 2 = SEMANTIC — the token names components actually consume (--bg, --text, --accent,
+               ...), each resolving to a palette var. Declared once on bare :root (today's
+               default/fallback, unchanged) and duplicated under :root[data-theme="light"] so a
+               future theme runtime (CPE-1535) can select "light" explicitly once it starts
+               stamping data-theme on the document. The two blocks are value-identical — this
+               split is a pure refactor, zero visual change. Dark comes later (CPE-1493).
+   Don't hand-edit a hex literal into a semantic rule below — add/rename a palette var and point
+   the semantic token at it, so every consumer of that token moves together. */
+
+/* ---------- Layer 1: palette (raw colour primitives) ---------- */
+:root {
+  --pal-white: #ffffff;
+  --pal-gray-50: #fbfbfb;
+  --pal-gray-100: #f3f3f3;
+  --pal-gray-150: #f0f0f0;
+  --pal-gray-200: #ebebeb;
+  --pal-gray-250: #e5e5e5;
+  --pal-gray-400: #b3b3b3;
+  --pal-gray-600: #8a8a8a;
+  --pal-gray-700: #616161;
+  --pal-gray-850: #3c3c3c;
+  --pal-gray-900: #1b1b1b;
+
+  --pal-blue-100: #e5f0fb;
+  --pal-blue-150: #dbeafc;
+  --pal-blue-600: #0067c0;
+  --pal-blue-650: #0078d4;
+
+  --pal-red-600: #c42b1c;
+  --pal-red-700: #a82419;
+  --pal-green-600: #3a9d4a;
+
+  /* Okabe-Ito colour-blind-safe set — backs the conflict-radar agent palette below. */
+  --pal-okabe-blue: #0072b2;
+  --pal-okabe-vermillion: #d55e00;
+  --pal-okabe-bluish-green: #009e73;
+  --pal-okabe-reddish-purple: #cc79a7;
+  --pal-okabe-orange: #e69f00;
+  --pal-okabe-sky-blue: #56b4e9;
+  --pal-purple-500: #6b4fbb;
+}
+
+/* ---------- Layer 2: semantic tokens — light theme (today's default/fallback) ---------- */
 :root {
   color-scheme: light;
 
-  --bg: #f3f3f3;          /* window background (mica-ish) */
-  --surface: #ffffff;     /* content surfaces */
-  --surface-alt: #fbfbfb;
-  --hover: #f0f0f0;
-  --active: #ebebeb;
+  --bg: var(--pal-gray-100);          /* window background (mica-ish) */
+  --surface: var(--pal-white);        /* content surfaces */
+  --surface-alt: var(--pal-gray-50);
+  --hover: var(--pal-gray-150);
+  --active: var(--pal-gray-200);
 
-  --border: #e5e5e5;
+  --border: var(--pal-gray-250);
   /* Emphasis border for toolbar/menu/input chrome (address bar, menus, pills, buttons). NOT
      dark enough for a dialog edge over a dimmed backdrop — see --dialog-border below
      (CPE-1193). Keep this var scoped to non-modal chrome; don't reach for it on a
      `.dialog`/overlay-panel border. */
-  --border-strong: #b3b3b3;
+  --border-strong: var(--pal-gray-400);
   /* Modal-dialog / overlay-panel edge. Every dialog sits on a dimmed backdrop
      (rgba(0,0,0,.25-.45) over --bg #f3f3f3), which itself renders as roughly #86-#b6 grey —
      uncomfortably close to --border-strong (#b3b3b3), so that var reads as a soft
@@ -21,7 +66,7 @@
      NearDuplicatesDialog). This value is picked dark enough to stay >=3:1 contrast against
      the darkest backdrop in use (rgba(0,0,0,.45) -> ~#868686) as well as the white dialog
      surface, so the edge reads as crisp in every dialog regardless of its backdrop opacity. */
-  --dialog-border: #3c3c3c;
+  --dialog-border: var(--pal-gray-850);
 
   /* Error/danger affordance (CPE-1212): error text/borders/backgrounds, destructive-confirmation
      accents, validation errors. Centralizes what had drifted into several near-identical hard-coded
@@ -29,18 +74,18 @@
      the canonical value — it was already the most common (37 occurrences vs. 27/9/5 for the others)
      and already the base `.error` colour below. NOT for menu-item text — MENUS.md keeps that
      `var(--text)` always; this token is for genuine error/destructive affordances only. */
-  --danger: #c42b1c;
-  --success: #3a9d4a;
-  --danger-hover: #a82419;
+  --danger: var(--pal-red-600);
+  --success: var(--pal-green-600);
+  --danger-hover: var(--pal-red-700);
 
-  --text: #1b1b1b;
-  --text-dim: #616161;
-  --text-faint: #8a8a8a;
+  --text: var(--pal-gray-900);
+  --text-dim: var(--pal-gray-700);
+  --text-faint: var(--pal-gray-600);
 
-  --accent: #0067c0;
-  --accent-hover: #0078d4;
-  --selection: #e5f0fb;     /* selected row fill */
-  --selection-hover: #dbeafc;
+  --accent: var(--pal-blue-600);
+  --accent-hover: var(--pal-blue-650);
+  --selection: var(--pal-blue-100);     /* selected row fill */
+  --selection-hover: var(--pal-blue-150);
 
   --radius: 6px;
   --radius-lg: 8px;
@@ -51,18 +96,69 @@
      activity heat-map's per-owner accent + legend (`agentColors.ts:colorForActor`), chosen from
      the colour-blind-safe Okabe-Ito set so distinct agents stay distinguishable. Never read
      directly by a colour literal in component code — always through `colorForActor` so a future
-     dark theme (this app is currently light-only; see `color-scheme: light` above) can override
-     these same six vars without touching any component. */
-  --agent-1: #0072b2; /* blue */
-  --agent-2: #d55e00; /* vermillion */
-  --agent-3: #009e73; /* bluish green */
-  --agent-4: #cc79a7; /* reddish purple */
-  --agent-5: #e69f00; /* orange */
-  --agent-6: #56b4e9; /* sky blue */
+     dark theme (CPE-1493) can override these same six vars without touching any component. */
+  --agent-1: var(--pal-okabe-blue);            /* blue */
+  --agent-2: var(--pal-okabe-vermillion);      /* vermillion */
+  --agent-3: var(--pal-okabe-bluish-green);    /* bluish green */
+  --agent-4: var(--pal-okabe-reddish-purple);  /* reddish purple */
+  --agent-5: var(--pal-okabe-orange);          /* orange */
+  --agent-6: var(--pal-okabe-sky-blue);        /* sky blue */
   /* Dedicated, out-of-cycle colour for the local user's own edits, so "you" is always the same
      colour regardless of how many agent sessions are running. */
-  --agent-user: #6b4fbb;
+  --agent-user: var(--pal-purple-500);
   /* Neutral/muted — an untagged ("unknown") actor never competes visually with a real owner. */
+  --agent-unknown: var(--text-faint);
+
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
+    Roboto, sans-serif;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--bg);
+}
+
+/* Same semantic layer, explicit selector for a future theme runtime (CPE-1535) that stamps
+   data-theme="light" on the document. Kept value-identical to the bare :root block above —
+   duplicated, not derived, so this file stays readable without a preprocessor. When CPE-1493
+   adds a dark block, the bare :root above becomes an OS-default fallback and this block is the
+   explicit "light" selection; until then it's inert (nothing sets data-theme yet). */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: var(--pal-gray-100);
+  --surface: var(--pal-white);
+  --surface-alt: var(--pal-gray-50);
+  --hover: var(--pal-gray-150);
+  --active: var(--pal-gray-200);
+
+  --border: var(--pal-gray-250);
+  --border-strong: var(--pal-gray-400);
+  --dialog-border: var(--pal-gray-850);
+
+  --danger: var(--pal-red-600);
+  --success: var(--pal-green-600);
+  --danger-hover: var(--pal-red-700);
+
+  --text: var(--pal-gray-900);
+  --text-dim: var(--pal-gray-700);
+  --text-faint: var(--pal-gray-600);
+
+  --accent: var(--pal-blue-600);
+  --accent-hover: var(--pal-blue-650);
+  --selection: var(--pal-blue-100);
+  --selection-hover: var(--pal-blue-150);
+
+  --radius: 6px;
+  --radius-lg: 8px;
+
+  --row-h: 30px;
+
+  --agent-1: var(--pal-okabe-blue);
+  --agent-2: var(--pal-okabe-vermillion);
+  --agent-3: var(--pal-okabe-bluish-green);
+  --agent-4: var(--pal-okabe-reddish-purple);
+  --agent-5: var(--pal-okabe-orange);
+  --agent-6: var(--pal-okabe-sky-blue);
+  --agent-user: var(--pal-purple-500);
   --agent-unknown: var(--text-faint);
 
   font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system,
