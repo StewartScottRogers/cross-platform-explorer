@@ -14,7 +14,7 @@
  */
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { invoke, unwrap } from "./invoke";
-import type { ViewMode, SortKey, SortDir, RecentFile, Favorite } from "./types";
+import type { ViewMode, SortKey, SortDir, RecentFile, Favorite, DensityMode } from "./types";
 import { COLUMN_DEFAULTS, META_COL_MIN, COLUMN_MAX, type ActiveMetaColumn } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
 import type { ColorRule } from "./colorRules";
@@ -78,6 +78,7 @@ export const KEYS = {
   copilotEnabled: "cpe.copilotEnabled",
   copilotBaseUrl: "cpe.copilotBaseUrl",
   copilotModel: "cpe.copilotModel",
+  density: "cpe.density",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -177,6 +178,7 @@ function write(key: string, value: unknown): void {
 
 const isView = (v: unknown): v is ViewMode =>
   v === "details" || v === "list" || v === "icons";
+const isDensity = (v: unknown): v is DensityMode => v === "comfortable" || v === "compact";
 // A metadata-column sort key is the `meta:<columnId>` prefix convention (CPE-1146); loosely
 // validated (any non-empty suffix) since the column-set membership check happens at use time — a
 // persisted `meta:` key for a column that's since been removed just degrades to an Empty-tiebreak
@@ -212,6 +214,13 @@ const isFavoriteArray = (v: unknown): v is Favorite[] =>
 
 export const loadView = (): ViewMode => read(KEYS.view, "details", isView);
 export const saveView = (v: ViewMode) => write(KEYS.view, v);
+
+// Row/chrome density (CPE-1526, foundation slice of epic CPE-1488 "compact/dense view mode"):
+// "comfortable" is today's spacing and the default — nothing looks different until a corrupt or
+// missing value degrades cleanly to it. This ticket only persists the value and threads it through
+// App.svelte; CPE-1527/1528/1529 are what actually read it to tighten row pitch and chrome.
+export const loadDensity = (): DensityMode => read(KEYS.density, "comfortable", isDensity);
+export const saveDensity = (v: DensityMode) => write(KEYS.density, v);
 
 export const loadShowHidden = (): boolean => read(KEYS.showHidden, false, isBool);
 export const saveShowHidden = (v: boolean) => write(KEYS.showHidden, v);

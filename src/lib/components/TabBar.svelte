@@ -2,9 +2,18 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import type { DensityMode } from "../types";
 
   export let tabs: { id: number; title: string }[] = [];
   export let activeId: number;
+  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): received but not yet read —
+  // this ticket only wires the prop through for CPE-1528 to consume later. "comfortable" (the
+  // default) leaves the tab strip unchanged.
+  export let density: DensityMode = "comfortable";
+  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
+  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
+  // this dummy reference just satisfies the unused-export-let lint until CPE-1528 reads density for real.
+  const _densityRef = density;
 
   const dispatch = createEventDispatcher<{
     select: number; close: number; new: void;

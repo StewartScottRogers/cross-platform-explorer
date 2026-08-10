@@ -23,7 +23,7 @@
   import { filterEntriesByTag } from "../tagFilter";
   import { tags } from "../tags";
   import type { FolderAction, FolderContext } from "../folderContext";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare } from "../types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare, DensityMode } from "../types";
   import type { ColorRule } from "../colorRules";
   import type { AgentSession } from "../sidecar";
   import type { ActiveMetaColumn } from "../columns";
@@ -33,6 +33,10 @@
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
   export let inHome = false;
+  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): threaded straight through to
+  // <FileList> below. Additive-only for now — FileList ignores it until CPE-1527/1528 add the
+  // compact row styling; "comfortable" (the default) renders exactly as today.
+  export let density: DensityMode = "comfortable";
   export let places: Place[] = [];
   export let drives: Place[] = [];
   export let pins: string[] = [];
@@ -562,6 +566,7 @@
     {sortKey}
     {sortDir}
     {view}
+    {density}
     {error}
     {loading}
     {searching}

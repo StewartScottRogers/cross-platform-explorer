@@ -223,7 +223,7 @@
   import {
     pushUndo, popUndo, canUndo, peekLabel, invert, deletedPaths, type UndoEntry,
   } from "./lib/undo";
-  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare, Connection } from "./lib/types";
+  import type { DirEntry, Place, SortKey, SortDir, ViewMode, RecentFile, Favorite, NetShare, Connection, DensityMode } from "./lib/types";
 
   interface OpResult { path: string; ok: boolean; error: string }
 
@@ -319,6 +319,10 @@
   // Dual-pane / commander mode (CPE-677, epic CPE-617). Pane B is a second <ExplorerPane> rendered beside
   // pane A when `dualPane` is on, navigating independently via navigateB/openB. Single-pane (default) is
   // unchanged. `activePane` drives the focus ring + Tab switch.
+  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488 "compact/dense view mode"):
+  // "comfortable" is today's spacing and the default — this ticket only persists the value and
+  // threads it as a prop into the panes/chrome below; CPE-1527/1528/1529 are what actually read it.
+  let density = settings.loadDensity();
   let dualPane = settings.loadDualPane();
   let paneBPath = settings.loadPaneBPath();
   let explorerPaneB: ExplorerPane | undefined;
@@ -2067,6 +2071,13 @@
     } catch {
       showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
     }
+  }
+
+  /** Set row/chrome density (CPE-1526, epic CPE-1488); persists. No renderer reads this value yet —
+   *  this ticket is the foundation seam CPE-1527/1528/1529 build the visible compact styling on. */
+  function setDensity(d: DensityMode) {
+    density = d;
+    settings.saveDensity(density);
   }
 
   /** Toggle single ⇄ dual pane (CPE-677); persists. On first enable pane B opens pane A's folder. */
@@ -5751,6 +5762,7 @@
 <TabBar
   tabs={tabList}
   {activeId}
+  {density}
   on:select={(e) => selectTab(e.detail)}
   on:close={(e) => closeTab(e.detail)}
   on:new={newTab}
@@ -5773,6 +5785,7 @@
   bind:editingPath
   {crumbs}
   {currentPath}
+  {density}
   recentPaths={recentFolders.map((r) => r.path)}
   canBack={canGoBack(activeTab.history)}
   canForward={canGoForward(activeTab.history)}
@@ -5843,6 +5856,7 @@
       {places}
       {drives}
       {favorites}
+      {density}
       {driveUsage}
       {driveRemovable}
       sessions={$agentSessions}
@@ -5922,6 +5936,7 @@
     <ExplorerPane
       bind:this={explorerPane}
       inHome={isHome && !smartFolder && !structuredSearch}
+      {density}
       {places}
       {drives}
       {pins}
@@ -5999,6 +6014,7 @@
       <ExplorerPane
         bind:this={explorerPaneB}
         inHome={paneBPath === HOME}
+        {density}
         bind:entries={entriesB}
         bind:visible={visibleB}
         bind:shown={shownB}

@@ -12,6 +12,7 @@ import {
   loadContentEmbedderBaseUrl, saveContentEmbedderBaseUrl,
   loadContentEmbedderModel, saveContentEmbedderModel,
   loadContentEmbedderConfig,
+  loadDensity, saveDensity,
 } from "./settings";
 import type { RecentFile, Favorite } from "./types";
 import type { WorkspaceTab } from "./workspaces";
@@ -146,6 +147,27 @@ describe("contentEmbedder config (CPE-1273)", () => {
     expect(cfg).not.toHaveProperty("api_key");
     expect(cfg).not.toHaveProperty("key");
     saveContentEmbedderEnabled(false);
+  });
+});
+
+// CPE-1526 (foundation slice of epic CPE-1488 "compact/dense view mode"): the persisted density
+// setting. "comfortable" is today's only behavior and stays the default so this ticket has zero
+// visible effect; the delete-test requires an absent/corrupt stored value to degrade to it cleanly
+// rather than crash (mirrors the isView-style validators already in this file).
+describe("density (CPE-1526)", () => {
+  it("defaults to comfortable with nothing saved", () => {
+    expect(loadDensity()).toBe("comfortable");
+  });
+
+  it("round-trips compact through save/load", () => {
+    saveDensity("compact");
+    expect(loadDensity()).toBe("compact");
+    saveDensity("comfortable"); // reset for other tests
+  });
+
+  it("degrades a corrupt/invalid stored value to the default rather than crashing", () => {
+    saveDensity("ultra-cozy" as unknown as ReturnType<typeof loadDensity>);
+    expect(loadDensity()).toBe("comfortable");
   });
 });
 

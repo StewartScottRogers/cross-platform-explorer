@@ -17,7 +17,7 @@
   import { startFileDrag, resolveDragIcon, isTauriEnv } from "../dragOut";
   import { commands } from "../bindings.gen";
   import type { Selection } from "../selection";
-  import type { DirEntry, SortKey, SortDir, ViewMode } from "../types";
+  import type { DirEntry, SortKey, SortDir, ViewMode, DensityMode } from "../types";
   import type { AvailableColumn, MetadataCell } from "../bindings.gen";
   import type { AgentActivity } from "../agentActivity";
   import { folderActivityKindNorm, folderOwnerNorm, normalizeActivityByKind } from "../agentActivity";
@@ -66,6 +66,14 @@
   export let sortKey: SortKey = "name";
   export let sortDir: SortDir = "asc";
   export let view: ViewMode = "details";
+  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488 "compact/dense view mode"):
+  // received but NOT YET READ by any row-height/CSS logic here — this ticket only wires the prop
+  // through so CPE-1527/1528 have it to consume. "comfortable" (the default) is today's row pitch.
+  export let density: DensityMode = "comfortable";
+  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
+  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
+  // this dummy reference just satisfies the unused-export-let lint until CPE-1527/1528 read it for real.
+  const _densityRef = density;
   export let error = "";
   export let loading = false;
   export let searching = false;

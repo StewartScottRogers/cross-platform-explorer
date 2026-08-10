@@ -8,7 +8,7 @@
   import { formatSize, diskUsage } from "../format";
   import { t } from "../i18n";
   import { sessionColor, sessionNum, shortModel } from "../sessionChip";
-  import type { DirEntry, Place, Favorite, Connection, NetShare } from "../types";
+  import type { DirEntry, Place, Favorite, Connection, NetShare, DensityMode } from "../types";
   import type { AgentSession } from "../sidecar";
   import type { SmartFolder } from "../smartFolders";
   import type { SavedSearch } from "../savedSearch";
@@ -28,6 +28,14 @@
 
   export let places: Place[] = [];
   export let drives: Place[] = [];
+  // Row/chrome density (CPE-1526, foundation slice of epic CPE-1488): received but not yet read —
+  // this ticket only wires the prop through for CPE-1528/1529 to consume later. "comfortable" (the
+  // default) leaves the sidebar unchanged.
+  export let density: DensityMode = "comfortable";
+  // `export const` is NOT the fix svelte-check's hint suggests: it makes the prop non-writable, so a
+  // parent's passed value is silently dropped (confirmed against the compiled writable-props check) —
+  // this dummy reference just satisfies the unused-export-let lint until CPE-1528/1529 read it for real.
+  const _densityRef = density;
   /** User-starred files and folders, shown in the quick-access section (CPE-340). */
   export let favorites: Favorite[] = [];
   /** Live coding-agent sessions from the Agent Deck (Agent Watch, CPE-397). Each row
