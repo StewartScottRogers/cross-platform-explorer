@@ -18,9 +18,9 @@ export type ViewMode = "details" | "list" | "icons" | "gallery";
 // only models + threads the value — no renderer reads it yet.
 export type DensityMode = "comfortable" | "compact";
 
-// Theme preference (CPE-1535, epic CPE-1492): only "system" and "light" are meaningful today — "system"
-// resolves to "light" until CPE-1493 ships a real dark palette. See theme.ts's resolveTheme.
-export type ThemeSetting = "system" | "light";
+// Theme preference (CPE-1535/CPE-1540, epic CPE-1492): "system" resolves live against the OS
+// prefers-color-scheme signal; "light"/"dark" are explicit overrides. See theme.ts's resolveTheme.
+export type ThemeSetting = "system" | "light" | "dark";
 
 export interface RecentFile {
   path: string;

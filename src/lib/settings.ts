@@ -182,7 +182,8 @@ function write(key: string, value: unknown): void {
 const isView = (v: unknown): v is ViewMode =>
   v === "details" || v === "list" || v === "icons";
 const isDensity = (v: unknown): v is DensityMode => v === "comfortable" || v === "compact";
-const isTheme = (v: unknown): v is ThemeSetting => v === "system" || v === "light";
+const isTheme = (v: unknown): v is ThemeSetting =>
+  v === "system" || v === "light" || v === "dark";
 // A metadata-column sort key is the `meta:<columnId>` prefix convention (CPE-1146); loosely
 // validated (any non-empty suffix) since the column-set membership check happens at use time — a
 // persisted `meta:` key for a column that's since been removed just degrades to an Empty-tiebreak
@@ -237,10 +238,10 @@ export const saveView = (v: ViewMode) => write(KEYS.view, v);
 export const loadDensity = (): DensityMode => read(KEYS.density, "comfortable", isDensity);
 export const saveDensity = (v: DensityMode) => write(KEYS.density, v);
 
-// Theme preference (CPE-1535, foundation slice of epic CPE-1492 "light/dark theme"): "system" is the
-// default and today resolves to "light" only (see theme.ts's resolveTheme) — there is no real dark
-// palette yet (that's CPE-1493). A corrupt/hand-edited value degrades to "system" rather than crashing,
-// same as every other validated setting in this file.
+// Theme preference (CPE-1535/CPE-1540, epic CPE-1492 "light/dark theme"): "system" is the default and
+// resolves live against the OS prefers-color-scheme signal (see theme.ts's resolveTheme); "light"/"dark"
+// are explicit overrides. A corrupt/hand-edited value degrades to "system" rather than crashing, same as
+// every other validated setting in this file.
 export const loadTheme = (): ThemeSetting => read(KEYS.theme, "system", isTheme);
 export const saveTheme = (v: ThemeSetting) => write(KEYS.theme, v);
 
