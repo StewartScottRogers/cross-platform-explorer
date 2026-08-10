@@ -1,6 +1,12 @@
 @echo off
 setlocal EnableDelayedExpansion
 
+REM  Anchor to this script's own folder so every step runs relative to where the
+REM  .cmd lives, not the caller's current directory (%~dp0 is that folder, with a
+REM  trailing backslash). This makes the launched herdr server and all path
+REM  detection deterministic no matter where the script is invoked from.
+cd /d "%~dp0"
+
 REM =============================================================================
 REM  hrdrClaudeNative.cmd  --  one-file portable Claude-in-herdr dev bootstrap
 REM =============================================================================
