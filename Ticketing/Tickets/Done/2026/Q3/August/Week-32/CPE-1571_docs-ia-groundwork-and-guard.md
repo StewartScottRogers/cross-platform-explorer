@@ -2,7 +2,7 @@
 id: CPE-1571
 title: "Docs IA groundwork: category frontmatter + Index page + shipped-feature-without-a-doc guard test"
 type: Task
-status: Doing
+status: Done
 priority: High
 component: Frontend
 epic: CPE-1569
