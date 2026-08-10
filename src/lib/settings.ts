@@ -14,7 +14,16 @@
  */
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { invoke, unwrap } from "./invoke";
-import type { ViewMode, SortKey, SortDir, RecentFile, Favorite, DensityMode, ThemeSetting } from "./types";
+import type {
+  ViewMode,
+  SortKey,
+  SortDir,
+  RecentFile,
+  Favorite,
+  DensityMode,
+  ThemeSetting,
+  ContrastSetting,
+} from "./types";
 import { COLUMN_DEFAULTS, META_COL_MIN, COLUMN_MAX, type ActiveMetaColumn } from "./columns";
 import { parseRules, serializeRules } from "./colorRulesStore";
 import type { ColorRule } from "./colorRules";
@@ -82,6 +91,7 @@ export const KEYS = {
   density: "cpe.density",
   dropStack: "cpe.dropStack",
   theme: "cpe.theme",
+  contrast: "cpe.contrast",
 } as const;
 
 const MAX_RECENTS = 20;
@@ -184,6 +194,8 @@ const isView = (v: unknown): v is ViewMode =>
 const isDensity = (v: unknown): v is DensityMode => v === "comfortable" || v === "compact";
 const isTheme = (v: unknown): v is ThemeSetting =>
   v === "system" || v === "light" || v === "dark";
+const isContrast = (v: unknown): v is ContrastSetting =>
+  v === "system" || v === "off" || v === "high";
 // A metadata-column sort key is the `meta:<columnId>` prefix convention (CPE-1146); loosely
 // validated (any non-empty suffix) since the column-set membership check happens at use time — a
 // persisted `meta:` key for a column that's since been removed just degrades to an Empty-tiebreak
@@ -244,6 +256,14 @@ export const saveDensity = (v: DensityMode) => write(KEYS.density, v);
 // every other validated setting in this file.
 export const loadTheme = (): ThemeSetting => read(KEYS.theme, "system", isTheme);
 export const saveTheme = (v: ThemeSetting) => write(KEYS.theme, v);
+
+// Contrast preference (CPE-1544, epic CPE-1496 "high contrast"): an axis ORTHOGONAL to theme — "off"
+// is the default (no contrast boost) and resolves to today's unchanged look; "high" is an explicit
+// manual override; "system" follows the OS high-contrast signal once CPE-1546 supplies one. A
+// corrupt/hand-edited value degrades to "off" rather than crashing, same as every other validated
+// setting in this file. See theme.ts's resolveContrast + the widened applyTheme.
+export const loadContrast = (): ContrastSetting => read(KEYS.contrast, "off", isContrast);
+export const saveContrast = (v: ContrastSetting) => write(KEYS.contrast, v);
 
 // Drop Stack (CPE-1530, foundation of epic CPE-1489): the persisted shelf of files/folders accumulated
 // across different folder navigations — see dropStack.ts for the reducer + reactive store this backs.

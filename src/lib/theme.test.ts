@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
-import { resolveTheme, applyTheme, watchSystemTheme } from "./theme";
+import { resolveTheme, resolveContrast, applyTheme, watchSystemTheme } from "./theme";
 
 // Minimal mockable shape of the bits of MediaQueryList this module touches.
 interface MockMql {
@@ -58,6 +58,31 @@ describe("resolveTheme (CPE-1535/CPE-1540)", () => {
   });
 });
 
+// CPE-1544 (epic CPE-1496 "high contrast"): resolveContrast resolves the persisted contrast
+// preference to whether the high-contrast variant should apply. "high"/"off" are unconditional
+// overrides; "system" is the single extension point CPE-1546 plugs the real OS high-contrast read
+// into — until then it just returns the `osHighContrastActive` argument, which defaults to `false`.
+describe("resolveContrast (CPE-1544)", () => {
+  it('resolves "high" to true unconditionally', () => {
+    expect(resolveContrast("high")).toBe(true);
+    expect(resolveContrast("high", false)).toBe(true);
+  });
+
+  it('resolves "off" to false unconditionally', () => {
+    expect(resolveContrast("off")).toBe(false);
+    expect(resolveContrast("off", true)).toBe(false);
+  });
+
+  it('resolves "system" to the osHighContrastActive argument', () => {
+    expect(resolveContrast("system", true)).toBe(true);
+    expect(resolveContrast("system", false)).toBe(false);
+  });
+
+  it('resolves "system" to false when osHighContrastActive is omitted (no OS signal yet, pre-CPE-1546)', () => {
+    expect(resolveContrast("system")).toBe(false);
+  });
+});
+
 describe("applyTheme (CPE-1535/CPE-1540)", () => {
   const originalMatchMedia = window.matchMedia;
 
@@ -86,6 +111,40 @@ describe("applyTheme (CPE-1535/CPE-1540)", () => {
     mockMatchMedia(false);
     applyTheme("system");
     expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  // CPE-1544: applyTheme now optionally composes an orthogonal contrast axis, stamping
+  // `hc-${base}` when contrast resolves to high. The bare single-argument call (default
+  // contrastPref "off") must keep stamping the plain base value — proving the widened signature is
+  // fully backward compatible with every pre-CPE-1544 call site.
+  it('a bare applyTheme("dark") still stamps "dark" (default contrastPref "off" is backward compatible)', () => {
+    applyTheme("dark");
+    expect(document.documentElement.dataset.theme).toBe("dark");
+  });
+
+  it('composes "hc-dark" for applyTheme("dark", "high")', () => {
+    applyTheme("dark", "high");
+    expect(document.documentElement.dataset.theme).toBe("hc-dark");
+  });
+
+  it('composes "hc-light" for applyTheme("light", "high")', () => {
+    applyTheme("light", "high");
+    expect(document.documentElement.dataset.theme).toBe("hc-light");
+  });
+
+  it('composes "hc-light" for applyTheme("light", "system", true) (system contrast, OS signal active)', () => {
+    applyTheme("light", "system", true);
+    expect(document.documentElement.dataset.theme).toBe("hc-light");
+  });
+
+  it('composes "light" (no hc- prefix) for applyTheme("light", "system", false) (system contrast, no OS signal)', () => {
+    applyTheme("light", "system", false);
+    expect(document.documentElement.dataset.theme).toBe("light");
+  });
+
+  it('stamps the plain base for applyTheme("dark", "off") (explicit contrast off)', () => {
+    applyTheme("dark", "off");
+    expect(document.documentElement.dataset.theme).toBe("dark");
   });
 });
 

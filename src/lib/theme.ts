@@ -1,8 +1,10 @@
 /**
- * Theme runtime (CPE-1535 foundation slice + CPE-1540 resolution, epic CPE-1492 "light/dark theme"):
- * resolves the persisted `theme` setting to a concrete theme and stamps it onto
- * `document.documentElement.dataset.theme` so CPE-1534's `:root[data-theme="light"]` (and CPE-1539's
- * `:root[data-theme="dark"]`) CSS layers have something to select on.
+ * Theme runtime (CPE-1535 foundation slice + CPE-1540 resolution, epic CPE-1492 "light/dark theme";
+ * widened by CPE-1544 with an orthogonal contrast axis, epic CPE-1496 "high contrast"): resolves the
+ * persisted `theme` (and, orthogonally, `contrast`) setting to a concrete theme and stamps it onto
+ * `document.documentElement.dataset.theme` so CPE-1534's `:root[data-theme="light"]` (CPE-1539's
+ * `:root[data-theme="dark"]`, and CPE-1543's `:root[data-theme="hc-light"/"hc-dark"]`) CSS layers have
+ * something to select on.
  *
  * "system" resolves live against the OS light/dark signal via
  * `window.matchMedia("(prefers-color-scheme: dark)")` — chosen over Tauri's
@@ -14,7 +16,7 @@
  *
  * Kept pure/synchronous and framework-free so it's trivially unit-testable.
  */
-import type { ThemeSetting } from "./types";
+import type { ThemeSetting, ContrastSetting } from "./types";
 
 /** The concrete theme a `ThemeSetting` resolves to. */
 export type ResolvedTheme = "light" | "dark";
@@ -34,12 +36,43 @@ export function resolveTheme(pref: ThemeSetting): ResolvedTheme {
 }
 
 /**
- * Apply a theme preference to the document by setting `documentElement.dataset.theme` to its
- * resolved value. Harmless before CPE-1534/CPE-1539's CSS lands (an unrecognised attribute has no
- * visual effect); once merged, the matching `:root[data-theme="..."]` selector takes effect.
+ * Resolve a persisted contrast preference to whether the high-contrast variant should apply.
+ * `"high"` is an unconditional manual override (`true`); `"off"` is an unconditional override
+ * (`false`); `"system"` follows the OS high-contrast signal — but until CPE-1546 wires up the real
+ * read, there's no signal to follow, so `"system"` returns the `osHighContrastActive` argument, which
+ * defaults to `false`. That default is the single extension point CPE-1546 plugs into: once it can
+ * read the real OS state, it passes that value through here instead of leaving the default in place.
+ * Mirrors how `resolveTheme`'s `"system"` branch is structured — one pure, synchronous resolution
+ * function per axis.
  */
-export function applyTheme(pref: ThemeSetting): void {
-  document.documentElement.dataset.theme = resolveTheme(pref);
+export function resolveContrast(pref: ContrastSetting, osHighContrastActive = false): boolean {
+  if (pref === "high") return true;
+  if (pref === "off") return false;
+  return osHighContrastActive;
+}
+
+/**
+ * Apply a theme preference (and, orthogonally, a contrast preference) to the document by setting
+ * `documentElement.dataset.theme` to the composed resolved value. The base theme comes from
+ * `resolveTheme`; when `resolveContrast` says high-contrast is active, the stamped value becomes
+ * `` `hc-${base}` `` (e.g. `"hc-dark"`) for CPE-1543's `:root[data-theme="hc-..."]` CSS layer to select
+ * on — otherwise it's the base value unchanged, exactly as before this ticket.
+ *
+ * `contrastPref` and `osHighContrastActive` are optional and default to `"off"`/`false`, which
+ * reproduces the pre-CPE-1544 one-argument behaviour exactly (`dataset.theme` is always the bare
+ * `"light"`/`"dark"` base) — so every existing call site (`main.ts`'s `applyTheme(loadTheme())`,
+ * `SettingsDialog.svelte`'s `applyTheme(v)`) keeps compiling and behaving identically without passing
+ * the new arguments. Callers that DO want the contrast axis applied pass `loadContrast()` (and, once
+ * CPE-1546 lands, the OS signal) as the extra arguments.
+ */
+export function applyTheme(
+  themePref: ThemeSetting,
+  contrastPref: ContrastSetting = "off",
+  osHighContrastActive = false,
+): void {
+  const base = resolveTheme(themePref);
+  const hc = resolveContrast(contrastPref, osHighContrastActive);
+  document.documentElement.dataset.theme = hc ? `hc-${base}` : base;
 }
 
 /**
