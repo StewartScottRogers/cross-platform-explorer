@@ -1819,6 +1819,202 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
         .collect()
 }
 
+// ---- Trash listing / restore / empty (CPE-1558, epic CPE-1486 slice 1) --------------------------
+// A browsable in-app Trash, built on the same `trash::os_limited` API `restore_from_trash` already
+// uses (Windows + Linux only — macOS has no listing/restore API, see `can_restore_from_trash_impl`).
+// Per `docs/design/SERVER-ARCHITECTURE.md`, these stay in the Tauri adapter (only the `TrashEntry` DTO
+// lives in `cpe_server::model`) since the `trash` crate itself must never become a `cpe-server` dep.
+// Handler registration + typed bindings are the NEXT slice (CPE-1559) — commands compile and are unit
+// tested here but aren't yet reachable from the frontend.
+
+/// Batch size for `list_trash_stream`'s channel flushes (STREAMING.md): small enough that even a tiny
+/// Trash reveals rows in one flush, big enough that a full one rarely needs more than a couple.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+const TRASH_LIST_BATCH: usize = 256;
+
+/// Maps one `trash::TrashItem` to the cross-platform-safe `cpe_server::model::TrashEntry`, skipping
+/// (never failing) an item whose id/name/path can't round-trip through UTF-8 or whose per-item metadata
+/// lookup errors — mirrors `list_dir`'s "skip unreadable entries rather than fail the whole listing" rule.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn trash_item_to_entry(item: &trash::TrashItem) -> Option<cpe_server::model::TrashEntry> {
+    let id = item.id.to_str()?.to_string();
+    let name = item.name.to_str()?.to_string();
+    let original_parent = item.original_parent.to_str()?.to_string();
+    let size = match trash::os_limited::metadata(item) {
+        Ok(meta) => meta.size.size(),
+        Err(_) => return None,
+    };
+    Some(cpe_server::model::trash_entry(id, name, original_parent, item.time_deleted, size))
+}
+
+/// One shared "walker" over the already-materialized `list()` result: maps + skips-on-error, then
+/// chunks into `batch`-sized `Vec`s via `flush` — the STREAMING.md shape, adapted for a payload the OS
+/// API hands back all at once rather than one this code walks lazily itself. Backs both
+/// `list_trash`/`list_trash_stream` so they can never diverge.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn stream_trash_entries(
+    items: Vec<trash::TrashItem>,
+    batch: usize,
+    mut flush: impl FnMut(Vec<cpe_server::model::TrashEntry>),
+) {
+    let mut buf = Vec::with_capacity(batch.min(items.len()));
+    for item in &items {
+        if let Some(entry) = trash_item_to_entry(item) {
+            buf.push(entry);
+            if buf.len() >= batch {
+                flush(std::mem::take(&mut buf));
+            }
+        }
+    }
+    if !buf.is_empty() {
+        flush(buf);
+    }
+}
+
+/// Collect-to-vec Trash listing, for tests and any caller that wants the whole list at once.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn list_trash() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
+    tauri::async_runtime::spawn_blocking(list_trash_impl).await.map_err(|e| e.to_string())?
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn list_trash_impl() -> Result<Vec<cpe_server::model::TrashEntry>, String> {
+    let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    stream_trash_entries(items, TRASH_LIST_BATCH, |batch| out.extend(batch));
+    Ok(out)
+}
+
+/// Streamed Trash listing (STREAMING.md): flushes batches over `on_entry` as they're mapped so a large
+/// Trash paints immediately instead of blocking on one big `Vec`. `os_limited::list()` already hands
+/// back everything at once (there's no lazy walk to interrupt), so — like `metadata_column_cells`'s
+/// visible-window batches — this has no cancel registry; a listing is bounded by what's literally
+/// sitting in the Recycle Bin.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn list_trash_stream(
+    on_entry: tauri::ipc::Channel<Vec<cpe_server::model::TrashEntry>>,
+) -> Result<usize, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let items = trash::os_limited::list().map_err(|e| e.to_string())?;
+        let mut count = 0usize;
+        stream_trash_entries(items, TRASH_LIST_BATCH, |batch| {
+            count += batch.len();
+            let _ = on_entry.send(batch);
+        });
+        Ok(count)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Turns a `trash::Error` from a *single-item* restore into a short, distinguishable message instead of
+/// the crate's `{:?}`-based `Display`, which for `RestoreCollision`/`RestoreTwins` would dump the whole
+/// `Vec<TrashItem>` of "remaining items" into the error string.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn describe_restore_error(e: &trash::Error) -> String {
+    match e {
+        trash::Error::RestoreCollision { path, .. } => {
+            format!("something already exists at {} — restore skipped", path.display())
+        }
+        trash::Error::RestoreTwins { path, .. } => {
+            format!("another trashed item shares the original path {} — restore skipped", path.display())
+        }
+        other => other.to_string(),
+    }
+}
+
+/// Restore specific Trash items by id (as returned by `list_trash`/`list_trash_stream`). Restores
+/// **one item at a time** — rather than a single `restore_all(matched)` batch call — so a
+/// `RestoreCollision`/`RestoreTwins` on one item is reported against just that item and doesn't abort
+/// (or falsely blame) the rest of the selection, mirroring `restore_from_trash_impl`'s per-item
+/// target-exists check.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn restore_trash_items(ids: Vec<String>) -> Vec<OpResult> {
+    tauri::async_runtime::spawn_blocking(move || restore_trash_items_impl(ids))
+        .await.unwrap()
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn restore_trash_items_impl(ids: Vec<String>) -> Vec<OpResult> {
+    use trash::os_limited::{list, restore_all};
+
+    let all = match list() {
+        Ok(v) => v,
+        Err(e) => return ids.iter().map(|id| OpResult::err(Path::new(id), &e)).collect(),
+    };
+
+    ids.iter()
+        .map(|id| {
+            let item = match all.iter().find(|item| item.id.to_string_lossy() == id.as_str()) {
+                Some(item) => item,
+                None => {
+                    return OpResult::err(
+                        Path::new(id),
+                        "Not found in the Recycle Bin — it may have been emptied",
+                    )
+                }
+            };
+
+            let target = item.original_path();
+
+            // Never clobber: if something now occupies the original path, refuse rather than
+            // overwrite it — same rule as `restore_from_trash_impl`.
+            if target.exists() {
+                return OpResult::err(&target, "Something already exists at the original location");
+            }
+
+            match restore_all([item.clone()]) {
+                Ok(()) => OpResult::ok(&target),
+                Err(e) => OpResult::err(&target, describe_restore_error(&e)),
+            }
+        })
+        .collect()
+}
+
+/// Empty the Trash: purge everything (`ids: None`) or just the given items (`ids: Some`). Purging is
+/// permanent — the UI must confirm before calling this with `None`.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn empty_trash(ids: Option<Vec<String>>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || empty_trash_impl(ids))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// Pure selection logic for `empty_trash`: `ids: None` means "everything", `Some(ids)` means "just the
+/// items whose id is named". Factored out from `empty_trash_impl` so it's unit-testable against
+/// hand-built `TrashItem`s without ever calling the real `purge_all` — a test exercising the `None` ("all")
+/// branch against the live OS trash would permanently delete whatever the developer/CI runner actually has
+/// in their Recycle Bin, which this split avoids entirely.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn select_trash_targets(all: Vec<trash::TrashItem>, ids: Option<&[String]>) -> Vec<trash::TrashItem> {
+    match ids {
+        None => all,
+        Some(ids) => all
+            .into_iter()
+            .filter(|item| ids.iter().any(|id| item.id.to_string_lossy() == id.as_str()))
+            .collect(),
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn empty_trash_impl(ids: Option<Vec<String>>) -> Result<(), String> {
+    use trash::os_limited::{list, purge_all};
+
+    let all = list().map_err(|e| e.to_string())?;
+    let targets = select_trash_targets(all, ids.as_deref());
+    if targets.is_empty() {
+        return Ok(());
+    }
+    purge_all(targets).map_err(|e| e.to_string())
+}
+
 /// Permanently delete entries. Irreversible — the UI must confirm explicitly
 /// before ever calling this.
 #[tauri::command]
@@ -10911,6 +11107,14 @@ pub fn run() {
             delete_permanent,
             can_restore_from_trash,
             restore_from_trash,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            list_trash,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            list_trash_stream,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            restore_trash_items,
+            #[cfg(any(target_os = "windows", target_os = "linux"))]
+            empty_trash,
             shred_paths,
             copy_entries,
             move_entries,
@@ -12580,6 +12784,211 @@ mod tests {
     }
 
     // list_dir + stream_dir_entries walker tests moved with the code to `cpe_server::listing` (CPE-815).
+
+    // ---- Trash listing / restore / empty (CPE-1558, epic CPE-1486 slice 1) --------------------------
+    // `trash::os_limited::{list, restore_all, purge_all}` only round-trips on a real desktop session —
+    // a headless CI runner can lack a working Recycle Bin (CPE-1268) — so every test below that touches
+    // the real OS trash guards on `trash_roundtrip_available()` and skips (doesn't fail) when it's false.
+    // `select_trash_targets` is pure and never calls `purge_all`, so it's tested unconditionally and never
+    // risks the developer's or CI runner's actual trash contents.
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn select_trash_targets_filters_by_id_or_selects_everything() {
+        // Hand-built `TrashItem`s — this never touches the real OS trash, so it needs no roundtrip guard
+        // and is always safe to run, including on a machine with real items sitting in its Recycle Bin.
+        fn probe_item(id: &str) -> trash::TrashItem {
+            trash::TrashItem {
+                id: id.into(),
+                name: format!("{id}.tmp").into(),
+                original_parent: std::env::temp_dir(),
+                time_deleted: 0,
+            }
+        }
+        let all = vec![probe_item("a"), probe_item("b"), probe_item("c")];
+
+        let everything = select_trash_targets(all.clone(), None);
+        assert_eq!(everything.len(), 3, "ids=None must select every item");
+
+        let just_b = select_trash_targets(all, Some(&["b".to_string()]));
+        assert_eq!(just_b.len(), 1);
+        assert_eq!(just_b[0].id.to_string_lossy(), "b");
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn list_trash_then_restore_trash_items_round_trips_a_probe_file() {
+        if !trash_roundtrip_available() {
+            eprintln!(
+                "skipping list_trash/restore_trash_items round-trip test: this environment cannot \
+                 delete→list→restore via the OS trash (e.g. a headless CI Windows Server session with no \
+                 working Recycle Bin) — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("cpe-1558-list-restore-probe.tmp");
+        fs::write(&probe, b"probe").unwrap();
+        trash::delete(&probe).unwrap();
+
+        let listed = list_trash_impl().expect("list_trash_impl should succeed");
+        let probe_path = probe.to_string_lossy().to_string();
+        let entry = listed
+            .iter()
+            .find(|e| e.original_path == probe_path)
+            .expect("the probe file should appear in the trash listing")
+            .clone();
+        assert_eq!(entry.name, "cpe-1558-list-restore-probe.tmp");
+
+        let results = restore_trash_items_impl(vec![entry.id.clone()]);
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok, "restore should succeed: {:?}", results[0]);
+        assert!(probe.exists(), "the probe file should be restored to its original path");
+
+        let _ = fs::remove_file(&probe);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn restore_trash_items_reports_a_collision_as_a_distinguishable_per_item_error_without_aborting_the_batch() {
+        if !trash_roundtrip_available() {
+            eprintln!(
+                "skipping restore_trash_items collision test: this environment cannot delete→list→restore \
+                 via the OS trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let colliding = dir.path().join("cpe-1558-collision-probe.tmp");
+        let clean = dir.path().join("cpe-1558-clean-probe.tmp");
+        fs::write(&colliding, b"one").unwrap();
+        fs::write(&clean, b"two").unwrap();
+        trash::delete(&colliding).unwrap();
+        trash::delete(&clean).unwrap();
+
+        // Something now occupies the colliding item's original path again — restoring it must be
+        // refused, but that must NOT stop the other item in the same call from restoring successfully.
+        fs::write(&colliding, b"occupied").unwrap();
+
+        let listed = list_trash_impl().unwrap();
+        let colliding_path = colliding.to_string_lossy().to_string();
+        let clean_path = clean.to_string_lossy().to_string();
+        let collision_id = listed
+            .iter().find(|e| e.original_path == colliding_path)
+            .expect("colliding probe should be listed").id.clone();
+        let clean_id = listed
+            .iter().find(|e| e.original_path == clean_path)
+            .expect("clean probe should be listed").id.clone();
+
+        let results = restore_trash_items_impl(vec![collision_id.clone(), clean_id.clone()]);
+        assert_eq!(results.len(), 2);
+
+        let collision_result = results.iter().find(|r| r.path == colliding_path)
+            .expect("a per-item result must exist for the colliding path");
+        assert!(!collision_result.ok, "a colliding restore must fail, never silently overwrite");
+        assert!(
+            collision_result.error.to_lowercase().contains("already exists"),
+            "the error must be a clear, distinguishable message, not a raw `{{:?}}` dump: {}",
+            collision_result.error
+        );
+
+        let clean_result = results.iter().find(|r| r.path == clean_path)
+            .expect("a per-item result must exist for the clean path");
+        assert!(
+            clean_result.ok,
+            "the OTHER item in the same batch must still restore despite the first one colliding: {clean_result:?}"
+        );
+        assert!(clean.exists(), "the non-colliding item should be restored to disk");
+
+        // Best-effort cleanup: purge the still-trashed colliding item so repeat runs don't pile up in the
+        // real OS trash (mirrors the cleanup in `macro_run_convert_step_then_undo_restores_...`).
+        let _ = trash::os_limited::list().map(|items| {
+            let ours: Vec<_> = items.into_iter().filter(|i| i.id.to_string_lossy() == collision_id).collect();
+            let _ = trash::os_limited::purge_all(ours);
+        });
+        let _ = fs::remove_file(&colliding);
+        let _ = fs::remove_file(&clean);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn empty_trash_purges_only_the_selected_probe_item() {
+        if !trash_roundtrip_available() {
+            eprintln!(
+                "skipping empty_trash selective-purge test: this environment cannot delete→list→restore \
+                 via the OS trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let keep = dir.path().join("cpe-1558-empty-keep.tmp");
+        let purge = dir.path().join("cpe-1558-empty-purge.tmp");
+        fs::write(&keep, b"keep").unwrap();
+        fs::write(&purge, b"purge").unwrap();
+        trash::delete(&keep).unwrap();
+        trash::delete(&purge).unwrap();
+
+        let listed = list_trash_impl().unwrap();
+        let keep_path = keep.to_string_lossy().to_string();
+        let purge_path = purge.to_string_lossy().to_string();
+        let keep_id = listed.iter().find(|e| e.original_path == keep_path)
+            .expect("keep probe should be listed").id.clone();
+        let purge_id = listed.iter().find(|e| e.original_path == purge_path)
+            .expect("purge probe should be listed").id.clone();
+
+        // Deliberately never call `empty_trash_impl(None)` here — on this real machine that would purge
+        // EVERYTHING sitting in the actual Recycle Bin, not just this test's probes. The "purge everything"
+        // branch is covered instead by the OS-call-free `select_trash_targets_filters_by_id_or_selects_everything`.
+        empty_trash_impl(Some(vec![purge_id.clone()])).expect("selective empty_trash should succeed");
+
+        let after = list_trash_impl().unwrap();
+        assert!(after.iter().any(|e| e.id == keep_id), "an item NOT named in `ids` must survive a selective purge");
+        assert!(!after.iter().any(|e| e.id == purge_id), "the targeted item must be gone after purging");
+
+        // Clean up: restore `keep`'s probe entry rather than leaving it in the real trash.
+        let _ = restore_trash_items_impl(vec![keep_id]);
+        let _ = fs::remove_file(&keep);
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant() {
+        if !trash_roundtrip_available() {
+            eprintln!(
+                "skipping list_trash_stream test: this environment cannot delete→list→restore via the OS \
+                 trash — CPE-1268"
+            );
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("cpe-1558-stream-probe.tmp");
+        fs::write(&probe, b"probe").unwrap();
+        trash::delete(&probe).unwrap();
+
+        let collected: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Default::default();
+        let on_entry = collecting_channel(collected.clone());
+        let streamed_count = tauri::async_runtime::block_on(list_trash_stream(on_entry))
+            .expect("list_trash_stream dispatches");
+
+        let batches = collected.lock().unwrap();
+        assert_eq!(batches.len(), streamed_count, "every streamed entry must have gone out over the channel");
+        let probe_path = probe.to_string_lossy().to_string();
+        assert!(
+            batches.iter().any(|v| v.get("original_path").and_then(|p| p.as_str()) == Some(probe_path.as_str())),
+            "the probe file should appear among the streamed batches: {batches:?}"
+        );
+
+        // Clean up: restore + remove so the probe doesn't linger in the real trash.
+        let listed = list_trash_impl().unwrap();
+        if let Some(entry) = listed.iter().find(|e| e.original_path == probe_path) {
+            let _ = restore_trash_items_impl(vec![entry.id.clone()]);
+        }
+        let _ = fs::remove_file(&probe);
+    }
 
     #[test]
     fn cancel_dir_stream_sets_the_registered_flag() {
