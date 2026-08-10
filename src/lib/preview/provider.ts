@@ -399,6 +399,29 @@ const archiveActions: PreviewAction[] = [
 ];
 
 /**
+ * Copy-glyph / copy-codepoint actions on the preview action bar for the `font` provider (CPE-1586, epic
+ * CPE-1568 slice 5): `FontPreview.svelte` reports the currently-selected glyph's character and codepoint
+ * up via `ctx.values`, mirroring the jwt/json providers' own `values` convention above — nothing to copy
+ * until a glyph is loaded/selected, so both actions gate on presence exactly like json's copy-path.
+ */
+const fontActions: PreviewAction[] = [
+  {
+    id: "copy-glyph",
+    labelKey: "pv.action.copyGlyph",
+    icon: "copy",
+    enabled: (ctx) => !!ctx.values["copy-glyph"],
+    run: (ctx) => ctx.copyToClipboard(ctx.values["copy-glyph"] ?? ""),
+  },
+  {
+    id: "copy-codepoint",
+    labelKey: "pv.action.copyCodepoint",
+    icon: "copy",
+    enabled: (ctx) => !!ctx.values["copy-codepoint"],
+    run: (ctx) => ctx.copyToClipboard(ctx.values["copy-codepoint"] ?? ""),
+  },
+];
+
+/**
  * Ordered by priority — the first match wins. Markdown is listed before text
  * because a `.md` file's category is "text"; without the ordering, text would
  * claim it first.
@@ -575,6 +598,8 @@ export const providers: PreviewProvider[] = [
     kind: "font",
     editable: false,
     canPreview: (e) => !e.is_dir && FONT_EXT.has(e.extension),
+    // Copy glyph / copy codepoint (CPE-1586) — see `fontActions`'s own doc comment.
+    actions: fontActions,
   },
   // Must precede the generic text provider: .eml categorises as "text" and would otherwise be shown as
   // raw source instead of the structured header/attachment/body card (CPE-1434, epic CPE-1433).

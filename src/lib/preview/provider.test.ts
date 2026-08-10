@@ -227,6 +227,26 @@ describe("pickProvider", () => {
     expect(jwt.actions?.map((a) => a.labelKey)).toEqual(["pv.action.copyClaims", "pv.action.copyHeader"]);
   });
 
+  it("declares copy-glyph/copy-codepoint on the font provider, gated on a selected glyph (CPE-1586)", () => {
+    const font = providers.find((p) => p.id === "font")!;
+    expect(font.actions?.map((a) => a.id)).toEqual(["copy-glyph", "copy-codepoint"]);
+    expect(font.actions?.map((a) => a.labelKey)).toEqual(["pv.action.copyGlyph", "pv.action.copyCodepoint"]);
+
+    const ctxFor = (values: Record<string, string>): PreviewActionCtx => ({
+      entry: entry({ name: "a.ttf", extension: "ttf" }),
+      values,
+      copyToClipboard: vi.fn(async () => {}),
+      invoke: vi.fn(async () => undefined) as unknown as PreviewActionCtx["invoke"],
+    });
+    // Nothing selected yet: neither action shows.
+    expect(visibleActions(font, ctxFor({}))).toEqual([]);
+    // A glyph selected: both show, independently keyed.
+    expect(visibleActions(font, ctxFor({ "copy-glyph": "A", "copy-codepoint": "U+0041" })).map((a) => a.id)).toEqual([
+      "copy-glyph",
+      "copy-codepoint",
+    ]);
+  });
+
   it("declares Extract/Extract to…/Check safety on the archive provider (CPE-1578)", () => {
     const archiveProvider = providers.find((p) => p.id === "archive")!;
     expect(archiveProvider.actions?.map((a) => a.id)).toEqual(["extract-here", "extract-to", "check-safety"]);
