@@ -3436,8 +3436,20 @@ export type ArchiveEntry = { name: string; size: number; is_dir: boolean }
  * a zip, corrupt/truncated central directory) — the rest of the report is a placeholder, not a real
  * scan, and callers must not read it as "safe". `unreadable == false` means the archive opened fine (an
  * empty archive still reports `entries_scanned: 0`, but with `unreadable: false`).
+ * 
+ * `unreadable_entries` (CPE-1591) is the sibling signal for the case `unreadable` doesn't cover: the
+ * archive itself opened fine (its central directory is readable), but one or more *individual entries*
+ * couldn't be read — overwhelmingly because they're AES/ZipCrypto-encrypted and no password was
+ * supplied, though the same field would also catch a one-off malformed local-file header. A skipped
+ * entry contributes nothing to `report` (it was never sized or scored), so **`report.dangerous == false`
+ * does not mean "safe" when `unreadable_entries > 0`** — it can just as easily mean "we couldn't check".
+ * A fully password-protected zip scans zero entries and reports `unreadable_entries` equal to the
+ * archive's whole entry count; a caller must treat any `unreadable_entries > 0` as "not fully assessed"
+ * and never render the plain safe banner for it, mirroring how `unreadable` already gates the corrupt
+ * case. `unreadable_entries == 0` (with `unreadable == false`) means every entry that exists was
+ * actually scored — the only shape a "no zip-bomb risk" verdict is honest for.
  */
-export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean; unreadable: boolean }
+export type ArchiveSafetyReport = { report: RatioReport; entries_scanned: number; truncated: boolean; unreadable: boolean; unreadable_entries: number }
 /**
  * One attachment: filename + decoded size + content-type. A projection of the attachment [`MimePart`]s
  * for the pill row the frontend renders.

@@ -71,7 +71,9 @@ All media files carry this fixed metadata (the single source of truth is the top
 Beyond the metadata baseline, the tree also carries substantial non-metadata fixtures:
 `archives/sample.zip` + `archives/sample.rar` (a real `docs/`+`images/`+`data/`+`src/`+`docs/sub/` tree),
 `database/mini.sqlite` (users/products/orders tables + an `order_summary` view, dozens of rows),
-`other/tiny.wasm` (a module exporting `add`/`fib`), and `fonts/mini.ttf` (a full printable-ASCII glyph set).
+`other/tiny.wasm` (a module exporting `add`/`fib`), `fonts/mini.ttf` (a full printable-ASCII glyph set),
+and `other/mini.dll` (a minimal-but-valid synthetic PE32 — one `.text` section, one import, one export,
+and real decodable x86 bytes — for the Binary Inspector, CPE-1597).
 
 Since **CPE-1425**, `crypto/` adds JWT + certificate fixtures for the Crypto epic (CPE-1417): 4 JWTs
 (valid/expired/`alg:none`/rich multi-shape claims), a self-signed RSA-2048 + EC-P256 cert pair, a
@@ -81,7 +83,20 @@ public key — see [`crypto/README.md`](crypto/README.md) for the full file-by-f
 
 The automated guard lives in `crates/server/tests/sample_fixtures.rs`, which reads each file through the
 shipped codecs/parsers (ID3/Vorbis/EXIF/PDF/MP4 metadata **plus** zip+rar listing, sqlite summary, wasm
-disassembly, font glyph-sheet render, and tiff→png transcode) and asserts the values above.
+disassembly, font glyph-sheet render, tiff→png transcode, and — since CPE-1597 — the minimal PE parsing
+with a real section/import/export and disassembling its `.text` bytes) and asserts the values above.
+
+### `other/mini.dll` — synthetic PE fixture (CPE-1597)
+
+Unlike the rest of this baseline, `other/mini.dll` is **not** produced by `gen_samples.py` (there's no
+general-purpose PE encoder to reach for, and one isn't worth adding as a real dependency for a single
+fixture) — like `samples/crypto/`'s JWTs and certificates, it's produced by a small, throwaway Rust
+program instead (not a permanent dependency of any shipping crate), byte-for-byte the same well-formed
+shape as `binary_preview.rs`'s own `build_minimal_pe32()` test helper: a DOS/PE/COFF/optional header, one
+`.text` section holding a real (if trivial) x86 export directory, import directory, and a few genuine,
+decodable x86 instructions (`push ebp; mov ebp, esp; xor eax, eax; pop ebp; ret`). It parses through
+goblin exactly like a real EXE/DLL would, so the Binary Inspector's tabs and the disassembly view all have
+something real to show rather than a hand-typed byte blob's worth of nothing.
 
 ## PDF fixtures (CPE-1357/1358)
 
@@ -123,6 +138,7 @@ opening any format the app claims to support has real fixture coverage:
 | `font`           | `fonts/mini.ttf`                                        |
 | `data-grid`      | `database/mini.sqlite`                                  |
 | `info`           | `other/tiny.wasm`                                       |
+| `binary`         | `other/mini.dll` (a real, parseable synthetic PE32 — see "`other/mini.dll` — synthetic PE fixture" above) |
 | `markdown`       | `text/readme.md`                                        |
 | `text`           | `text/notes.txt`, `text/hello.py`                        |
 | `hex`            | `other/blob.pak` (any file no richer provider claims falls back to the hex view) |

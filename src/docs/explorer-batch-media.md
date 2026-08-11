@@ -86,13 +86,38 @@ and from every other planned output in the batch:
 - If two inputs would land on the same output name, later ones are disambiguated `-2`, `-3`, …
 
 **Unchecking the box** turns off both guarantees: an op combination that has no suffix of its own (a lone
-Compress, Strip metadata, or Watermark) then **overwrites the original file in place**, with **no
-confirmation prompt** before you click Apply — unlike delete or secure-delete elsewhere in the app, there
-is no extra friction here. Only uncheck it once you're sure you don't need the originals; Resize/Rotate/
-Flip/Convert/Rename still produce a differently-named file either way, since their suffix logic doesn't
-depend on the checkbox.
+Compress, Strip metadata, or Watermark) then plans to **overwrite the original file in place**. A
+persistent reminder appears under the checkbox the moment it's unchecked, spelling out exactly which ops
+that affects, so the risk is visible before you've even built a plan that triggers it. Resize, Rotate,
+Flip, Convert, and Rename **usually** produce a differently-named file too, but not as an absolute
+guarantee: **Convert** to the extension a file already has, or **Rename** left at its pre-filled default
+`{stem}` template, can still resolve to the same name as the input. Whichever op combination you use, the
+live plan preview always shows the real planned path, and Apply always confirms first whenever the actual
+plan would overwrite something — that check (see next section) is what you can rely on, not a mental list
+of "safe" ops.
 
 There is **no subfolder option** — outputs always sit alongside their inputs.
+
+### Confirming an in-place overwrite (CPE-1590)
+
+If the live plan preview would overwrite one or more originals — checked automatically off the concrete
+planned paths, not just "the box is unchecked" — clicking **Apply** does **not** run the batch
+immediately. Instead it swaps the action row for a danger-styled confirmation panel that:
+
+- States exactly **how many original files** will be overwritten in place.
+- Reminds you this is **not on the Undo (Ctrl+Z) stack** — see [Undo](safety-undo).
+- Tells you the app **will attempt** to checkpoint the affected folder(s) first, as a recovery net (see
+  *Recovery* below) — worded as an attempt, not a guarantee, because it's a best-effort step that can
+  itself fail; if it does, you're warned afterward rather than left thinking you have a safety net you
+  don't.
+
+Only its own **"Overwrite N files"** button (not the space where Apply used to be, and not a stray
+Enter/click) starts the run; **Cancel** — or **Escape**, which backs out of just this panel rather than
+the whole dialog — returns you to the op list with nothing written. Editing the op list, the selection, or
+the checkbox while the panel is open dismisses it automatically, so a confirm can never be granted for one
+plan and silently applied to a different, later-edited one. A plan where every output already differs from
+its input (the default, non-destructive path, or any op combo with its own suffix) is completely
+unaffected — Apply still runs immediately, with no new friction.
 
 ## Applying
 
@@ -100,6 +125,22 @@ There is **no subfolder option** — outputs always sit alongside their inputs.
 **inside this dialog** (not the shared bottom-corner transfer panel other file operations use) as a bar
 with a live "N/M done" count, streamed as each file finishes. **There is no mid-run cancel** — once
 started, a batch runs to completion; Cancel (and Escape) are disabled while it's applying.
+
+### Recovery for a confirmed in-place overwrite
+
+Once you click **"Overwrite N files"** on the confirm panel, the dialog takes a **best-effort checkpoint**
+(`commands.checkpointCreate`, the same mechanism [Checkpoints & Rollback](16-checkpoints) uses elsewhere)
+of every folder that has a file about to be overwritten — one checkpoint per distinct folder, taken once
+before any byte is touched. That gives you a way back afterward (revert that checkpoint), even though
+batch media's writes are still never pushed onto the app's Ctrl+Z undo stack. This is a **bonus safety
+net, not a gate**: if the checkpoint itself fails (e.g. the disk is full), the confirmed write still
+proceeds — you already explicitly agreed to it on the confirm panel.
+
+**A failed checkpoint is never silent.** If any affected folder's checkpoint couldn't be taken, the dialog
+holds itself open afterward on a danger-styled warning naming exactly which folder(s) have no checkpoint
+to revert to — the same "stay open until acknowledged" treatment the skipped-files panel uses — instead of
+closing normally while you still believe the promised recovery net exists. Click **Done** once you've read
+it. Your only recovery for a folder in that warning is your own backup.
 
 ## Failures and partial success
 
@@ -140,8 +181,11 @@ You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP
 - **No mid-run cancel.** Once Apply is clicked, the batch runs to completion.
 - **No pre-flight failure check.** The live preview shows a planned path for every file regardless of
   whether it will actually decode; you only learn about a bad file from the post-run skip panel.
-- **Overwrite mode has no confirmation.** Unchecking "Write to new files" and running Compress, Strip
-  metadata, or Watermark alone replaces the original bytes with nothing to undo through this dialog — see
-  [Undo](safety-undo) for what *is* covered (batch media's writes are not on that stack; the only recovery
-  is a prior [checkpoint](16-checkpoints) or your own backup).
+- **Overwrite mode requires an explicit confirmation (CPE-1590).** Unchecking "Write to new files" and
+  running Compress, Strip metadata, or Watermark alone no longer overwrites originals silently — Apply
+  opens a danger-styled confirm panel naming the file count first, and a best-effort checkpoint of the
+  affected folder(s) is attempted on confirm — and if that attempt fails, the dialog says so afterward
+  rather than staying quiet about it. It's still **not** on the [Undo](safety-undo) Ctrl+Z stack — recovery
+  after a confirmed overwrite is that checkpoint (see [Checkpoints & Rollback](16-checkpoints)) or your own
+  backup, same as before this ticket; only the "no warning at all" gap is fixed.
 - **No command-palette entry or shortcut** — right-click is the only way in.

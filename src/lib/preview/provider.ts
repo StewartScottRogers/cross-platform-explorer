@@ -36,6 +36,7 @@ export type PreviewKind =
   | "jwt"
   | "cert"
   | "hex"
+  | "binary"
   | "folder"
   | "none";
 
@@ -170,7 +171,9 @@ const ARCHIVE_EXT = new Set([
  * CPE-210/214/215/216/218.
  */
 const INFO_EXT = new Set([
-  "exe", "dll", "sys", "efi", "ocx", "scr", "cpl", // PE headers
+  // PE/ELF/Mach-O extensions used to route here for a plain-text PE-header summary; CPE-1597 (epic
+  // CPE-1562 "Binary Inspector" slice 4) supersedes that with the tabbed `binary` provider below (see
+  // BINARY_EXT) — they're no longer listed here.
   "wasm", "torrent", "mid", "midi",
   "rtf", "docx", "odt", "epub", // document text extraction
   "bin", "dat", // generic binary -> hex dump
@@ -182,6 +185,21 @@ const INFO_EXT = new Set([
   // graceful summary rather than a raw hex dump of compressed bytes. dmg/cab are deliberately NOT here:
   // they'd need a real Apple-disk-image / MS-cabinet reader, which is out of scope (won't-fix, CPE-1439).
   "xz", "bz2", "zst", "lz", "lzma",
+]);
+
+/**
+ * PE/ELF/Mach-O executables and libraries previewed by the tabbed Binary Inspector (Overview / Sections
+ * / Imports / Exports / Symbols / Disassembly) instead of a plain-text summary (CPE-1597, epic CPE-1562
+ * "Binary Inspector" slice 4) — backed by the CPE-1572/1581 `binaryInfo`/`binaryDisasm` commands. `.so`
+ * (ELF) and `.dylib` (Mach-O) route here by extension only; an extensionless ELF (detectable by magic
+ * bytes, like `hexdump.ts`'s `detectSignature` already does for the hex-view label) isn't covered — that
+ * would need an async sniff `canPreview` can't do (it's a pure sync function of the `DirEntry`, by
+ * design — see the registry's own doc comment), and this ticket doesn't fork that mechanism.
+ */
+const BINARY_EXT = new Set([
+  "exe", "dll", "sys", "efi", "ocx", "scr", "cpl", // PE
+  "so", // ELF shared object
+  "dylib", // Mach-O dynamic library
 ]);
 
 /**
@@ -670,6 +688,13 @@ export const providers: PreviewProvider[] = [
     kind: "data-grid",
     editable: false,
     canPreview: (e) => !e.is_dir && DATA_GRID_EXT.has(e.extension),
+  },
+  {
+    id: "binary",
+    label: "Binary",
+    kind: "binary",
+    editable: false,
+    canPreview: (e) => !e.is_dir && BINARY_EXT.has(e.extension),
   },
   {
     id: "info",

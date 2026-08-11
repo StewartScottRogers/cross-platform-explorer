@@ -95,10 +95,15 @@ payload that decompresses to something enormous.
    (flagged as pills). A clear **danger** indicator appears when the archive as a whole crosses the
    zip-bomb threshold; otherwise it reports as safe.
 
-Only true ZIP containers are scored today — `.tar`, `.tar.gz`/`.tgz`, `.7z`, and `.iso` aren't ZIP
+Only true ZIP containers are scored today — `.tar`, `.tar.gz`/`.tgz`, `.7z`, `.iso`, and `.rar` aren't ZIP
 archives, so the action doesn't offer itself for them (rather than silently reporting "0 entries scanned"
 as if it had checked). Support for those formats is a later addition. See [Archives](explorer-archives)
 for the full format/extract/create matrix and the rest of the archive feature set this check is part of.
+
+A password-protected ZIP opens fine (its central directory needs no password) but its individual entries
+can't be read without one — the dialog counts those and reports a dedicated "couldn't be read, likely
+password-protected" state rather than the plain safe banner, so an unassessed archive is never mistaken
+for a clean one. See [Archives](explorer-archives) for the full behavior.
 
 ## More tabs coming
 

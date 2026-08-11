@@ -11,6 +11,14 @@
    * is a single scan with no follow-up action (read-only, like the File Health tabs) so it runs
    * automatically on mount rather than waiting for an explicit "Scan" click — the ticket's whole point
    * is a one-click "what's in this archive" answer from the context menu.
+   *
+   * Two "couldn't actually scan this" states, both deliberately NEVER falling through to the plain safe
+   * banner: `result.unreadable` (CPE-1320) means the archive itself couldn't be opened at all (corrupt,
+   * not a zip); `result.unreadable_entries > 0` (CPE-1591) means the archive opened fine but one or more
+   * entries inside it couldn't be read — in practice almost always because they're password-protected and
+   * this dialog has no password prompt. A zero-entries password-protected zip used to collapse to the same
+   * `entries_scanned: 0, dangerous: false` shape as a genuinely safe empty archive; `unreadable_entries`
+   * makes that case structurally distinct so it can never render as "No zip-bomb risk detected" again.
    */
   import { createEventDispatcher, onMount } from "svelte";
   import { invoke } from "../invoke"; // busy-cursor wrapper (BUSY-CURSOR.md) — never raw @tauri-apps/api/core
@@ -82,6 +90,15 @@
            safe. `result.unreadable` distinguishes the two; this is a dedicated unknown/error state,
            styled like `.err` (never the safe banner). -->
       <p class="err" data-testid="as-unreadable">{$t("arcsafe.unreadable")}</p>
+    {:else if result && !result.report.dangerous && result.unreadable_entries > 0}
+      <!-- CPE-1591: the archive itself opened fine (unlike the CPE-1320 case above), but one or more
+           entries couldn't be read — overwhelmingly because they're password-protected and this dialog
+           has no password prompt. Those entries were never sized or scored, so `report.dangerous ===
+           false` here means "we don't know", not "safe" — before this fix that shape rendered the same
+           reassuring safe banner as a fully-scanned clean archive. Only gated when nothing dangerous was
+           already found among whatever WAS readable: a real danger signal from the readable portion still
+           takes priority (below) rather than being hidden behind "couldn't fully assess". -->
+      <p class="err" data-testid="as-encrypted">{$t("arcsafe.encrypted", { count: result.unreadable_entries })}</p>
     {:else if result}
       {#if result.report.dangerous}
         <!-- DANGER treatment: --danger is an app-wide THEME variable (see app.css :root), same token
@@ -91,6 +108,12 @@
           <Icon name="ban" size={16} />
           <span>{$t("arcsafe.dangerous")}</span>
         </div>
+        {#if result.unreadable_entries > 0}
+          <!-- Mixed archive: danger was already found among the readable entries, so that verdict still
+               leads — but there were ALSO entries this scan couldn't read, so say so rather than implying
+               a complete scan. -->
+          <p class="dim" data-testid="as-partial-note">{$t("arcsafe.encrypted", { count: result.unreadable_entries })}</p>
+        {/if}
       {:else}
         <div class="banner safe" data-testid="as-safe">
           <Icon name="check" size={16} />
@@ -108,6 +131,10 @@
           {result.entries_scanned.toLocaleString()}
           {#if result.truncated}<span class="dim"> {$t("arcsafe.capped")}</span>{/if}
         </dd>
+        {#if result.unreadable_entries > 0}
+          <dt>{$t("arcsafe.unreadableEntries")}</dt>
+          <dd data-testid="as-unreadable-entries">{result.unreadable_entries.toLocaleString()}</dd>
+        {/if}
       </dl>
 
       {#if result.report.flagged.length > 0}

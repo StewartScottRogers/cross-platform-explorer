@@ -5,9 +5,15 @@
 //! result to the planned output — **skip-on-error, never fatal**, mirroring the `list_dir` /
 //! `revert_engine` ethos: one bad file must never abort the whole batch.
 //!
-//! Non-destructive by construction: `batch_media::plan` already computed collision-safe output paths
-//! distinct from every input (when `job.non_destructive`), so this module never overwrites a source file
-//! — it only ever reads inputs and writes to the (different) planned outputs.
+//! Non-destructive **only when `job.non_destructive` is true**: `batch_media::plan` then guarantees
+//! every output path differs from its input, so this module only ever reads an input and writes to a
+//! *different* planned output. When the caller sets `job.non_destructive = false`, `plan` drops that
+//! guarantee — for an op combo with no dedicated output-renaming suffix (a lone Compress, Strip
+//! metadata, or Watermark) the planned output can equal the input, and this module then **overwrites
+//! the source file's bytes in place**, same as any other planned write (CPE-1590). This module itself
+//! has no concept of "confirm the user actually wants that" — by the time a plan reaches here, gating
+//! an in-place overwrite behind an explicit confirmation is the caller's job (the batch-media dialog,
+//! `BatchMediaDialog.svelte`); see its CPE-1590 doc comment for the guard.
 
 use std::fs;
 use std::path::Path;
@@ -31,8 +37,9 @@ pub struct BatchReport {
 /// each `PlannedItem`, reads its input bytes, applies `job.ops` via [`batch_transform::apply_ops`], and
 /// writes the result to the item's planned output (creating the output's parent directory as needed). A
 /// failing item — unreadable input, a non-image or otherwise rejected transform, or a failed write — is
-/// recorded in the returned report and reported to `flush` with a reason; it never aborts the run. Input
-/// files are never modified.
+/// recorded in the returned report and reported to `flush` with a reason; it never aborts the run.
+/// **Input files are modified in place whenever the planned `output == input`** — see the module doc
+/// (CPE-1590) for when `plan` allows that (`job.non_destructive == false`).
 pub fn execute_plan_walk(items: &[PlannedItem], job: &BatchJob, mut flush: impl FnMut(OpResult)) -> BatchReport {
     let mut report = BatchReport::default();
     for item in items {
