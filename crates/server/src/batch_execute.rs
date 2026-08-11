@@ -48,7 +48,8 @@
 //! directory, skip `plan()`, call [`execute_plan`] → `Ok(BatchReport { written: 1, .. })`, a file created
 //! at the arbitrary path — and, with a real file already sitting there plus caller-supplied
 //! `confirmed_overwrite: true`, its bytes replaced. [`execute_plan_walk`] now re-derives containment
-//! itself, per item, before ANY byte is read or written — using [`crate::batch_media::output_escapes_input_dir`],
+//! itself, per item, before ANY byte is read or written — using
+//! [`crate::batch_media::classify_output_containment`],
 //! the identical check `plan()` uses (not a fresh, potentially-drifting reimplementation) — and refuses the
 //! whole batch, nothing written, if any item's output would leave its own input's folder. This runs
 //! **regardless of `confirmed_overwrite`**: that flag only ever authorises overwriting the user's OWN
@@ -64,7 +65,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::batch_media::{output_escapes_input_dir, same_file, BatchJob, ParentCache, PlannedItem};
+use crate::batch_media::{
+    classify_output_containment, same_file, BatchJob, Containment, ParentCache, PlannedItem,
+};
 use crate::batch_transform;
 use crate::model::OpResult;
 
@@ -118,11 +121,13 @@ pub fn any_in_place(items: &[PlannedItem]) -> bool {
 ///
 /// 1. **Containment (IPC-bypass follow-up, unconditional — `confirmed_overwrite` has no effect on this
 ///    one).** Any item whose `output` would leave its own `input`'s directory, per
-///    [`crate::batch_media::output_escapes_input_dir`] — the same check `batch_media::plan()` itself uses,
-///    re-derived here because a `PlannedItem` reaching this fn may never have gone through `plan()` at all
-///    (see the module doc for the demonstrated bypass). This can't be waived by any flag: it isn't asking
-///    "did the user consent to an overwrite?", it's asking "is this even a place the batch was allowed to
-///    touch?".
+///    [`crate::batch_media::classify_output_containment`] — the same check `batch_media::plan()` itself
+///    uses, re-derived here because a `PlannedItem` reaching this fn may never have gone through `plan()`
+///    at all (see the module doc for the demonstrated bypass). This can't be waived by any flag: it isn't
+///    asking "did the user consent to an overwrite?", it's asking "is this even a place the batch was
+///    allowed to touch?". Reports its two refusal reasons **separately** (CPE-1642): an output whose
+///    identity couldn't be established has not been shown to leave the folder, and saying otherwise would
+///    tell the user something false about their own files.
 /// 2. **Foreign overwrite (CPE-1590/CPE-1599/CPE-1623).** Any planned item that [`is_foreign_overwrite`]
 ///    — its output is the same file as its own input, OR resolves onto some other real file this batch
 ///    never selected — when `job.confirmed_overwrite` is `false`. Otherwise, those files ARE overwritten
@@ -133,17 +138,40 @@ pub fn execute_plan_walk(
     mut flush: impl FnMut(OpResult),
 ) -> Result<BatchReport, String> {
     let mut parent_cache = ParentCache::new();
-    let escaping = items
-        .iter()
-        .filter(|it| output_escapes_input_dir(&it.input, &it.output, &mut parent_cache))
-        .count();
-    if escaping > 0 {
+    // CPE-1642: count the two refusal reasons SEPARATELY. An output whose identity could not be resolved
+    // has not been shown to leave the folder — reporting it as one that "would land outside" tells the
+    // user something factually untrue about their own files.
+    let mut escaping = 0usize;
+    let mut unverifiable: Vec<&'static str> = Vec::new();
+    for it in items {
+        match classify_output_containment(&it.input, &it.output, &mut parent_cache) {
+            Containment::Inside => {}
+            Containment::Escapes => escaping += 1,
+            Containment::Unverifiable(why) => unverifiable.push(why),
+        }
+    }
+    if escaping > 0 || !unverifiable.is_empty() {
+        let mut reasons: Vec<String> = Vec::new();
+        if escaping > 0 {
+            reasons.push(format!(
+                "{escaping} planned output{} would land outside its own input's folder",
+                if escaping == 1 { "" } else { "s" }
+            ));
+        }
+        if !unverifiable.is_empty() {
+            let why = unverifiable[0];
+            reasons.push(format!(
+                "{} planned output{} couldn't be verified to stay inside its own input's folder ({why})",
+                unverifiable.len(),
+                if unverifiable.len() == 1 { "" } else { "s" }
+            ));
+        }
         return Err(format!(
-            "refusing to run: {escaping} planned output{} would land outside its own input's folder — \
-             this can happen when a PlannedItem is supplied without going through batch_media::plan() \
-             (which normally refuses this itself); nothing was written, and this cannot be overridden by \
-             confirmed_overwrite, which only ever authorises overwriting a file inside the selected folder",
-            if escaping == 1 { "" } else { "s" }
+            "refusing to run: {} — this can happen when a PlannedItem is supplied without going through \
+             batch_media::plan() (which normally refuses this itself); nothing was written, and this \
+             cannot be overridden by confirmed_overwrite, which only ever authorises overwriting a file \
+             inside the selected folder",
+            reasons.join(", and ")
         ));
     }
 
@@ -864,6 +892,166 @@ mod tests {
 
         // Byte-level proof: the victim path must never have come into existence at all.
         assert!(!victim.exists(), "the escaping write through a dangling symlink must never have happened");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1642: identity resolution, end-to-end and byte-proven ----------------------------------
+    //
+    // The two escapes CPE-1623's shape-matching left open, reproduced here as full `execute_plan` runs and
+    // proven by reading the victim's ACTUAL bytes back off disk. **Negative control:** both were run
+    // against the pre-fix code first — the chain case returned `Ok(BatchReport { written: 1 })` with the
+    // outside victim's bytes changed, and the contended hard-link case likewise; see the ticket's work log.
+
+    /// **Finding A — symlink CHAIN.** `linkA → linkB` (relative, same folder) → `outside/important.jpg`.
+    /// Reading one hop saw `linkB` sitting textually inside the selected folder and waved it through.
+    /// Run with `confirmed_overwrite: true`, exactly as demonstrated.
+    #[test]
+    fn cpe_1642_symlink_chain_alias_is_refused_and_the_victim_bytes_are_untouched() {
+        let d = scratch("cpe1642-chain");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must survive a two-hop chain".to_vec();
+        fs::write(&victim, &victim_original).unwrap();
+
+        let link_b = selected.join("linkB.jpg");
+        let link_a = selected.join("linkA.jpg");
+        if crate::links::create_symlink(&victim.to_string_lossy(), &link_b.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPING cpe_1642_symlink_chain_alias_is_refused: could not create a symlink here \
+                 (Windows needs Developer Mode or elevation) — this test verified NOTHING"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        if crate::links::create_symlink("linkB.jpg", &link_a.to_string_lossy()).is_err() {
+            eprintln!("SKIPPING cpe_1642_symlink_chain_alias_is_refused: second hop could not be created");
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link_a.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a two-hop symlink chain".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        job.confirmed_overwrite = true;
+
+        let err = execute_plan(&items, &job).expect_err(
+            "a symlink CHAIN whose far end lands outside the selected folder must be refused",
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_original,
+            "the chain's outside victim must be byte-for-byte untouched"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **Finding B — a contended hard link used to fail OPEN.** Same hard-link alias the CPE-1623 test
+    /// above covers, but with an ordinary unprivileged process holding an exclusive handle on it, which
+    /// made the old `GENERIC_READ` link-count read fail and default to "one link, nothing to see".
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_contended_hard_link_alias_is_refused_and_the_victim_bytes_are_untouched() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let d = scratch("cpe1642-contended");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must survive a contended read".to_vec();
+        fs::write(&victim, &victim_original).unwrap();
+        let link = selected.join("link.jpg");
+        crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+
+        // Any concurrent holder — another process, an AV scanner, a second thread of the same batch.
+        let hold = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&link)
+            .expect("an exclusive handle needs no privilege");
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a contended hard link".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        job.confirmed_overwrite = true;
+
+        let err = execute_plan(&items, &job).expect_err(
+            "a hard-linked output must stay refused while the file is held exclusively — a failed read \
+             must never be reported as \"not linked\"",
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+        drop(hold);
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_original,
+            "the hard-linked victim must be byte-for-byte untouched"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **Refusal messages must state what is actually true (CPE-1642).** An output whose identity could
+    /// not be established has NOT been shown to leave the folder — saying "would land outside its own
+    /// input's folder" about it tells the user something false about their own files. A symlink cycle is
+    /// the deterministic unverifiable case: nothing escaped, the chain simply has no real end.
+    #[test]
+    fn cpe_1642_unverifiable_output_is_refused_without_claiming_it_left_the_folder() {
+        let d = scratch("cpe1642-message");
+        let selected = d.join("selected");
+        fs::create_dir_all(&selected).unwrap();
+        let link_a = selected.join("linkA.jpg");
+        let link_b = selected.join("linkB.jpg");
+        if crate::links::create_symlink("linkB.jpg", &link_a.to_string_lossy()).is_err()
+            || crate::links::create_symlink("linkA.jpg", &link_b.to_string_lossy()).is_err()
+        {
+            eprintln!(
+                "SKIPPING cpe_1642_unverifiable_output_message: could not create a symlink here \
+                 (Windows needs Developer Mode or elevation) — this test verified NOTHING"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link_a.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a cyclic symlink".into(),
+        }];
+
+        let err = execute_plan(&items, &BatchJob::new(vec![MediaOp::StripMetadata]))
+            .expect_err("a cyclic link chain must be refused, not followed forever");
+        assert!(
+            err.contains("couldn't be verified"),
+            "the refusal must say the output could not be VERIFIED: {err}"
+        );
+        assert!(
+            !err.contains("would land outside"),
+            "an unverifiable output must NOT be reported as a proven escape: {err}"
+        );
 
         let _ = fs::remove_dir_all(&d);
     }
