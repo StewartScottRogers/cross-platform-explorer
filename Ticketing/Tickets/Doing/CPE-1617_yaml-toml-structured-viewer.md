@@ -2,7 +2,7 @@
 id: CPE-1617
 title: "YAML/TOML structured view + validate — not just ini/yaml syntax-highlighted text"
 type: Feature
-status: Backlog
+status: In Progress
 priority: Medium
 component: Frontend
 epic: CPE-1568
@@ -71,3 +71,44 @@ in-flight backend ticket.
 
 ## Notes
 Model: sonnet. Library entry: `filetype-right-pane-coverage-2026-08-10` (epic spike).
+
+## Work Log
+2026-08-11 — Picked up, unblocked behind CPE-1616/CPE-1618 (both merged). Read both sibling viewers
+(`notebook.ts`+`NotebookPreview.svelte`, `logViewer.ts`+`LogPreview.svelte`) as the template: pure
+framework-free parser module + a self-contained Svelte component that fetches/parses its own content,
+no provider-declared action-bar actions.
+2026-08-11 — Dependency decision (per Foreman direction, overriding the ticket's suggested
+smol-toml/js-yaml pick): hand-rolled both parsers instead of adding a dependency. TOML
+(`src/lib/preview/toml.ts`): a real recursive-descent parser covering tables, dotted keys,
+`[table]`/`[[array.of.tables]]` headers, inline tables, single- and multi-line arrays, basic/literal
+strings, all numeric forms (dec/hex/oct/bin, inf/nan), with anything out of that tractable subset
+(multi-line `"""`/`'''` strings) surfacing as a specific parse error rather than a silent guess. YAML
+(`src/lib/preview/yaml.ts`): a BOUNDED SUBSET only — block mappings/sequences, the `- key: value`
+shorthand, single-line flow collections, plain/quoted scalars. Anchors, aliases, tags, block scalars
+(`|`/`>`), complex mapping keys, multi-document streams, tab indentation, and a flow collection
+spanning multiple lines all degrade EXPLICITLY (`unsupported:true` + a specific reason), never
+silently mis-parsed; a genuine syntax error is a structurally distinct `unsupported:false` result.
+2026-08-11 — Reused `JsonTree.svelte`/`jsonTree.ts` UNCHANGED (no fork, no prop-level generalization
+needed) by round-tripping the parsed value through `JSON.stringify` before handing it to `<JsonTree
+text={...}>` — both parsers only ever produce the same plain-JS value shapes JSON does, so this is
+lossless and gets `JsonTree`'s own `MAX_CHILDREN`/`AUTO_COLLAPSE_DEPTH` render-safety caps for free.
+2026-08-11 — Built `YamlTomlPreview.svelte`: five structurally distinct states (loading / load-error /
+empty file / parse error / deliberately-unsupported degrade / success tree), each its own
+`data-testid`, per the "never conflate a parse failure with an empty file" lesson from CPE-1591/1615/
+1618. Registered `yaml`+`toml` `PreviewKind`s and two provider entries in `provider.ts` (extension-gated,
+`editable:false`, no `actions`), one new `{:else if}` branch in `PreviewPane.svelte` — additive-only,
+mirroring notebook/log exactly to avoid the parallel-PR shared-file conflict this crew has hit before.
+Skipped i18n for the new component (matches the Notebook/Log precedent — neither uses `$t()` either;
+adding new keys would require translating them across all `COMPLETE_LOCALES`, a much larger diff for a
+component pattern that already doesn't participate in i18n).
+2026-08-11 — Added `text/config.toml` + `text/config.yaml` samples (`scripts/gen_samples.py` dict entries
++ the actual files) to satisfy `sampleCoverage.test.ts`'s ratchet — a first draft nested
+`limits`/`allowed_ports`/`dependencies` after `[server.tls]`, which is CORRECT TOML semantics for
+"these keys belong to server.tls", not what was intended; caught by writing a throwaway verification
+test that printed the parsed JSON, fixed by moving those keys before the first table header, verified,
+then deleted the throwaway test. Updated `samples/README.md`'s two tables. Added a one-`it()` capture to
+`gui-smoke/specs/preview-pane.smoke.ts` (its own README documents this as a "one-line recipe" for a new
+provider) — not run locally (needs a real `tauri build` + `tauri-driver`/WebDriver stack).
+2026-08-11 — `npm run check`: 0 errors, 0 warnings. `npx vitest run`: 286 files, 3556 tests passed, 0
+failed (60 new parser tests + 8 new component tests). No `crates/server/`, `src-tauri/`, or `Cargo.*`
+file touched — confirmed via `git status`, satisfying the ticket's frontend-only acceptance criterion.

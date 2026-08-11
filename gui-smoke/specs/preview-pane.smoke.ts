@@ -309,4 +309,24 @@ describe("CPE-1629 — headless GUI smoke: preview-pane provider screenshots", f
 
     await assertAppStillAlive("previewing crypto/expired.jwt + crypto/rich-claims.jwt");
   });
+
+  it("the YAML/TOML structured-tree preview renders a real nested config (text/config.yaml, text/config.toml)", async function () {
+    // CPE-1617 (epic CPE-1568 slice 7): the one-line recipe from this file's README section — reuses
+    // the JsonTree-backed structured view via `[data-testid="yamltoml-preview"]` (YamlTomlPreview.svelte).
+    await openSampleFile(path.join(samplesRootAbs, "text"), "config.yaml", {
+      extraSelectors: ['[data-testid="yamltoml-preview"]'],
+    });
+    await $('[data-testid="yamltoml-tree"]').waitForExist({ timeout: 10_000 });
+    await applyCombo({ theme: "dark", widthPx: NARROW, suffix: "dark-narrow" });
+    await snap("preview-pane-yaml-dark-narrow");
+
+    await openSampleFile(path.join(samplesRootAbs, "text"), "config.toml", {
+      extraSelectors: ['[data-testid="yamltoml-preview"]'],
+    });
+    await $('[data-testid="yamltoml-tree"]').waitForExist({ timeout: 10_000 });
+    await applyCombo({ theme: "light", widthPx: WIDE, suffix: "light-wide" });
+    await snap("preview-pane-toml-light-wide");
+
+    await assertAppStillAlive("previewing text/config.yaml + text/config.toml");
+  });
 });

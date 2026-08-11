@@ -24,6 +24,8 @@ export type PreviewKind =
   | "json"
   | "notebook"
   | "log"
+  | "yaml"
+  | "toml"
   | "csv"
   | "tsv"
   | "archive"
@@ -726,6 +728,24 @@ export const providers: PreviewProvider[] = [
     kind: "log",
     editable: false,
     canPreview: (e) => !e.is_dir && e.extension === "log",
+  },
+  // Must precede the generic text provider: yaml/yml/toml categorise as "code" text in filetypes.ts
+  // (and `toml` maps to the merely-approximate `ini` highlight.js grammar) and would otherwise render as
+  // undifferentiated highlighted text with no real parse (CPE-1617, epic CPE-1568 slice 7). Self-
+  // contained like notebook/log above — YamlTomlPreview.svelte fetches + parses its own content.
+  {
+    id: "yaml",
+    label: "YAML",
+    kind: "yaml",
+    editable: false,
+    canPreview: (e) => !e.is_dir && (e.extension === "yaml" || e.extension === "yml"),
+  },
+  {
+    id: "toml",
+    label: "TOML",
+    kind: "toml",
+    editable: false,
+    canPreview: (e) => !e.is_dir && e.extension === "toml",
   },
   {
     id: "markdown",
