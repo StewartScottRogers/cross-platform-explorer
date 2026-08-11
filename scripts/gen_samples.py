@@ -1057,6 +1057,65 @@ TEXT_FILES = {
         "\x1b[31mERROR\x1b[0m Payment gateway timeout after 3 retries\n"
         "[2026-08-11 09:14:10] INFO  Shutting down gracefully\n"
     ),
+    # A realistic multi-level TOML config for the TOML structured-view path (CPE-1617): top-level
+    # scalars of every type, a dotted key, a [table], a nested [table.subtable], an inline table, a
+    # single-line array, a multi-line array with comments (the common pyproject.toml shape), and a
+    # [[array.of.tables]] with two entries — exercises the hand-rolled parser's whole tractable subset.
+    "text/config.toml": (
+        'title = "Baseline Sample Service"\n'
+        "version = 2\n"
+        "debug = false\n"
+        "owner.name = \"CPE Test Suite\"\n\n"
+        "limits = { max_connections = 100, max_body_bytes = 1048576 }\n\n"
+        "allowed_ports = [8080, 8443, 9000]\n\n"
+        "dependencies = [\n"
+        '  "requests>=2",  # http client\n'
+        '  "click",\n'
+        "  # a comment-only line inside the array\n"
+        '  "rich",\n'
+        "]\n\n"
+        "[server]\n"
+        'host = "0.0.0.0"\n'
+        "port = 8080\n"
+        "timeout_seconds = 30.5\n\n"
+        "[server.tls]\n"
+        "enabled = true\n"
+        'cert = "/etc/ssl/baseline.pem"\n\n'
+        "[[workers]]\n"
+        'name = "primary"\n'
+        "threads = 4\n\n"
+        "[[workers]]\n"
+        'name = "background"\n'
+        "threads = 2\n"
+    ),
+    # A realistic multi-level YAML config for the YAML structured-view path (CPE-1617): nested mappings,
+    # a block sequence of scalars, a block sequence of mappings (the `- key: value` shorthand), a
+    # single-line flow sequence, comments — every shape the bounded-subset parser is meant to handle,
+    # and NONE of the deliberately-unsupported constructs (anchors/aliases/tags/block scalars), so this
+    # fixture always renders as a full structured tree.
+    "text/config.yaml": (
+        "# Baseline Sample Service configuration\n"
+        "title: Baseline Sample Service\n"
+        "version: 2\n"
+        "debug: false\n"
+        "server:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8080\n"
+        "  timeout_seconds: 30.5\n"
+        "  tls:\n"
+        "    enabled: true\n"
+        "    cert: /etc/ssl/baseline.pem\n"
+        "allowed_ports: [8080, 8443, 9000]\n"
+        "tags:\n"
+        "  - cpe\n"
+        "  - sample\n"
+        "  - baseline\n"
+        "workers:\n"
+        "  - name: primary\n"
+        "    threads: 4\n"
+        "  - name: background\n"
+        "    threads: 2\n"
+    ),
 }
 
 

@@ -30,6 +30,7 @@
   import VcardPreview from "./VcardPreview.svelte";
   import NotebookPreview from "./NotebookPreview.svelte";
   import LogPreview from "./LogPreview.svelte";
+  import YamlTomlPreview from "./YamlTomlPreview.svelte";
   import MediaPlayer from "./MediaPlayer.svelte";
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
@@ -1186,6 +1187,11 @@
          NotebookPreview/CertPreview above — fetches + parses its own content from `path`, no declared
          action-bar actions. -->
     <LogPreview path={entry.path} />
+  {:else if (provider.kind === "yaml" || provider.kind === "toml") && entry}
+    <!-- YAML/TOML structured view (CPE-1617, epic CPE-1568 slice 7): self-contained like
+         NotebookPreview/LogPreview above — fetches + parses its own content from `path`, no declared
+         action-bar actions. -->
+    <YamlTomlPreview path={entry.path} format={provider.kind} />
   {:else if provider.kind === "folder" && entry}
     <!-- Folder peek (CPE-1426): browsable one-level-down listing; row clicks bubble up to the app via
          Svelte's bare `on:` forwarding (this component has no other listeners to conflict with). -->

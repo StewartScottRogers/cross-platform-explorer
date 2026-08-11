@@ -1,0 +1,21 @@
+# Baseline Sample Service configuration
+title: Baseline Sample Service
+version: 2
+debug: false
+server:
+  host: 0.0.0.0
+  port: 8080
+  timeout_seconds: 30.5
+  tls:
+    enabled: true
+    cert: /etc/ssl/baseline.pem
+allowed_ports: [8080, 8443, 9000]
+tags:
+  - cpe
+  - sample
+  - baseline
+workers:
+  - name: primary
+    threads: 4
+  - name: background
+    threads: 2
