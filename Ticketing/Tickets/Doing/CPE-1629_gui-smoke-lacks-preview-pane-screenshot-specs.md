@@ -122,3 +122,50 @@ recipe for adding a new provider spec, now citing the confirmed CPE-1615 pickup)
 render/dark-theme debt — to ✅, pinned by this ticket's spec; supplementary 10→9, total 13→12).
 `known-failing.json` is UNCHANGED (still 3 files / 7 specs) — no new spec was added to the ratchet's
 allowed-to-fail list.
+
+2026-08-11 — **PR #827's ratchet job (run 31485531728) failed on `GUI smoke (ubuntu-latest)`**: "41/41
+spec(s) reported — 37 passed, 4 failed, 3 known-failing listed. NEW GUI REGRESSION:
+`preview-pane.smoke.ts` failed and is not listed in `known-failing.json`." Pulled the job's raw log via
+`gh api repos/.../actions/jobs/93759931023/logs` (the `gh run view --log` text form silently truncates
+long runs — the raw API log is the reliable source) and the run's screenshot artifact
+(`gui-smoke-screenshots-ubuntu`). Both new tests in the spec failed — `the Binary Inspector's tabs
+render across a native PE ... flagship depth on Overview` and `... a MANAGED .NET PE ...` — both on the
+mocha reporter's own recorded reason:
+`Element <button class="tab active" role="tab" aria-selected="true">Overview</button> did not become
+interactable` / `webdriverio(middleware): element did not become interactable`. Both failures happen at
+the identical point: the very first `.click()` in `walkBinaryInspectorTabs` (index 0, the "Overview" tab,
+already active by default).
+
+Root cause, confirmed by reading `BinaryPreview.svelte`: `[data-testid="binary-preview"]` (the selector
+`walkBinaryInspectorTabs` waited on before touching the tab strip) sits on the component's OUTERMOST
+wrapper (`<div class="bp-preview" data-testid="binary-preview">`), which is present even while `loading`
+is still true (it just wraps a "Loading…" `<p>` then) — so that wait proves the component mounted, not
+that the tab strip exists or has finished layout/paint. The click itself then had no
+`waitForClickable()` guard before it, unlike literally every other tab/row click in this harness
+(`grep -rn waitForClickable gui-smoke/specs` — 50+ call sites; `cost-history.smoke.ts`'s CPE-1130
+comment documents exactly this convention: "kept here as defence-in-depth for a genuine render/paint
+beat"). On the slower/loaded Linux CI runner that beat is wide enough to lose the race consistently
+(both tests, same tab, same failure); on the author's local Windows runs it apparently never was — spec
+fragility from a missing wait, not an app defect. (Ruled out an alternative hypothesis floated mid-review
+— a dead `.preview-font` selector in `samplesNav.ts`'s `PREVIEW_CONTENT_SELECTOR` — as the cause of
+*this* failure: it's a real, separate bug [see CPE-1639 below], but `preview-pane.smoke.ts`'s font test
+passes its own working `[data-testid="font-preview"]` selector via `extraSelectors` and never depended on
+the dead entry; that test's mocha result in the same failing run was `✓`, not `✖`.)
+
+Fix (`gui-smoke/specs/preview-pane.smoke.ts`, `walkBinaryInspectorTabs`): wait for an actual
+`.bp-tabs .tab` to exist (not just the outer wrapper) before reading the tab list, and add the same
+`waitForClickable({ timeout: 10_000 })` guard the rest of the suite already uses before every click in
+the walk loop — a real DOM/state-condition wait, not a lengthened timeout. Rebased the branch onto
+latest `main` (pulled in CPE-1615/#820, CPE-1616/#822's notebook viewer, CPE-1600/#826 — clean, no
+conflicts). Verified locally: `npm run check` clean, `npx vitest run` 278 files/3412 tests green,
+`cargo test --test sample_fixtures` 16/16 green (including `mini_dotnet_dll_parses_as_a_real_managed_pe`),
+`gui-smoke` `npm run typecheck` clean and `npm run test:unit` 32/32 green. Attempted a real
+`tauri build --no-bundle` to re-run the spec end-to-end, but it failed on this machine with a systemic
+`os error 3` ("the system cannot find the path specified") across many unrelated crates' build scripts —
+an environmental path-depth issue from the doubly-nested worktree this session ended up isolated into,
+not a code problem (every other independent check above passed clean); flagged honestly as unverified
+rather than claimed. `known-failing.json` is unchanged (still 3 files / 7 specs, none stale). Pushed the
+rebase + fix as `892af3e6`; also filed and pushed **CPE-1639** (`e4d12b7e`) for the dead
+`.preview-font` selector found while investigating — real bug, but not the cause of this ratchet
+failure. New CI run (31491876898) kicked off on push; still in progress as of this entry (the Linux
+GUI-smoke leg took ~40 minutes on the prior run) — not yet confirmed green, flagged as unverified.
