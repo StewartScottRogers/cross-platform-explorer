@@ -47,7 +47,12 @@
   let convertExt = "webp";
   let rotateDegrees: "90" | "180" | "270" = "90";
   let flipDir: "horizontal" | "vertical" = "horizontal";
-  let renameTemplate = "{stem}";
+  /** The Rename op's pre-filled default template — a plain JS constant (not embedded literally in markup,
+   *  which Svelte would otherwise try to parse `{tokens}` in as mustache expressions). Left at this
+   *  default, Rename reproduces the input's stem verbatim — a narrow overwrite-in-place edge case the
+   *  CPE-1590 overwrite-hint copy below calls out by referencing this same constant. */
+  const RENAME_DEFAULT_TEMPLATE = "{stem}";
+  let renameTemplate = RENAME_DEFAULT_TEMPLATE;
   let compressQuality = 80;
   let watermarkImage = "";
   let watermarkPosition: Corner = "bottom_right";
@@ -234,6 +239,12 @@
    *  skipped file + reason (CPE-1115), so a skip is never silently dropped. Cleared → the dialog closes via
    *  the parent on "Done". A clean run (no skips) never sets this and closes immediately. */
   let completed: BatchReport | null = null;
+  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED (CPE-1590 code-review follow-up):
+   *  the confirm panel promises a checkpoint as the recovery net for a write that has no other one, so a
+   *  failure must never be silent — a console.error alone is invisible to the user who read that promise
+   *  and consented on the strength of it. A non-empty list forces the dialog to hold open (like a skip)
+   *  so the warning is actually seen, even on an otherwise-clean run. Reset at the start of every apply(). */
+  let checkpointFailures: string[] = [];
 
   function detachChannel() {
     if (activeChannel) activeChannel.onmessage = null;
@@ -252,18 +263,22 @@
     done = 0;
     failed = 0;
     total = planned.length;
+    checkpointFailures = [];
 
     if (needsOverwriteConfirm) {
       // Best-effort pre-write checkpoint of every folder about to lose original files (CPE-1590), taken
       // ONCE per affected folder before any byte is touched — mirrors MetadataStudioDialog/
       // DeclutterDialog/SimilarImagesDialog's "checkpoint before an irreversible batch" convention. A
-      // checkpoint failure must never block the (now explicitly confirmed) write; it's a bonus recovery
-      // path layered on top of the confirm, not a gate.
+      // checkpoint failure must never BLOCK the (now explicitly confirmed) write — the user already
+      // consented on the confirm panel — but it must also never be silent: the confirm text promises this
+      // checkpoint as the recovery net for a write that otherwise has none, so a failed one is recorded
+      // in `checkpointFailures` and surfaced in the results panel below, not just logged to devtools.
       for (const dir of uniqueParentDirs(overwriteItems.map((it) => it.input))) {
         try {
           unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
         } catch (e) {
           console.error("Batch media: pre-overwrite checkpoint failed (proceeding with confirmed write)", e);
+          checkpointFailures = [...checkpointFailures, dir];
         }
       }
     }
@@ -287,9 +302,11 @@
       });
       detachChannel();
       applying = false;
-      if (report.skipped.length > 0) {
+      if (report.skipped.length > 0 || checkpointFailures.length > 0) {
         // Hold the dialog open on a results panel so the user sees exactly which files were skipped and
-        // why, instead of a transient toast showing only the first (CPE-1115). "Done" finishes the flow.
+        // why (CPE-1115), AND — even on an otherwise-clean run — which folder(s) got no pre-overwrite
+        // checkpoint (CPE-1590), instead of either vanishing behind a transient toast or closing outright
+        // while the user still believes the promised recovery net exists. "Done" finishes the flow.
         completed = report;
       } else {
         dispatch("apply", { report });
@@ -410,7 +427,11 @@
         <div class="overwrite-hint" data-testid="overwrite-hint">
           Unchecked: Compress, Strip metadata, and Watermark (alone or combined, with no other op that
           renames the output) overwrite your original files instead of creating new ones. Resize, Rotate,
-          Flip, Convert, and Rename are unaffected — they always produce a differently-named file.
+          Flip, Convert, and Rename usually produce a differently-named file too — though a narrow edge
+          case (Convert to the extension a file already has, or Rename left at its default
+          "{RENAME_DEFAULT_TEMPLATE}" template) can still land on the same name. Either way, the plan
+          preview below always shows the real planned path, and Apply always confirms first whenever it
+          would actually overwrite something.
         </div>
       {/if}
     </div>
@@ -471,6 +492,26 @@
       </div>
     {/if}
 
+    {#if checkpointFailures.length > 0}
+      <!-- CPE-1590 code-review follow-up: the confirm panel promises a pre-overwrite checkpoint as the
+           recovery net for a write that has no other one — a failure to actually take it must never be
+           silent (a console.error alone is invisible), so it holds the dialog open and names exactly
+           which folder(s) have no checkpoint to revert to. The write itself still went ahead (already
+           confirmed), this is purely "here's what your safety net actually covers". -->
+      <div class="checkpoint-warn" data-testid="checkpoint-warning">
+        <strong>No checkpoint was taken</strong> for {checkpointFailures.length}
+        folder{checkpointFailures.length === 1 ? "" : "s"} before the overwrite — the write went ahead (you
+        already confirmed it), but there is nothing to revert to for:
+        <ul class="checkpoint-warn-list">
+          {#each checkpointFailures as dir}
+            <li title={dir}>{baseName(dir) || dir}</li>
+          {/each}
+        </ul>
+        Your only recovery for files in {checkpointFailures.length === 1 ? "that folder" : "those folders"}
+        now is your own backup.
+      </div>
+    {/if}
+
     {#if showOverwriteConfirm}
       <!-- CPE-1590: the destructive-overwrite confirm — replaces the normal action row so Apply can't
            still be clicked underneath it, names exactly how many originals will be overwritten, and
@@ -480,10 +521,11 @@
         <p class="overwrite-confirm-text">
           <strong>{overwriteItems.length}</strong> original file{overwriteItems.length === 1 ? "" : "s"}
           will be overwritten in place — the edited bytes replace the source file, and this is
-          <strong>not on the Undo (Ctrl+Z) stack</strong>. A checkpoint of the affected folder
-          {uniqueParentDirs(overwriteItems.map((it) => it.input)).length === 1 ? "" : "s"} will be taken
-          first as a recovery net, but the only way back after that is reverting that checkpoint or your
-          own backup.
+          <strong>not on the Undo (Ctrl+Z) stack</strong>. The app will attempt to checkpoint the affected
+          folder{uniqueParentDirs(overwriteItems.map((it) => it.input)).length === 1 ? "" : "s"} first as a
+          recovery net — if that fails you'll see a clear warning naming which folder(s) it didn't cover,
+          rather than it failing silently — but the write itself proceeds either way once you confirm, so
+          the only guaranteed way back is your own backup.
         </p>
         <div class="overwrite-confirm-actions">
           <button class="btn" data-testid="overwrite-confirm-cancel" on:click={cancelOverwriteConfirm}>Cancel</button>
@@ -684,6 +726,24 @@
     margin: 0 0 10px;
   }
   .overwrite-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* CPE-1590 code-review follow-up: a failed pre-overwrite checkpoint must be as visible as the promise
+     of it was — same danger-toned treatment as the confirm panel, shown in the post-run results area. */
+  .checkpoint-warn {
+    margin-bottom: 14px;
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  .checkpoint-warn-list {
+    margin: 4px 0;
+    padding-left: 18px;
+  }
+  .checkpoint-warn-list li { color: var(--text); font-weight: 500; }
 
   /* CPE-1115: prominent skipped-files results panel — a skip is never silently dropped. */
   .skips {

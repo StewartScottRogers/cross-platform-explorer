@@ -351,7 +351,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
    *  the plan so every planned output equals its input — the exact "unchecking the box silently arms an
    *  overwrite" scenario the ticket reports. */
   async function planOverwriteReady(paths: string[] = ["/repo/a.jpg"]) {
-    render(BatchMediaDialog, { paths });
+    const rendered = render(BatchMediaDialog, { paths });
     const opSelect = screen.getByLabelText("Operation") as HTMLSelectElement;
     await fireEvent.change(opSelect, { target: { value: "compress" } });
     await fireEvent.click(addButton());
@@ -361,6 +361,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     expect(planCalls[0].args.job.non_destructive).toBe(false);
     planCalls[0].resolve(paths.map((p) => ({ input: p, output: p, summary: "compress q80" })));
     await settle();
+    return rendered;
   }
 
   it("does not execute on the first Apply click when the plan would overwrite originals in place", async () => {
@@ -424,6 +425,50 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
     expect(checkpointCalls).toHaveLength(1);
     expect(execCalls).toHaveLength(1); // still proceeds — checkpoint is a bonus net, not a gate
+  });
+
+  it("shows a visible warning naming the folder when the pre-write checkpoint fails, and holds the " +
+    "dialog open until acknowledged — even on an otherwise-clean run with nothing skipped", async () => {
+    checkpointBehavior = "reject";
+    const { component } = await planOverwriteReady(["/repo/pics/a.jpg"]);
+    const onApply = vi.fn();
+    component.$on("apply", (e: CustomEvent) => onApply(e.detail));
+
+    await fireEvent.click(applyButton());
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    expect(checkpointCalls).toEqual([["/repo/pics", "Before batch media overwrite"]]);
+    expect(execCalls).toHaveLength(1);
+
+    // A clean execute — nothing skipped — would normally close the dialog immediately. The checkpoint
+    // failure alone must still hold it open so the warning is actually seen.
+    execCalls[0].resolve({ written: 1, skipped: [] });
+    await settle();
+
+    expect(onApply).not.toHaveBeenCalled(); // held open, not auto-dispatched/closed
+    const warning = screen.getByTestId("checkpoint-warning");
+    expect(warning.textContent).toContain("No checkpoint was taken");
+    expect(warning.textContent).toContain("pics"); // names the affected folder, not just a generic notice
+    expect(screen.getByTestId("batch-media-done")).toBeTruthy();
+
+    // "Done" still hands the (unmodified) report to the parent once the user has acknowledged the warning.
+    await fireEvent.click(screen.getByTestId("batch-media-done"));
+    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } });
+  });
+
+  it("does NOT show the checkpoint warning, and closes normally, when the pre-write checkpoint succeeds", async () => {
+    const { component } = await planOverwriteReady(["/repo/a.jpg"]);
+    const onApply = vi.fn();
+    component.$on("apply", (e: CustomEvent) => onApply(e.detail));
+
+    await fireEvent.click(applyButton());
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    expect(checkpointCalls).toHaveLength(1); // took the checkpoint, and it succeeded (default behavior)
+    execCalls[0].resolve({ written: 1, skipped: [] });
+    await settle();
+
+    expect(screen.queryByTestId("checkpoint-warning")).toBeNull();
+    expect(screen.queryByTestId("batch-media-done")).toBeNull(); // not held open
+    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } }); // closed immediately
   });
 
   it("editing the op list after opening the confirm panel dismisses it (no stale confirm)", async () => {
