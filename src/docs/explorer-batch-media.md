@@ -1,0 +1,147 @@
+---
+title: Batch Media
+order: 46
+category: Explorer
+categoryOrder: 2
+---
+
+# Batch Media
+
+**Batch media…** applies an ordered list of image edits — resize, convert, rotate, flip, rename, strip
+metadata, compress, watermark — to every file in a multi-image selection at once, with a live preview of
+each output's path before anything is written.
+
+## When to use it
+
+Batch media is for applying the **same transform pipeline to many images** in one pass — resizing a
+folder of photos for the web, converting a batch to WebP, stripping EXIF before sharing, or stamping a
+watermark across a set. For a single image, or for anything not covered here (crop, color adjustment,
+format-specific edits), there is no in-app editor — batch media only ever runs the eight ops below.
+
+It is strictly an **image** tool. Despite the "media" name, nothing here touches video or audio; a
+non-image file in the selection is filtered out before the dialog even opens (see *Selection* below).
+
+## How to open it
+
+- **Select 2 or more files, with at least one recognised image among them**, then right-click →
+  **Batch media…**.
+- There is **no command-palette entry** and **no keyboard shortcut** — the context menu is the only opener.
+
+## Selection
+
+The menu item itself appears once **2+ items are selected and at least one is a supported image**
+(`png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `tif`/`tiff` — case-insensitive). That set is deliberately
+**narrower** than the format list the thumbnailer/Quick-look can *decode* (which also covers `avif`):
+batch media's encoder can only **write** those eight formats, so a format it can decode but never
+re-encode is excluded up front rather than being offered and failing on every run.
+
+Clicking the menu item re-checks the selection:
+
+- Non-image files (and folders) are silently dropped, with a notice — *"N of M files aren't images and
+  will be skipped."* — if any were.
+- If fewer than **2** images remain after that filter, the dialog never opens; instead you see *"Not
+  enough image files in the selection for batch media."* Because the menu item only requires **one**
+  eligible image to appear, a selection of one image plus one unrelated file shows the menu row but then
+  bounces with this message instead of opening — the item's own count is what actually decides.
+
+## Building the op list
+
+The dialog's op builder has one row: pick an operation, fill in its settings, click **+ Add** to append it
+to the list. **Nothing runs until you've added at least one op.** Ops apply **in the order they were
+added**, top to bottom — each op's output feeds the next op's input (same decoded pixels, carried through
+the whole pipeline, decoded once at the start and encoded once at the end). You can add the **same
+operation twice** (e.g. two resizes), and remove any op from the list with its pill's **✕** — but there is
+**no drag-to-reorder**; to change the order, remove and re-add in the sequence you want.
+
+| Operation | Fields | Default | What it does |
+|---|---|---|---|
+| **Resize** | Max size (px, longest side) | 1024 | Downscales so neither dimension exceeds the value — **never upscales** a smaller source; a source already under the limit passes through untouched. |
+| **Convert** | Target extension | `webp` | Re-encodes to a different format. Only **six** output formats exist: `png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `tif`/`tiff` — anything else (`heic`, `avif`, `psd`, `svg`, …) fails that file with a clear error rather than silently no-op'ing. |
+| **Rotate** | Degrees: 90 / 180 / 270 | 90 | Rotates clockwise by an exact right angle — no arbitrary-angle input. |
+| **Flip** | Horizontal / Vertical | Horizontal | Mirrors the image on the chosen axis. |
+| **Rename** | Template | `{stem}` | Renames the output using tokens `{stem}` (original filename, no extension), `{n}` (1-based position in the batch), and `{ext}` (the extension at that point in the pipeline) — e.g. `photo-{n}` on 3 files → `photo-1`, `photo-2`, `photo-3`. |
+| **Strip metadata** | — | — | Drops all embedded EXIF/IPTC/XMP by re-encoding from decoded pixels, which never carry it. Because a phone photo's on-disk orientation often depends on the EXIF `Orientation` tag, this first **bakes that orientation into the pixels** (an equivalent rotate/flip) so the image doesn't silently change apparent orientation once the tag is gone. |
+| **Compress** | Quality (1–100) | 80 | Re-encodes at the given quality. This **only has an effect when the output is a JPEG** — png/gif/bmp/tif have no quality knob, and this build's WebP encoder is lossless-only, so Compress on any of those is a graceful no-op (the file is still re-encoded, just at that format's normal settings). Order matters: **Convert then Compress** applies quality to the new format; Compress before a later Convert has nothing to act on. |
+| **Watermark** | Image (Browse…), corner (one of 5), opacity (0–100) | no image · bottom-right · 80 | Alpha-composites the chosen image onto each file at the given corner and opacity. **Optional by construction** — leave the image unset and the op contributes nothing (not even to the output filename). An overlay bigger than the base image is anchored at the corner and clipped, never scaled down. A missing or undecodable overlay file fails that op for that run (see *Failures* below), not the whole batch. |
+
+A live **plan preview** below the op list shows every file as `original → planned output` plus a
+one-line summary of the ops that will run, updating automatically (debounced ~200ms) as you edit ops —
+capped at showing the first 300 rows for a very large selection, with a note of how many more there are.
+
+## Where results land
+
+**Write to new files (non-destructive)** is checked by default. With it checked, the output always lands
+in **the same folder as the input** under a modified name, and is guaranteed to differ from every input
+and from every other planned output in the batch:
+
+- **Resize** appends `-{px}` (`cat.jpg` → `cat-1024.jpg`).
+- **Rotate** appends `-rot{degrees}` (`cat-rot90.jpg`).
+- **Flip** appends `-fliph` or `-flipv`.
+- **Convert** changes only the extension (`cat.png` → `cat.webp`).
+- **Rename** replaces the whole stem from your template, and clears any suffix the other ops would have
+  added.
+- **Compress**, **Strip metadata**, and **Watermark** add **no suffix of their own** — if that leaves the
+  output identical to the input, the planner falls back to a generic `-out` suffix (`cat.jpg` →
+  `cat-out.jpg`), so don't expect a descriptive name like `cat-compressed.jpg` from those three ops alone.
+- If two inputs would land on the same output name, later ones are disambiguated `-2`, `-3`, …
+
+**Unchecking the box** turns off both guarantees: an op combination that has no suffix of its own (a lone
+Compress, Strip metadata, or Watermark) then **overwrites the original file in place**, with **no
+confirmation prompt** before you click Apply — unlike delete or secure-delete elsewhere in the app, there
+is no extra friction here. Only uncheck it once you're sure you don't need the originals; Resize/Rotate/
+Flip/Convert/Rename still produce a differently-named file either way, since their suffix logic doesn't
+depend on the checkbox.
+
+There is **no subfolder option** — outputs always sit alongside their inputs.
+
+## Applying
+
+**Apply** is enabled once at least one op is added and the plan resolved cleanly. Progress renders
+**inside this dialog** (not the shared bottom-corner transfer panel other file operations use) as a bar
+with a live "N/M done" count, streamed as each file finishes. **There is no mid-run cancel** — once
+started, a batch runs to completion; Cancel (and Escape) are disabled while it's applying.
+
+## Failures and partial success
+
+Batch media is **skip-on-error**: each file is processed independently, and one that can't be handled —
+unreadable, not actually decodable despite its extension, a missing/broken watermark overlay, or a write
+failure — is skipped with a reason, never aborting the rest of the run. An extremely large or
+maliciously-crafted image (a declared canvas over 20,000px on a side, or a decode that would need more
+than ~256 MB) is rejected the same way rather than risking a hang or an out-of-memory failure.
+
+If anything was skipped, the dialog **stays open** on a results panel — *"✓ N written · ⚠ M skipped"* —
+listing every skipped file by name with its reason, so nothing is silently dropped; click **Done** to close
+it and refresh the folder. A clean run (nothing skipped) closes and refreshes immediately. The plan preview
+itself does **not** predict which files will fail — a corrupt-but-correctly-named file only surfaces as a
+skip after you click Apply, not beforehand.
+
+## Worked example
+
+You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP, and strip camera EXIF.
+
+1. Select all 40, right-click → **Batch media…**.
+2. Add **Resize** at 1600px, click **+ Add**.
+3. Switch the operation dropdown to **Convert**, set the extension to `webp`, click **+ Add**.
+4. Switch to **Strip metadata**, click **+ Add** — three pills now show: *Resize 1600px*, *Convert →
+   webp*, *Strip metadata*.
+5. Leave **Write to new files** checked. The preview lists all 40 as `IMG_0001.jpg →
+   IMG_0001-1600.webp`, etc.
+6. Click **Apply**. The progress bar counts up to 40/40; if any file couldn't be decoded it's listed with
+   a reason on the results panel instead of silently vanishing.
+
+## Limits / notes
+
+- **Images only, always.** No video/audio operation exists despite the feature's name; a selection with
+  no eligible image never opens the dialog.
+- **Six writable output formats.** `png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `tif`/`tiff` — Convert to
+  anything else fails that file. The bundled WebP encoder is **lossless-only**, so Compress has no effect
+  on a WebP output.
+- **No reordering** once an op is added — remove and re-add to change the sequence.
+- **No mid-run cancel.** Once Apply is clicked, the batch runs to completion.
+- **No pre-flight failure check.** The live preview shows a planned path for every file regardless of
+  whether it will actually decode; you only learn about a bad file from the post-run skip panel.
+- **Overwrite mode has no confirmation.** Unchecking "Write to new files" and running Compress, Strip
+  metadata, or Watermark alone replaces the original bytes with nothing to undo through this dialog — see
+  [Undo](safety-undo) for what *is* covered (batch media's writes are not on that stack; the only recovery
+  is a prior [checkpoint](16-checkpoints) or your own backup).
+- **No command-palette entry or shortcut** — right-click is the only way in.

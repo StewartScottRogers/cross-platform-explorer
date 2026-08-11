@@ -97,7 +97,8 @@ payload that decompresses to something enormous.
 
 Only true ZIP containers are scored today — `.tar`, `.tar.gz`/`.tgz`, `.7z`, and `.iso` aren't ZIP
 archives, so the action doesn't offer itself for them (rather than silently reporting "0 entries scanned"
-as if it had checked). Support for those formats is a later addition.
+as if it had checked). Support for those formats is a later addition. See [Archives](explorer-archives)
+for the full format/extract/create matrix and the rest of the archive feature set this check is part of.
 
 ## More tabs coming
 

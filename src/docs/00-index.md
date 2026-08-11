@@ -18,6 +18,9 @@ link to jump straight to that page.
 ## Explorer
 
 - [The Explorer](03-explorer)
+- [Archives](explorer-archives)
+- [Batch Media](explorer-batch-media)
+- [Properties](explorer-properties)
 
 ## Organizing & Tagging
 
