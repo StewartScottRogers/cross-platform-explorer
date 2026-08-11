@@ -220,6 +220,29 @@ fn eml_parses_headers_attachment_and_body() {
     assert!(p.error.is_none());
 }
 
+/// The minimal-but-valid synthetic PE32 (`other/mini.dll`, CPE-1597's Binary Inspector sample coverage
+/// fixture — same well-formed shape as `binary_preview.rs`'s own `build_minimal_pe32()` test helper,
+/// which this reproduces bytes-for-bytes as a standalone generator so no production/test code had to
+/// move) parses through `binary_info` with a real section, import, and export, and its `.text` bytes
+/// disassemble to real x86 instructions (not the empty/garbage list a malformed fixture would yield).
+#[test]
+fn mini_dll_parses_as_a_real_pe_with_disassembly() {
+    use cpe_server::binary_preview::binary_info;
+    let info = binary_info(&sample_path("other/mini.dll")).expect("a well-formed minimal PE must parse");
+    assert_eq!(info.format, cpe_server::model::BinaryFormat::Pe);
+    assert!(!info.is_64, "this fixture is PE32, not PE32+");
+    assert!(info.sections.iter().any(|s| s.name == ".text"), "expected the .text section: {info:?}");
+    assert!(
+        info.imports.iter().any(|i| i.name == "SampleImport" && i.library.as_deref() == Some("SAMPLE.dll")),
+        "expected the SampleImport import: {info:?}"
+    );
+    assert!(
+        info.exports.iter().any(|e| e.name == "SampleExport"),
+        "expected the SampleExport export: {info:?}"
+    );
+    assert!(!info.disasm.is_empty(), "the .text bytes must disassemble to real x86 instructions: {info:?}");
+}
+
 /// The TIFF decodes and transcodes to a PNG data URL (decoded-image preview path).
 #[test]
 fn tiff_transcodes_to_png_data_url() {

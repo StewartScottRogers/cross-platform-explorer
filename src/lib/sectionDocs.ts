@@ -34,7 +34,8 @@ export type Section =
   | "appearance"
   | "keyboard-shortcuts"
   | "navigation-mode"
-  | "trash";
+  | "trash"
+  | "binary-inspector";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -144,6 +145,12 @@ const SECTION_DOC: Record<Section, string> = {
   // pointer on macOS) + `TrashView`'s listing and Restore/Empty actions. Like navigation-mode above,
   // it earns its own doc page + registry entry per [[maintain-in-app-docs-library]].
   trash: "38-trash",
+  // CPE-1597 (epic CPE-1562 "Binary Inspector" slice 4): the preview pane's tabbed read-only view for
+  // executables/libraries (Overview/Sections/Imports/Exports/Symbols/Disassembly). Like crypto-preview/
+  // media-player/structured-previews above, not a sidebar view you switch into (it's whichever decoded
+  // panel the preview pane shows for a PE/ELF/Mach-O file), but it still earns its own doc page +
+  // registry entry per [[maintain-in-app-docs-library]].
+  "binary-inspector": "binary-inspector",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
