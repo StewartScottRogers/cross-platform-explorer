@@ -21,6 +21,10 @@ link to jump straight to that page.
 - [Archives](explorer-archives)
 - [Batch Media](explorer-batch-media)
 - [Properties](explorer-properties)
+- [Tags](explorer-tags)
+- [Smart Folders](explorer-smart-folders)
+- [Saved Searches](explorer-saved-searches)
+- [Agent Watch](explorer-agent-watch)
 
 ## Organizing & Tagging
 

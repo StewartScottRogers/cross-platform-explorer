@@ -1026,6 +1026,10 @@
     if (showWorkbench) return "workbench";
     if (showTerminal) return "terminal";
     if (showTrash) return "trash";
+    // CPE-1604: the Agent Watch strip (ExplorerPane) shows whenever `activeWatchCwd` is non-empty — F1/
+    // the toolbar "?" should jump straight to its own page while it's on screen, ahead of the plain
+    // explorer fallback below.
+    if (activeWatchCwd) return "agent-watch";
     return isHome ? "home" : "explorer";
   }
   /** Every documented section + a friendly label, for per-section jump-links (palette, menus) — CPE-764. */
@@ -1041,6 +1045,7 @@
     { section: "repositories", label: "Repositories" },
     { section: "swarms", label: "Swarms" },
     { section: "trash", label: "Trash" },
+    { section: "agent-watch", label: "Agent Watch" },
   ];
 
   // Command Palette (CPE-602): Ctrl+Shift+P. The command list reuses existing handlers — nothing is

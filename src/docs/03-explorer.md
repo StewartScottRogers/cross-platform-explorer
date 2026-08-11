@@ -96,21 +96,15 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Tags & labels** — right-click a file or folder and choose **Tags…** to attach free-text tags and a
   single colour label. Tagged rows show their tags as small chips, and a labelled row gets a colour dot
   and a soft accent bar in its label's colour. Tags persist across sessions; untagged items look exactly
-  as before.
-- **Smart folders** — a saved search surfaced as a virtual folder. Right-click a tag in the sidebar's
-  **Tags** section and choose **Save as smart folder**; it appears under **Smart Folders** in the
-  sidebar. Opening it lists every file carrying that tag, wherever they live, and the view refreshes
-  automatically as you add or remove that tag. It's a read-only view (open a file's real location to
-  change it); rename or delete a smart folder by right-clicking it. Smart folders persist across
-  sessions and cost nothing when you have none.
-- **Saved searches** — a structured search (extension, name pattern, size, or date, built the same way as
-  **Select by…**) saved as its own virtual folder, alongside smart folders but listed separately under
-  **Saved Searches** in the sidebar. From the Command Palette, run **Select by…** (or **Save search…** to
-  jump straight to naming it), set your criterion, then choose **Save search…** and give it a name.
-  Opening a saved search re-scans recursively from the folder it was saved in and shows only the entries
-  matching that criterion right now — a read-only view, like a smart folder (open a file's real location
-  to change it). Right-click a saved search to rename or delete it. Saved searches persist across
-  sessions and cost nothing when you have none.
+  as before. See [Tags](explorer-tags) for the full editor, the sidebar's click-to-filter tag section, and
+  import/export.
+- **Smart folders** — a saved tag query surfaced as a virtual, read-only folder under **Smart Folders** in
+  the sidebar, listing every file carrying that tag wherever it lives and refreshing live. See
+  [Smart Folders](explorer-smart-folders) for how to create, open, and manage one.
+- **Saved searches** — a structured search (extension, name pattern, size, age, or "is a folder", built
+  the same way as **Select by…**) saved as its own virtual, read-only folder under **Saved Searches** in
+  the sidebar. See [Saved Searches](explorer-saved-searches) for the full criteria list, how the captured
+  root works, and its live refresh.
 - **Selection** — multi-select with Shift/Ctrl; the status bar shows the count and total size.
 - **Operations** — copy, cut, paste, rename, delete (to the trash, restorable), new folder, and batch
   rename. Filesystem operations skip entries they can't read rather than failing the whole listing.
@@ -270,60 +264,9 @@ this is Windows-only for now and shows a "coming soon" note elsewhere.
 
 ## Agent Watch
 
-Agent Watch is a mode layered over the explorer, not a separate app or a toggle you hunt for. It appears
-only when there's something to show: launch a coding agent from the AI Console, then navigate the
-explorer into (or already be sitting in) that agent's project folder. An **"Agent Watch — \<name\>"**
-strip appears above the file list, with a live dot, a running feed of recent change chips (created /
-modified / renamed / removed, fading over time), and a **Log** button.
-
-**Off means off.** Leave the folder, or let the agent's session end, and the strip disappears along with
-everything it drives — no watched session means no Agent Watch, no background watcher, and no cost, on
-top of the plain explorer.
-
-Click **Log** to open the Agent Watch drawer on the right — a tabbed activity panel: **Live**, **Replay**,
-**Cost**, **Radar**, **History**.
-
-### Live
-
-The default tab: a durable, newest-first log of every filesystem action the agent has taken this session
-— created, edited, deleted, moved. Click any row to jump the explorer to its containing folder. A
-**consulted files** list above the log surfaces files the agent has *read* (not just changed) this
-session — reads aren't visible to a filesystem watcher, so they're parsed from the agent's own output and
-shown as a dimmer, distinct signal from actual writes. A row whose edit captured a before/after diff shows
-a small `+added −removed` line count; hover or focus it to peek the diff inline, or click **Open full
-diff** for a side-by-side view.
-
-### Replay
-
-Scrub back and forth through the session's recorded activity with a slider — plus jump-to-start,
-jump-to-end, step back/forward, and play/pause at 0.5×/1×/2×/4× speed. Moving the scrubber reconstructs
-the folder listing exactly as it stood at that instant: files that had been created, modified, or removed
-by that point in time are shown, read-only, right in the drawer. A **"Show in file pane"** checkbox
-graduates that same reconstruction into the main explorer pane itself — pausing its live listing until you
-switch the toggle off or leave the Replay tab. If a path was edited more than once during the session, its
-diff at an earlier scrub point isn't retained; the drawer says so rather than showing a diff from the
-wrong moment.
-
-### Cost
-
-Live, per-session token and cost usage: input/output/total tokens and a USD estimate for every reporting
-session, plus files touched, edit count, churn (bytes changed), and wall-clock time, with per-minute and
-per-file throughput ratios once there's enough data to derive them. These figures are scraped from the
-agent's own printed output — **advisory, not a billing record**.
-
-### Radar
-
-Flags paths that two or more distinct actors have touched within a short window — the "two agents, or an
-agent and you, editing the same file" signal — as a list of paths with the actors involved and a relative
-timestamp; click a row to jump there. It's deliberately worded as an **activity overlap**, not a
-"conflict": a filesystem watcher can't prove two touches came from genuinely unrelated processes rather
-than the same agent revisiting its own file, so an overlap involving an unresolved actor carries a hedge
-note. A **Competing renames** section below it separately flags same-source or same-destination rename
-divergences across distinct actors.
-
-### History
-
-A cross-session rollup read from a small local history log, loaded once the first time you open the tab:
-totals (sessions, cost, tokens, time, files touched, churn), throughput ratios, per-model and per-agent
-breakdowns with each one's share of total cost, and a bar chart of cost or tokens per day. Same advisory
-framing as the Cost tab — best-effort figures, never billing.
+Agent Watch is a mode layered over the explorer, not a separate app or a toggle you hunt for: launch a
+coding agent from the AI Console, navigate into (or already be sitting in) its project folder, and an
+**"Agent Watch — ⟨name⟩"** strip appears above the file list with live change chips and a **Log** drawer
+(Live / Replay / Cost / Radar / History tabs, plus checkpoint-backed revert from a bad edit). See
+[Agent Watch](explorer-agent-watch) for the full drawer walkthrough, the sidebar Agents section, the
+session-history export tool, and exactly what "off means off" does and doesn't cover.

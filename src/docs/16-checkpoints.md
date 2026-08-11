@@ -69,6 +69,9 @@ the first capture happens shortly after you add it (or after launch), then on it
 
 ## What this is (and isn't)
 
-This is the palette-driven, headless-friendly way to create and use checkpoints. A richer visual restore
-panel — with timeline markers showing checkpoints alongside an agent's activity — is a separate, deferred
-feature; this dialog covers the same underlying commands with a minimal UI.
+This is the palette-driven, headless-friendly way to create and use checkpoints, usable on any folder at
+any time. A second, richer restore surface now also exists **inside [Agent Watch](explorer-agent-watch)**:
+its Replay tab shows a watched folder's checkpoints as pins right on the activity scrubber, with the same
+drift-aware preview and two-step confirm as here — but only while you're watching that folder's agent
+session. This dialog is the one that works everywhere else, on any folder, with or without an agent
+involved.
