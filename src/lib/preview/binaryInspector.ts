@@ -74,8 +74,11 @@ export type ManagedConfidence = "confirmed" | "possible" | "none";
  *   is the norm, not an anomaly — flagging one as "possibly managed" was actively wrong, hid a perfectly
  *   real, valid x86/x64 disassembly behind an unnecessary extra click, and told the user an everyday
  *   shape was "unusual" when it's standard.
- * - `.sys` — Windows kernel drivers can likewise carry a near-empty (occasionally fully empty) import
- *   table depending on how they reach the kernel/HAL; included on the same grounds, more conservatively.
+ * - `.sys` — Windows kernel drivers. They can likewise carry a near-empty (occasionally fully empty)
+ *   import table depending on how they reach the kernel/HAL, but the stronger reason is categorical: the
+ *   CLR does not run in kernel mode at all, so a kernel driver can never legitimately be a managed .NET
+ *   assembly in the first place. "Possibly managed" is inapplicable to this format regardless of how
+ *   common empty import tables happen to be among drivers.
  *
  * The zero-imports-AND-zero-exports signal below is SKIPPED entirely for these extensions (never
  * downgraded to a lesser warning — it simply isn't evidence for this format), so `.efi`/`.sys` never gate
