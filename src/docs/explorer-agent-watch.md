@@ -133,8 +133,13 @@ in the explorer.
   proper "ended" signal — its process is simply stopped. That session's activity up to that moment is
   still persisted to History, but the row is marked as **not a clean end** (its end time is when the
   deck closed, not the session's real finish, so wall-clock/throughput numbers for that row may
-  undercount). A History view that surfaces this can use the marker to tell the two apart; nothing here
-  guesses at a real end it never saw. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning
+  undercount). Nothing here guesses at a real end it never saw.
+
+  **The marker is recorded but not yet shown anywhere.** History today displays only aggregate totals —
+  no per-session rows — so a session that was reaped mid-run is currently folded into those totals
+  looking exactly like one that finished normally, and its duration is measured from when you closed the
+  deck rather than when it actually stopped. Surfacing that distinction, and reporting an honest duration
+  for such a row, is tracked as **CPE-1641**. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning
   (including why an earlier version of this app kept the watcher running after you left a project, and
   why that's no longer necessary).
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
