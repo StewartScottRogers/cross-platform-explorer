@@ -14,9 +14,12 @@
    *
    * Two "couldn't actually scan this" states, both deliberately NEVER falling through to the plain safe
    * banner: `result.unreadable` (CPE-1320) means the archive itself couldn't be opened at all (corrupt,
-   * not a zip); `result.unreadable_entries > 0` (CPE-1591) means the archive opened fine but one or more
-   * entries inside it couldn't be read — in practice almost always because they're password-protected and
-   * this dialog has no password prompt. A zero-entries password-protected zip used to collapse to the same
+   * not a zip); `result.unreadable_entries > 0` (CPE-1591, widened by CPE-1602) means the archive opened
+   * fine but one or more entries inside it couldn't be read — either because they're password-protected
+   * (this dialog has no password prompt) or because an entry looked suspicious and its bounded
+   * verification ran out of budget before reaching a verdict. The backend doesn't currently distinguish
+   * *which* of those happened (CPE-1612), so the copy below (`arcsafe.encrypted`) names both possibilities
+   * rather than asserting encryption. A zero-entries password-protected zip used to collapse to the same
    * `entries_scanned: 0, dangerous: false` shape as a genuinely safe empty archive; `unreadable_entries`
    * makes that case structurally distinct so it can never render as "No zip-bomb risk detected" again.
    */
@@ -92,12 +95,14 @@
       <p class="err" data-testid="as-unreadable">{$t("arcsafe.unreadable")}</p>
     {:else if result && !result.report.dangerous && result.unreadable_entries > 0}
       <!-- CPE-1591: the archive itself opened fine (unlike the CPE-1320 case above), but one or more
-           entries couldn't be read — overwhelmingly because they're password-protected and this dialog
-           has no password prompt. Those entries were never sized or scored, so `report.dangerous ===
-           false` here means "we don't know", not "safe" — before this fix that shape rendered the same
-           reassuring safe banner as a fully-scanned clean archive. Only gated when nothing dangerous was
-           already found among whatever WAS readable: a real danger signal from the readable portion still
-           takes priority (below) rather than being hidden behind "couldn't fully assess". -->
+           entries couldn't be read — either password-protected, or (CPE-1602) suspicious-looking entries
+           whose bounded verification ran out of budget; see `arcsafe.encrypted` (CPE-1612), which names
+           both rather than assuming encryption. Those entries were never sized or scored, so
+           `report.dangerous === false` here means "we don't know", not "safe" — before this fix that shape
+           rendered the same reassuring safe banner as a fully-scanned clean archive. Only gated when
+           nothing dangerous was already found among whatever WAS readable: a real danger signal from the
+           readable portion still takes priority (below) rather than being hidden behind "couldn't fully
+           assess". -->
       <p class="err" data-testid="as-encrypted">{$t("arcsafe.encrypted", { count: result.unreadable_entries })}</p>
     {:else if result}
       {#if result.report.dangerous}

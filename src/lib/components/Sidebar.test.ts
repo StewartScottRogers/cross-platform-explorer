@@ -166,6 +166,21 @@ describe("Sidebar Saved Searches section (CPE-1229)", () => {
     expect(screen.getByText("Screenshots")).toBeTruthy();
     expect(screen.getByText("Big PNGs")).toBeTruthy();
   });
+
+  // CPE-1605: a Smart Folder row's tooltip must name itself correctly — it is NOT a saved search
+  // (a different feature, single-tag live view vs. multi-condition query), and the two live as
+  // adjacent-but-distinct sidebar sections, so the wrong label is actively confusing.
+  it("labels a Smart Folder row's tooltip as a smart folder, not a saved search (CPE-1605)", () => {
+    render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [],
+      smartFolders: [{ id: "sf1", name: "Screenshots", tag: "screenshot" }],
+    });
+    const row = screen.getByText("Screenshots").closest("button") as HTMLElement;
+    expect(row.title).toContain("smart folder");
+    expect(row.title).not.toContain("saved search");
+  });
 });
 
 describe("Sidebar drive usage bars (CPE-406)", () => {

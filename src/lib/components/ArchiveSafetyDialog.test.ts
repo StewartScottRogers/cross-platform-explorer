@@ -170,6 +170,11 @@ describe("ArchiveSafetyDialog (CPE-1318)", () => {
 
     await waitFor(() => expect(screen.getByTestId("as-encrypted")).toBeTruthy());
     expect(screen.getByTestId("as-encrypted").textContent).toContain("3");
+    // CPE-1612: `unreadable_entries` also catches a suspicious entry whose bounded verification ran out
+    // of budget (CPE-1602) — a legitimate, unencrypted archive — so the copy must name both possibilities
+    // rather than asserting "likely password-protected" as the sole explanation.
+    expect(screen.getByTestId("as-encrypted").textContent).toContain("password-protected");
+    expect(screen.getByTestId("as-encrypted").textContent).toContain("too complex to verify");
     // Must NOT render as safe or dangerous — the archive was never actually scanned.
     expect(screen.queryByTestId("as-safe")).toBeNull();
     expect(screen.queryByTestId("as-danger")).toBeNull();
