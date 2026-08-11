@@ -62,15 +62,19 @@ export function classifyBinaryError(message: string): BinaryErrorKind {
  * display (CPE-1615) — the backend exposes the raw column unparsed (see its own doc comment in
  * `bindings.gen.ts`), so the frontend names the bits a user is likely to care about rather than showing a
  * bare hex/decimal number. Deliberately not exhaustive (the processor-architecture sub-field and a couple
- * of rarely-set compatibility bits are omitted) — an unrecognized bit simply contributes no pill, it's
- * never dropped silently from anything that matters (the raw value is still available via `flags` itself
- * if ever needed).
+ * of rarely-set compatibility bits are omitted) — an unrecognized bit contributes no pill, but the raw
+ * value is always rendered alongside the pills, so nothing a binary declares is ever invisible.
+ *
+ * Bit values are `CorAssemblyFlags` (ECMA-335 II.23.1.2 / `corhdr.h`). CPE-1615's first cut mislabeled
+ * these — 0x0200 is the WindowsRuntime content type, not a JIT bit, and the two JIT bits sat one slot too
+ * low — so a Debug build (0xC000) showed a single, wrongly-named pill. Corrected against `corhdr.h`.
  */
 const ASSEMBLY_FLAG_BITS: ReadonlyArray<readonly [number, string]> = [
   [0x0001, "PublicKey"],
   [0x0100, "Retargetable"],
-  [0x0200, "DisableJITcompileOptimizer"],
-  [0x4000, "EnableJITcompileTracking"],
+  [0x0200, "ContentType:WindowsRuntime"],
+  [0x4000, "DisableJITcompileOptimizer"],
+  [0x8000, "EnableJITcompileTracking"],
 ];
 
 /** Decode the recognized bits of an `AssemblyFlags` value into short display labels (CPE-1615), for
@@ -90,6 +94,13 @@ export function cultureLabel(culture: string | null): string {
  *  than an empty cell that could be mistaken for a loading gap. */
 export function hexOrDash(hex: string | null): string {
   return hex && hex.length > 0 ? hex : "—";
+}
+
+/** Render the raw `AssemblyFlags` word as hex (CPE-1615) so a bit {@link decodeAssemblyFlags} doesn't
+ *  recognize is still visible — the inspector's job is ground truth, so nothing a binary declares should
+ *  be reachable only through a lookup table we happen to have filled in. */
+export function rawAssemblyFlags(flags: number): string {
+  return `0x${(flags >>> 0).toString(16).toUpperCase().padStart(4, "0")}`;
 }
 
 /** Human label for a `BinaryFormat` value. */

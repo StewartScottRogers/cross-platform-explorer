@@ -16,6 +16,7 @@
     formatLabel,
     hexAddress,
     decodeAssemblyFlags,
+    rawAssemblyFlags,
     cultureLabel,
     hexOrDash,
     BINARY_TABLE_ROW_CAP,
@@ -338,6 +339,12 @@
                 <div><dt>Version</dt><dd class="mono">{dotnetMeta.assembly.version}</dd></div>
                 <div><dt>Culture</dt><dd>{cultureLabel(dotnetMeta.assembly.culture)}</dd></div>
                 <div><dt>Public key</dt><dd class="mono">{hexOrDash(dotnetMeta.assembly.public_key)}</dd></div>
+                <div>
+                  <dt>Flags</dt>
+                  <dd class="mono" data-testid="binary-dotnet-flags-raw">
+                    {rawAssemblyFlags(dotnetMeta.assembly.flags)}
+                  </dd>
+                </div>
               </dl>
               {#if assemblyFlags.length > 0}
                 <div class="bp-pills" data-testid="binary-dotnet-flags">

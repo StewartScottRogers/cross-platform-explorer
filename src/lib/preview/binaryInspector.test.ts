@@ -4,6 +4,7 @@ import {
   capRows,
   classifyBinaryError,
   decodeAssemblyFlags,
+  rawAssemblyFlags,
   cultureLabel,
   hexOrDash,
   formatLabel,
@@ -79,9 +80,42 @@ describe("decodeAssemblyFlags (CPE-1615 — recognized ECMA-335 AssemblyFlags bi
   });
 
   it("an unrecognized bit contributes nothing (never throws, never a garbage label)", () => {
-    expect(decodeAssemblyFlags(0x8000)).toEqual([]);
+    // 0x0010 is not a CorAssemblyFlags bit we name.
+    expect(decodeAssemblyFlags(0x0010)).toEqual([]);
     // A recognized bit alongside unrecognized ones still surfaces cleanly.
-    expect(decodeAssemblyFlags(0x0001 | 0x8000)).toEqual(["PublicKey"]);
+    expect(decodeAssemblyFlags(0x0001 | 0x0010)).toEqual(["PublicKey"]);
+  });
+
+  // Ground truth from `corhdr.h` / ECMA-335 II.23.1.2, not from our own table — the first cut of this
+  // decoder passed its own self-consistent tests while shipping two mislabeled constants (0x0200 named as
+  // a JIT bit, and both JIT bits one slot too low). These assert the real values.
+  it("uses the real CorAssemblyFlags bit values", () => {
+    expect(decodeAssemblyFlags(0x0200)).toEqual(["ContentType:WindowsRuntime"]);
+    expect(decodeAssemblyFlags(0x4000)).toEqual(["DisableJITcompileOptimizer"]);
+    expect(decodeAssemblyFlags(0x8000)).toEqual(["EnableJITcompileTracking"]);
+  });
+
+  it("decodes a real Debug-build assembly's flags (0xC000) as BOTH JIT bits", () => {
+    // A typical Debug configuration sets DebuggableAttribute, i.e. 0x4000 | 0x8000. The mislabeled table
+    // rendered this as a single, wrongly-named pill.
+    expect(decodeAssemblyFlags(0xc000)).toEqual([
+      "DisableJITcompileOptimizer",
+      "EnableJITcompileTracking",
+    ]);
+  });
+});
+
+describe("rawAssemblyFlags (CPE-1615 — the raw word stays visible so an unnamed bit is never hidden)", () => {
+  it("renders the value as padded uppercase hex", () => {
+    expect(rawAssemblyFlags(0)).toBe("0x0000");
+    expect(rawAssemblyFlags(0x0001)).toBe("0x0001");
+    expect(rawAssemblyFlags(0xc000)).toBe("0xC000");
+  });
+
+  it("a bit with no pill is still readable in the raw value", () => {
+    // 0x0010 produces no pill (above); the user can still see the binary declared it.
+    expect(decodeAssemblyFlags(0x0010)).toEqual([]);
+    expect(rawAssemblyFlags(0x0010)).toBe("0x0010");
   });
 });
 
