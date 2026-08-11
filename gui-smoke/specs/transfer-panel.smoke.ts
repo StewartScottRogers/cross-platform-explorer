@@ -102,7 +102,20 @@ describe("CPE-1226 — headless GUI smoke: TransferPanel archive row + CPE-1212 
     const crumb = await $('[aria-current="page"]');
     await crumb.waitForExist({ timeout: 30_000 });
 
-    const folderPt = await pointOfRow(TRANSFER_PANEL_DIR_NAME);
+    // CPE-1595: `pointOfRow` used to be called once, immediately after `crumb.waitForExist` — that
+    // only proves navigation STARTED, not that the (per docs/design/STREAMING.md) batched listing
+    // finished streaming ~30 root-level fixtures into the DOM. A live run (PR #801/CPE-1594, job
+    // 93649941153) failed here with "expected a row for the seeded CPE-1226-transfer-panel-folder:
+    // expected null to not equal null" — the same batch-streaming race archive-browse.smoke.ts hit on
+    // its own initial row lookup — so retry instead of a one-shot call.
+    let folderPt: Awaited<ReturnType<typeof pointOfRow>> = null;
+    await browser.waitUntil(
+      async () => {
+        folderPt = await pointOfRow(TRANSFER_PANEL_DIR_NAME);
+        return folderPt !== null;
+      },
+      { timeout: 15_000, timeoutMsg: `expected a row for the seeded "${TRANSFER_PANEL_DIR_NAME}" to render` },
+    );
     expect(folderPt, `expected a row for the seeded "${TRANSFER_PANEL_DIR_NAME}"`).to.not.equal(null);
     await doubleClick(folderPt!);
 

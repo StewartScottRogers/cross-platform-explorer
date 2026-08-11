@@ -74,15 +74,30 @@ describe("CPE-1181 — headless GUI smoke: browsing into a non-zip (.tar.gz) arc
     // Locate the fixture's row by scanning rendered row HTML for its filename (the reliable primitive
     // under wry's classic-WebDriver webview — see open-dir.smoke.ts's note on why a text-based
     // `$('=name')` locator isn't used here), then resolve its centre point for a faithful CDP click.
-    const rows = $$(".row");
+    //
+    // CPE-1595: this used to be a ONE-SHOT scan run immediately after only `crumb.waitForExist` —
+    // that only confirms navigation STARTED (App.svelte renders the breadcrumb as soon as `currentPath`
+    // changes), not that the listing finished rendering. Per docs/design/STREAMING.md the listing
+    // streams in batches and "flips loading off on the first batch", so a single scan can race a batch
+    // that hasn't delivered this fixture's row yet — worse under a loaded CI runner with ~30 root-level
+    // fixtures to stream. A live run (PR #801/CPE-1594, job 93649941153) hit exactly this: "expected a
+    // file row containing CPE-1181-archive.tar.gz: expected false to equal true" — confirmed a race
+    // (not a genuinely missing row: the fixture is real and seeded, and other specs read it fine),
+    // fixed by retrying the scan like every other row-lookup in this suite already does.
     let archiveRowFound = false;
-    for await (const row of rows) {
-      const html = await row.getHTML({ includeSelectorTag: false });
-      if (html.includes(ARCHIVE_TARGZ_NAME)) {
-        archiveRowFound = true;
-        break;
-      }
-    }
+    await browser.waitUntil(
+      async () => {
+        for await (const row of $$(".row")) {
+          const html = await row.getHTML({ includeSelectorTag: false });
+          if (html.includes(ARCHIVE_TARGZ_NAME)) {
+            archiveRowFound = true;
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: 15_000, timeoutMsg: `expected a file row containing "${ARCHIVE_TARGZ_NAME}" to render` },
+    );
     expect(archiveRowFound, `expected a file row containing "${ARCHIVE_TARGZ_NAME}"`).to.equal(true);
 
     const archivePt = await pointOfRow(ARCHIVE_TARGZ_NAME);
