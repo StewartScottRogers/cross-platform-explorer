@@ -1,0 +1,80 @@
+<!doctype html>
+<!--
+  CPE-1631 syntax-highlighting verification harness. Renders the REAL highlight.js output (via
+  src/lib/preview/highlight.ts) inside the REAL markup+classes PreviewPane.svelte's code view
+  (`.main.with-details > aside.preview > .code-view > pre.preview-text.code-rows > code.cl-code`)
+  and NotebookPreview.svelte's code cell (`.nb-cell > pre.nb-code`) use, with the app's real
+  src/app.css loaded — so the `.hljs-*` rules added for CPE-1631 either colour the tokens or they
+  don't, exactly as a user would see it. No Svelte component mount, no Tauri backend: highlight.ts
+  has no such dependency, so this is a plain script.
+
+  Reuses the CPE-1635 checkpoint-narrow harness's pattern (own tiny page, real app.css, query-param
+  theme switch matching src/lib/theme.ts's `data-theme` convention) — this check doesn't need
+  CPE-1635's iframe-for-vw trick (nothing here is viewport-width-relative), so it's a single flat
+  page.
+
+  Usage: `npm run harness:hljs-theme`, then open
+  http://localhost:4320/scripts/dev-harness/hljs-theme/index.html?theme=dark (theme = "light"|"dark",
+  default "light"). Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1631 harness — hljs theme</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      body { padding: 16px; }
+      .main.with-details {
+        display: block; /* override the real 3-col grid — this harness only needs one column */
+        padding: 16px;
+        max-width: 720px;
+      }
+      h2 { color: var(--text); font: 600 13px "Segoe UI", sans-serif; margin: 0 0 6px; }
+      section { margin-bottom: 24px; }
+      aside.preview { display: block; }
+      /* Harness-local layout only (wrap + monospace + padding) — NOT a reproduction of
+         PreviewPane.svelte's/NotebookPreview.svelte's real (Svelte-scoped) rules, see main.ts's
+         comment. The colour rules under test (`.hljs-*`) come from the real, unscoped src/app.css. */
+      #code-preview, #nb-cell, #json-sample, #svelte-sample {
+        display: block; white-space: pre-wrap; word-break: break-word;
+        font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
+        padding: 12px; background: var(--surface); color: var(--text);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="main with-details">
+      <section>
+        <h2>Plain code preview (PreviewPane.svelte markup: .code-view &gt; .cl-code &gt; .cl-row)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="code-preview"></code></pre>
+          </div>
+        </aside>
+      </section>
+      <section>
+        <h2>Notebook code cell (NotebookPreview.svelte markup: .nb-cell &gt; pre.nb-code)</h2>
+        <div class="nb-cell">
+          <pre class="nb-code"><code id="nb-cell"></code></pre>
+        </div>
+      </section>
+      <section>
+        <h2>JSON (hljs-attr keys + hljs-punctuation — 0% covered before the round-2 fix)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="json-sample"></code></pre>
+          </div>
+        </aside>
+      </section>
+      <section>
+        <h2>Svelte-shaped XML (hljs-attr on real component attribute names)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="svelte-sample"></code></pre>
+          </div>
+        </aside>
+      </section>
+    </div>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

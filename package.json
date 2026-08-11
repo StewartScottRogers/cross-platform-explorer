@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "organize:done": "node scripts/organize-done.mjs",
     "harness:checkpoint-narrow": "vite --config vite.harness.config.ts",
+    "harness:hljs-theme": "vite --config vite.harness.hljs-theme.config.ts",
     "tauri": "tauri"
   },
   "dependencies": {

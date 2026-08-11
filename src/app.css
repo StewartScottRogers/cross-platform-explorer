@@ -44,6 +44,30 @@
 
   /* Log-preview WARN tone (CPE-1618) — 5.93:1 on white / 5.34:1 on --pal-gray-100, clears WCAG AA. */
   --pal-amber-700: #8a5a00;
+
+  /* Syntax-highlighting palette (CPE-1631): six token-source hues for highlight.js's `hljs-*`
+     classes (see the `.hljs-*` rules near the end of this file), chosen so each clears WCAG AA
+     >=4.5:1 against BOTH --surface (#fff) and --surface-alt (#fbfbfb) — code is small monospace
+     text, so it gets the stricter body-text bar, not the 3:1 non-text-UI bar the --agent-* swatches
+     use. Measured (vs surface / vs surfaceAlt): keyword 5.63/5.44, title 7.59/7.34, string
+     5.08/4.91, comment 6.11/5.91, number 7.39/7.14, tag 7.04/6.80 — all comfortably above 4.5:1.
+     CPE-1631 PR review round 2 (colour-blind-safety pass): `keyword` and `tag` were re-hued —
+     keyword from #8250df (a blue-violet only ~50° from `title`'s hue, which a protanopia/
+     deuteranopia simulation collapses to a near-collision) to this more magenta-leaning purple;
+     `tag` from #116b6b (a teal sitting almost exactly between `string`'s green and `title`'s blue,
+     the hue zone tritanopia confuses most) to a hue+lightness combination re-derived to clear a
+     real simulated-CVD safety margin against ALL FIVE other tokens simultaneously (not just the
+     ones it happened to collide with), not just against the one or two pairs a reviewer's spot
+     check found. `title`/`string`/`number`/`comment` are UNCHANGED from the first review round —
+     see app.css.hljs-contrast.test.ts's docstring and the ticket's Work Log for the full
+     before/after colour-blind simulation numbers (Machado, Oliveira & Fialho 2009 dichromacy
+     matrices, the same family Chrome DevTools' "Emulate vision deficiencies" uses). */
+  --pal-hljs-keyword: #a8389f;  /* keyword, selector-tag — magenta-purple */
+  --pal-hljs-title: #0550ae;    /* title, section, function — blue */
+  --pal-hljs-string: #1a7f37;   /* string, symbol, bullet, addition, code — green */
+  --pal-hljs-comment: #59636e;  /* comment, quote — muted gray */
+  --pal-hljs-number: #953800;   /* number, built_in, literal, type, params, meta, link, attribute — rust */
+  --pal-hljs-tag: #0b654d;      /* variable, tag, name, attr, property, selector-id/class, regexp, deletion — teal-green */
 }
 
 /* ---------- Layer 2: semantic tokens — light theme (today's default/fallback) ---------- */
@@ -92,6 +116,15 @@
      level-tint only, not a general "warning" token elsewhere. ERROR/INFO reuse --danger/--accent (they
      already carry the right meaning); amber has no existing semantic token to reuse. */
   --log-warn: var(--pal-amber-700);
+
+  /* Syntax highlighting (CPE-1631) — backs the `.hljs-*` rules near the end of this file. See
+     --pal-hljs-* above for the WCAG AA contrast measurements. */
+  --hljs-keyword: var(--pal-hljs-keyword);
+  --hljs-title: var(--pal-hljs-title);
+  --hljs-string: var(--pal-hljs-string);
+  --hljs-comment: var(--pal-hljs-comment);
+  --hljs-number: var(--pal-hljs-number);
+  --hljs-tag: var(--pal-hljs-tag);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -154,6 +187,13 @@
   --danger-hover: var(--pal-red-700);
   --danger-on-tint: var(--danger);
   --log-warn: var(--pal-amber-700);
+
+  --hljs-keyword: var(--pal-hljs-keyword);
+  --hljs-title: var(--pal-hljs-title);
+  --hljs-string: var(--pal-hljs-string);
+  --hljs-comment: var(--pal-hljs-comment);
+  --hljs-number: var(--pal-hljs-number);
+  --hljs-tag: var(--pal-hljs-tag);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -235,6 +275,20 @@
      --pal-dark-gray-900 (--bg), well past WCAG AA. */
   --pal-dark-amber-300: #ffb84d;
 
+  /* Syntax-highlighting palette (CPE-1631), dark theme — brightened re-derivations of the light
+     --pal-hljs-* hues (not a flat inversion) so each clears WCAG AA >=4.5:1 against BOTH --surface
+     (#2b2b2b) and --surface-alt (#262626). Measured (vs surface / vs surfaceAlt): keyword
+     8.82/9.42, title 6.82/7.29, string 9.22/9.85, comment 5.88/6.29, number 7.63/8.15,
+     tag 8.50/9.09 — all comfortably above 4.5:1. `keyword`/`tag` re-hued in the CPE-1631 PR review
+     round 2 colour-blind-safety pass — see the light-palette `--pal-hljs-keyword`/`--pal-hljs-tag`
+     comment above for why; `title`/`string`/`number`/`comment` unchanged. */
+  --pal-dark-hljs-keyword: #f5bcd9;
+  --pal-dark-hljs-title: #79b8ff;
+  --pal-dark-hljs-string: #7ee787;
+  --pal-dark-hljs-comment: #a0a8b0;
+  --pal-dark-hljs-number: #ffab70;
+  --pal-dark-hljs-tag: #36e2a9;
+
   /* Okabe-Ito colour-blind-safe agent set, lightened off the light-theme base hues until each
      clears 3:1 against --pal-dark-gray-800 (--surface) — see the dark-contrast guard test. */
   --pal-dark-okabe-blue: #4095c5;
@@ -274,6 +328,13 @@
      NotebookPreview.svelte's `.nb-error-output`. */
   --danger-on-tint: var(--pal-dark-red-450-notebook);
   --log-warn: var(--pal-dark-amber-300);
+
+  --hljs-keyword: var(--pal-dark-hljs-keyword);
+  --hljs-title: var(--pal-dark-hljs-title);
+  --hljs-string: var(--pal-dark-hljs-string);
+  --hljs-comment: var(--pal-dark-hljs-comment);
+  --hljs-number: var(--pal-dark-hljs-number);
+  --hljs-tag: var(--pal-dark-hljs-tag);
 
   --text: var(--pal-dark-gray-100);
   --text-dim: var(--pal-dark-gray-200);
@@ -346,6 +407,19 @@
   --pal-hc-light-okabe-sky-blue: #0a5a8c;
   --pal-hc-light-purple-900: #4a2e8c; /* agent-user */
 
+  /* Syntax-highlighting palette (CPE-1631), hc-light — pushed past the normal light theme's
+     --pal-hljs-* hues to clear the STRICTER AAA-inspired >=7:1 bar (src/app.css.hc-contrast.test.ts
+     convention), same as every other hc-light token above. Measured vs --surface (#ffffff):
+     keyword 7.81, title 10.28, string 8.20, comment 9.56, number 9.47, tag 10.81.
+     `keyword`/`tag` re-hued in the CPE-1631 PR review round 2 colour-blind-safety pass, same
+     reasoning as the normal light palette's `--pal-hljs-keyword`/`--pal-hljs-tag` comment above. */
+  --pal-hc-light-hljs-keyword: #862d7e;
+  --pal-hc-light-hljs-title: #003c8f;
+  --pal-hc-light-hljs-string: #095c1e;
+  --pal-hc-light-hljs-comment: #3d4652;
+  --pal-hc-light-hljs-number: #7a2e00;
+  --pal-hc-light-hljs-tag: #174537;
+
   --pal-hc-dark-black: #000000;       /* bg */
   --pal-hc-dark-gray-050: #0d0d0d;    /* surface */
   --pal-hc-dark-gray-100: #1a1a1a;    /* surface-alt */
@@ -376,6 +450,20 @@
   --pal-hc-dark-okabe-orange: #ffcc66;
   --pal-hc-dark-okabe-sky-blue: #99ddff;
   --pal-hc-dark-purple-300: #b399e6; /* agent-user */
+
+  /* Syntax-highlighting palette (CPE-1631), hc-dark — brightened past the normal dark theme's
+     --pal-dark-hljs-* hues to clear the STRICTER AAA-inspired >=7:1 bar
+     (src/app.css.hc-contrast.test.ts convention). Measured vs --surface (#0d0d0d): keyword 14.25,
+     title 12.20, string 14.86, comment 12.24, number 13.02, tag 12.00.
+     `keyword`/`tag` re-hued in the CPE-1631 PR review round 2 colour-blind-safety pass, same
+     reasoning as the normal dark palette's `--pal-dark-hljs-keyword`/`--pal-dark-hljs-tag` comment
+     above. */
+  --pal-hc-dark-hljs-keyword: #fad1ec;
+  --pal-hc-dark-hljs-title: #a6d1ff;
+  --pal-hc-dark-hljs-string: #a6f3ae;
+  --pal-hc-dark-hljs-comment: #c7ced6;
+  --pal-hc-dark-hljs-number: #ffc999;
+  --pal-hc-dark-hljs-tag: #6ce0b5;
 }
 
 /* Same semantic layer as :root[data-theme="light"]/"dark" above, resolved to the hc-light palette
@@ -400,6 +488,13 @@
   --success: var(--pal-hc-light-green-900);
   --danger-hover: var(--pal-hc-light-red-950);
   --danger-on-tint: var(--danger);
+
+  --hljs-keyword: var(--pal-hc-light-hljs-keyword);
+  --hljs-title: var(--pal-hc-light-hljs-title);
+  --hljs-string: var(--pal-hc-light-hljs-string);
+  --hljs-comment: var(--pal-hc-light-hljs-comment);
+  --hljs-number: var(--pal-hc-light-hljs-number);
+  --hljs-tag: var(--pal-hc-light-hljs-tag);
 
   --text: var(--pal-hc-light-black);
   --text-dim: var(--pal-hc-light-gray-800);
@@ -451,6 +546,13 @@
   --danger-hover: var(--pal-hc-dark-red-200);
   --danger-on-tint: var(--danger);
 
+  --hljs-keyword: var(--pal-hc-dark-hljs-keyword);
+  --hljs-title: var(--pal-hc-dark-hljs-title);
+  --hljs-string: var(--pal-hc-dark-hljs-string);
+  --hljs-comment: var(--pal-hc-dark-hljs-comment);
+  --hljs-number: var(--pal-hc-dark-hljs-number);
+  --hljs-tag: var(--pal-hc-dark-hljs-tag);
+
   --text: var(--pal-hc-dark-white);
   --text-dim: var(--pal-hc-dark-gray-700);
   --text-faint: var(--pal-hc-dark-gray-600);
@@ -480,6 +582,107 @@
   color: var(--text);
   background: var(--bg);
 }
+
+/* ---------- Syntax highlighting: highlight.js `hljs-*` classes (CPE-1631) ---------- */
+/* `src/lib/preview/highlight.ts` runs highlight.js and emits markup decorated with these class
+   names — PreviewPane's code view and NotebookPreview's code cells both `{@html}`-inject the
+   result. highlight.js ships no CSS of its own; before this ticket NOTHING in the app defined a
+   `.hljs-*` rule, so every code view rendered flat monochrome in both themes. Colour-only, no
+   background/border here (the code-view/nb-code container already supplies --surface/--surface-alt
+   and padding) — six buckets, grouped the same way highlight.js's own a11y-light/a11y-dark
+   reference themes group them (see node_modules/highlight.js/styles/a11y-light.css), so it's a
+   well-trodden accessible mapping, just re-expressed through this app's --hljs-* tokens instead of
+   hard-coded hex. Every token is defined in all five theme blocks above (light/dark/hc-light/
+   hc-dark + the bare :root fallback) and measured against WCAG AA >=4.5:1 (>=7:1 for the hc
+   themes) — see the --pal-hljs-*, --pal-dark-hljs-*, and --pal-hc-*-hljs-* comments for the numbers.
+   CAUTION for future edits to this block: writing two `--pal-*` token names back to back separated
+   only by a forward slash, with no space, accidentally spells out the two-character CSS
+   comment-close sequence (asterisk immediately followed by slash) mid-sentence — that silently
+   truncates this WHOLE comment right there and corrupts everything parsed after it as garbage CSS.
+   This exact bug shipped in this ticket's first PR revision undetected because it happened to still
+   visually render something plausible; caught only via `document.styleSheets[0].cssRules.length` in
+   a real browser reading far fewer rules than expected. When referencing multiple `--pal-*` names in
+   a sentence, use ", " or " and " between them, never a bare "/" with no surrounding space.
+
+   CPE-1631 PR review round 2, coverage gap: `hljs-attr` (JSON/YAML/TOML object KEYS, TS interface
+   fields, XML/HTML/Svelte attribute NAMES — `.svelte` and `.html` route through the `xml` grammar)
+   had NO rule at all, measured at 0% coverage — every JSON key in the app rendered flat black next
+   to a coloured string value, and every `<span class:broken={x} title={y}>` in this codebase's own
+   `.svelte` files rendered its attribute names unstyled. `hljs-property` (`obj.prop` member access
+   in JS/TS), `hljs-function` (the JS/TS arrow-function wrapper span), and `hljs-punctuation` (JSON's
+   `{}:,[]`  — a huge fraction of JSON's token count, which is why JSON measured only 23.6% covered
+   before this fix) had the same gap. Combined per-file span coverage measured before/after this fix
+   (real files: Rust/Bash/Python/TOML/Svelte/Markdown/TypeScript/JSON/YAML) went from 2348/3017
+   (77.8%) to 3015/3017 (99.9%) — see the ticket's Work Log for the full per-file table. `hljs-attr`/
+   `hljs-property` join the `--hljs-tag` bucket (an "identifier that labels something" bucket XML's
+   own `attr`/`tag`/`name` already anchored — keeping it separate from `--hljs-string` matters
+   because JSON/YAML/TOML keys sit right next to string VALUES, which would be indistinguishable if
+   both were the same colour); `hljs-punctuation` gets its own rule reusing the EXISTING, already-guarded
+   `hljs-code` (inline code spans in the `markdown` grammar)
+   joins `--hljs-string`; `hljs-punctuation` gets its own rule reusing the EXISTING, already-guarded
+   `--text-dim` token (deliberately de-emphasised, not a seventh hue — punctuation is structural, not
+   semantic, and de-emphasising it is standard practice in accessible syntax themes, matching how
+   this same file already uses `--text-faint` for the code view's line-number gutter).
+
+   Any class highlight.js can still emit that isn't listed below (e.g. hljs-subst, hljs-formula)
+   inherits the surrounding --text colour — a safe, always-legible default for genuinely rare
+   classes, not a gap like hljs-attr was. */
+.hljs-keyword,
+.hljs-selector-tag {
+  color: var(--hljs-keyword);
+  font-weight: 600;
+}
+/* Note: there is deliberately no `.hljs-function` rule. highlight.js's dotted-scope convention
+   turns `title.function` into `hljs-title` PLUS a bare, unprefixed `function_` — it never emits a
+   literal `hljs-function` class, so such a rule would be dead CSS. Function names are already
+   coloured by `.hljs-title` below (verified at 100% coverage on a real TypeScript sample). */
+.hljs-title,
+.hljs-section {
+  color: var(--hljs-title);
+  font-weight: 600;
+}
+.hljs-string,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition,
+.hljs-doctag,
+.hljs-code {
+  color: var(--hljs-string);
+}
+.hljs-comment,
+.hljs-quote {
+  color: var(--hljs-comment);
+  font-style: italic;
+}
+.hljs-number,
+.hljs-built_in,
+.hljs-literal,
+.hljs-type,
+.hljs-params,
+.hljs-meta,
+.hljs-link,
+.hljs-attribute {
+  color: var(--hljs-number);
+}
+.hljs-variable,
+.hljs-template-variable,
+.hljs-tag,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class,
+.hljs-regexp,
+.hljs-deletion,
+.hljs-attr,
+.hljs-property {
+  color: var(--hljs-tag);
+}
+/* Structural, not semantic — de-emphasised via the existing --text-dim token rather than a seventh
+   hue (JSON's `{}:,[]`, the biggest single reason JSON's coverage measured so low before this fix). */
+.hljs-punctuation {
+  color: var(--text-dim);
+}
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: 700; }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 
