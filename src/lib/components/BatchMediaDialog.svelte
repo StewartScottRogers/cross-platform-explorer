@@ -31,6 +31,7 @@
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, unwrap, type StreamChannel } from "../invoke";
+  import { t } from "../i18n";
   import {
     confirmOverwriteJob,
     mediaOpLabel,
@@ -38,6 +39,7 @@
     overwritesInPlace,
     progressPercent,
     skipRows,
+    templateEscapesDirectory,
     uniqueParentDirs,
   } from "../batchMedia";
   import type { CheckpointPartial } from "../batchMedia";
@@ -113,8 +115,11 @@
       case "flip":
         return { op: "flip", horizontal: flip === "horizontal" };
       case "rename": {
-        const t = template.trim();
-        return t ? { op: "rename", template: t } : null;
+        // CPE-1623: a template containing a path separator or ".." could move the computed output
+        // outside the folder the user picked — reject it here (before "+ Add" is even enabled) so the
+        // user is told before they click, mirroring the backend's own validate() rejection.
+        const trimmed = template.trim();
+        return trimmed && !templateEscapesDirectory(trimmed) ? { op: "rename", template: trimmed } : null;
       }
       case "strip_metadata":
         return { op: "strip_metadata" };
@@ -469,6 +474,12 @@
         {/if}
         <button class="btn" data-testid="add-op-btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
       </div>
+
+      {#if opKind === "rename" && renameTemplate.trim() && templateEscapesDirectory(renameTemplate.trim())}
+        <!-- CPE-1623: told before they click — "+ Add" above is already disabled via `pendingOp`, this
+             names WHY so the user isn't left guessing at a silently-disabled button. -->
+        <div class="overwrite-hint" data-testid="rename-escape-hint">{$t("bm.renameEscapes")}</div>
+      {/if}
 
       {#if ops.length > 0}
         <div class="pills" data-testid="op-pills">

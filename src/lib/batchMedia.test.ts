@@ -9,6 +9,7 @@ import {
   canBatchTransform,
   sameFile,
   skipRows,
+  templateEscapesDirectory,
   uniqueParentDirs,
 } from "./batchMedia";
 import type { MediaOp } from "./bindings.gen";
@@ -222,6 +223,26 @@ describe("overwritesInPlace platform-gated case-only differences (CPE-1613)", ()
     for (const platform of ["Win32", "MacIntel", "Linux x86_64"]) {
       expect(overwritesInPlace(items, platform)).toEqual([]);
     }
+  });
+});
+
+describe("templateEscapesDirectory (CPE-1623)", () => {
+  it("rejects the ticket's exact traversal template", () => {
+    expect(templateEscapesDirectory("..\\..\\cpe1613_traversal_victim\\important")).toBe(true);
+  });
+
+  it("rejects any path separator, forward or backward, and a literal '..'", () => {
+    expect(templateEscapesDirectory("sub/name")).toBe(true);
+    expect(templateEscapesDirectory("sub\\name")).toBe(true);
+    expect(templateEscapesDirectory("..")).toBe(true);
+    expect(templateEscapesDirectory("a..b")).toBe(true); // ".." anywhere, not just as a whole segment
+  });
+
+  it("accepts ordinary templates with no separators or traversal", () => {
+    expect(templateEscapesDirectory("{stem}")).toBe(false);
+    expect(templateEscapesDirectory("{stem}-{n}")).toBe(false);
+    expect(templateEscapesDirectory("photo-{n}")).toBe(false);
+    expect(templateEscapesDirectory("vacation 2024")).toBe(false);
   });
 });
 

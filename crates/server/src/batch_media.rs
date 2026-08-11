@@ -1,8 +1,21 @@
 //! Batch media operation planner (CPE-940, epic CPE-723): given a set of **non-destructive-by-default**
 //! media transforms (resize / convert / rotate / flip / rename / strip-metadata) and a selection of input
 //! files, compute the concrete per-file **output path** each will be written to — **collision-safe** — plus
-//! a short human summary of the ops applied. Pure planning: no image work, no filesystem; the transform
-//! engine executes the returned plan.
+//! a short human summary of the ops applied. No image work here (byte transforms live in
+//! `batch_transform`) — but, as of CPE-1613/CPE-1623, `plan()` is **not** filesystem-free either: it
+//! canonicalizes paths to decide "same file?" and stats candidate outputs to decide "already occupied?".
+//! The transform engine (`batch_execute`) executes the returned plan.
+//!
+//! **`plan()` is non-destructive only within the folder the caller selected — not an absolute claim
+//! (CPE-1623).** Before this fix, an independent security audit demonstrated that a `Rename` template
+//! containing `..`/path separators (`"..\\..\\elsewhere\\name"`) made `plan()` compute an output
+//! CANONICALIZING OUTSIDE the input's own directory, with no error and no refusal, and `execute_plan`
+//! then silently overwrote an unrelated file there — even with `non_destructive: true`, the mode this
+//! module's own former wording called safe. `plan()` now refuses the whole batch ([`Err`]) when a
+//! computed output would leave the input's own directory (`validate()` also rejects the template up
+//! front, so this is the engine's own backstop, not just the one UI's field-level check) — see `plan()`'s
+//! own doc for the containment check and the broadened real-filesystem collision guard that closes the
+//! rest of the gap.
 //!
 //! **Same-file detection (CPE-1613).** "Does output overwrite input?" must NOT be decided by raw string
 //! equality: `plan()` itself lower-cases a `Convert` target's extension, so `IMG_1.JPG` + Convert→jpg
@@ -119,8 +132,22 @@ pub struct PlannedItem {
     pub summary: String,
 }
 
-/// Reject a job that can't be executed: no ops, a bad rotation angle, an empty convert extension, or an
-/// empty rename template.
+/// True when `template` could move a [`MediaOp::Rename`]'s computed output into a different directory
+/// than its input: a path separator (`/` or `\`) or a literal `..` traversal segment (CPE-1623). The
+/// template only ever substitutes into the file's STEM — see `plan()`'s `Rename` arm, which runs the
+/// substituted result straight through [`join`] alongside the input's own unchanged directory — so it
+/// has no legitimate reason to name a directory, let alone walk out of one, at all. Checked as plain
+/// substrings (not "is this a whole path segment") deliberately: `template.replace("{stem}", ...)` means
+/// the attacker doesn't need the traversal to occupy a whole segment on its own (see the ticket's worked
+/// example, `"..\\..\\cpe1613_traversal_victim\\important"`, which has no `{stem}`/`{n}`/`{ext}` token at
+/// all and is used completely literally).
+fn template_escapes_directory(template: &str) -> bool {
+    template.contains('/') || template.contains('\\') || template.contains("..")
+}
+
+/// Reject a job that can't be executed: no ops, a bad rotation angle, an empty convert extension, an
+/// empty rename template, or (CPE-1623) a rename template that could walk the output outside the folder
+/// the user picked.
 pub fn validate(job: &BatchJob) -> Result<(), String> {
     if job.ops.is_empty() {
         return Err("a batch job needs at least one operation".into());
@@ -138,6 +165,12 @@ pub fn validate(job: &BatchJob) -> Result<(), String> {
             }
             MediaOp::Rename { template } if template.trim().is_empty() => {
                 return Err("rename needs a non-empty template".into());
+            }
+            MediaOp::Rename { template } if template_escapes_directory(template) => {
+                return Err(format!(
+                    "rename template \"{template}\" can't contain \\, /, or \"..\" — it can only change \
+                     the file's name, not its folder"
+                ));
             }
             MediaOp::Compress { quality } if *quality == 0 || *quality > 100 => {
                 return Err(format!("compress quality must be 1-100 (got {quality})"));
@@ -345,12 +378,37 @@ pub fn same_file(a: &str, b: &str) -> bool {
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
 /// keep it non-destructive + collision-free when `non_destructive`, and summarise. Ordered like `inputs`.
+/// **Not purely in-memory** despite the module's original "no filesystem" framing (CPE-1623): computing
+/// [`PathKey`]s and checking real on-disk existence both call [`canonicalize_path`]/[`std::path::Path`]
+/// metadata — see the CPE-1613 module doc for why that's cheap in the common case. **Refuses the whole
+/// batch** ([`Err`], no partial [`Vec`]) rather than silently dropping or reshaping the offending item:
+/// this mirrors [`crate::batch_execute::execute_plan_walk`]'s own "refuse the batch, don't guess"
+/// treatment of a destructive write (CPE-1590/1599) — a computed output escaping the folder the user
+/// picked is a safety violation, not an ordinary per-file failure like an unreadable input.
 ///
 /// **Collision-set performance (CPE-1613):** the non-destructive collision set is a `HashSet<PathKey>`,
 /// not a pairwise string/`same_file` scan — O(1) lookup instead of O(n) per item (which made the whole
 /// batch O(n²); see the module doc). `parent_cache` memoizes each unique parent directory's
 /// canonicalization once for the whole call, since a batch overwhelmingly shares one parent.
-pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
+///
+/// **Containment (CPE-1623):** `validate()` already rejects any `Rename` template containing a path
+/// separator or `..`, so under the one production call path (`batch_media_plan` calls `validate()` before
+/// `plan()`) this only ever fires for a caller that invokes `plan()` directly, bypassing `validate()` —
+/// devtools, a future automation surface, or a bug in a future op that also builds a stem. The engine
+/// stays the actual enforcement point, not just the one UI's template field. Zero extra cost for every
+/// ordinary item: `out_dir` is compared to `dir` as plain strings first, and only a template that actually
+/// changed the directory portion of the joined output pays for the (still O(1)-amortized) `path_key`
+/// resolution that confirms it.
+///
+/// **Real-filesystem non-destructive guarantee (CPE-1623):** the collision-avoidance disambiguation below
+/// used to only ever check against this batch's OWN inputs/outputs (`used`) — a computed name that
+/// happened to already exist as some unrelated file never selected into the batch would silently
+/// overwrite it, even in the supposedly-safe default mode. It now also treats a real existing file at the
+/// candidate output as occupied, exactly like a collision with `used`, and renames past it the same way —
+/// a single `Path::is_file()` stat per item (not a `canonicalize`), so the common "the first candidate
+/// name is free" case costs one cheap syscall, not a regression to the per-item cost this module's own
+/// CPE-1613 fix eliminated.
+pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, String> {
     let mut parent_cache: std::collections::HashMap<String, Option<std::path::PathBuf>> =
         std::collections::HashMap::new();
     // Computed once per input (not re-derived per collision check below) and reused by index — avoids
@@ -365,7 +423,7 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
     inputs
         .iter()
         .enumerate()
-        .map(|(i, input)| {
+        .map(|(i, input)| -> Result<PlannedItem, String> {
             let (dir, mut stem, mut ext) = split(input);
             let mut parts: Vec<String> = Vec::new();
             let mut suffix = String::new();
@@ -417,6 +475,23 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
             let mut out_stem = format!("{stem}{suffix}");
             let mut output = join(&dir, &out_stem, &ext);
 
+            // CPE-1623: constrain the computed output to the input's own directory — plan() has never
+            // taken a separate "target dir" parameter; each item's implicit target is always the folder
+            // its own input already lives in. Cheap fast path: every non-Rename op, and any Rename
+            // template without a separator, leaves `out_dir` textually identical to `dir`, so the
+            // (still O(1)-amortized, but non-zero) `path_key` resolution below is skipped entirely.
+            let (out_dir, _, _) = split(&output);
+            if out_dir != dir {
+                let out_dir_key = path_key(&out_dir, &mut parent_cache);
+                let in_dir_key = path_key(&dir, &mut parent_cache);
+                if out_dir_key != in_dir_key {
+                    return Err(format!(
+                        "rename template for \"{input}\" would write to \"{output}\", outside its own \
+                         folder — a rename can only change a file's name, not its folder"
+                    ));
+                }
+            }
+
             if job.non_destructive {
                 // Guarantee output != input and no two plans share an output — disambiguate with -2, -3…
                 // "Same file" is decided by `path_key` equality, not raw string equality (CPE-1613): a
@@ -431,7 +506,11 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
                 }
                 let base = out_stem.clone();
                 let mut n = 2;
-                while used.contains(&out_key) {
+                // CPE-1623: also treat a REAL existing file at the candidate output as occupied, not just
+                // a collision with this batch's own `used` set — see the fn doc. `Path::is_file()` is a
+                // single stat, not a `canonicalize`, so this doesn't reintroduce the O(n²) cost CPE-1613
+                // fixed.
+                while used.contains(&out_key) || std::path::Path::new(&output).is_file() {
                     out_stem = format!("{base}-{n}");
                     output = join(&dir, &out_stem, &ext);
                     out_key = path_key(&output, &mut parent_cache);
@@ -441,7 +520,7 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
             }
 
             let summary = if parts.is_empty() { "no-op".into() } else { parts.join(", ") };
-            PlannedItem { input: input.clone(), output, summary }
+            Ok(PlannedItem { input: input.clone(), output, summary })
         })
         .collect()
 }
@@ -474,7 +553,7 @@ mod tests {
     #[test]
     fn compress_summary_and_no_forced_suffix() {
         let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
-        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        let out = plan(&job, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out[0].summary, "compress q80");
         // No dedicated suffix (mirrors StripMetadata) — the generic non-destructive fallback renames
         // the sole-op case to "-out" so the output still differs from the input.
@@ -507,14 +586,14 @@ mod tests {
             position: Corner::BottomRight,
             opacity: 80,
         }]);
-        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        let out = plan(&job, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out[0].summary, "no-op");
         assert_eq!(out[0].output, "/pics/cat-out.jpg");
 
         // In overwrite mode (no collision guard), an empty-image watermark truly changes nothing.
         let mut job2 = job.clone();
         job2.non_destructive = false;
-        let out2 = plan(&job2, &v(&["/pics/cat.jpg"]));
+        let out2 = plan(&job2, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out2[0].output, "/pics/cat.jpg");
     }
 
@@ -525,7 +604,7 @@ mod tests {
             position: Corner::TopLeft,
             opacity: 40,
         }]);
-        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        let out = plan(&job, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out[0].summary, "watermark logo.png top_left 40%");
         // No dedicated suffix (mirrors Compress/StripMetadata) — falls back to the generic "-out".
         assert_eq!(out[0].output, "/pics/cat-out.jpg");
@@ -534,7 +613,7 @@ mod tests {
     #[test]
     fn resize_is_non_destructive_by_default() {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 1024 }]);
-        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        let out = plan(&job, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out[0].output, "/pics/cat-1024.jpg"); // suffix keeps it off the source
         assert_eq!(out[0].summary, "resize→1024px");
     }
@@ -542,7 +621,7 @@ mod tests {
     #[test]
     fn convert_changes_extension_and_lowercases() {
         let job = BatchJob::new(vec![MediaOp::Convert { to_ext: ".PNG".into() }]);
-        let out = plan(&job, &v(&["/pics/cat.jpg"]));
+        let out = plan(&job, &v(&["/pics/cat.jpg"])).unwrap();
         assert_eq!(out[0].output, "/pics/cat.png"); // different ext ⇒ already non-destructive
     }
 
@@ -555,7 +634,7 @@ mod tests {
         // "-out" suffix there too, matching the acceptance criteria ("produces a genuinely different
         // file, or refuses").
         let job = BatchJob::new(vec![MediaOp::Convert { to_ext: "jpg".into() }]);
-        let out = plan(&job, &v(&["/pics/IMG_1.JPG"]));
+        let out = plan(&job, &v(&["/pics/IMG_1.JPG"])).unwrap();
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         assert_eq!(out[0].output, "/pics/IMG_1-out.jpg");
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -571,7 +650,7 @@ mod tests {
         // refusal itself.
         let mut job = BatchJob::new(vec![MediaOp::Convert { to_ext: "jpg".into() }]);
         job.non_destructive = false;
-        let out = plan(&job, &v(&["/pics/IMG_1.JPG"]));
+        let out = plan(&job, &v(&["/pics/IMG_1.JPG"])).unwrap();
         assert_eq!(out[0].output, "/pics/IMG_1.jpg");
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         assert!(same_file(&out[0].input, &out[0].output));
@@ -582,7 +661,7 @@ mod tests {
     #[test]
     fn rename_template_expands_stem_and_index() {
         let job = BatchJob::new(vec![MediaOp::Rename { template: "photo-{n}".into() }]);
-        let out = plan(&job, &v(&["/a/x.jpg", "/a/y.jpg"]));
+        let out = plan(&job, &v(&["/a/x.jpg", "/a/y.jpg"])).unwrap();
         assert_eq!(out[0].output, "/a/photo-1.jpg");
         assert_eq!(out[1].output, "/a/photo-2.jpg");
     }
@@ -591,7 +670,7 @@ mod tests {
     fn same_target_collisions_are_disambiguated() {
         // Two inputs in different dirs both renamed to the same stem in the SAME dir → -2 suffix.
         let job = BatchJob::new(vec![MediaOp::Rename { template: "out".into() }]);
-        let out = plan(&job, &v(&["/a/x.jpg", "/a/y.jpg"]));
+        let out = plan(&job, &v(&["/a/x.jpg", "/a/y.jpg"])).unwrap();
         assert_eq!(out[0].output, "/a/out.jpg");
         assert_eq!(out[1].output, "/a/out-2.jpg");
     }
@@ -600,7 +679,7 @@ mod tests {
     fn overwrite_mode_keeps_the_input_path() {
         let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 512 }, MediaOp::StripMetadata]);
         job.non_destructive = false;
-        let out = plan(&job, &v(&["/p/a.jpg"]));
+        let out = plan(&job, &v(&["/p/a.jpg"])).unwrap();
         assert_eq!(out[0].output, "/p/a-512.jpg"); // suffix still applied, but no collision guard
         assert_eq!(out[0].summary, "resize→512px, strip-metadata");
     }
@@ -608,7 +687,7 @@ mod tests {
     #[test]
     fn multiple_ops_compose_suffix_and_summary() {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 800 }, MediaOp::Rotate { degrees: 90 }]);
-        let out = plan(&job, &v(&["c:\\img\\p.png"]));
+        let out = plan(&job, &v(&["c:\\img\\p.png"])).unwrap();
         assert_eq!(out[0].output, "c:\\img\\p-800-rot90.png");
         assert_eq!(out[0].summary, "resize→800px, rotate 90°");
     }
@@ -774,7 +853,7 @@ mod tests {
 
         let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
         reset_canonicalize_call_count();
-        let out = plan(&job, &inputs);
+        let out = plan(&job, &inputs).unwrap();
         let calls = canonicalize_call_count();
         assert_eq!(out.len(), n);
 
@@ -788,6 +867,136 @@ mod tests {
              check may have regressed to a pairwise O(n²) scan",
             n * 10
         );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// Manual-only timing measurement (CPE-1623 follow-up to the CPE-1613 perf fix): `#[ignore]`d so it
+    /// never runs in CI (avoids flaky wall-clock assertions, per CLAUDE.md), but gives a real number for
+    /// the Foreman's requested "state your own measured `plan()` timing for 2000 files" — run explicitly
+    /// with `cargo test --release -- --ignored --nocapture cpe_1623_plan_timing_for_2000_files`.
+    #[test]
+    #[ignore]
+    fn cpe_1623_plan_timing_for_2000_files() {
+        let dir = scratch("cpe1623-timing-2000");
+        let n = 2000usize;
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                let p = dir.path().join(format!("photo{i:04}.jpg"));
+                std::fs::write(&p, b"x").unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+        let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
+
+        let start = std::time::Instant::now();
+        let out = plan(&job, &inputs).unwrap();
+        let elapsed = start.elapsed();
+        assert_eq!(out.len(), n);
+        println!("plan() for {n} files in one directory took {elapsed:?}");
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ---- CPE-1623: rename template can't escape the input's own directory ----------------------------
+
+    #[test]
+    fn cpe_1623_validate_rejects_rename_templates_with_separators_or_traversal() {
+        let reject = |t: &str| {
+            let job = BatchJob::new(vec![MediaOp::Rename { template: t.into() }]);
+            let err = validate(&job).expect_err(&format!("expected {t:?} to be rejected"));
+            assert!(err.contains("folder") || err.contains(".."), "unexpected message for {t:?}: {err}");
+        };
+        reject("../evil");
+        reject("..\\evil");
+        reject("sub/name");
+        reject("sub\\name");
+        reject("..");
+        reject("a/../b");
+
+        // Ordinary templates — no separators, no ".." — must still validate fine.
+        for ok in ["{stem}", "{stem}-{n}", "photo-{n}", "vacation 2024", "{stem}_backup"] {
+            let job = BatchJob::new(vec![MediaOp::Rename { template: ok.into() }]);
+            assert!(validate(&job).is_ok(), "expected {ok:?} to validate");
+        }
+    }
+
+    #[test]
+    fn cpe_1623_plan_refuses_a_traversal_template_even_when_validate_is_bypassed() {
+        // Defense in depth: plan() itself refuses, not just validate() — this simulates a caller that
+        // calls plan() directly (devtools, a future automation surface) without ever calling validate()
+        // first. Bare in-memory paths (not on disk), so this exercises the purely lexical fallback tier.
+        let job = BatchJob::new(vec![MediaOp::Rename {
+            template: "..\\..\\cpe1613_traversal_victim\\important".into(),
+        }]);
+        let err = plan(&job, &v(&["/pics/traversal_workdir/innocuous.jpg"]))
+            .expect_err("a template that walks the output outside its own directory must be refused");
+        assert!(err.contains("folder"), "refusal reason should explain the containment violation: {err}");
+    }
+
+    #[test]
+    fn cpe_1623_ordinary_rename_templates_without_separators_are_unaffected() {
+        // No new false alarms: a template with no separator/".." must plan exactly as before.
+        let job = BatchJob::new(vec![MediaOp::Rename { template: "{stem}-final".into() }]);
+        let out = plan(&job, &v(&["/pics/vacation/photo1.jpg", "/pics/vacation/photo2.jpg"])).unwrap();
+        assert_eq!(out[0].output, "/pics/vacation/photo1-final.jpg");
+        assert_eq!(out[1].output, "/pics/vacation/photo2-final.jpg");
+    }
+
+    #[test]
+    fn cpe_1623_directory_traversal_rename_is_refused_with_real_files_on_disk() {
+        // The ticket's exact reproduction, on-disk: a rename template that walks "up and over" into a
+        // sibling directory containing an unrelated victim file. plan() must refuse the WHOLE batch
+        // ([`Err`]) before any bytes are ever read or written — never mind execute_plan. Two levels deep
+        // so "..\\..\\" from innocuous.jpg's own directory lands EXACTLY on `victim_dir` (one ".." undoes
+        // "traversal_workdir", the second undoes "a") — a precise demonstration, not just "escapes
+        // somewhere" (confirmed against the pre-fix code as a negative control: this exact template
+        // silently overwrote `important.jpg` there — see the ticket / PR description for the details).
+        let root = scratch("cpe1623-traversal");
+        let workdir = root.path().join("a").join("traversal_workdir");
+        let victim_dir = root.path().join("cpe1613_traversal_victim");
+        std::fs::create_dir_all(&workdir).unwrap();
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let input = workdir.join("innocuous.jpg");
+        std::fs::write(&input, b"innocuous original bytes").unwrap();
+        let victim = victim_dir.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        std::fs::write(&victim, &victim_original).unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Rename {
+            template: "..\\..\\cpe1613_traversal_victim\\important".into(),
+        }]);
+        assert!(job.non_destructive, "the default, supposedly-safe mode — matches the ticket's repro");
+
+        let err = plan(&job, &[input.to_string_lossy().to_string()])
+            .expect_err("the traversal template must be refused, not silently planned");
+        assert!(err.contains("folder"), "refusal reason: {err}");
+
+        // Byte-for-byte proof, not a trust-the-return-value check: read the victim back off disk.
+        assert_eq!(std::fs::read(&victim).unwrap(), victim_original, "the victim file must be untouched");
+
+        let _ = std::fs::remove_dir_all(root.path());
+    }
+
+    #[test]
+    fn cpe_1623_non_destructive_mode_steps_around_a_real_pre_existing_unrelated_file() {
+        // Fix #3 (the non-traversal half): even with no ".." in sight, a rename that happens to land on
+        // the name of a REAL file this batch never selected must not silently overwrite it — plan()'s
+        // "non-destructive" promise now checks real disk state, not just the batch's own working set, so
+        // it disambiguates past the occupied name exactly like a same-batch collision.
+        let dir = scratch("cpe1623-foreign-collision");
+        let input = dir.path().join("photo.jpg");
+        std::fs::write(&input, b"input bytes").unwrap();
+        let foreign = dir.path().join("vacation.jpg"); // NOT part of the batch's inputs
+        let foreign_original = b"unrelated pre-existing file".to_vec();
+        std::fs::write(&foreign, &foreign_original).unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Rename { template: "vacation".into() }]); // would collide
+        let out = plan(&job, &[input.to_string_lossy().to_string()]).unwrap();
+
+        assert_ne!(out[0].output, foreign.to_string_lossy(), "must not plan straight onto the foreign file");
+        assert_eq!(out[0].output, dir.path().join("vacation-2.jpg").to_string_lossy());
+        assert_eq!(std::fs::read(&foreign).unwrap(), foreign_original, "the foreign file must be untouched");
 
         let _ = std::fs::remove_dir_all(dir.path());
     }

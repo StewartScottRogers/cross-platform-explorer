@@ -25,6 +25,15 @@
 //! carry `confirmed_overwrite: true`, which should only ever be set by that one confirm panel after
 //! showing its warning. See [`BatchJob::confirmed_overwrite`]'s doc for the ownership of that promise.
 //!
+//! **Broadened beyond self-overwrite (CPE-1623).** The refusal used to fire only for `output == input`
+//! (per item, comparing a planned item against its OWN input). A planned output that instead resolves
+//! onto some OTHER real file on disk — one never submitted as any of this batch's own inputs — is just as
+//! destructive to overwrite unconfirmed: an ordinary rename landing on an unrelated pre-existing file's
+//! name, or the directory-traversal case a security audit demonstrated (`batch_media::plan` now refuses
+//! that one outright before it even reaches here, but this is the second, independent layer for anything
+//! that gets a `PlannedItem` past that gate some other way). [`any_in_place`] now catches both; see its
+//! own doc.
+//!
 //! **Known, out-of-scope gap: TOCTOU.** [`any_in_place`]'s scan runs once per batch, before any bytes are
 //! touched — not once per write. A file that changes identity between the check and its own write (e.g.
 //! swapped for a symlink mid-batch) isn't re-checked. Filed separately as CPE-1624; not fixed here.
@@ -45,14 +54,32 @@ pub struct BatchReport {
     pub skipped: Vec<(String /* input */, String /* why */)>,
 }
 
-/// True when running `items` would overwrite at least one input file's bytes in place — decided by
-/// [`same_file`] (CPE-1613), **not** raw string equality: `batch_media::plan` lower-cases a `Convert`
-/// target's extension, so a planned `output` can be textually different from `input` yet be the SAME
-/// file on a case-insensitive filesystem (Windows, default macOS). Shared by the [`execute_plan_walk`]
-/// refusal check and available to any future caller that wants to ask "would this plan be destructive?"
-/// without duplicating the comparison.
+/// True when `item`'s planned write would replace bytes belonging to a file that was never submitted as
+/// one of `items`' own inputs — the original CPE-1613 in-place case (`item.output` is [`same_file`] as
+/// `item.input`), OR (CPE-1623) `item.output` resolves onto some OTHER real, pre-existing file that isn't
+/// any input in this batch. The second check is gated behind a plain `Path::is_file()` stat — cheap, and
+/// false for the overwhelmingly common case (a freshly-computed non-destructive name that doesn't exist
+/// yet) — so only a genuine collision pays for the `O(n)` [`same_file`] scan over the batch's own inputs.
+fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
+    if same_file(&item.input, &item.output) {
+        return true;
+    }
+    if !Path::new(&item.output).is_file() {
+        return false; // nothing sits there yet — not an overwrite of anything
+    }
+    // A real file already occupies the output path. It's only a refusable overwrite if it's not one of
+    // THIS batch's own inputs — a batch is always allowed to write into paths it explicitly selected.
+    !items.iter().any(|other| same_file(&other.input, &item.output))
+}
+
+/// True when running `items` would overwrite at least one file's bytes that isn't explicitly part of this
+/// batch's own input set — decided by [`is_foreign_overwrite`] (CPE-1613/CPE-1623), **not** raw string
+/// equality: `batch_media::plan` lower-cases a `Convert` target's extension, so a planned `output` can be
+/// textually different from `input` yet be the SAME file on a case-insensitive filesystem (Windows,
+/// default macOS). Shared by the [`execute_plan_walk`] refusal check and available to any future caller
+/// that wants to ask "would this plan be destructive?" without duplicating the comparison.
 pub fn any_in_place(items: &[PlannedItem]) -> bool {
-    items.iter().any(|it| same_file(&it.input, &it.output))
+    items.iter().any(|it| is_foreign_overwrite(it, items))
 }
 
 /// Execute a planned batch, calling `flush` with each file's [`OpResult`] as it completes — the shared
@@ -63,22 +90,26 @@ pub fn any_in_place(items: &[PlannedItem]) -> bool {
 /// failing item — unreadable input, a non-image or otherwise rejected transform, or a failed write — is
 /// recorded in the returned report and reported to `flush` with a reason; it never aborts the run.
 ///
-/// **Refuses up front** ([`Err`], nothing written, `flush` never called) when any planned `output ==
-/// input` and `job.confirmed_overwrite` is `false` — see the module doc (CPE-1590/CPE-1599). Otherwise,
-/// input files ARE modified in place wherever the planned `output == input`.
+/// **Refuses up front** ([`Err`], nothing written, `flush` never called) when any planned item is an
+/// [`is_foreign_overwrite`] — its output is the same file as its own input, OR resolves onto some other
+/// real file this batch never selected — and `job.confirmed_overwrite` is `false` — see the module doc
+/// (CPE-1590/CPE-1599/CPE-1623). Otherwise, those files ARE overwritten wherever the plan says to.
 pub fn execute_plan_walk(
     items: &[PlannedItem],
     job: &BatchJob,
     mut flush: impl FnMut(OpResult),
 ) -> Result<BatchReport, String> {
-    if !job.confirmed_overwrite && any_in_place(items) {
-        let count = items.iter().filter(|it| same_file(&it.input, &it.output)).count();
-        return Err(format!(
-            "refusing to run: this plan would overwrite {count} original file{} in place, and \
-             `confirmed_overwrite` was not set on the batch job — re-plan with an explicit confirmation \
-             or change the job so every output differs from its input",
-            if count == 1 { "" } else { "s" }
-        ));
+    if !job.confirmed_overwrite {
+        let count = items.iter().filter(|it| is_foreign_overwrite(it, items)).count();
+        if count > 0 {
+            return Err(format!(
+                "refusing to run: this plan would overwrite {count} file{} not explicitly part of this \
+                 batch (either the same file as its own input, or an existing file this batch never \
+                 selected), and `confirmed_overwrite` was not set on the batch job — re-plan with an \
+                 explicit confirmation or change the job so every output stays clear of existing files",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
     }
 
     let mut report = BatchReport::default();
@@ -167,7 +198,7 @@ mod tests {
             b.to_string_lossy().to_string(),
             t.to_string_lossy().to_string(),
         ];
-        let items = plan(&job, &inputs);
+        let items = plan(&job, &inputs).unwrap();
         assert_eq!(items.len(), 3);
 
         let report = execute_plan(&items, &job).unwrap();
@@ -201,7 +232,7 @@ mod tests {
         let d = scratch("missing");
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
         let missing = d.join("nope.png").to_string_lossy().to_string();
-        let items = plan(&job, std::slice::from_ref(&missing));
+        let items = plan(&job, std::slice::from_ref(&missing)).unwrap();
 
         let report = execute_plan(&items, &job).unwrap();
 
@@ -227,7 +258,7 @@ mod tests {
             opacity: 50,
         }]);
         let inputs = vec![a.to_string_lossy().to_string()];
-        let items = plan(&job, &inputs);
+        let items = plan(&job, &inputs).unwrap();
 
         let report = execute_plan(&items, &job).unwrap();
         assert_eq!(report.written, 0);
@@ -275,7 +306,7 @@ mod tests {
         assert!(!job.confirmed_overwrite, "confirmed_overwrite must default to false");
 
         let inputs = vec![a.to_string_lossy().to_string()];
-        let items = plan(&job, &inputs);
+        let items = plan(&job, &inputs).unwrap();
         assert_eq!(items[0].input, items[0].output, "sanity: this plan IS in-place");
 
         let mut flushed = 0usize;
@@ -304,7 +335,7 @@ mod tests {
         job.confirmed_overwrite = true;
 
         let inputs = vec![a.to_string_lossy().to_string()];
-        let items = plan(&job, &inputs);
+        let items = plan(&job, &inputs).unwrap();
         assert_eq!(items[0].input, items[0].output, "sanity: this plan IS in-place");
 
         let report = execute_plan(&items, &job).expect("a confirmed in-place plan must be allowed to run");
@@ -330,7 +361,7 @@ mod tests {
             assert!(job.non_destructive);
 
             let inputs = vec![a.to_string_lossy().to_string()];
-            let items = plan(&job, &inputs);
+            let items = plan(&job, &inputs).unwrap();
             assert_ne!(items[0].input, items[0].output, "sanity: this plan is NOT in-place");
 
             let report = execute_plan(&items, &job)
@@ -360,7 +391,7 @@ mod tests {
             b.to_string_lossy().to_string(),
             t.to_string_lossy().to_string(),
         ];
-        let items_direct = plan(&job, &inputs);
+        let items_direct = plan(&job, &inputs).unwrap();
         let direct_report = execute_plan(&items_direct, &job).unwrap();
 
         // Re-plan into a sibling scratch dir so the streamed run doesn't clash with the direct run's
@@ -377,7 +408,7 @@ mod tests {
             b2.to_string_lossy().to_string(),
             t2.to_string_lossy().to_string(),
         ];
-        let items_streamed = plan(&job, &inputs2);
+        let items_streamed = plan(&job, &inputs2).unwrap();
 
         let mut streamed_results: Vec<OpResult> = Vec::new();
         let streamed_report = execute_plan_walk(&items_streamed, &job, |r| streamed_results.push(r)).unwrap();
@@ -428,7 +459,7 @@ mod tests {
             good_jpg.to_string_lossy().to_string(),
             bad_jpg.to_string_lossy().to_string(),
         ];
-        let items = plan(&job, &inputs);
+        let items = plan(&job, &inputs).unwrap();
         assert_eq!(items.len(), 3, "one planned item per input");
 
         let report = execute_plan(&items, &job).unwrap();
@@ -470,7 +501,7 @@ mod tests {
 
         let mut job = BatchJob::new(vec![MediaOp::Convert { to_ext: "jpg".into() }]);
         job.non_destructive = false;
-        let items = plan(&job, &[input.to_string_lossy().to_string()]);
+        let items = plan(&job, &[input.to_string_lossy().to_string()]).unwrap();
         assert_eq!(items[0].output, input.with_file_name("IMG_1.jpg").to_string_lossy());
 
         #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -500,6 +531,73 @@ mod tests {
             let report = execute_plan(&items, &job).expect("a genuinely distinct output needs no refusal");
             assert_eq!(report.written, 1);
         }
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1623: broadened destructive-overwrite refusal beyond the batch's own input set -----------
+
+    /// Fix #3 from the ticket: an output that resolves onto an EXISTING file this batch never selected as
+    /// one of its own inputs must be treated exactly like an in-place self-overwrite (CPE-1599) — refused
+    /// without `confirmed_overwrite`, allowed to proceed once it's set. Overwrite mode (`non_destructive:
+    /// false`) is used here because that's the case `plan()` itself does no disambiguation for — see
+    /// `batch_media.rs`'s `cpe_1623_non_destructive_mode_steps_around_a_real_pre_existing_unrelated_file`
+    /// for the non-destructive-mode side of the fix, where `plan()` just picks a different name instead.
+    #[test]
+    fn cpe_1623_output_landing_on_a_foreign_existing_file_is_refused_then_allowed_once_confirmed() {
+        let d = scratch("cpe1623-foreign-overwrite");
+        let input = d.join("photo.png");
+        fs::write(&input, png_bytes(10, 10)).unwrap();
+        let foreign = d.join("vacation.png"); // real file, NOT one of this batch's inputs
+        let foreign_original = png_bytes(4, 4);
+        fs::write(&foreign, &foreign_original).unwrap();
+
+        let mut job = BatchJob::new(vec![MediaOp::Rename { template: "vacation".into() }]);
+        job.non_destructive = false; // explicit "write to this literal location" mode — no disambiguation
+        let items = plan(&job, &[input.to_string_lossy().to_string()]).unwrap();
+        assert_eq!(
+            items[0].output,
+            foreign.to_string_lossy(),
+            "sanity: the rename lands exactly on the foreign file"
+        );
+        assert!(!same_file(&items[0].input, &items[0].output), "sanity: this is NOT the self-overwrite case");
+
+        assert!(any_in_place(&items), "an output landing on a real foreign file must be flagged");
+        let err = execute_plan_walk(&items, &job, |_| {})
+            .expect_err("must refuse an unconfirmed overwrite of a file outside this batch");
+        assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+        assert_eq!(
+            fs::read(&foreign).unwrap(),
+            foreign_original,
+            "the foreign file must be untouched by a refused plan"
+        );
+
+        // Confirmed, it proceeds and genuinely overwrites the foreign file.
+        job.confirmed_overwrite = true;
+        let report = execute_plan(&items, &job).expect("a confirmed overwrite must be allowed to run");
+        assert_eq!(report.written, 1);
+        assert_ne!(fs::read(&foreign).unwrap(), foreign_original, "the confirmed write actually replaced the bytes");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The flip side, proving no new false alarms: a plan whose output does NOT already exist on disk is
+    /// never flagged, confirmed_overwrite or not — mirrors the pre-CPE-1623
+    /// `a_non_destructive_plan_runs_regardless_of_confirmed_overwrite` coverage above, but for overwrite
+    /// mode specifically (where `plan()` does no disambiguation at all).
+    #[test]
+    fn cpe_1623_overwrite_mode_with_a_genuinely_new_output_name_needs_no_confirmation() {
+        let d = scratch("cpe1623-no-false-alarm");
+        let input = d.join("photo.png");
+        fs::write(&input, png_bytes(10, 10)).unwrap();
+
+        let mut job = BatchJob::new(vec![MediaOp::Rename { template: "brand-new-name".into() }]);
+        job.non_destructive = false;
+        let items = plan(&job, &[input.to_string_lossy().to_string()]).unwrap();
+
+        assert!(!any_in_place(&items), "a genuinely new output name must not be flagged");
+        let report = execute_plan(&items, &job).expect("no refusal expected for a non-colliding rename");
+        assert_eq!(report.written, 1);
 
         let _ = fs::remove_dir_all(&d);
     }

@@ -26,6 +26,19 @@ export function canBatchTransform(name: string): boolean {
 }
 
 /**
+ * CPE-1623: true when a Rename op's `template` could move the computed output into a different
+ * directory than its input — a path separator (`/` or `\`) or a literal `..` traversal segment.
+ * Mirrors `crates/server/src/batch_media.rs`'s `validate()` rejection exactly (same three substrings),
+ * so the dialog can disable "+ Add" and explain why *before* the user ever reaches the backend — the
+ * engine (`validate()`/`plan()`) remains the actual enforcement point either way; this is purely a
+ * friendlier, earlier echo of the same rule. The Rename template only ever substitutes into the file's
+ * STEM (see `plan()`'s Rename arm) — it has no legitimate reason to name a directory at all.
+ */
+export function templateEscapesDirectory(template: string): boolean {
+  return template.includes("/") || template.includes("\\") || template.includes("..");
+}
+
+/**
  * A short one-line pill label for a single op, in the order it will run, e.g. `"Resize 1024px"`,
  * `"Convert → webp"`, `"Rotate 90°"`. Mirrors the wording `batch_media::plan`'s summary uses on the
  * backend, so the pill and the live-preview summary read consistently.

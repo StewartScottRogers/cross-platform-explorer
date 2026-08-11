@@ -59,7 +59,7 @@ operation twice** (e.g. two resizes), and remove any op from the list with its p
 | **Convert** | Target extension | `webp` | Re-encodes to a different format. Only **six** output formats exist: `png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `tif`/`tiff` — anything else (`heic`, `avif`, `psd`, `svg`, …) fails that file with a clear error rather than silently no-op'ing. |
 | **Rotate** | Degrees: 90 / 180 / 270 | 90 | Rotates clockwise by an exact right angle — no arbitrary-angle input. |
 | **Flip** | Horizontal / Vertical | Horizontal | Mirrors the image on the chosen axis. |
-| **Rename** | Template | `{stem}` | Renames the output using tokens `{stem}` (original filename, no extension), `{n}` (1-based position in the batch), and `{ext}` (the extension at that point in the pipeline) — e.g. `photo-{n}` on 3 files → `photo-1`, `photo-2`, `photo-3`. |
+| **Rename** | Template | `{stem}` | Renames the output using tokens `{stem}` (original filename, no extension), `{n}` (1-based position in the batch), and `{ext}` (the extension at that point in the pipeline) — e.g. `photo-{n}` on 3 files → `photo-1`, `photo-2`, `photo-3`. The template can only change the **name**, not the folder: `\`, `/`, and `..` are rejected (CPE-1623) — see *Where results land* below. |
 | **Strip metadata** | — | — | Drops all embedded EXIF/IPTC/XMP by re-encoding from decoded pixels, which never carry it. Because a phone photo's on-disk orientation often depends on the EXIF `Orientation` tag, this first **bakes that orientation into the pixels** (an equivalent rotate/flip) so the image doesn't silently change apparent orientation once the tag is gone. |
 | **Compress** | Quality (1–100) | 80 | Re-encodes at the given quality. This **only has an effect when the output is a JPEG** — png/gif/bmp/tif have no quality knob, and this build's WebP encoder is lossless-only, so Compress on any of those is a graceful no-op (the file is still re-encoded, just at that format's normal settings). Order matters: **Convert then Compress** applies quality to the new format; Compress before a later Convert has nothing to act on. |
 | **Watermark** | Image (Browse…), corner (one of 5), opacity (0–100) | no image · bottom-right · 80 | Alpha-composites the chosen image onto each file at the given corner and opacity. **Optional by construction** — leave the image unset and the op contributes nothing (not even to the output filename). An overlay bigger than the base image is anchored at the corner and clipped, never scaled down. A missing or undecodable overlay file fails that op for that run (see *Failures* below), not the whole batch. |
@@ -100,7 +100,15 @@ possible files and isn't flagged. Whichever op combination you use, the live pla
 real planned path, and Apply always confirms first whenever the actual plan would overwrite something —
 that check (see next section) is what you can rely on, not a mental list of "safe" ops.
 
-There is **no subfolder option** — outputs always sit alongside their inputs.
+There is **no subfolder option** — outputs always sit alongside their inputs. This is enforced, not just
+the default behaviour: a **Rename** template can't contain `\`, `/`, or `..` (CPE-1623) — the field rejects
+it immediately (before you can even click **+ Add**), and the backend refuses the whole plan if it ever
+sees one anyway, so a template can't be used to walk the output out of the selected folder and quietly
+land on — and overwrite — an unrelated file elsewhere. Separately, a computed output name that happens to
+already exist as a **real file this batch never selected** is treated exactly like an in-place overwrite:
+in non-destructive mode the planner picks a different, genuinely free name instead (the same `-2`, `-3`
+disambiguation already used for a collision within the batch); with the box unchecked, it's refused the
+same way an in-place overwrite is (see the next section) — Apply never silently clobbers a stranger's file.
 
 ### Confirming an in-place overwrite (CPE-1590)
 
@@ -213,4 +221,9 @@ You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP
   run any plan containing an in-place overwrite unless it's explicitly told this confirmation happened —
   this dialog's "Overwrite N files" button is the only place that ever does. You won't notice this in
   normal use; it exists so nothing else that might call the batch-media engine can skip the confirmation.
+- **A Rename template can't leave the selected folder (CPE-1623).** `\`, `/`, and `..` are rejected in the
+  template field itself, and the backend refuses the whole plan if one somehow gets through anyway —
+  outputs always stay in the same folder as their inputs, with no exception. A rename that would otherwise
+  land on a real, pre-existing file this batch never selected is treated as an overwrite too: renamed past
+  automatically in non-destructive mode, or refused (same as an in-place overwrite) with the box unchecked.
 - **No command-palette entry or shortcut** — right-click is the only way in.
