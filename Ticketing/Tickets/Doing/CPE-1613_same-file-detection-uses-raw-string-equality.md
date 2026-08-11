@@ -151,3 +151,85 @@ tests. Related: [[CPE-1599]], [[CPE-1590]]. Model: sonnet.
   - No `specta::Type` struct was touched (only free functions + doc comments on modules/functions), so
     `bindings.gen.ts` did not need regeneration; confirmed by `npm run check` staying clean.
   - No Cargo dependency was added/changed, so `src-tauri/Cargo.lock` needed no regeneration.
+
+- 2026-08-11 (sprint) — **Blocking review finding fixed: `plan()`'s collision check was O(n²).** The
+  independent reviewer measured `plan()` over 2000 files (non_destructive, one directory) at **717.9s**
+  (~12 minutes) in a release build, because the fix above swapped the collision set from a
+  `HashSet<String>` (exact-match, O(1)) to a `Vec<String>` scanned pairwise with `same_file` — O(n) per
+  item, O(n²) per batch, each non-trivial `same_file` call issuing 1-2 **uncached**
+  `std::fs::canonicalize` syscalls (the same parent directory re-canonicalized from scratch on every
+  comparison, for a batch that overwhelmingly shares one parent). Unbounded — `BatchMediaDialog.svelte`'s
+  `MAX_PREVIEW = 300` only caps rendered preview rows, not the planned/executed batch, and `plan()` reruns
+  on every debounced UI update — so selecting a few thousand photos for an ordinary non-destructive
+  convert/compress froze the app for minutes. PURPOSE.md's fast/small/predictable tiebreaker fully applies
+  here (plain explorer, not Agent Watch).
+
+  **Fix — normalized identity key + `HashSet`, one shared definition.** Added `path_key(path,
+  parent_cache) -> PathKey` in `crates/server/src/batch_media.rs`: the same tiered resolution strategy
+  `same_file` always used (path resolves via `canonicalize` → parent+name; else the path's *parent*
+  resolves → canonical parent + case-folded literal name; else pure lexical fallback), but expressed as a
+  **key** instead of a pairwise comparison, so two paths are the same file iff their keys are equal.
+  `parent_cache: HashMap<String, Option<PathBuf>>` memoizes each unique parent directory's
+  canonicalization once per `plan()` call — the syscall the reviewer flagged as uncached. `plan()`'s
+  collision set is now `HashSet<PathKey>` (`used.contains(&key)`, O(1)) instead of
+  `Vec<String>`+`.iter().any(same_file)` (O(n)); each input's key is computed once and reused by index for
+  its own self-collision check, avoiding a second `canonicalize` of the same input. `same_file(a, b)` is
+  now *implemented* in terms of `path_key` (`a == b` fast path, else `path_key(a) == path_key(b)` via a
+  throwaway per-call cache) — still the single shared definition backing both `plan()`'s guarantee and
+  `batch_execute::any_in_place`/the `confirmed_overwrite` refusal check, so the two call sites cannot
+  diverge. Manually re-verified every existing `same_file`/`plan()` test scenario against the new
+  tiered-key logic by hand before running the suite (symlink/junction resolution, the worked example's
+  case-only extension change, trailing separator/`.`/`..`, macOS NFC/NFD, and the Linux case-sensitive
+  negative controls) — none needed to change; they all still pin the exact same expected outputs.
+
+  **Benchmark — reproduced the reviewer's setup, measured before AND after.** 2000 real files in one
+  directory, release build (`cargo test --release`), non_destructive `Compress` plan (mirrors the
+  reviewer's exact scenario). "Before" was reproduced as a faithful reimplementation of the pre-fix
+  algorithm (the old `Vec<String>` + pairwise-`same_file` collision loop), calling this branch's own
+  `same_file` in that old O(n²) pattern — valid, because `same_file`'s per-call cost (no cross-call
+  memoization) is unchanged; only `plan()`'s use of it changed. Measured, not estimated:
+  - **Before:** 552.8s (~9.2 min) — same order of magnitude as the reviewer's 717.9s (variance expected:
+    different machine, disk, and exact file layout, but confirms the reproduction is a genuine O(n²)).
+  - **After:** 195.8ms.
+  - **~2823x faster** on the reviewer's exact reproduction case.
+
+  **Regression guard — call-count, not wall-clock.** Added
+  `cpe_1613_plan_collision_check_makes_a_bounded_number_of_canonicalize_calls_not_quadratic` in
+  `batch_media.rs`: plans 300 real files in one directory and asserts the number of
+  `std::fs::canonicalize` calls stays ≤ `10 * n` (a generous linear bound — O(n²) at n=300 would be
+  ~45,000 calls, hugely over any linear bound). Counted via a thin `canonicalize_path` seam
+  (`#[cfg(test)]`-gated) backed by a **thread-local** counter, not a process-global atomic, so parallel
+  test execution (Rust's default per-test-thread harness) can't pollute one test's count with another's —
+  deliberately avoiding a flaky wall-clock timing assertion on loaded CI runners, per the review's own
+  guidance.
+
+  **TOCTOU — knowingly out of scope, filed separately.** `any_in_place`'s scan still runs once per batch,
+  before any bytes are written, not once per individual write — a file that changes identity mid-batch
+  (e.g. swapped for a symlink between the check and its own write) isn't re-checked. Noted directly in
+  `batch_execute.rs`'s module doc. Filed as **CPE-1624**; intentionally not addressed in this ticket.
+
+  **Worked example re-verified end-to-end, with bytes (not just a return value).** Wrote a real,
+  decodable `IMG_1.JPG`, ran it through `plan()` → `any_in_place` → `execute_plan_walk`'s refusal →
+  `execute_plan` after confirming, all via the crate's public API in a throwaway manual test (deleted
+  before commit — the shipped regression coverage is the existing
+  `cpe_1613_worked_example_real_file_in_place_detection_is_platform_gated` test in `batch_execute.rs`,
+  which already asserts this on every CI run). Observed directly: original was 634 bytes,
+  fingerprint `fae26686143a8f88`; after the refused (unconfirmed) run, `fs::read` of the original was
+  still 634 bytes, same fingerprint, byte-for-byte identical — the refusal genuinely touches zero bytes.
+  After confirming, the batch proceeds and writes 1 file. This branch still protects the original exactly
+  as the independent UAT proved for the base fix.
+
+  **Verification (all run synchronously, this environment, after the perf fix):**
+  - `cargo build` (crates/server) — clean.
+  - `cargo test` (crates/server, full suite) — **1869 passed**, 0 failed, 1 ignored (pre-existing,
+    unrelated) — one more passing test than the baseline 1868, the new perf regression guard.
+  - `cargo clippy --all-targets -- -D warnings` (crates/server, default features) — clean, 0 warnings.
+  - `cargo clippy --all-targets --features specta -- -D warnings` (crates/server) — clean, 0 warnings.
+  - `npm run check` — 0 errors, 0 warnings.
+  - `npx vitest run` (full frontend suite) — 272 files, 3319 tests passed, 0 failed (untouched — this fix
+    is Rust-only).
+  - No `specta::Type` struct touched; no dependency added/changed — `bindings.gen.ts` and
+    `src-tauri/Cargo.lock` both untouched, confirmed by `npm run check` staying clean and no `Cargo.toml`
+    diff.
+  - Files changed: `crates/server/src/batch_media.rs`, `crates/server/src/batch_execute.rs` (doc-comment
+    only, the TOCTOU note). No `Cargo.toml`/`Cargo.lock` change (lean-core, no new dependencies).

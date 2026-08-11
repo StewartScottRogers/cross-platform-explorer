@@ -24,6 +24,10 @@
 //! longer gets an in-place overwrite for free just by setting `non_destructive: false` — it must ALSO
 //! carry `confirmed_overwrite: true`, which should only ever be set by that one confirm panel after
 //! showing its warning. See [`BatchJob::confirmed_overwrite`]'s doc for the ownership of that promise.
+//!
+//! **Known, out-of-scope gap: TOCTOU.** [`any_in_place`]'s scan runs once per batch, before any bytes are
+//! touched — not once per write. A file that changes identity between the check and its own write (e.g.
+//! swapped for a symlink mid-batch) isn't re-checked. Filed separately as CPE-1624; not fixed here.
 
 use std::fs;
 use std::path::Path;

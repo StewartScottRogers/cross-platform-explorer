@@ -11,6 +11,16 @@
 //! by BOTH (1) this module's non-destructive "output must differ from input" guarantee + collision set
 //! below, and (2) [`crate::batch_execute::any_in_place`]'s `confirmed_overwrite` refusal check — fixing
 //! one and not the other just moves the hole, per the ticket.
+//!
+//! **Collision-set performance (CPE-1613 follow-up).** An earlier version of this fix kept the collision
+//! set as a `Vec<String>` scanned pairwise with `same_file` — O(n) per item, O(n²) per batch in one
+//! folder, each non-trivial `same_file` call issuing 1-2 *uncached* `std::fs::canonicalize` syscalls. On
+//! 2000 files in one directory that measured ~718s in a release build. [`path_key`] replaces the pairwise
+//! scan: it maps a path to a normalized identity key (canonicalized parent + case-folded final
+//! component, memoizing the parent canonicalization in a `HashMap` since a batch overwhelmingly shares
+//! one parent directory), and `plan()`'s collision set is a `HashSet<PathKey>` — O(1) lookup, O(n)
+//! overall. [`same_file`] is now defined in terms of the same `path_key`, so there is still exactly one
+//! notion of "same file" backing both call sites.
 
 /// One media transform in a batch. Order matters (ops apply left-to-right).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -228,51 +238,128 @@ fn parent_and_name(path: &str) -> Option<(&str, &str)> {
     Some((dir, name))
 }
 
-/// **The one shared "is this the same file?" definition (CPE-1613)**, used by both `plan()`'s
-/// non-destructive guarantee/collision set below and [`crate::batch_execute::any_in_place`]'s
-/// `confirmed_overwrite` refusal check. Strongest signal first, falling back only when a stronger one
-/// isn't available:
+/// Thin seam over [`std::fs::canonicalize`] so a test can count how many real syscalls a call makes
+/// (CPE-1613 perf regression guard) without asserting flaky wall-clock timing. Behaviourally identical to
+/// calling `std::fs::canonicalize` directly outside `#[cfg(test)]`.
+fn canonicalize_path<P: AsRef<std::path::Path>>(p: P) -> std::io::Result<std::path::PathBuf> {
+    #[cfg(test)]
+    CANONICALIZE_CALLS.with(|c| c.set(c.get() + 1));
+    std::fs::canonicalize(p)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-test-thread call counter for [`canonicalize_path`]. Rust's default test harness runs each
+    /// `#[test]` fn on its own thread, so a thread-local (rather than a process-global atomic) keeps
+    /// concurrently-running tests from polluting each other's counts.
+    static CANONICALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+#[cfg(test)]
+fn reset_canonicalize_call_count() {
+    CANONICALIZE_CALLS.with(|c| c.set(0));
+}
+#[cfg(test)]
+fn canonicalize_call_count() -> usize {
+    CANONICALIZE_CALLS.with(|c| c.get())
+}
+
+/// A normalized "identity" for a path — the key [`same_file`]/`plan()`'s collision set compare instead of
+/// scanning pairwise (CPE-1613 perf fix). Two paths are the same file iff [`path_key`] returns an equal
+/// key for both; see [`path_key`]'s doc for how each tier is derived. `Resolved`'s `PathBuf` is always a
+/// canonical **directory** (never a bare filename), so it hashes/compares cheaply and consistently
+/// regardless of which tier produced it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum PathKey {
+    /// Either the path itself resolved on disk (canonicalized, then split into its parent + final
+    /// component — following symlinks/junctions and case-insensitive/NFC-NFD lookups for free), or only
+    /// its parent directory resolved and the final component is compared as literal, case-folded text.
+    /// Both tiers land in this one variant because splitting an already-fully-resolved canonical path
+    /// into (parent, name) loses no information versus comparing the full canonical paths directly, so a
+    /// path that fully resolves and a path whose parent-only resolves are still directly comparable.
+    Resolved(std::path::PathBuf, String),
+    /// Neither the path nor its parent exists on disk (e.g. bare in-memory strings in most unit tests): a
+    /// purely lexical, filesystem-free normalization, case-folded per platform.
+    Lexical(String),
+}
+
+/// Map `path` to its [`PathKey`] — the one shared "is this the same file?" identity (CPE-1613) backing
+/// both `plan()`'s non-destructive guarantee/collision set and [`same_file`] (and, transitively,
+/// [`crate::batch_execute::any_in_place`]'s `confirmed_overwrite` refusal check). Strongest signal first,
+/// falling back only when a stronger one isn't available:
 ///
-/// 1. **Both paths exist on disk:** ask the OS for each one's canonical identity
-///    ([`std::fs::canonicalize`]) and compare those. This resolves symlinks/junctions to the same
-///    underlying file, and — because canonicalize returns the file's own *stored* path/casing rather than
-///    the literal input string — also folds case-only differences on a case-insensitive filesystem and
-///    Unicode NFC/NFD differences on macOS/APFS (which resolves lookups normalization-insensitively) for
-///    free, with no per-platform special-casing needed in this branch.
-/// 2. **The common case for a planned OUTPUT, which usually doesn't exist yet:** canonicalize each path's
-///    *parent* directory (for every path `plan()` produces, that's the input's own already-existing
-///    directory, so this almost always succeeds) and compare the resolved parent plus the final path
-///    component, case-folded per [`fold_case`]'s platform rule. Catches the ticket's worked example
-///    (`IMG_1.JPG` vs `IMG_1.jpg`) and trailing-separator/`.`/`..` variants of an existing directory.
-/// 3. **Neither path (nor its parent) exists on disk** — e.g. a unit test using bare in-memory strings:
+/// 1. **The path resolves on disk:** ask the OS for its canonical identity ([`canonicalize_path`]) and
+///    split that into (canonical parent, final component). This resolves symlinks/junctions to their real
+///    target, AND — because canonicalize returns the file's own *stored* path/casing rather than the
+///    literal input string — folds case-only differences on a case-insensitive filesystem and (on
+///    macOS/APFS, which resolves lookups normalization-insensitively) Unicode NFC/NFD differences, for
+///    free, with zero per-platform special-casing here. `fold_case` is still applied to the split-off name
+///    for consistency with tier 2, though it's a no-op in practice: two on-disk names that differ only by
+///    case can't coexist on a case-insensitive filesystem.
+/// 2. **The path itself doesn't resolve (the common case for a planned OUTPUT, which usually doesn't
+///    exist yet), but its *parent* directory does:** canonicalize the parent (for every path `plan()`
+///    produces, that's the input's own already-existing directory, so this almost always succeeds — and
+///    is memoized in `parent_cache` since a batch overwhelmingly shares one parent) and pair it with the
+///    literal final path component, case-folded per [`fold_case`]'s platform rule. Catches the ticket's
+///    worked example (`IMG_1.JPG` vs `IMG_1.jpg`) and trailing-separator/`.`/`..` variants of an existing
+///    directory.
+/// 3. **Neither the path nor its parent exists on disk** — e.g. a unit test using bare in-memory strings:
 ///    fall back to a purely lexical, filesystem-free comparison ([`lexical_normalize`]), still case-folded
 ///    per platform. Doesn't catch symlinks/junctions or macOS NFC/NFD (those need real files to resolve),
 ///    but does catch case, separator, and `.`/`..` variants.
+fn path_key(path: &str, parent_cache: &mut std::collections::HashMap<String, Option<std::path::PathBuf>>) -> PathKey {
+    if let Ok(canonical) = canonicalize_path(path) {
+        if let (Some(parent), Some(name)) = (canonical.parent(), canonical.file_name()) {
+            return PathKey::Resolved(parent.to_path_buf(), fold_case(&name.to_string_lossy()));
+        }
+        // A canonicalized path with no parent/file_name at all (e.g. a bare drive/volume root) — no
+        // sensible (parent, name) split; fall through to the lexical tier below.
+    }
+
+    if let Some((dir, name)) = parent_and_name(path) {
+        let canon_dir = parent_cache
+            .entry(dir.to_string())
+            .or_insert_with(|| canonicalize_path(dir).ok())
+            .clone();
+        if let Some(canon_dir) = canon_dir {
+            return PathKey::Resolved(canon_dir, fold_case(name));
+        }
+    }
+
+    PathKey::Lexical(fold_case(&lexical_normalize(path)))
+}
+
+/// **The one shared "is this the same file?" definition (CPE-1613)**, used by both `plan()`'s
+/// non-destructive guarantee/collision set and [`crate::batch_execute::any_in_place`]'s
+/// `confirmed_overwrite` refusal check. `a == b` is a cheap fast path; otherwise this is just
+/// `path_key(a) == path_key(b)` (see [`path_key`]'s doc for the tiered resolution strategy) using a
+/// throwaway per-call parent cache — callers comparing many paths against each other in a loop (like
+/// `plan()`'s collision set) should compute [`path_key`] directly with a shared cache instead of calling
+/// `same_file` pairwise, or the O(1)-per-key win is lost.
 pub fn same_file(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-
-    if let (Ok(ca), Ok(cb)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        return ca == cb;
-    }
-
-    if let (Some((dir_a, name_a)), Some((dir_b, name_b))) = (parent_and_name(a), parent_and_name(b)) {
-        if let (Ok(cda), Ok(cdb)) = (std::fs::canonicalize(dir_a), std::fs::canonicalize(dir_b)) {
-            return cda == cdb && fold_case(name_a) == fold_case(name_b);
-        }
-    }
-
-    fold_case(&lexical_normalize(a)) == fold_case(&lexical_normalize(b))
+    let mut cache = std::collections::HashMap::new();
+    path_key(a, &mut cache) == path_key(b, &mut cache)
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
 /// keep it non-destructive + collision-free when `non_destructive`, and summarise. Ordered like `inputs`.
+///
+/// **Collision-set performance (CPE-1613):** the non-destructive collision set is a `HashSet<PathKey>`,
+/// not a pairwise string/`same_file` scan — O(1) lookup instead of O(n) per item (which made the whole
+/// batch O(n²); see the module doc). `parent_cache` memoizes each unique parent directory's
+/// canonicalization once for the whole call, since a batch overwhelmingly shares one parent.
 pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
-    let mut used: Vec<String> = Vec::new();
+    let mut parent_cache: std::collections::HashMap<String, Option<std::path::PathBuf>> =
+        std::collections::HashMap::new();
+    // Computed once per input (not re-derived per collision check below) and reused by index — avoids
+    // redundant `canonicalize` syscalls for the same input path.
+    let input_keys: Vec<PathKey> = inputs.iter().map(|p| path_key(p, &mut parent_cache)).collect();
+    let mut used: std::collections::HashSet<PathKey> = std::collections::HashSet::new();
     // Pre-seed with the inputs so non-destructive outputs never collide with a source file.
     if job.non_destructive {
-        used.extend(inputs.iter().cloned());
+        used.extend(input_keys.iter().cloned());
     }
 
     inputs
@@ -332,21 +419,25 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Vec<PlannedItem> {
 
             if job.non_destructive {
                 // Guarantee output != input and no two plans share an output — disambiguate with -2, -3…
-                // "Same file" is decided by `same_file`, not raw string equality (CPE-1613): a
+                // "Same file" is decided by `path_key` equality, not raw string equality (CPE-1613): a
                 // case/separator/`.`-`..` variant of an existing name must be caught too, or this
-                // "non-destructive" promise doesn't hold on a case-insensitive filesystem.
-                if same_file(&output, input) && suffix.is_empty() {
+                // "non-destructive" promise doesn't hold on a case-insensitive filesystem. Keyed lookups
+                // (not a pairwise `same_file` scan) keep this O(1) per check — see the module doc.
+                let mut out_key = path_key(&output, &mut parent_cache);
+                if out_key == input_keys[i] && suffix.is_empty() {
                     out_stem = format!("{stem}-out");
                     output = join(&dir, &out_stem, &ext);
+                    out_key = path_key(&output, &mut parent_cache);
                 }
                 let base = out_stem.clone();
                 let mut n = 2;
-                while used.iter().any(|u| same_file(u, &output)) {
+                while used.contains(&out_key) {
                     out_stem = format!("{base}-{n}");
                     output = join(&dir, &out_stem, &ext);
+                    out_key = path_key(&output, &mut parent_cache);
                     n += 1;
                 }
-                used.push(output.clone());
+                used.insert(out_key);
             }
 
             let summary = if parts.is_empty() { "no-op".into() } else { parts.join(", ") };
@@ -657,5 +748,47 @@ mod tests {
             same_file(&real.to_string_lossy(), &nfd_path.to_string_lossy()),
             "NFC and NFD spellings of the same name must resolve to the same file on macOS/APFS"
         );
+    }
+
+    // ---- CPE-1613 follow-up: collision-set performance regression guard -------------------------------
+
+    #[test]
+    fn cpe_1613_plan_collision_check_makes_a_bounded_number_of_canonicalize_calls_not_quadratic() {
+        // Perf regression guard for the reviewer finding on PR #818: `plan()`'s non-destructive collision
+        // set used to be a `Vec<String>` scanned pairwise via `same_file` — O(n) `same_file` calls per
+        // item, each issuing up to 2 *uncached* `canonicalize` syscalls, so a single-folder batch was
+        // O(n²) syscalls overall (measured: 2000 files, release build, ~718s — see the ticket's work log
+        // for the exact before/after numbers). `path_key`'s `HashSet` + memoized parent-canonicalize cache
+        // should make this O(n) — a small constant number of syscalls per file, not proportional to n².
+        // Counting syscalls (via the `canonicalize_path` test seam) instead of asserting wall-clock time
+        // keeps this deterministic on loaded/slow CI runners, per CLAUDE.md's flaky-timing guidance.
+        let dir = scratch("cpe1613-perf-guard");
+        let n = 300usize;
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                let p = dir.path().join(format!("photo{i:04}.jpg"));
+                std::fs::write(&p, b"x").unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+
+        let job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]);
+        reset_canonicalize_call_count();
+        let out = plan(&job, &inputs);
+        let calls = canonicalize_call_count();
+        assert_eq!(out.len(), n);
+
+        // A generous linear bound: O(n) allows a small constant number of canonicalize calls per file
+        // (pre-seed pass + the self-collision/while-loop checks per item). O(n²) would blow far past this
+        // even at n=300 (300*300/2 = 45,000 pairwise comparisons). 10x n leaves headroom for the exact
+        // constant while still comfortably rejecting a quadratic regression.
+        assert!(
+            calls <= n * 10,
+            "expected O(n) canonicalize calls (bound {}), got {calls} for n={n} files — the collision \
+             check may have regressed to a pairwise O(n²) scan",
+            n * 10
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
     }
 }
