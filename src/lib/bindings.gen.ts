@@ -236,6 +236,23 @@ async readFileText(path: string, maxBytes: number) : Promise<Result<string, stri
 }
 },
 /**
+ * Bounded windowed read for the log preview (CPE-1637, epic CPE-1568 slice 8): reads one page of a text
+ * file — the **tail** by default (`end: None`), the same `max_bytes` cap other preview reads use — so a
+ * multi-megabyte real-world log (`CBS.log`, `dism.log`, …) is viewable instead of outright refused like
+ * `read_file_text` above it. Pass a previous [`cpe_server::log_window::LogWindow::window_start`] back in
+ * as `end` to page further back. Thin dispatcher into `cpe_server::log_window::read_window`, which does
+ * the bounded seek+read (never the whole file, regardless of its size) and the line/UTF-8-boundary
+ * alignment — see that module's docs.
+ */
+async readLogWindow(path: string, maxBytes: number, end: number | null) : Promise<Result<LogWindow, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("read_log_window", { path, maxBytes, end }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Read a byte range of a file without loading the whole file — backs the hex inspector's paging
  * (CPE-772, epic CPE-719). Seeks to `offset` (past EOF yields an empty slice, not an error, so the
  * viewer can page freely) and reads up to `len` bytes, clamped to EOF.
@@ -4802,6 +4819,40 @@ target: string | null;
  * True only for a symlink whose target does not currently resolve.
  */
 broken: boolean }
+/**
+ * One bounded window of a text file, decoded to a `String` — see the module docs for the alignment and
+ * work-bounding guarantees.
+ */
+export type LogWindow = { 
+/**
+ * The window's decoded text.
+ */
+text: string; 
+/**
+ * Byte offset into the file where `text` starts, after line-boundary alignment.
+ */
+window_start: number; 
+/**
+ * Byte offset into the file where `text` ends (exclusive).
+ */
+window_end: number; 
+/**
+ * The file's total size in bytes, at the moment of this read.
+ */
+file_len: number; 
+/**
+ * `true` when `window_start == 0` — there is nothing further back to page to.
+ */
+at_start: boolean; 
+/**
+ * `true` when `window_end == file_len` — this window is the tail of the file.
+ */
+at_end: boolean; 
+/**
+ * `true` unless the window held no newline at all, forcing the start to fall back to a raw UTF-8
+ * character boundary instead of a true line boundary (one pathologically long line).
+ */
+line_aligned: boolean }
 /**
  * One step in a macro. Each variant maps to an existing op primitive.
  */

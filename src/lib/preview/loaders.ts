@@ -6,13 +6,22 @@
 import { unwrap } from "../invoke";
 import { commands } from "../bindings.gen"; // typed client (CPE-964)
 import type { ArchiveEntry } from "./provider";
-import type { EmailPreview, IcalPreview, VcardPreview } from "../bindings.gen";
+import type { EmailPreview, IcalPreview, VcardPreview, LogWindow } from "../bindings.gen";
 
 /** Cap on how much of a text file the preview will load. */
 export const PREVIEW_MAX_BYTES = 256 * 1024;
 
 export const loadPreviewText = (path: string): Promise<string> =>
   commands.readFileText(path, PREVIEW_MAX_BYTES).then(unwrap);
+
+/** Bounded windowed read for the log preview (CPE-1637, epic CPE-1568 slice 8): reads one `PREVIEW_MAX_BYTES`
+ *  page of a text file — the **tail** when `end` is `null`, otherwise the page ending at that byte offset —
+ *  instead of {@link loadPreviewText}'s all-or-nothing whole-file cap that refuses every real-world
+ *  multi-megabyte log outright. Pass a previous response's `window_start` back in as `end` to page further
+ *  back; see `LogPreview.svelte` and `cpe_server::log_window` for the bounded-read + line-alignment
+ *  guarantees. */
+export const loadLogWindow = (path: string, end: number | null): Promise<LogWindow> =>
+  commands.readLogWindow(path, PREVIEW_MAX_BYTES, end).then(unwrap);
 
 export const loadArchiveEntries = (path: string): Promise<ArchiveEntry[]> =>
   commands.readArchiveEntries(path).then(unwrap);

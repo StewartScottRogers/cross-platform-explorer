@@ -1429,6 +1429,28 @@ fn read_file_text_impl(path: String, max_bytes: u64) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8 text.".to_string())
 }
 
+/// Bounded windowed read for the log preview (CPE-1637, epic CPE-1568 slice 8): reads one page of a text
+/// file — the **tail** by default (`end: None`), the same `max_bytes` cap other preview reads use — so a
+/// multi-megabyte real-world log (`CBS.log`, `dism.log`, …) is viewable instead of outright refused like
+/// `read_file_text` above it. Pass a previous [`cpe_server::log_window::LogWindow::window_start`] back in
+/// as `end` to page further back. Thin dispatcher into `cpe_server::log_window::read_window`, which does
+/// the bounded seek+read (never the whole file, regardless of its size) and the line/UTF-8-boundary
+/// alignment — see that module's docs.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn read_log_window(
+    path: String,
+    max_bytes: u64,
+    end: Option<u64>,
+) -> Result<cpe_server::log_window::LogWindow, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::fs_route::require_local(&path)?;
+        cpe_server::log_window::read_window(Path::new(&path), max_bytes, end)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Aggregate code-intelligence bundle — outline, fold ranges, indent depths, and minimap rows — for a
 /// file whose text the frontend already has loaded (CPE-1089, epic CPE-724). Pure/in-memory (no fs, no
 /// path); the previewer sends `text` straight from `read_file_text`'s result instead of a second read.
@@ -11176,6 +11198,7 @@ pub fn run() {
             special_folders,
             create_dir,
             read_file_text,
+            read_log_window,
             read_file_range,
             code_intel,
             file_len,
@@ -12035,6 +12058,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         special_folders,
         create_dir,
         read_file_text,
+        read_log_window,
         read_file_range,
         code_intel,
         file_len,
