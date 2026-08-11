@@ -170,3 +170,142 @@ TOCTOU per-write re-check, and alternate-data-stream path recognition. Neither t
   `src-tauri/src/lib.rs`, `src/lib/batchMedia.ts` (+ its test), `src/lib/components/BatchMediaDialog.svelte`,
   `src/lib/i18n.ts`, `src/lib/bindings.gen.ts`, `src/docs/explorer-batch-media.md`. No `Cargo.toml`/
   `Cargo.lock` change, no new dependency.
+
+---
+
+## Work Log — PR #828, blocking-finding pass (three rounds)
+
+PR #828 (branch `cpe-1623-contain-batch-output`) was already open with the fix above when an independent
+Security Auditor demonstrated the engine — not just the UI — was still bypassable, followed in the same
+pass by a UAT false-positive report and, after fixing that, a Reviewer's CHANGES REQUESTED with two more
+engine-level bypasses. All fixed in this one pass, on the same branch/PR.
+
+### Finding 1 (Security Auditor) — the IPC surface never re-derives containment
+
+**The gap:** every containment check lived inside `batch_media::validate()`/`plan()`. But
+`batch_media_execute_stream` (`src-tauri/src/lib.rs`) takes `items: Vec<PlannedItem>` straight from the IPC
+caller, and `PlannedItem` is a plain public struct with zero invariants (`Serialize`/`Deserialize`, nothing
+enforcing "came from `plan()`"). `execute_plan_walk`'s only gate, `is_foreign_overwrite`
+(`batch_execute.rs`), asked "does something already exist at this output?" — never "does this stay inside
+the input's own folder?" — so a hand-built `PlannedItem` with `output` pointing anywhere the process can
+write sailed through as a **new** file, `confirmed_overwrite` or not.
+
+**Fix:** pulled the containment check out of `plan()` into a new shared fn,
+`batch_media::output_escapes_input_dir(input, output, &mut ParentCache)` (same `path_key`-based directory
+identity comparison `plan()` always used — `ParentCache` is a new `pub(crate)` type alias for the memoized
+cache so it can be threaded across a whole batch from either caller). `plan()` now calls it instead of
+duplicating the logic. `execute_plan_walk` now calls it too, per item, **before any byte is read or
+written**, unconditionally (not gated behind `confirmed_overwrite` — that flag only ever authorises
+overwriting the user's own input in place, never escaping the folder). Refuses the whole batch, nothing
+written, on any escaping item.
+
+**Negative control (actually run, not asserted):** wrote the regression tests first, ran them against the
+branch's HEAD (which had the CPE-1623 planner fix but NOT this IPC-bypass fix) — both hand-built-escaping
+tests failed exactly as predicted: `execute_plan` returned `Ok(BatchReport { written: 1, skipped: [] })`
+for a `PlannedItem` whose `output` pointed at `.../cpe1613_traversal_victim/important.jpg`, built without
+ever calling `plan()`. Applied the fix, reran — both refuse with "outside its own input's folder", nothing
+written, and (for the `confirmed_overwrite: true` case) a real pre-existing victim file's bytes
+byte-for-byte unchanged. New tests:
+`ipc_bypass_hand_built_escaping_planned_item_is_refused_and_writes_nothing`,
+`ipc_bypass_hand_built_escaping_planned_item_is_refused_even_with_confirmed_overwrite`,
+`ipc_bypass_containment_recheck_does_not_disturb_an_ordinary_contained_plan` (no false alarms) — all in
+`batch_execute.rs`.
+
+### Finding 2 (UAT) — `..` substring check over-corrected: `shot..final` wrongly rejected
+
+**The gap:** `template_escapes_directory()` (`batch_media.rs`) and its frontend mirror
+(`templateEscapesDirectory()` in `batchMedia.ts`) rejected `..` as a raw **substring**, so an ordinary
+filename like `"shot..final"` or a version stamp `"v1..2"` — no separator anywhere, so nothing to walk
+through — was wrongly refused. Directly violated the ticket's own acceptance criterion ("ordinary rename
+templates, no separators, are unaffected").
+
+**Fix:** `..` is now a traversal risk only as a **whole path segment**. Once a separator (`/` or `\`, and
+now `:` — see Finding 3) has already failed the check and returned `true`, the template is guaranteed to
+contain none of them, so "is `..` a whole segment" reduces to "is the (trimmed) template exactly `..`" —
+every genuine traversal case the module's tests already pinned (`".."`, `"../evil"`, `"..\\evil"`,
+`"a/../b"`) still contains a separator and is still rejected; `"shot..final"`/`"v1..2"`/`"a..b"`/`"..."`
+now validate fine. Backend and frontend kept in lockstep (same rule, same character set).
+
+**Negative control:** isolated the "shot..final" case in its own throwaway test against the pre-fix
+substring check — confirmed it failed (`validate()` rejected it) before applying the narrowed rule, then
+removed the throwaway test once the real fix (and the permanent test,
+`cpe_1623_dotdot_only_rejected_as_a_whole_path_segment_not_any_occurrence`) confirmed green.
+
+**Also resolved the auditor's inconclusive Unicode-slash question while here:** U+2215 (DIVISION SLASH),
+U+FF0F (FULLWIDTH SOLIDUS), U+FF3C (FULLWIDTH REVERSE SOLIDUS) are **accepted**, definitively — they are
+distinct Unicode scalars from ASCII `/`/`\`, the `char`-based `contains` check correctly doesn't match
+them, `split`/`join` only ever split on the literal ASCII characters, and none of the three is one of
+NTFS's 9 reserved characters (`< > : " / \ | ? *`) — so a template containing one produces an ordinary,
+real, single-file output inside the input's own directory. Proven with real files on disk, not just string
+assertions: `cpe_1623_unicode_lookalike_slash_characters_are_accepted_not_path_separators`.
+
+### Finding 3 (Reviewer, CHANGES REQUESTED, attempt 2) — two structural gaps in the directory-identity check
+
+The reviewer confirmed the core containment logic (canonicalized directory identity via `path_key`, not a
+string prefix), the junction/UNC/`\\?\` handling, `spawn_blocking`, the zero-diff bindings regen, and the
+12 real locale translations were all sound — but found two ways `split()` (a plain filename splitter, not
+a full path parser) let a crafted output slip past the directory-identity comparison itself:
+
+- **Finding A — `C:foo` on a bare-filename input.** `split` finds `dir == ""` for a bare relative filename
+  (no directory component at all). A template like `"C:foo"` produced an `output` whose computed
+  directory was *also* textually empty — two empty strings compared equal, no escape detected — even
+  though `C:foo.jpg` is a Windows drive-relative reference resolving against drive `C:`'s own current
+  directory at write time, not the folder the user picked. Live repro:
+  `plan(Rename{template:"C:foo"}, ["innocuous.jpg"])` → `Ok([...output: "C:foo.jpg"...])`.
+- **Finding B — a bare `..`/`.` final component.** An extensionless input plus a template that's literally
+  `".."` produced an `output` whose FINAL path component was a bare `..` — `split` hands that back as an
+  ordinary-looking "stem", so the directory-identity check never even asked whether it denotes a real
+  file. Live repro: `plan(Rename{template:".."}, ["/pics/a/traversal_workdir/innocuous"])` →
+  `Ok([...output: "/pics/a/traversal_workdir/.."...])`. (Harmless with an EXTENSIONED input — `join`
+  appends the extension, turning the `".."` stem into the literal filename `"...ext"` — confirmed by test.)
+- **Finding C (message accuracy)** — a `Convert.to_ext` escape fed straight to `plan()` (bypassing
+  `validate()`) was still refused (the containment check is op-agnostic), but the message read "rename
+  template" regardless of which op caused it.
+
+**Fix:** `output_escapes_input_dir` now checks, in order: (1) the output's raw final path component (via
+`output.rsplit(['/','\\'])`) — if it's exactly `"."` or `".."`, refuse outright, independent of the
+directory comparison (closes Finding B); (2) if the input's `dir` is empty AND the output's stem contains
+`:`, refuse (closes Finding A's structural gap); (3) the existing directory-identity comparison. Also
+rejected `:` outright in `template_escapes_directory()` (closes Finding A at the friendlier field-level
+layer for both Rename and Convert — also incidentally narrows the NTFS alternate-data-stream surface,
+though that finding stays out of scope, filed as CPE-1624). `plan()`'s backstop error message reworded to
+name **both** possible causing ops ("a Convert extension or Rename template can only change...") instead of
+hard-coding "rename template" (closes Finding C).
+
+**Negative control:** temporarily stripped just the two new guard blocks from `output_escapes_input_dir`
+(reproducing the exact pre-fix directory-comparison logic) and reverted `template_escapes_directory` to
+the original unconditional substring check; ran the new tests against that state. Observed exact repro of
+both reviewer PoCs: `cpe_1623_reviewer_finding_a_bare_filename_input_drive_relative_template_is_refused`
+failed with `output: "C:foo.jpg"` accepted; `cpe_1623_reviewer_finding_b_dotdot_final_component_is_refused`
+failed with `output: "/pics/a/traversal_workdir/.."` accepted; `cpe_1623_validate_rejects_rename_templates_
+with_separators_or_traversal` and the new Convert-extension test both failed on `"C:foo"`/`"secrets:hidden"`
+being accepted. Restored the real fix, reran — all green.
+
+**Perf-guard blind spot (reviewer caveat):** the existing quadratic-regression guard
+(`cpe_1613_plan_collision_check_makes_a_bounded_number_of_canonicalize_calls_not_quadratic`) uses
+`MediaOp::Compress`, which never enters the containment branch at all (`out_dir == dir` textually for
+every item). Added a new test, `cpe_1623_containment_check_for_a_directory_changing_rename_stays_bounded`,
+using a `Rename` template of `"./{stem}"` (changes `out_dir` textually — adds a `"./"` segment — but
+resolves to the identical real directory), so `path_key`'s full resolution genuinely runs on every item;
+confirmed still O(n) (n=300, bound n×10 canonicalize calls) rather than extending the original guard
+in-place (kept them separate to avoid destabilising an already-established, passing test).
+
+**Verification (all run synchronously, this environment, after all three rounds):**
+- `cargo build` (crates/server) — clean. `cargo build` (src-tauri) — clean.
+- `cargo test --lib` (crates/server) — **1888 passed**, 0 failed, 2 ignored (baseline 1878 + 10 new tests:
+  7 in `batch_media.rs`, 3 in `batch_execute.rs`).
+- `cargo clippy --all-targets -- -D warnings` (crates/server, default + `--features specta`) — both clean.
+- `npm run check` — 0 errors, 0 warnings.
+- `npx vitest run` — **273 files, 3337 tests passed**, 0 failed (includes `batchMedia.test.ts`'s expanded
+  accept/reject sets and the i18n 100%-coverage gate for the new `bm.convertEscapes` key).
+- `cargo run --bin export_bindings --features specta-bindings,sidecar-platform` — regenerated
+  `bindings.gen.ts`; content is byte-identical (line-ending-normalized diff empty) — no `specta::Type`
+  struct changed, so no commit needed for it.
+- `cpe_1623_plan_timing_for_2000_files` (release, `--ignored --nocapture`): **164.19ms** — in line with
+  (in fact faster than) the prior measured baseline of ~186ms; no regression from the new checks.
+- Canonicalize-count guard (`cpe_1613_plan_collision_check_makes_a_bounded_number_of_canonicalize_calls_
+  not_quadratic`) still green, plus the new containment-branch-specific guard above.
+- Files changed this pass: `crates/server/src/batch_media.rs`, `crates/server/src/batch_execute.rs`,
+  `src/lib/batchMedia.ts`, `src/lib/batchMedia.test.ts`, `src/lib/components/BatchMediaDialog.svelte`,
+  `src/lib/i18n.ts`, `src/docs/explorer-batch-media.md`. No `Cargo.toml`/`Cargo.lock` change, no new
+  dependency, no `bindings.gen.ts` commit needed (zero diff).

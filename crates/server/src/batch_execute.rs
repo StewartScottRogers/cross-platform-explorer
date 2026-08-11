@@ -29,19 +29,42 @@
 //! (per item, comparing a planned item against its OWN input). A planned output that instead resolves
 //! onto some OTHER real file on disk — one never submitted as any of this batch's own inputs — is just as
 //! destructive to overwrite unconfirmed: an ordinary rename landing on an unrelated pre-existing file's
-//! name, or the directory-traversal case a security audit demonstrated (`batch_media::plan` now refuses
-//! that one outright before it even reaches here, but this is the second, independent layer for anything
-//! that gets a `PlannedItem` past that gate some other way). [`any_in_place`] now catches both; see its
-//! own doc.
+//! name, or the directory-traversal case a security audit demonstrated. [`any_in_place`] catches both; see
+//! its own doc. **This alone was NOT the "second, independent layer" an earlier cut of this doc claimed
+//! it was** — see the containment paragraph immediately below for why, and what actually closes that gap.
 //!
-//! **Known, out-of-scope gap: TOCTOU.** [`any_in_place`]'s scan runs once per batch, before any bytes are
-//! touched — not once per write. A file that changes identity between the check and its own write (e.g.
-//! swapped for a symlink mid-batch) isn't re-checked. Filed separately as CPE-1624; not fixed here.
+//! **The engine — not just `batch_media::plan()` — is the actual containment enforcement point (IPC-bypass
+//! follow-up, PR #828).** `PlannedItem` is a plain public struct: `Serialize`/`Deserialize`, no invariants
+//! of its own, nothing that enforces "this came from `plan()`". Before this fix, EVERY containment check
+//! (a Rename template can't walk `output` outside `input`'s own folder) lived entirely inside
+//! `batch_media::validate()`/`plan()` — and `batch_media_execute_stream`, the Tauri command backing this
+//! module, took `items: Vec<PlannedItem>` straight off the IPC wire. [`is_foreign_overwrite`]'s only
+//! question was "does something already exist at this output?" — never "does this output stay inside the
+//! input's own folder?" — so a caller that hand-built a `PlannedItem` (skipping `plan()` entirely: a
+//! devtools call, a compromised webview, a future automation surface) pointing `output` at a **path
+//! nothing occupied yet** sailed straight through, `confirmed_overwrite` or not: `is_foreign_overwrite`
+//! returns `false` the instant `Path::is_file()` is false, and [`execute_one`] then does an unconditional
+//! `fs::write`. Demonstrated: hand-build a `PlannedItem` with `output` pointing outside `input`'s
+//! directory, skip `plan()`, call [`execute_plan`] → `Ok(BatchReport { written: 1, .. })`, a file created
+//! at the arbitrary path — and, with a real file already sitting there plus caller-supplied
+//! `confirmed_overwrite: true`, its bytes replaced. [`execute_plan_walk`] now re-derives containment
+//! itself, per item, before ANY byte is read or written — using [`crate::batch_media::output_escapes_input_dir`],
+//! the identical check `plan()` uses (not a fresh, potentially-drifting reimplementation) — and refuses the
+//! whole batch, nothing written, if any item's output would leave its own input's folder. This runs
+//! **regardless of `confirmed_overwrite`**: that flag only ever authorises overwriting the user's OWN
+//! input in place (or a foreign file the user's own plan happened to land on) — it was never meant to, and
+//! must not, license writing to a folder the user never selected. The engine is now the actual enforcement
+//! point end-to-end, not just this one IPC command's two former layers.
+//!
+//! **Known, out-of-scope gap: TOCTOU.** [`any_in_place`]'s scan (and the new containment re-check) run
+//! once per batch, before any bytes are touched — not once per write. A file that changes identity between
+//! the check and its own write (e.g. swapped for a symlink mid-batch) isn't re-checked. Filed separately
+//! as CPE-1624; not fixed here.
 
 use std::fs;
 use std::path::Path;
 
-use crate::batch_media::{same_file, BatchJob, PlannedItem};
+use crate::batch_media::{output_escapes_input_dir, same_file, BatchJob, ParentCache, PlannedItem};
 use crate::batch_transform;
 use crate::model::OpResult;
 
@@ -90,15 +113,40 @@ pub fn any_in_place(items: &[PlannedItem]) -> bool {
 /// failing item — unreadable input, a non-image or otherwise rejected transform, or a failed write — is
 /// recorded in the returned report and reported to `flush` with a reason; it never aborts the run.
 ///
-/// **Refuses up front** ([`Err`], nothing written, `flush` never called) when any planned item is an
-/// [`is_foreign_overwrite`] — its output is the same file as its own input, OR resolves onto some other
-/// real file this batch never selected — and `job.confirmed_overwrite` is `false` — see the module doc
-/// (CPE-1590/CPE-1599/CPE-1623). Otherwise, those files ARE overwritten wherever the plan says to.
+/// **Refuses up front** ([`Err`], nothing written, `flush` never called) in two independent ways, checked
+/// in this order:
+///
+/// 1. **Containment (IPC-bypass follow-up, unconditional — `confirmed_overwrite` has no effect on this
+///    one).** Any item whose `output` would leave its own `input`'s directory, per
+///    [`crate::batch_media::output_escapes_input_dir`] — the same check `batch_media::plan()` itself uses,
+///    re-derived here because a `PlannedItem` reaching this fn may never have gone through `plan()` at all
+///    (see the module doc for the demonstrated bypass). This can't be waived by any flag: it isn't asking
+///    "did the user consent to an overwrite?", it's asking "is this even a place the batch was allowed to
+///    touch?".
+/// 2. **Foreign overwrite (CPE-1590/CPE-1599/CPE-1623).** Any planned item that [`is_foreign_overwrite`]
+///    — its output is the same file as its own input, OR resolves onto some other real file this batch
+///    never selected — when `job.confirmed_overwrite` is `false`. Otherwise, those files ARE overwritten
+///    wherever the plan says to.
 pub fn execute_plan_walk(
     items: &[PlannedItem],
     job: &BatchJob,
     mut flush: impl FnMut(OpResult),
 ) -> Result<BatchReport, String> {
+    let mut parent_cache = ParentCache::new();
+    let escaping = items
+        .iter()
+        .filter(|it| output_escapes_input_dir(&it.input, &it.output, &mut parent_cache))
+        .count();
+    if escaping > 0 {
+        return Err(format!(
+            "refusing to run: {escaping} planned output{} would land outside its own input's folder — \
+             this can happen when a PlannedItem is supplied without going through batch_media::plan() \
+             (which normally refuses this itself); nothing was written, and this cannot be overridden by \
+             confirmed_overwrite, which only ever authorises overwriting a file inside the selected folder",
+            if escaping == 1 { "" } else { "s" }
+        ));
+    }
+
     if !job.confirmed_overwrite {
         let count = items.iter().filter(|it| is_foreign_overwrite(it, items)).count();
         if count > 0 {
@@ -598,6 +646,114 @@ mod tests {
         assert!(!any_in_place(&items), "a genuinely new output name must not be flagged");
         let report = execute_plan(&items, &job).expect("no refusal expected for a non-colliding rename");
         assert_eq!(report.written, 1);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- IPC-bypass follow-up: execute_plan_walk re-derives containment itself ------------------------
+    //
+    // The security-audit finding this closes: `PlannedItem` is a plain public struct with zero invariants
+    // of its own — `Serialize`/`Deserialize`, nothing enforcing "this came from `plan()`". Every
+    // containment guarantee lived in `batch_media::plan()`/`validate()`, but `batch_media_execute_stream`
+    // (the Tauri command) took `items: Vec<PlannedItem>` straight off the wire, and this module's only
+    // gate (`is_foreign_overwrite`) asked "does something already exist at this output?" — never "does
+    // this stay inside the input's own folder?". A caller that skips `plan()` entirely (devtools, a
+    // compromised webview, a future automation surface) could hand-build a `PlannedItem` pointing `output`
+    // at ANY path the process can write, and a brand-new file at that path sailed straight through with no
+    // refusal, `confirmed_overwrite` or not. These tests hand-build exactly such an item WITHOUT ever
+    // calling `plan()`, proving `execute_plan` now refuses it — verified by reading bytes off disk, not
+    // trusting the `Result`.
+
+    /// The core PoC turned into a permanent regression test: a hand-built `PlannedItem` whose `output`
+    /// resolves outside its `input`'s own directory must be refused — nothing written at all, proven by
+    /// asserting the target path never came into existence.
+    #[test]
+    fn ipc_bypass_hand_built_escaping_planned_item_is_refused_and_writes_nothing() {
+        let d = scratch("ipc-bypass-escape");
+        let workdir = d.join("a").join("traversal_workdir");
+        let victim_dir = d.join("cpe1613_traversal_victim");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(&victim_dir).unwrap();
+        let input = workdir.join("innocuous.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let victim_target = victim_dir.join("important.jpg"); // does NOT exist yet — the attack scenario
+
+        // Hand-built PlannedItem: NEVER goes through batch_media::plan(), so none of plan()'s own
+        // containment checks ever run — this simulates a caller invoking the execute IPC surface directly.
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: victim_target.to_string_lossy().to_string(),
+            summary: "hand-built, bypassing plan()".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+
+        let err = execute_plan(&items, &job)
+            .expect_err("an output escaping the input's own directory must be refused even without plan()");
+        assert!(err.to_lowercase().contains("folder"), "refusal reason: {err}");
+
+        // Byte-level proof, not a trust-the-return-value check: the target must never have been created.
+        assert!(!victim_target.exists(), "the escaping write must never have happened");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The same hand-built escape, but with `confirmed_overwrite: true` — confirmation must not buy an
+    /// escape. It only ever authorises overwriting the user's OWN input in place (CPE-1599/1613); it was
+    /// never meant to, and must not, license writing to an arbitrary path outside the selected folder.
+    #[test]
+    fn ipc_bypass_hand_built_escaping_planned_item_is_refused_even_with_confirmed_overwrite() {
+        let d = scratch("ipc-bypass-escape-confirmed");
+        let workdir = d.join("a").join("traversal_workdir");
+        let victim_dir = d.join("cpe1613_traversal_victim");
+        fs::create_dir_all(&workdir).unwrap();
+        fs::create_dir_all(&victim_dir).unwrap();
+        let input = workdir.join("innocuous.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let victim_target = victim_dir.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        fs::write(&victim_target, &victim_original).unwrap(); // a REAL pre-existing file this time
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: victim_target.to_string_lossy().to_string(),
+            summary: "hand-built, bypassing plan()".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        job.confirmed_overwrite = true; // the caller-supplied "confirmation" from the finding
+
+        let err = execute_plan(&items, &job).expect_err(
+            "confirmed_overwrite must not authorise escaping the input's own folder — only an in-place \
+             overwrite of the user's own input",
+        );
+        assert!(err.to_lowercase().contains("folder"), "refusal reason: {err}");
+
+        // Byte-for-byte proof the victim's real bytes are untouched.
+        assert_eq!(
+            fs::read(&victim_target).unwrap(),
+            victim_original,
+            "confirmed_overwrite must never buy an escape — the victim file must be byte-for-byte untouched"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// No new false refusals: an ordinary plan produced BY `plan()` itself (output correctly contained)
+    /// must still execute normally through the new pre-write containment re-check.
+    #[test]
+    fn ipc_bypass_containment_recheck_does_not_disturb_an_ordinary_contained_plan() {
+        let d = scratch("ipc-bypass-no-false-alarm");
+        let a = d.join("a.png");
+        let b = d.join("b.png");
+        fs::write(&a, png_bytes(20, 10)).unwrap();
+        fs::write(&b, png_bytes(15, 15)).unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 8 }]);
+        let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
+        let items = plan(&job, &inputs).unwrap();
+
+        let report = execute_plan(&items, &job)
+            .unwrap_or_else(|e| panic!("an ordinary contained plan must not be refused: {e}"));
+        assert_eq!(report.written, 2);
 
         let _ = fs::remove_dir_all(&d);
     }

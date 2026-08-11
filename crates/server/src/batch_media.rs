@@ -14,8 +14,53 @@
 //! module's own former wording called safe. `plan()` now refuses the whole batch ([`Err`]) when a
 //! computed output would leave the input's own directory (`validate()` also rejects the template up
 //! front, so this is the engine's own backstop, not just the one UI's field-level check) — see `plan()`'s
-//! own doc for the containment check and the broadened real-filesystem collision guard that closes the
-//! rest of the gap.
+//! own doc for the containment check (shared with `validate()`'s field-level echo AND
+//! `batch_execute::execute_plan_walk`'s pre-write re-check, via [`output_escapes_input_dir`]) and the
+//! broadened real-filesystem collision guard that closes the rest of the gap. `validate()` sanitises
+//! **both** `Rename.template` and `Convert.to_ext` — an earlier cut of this fix checked only the former,
+//! which `plan()`'s own backstop still caught (never exploitable) but left no early field-level warning
+//! for a malicious/malformed Convert extension, and mis-blamed "rename template" in the error either way.
+//!
+//! **`plan()`/`validate()` do NOT reach the IPC boundary (follow-up to CPE-1623).** The containment
+//! checks above only ever ran inside this module — but `batch_media_execute_stream`'s Tauri command took
+//! `items: Vec<PlannedItem>` straight from the caller, and `PlannedItem` is a plain public struct with no
+//! invariants of its own (`Serialize`/`Deserialize`, nothing enforcing "came from `plan()`"). A caller
+//! that skips `plan()` entirely — devtools, a compromised webview, a future automation surface — could
+//! hand-build a `PlannedItem` pointing `output` at any absolute path the process can write, and
+//! `batch_execute::execute_plan_walk`'s only gate (`is_foreign_overwrite`) asked "does something already
+//! exist there?", never "does this stay inside the input's folder?" — so a **new** file at an arbitrary
+//! location sailed straight through, `confirmed_overwrite` or not. `execute_plan_walk` now re-derives
+//! containment itself, per item, before any byte is read or written, using the identical
+//! [`output_escapes_input_dir`] check `plan()` uses — see that module's doc for the refusal. The engine is
+//! now the actual enforcement point end-to-end, not just this one module's own two entry points.
+//!
+//! **`..` is a traversal risk only as a whole path segment, not any occurrence (UAT follow-up).** The
+//! first cut of the template/extension check rejected `..` as a bare substring, which also rejected
+//! ordinary filenames like `"shot..final"` or a version stamp `"v1..2"` that can never leave the input's
+//! directory (no separator anywhere ⇒ nothing to walk through). See
+//! [`template_escapes_directory`]'s doc for the corrected rule.
+//!
+//! **Unicode look-alike separators (audited, resolved — not path separators here).** A rename template
+//! containing U+2215 (DIVISION SLASH), U+FF0F (FULLWIDTH SOLIDUS), or U+FF3C (FULLWIDTH REVERSE SOLIDUS)
+//! is **accepted** by `validate()`/`template_escapes_directory`: those are distinct Unicode scalars from
+//! ASCII `/`/`\`, so the `char`-based `contains` check correctly does not match them, and neither
+//! `split`/`join` (which only ever split on literal `/`/`\`) nor the OS treat them as directory
+//! separators — a template containing one produces an output that is still a single path component inside
+//! the input's own directory, confirmed by a real-file test in this module (`cpe_1623_unicode_lookalike_...`).
+//! They are ordinary, legal filename characters on NTFS/APFS/ext4 (none of the 9 characters NTFS reserves
+//! — `< > : " / \ | ? *` — matches any of the three), so accepting them is correct, not a gap.
+//!
+//! **Two structural bypasses of the directory-identity check itself (reviewer, PR #828 attempt 2).**
+//! [`split`] is a plain filename splitter, not a full path parser, and the containment comparison used to
+//! trust it too far: (A) a **bare-filename input** (`split` finds no directory component, so `dir == ""`)
+//! let a Windows drive-relative template like `"C:foo"` through, because the computed `out_dir` was
+//! *also* textually empty — two empty strings compare equal, no escape detected, even though `C:foo.jpg`
+//! resolves against drive `C:`'s own current directory, not the folder the user picked; (B) an
+//! **extensionless input** plus a template that's literally `".."` produced an `output` whose FINAL path
+//! component is a bare dot-segment, which `split` hands back as an ordinary "stem" — `out_dir == dir`
+//! skips the check entirely even though the output denotes a directory, not a file. Both are now guarded
+//! explicitly in [`output_escapes_input_dir`] itself (not just `validate()`'s template-level `:` rejection
+//! above, which only covers the one production call path) — see that fn's doc for the exact conditions.
 //!
 //! **Same-file detection (CPE-1613).** "Does output overwrite input?" must NOT be decided by raw string
 //! equality: `plan()` itself lower-cases a `Convert` target's extension, so `IMG_1.JPG` + Convert→jpg
@@ -132,22 +177,53 @@ pub struct PlannedItem {
     pub summary: String,
 }
 
-/// True when `template` could move a [`MediaOp::Rename`]'s computed output into a different directory
-/// than its input: a path separator (`/` or `\`) or a literal `..` traversal segment (CPE-1623). The
-/// template only ever substitutes into the file's STEM — see `plan()`'s `Rename` arm, which runs the
-/// substituted result straight through [`join`] alongside the input's own unchanged directory — so it
-/// has no legitimate reason to name a directory, let alone walk out of one, at all. Checked as plain
-/// substrings (not "is this a whole path segment") deliberately: `template.replace("{stem}", ...)` means
-/// the attacker doesn't need the traversal to occupy a whole segment on its own (see the ticket's worked
-/// example, `"..\\..\\cpe1613_traversal_victim\\important"`, which has no `{stem}`/`{n}`/`{ext}` token at
-/// all and is used completely literally).
+/// True when `template` could move a [`MediaOp::Rename`]'s (or, as of the Convert-extension fix below,
+/// a [`MediaOp::Convert`]'s `to_ext`) computed output into a different directory than its input, or off
+/// the volume the input's own directory names entirely: a path separator (`/` or `\`) anywhere, a `:`
+/// anywhere, or a **whole-segment** `..` traversal (CPE-1623; narrowed by a UAT follow-up — see below).
+/// The template only ever substitutes into the file's STEM (or, for Convert, the extension) — see
+/// `plan()`'s `Rename`/`Convert` arms, which run the result straight through [`join`] alongside the
+/// input's own unchanged directory — so it has no legitimate reason to name a directory, let alone walk
+/// out of one, at all.
+///
+/// A literal separator (or `:`) is checked as a plain substring deliberately (not "is this a whole path
+/// segment"): `template.replace("{stem}", ...)` means the attacker doesn't need it to occupy a whole
+/// segment on its own (see the ticket's worked example, `"..\\..\\cpe1613_traversal_victim\\important"`,
+/// which has no `{stem}`/`{n}`/`{ext}` token at all and is used completely literally) — and a filename
+/// can never legitimately contain a raw `/`, `\`, or `:` at all on any mainstream filesystem (all three
+/// are reserved on NTFS; `:` doubles as the drive-letter separator on Windows), so there is no
+/// false-positive risk in flagging any of them anywhere they appear.
+///
+/// **`:` (reviewer finding, PR #828 attempt 2).** A template like `"C:foo"` contains none of the three
+/// original characters this fn checked — only `/`, `\`, `..` were rejected — so it passed straight
+/// through both here and [`output_escapes_input_dir`]'s directory-identity comparison for a
+/// **bare-filename input** (no directory component at all, so both `dir` and the computed `out_dir` are
+/// textually empty and compare equal): a classic Windows drive-relative reference, which resolves against
+/// drive `C:`'s *current directory* at write time — not the folder the user picked. Rejecting `:` outright
+/// closes it at this field-level layer; [`output_escapes_input_dir`] carries a second, independent guard
+/// for the same case (see its doc) so a caller that skips this check entirely (bypassing `validate()`)
+/// is still caught.
+///
+/// **`..` is different (UAT follow-up to CPE-1623).** The very first cut of this check flagged `..`
+/// as a **substring** — `template.contains("..")` — which rejected perfectly ordinary filenames like
+/// `"shot..final"` or a version stamp `"v1..2"` that contain the two characters but can never walk
+/// anywhere: with no separator present at all, the whole template is exactly ONE path segment, so `..`
+/// is only a traversal risk when it occupies that entire segment. Once any separator/`:` has already
+/// failed the check above and returned `true`, there's nothing further to decide here — so by the time
+/// this line runs, `template` is guaranteed to contain no `/`, `\`, or `:`, and "is `..` a whole segment"
+/// reduces to "is the (trimmed) template exactly `..`". This stays exactly as strict for every case the
+/// module's own tests already pinned (`".."`, `"../evil"`, `"..\\evil"`, `"a/../b"` all still contain a
+/// separator and are still rejected above) while accepting the two the auditor's own worked examples name.
 fn template_escapes_directory(template: &str) -> bool {
-    template.contains('/') || template.contains('\\') || template.contains("..")
+    if template.contains('/') || template.contains('\\') || template.contains(':') {
+        return true;
+    }
+    template.trim() == ".."
 }
 
 /// Reject a job that can't be executed: no ops, a bad rotation angle, an empty convert extension, an
-/// empty rename template, or (CPE-1623) a rename template that could walk the output outside the folder
-/// the user picked.
+/// empty rename template, or (CPE-1623) a rename template OR convert extension that could walk the
+/// output outside the folder the user picked.
 pub fn validate(job: &BatchJob) -> Result<(), String> {
     if job.ops.is_empty() {
         return Err("a batch job needs at least one operation".into());
@@ -159,6 +235,19 @@ pub fn validate(job: &BatchJob) -> Result<(), String> {
             }
             MediaOp::Convert { to_ext } if to_ext.trim().is_empty() => {
                 return Err("convert needs a target extension".into());
+            }
+            // CPE-1623 follow-up: `validate()` used to sanitise ONLY `Rename.template`, even though
+            // `Convert.to_ext` feeds the exact same joined output path (`plan()`'s Convert arm sets
+            // `ext` to `to_ext`'s sanitised-but-not-separator-checked value, which `join()` then
+            // concatenates straight into the output string). `plan()`'s own containment backstop still
+            // caught an escaping `to_ext` — this was never exploitable — but the field-level check gave
+            // no early warning for this op, and a caller relying on `validate()` alone (skipping `plan()`)
+            // wasn't protected at all. Same rule, same helper, as Rename's template.
+            MediaOp::Convert { to_ext } if template_escapes_directory(to_ext) => {
+                return Err(format!(
+                    "convert extension \"{to_ext}\" can't contain \\, /, or \"..\" — it can only \
+                     change the file's extension, not its folder"
+                ));
             }
             MediaOp::Resize { max_px } if *max_px == 0 => {
                 return Err("resize max_px must be > 0".into());
@@ -315,6 +404,12 @@ enum PathKey {
     Lexical(String),
 }
 
+/// Shared type for [`path_key`]'s per-call memoized parent-canonicalize cache — pulled out to a named
+/// alias so [`output_escapes_input_dir`] (used by both this module's `plan()` and, as of the IPC-bypass
+/// fix, [`crate::batch_execute::execute_plan_walk`]) can be threaded a cache across an entire batch
+/// without either caller having to spell out the `HashMap<String, Option<PathBuf>>` type by hand.
+pub(crate) type ParentCache = std::collections::HashMap<String, Option<std::path::PathBuf>>;
+
 /// Map `path` to its [`PathKey`] — the one shared "is this the same file?" identity (CPE-1613) backing
 /// both `plan()`'s non-destructive guarantee/collision set and [`same_file`] (and, transitively,
 /// [`crate::batch_execute::any_in_place`]'s `confirmed_overwrite` refusal check). Strongest signal first,
@@ -339,7 +434,7 @@ enum PathKey {
 ///    fall back to a purely lexical, filesystem-free comparison ([`lexical_normalize`]), still case-folded
 ///    per platform. Doesn't catch symlinks/junctions or macOS NFC/NFD (those need real files to resolve),
 ///    but does catch case, separator, and `.`/`..` variants.
-fn path_key(path: &str, parent_cache: &mut std::collections::HashMap<String, Option<std::path::PathBuf>>) -> PathKey {
+fn path_key(path: &str, parent_cache: &mut ParentCache) -> PathKey {
     if let Ok(canonical) = canonicalize_path(path) {
         if let (Some(parent), Some(name)) = (canonical.parent(), canonical.file_name()) {
             return PathKey::Resolved(parent.to_path_buf(), fold_case(&name.to_string_lossy()));
@@ -374,6 +469,60 @@ pub fn same_file(a: &str, b: &str) -> bool {
     }
     let mut cache = std::collections::HashMap::new();
     path_key(a, &mut cache) == path_key(b, &mut cache)
+}
+
+/// **The one shared containment check (CPE-1623, broadened by the IPC-bypass follow-up):** true when
+/// `output`'s directory is NOT the same place as `input`'s own directory, per [`path_key`] — i.e. this
+/// output would leave the folder its input lives in. Used by BOTH `plan()`'s own backstop below (catches
+/// a caller that invokes `plan()` directly, bypassing `validate()`) AND
+/// [`crate::batch_execute::execute_plan_walk`]'s pre-write re-check (catches a caller that hand-builds a
+/// `PlannedItem` and skips `plan()` **entirely** — the IPC surface `batch_media_execute_stream` took
+/// `items: Vec<PlannedItem>` straight off the wire with zero invariants of its own, so nothing on that
+/// path had ever re-derived containment before this fix; see `batch_execute`'s module doc for the
+/// demonstrated bypass). Fails closed: [`path_key`] never panics or silently no-ops on an IO error/missing
+/// parent/non-canonicalizable path, it falls back tier-by-tier to a purely lexical, filesystem-free
+/// comparison ([`lexical_normalize`]) that still correctly resolves `.`/`..` segments — so an unresolvable
+/// path still gets a real containment answer, never a free pass.
+///
+/// Cheap fast path: textually-identical directories (the overwhelmingly common case — every non-Rename,
+/// non-Convert op, and any Rename/Convert value without a separator) never touch [`path_key`] at all; only
+/// an `output` whose directory actually differs from `input`'s pays for the (still O(1)-amortized, thanks
+/// to `parent_cache`) resolution that confirms whether that's a real escape or just a resolvable variant
+/// (trailing separator, `.`/`..`, symlink) of the same place.
+///
+/// **Two structural gaps closed (reviewer, PR #828 attempt 2) — [`split`] is a plain filename splitter,
+/// not a full path parser, and the directory-identity comparison above trusted it too far:**
+///
+/// - **Finding A — a bare-filename input.** `split` finds `dir == ""` when `input` has no directory
+///   component at all (a relative filename with nothing before it). `validate()`/[`template_escapes_directory`]
+///   now reject `:` in a template outright, but a caller that skips `validate()` (calls `plan()` directly)
+///   could still produce a Windows drive-relative output like `"C:foo.jpg"` — `split` finds no separator
+///   in that either, so `out_dir` is ALSO `""`, the two empty strings compare equal, and the fast path
+///   above would wave a drive-relative escape straight through with zero [`path_key`] calls. Guarded
+///   explicitly: with no directory component, the computed name itself must contain no `:`.
+/// - **Finding B — a dot-segment final component.** An extensionless input plus a template that's
+///   literally `".."` (bypassing `validate()`, which rejects that template outright) produces an `output`
+///   whose FINAL path component is a bare `..`/`.` — `split` hands that back as an ordinary-looking "stem"
+///   with no separator involved, so `out_dir == dir` and the check above never even asks whether this is a
+///   real filename. A dot-segment final component never denotes an ordinary file (it resolves to the
+///   directory itself or its parent) — rejected outright, independent of the directory-identity check.
+///   (With an extensioned input this can't happen: `join` appends the extension, turning a `".."` stem
+///   into the literal, harmless filename `"...ext"`.)
+pub(crate) fn output_escapes_input_dir(input: &str, output: &str, parent_cache: &mut ParentCache) -> bool {
+    let out_final = output.rsplit(['/', '\\']).next().unwrap_or(output);
+    if out_final == "." || out_final == ".." {
+        return true;
+    }
+
+    let (dir, _, _) = split(input);
+    let (out_dir, out_stem, _) = split(output);
+    if dir.is_empty() && out_stem.contains(':') {
+        return true;
+    }
+    if out_dir == dir {
+        return false;
+    }
+    path_key(&out_dir, parent_cache) != path_key(&dir, parent_cache)
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
@@ -477,19 +626,16 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
 
             // CPE-1623: constrain the computed output to the input's own directory — plan() has never
             // taken a separate "target dir" parameter; each item's implicit target is always the folder
-            // its own input already lives in. Cheap fast path: every non-Rename op, and any Rename
-            // template without a separator, leaves `out_dir` textually identical to `dir`, so the
-            // (still O(1)-amortized, but non-zero) `path_key` resolution below is skipped entirely.
-            let (out_dir, _, _) = split(&output);
-            if out_dir != dir {
-                let out_dir_key = path_key(&out_dir, &mut parent_cache);
-                let in_dir_key = path_key(&dir, &mut parent_cache);
-                if out_dir_key != in_dir_key {
-                    return Err(format!(
-                        "rename template for \"{input}\" would write to \"{output}\", outside its own \
-                         folder — a rename can only change a file's name, not its folder"
-                    ));
-                }
+            // its own input already lives in. [`output_escapes_input_dir`] is the one shared definition
+            // of this check — also used by `batch_execute::execute_plan_walk`'s independent pre-write
+            // re-check, so there is exactly one place that decides "did this leave the folder?", not two
+            // definitions that could drift apart.
+            if output_escapes_input_dir(input, &output, &mut parent_cache) {
+                return Err(format!(
+                    "computed output for \"{input}\" would land at \"{output}\", outside its own folder \
+                     — a Convert extension or Rename template can only change a file's name/extension, \
+                     never its folder"
+                ));
             }
 
             if job.non_destructive {
@@ -871,6 +1017,47 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
+    #[test]
+    fn cpe_1623_containment_check_for_a_directory_changing_rename_stays_bounded() {
+        // Reviewer caveat (PR #828 attempt 2): the quadratic-regression guard above uses
+        // `MediaOp::Compress`, which NEVER enters the CPE-1623 containment branch — `out_dir == dir`
+        // textually for every item, so `path_key` is never called for it at all. That guard has a blind
+        // spot for the containment check's own cost. This test exercises that branch on EVERY item: a
+        // Rename template of `"./{stem}"` changes `out_dir` TEXTUALLY (adds a `"./"` segment) but resolves
+        // to the exact same real directory, so `output_escapes_input_dir` genuinely runs `path_key`'s full
+        // resolution for both `out_dir` and `dir` on every single item (the fast path is skipped), and
+        // still correctly reports "contained" (`plan()` succeeds, not refused).
+        let dir = scratch("cpe1623-containment-perf-guard");
+        let n = 300usize;
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                let p = dir.path().join(format!("photo{i:04}.jpg"));
+                std::fs::write(&p, b"x").unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+
+        let mut job = BatchJob::new(vec![MediaOp::Rename { template: "./{stem}".into() }]);
+        job.non_destructive = false; // isolate the containment check's own cost from collision-avoidance
+        reset_canonicalize_call_count();
+        let out = plan(&job, &inputs).unwrap_or_else(|e| panic!("a same-directory rename must not be refused: {e}"));
+        let calls = canonicalize_call_count();
+        assert_eq!(out.len(), n);
+
+        // Same generous linear bound as the guard above — O(n) allows a small constant number of
+        // canonicalize calls per file (here: two path_key resolutions per item, one for `out_dir` and one
+        // for `dir`, both memoized after the first). O(n²) would blow far past this even at n=300.
+        assert!(
+            calls <= n * 10,
+            "expected O(n) canonicalize calls even when every item genuinely resolves the containment \
+             check (bound {}), got {calls} for n={n} files — the containment check may have regressed to \
+             a per-item uncached resolution",
+            n * 10
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
     /// Manual-only timing measurement (CPE-1623 follow-up to the CPE-1613 perf fix): `#[ignore]`d so it
     /// never runs in CI (avoids flaky wall-clock assertions, per CLAUDE.md), but gives a real number for
     /// the Foreman's requested "state your own measured `plan()` timing for 2000 files" — run explicitly
@@ -912,12 +1099,36 @@ mod tests {
         reject("sub/name");
         reject("sub\\name");
         reject("..");
+        reject(" .. "); // whole segment once trimmed — still a traversal
         reject("a/../b");
+        reject("x/..");
+        reject("C:foo"); // reviewer finding A: drive-relative reference
+        reject("secrets:hidden"); // colon anywhere, not just drive-letter position
 
-        // Ordinary templates — no separators, no ".." — must still validate fine.
-        for ok in ["{stem}", "{stem}-{n}", "photo-{n}", "vacation 2024", "{stem}_backup"] {
+        // Ordinary templates — no separators, no ":", no WHOLE-SEGMENT ".." — must still validate fine.
+        // "shot..final"/"v1..2" are the UAT tester's exact worked examples: two literal dots inside an
+        // otherwise ordinary filename, no separator anywhere, so there is nothing to walk through.
+        for ok in [
+            "{stem}", "{stem}-{n}", "photo-{n}", "vacation 2024", "{stem}_backup",
+            "shot..final", "v1..2", "a..b", "...",
+        ] {
             let job = BatchJob::new(vec![MediaOp::Rename { template: ok.into() }]);
             assert!(validate(&job).is_ok(), "expected {ok:?} to validate");
+        }
+    }
+
+    #[test]
+    fn cpe_1623_convert_extension_is_sanitised_the_same_way_as_rename_template() {
+        // The Convert-extension gap: to_ext feeds the exact same join()'d output path but wasn't checked
+        // at all before this fix. Mirrors the Rename-template accept/reject split exactly (same helper).
+        for bad in ["../evil", "..\\evil", "sub/ext", "C:foo", "..", "a/.."] {
+            let job = BatchJob::new(vec![MediaOp::Convert { to_ext: bad.into() }]);
+            let err = validate(&job).expect_err(&format!("expected convert to_ext {bad:?} to be rejected"));
+            assert!(err.contains("convert extension"), "message should name the actual op: {err}");
+        }
+        for ok in ["jpg", "PNG", ".webp", "shot..final"] {
+            let job = BatchJob::new(vec![MediaOp::Convert { to_ext: ok.into() }]);
+            assert!(validate(&job).is_ok(), "expected convert to_ext {ok:?} to validate");
         }
     }
 
@@ -932,6 +1143,107 @@ mod tests {
         let err = plan(&job, &v(&["/pics/traversal_workdir/innocuous.jpg"]))
             .expect_err("a template that walks the output outside its own directory must be refused");
         assert!(err.contains("folder"), "refusal reason should explain the containment violation: {err}");
+    }
+
+    #[test]
+    fn cpe_1623_convert_extension_traversal_is_refused_with_an_accurate_op_name() {
+        // Reviewer finding C: the containment backstop is op-agnostic (it fires regardless of which op
+        // produced the escaping output) but the refusal message used to hard-code "rename template" even
+        // when the actual op was Convert. Bypasses validate() (which would now also catch this at the
+        // to_ext field-level check) to exercise plan()'s own independent backstop directly.
+        let job = BatchJob::new(vec![MediaOp::Convert { to_ext: "..\\..\\victim\\important".into() }]);
+        let err = plan(&job, &v(&["/pics/traversal_workdir/innocuous.jpg"]))
+            .expect_err("a Convert extension that walks the output outside its own directory must be refused");
+        assert!(err.contains("folder"), "refusal reason: {err}");
+        assert!(!err.contains("rename template"), "must not misattribute a Convert escape to Rename: {err}");
+        assert!(err.contains("Convert"), "refusal reason should name Convert as a possible cause: {err}");
+    }
+
+    #[test]
+    fn cpe_1623_reviewer_finding_a_bare_filename_input_drive_relative_template_is_refused() {
+        // Reviewer finding A (PR #828 attempt 2): a BARE-FILENAME input (no directory component at all)
+        // makes split()'s `dir` textually empty. A Windows drive-relative template ("C:foo") produces an
+        // output whose directory portion is ALSO textually empty (split only recognises `/`/`\`, never
+        // `:`), so the old fast-path `out_dir == dir` comparison (two empty strings) would silently accept
+        // a drive-relative escape. Bypasses validate() (which now also rejects `:` at the field level) to
+        // exercise plan()'s own independent structural backstop.
+        let job = BatchJob::new(vec![MediaOp::Rename { template: "C:foo".into() }]);
+        let err = plan(&job, &v(&["innocuous.jpg"]))
+            .expect_err("a drive-relative output for a bare-filename input must be refused, not planned");
+        assert!(err.contains("folder"), "refusal reason: {err}");
+    }
+
+    #[test]
+    fn cpe_1623_reviewer_finding_b_dotdot_final_component_is_refused() {
+        // Reviewer finding B (PR #828 attempt 2): an EXTENSIONLESS input plus a template that's literally
+        // ".." produces an output whose FINAL path component is a bare ".." — split() hands that back as
+        // an ordinary-looking stem with no separator, so the old check never even asked whether it denotes
+        // a real file. Bypasses validate() (which already rejects a whole-segment ".." template) to
+        // exercise plan()'s own independent structural backstop. Extensionless matters: with an extension,
+        // join() appends it and turns the ".." stem into the literal, harmless filename "...ext" (covered
+        // by cpe_1623_dotdot_only_rejected_as_a_whole_path_segment_not_any_occurrence's accept list).
+        let job = BatchJob::new(vec![MediaOp::Rename { template: "..".into() }]);
+        let err = plan(&job, &v(&["/pics/a/traversal_workdir/innocuous"]))
+            .expect_err("an output whose final component is a bare \"..\" must be refused, not planned");
+        assert!(err.contains("folder"), "refusal reason: {err}");
+    }
+
+    #[test]
+    fn cpe_1623_dotdot_only_rejected_as_a_whole_path_segment_not_any_occurrence() {
+        // UAT follow-up: ".." embedded in an ordinary filename (no separator anywhere) is not a traversal
+        // risk — the template only ever substitutes into the STEM, so with no separator there is only ONE
+        // segment, and it's a traversal risk only if that whole segment IS "..". Plans successfully, and
+        // the output stays in the input's own folder (contrast with the refused cases above/below).
+        for ok in ["shot..final", "v1..2", "a..b", "..."] {
+            let job = BatchJob::new(vec![MediaOp::Rename { template: ok.into() }]);
+            let out = plan(&job, &v(&["/pics/vacation/photo1.jpg"]))
+                .unwrap_or_else(|e| panic!("expected {ok:?} to plan successfully: {e}"));
+            assert_eq!(out[0].output, format!("/pics/vacation/{ok}.jpg"), "template {ok:?}");
+        }
+        // Genuine traversal still refused at the plan() layer too (bypassing validate()). Bare ".." isn't
+        // in this list: against an EXTENSIONED input (as used here), ".." as a Rename stem plans to the
+        // literal, harmless filename "...jpg" (join() appends the extension) — it only denotes a real
+        // parent-directory reference against an EXTENSIONLESS input, which
+        // cpe_1623_reviewer_finding_b_dotdot_final_component_is_refused covers on its own.
+        for bad in ["../x", "..\\x", "a/../../b", "x/.."] {
+            let job = BatchJob::new(vec![MediaOp::Rename { template: bad.into() }]);
+            let err = plan(&job, &v(&["/pics/a/b/photo1.jpg"]))
+                .expect_err(&format!("expected {bad:?} to be refused"));
+            assert!(err.contains("folder"), "refusal reason for {bad:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn cpe_1623_unicode_lookalike_slash_characters_are_accepted_not_path_separators() {
+        // Resolves the auditor's inconclusive finding definitively: U+2215 (DIVISION SLASH), U+FF0F
+        // (FULLWIDTH SOLIDUS), and U+FF3C (FULLWIDTH REVERSE SOLIDUS) are distinct Unicode scalars from
+        // ASCII '/' and '\\' — the char-based `contains` checks in template_escapes_directory correctly do
+        // NOT match them, so validate() accepts these templates, and split()/join() (which only ever split
+        // on literal '/'/'\\') treat the character as an ordinary part of the filename, not a separator.
+        // Proven with REAL files on disk (not just string assertions) so this is authoritative, not a
+        // guess about OS behaviour.
+        let dir = scratch("cpe1623-unicode-lookalikes");
+        for (tag, ch) in [("division-slash", '\u{2215}'), ("fullwidth-solidus", '\u{FF0F}'), ("fullwidth-reverse-solidus", '\u{FF3C}')] {
+            let input = dir.path().join(format!("{tag}.jpg"));
+            std::fs::write(&input, b"x").unwrap();
+            let template = format!("sub{ch}evil");
+
+            let job = BatchJob::new(vec![MediaOp::Rename { template: template.clone() }]);
+            assert!(validate(&job).is_ok(), "{tag}: {template:?} must validate (not an ASCII separator)");
+
+            let out = plan(&job, &[input.to_string_lossy().to_string()])
+                .unwrap_or_else(|e| panic!("{tag}: {template:?} must plan successfully: {e}"));
+            // The computed output is a SINGLE file directly inside the input's own directory — the
+            // look-alike character became part of the filename, not a directory boundary.
+            let expected = dir.path().join(format!("{template}.jpg"));
+            assert_eq!(out[0].output, expected.to_string_lossy(), "{tag}: output must stay in the input's own folder");
+
+            // Real-filesystem proof: the OS actually accepts this as one ordinary filename (it's not one
+            // of NTFS's 9 reserved characters `< > : " / \ | ? *`).
+            std::fs::write(&out[0].output, b"written").unwrap();
+            assert!(std::path::Path::new(&out[0].output).is_file(), "{tag}: the OS must accept this as a real filename");
+        }
+        let _ = std::fs::remove_dir_all(dir.path());
     }
 
     #[test]
