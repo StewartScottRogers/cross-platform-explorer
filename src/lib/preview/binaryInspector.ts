@@ -65,32 +65,57 @@ export function classifyBinaryError(message: string): BinaryErrorKind {
 export type ManagedConfidence = "confirmed" | "possible" | "none";
 
 /**
+ * Extensions where an EMPTY import/export table is the **normal, by-design** shape for a legitimate
+ * native binary — not a hint of anything unusual, let alone managed .NET (CPE-1597, fixing a code-review
+ * finding on the first version of this heuristic):
+ *
+ * - `.efi` — UEFI drivers/boot applications reach firmware services through the `EFI_SYSTEM_TABLE`
+ *   pointer handed to them at entry, never through a PE import table. A zero-import, zero-export `.efi`
+ *   is the norm, not an anomaly — flagging one as "possibly managed" was actively wrong, hid a perfectly
+ *   real, valid x86/x64 disassembly behind an unnecessary extra click, and told the user an everyday
+ *   shape was "unusual" when it's standard.
+ * - `.sys` — Windows kernel drivers can likewise carry a near-empty (occasionally fully empty) import
+ *   table depending on how they reach the kernel/HAL; included on the same grounds, more conservatively.
+ *
+ * The zero-imports-AND-zero-exports signal below is SKIPPED entirely for these extensions (never
+ * downgraded to a lesser warning — it simply isn't evidence for this format), so `.efi`/`.sys` never gate
+ * their Disassembly tab behind the "possible" caveat's opt-in click. The "confirmed" signal (an actual
+ * `mscoree.dll` import / CLR export) is unaffected and still applies to any extension — it's real evidence
+ * regardless of format.
+ */
+const EMPTY_TABLES_NORMAL_EXTS = new Set(["efi", "sys"]);
+
+/**
  * Best-effort, frontend-side detection of a managed .NET assembly (CPE-1597) — so the Disassembly tab
  * never presents CIL bytecode decoded as x86/x64 as if it were real machine code (confirmed nonsense on
  * `mscorlib.dll` during CPE-1585's UAT: 2,048 meaningless "instructions").
  *
  * TODO(CPE-1596): that ticket is adding a real `is_managed` flag to `BinaryInfo`, computed backend-side
  * from the actual CLR header (the IMAGE_COR20_HEADER pointed at by the PE optional header's 15th data
- * directory) — once it lands, prefer `info.is_managed` directly and retire this whole heuristic. Landing
- * this ticket first (rather than blocking on that parallel branch) means the caveat ships now, on data
- * the backend already returns.
+ * directory) — once it lands, prefer `info.is_managed` directly and retire this whole heuristic (the
+ * `EMPTY_TABLES_NORMAL_EXTS` carve-out below goes away with it — a real CLR-header read never needs a
+ * per-format exception list). Landing this ticket first (rather than blocking on that parallel branch)
+ * means the caveat ships now, on data the backend already returns.
  *
  * Two signals, checked in order:
  *
  * 1. **"confirmed"** — the PE imports `mscoree.dll` (checked case-insensitively by owning library) or
  *    exports the CLR loader entry points `_CorExeMain`/`_CorDllMain`. This is the classic, well-known
  *    signal: an OLDER or 32-bit-targeted CLR-hosted image carries exactly this one native import so the
- *    plain PE/COFF loader can bootstrap the runtime before any managed code runs.
+ *    plain PE/COFF loader can bootstrap the runtime before any managed code runs. Applies to ANY
+ *    extension — an actual CLR import/export is real evidence no matter what the file is named.
  *
- * 2. **"possible"** — the PE has **zero imports and zero exports**. Verified against a real 64-bit
- *    `mscorlib.dll` (`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll`) during this ticket's
- *    own manual testing: it reports `imports: 0, exports: 0` — signal 1 alone MISSES it, because a modern
- *    x64/AnyCPU pure-IL assembly is loaded straight off its CLR header, with no legacy import-table stub
- *    at all. An ordinary native PE, by contrast, almost always imports *something* (at minimum a handful
- *    of kernel32 functions) — an import-free, export-free PE is unusual enough to be worth a hedged
- *    caveat, even though it isn't proof (a genuinely native, statically-linked or resource-only binary can
- *    also have empty tables). This is why it's ranked below "confirmed" and worded as a possibility, not a
- *    fact, in the UI.
+ * 2. **"possible"** — the PE has **zero imports and zero exports**, AND its extension isn't in
+ *    {@link EMPTY_TABLES_NORMAL_EXTS} (where that shape is the norm, not a signal — see its doc comment).
+ *    Verified against a real 64-bit `mscorlib.dll`
+ *    (`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll`) during this ticket's own manual
+ *    testing: it reports `imports: 0, exports: 0` — signal 1 alone MISSES it, because a modern x64/AnyCPU
+ *    pure-IL assembly is loaded straight off its CLR header, with no legacy import-table stub at all. An
+ *    ordinary EXE/DLL, by contrast, almost always imports *something* (at minimum a handful of kernel32
+ *    functions), so an import-free, export-free one is worth a hedged caveat there — but this signal is
+ *    weak either way (a real IL assembly usually carries exactly one `mscoree.dll` import, which the
+ *    "confirmed" tier already catches), so the UI must never claim this shape is itself unusual — only
+ *    that it's consistent with a guess, not a finding.
  *
  * Neither signal reads the CLR header itself, so a packed/obfuscated .NET binary that strips its imports
  * AND happens to carry unrelated exports could still slip past both — an acceptable gap for a caveat, not
@@ -98,14 +123,29 @@ export type ManagedConfidence = "confirmed" | "possible" | "none";
  */
 export function managedDotNetConfidence(
   info: Pick<BinaryInfo, "format" | "imports" | "exports">,
+  extension: string,
 ): ManagedConfidence {
   if (info.format !== "Pe") return "none";
   const confirmed =
     info.imports.some((i: BinaryImport) => (i.library ?? "").toLowerCase() === "mscoree.dll") ||
     info.exports.some((e: BinaryExport) => e.name === "_CorExeMain" || e.name === "_CorDllMain");
   if (confirmed) return "confirmed";
+  if (EMPTY_TABLES_NORMAL_EXTS.has(extension.toLowerCase())) return "none";
   if (info.imports.length === 0 && info.exports.length === 0) return "possible";
   return "none";
+}
+
+/**
+ * Whether `extension` is a format where an empty import/export table is normal-by-design (CPE-1597) —
+ * exported so the component can show a short, non-gating, purely informational note explaining WHY the
+ * Imports/Exports tabs are empty for one of these files, without implying anything about managed .NET
+ * (that heuristic already skips these extensions entirely — see {@link EMPTY_TABLES_NORMAL_EXTS}). Kept
+ * separate from {@link managedDotNetConfidence} so the note can render even though that function
+ * correctly returns "none" here (nothing to caveat, but a user staring at two empty tables still
+ * deserves an explanation).
+ */
+export function emptyImportExportIsNormalFor(extension: string): boolean {
+  return EMPTY_TABLES_NORMAL_EXTS.has(extension.toLowerCase());
 }
 
 /** Human label for a `BinaryFormat` value. */

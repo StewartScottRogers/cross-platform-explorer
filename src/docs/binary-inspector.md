@@ -75,14 +75,22 @@ notes* below), so it recognizes a likely-managed assembly two ways, and is hones
 - **Confirmed** — the file imports `mscoree.dll` (the classic native stub older/32-bit CLR images use to
   bootstrap the runtime) or exports the CLR loader entry points. The Disassembly tab states plainly that
   this is a managed assembly.
-- **Possible** — the file has **no imports and no exports at all**. This is common for a modern 64-bit/
-  AnyCPU assembly, which the OS loads straight off its CLR header with no native import table (this is
-  the shape a real `mscorlib.dll` has) — but it isn't proof by itself, so the wording says "if this is a
-  managed assembly" rather than stating it outright.
+- **Possible** — the file has **no imports and no exports at all**. This is consistent with a modern
+  64-bit/AnyCPU assembly, which the OS loads straight off its CLR header with no native import table (this
+  is the shape a real `mscorlib.dll` has) — but it isn't proof by itself (some legitimate native binaries
+  have empty tables too), so the wording says "if this is a managed assembly" rather than stating it
+  outright.
 
 Either way, the Disassembly tab shows that explanation instead of a decode. A **"Show it anyway"** button
 is still there if you want to see the raw (possibly meaningless) decode — it stays clearly labelled the
 whole time it's shown, so nothing is ever presented as fact that isn't.
+
+An empty import/export table isn't always ambiguous, though: for **`.efi`** (UEFI drivers and boot
+applications) and **`.sys`** (kernel drivers), it's the **normal, by-design** shape — UEFI code reaches
+firmware services through a pointer handed to it at entry, never through a PE import table. The inspector
+never applies the "Possible" caveat to these two extensions; instead the Overview tab shows a short,
+non-gating note explaining that the empty tables are ordinary for the format, and the Disassembly tab
+shows the real x86/x64 decode directly, with no extra click required.
 
 ## Big binaries
 

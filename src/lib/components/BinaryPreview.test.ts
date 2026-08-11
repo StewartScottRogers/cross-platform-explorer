@@ -139,7 +139,7 @@ describe("BinaryPreview (CPE-1597)", () => {
   it("caveats the Disassembly tab for a CONFIRMED managed .NET assembly (mscoree.dll import) instead of decoding it", async () => {
     binaryInfoMock.mockResolvedValueOnce(ok(managedPe));
 
-    render(BinaryPreview, { path: "/x/managed.dll" });
+    render(BinaryPreview, { path: "/x/managed.dll", extension: "dll" });
     await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
     expect(screen.getByTestId("binary-managed-badge")).toBeTruthy();
 
@@ -156,7 +156,7 @@ describe("BinaryPreview (CPE-1597)", () => {
   it("caveats the Disassembly tab for the REAL mscorlib.dll shape (zero imports, zero exports) — the confirmed signal alone would miss this file", async () => {
     binaryInfoMock.mockResolvedValueOnce(ok(mscorlibShapedPe));
 
-    render(BinaryPreview, { path: "/x/mscorlib.dll" });
+    render(BinaryPreview, { path: "/x/mscorlib.dll", extension: "dll" });
     await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
     expect(screen.getByTestId("binary-managed-badge").textContent).toMatch(/no imports or exports/);
 
@@ -165,6 +165,67 @@ describe("BinaryPreview (CPE-1597)", () => {
     // The hedged wording never asserts this AS a .NET assembly (only "confirmed" does) — it says "if".
     expect(screen.getByTestId("binary-managed-disasm-caveat").textContent).toMatch(/no imports or exports/);
     expect(binaryDisasmMock).not.toHaveBeenCalled();
+  });
+
+  // ---- Code-review fix: .efi (and .sys) must NOT get the "possible managed" caveat for an empty table
+  // — an empty import/export table is NORMAL BY DESIGN for UEFI images (they reach firmware services via
+  // EFI_SYSTEM_TABLE, never a PE import table), so the real, valid x86/x64 disassembly must render
+  // directly, with no caveat gating it behind an extra click. ----
+  it(".efi with zero imports AND zero exports: NO managed badge, a lighter non-gating note instead, and the Disassembly tab shows the REAL decode with no opt-in click required", async () => {
+    binaryInfoMock.mockResolvedValueOnce(ok(mscorlibShapedPe)); // same 0-imports/0-exports shape as mscorlib.dll
+    binaryDisasmMock.mockResolvedValueOnce(ok(someDisasm));
+
+    render(BinaryPreview, { path: "/x/driver.efi", extension: "efi" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+
+    // No "possibly managed" badge — that would be actively wrong for a UEFI image.
+    expect(screen.queryByTestId("binary-managed-badge")).toBeNull();
+    // Instead, a lighter, purely informational note explains the empty tables as NORMAL for this format
+    // (never implying anything about managed .NET) — the opposite of the old, wrong "unusual" framing.
+    const note = screen.getByTestId("binary-empty-tables-normal-note");
+    expect(note.textContent).toMatch(/normal for a EFI image/);
+    expect(note.textContent).toMatch(/not a sign of anything unusual/);
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Disassembly" }));
+
+    // No caveat, no "Show anyway" gate — the real disassembly is fetched and shown directly.
+    expect(screen.queryByTestId("binary-managed-disasm-caveat")).toBeNull();
+    expect(screen.queryByTestId("binary-managed-show-anyway")).toBeNull();
+    await waitFor(() => expect(binaryDisasmMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.getByText("mov rbp, rsp")).toBeTruthy());
+  });
+
+  it(".sys with zero imports AND zero exports: same treatment as .efi — no managed badge, no gate", async () => {
+    binaryInfoMock.mockResolvedValueOnce(ok(mscorlibShapedPe));
+
+    render(BinaryPreview, { path: "/x/driver.sys", extension: "sys" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+
+    expect(screen.queryByTestId("binary-managed-badge")).toBeNull();
+    expect(screen.getByTestId("binary-empty-tables-normal-note")).toBeTruthy();
+  });
+
+  it(".efi with a CONFIRMED managed signal (an actual mscoree.dll import) still caveats — the extension carve-out only ever suppresses the WEAK zero/zero signal", async () => {
+    binaryInfoMock.mockResolvedValueOnce(ok(managedPe)); // real mscoree.dll import
+
+    render(BinaryPreview, { path: "/x/oddball.efi", extension: "efi" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+    expect(screen.getByTestId("binary-managed-badge").textContent).toMatch(/managed \.NET assembly/);
+
+    await fireEvent.click(screen.getByRole("tab", { name: "Disassembly" }));
+    await waitFor(() => expect(screen.getByTestId("binary-managed-disasm-caveat")).toBeTruthy());
+    expect(binaryDisasmMock).not.toHaveBeenCalled();
+  });
+
+  it(".dll (not in the empty-tables-normal set) still gets the hedged 'possible' caveat for the same zero/zero shape", async () => {
+    // Same underlying data as the .efi test above, different extension — proves the carve-out is
+    // extension-specific, not a blanket change to the zero/zero signal itself.
+    binaryInfoMock.mockResolvedValueOnce(ok(mscorlibShapedPe));
+
+    render(BinaryPreview, { path: "/x/mystery.dll", extension: "dll" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+    expect(screen.getByTestId("binary-managed-badge")).toBeTruthy();
+    expect(screen.queryByTestId("binary-empty-tables-normal-note")).toBeNull();
   });
 
   // ---- THE #3 priority: big tables must not stall the pane ----

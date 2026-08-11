@@ -15,6 +15,7 @@
     formatLabel,
     hexAddress,
     managedDotNetConfidence,
+    emptyImportExportIsNormalFor,
     BINARY_TABLE_ROW_CAP,
   } from "../preview/binaryInspector";
 
@@ -23,6 +24,11 @@
   /** The file's size in bytes — from the previewed `DirEntry` (`BinaryInfo` itself carries no file-size
    *  field, only structural data), shown on the Overview tab. */
   export let size = 0;
+  /** The file's lowercased extension (no dot), from the previewed `DirEntry` — needed so
+   *  `managedDotNetConfidence` can skip its zero-imports/zero-exports "possible" signal for formats
+   *  (`.efi`/`.sys`) where that shape is normal by design, not evidence of anything (CPE-1597 code-review
+   *  fix). Never used to decide the format itself — that always comes from `info.format`. */
+  export let extension = "";
 
   type Tab = "overview" | "sections" | "imports" | "exports" | "symbols" | "disasm";
   let tab: Tab = "overview";
@@ -59,8 +65,17 @@
   // Two-tier confidence rather than a plain flag, so the wording never asserts a guess as fact — see
   // `managedDotNetConfidence`'s own doc comment for why "possible" (zero imports AND zero exports) exists
   // at all: it's the ONLY signal that catches the real mscorlib.dll shape this ticket verified against.
-  $: managedConfidence = info ? managedDotNetConfidence(info) : "none";
+  // `extension` is threaded through so that signal is SKIPPED for .efi/.sys (empty tables are normal by
+  // design for those formats — a code-review fix; see `EMPTY_TABLES_NORMAL_EXTS`'s own doc comment).
+  $: managedConfidence = info ? managedDotNetConfidence(info, extension) : "none";
   $: managed = managedConfidence !== "none";
+  // Purely informational, non-gating note (CPE-1597 code-review fix, item 3): when the "possible" signal
+  // was skipped ONLY because this extension is a known-normal-empty-table format, a user staring at two
+  // empty Imports/Exports tabs still deserves an explanation for why — without implying anything about
+  // managed .NET, and without hiding the (perfectly real) Disassembly tab behind an extra click.
+  $: emptyTablesExplained =
+    !!info && managedConfidence === "none" && info.imports.length === 0 && info.exports.length === 0 &&
+    emptyImportExportIsNormalFor(extension);
   // The user can still ask to see the raw (meaningless) x86/x64 decode of a managed assembly's CIL bytes
   // — transparency over silently withholding data — but it's opt-in and stays clearly labelled, never
   // shown as if it were real disassembly. Reset whenever the file changes (see resetDisasm below).
@@ -183,7 +198,15 @@
         {:else if managedConfidence === "possible"}
           <div class="bp-banner warn" data-testid="binary-managed-badge">
             <Icon name="info" size={14} />
-            <span>This file has no imports or exports — common for a managed .NET assembly with no classic native import table. See the Disassembly tab for what that would mean for machine-code decoding.</span>
+            <span>This file has no imports or exports. That's consistent with a managed .NET assembly loaded off its CLR header rather than a native import table — but it isn't proof; some native binaries have empty tables too. See the Disassembly tab for what that would mean for machine-code decoding.</span>
+          </div>
+        {:else if emptyTablesExplained}
+          <!-- Lighter, non-gating note (CPE-1597 code-review fix): .efi/.sys files routinely have empty
+               import/export tables by design — this explains the empty Imports/Exports tabs below without
+               implying anything about managed .NET, and never hides the (perfectly real) Disassembly tab. -->
+          <div class="bp-banner" data-testid="binary-empty-tables-normal-note">
+            <Icon name="info" size={14} />
+            <span>This file has no imports or exports — that's normal for a {extension.toUpperCase()} image, not a sign of anything unusual.</span>
           </div>
         {/if}
       {:else if tab === "sections"}
@@ -283,11 +306,12 @@
               </span>
             {:else}
               <span>
-                This file has <strong>no imports or exports</strong> — common for a managed .NET assembly
-                loaded straight off its CLR header rather than a native import table (it isn't definitive;
-                an unusual native binary can also have empty tables). If it IS managed, its code section is
-                Common Intermediate Language (CIL) bytecode, not native machine code, and decoding it as
-                x86/x64 would produce meaningless output — so it isn't shown here automatically.
+                This file has <strong>no imports or exports</strong>. That's consistent with a managed .NET
+                assembly loaded straight off its CLR header rather than a native import table — but it
+                isn't proof; some native binaries have empty tables too, so this is a guess, not a finding.
+                If it IS managed, its code section is Common Intermediate Language (CIL) bytecode, not
+                native machine code, and decoding it as x86/x64 would produce meaningless output — so it
+                isn't shown here automatically.
               </span>
             {/if}
           </div>
@@ -301,7 +325,7 @@
               <span>
                 {managedConfidence === "confirmed"
                   ? "Reminder: this is CIL bytecode decoded as x86/x64 — it is not real disassembly."
-                  : "Reminder: this file has no imports/exports, so this MAY be CIL bytecode decoded as x86/x64 rather than real disassembly."}
+                  : "Reminder: this file has no imports/exports — consistent with (but not proof of) managed CIL bytecode decoded as x86/x64 rather than real disassembly."}
               </span>
             </div>
           {/if}
