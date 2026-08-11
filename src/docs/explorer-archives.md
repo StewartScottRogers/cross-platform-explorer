@@ -89,17 +89,21 @@ Two independent protections apply to every extraction, automatically — you don
   (or the archive as a whole) expanding more than **100×** trips a clear **DANGER** banner; otherwise it
   reports as safe. This threshold isn't configurable from the UI.
   - **The check no longer takes an archive's declared sizes on faith.** A ZIP's compressed/uncompressed
-    sizes are numbers the archive states about itself, and nothing stops those numbers from being wrong —
-    an entry can be re-packaged with a truthful compressed payload but a hand-edited, artificially small
-    declared uncompressed size, making a real bomb read as a tiny, harmless file. Every entry is
-    cross-checked (its local file header against the central directory, and its declared sizes against
-    what's physically possible for its compression method) and, whenever that check finds something
-    implausible, the scan verifies the entry for real by decompressing it — but only up to a **capped**
-    number of bytes, never the whole thing. If that capped read proves the entry expands past the
-    threshold, it's reported dangerous without decompressing any further; if the scan can't finish
-    verifying an entry within its own time/byte budget, that entry is reported as **not fully assessed**
-    (the same "couldn't be checked" state below), never as safe. An ordinary archive's metadata agrees
-    with itself and never triggers this extra work, so the common case is exactly as fast as before.
+    sizes are numbers the archive states about itself, and nothing stops those numbers from being wrong in
+    either direction — a real bomb can be re-packaged with an artificially small declared uncompressed
+    size (making it read as a tiny, harmless file), or with an artificially large declared compressed size
+    (making its ratio read as unremarkable). Every entry is cross-checked several ways before its declared
+    sizes are trusted: its local file header against the central directory; its declared sizes against
+    what's physically possible for its compression method; and its declared *compressed* size against a
+    hard ceiling derived from the entry's real position in the file — no archive can claim a compressed
+    size larger than the actual gap to whatever comes next on disk without literally writing that many
+    extra bytes. Whenever any of those checks finds something implausible, the scan verifies the entry for
+    real by decompressing it — but only up to a **capped** number of bytes, never the whole thing. If that
+    capped read proves the entry expands past the threshold, it's reported dangerous without decompressing
+    any further; if the scan can't finish verifying an entry within its own time/byte budget, that entry is
+    reported as **not fully assessed** (the same "couldn't be checked" state below), never as safe. An
+    ordinary archive's metadata agrees with itself and its own file layout and never triggers this extra
+    work, so the common case is exactly as fast as before.
   - **What this still doesn't guarantee:** the check is a best-effort risk signal, not a proof. It only
     looks at ZIP entries (not nested archives-within-archives, and not other formats). Its own
     decompression verification is deliberately capped for both a single entry and the archive as a whole,
@@ -156,18 +160,19 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
 - **RAR can only give you back an uncompressed (STORE) entry**, one file at a time via "open" or Alt-drag —
   a genuinely compressed RAR entry refuses with a clear error rather than corrupting output.
 - **"Check archive safety…" is ZIP-family only** and never gates Extract — see *Safety limits* above.
-- **A password-protected ZIP can't be safety-checked today — and the dialog says so honestly.** The
-  safety scan needs to read every entry's size metadata, and an encrypted entry can't be read without its
-  password. The scan still opens the archive and counts how many entries it couldn't read; when that count
-  is non-zero, the dialog shows a dedicated **"couldn't be read (likely password-protected) — this
-  archive's safety could not be checked"** state instead of the green safe banner — it never claims "No
-  zip-bomb risk detected" for an archive it only partially (or never) examined. If some entries *were*
+- **Not every entry can always be vouched for — and the dialog says so honestly.** An entry lands in the
+  "couldn't be read" count for either of two independent reasons: it's **encrypted** (an AES/ZipCrypto
+  entry can't be read without a password, and this dialog has no password prompt), or its declared sizes
+  looked implausible and the scan's own bounded verification (see the decompression-verification bullet
+  above) **ran out of budget** before it could confirm the entry either way. Both land in the same
+  tri-state, since the dialog can't reliably tell them apart and the honest answer is the same either
+  way — "not fully assessed", not "safe". When the count is non-zero, the dialog shows a dedicated state
+  instead of the green safe banner: **"{count} entries couldn't be read (some may be password-protected,
+  others too complex to verify in time) — this archive's safety could not be checked."** It never claims
+  "No zip-bomb risk detected" for an archive it only partially (or never) examined. If some entries *were*
   readable and one of those trips the danger threshold, the **DANGER** banner still leads, with a note
-  that other entries couldn't be assessed. There's still no password prompt in this dialog, so an
-  all-encrypted zip always reports as unassessed rather than safe or dangerous. The same "couldn't be
-  checked" count also covers the (much rarer) case where an entry's declared sizes looked implausible and
-  the scan's own verification budget ran out before it could confirm either way — see the bullet on
-  decompression verification above.
+  that other entries couldn't be assessed. An all-encrypted zip, and an archive whose suspicious entries
+  all exhausted the verification budget, both report as unassessed rather than safe or dangerous.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
