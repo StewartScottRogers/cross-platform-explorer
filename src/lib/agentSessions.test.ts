@@ -169,4 +169,15 @@ describe("markVisited (CPE-1606 — grows the visited-this-run set that gates wa
     const visited = new Set(["s1"]);
     expect(markVisited(sessions, "/elsewhere", visited)).toBe(visited);
   });
+
+  it("CPE-1625: arms BOTH sessions when two agents share the exact same cwd", () => {
+    // Fleets/parallel agents plausibly point two sessions at the identical project folder. Before
+    // CPE-1606 every running session was watched unconditionally, so both were visible; CPE-1606's
+    // `sessions.find(...)` narrowed that to the first co-located session only, silently orphaning the
+    // second one from Radar/Cost/History for the rest of the run. Negative control: this failed
+    // against pre-fix code (only "s1" was returned) — see Work Log.
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/work/api")];
+    const visited = markVisited(sessions, "/work/api/routes", new Set());
+    expect(visited).toEqual(new Set(["s1", "s2"]));
+  });
 });

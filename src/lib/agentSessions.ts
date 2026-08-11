@@ -67,17 +67,22 @@ export function markVisited(
 ): Set<string> {
   const running = new Set(sessions.map((s) => s.sessionId));
   const target = watchTargetFor(sessions, current);
-  const hitId = target
-    ? sessions.find((s) => normalizePath(s.cwd) === normalizePath(target))?.sessionId
-    : undefined;
+  // CPE-1625: collect EVERY session at the visited path, not just the first. Two fleet/parallel agents
+  // can plausibly share one cwd; `.find()` here used to arm only the first-found one, permanently
+  // hiding any co-located sibling from Radar/Cost/History (a regression from CPE-1606, which had armed
+  // every running session unconditionally). The visited set is keyed by session id, so it's a plain
+  // filter, not a single lookup.
+  const hitIds = target
+    ? sessions.filter((s) => normalizePath(s.cwd) === normalizePath(target)).map((s) => s.sessionId)
+    : [];
 
-  let changed = hitId !== undefined && !visited.has(hitId);
+  let changed = hitIds.some((id) => !visited.has(id));
   if (!changed) for (const id of visited) if (!running.has(id)) { changed = true; break; }
   if (!changed) return visited as Set<string>;
 
   const next = new Set<string>();
   for (const id of visited) if (running.has(id)) next.add(id);
-  if (hitId) next.add(hitId);
+  for (const id of hitIds) next.add(id);
   return next;
 }
 
