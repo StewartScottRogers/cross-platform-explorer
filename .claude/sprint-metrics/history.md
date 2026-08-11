@@ -1270,3 +1270,60 @@ CPE-1568, docs CPE-1569) with research banked to the Library (5 new entries). Bu
 CPE-1584. Tuned defaults: frontend=sonnet (opus for big App.svelte integration); gate Rust/dep/specta PRs on 3-OS
 Backend+Server-crates matrix (ignore flaky GUI-smoke); new dep → both Cargo.locks; STOP sub-agents that poll CI
 (Foreman owns CI verify); Foreman-apply trivial exactly-prescribed fixes. Budget ~124/200 → clean hand-off.
+
+## Sprint 2026-08-10 (CLI resume, evening) — BATCHED "up to 50", reached 21/50 before the budget line
+21 batches merged this session, **0 escaped defects**, Reviewer+UAT gauntlet throughout. The headline is
+not the count — it is that the crew stopped trusting itself. Nine rework cycles, every one a genuine
+defect caught pre-merge, several of them regressions *introduced by a fix* for a real bug.
+
+**The gui-smoke turnaround (CPE-1594/1595/1601).** The QA-Architect audit found the harness had produced
+**796 cancelled / 4 failed / 0 succeeded across 800 runs** — not flaky, silent. Three causes: the Windows
+leg never executed a single assertion (WebView2, CPE-1048) and its 45-min timeout stamped whole runs
+`cancelled`; the Linux leg worked and was discarded; and **`actions/upload-artifact` silently excludes
+dot-prefixed dirs**, so `gui-smoke/.screenshots/` never uploaded (`include-hidden-files: true` fixes it).
+Also: the standing "it's flaky, ignore it" note cited the WRONG ticket for weeks, which is part of why
+nobody re-opened it. Now a blocking ratcheted gate: went 33/7 → **37 passed / 3 failed**, four specs
+retired, screenshots uploading (5.4MB artifact). The remaining 3 are one coherent WebKitGTK `getText()`
+family, not a vague pile.
+**Screenshots paid for themselves the same day**: a worker read `shred-dialog-fail.png` and found a real
+product bug — `.ctx` had no scroll container, so context-menu items past the fold were *unreachable*.
+
+**Three-round tickets are worth it when each round finds something NEW.** CPE-1601 took 3 rounds: fix →
+broke every flyout (`overflow-y:auto` forces `overflow-x:auto`; `overflow-x:visible` cannot opt back out)
+→ fixed via `position:fixed` + JS anchoring → flyout orphaned on scroll → fixed by closing on
+anchor-out-of-clip. CPE-1590 took 3 rounds the same way. Rule learned: **allow round 3 when the findings
+are different each time; park when they repeat.**
+
+**jsdom cannot see layout — say so out loud.** 3,231 tests passed while every submenu in the app was
+clipped to nothing. Every real finding on menu work came from rebuilding the component CSS in **real
+Chrome**. The best agents ran a **negative control** (reproduce the bug with the OLD code in the same
+harness) before trusting a green result. Adopt that as standard for any visual/layout claim.
+
+**Security-shaped findings, all from adversarial review rather than the author:**
+- Archive safety reported "No zip-bomb risk detected" on a password-protected zip having read **zero**
+  entries (CPE-1591). Fix = a tri-state; "unknown" must be structurally distinct from "safe".
+- The ratio scan trusted the archive's **own declared sizes** (CPE-1602). Reviewer forged it. Round 1's fix
+  was **one-directional** (caught shrunk-uncompressed, missed inflated-compressed) and — the subtle part —
+  even a correct trigger still divided the honestly-measured numerator by a **forgeable denominator**.
+  Final fix: a decompression-free **physical ceiling** from on-disk layout, sorted by real `data_start`,
+  clamped everywhere. Padding-based evasion costs threshold-proportional real bytes, i.e. it stops being a
+  lie. Common case still ~10-30ms.
+- A crafted font froze the UI **8.8s** (bounded output, unbounded *work*: the cap counted codepoints
+  *pushed*, not *examined*). ~3ms after.
+- Batch Media silently overwrote originals with no confirm and nothing on the undo stack (CPE-1590), and
+  the guard was frontend-only until CPE-1599 made the **engine refuse**.
+
+**Docs work is a bug-detector.** Writing claims against real code found **nine** shipped bugs this session
+(1577, 1584, 1590, 1591, 1592, 1605, 1606, plus 1613/1614 from reviews). Brief workers that the prose is
+the by-product.
+
+**Open at hand-off (all filed, none lost):** CPE-1613 (**High** — same-file check is raw string equality, so
+`IMG_1.JPG`→jpg overwrites the original on Windows *even in non-destructive mode*), CPE-1611 (Medium,
+raised from Low — shred_paths has no trash fallback and a smaller fix than batch-media had), CPE-1606
+(Agent Watch keeps watching after you leave), 1600, 1603, 1607(merging), 1614, 1518.
+
+**Tuned defaults confirmed:** sonnet for nearly everything, opus only for the QA-Architect audit; batch
+trivial same-file tickets into one worker; **Foreman-apply exactly-prescribed fixes** (did so ~6 times,
+0 agents); tell sub-agents to run everything **synchronously** — one stalled "awaiting background
+notification" and had to be restarted; hold new dispatch when the merge queue backs up rather than
+lengthening the CI jam; reserve ~25% agent budget to finish what's in flight.
