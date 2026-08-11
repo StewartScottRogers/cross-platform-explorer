@@ -1327,3 +1327,63 @@ trivial same-file tickets into one worker; **Foreman-apply exactly-prescribed fi
 0 agents); tell sub-agents to run everything **synchronously** — one stalled "awaiting background
 notification" and had to be restarted; hold new dispatch when the merge queue backs up rather than
 lengthening the CI jam; reserve ~25% agent budget to finish what's in flight.
+
+## RUN 2026-08-11 (CLI resume, batched "up to 50") — batches 29→43, 21 merged, 0 escaped defects
+
+**Shipped:** CPE-1606 Agent Watch "off means off" · CPE-1614 smart-folder notice (12 locales) ·
+CPE-1603 File Health honours unreadable archives · CPE-1611 shred_paths confirm gate · CPE-1625 co-located
+agent sessions · CPE-1619 docs depth pass · **CPE-1613 same-file canonicalisation (High data-loss)** ·
+CPE-1615 .NET metadata tab · CPE-1616 notebook viewer · CPE-1627 45 notices → 12 languages · CPE-1600
+durable checkpoint-failure records · CPE-1626 pause-vs-end metrics · CPE-1618 log viewer · CPE-1629
+preview-pane screenshot harness · **CPE-1623 batch-media output containment (High)** · CPE-1633 onDestroy
+teardown · CPE-1635 (premise disproven; hardening + harness) · CPE-1630 vault_create confirm gate ·
+CPE-1637 bounded log window · CPE-1617 YAML/TOML viewer · CPE-1631 syntax highlighting.
+
+**Filed from gauntlet findings: 29 tickets (CPE-1620…CPE-1648).** Two High: CPE-1642 (resolve output
+identity instead of pattern-matching link shapes), CPE-1647 (vault_unlock's session_dir is uncontained, so
+lock can shred an arbitrary directory), plus CPE-1645 (locking a vault silently destroys edits made while
+unlocked).
+
+### What the gauntlet caught that tests could not
+Every PR passed its author's own tests. Independent checks still bounced **13** of them, every bounce a real
+defect. The pattern worth keeping:
+- **Ask for the number, not the impression.** "Is highlighting fixed?" → *measure token coverage*: 70.4%,
+  with JSON at 23.6% because one class carried every object key. "Does the YAML viewer work?" → *count real
+  files*: 4/13, with 2 valid files falsely called broken.
+- **Use real inputs, never the committed fixture.** 13 real logs, 20 real configs, real .NET assemblies,
+  real CI workflows. The fixture agrees with the parser by construction — it was written by the same author.
+- **A negative control or it didn't happen.** Reproduce the bug against the OLD code in the SAME harness
+  before believing a green result. This caught a "fix" that fixed nothing more than once.
+- **Three lenses find three different things.** On CPE-1623: the reviewer found inputs wrongly accepted, UAT
+  found valid input wrongly rejected, security found the engine wasn't the enforcement point at all.
+
+### Failure modes to expect (all hit tonight)
+- **A test written by reading the code can only confirm the code.** `foldBlockLines`'s test encoded the buggy
+  output as expected, so the suite actively protected the bug. Derive expectations from the spec or a
+  reference implementation (PyYAML/`tomllib` worked well).
+- **"We don't know" must never look like "it's fine."** Hit four separate times: a corrupt binary rendering
+  as an empty module, a non-empty log window reading as "This file is empty", a crashed session's record
+  indistinguishable from a clean one, a failed checkpoint needing to be a *different type* to be safe.
+- **Fixing a symptom invites the next variant.** CPE-1623 took three rounds — raw text → one-hop links →
+  chains → contended reads — because the check matched link *shapes*. Filed CPE-1642 to resolve identity once.
+- **A fix can be worse than the bug.** CPE-1626 round 1 stopped truncating a session's record and started
+  losing it entirely. Two checkers caught it with separate harnesses.
+- **Exposed ≠ caused.** CPE-1637 made a latent UTF-16 bug reachable by lifting a size ceiling. Say which.
+- **Agents overstate severity.** A worker reported "95% of app.css dead"; triangulation showed one rule lost.
+  Approve the code, don't approve the record — and correct it in place rather than quietly.
+
+### Tooling lessons (now in .claude/qa-architecture/MANUAL-TEST-BURNDOWN.md)
+- Headless Chrome's `--window-size` does NOT set the CSS viewport under `--headless=new`; it clamps to ~500px
+  and rescales the screenshot. **This produced a false defect report (CPE-1635).** Mount in an **iframe** and
+  confirm the width from inside it. Reproduce a layout defect with a verified viewport *before* filing it.
+- **Never `taskkill /IM chrome.exe`** — it closed the user's own browser session. Kill your own PID only.
+- The Linux GUI-smoke leg runs WebKitGTK with compositing disabled, where `waitForClickable` can never
+  resolve for a button inside an `overflow-x:auto` strip. Dispatch the click at the DOM node instead.
+- Two parallel PRs inserting at the same anchor in `i18n.ts` merge clean then conflict — sequence, rebase,
+  and verify the **merged** state.
+
+### Tuned defaults confirmed
+sonnet for everything; three-leg gauntlet (Reviewer + UAT + Visual/Security as the diff earns it); Foreman
+applies exactly-prescribed fixes directly (~8 times, 0 agents); `SendMessage` to resume a worker with context
+beats a fresh dispatch; a worker that reports "awaiting a background notification" is **stalled** — restart it
+and tell it to run synchronously; hold dispatch when the merge queue backs up.
