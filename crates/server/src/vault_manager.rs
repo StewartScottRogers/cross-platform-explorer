@@ -130,14 +130,25 @@ pub fn is_vault(path: &Path) -> bool {
 /// passphrase — the original is left completely intact and the error is returned. The encrypted copy
 /// is never trusted, and the plaintext is never destroyed, until recovery is proven.
 ///
-/// With `shred_original` off (the default) the plaintext is left untouched and no verification runs.
+/// With `shred_original` off (the default) the plaintext is left untouched and no verification runs,
+/// and `confirmed` is ignored.
+///
+/// `confirmed` (CPE-1630, following CPE-1611's identical treatment of `secure_shred::shred_paths`) is
+/// **required, separately from `shred_original`, whenever `shred_original` is true**: sealing itself
+/// always proceeds, but the destructive shred of the plaintext original refuses up front — before the
+/// folder is even encrypted — unless `confirmed` is also `true`. This closes the same class of gap
+/// CPE-1611 closed for `shred_paths`: without a distinct confirm flag, a devtools or automation caller
+/// could invoke `vault_create(folder, dest, pass, true)` and skip `VaultCreateDialog.svelte`'s warning
+/// entirely. `VaultCreateDialog.svelte` — the one place in the codebase allowed to set `confirmed: true`
+/// — is now the only thing that can make the backend actually shred the original.
 pub fn create_vault(
     folder: &Path,
     dest_blob_path: &Path,
     passphrase: &SecretString,
     opts: &CreateOpts,
+    confirmed: bool,
 ) -> Result<(), VaultError> {
-    create_vault_with_verifier(folder, dest_blob_path, passphrase, opts, verify_recoverable)
+    create_vault_with_verifier(folder, dest_blob_path, passphrase, opts, confirmed, verify_recoverable)
 }
 
 /// [`create_vault`] with the recoverability check injected, so tests can force the verify step to
@@ -148,9 +159,24 @@ fn create_vault_with_verifier(
     dest_blob_path: &Path,
     passphrase: &SecretString,
     opts: &CreateOpts,
+    confirmed: bool,
     verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
     if opts.shred_original {
+        // CONFIRM GATE (CPE-1630): checked first, before anything is written, encrypted, or destroyed —
+        // a distinct `confirmed` flag, separate from the caller's `shred_original` intent, exactly the
+        // shape CPE-1599/CPE-1611 established for every other conditionally-destructive engine entry
+        // point. Refuses cleanly; never a panic, never a partial shred, never a silently-skipped one.
+        if !confirmed {
+            return Err(VaultError::Format(
+                "refusing to shred: `confirmed` was not set on this vault_create call — shredding the \
+                 original is a permanent, non-recoverable operation with no trash fallback, so it must \
+                 be re-invoked with an explicit confirmation (only VaultCreateDialog's \"Create vault\" \
+                 button, submitted with \"Securely delete the original folder\" checked, should ever \
+                 set it)"
+                    .to_string(),
+            ));
+        }
         // DATA-LOSS GUARD (checked BEFORE anything is written or destroyed): refuse to shred when the
         // destination blob would live INSIDE the folder we're about to `remove_dir_all`. Otherwise the
         // just-verified encrypted copy would be shredded along with the plaintext, losing both.
@@ -554,7 +580,7 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("data.cpevault");
-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
         assert!(is_vault(&blob_path), "a real sealed blob must be detected");
 
         // A non-vault file (even with the extension) is rejected — detection is by content.
@@ -581,7 +607,7 @@ mod tests {
         let blob_path = dir.path().join("v.cpevault");
 
         // Create does NOT touch the original by default.
-        create_vault(&src, &blob_path, &pass("open sesame"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("open sesame"), &CreateOpts::default(), false).unwrap();
         assert!(src.join("top.txt").exists(), "default create must not shred the original");
         assert!(is_vault(&blob_path));
 
@@ -613,7 +639,7 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
         let session1 = dir.path().join("session1");
@@ -646,7 +672,7 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
         let session1 = dir.path().join("session1");
@@ -675,13 +701,96 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
-        create_vault(&src, &blob_path, &pass("right"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("right"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
         let session = dir.path().join("session");
         let result = reg.unlock(&blob_path, &pass("wrong"), &session);
         assert!(matches!(result, Err(VaultError::BadPassphrase)), "got {result:?}");
         assert!(!reg.is_unlocked(&blob_path), "a failed unlock must not record unlocked state");
+    }
+
+    // ---- CPE-1630: engine-side refusal of an unconfirmed shred_original create_vault call ----------
+
+    /// The core defence-in-depth guarantee (mirrors CPE-1611's `shred_paths_refuses_the_whole_batch_
+    /// when_not_confirmed`): `shred_original: true, confirmed: false` refuses the WHOLE call — `Err`,
+    /// nothing written and nothing shredded, not even a partial vault blob — with a specific reason, not
+    /// a panic and not a "vault created but shred silently skipped". Verified by reading the originals'
+    /// **bytes back off disk**, not by trusting the `Err`.
+    #[test]
+    fn create_vault_refuses_the_whole_call_when_shred_original_is_not_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        let err = create_vault(&src, &blob_path, &pass("pw"), &opts, false)
+            .expect_err("an unconfirmed shred_original create_vault call must be refused, not executed");
+
+        let msg = err.to_string();
+        assert!(!msg.is_empty(), "the refusal must carry a specific reason");
+        assert!(msg.to_lowercase().contains("confirm"), "refusal reason: {msg}");
+
+        // Nothing was shredded: read the original bytes back off disk (not merely `Err`, and not merely
+        // `exists()` — the actual plaintext content must be intact).
+        assert!(src.exists(), "the original folder must survive an unconfirmed call");
+        assert_eq!(
+            std::fs::read(src.join("top.txt")).unwrap(),
+            b"top secret",
+            "top.txt bytes must be untouched by a refused shred"
+        );
+        assert_eq!(
+            std::fs::read(src.join("sub/inner.bin")).unwrap(),
+            [0u8, 1, 2, 255, 254],
+            "sub/inner.bin bytes must be untouched by a refused shred"
+        );
+        // Nothing was written either: no vault blob, no partial encrypt — the whole call is refused up
+        // front, before sealing even runs.
+        assert!(!blob_path.exists(), "no vault blob should be written when the shred is refused");
+    }
+
+    /// The flip side: the identical call proceeds — including the existing verify-before-shred
+    /// guarantee — once `confirmed` is explicitly `true`, proving the flag is load-bearing, not
+    /// decorative, and that CPE-1630 doesn't regress CPE-1248's invariant.
+    #[test]
+    fn create_vault_proceeds_and_still_verifies_before_shred_once_confirmed_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        create_vault(&src, &blob_path, &pass("pw"), &opts, true)
+            .expect("a confirmed shred_original create_vault call must be allowed to run");
+
+        assert!(!src.exists(), "a confirmed call must actually shred the original away");
+        assert!(is_vault(&blob_path));
+
+        // The verify-before-shred guarantee still holds end to end: the sealed blob is genuinely
+        // recoverable (a real unlock round-trips the plaintext back).
+        let reg = VaultRegistry::default();
+        let session = dir.path().join("session");
+        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
+        assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
+        reg.lock(&blob_path).unwrap();
+    }
+
+    /// `confirmed` is a no-op when `shred_original` is off — the common case. A caller that (say)
+    /// hardcodes `confirmed: false` for every non-destructive create must not be penalised: sealing
+    /// succeeds normally and the original (never at risk) is left alone.
+    #[test]
+    fn confirmed_is_ignored_when_shred_original_is_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false)
+            .expect("shred_original: false must succeed regardless of confirmed");
+        assert!(is_vault(&blob_path));
+        assert!(src.exists(), "shred_original: false must never touch the original");
+        assert_eq!(std::fs::read(src.join("top.txt")).unwrap(), b"top secret");
     }
 
     // ---- verify-before-shred safety invariant ---------------------------
@@ -695,7 +804,7 @@ mod tests {
 
         // Inject a verifier that always fails: the plaintext MUST survive.
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
-        let result = create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, |_, _| {
+        let result = create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, true, |_, _| {
             Err(VaultError::Corrupt)
         });
 
@@ -718,7 +827,7 @@ mod tests {
         // Real verifier, real round-trip: after this returns, the original is gone AND the blob is
         // provably recoverable (unlock below succeeds).
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
-        create_vault(&src, &blob_path, &pass("pw"), &opts).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &opts, true).unwrap();
         assert!(!src.exists(), "a good verify must let the original be shredded away");
         assert!(is_vault(&blob_path));
 
@@ -742,7 +851,7 @@ mod tests {
         std::fs::write(&dest_inside, b"pre-existing bytes").unwrap();
 
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
-        let result = create_vault(&folder, &dest_inside, &pass("pw"), &opts);
+        let result = create_vault(&folder, &dest_inside, &pass("pw"), &opts, true);
         assert!(matches!(result, Err(VaultError::Format(_))), "must refuse a dest inside the folder: {result:?}");
 
         // Nothing was shredded or overwritten: plaintext AND the pre-existing blob both survive intact.
@@ -752,14 +861,14 @@ mod tests {
         // A nested-inside dest is refused too (guard is by canonicalized path prefix, not name match).
         let nested = folder.join("sub").join("deep.cpevault");
         assert!(matches!(
-            create_vault(&folder, &nested, &pass("pw"), &opts),
+            create_vault(&folder, &nested, &pass("pw"), &opts, true),
             Err(VaultError::Format(_))
         ));
         assert_eq!(std::fs::read(folder.join("top.txt")).unwrap(), b"top secret");
 
         // A sibling dest just OUTSIDE the folder (shared name prefix) is allowed and shreds cleanly.
         let sibling = dir.path().join("secret.cpevault");
-        create_vault(&folder, &sibling, &pass("pw"), &opts).unwrap();
+        create_vault(&folder, &sibling, &pass("pw"), &opts, true).unwrap();
         assert!(!folder.exists(), "an outside dest must still let the folder be shredded");
         assert!(is_vault(&sibling));
     }
@@ -779,7 +888,7 @@ mod tests {
         let blob_path = dir.path().join("v.cpevault");
 
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
-        let result = create_vault(&src, &blob_path, &pass("pw"), &opts);
+        let result = create_vault(&src, &blob_path, &pass("pw"), &opts, true);
         assert!(matches!(result, Err(VaultError::Format(_))), "must refuse an unsealable name: {result:?}");
 
         // Nothing was written or shredded: the original survives and no blob was produced.
@@ -801,7 +910,7 @@ mod tests {
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
-        create_vault(&src, &blob_path, &pass("pw"), &opts).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &opts, true).unwrap();
 
         assert_eq!(
             before,
@@ -831,7 +940,7 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
         let session = dir.path().join("session");
@@ -895,7 +1004,7 @@ mod tests {
         let src = dir.path().join("src");
         sample_folder(&src);
         let blob_path = dir.path().join("v.cpevault");
-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let access = MemAccess::default();
 

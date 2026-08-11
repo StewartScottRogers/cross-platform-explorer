@@ -17,6 +17,14 @@
    * only shreds AFTER a full decrypt round-trip proves the encrypted copy is recoverable
    * (verify-before-shred, vault_manager::create_vault). The default destination is a SIBLING of the
    * folder, never inside it, because the backend refuses an inside-the-folder dest when shredding.
+   *
+   * **CPE-1630:** the backend engine (`vault_manager::create_vault`) now refuses to shred the original
+   * unless a `confirmed: true` flag is passed too — separate from the `shredOriginal` intent bool —
+   * mirroring CPE-1611's identical gate on `shred_paths`. This component is the ONE place in the
+   * codebase allowed to pass it: submitting this form with the checkbox checked (and its inline
+   * warning shown) IS the confirmation, so `create()` below passes `confirmed: shredOriginal`. That
+   * closes the gap where a devtools/automation call could invoke `vault_create(..., true)` directly and
+   * skip this dialog's warning entirely.
    */
   import { createEventDispatcher, onMount, tick } from "svelte";
   import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
@@ -72,7 +80,10 @@
     busy = true;
     error = "";
     try {
-      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal));
+      // `confirmed` mirrors `shredOriginal`: this dialog's submit IS the confirmation (checkbox +
+      // inline warning already shown above), and the flag is a no-op on the backend unless
+      // `shredOriginal` is also true (CPE-1630) — see the header doc comment.
+      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal, shredOriginal));
       // Opt-in keychain persistence — keyed to the NEW blob path, exactly what CPE-1249's unlock looks up.
       if (remember) unwrap(await commands.vaultRememberPassphrase(dest, passphrase));
       dispatch("created", dest);
