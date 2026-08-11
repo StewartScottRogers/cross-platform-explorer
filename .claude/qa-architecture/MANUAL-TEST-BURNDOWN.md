@@ -259,3 +259,20 @@ upload downgraded to `warn` and reordered to run AFTER the ratchet step. Rows #1
 + the Windows canary noted as residuals); row #3 stays 🔧 (screenshots now reach CI, real baselines still
 owed). Follow-up filed: **CPE-1595** (triage the remaining 4 unrelated known-failing specs; `network.smoke.ts`
 is tracked there too, pending a live green run).
+
+## Critic technique note (2026-08-11) — headless Chrome viewport trap
+
+When a Visual Critic renders a component to check it, **`--window-size` does not reliably set the CSS
+viewport under `chrome.exe --headless=new`.** It clamps to an internal ~500px width regardless of the
+requested value, then *rescales the screenshot* to the requested output pixel size. A critic reviewing
+CPE-1618 nearly filed a false "filter chips overflow at 260px" defect because of this.
+
+The reliable technique, which that critic worked out and verified:
+- Give the harness a wrapper element with an explicit CSS `width`, driven by a query param.
+- Always launch Chrome with a **large** window (e.g. 1200×900) so the internal clamp never engages.
+- **Confirm the achieved width via `getBoundingClientRect` / `clientWidth` before trusting any screenshot.**
+
+Also: drive Chrome directly from Bash, not PowerShell `Start-Process`, which mangles `&` in URLs and yields
+misleading error-page screenshots.
+
+Worth folding into `gui-smoke`'s README when CPE-1629 lands, so this is discoverable rather than rediscovered.

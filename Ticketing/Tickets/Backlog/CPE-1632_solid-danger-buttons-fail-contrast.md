@@ -55,3 +55,30 @@ asserts the **solid-fill** pairing of `#fff` on raw `var(--danger)`, so the fail
 **Conflict surface:** `src/app.css`, the contrast guard tests, and the components listed above. Touches global
 theme tokens — do not run in parallel with other theming work (notably CPE-1631, the missing highlight.js
 theme).
+
+---
+
+## Update 2026-08-11 — a second blind spot, same cause
+The Visual Critic reviewing CPE-1618 (the log viewer, PR #829) measured another failing pairing that the
+guard also doesn't cover:
+
+**`--text-faint` (#8a8a8a) on `--surface`/`--surface-alt` (white / #fbfbfb) = 3.45:1** in **light** theme —
+under AA's 4.5:1 for normal text. Dark theme is fine at 5.16:1. This token carries real information in
+several places: the TRACE badge and the gutter line-numbers in the log viewer, and the "This file is empty."
+/ "Loading…" notes. The 10.5px bold badge does **not** qualify as "large text" (that needs ≥18.66px bold), so
+4.5:1 is the applicable floor.
+
+Pre-existing and app-wide, like the solid-fill case above — and invisible for the same reason.
+
+**So the real deliverable here is the guard, not any single colour.** Two distinct failing pairings have now
+been found by humans looking at screenshots, both in tokens the guard never checks. Rather than fixing two
+colours and waiting for a third to be spotted, this ticket should:
+- **Enumerate the token pairings that actually occur on screen** — foreground-on-surface, foreground-on-tint
+  (`color-mix`), white-on-solid-fill, and text-on-badge — and assert each clears its applicable threshold
+  (4.5:1 normal text, 3:1 UI components and large text) in **both** themes.
+- Derive the pairings from real usage where possible rather than a hand-maintained list, since a
+  hand-maintained list is exactly what has been silently incomplete.
+- Fail against today's values first (negative control), then fix the colours the guard exposes.
+
+Note that CPE-1618's own component-scoped active-chip contrast issue is being fixed within that ticket and is
+not part of this one; only the shared `--text-faint` pairing is.
