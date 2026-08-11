@@ -6,11 +6,18 @@ import * as settings from "../settings";
 
 // Mock the Tauri bridge: entry_info returns metadata, hash_file returns a fixed digest (CPE-412).
 // native_tags_name/native_tags_pull back the read-only Native metadata section (CPE-1176).
+// inspect_file returns file inspection data including encoding, line endings, file type, and architecture.
 const invoke = vi.fn(async (cmd: string, args?: { path?: string }) => {
-  if (cmd === "entry_info")
+  if (cmd === "entry_info") {
+    if (args?.path === "/exe.exe") return { name: "exe.exe", path: "/exe.exe", is_dir: false, size: 1024, modified: 0, created: 0, readonly: false, hidden: false };
     return { name: "a.txt", path: "/a.txt", is_dir: false, size: 3, modified: 0, created: 0, readonly: false, hidden: false };
+  }
   if (cmd === "hash_file") return "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
   if (cmd === "text_stats") return { lines: 2, words: 3, chars: 16, bytes: 16 };
+  if (cmd === "inspect_file") {
+    if (args?.path === "/exe.exe") return { encoding: "Binary", line_endings: null, file_type: "PE executable", type_mismatch: null, architecture: "x86-64 (64-bit, little-endian)" };
+    return { encoding: "UTF-8", line_endings: "LF", file_type: null, type_mismatch: null, architecture: null };
+  }
   if (cmd === "native_tags_name") return "NTFS alternate data streams";
   if (cmd === "native_tags_pull")
     return { [args?.path ?? ""]: { tags: ["work", "q3"], label: "red" } };
@@ -105,5 +112,20 @@ describe("PropertiesDialog — Native metadata section (CPE-1176)", () => {
     expect(section.textContent).toContain("q3");
     expect(section.textContent).toContain("red");
     expect(invoke).toHaveBeenCalledWith("native_tags_pull", { path: "/native.txt" });
+  });
+});
+
+describe("PropertiesDialog — Architecture field (CPE-1592)", () => {
+  beforeEach(() => invoke.mockClear());
+
+  it("shows Architecture row for a binary with an architecture value", async () => {
+    render(PropertiesDialog, { entries: [file({ name: "exe.exe", path: "/exe.exe", extension: "exe" })] });
+    await waitFor(() => expect(screen.getByText("x86-64 (64-bit, little-endian)")).toBeTruthy());
+  });
+
+  it("omits Architecture row when architecture is null (not an executable)", async () => {
+    render(PropertiesDialog, { entries: [file()] });
+    await screen.findByText("SHA-256"); // dialog rendered
+    expect(screen.queryByText("Architecture")).toBeNull();
   });
 });
