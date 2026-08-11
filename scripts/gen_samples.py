@@ -40,6 +40,7 @@ images; ffmpeg must be on PATH for real media).
 """
 from __future__ import annotations
 import io
+import json
 import math
 import os
 import shutil
@@ -933,6 +934,105 @@ TEXT_FILES = {
         'if __name__ == "__main__":\n'
         '    raise SystemExit(main(sys.argv))\n'
     ),
+    # A real Jupyter notebook (CPE-1616): markdown + code cells, and every output kind the notebook
+    # preview renders (stream stdout, an execute_result text/plain, a display_data image/png, and an
+    # error traceback), plus a raw cell. Pure JSON — deterministic, no ffmpeg/PIL needed. Kept as a plain
+    # Python dict -> json.dumps (rather than a hand-typed JSON string) so it can never drift out of valid
+    # nbformat shape.
+    "text/notebook.ipynb": json.dumps(
+        {
+            "nbformat": 4,
+            "nbformat_minor": 5,
+            "metadata": {
+                "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
+                "language_info": {"name": "python", "version": "3.11"},
+            },
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "metadata": {},
+                    "source": [
+                        "# Baseline Notebook Sample\n",
+                        "\n",
+                        "A **Jupyter** notebook fixture for the notebook preview path (CPE-1616). It exercises\n",
+                        "markdown, code, and every supported output kind.\n",
+                    ],
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": 1,
+                    "metadata": {},
+                    "outputs": [
+                        {"output_type": "stream", "name": "stdout", "text": ["fib(5) = 5\n"]},
+                        {
+                            "output_type": "execute_result",
+                            "execution_count": 1,
+                            "metadata": {},
+                            "data": {"text/plain": ["5"]},
+                        },
+                    ],
+                    "source": [
+                        "def fib(n):\n",
+                        "    a, b = 0, 1\n",
+                        "    for _ in range(n):\n",
+                        "        a, b = b, a + b\n",
+                        "    return a\n",
+                        "\n",
+                        "print(f\"fib(5) = {fib(5)}\")\n",
+                        "fib(5)",
+                    ],
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": 2,
+                    "metadata": {},
+                    "outputs": [
+                        {
+                            "output_type": "display_data",
+                            "metadata": {},
+                            "data": {
+                                "image/png": (
+                                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+                                    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                                )
+                            },
+                        },
+                    ],
+                    "source": [
+                        "# A tiny inline plot placeholder (1x1 PNG) exercising the image/png output path\n",
+                        "show_plot()",
+                    ],
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": 3,
+                    "metadata": {},
+                    "outputs": [
+                        {
+                            "output_type": "error",
+                            "ename": "ZeroDivisionError",
+                            "evalue": "division by zero",
+                            "traceback": [
+                                "Traceback (most recent call last):",
+                                "ZeroDivisionError: division by zero",
+                            ],
+                        },
+                    ],
+                    "source": ["1 / 0"],
+                },
+                {
+                    "cell_type": "raw",
+                    "metadata": {},
+                    "source": [
+                        "A raw cell — shown as plain preformatted text, never rendered as markdown or highlighted.\n"
+                    ],
+                },
+            ],
+        },
+        indent=1,
+        ensure_ascii=False,
+    )
+    + "\n",
 }
 
 

@@ -97,13 +97,16 @@ describe("pickProvider", () => {
     expect(mediaType(entry({ name: "a.mov", extension: "mov" }))).toBe("video");
   });
 
-  it("previews HTML and Jupyter notebooks as editable source (CPE-078/114)", () => {
+  it("previews HTML as editable source (CPE-078)", () => {
     const html = pickProvider(entry({ name: "a.html", extension: "html" }));
     expect(html.kind).toBe("text");
     expect(html.editable).toBe(true);
+  });
+
+  it("previews Jupyter notebooks with the dedicated cell-by-cell provider, not raw text (CPE-1616, supersedes CPE-114's json-blob fallback)", () => {
     const nb = pickProvider(entry({ name: "a.ipynb", extension: "ipynb" }));
-    expect(nb.kind).toBe("text");
-    expect(nb.editable).toBe(true);
+    expect(nb.kind).toBe("notebook");
+    expect(nb.editable).toBe(false);
   });
 
   it("previews binary formats as read-only info text (CPE-210/214/215/216/218)", () => {
