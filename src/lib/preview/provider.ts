@@ -22,6 +22,7 @@ export type PreviewKind =
   | "media"
   | "pdf"
   | "json"
+  | "notebook"
   | "csv"
   | "tsv"
   | "archive"
@@ -516,6 +517,17 @@ export const providers: PreviewProvider[] = [
     kind: "pdf",
     editable: false,
     canPreview: (e) => !e.is_dir && categoryOf(e) === "pdf",
+  },
+  // Must precede the generic text/json providers: .ipynb categorises as "code" text in filetypes.ts (and
+  // LANG_BY_EXT maps it to the json grammar for that fallback text view) and would otherwise be shown as
+  // one undifferentiated JSON blob instead of a cell-by-cell notebook view (CPE-1616, epic CPE-1568 slice
+  // 6). Self-contained like jwt/cert/font above — NotebookPreview.svelte fetches + parses its own content.
+  {
+    id: "notebook",
+    label: "Notebook",
+    kind: "notebook",
+    editable: false,
+    canPreview: (e) => !e.is_dir && e.extension === "ipynb",
   },
   // JSON and CSV are declared before the generic text provider because their
   // categories ("code"/"spreadsheet") would otherwise be claimed by it / skipped.

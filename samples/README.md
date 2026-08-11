@@ -67,6 +67,7 @@ All media files carry this fixed metadata (the single source of truth is the top
 | `video/clip.mp4`    | MP4 / iTunes    | Real H.264/AAC clip (a few seconds), `ilst` Title/Artist/Album/Year (editable) |
 | `mail/sample.eml`   | RFC 822 / MIME  | `multipart/mixed` email: encoded-word Subject, quoted-printable body, one base64 attachment (`hello.txt`) — the structured `.eml` preview (CPE-1434) |
 | `text/notes.txt`, `readme.md`, `data.json`, `table.csv`, `table.tsv`, `hello.py` | Text | Plain-text/markdown/JSON/CSV/TSV/code preview + line/word counts |
+| `text/notebook.ipynb` | Jupyter notebook | Markdown + code cells and every rendered output kind (stream stdout, `execute_result` text/plain, `display_data` image/png, an error traceback) plus a raw cell — the notebook preview (CPE-1616) |
 
 Beyond the metadata baseline, the tree also carries substantial non-metadata fixtures:
 `archives/sample.zip` + `archives/sample.rar` (a real `docs/`+`images/`+`data/`+`src/`+`docs/sub/` tree),

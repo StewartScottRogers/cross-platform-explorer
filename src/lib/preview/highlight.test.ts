@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   highlightForFile,
+  highlightCode,
   languageForExt,
   languageForName,
   ensureLanguage,
@@ -120,6 +121,19 @@ describe("highlightForFile (lazy grammars)", () => {
     expect(highlightForFile("\\section{Intro} \\textbf{hi}", "a.tex")).toContain("hljs-");
     await ensureLanguage("asciidoc");
     expect(highlightForFile("= Title\n\n== Section", "a.adoc")).toContain("hljs-");
+  });
+});
+
+describe("highlightCode (explicit language id, CPE-1616)", () => {
+  it("escapes plain text when no grammar is registered for the language", () => {
+    const html = highlightCode("a < b", "not-a-real-language");
+    expect(html).toContain("&lt;");
+    expect(html).not.toContain("hljs-");
+  });
+
+  it("highlights once the grammar is ensured, without needing a file name", async () => {
+    await ensureLanguage("python");
+    expect(highlightCode("def f():\n    return 1", "python")).toContain("hljs-");
   });
 });
 

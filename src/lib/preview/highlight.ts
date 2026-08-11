@@ -195,6 +195,20 @@ export function highlightForFile(code: string, name: string): string {
 }
 
 /**
+ * Highlight code for an explicit language id (rather than a file name) — the counterpart to
+ * {@link highlightForFile} for a caller that already knows the language, e.g. a Jupyter notebook code
+ * cell resolving its grammar from `metadata.kernelspec.language`/`language_info.name` instead of a file
+ * extension (CPE-1616). Call {@link ensureLanguage} first; falls back to escaped plain text the same way
+ * highlightForFile does when the grammar isn't registered (unknown language, or one with no loader here).
+ */
+export function highlightCode(code: string, lang: string): string {
+  if (lang && hljs.getLanguage(lang)) {
+    return hljs.highlight(code, { language: lang }).value;
+  }
+  return escapeHtml(code);
+}
+
+/**
  * Split one highlight.js HTML blob into per-source-line HTML fragments so the preview can render one
  * DOM row per line (line/fold gutter, indent guides, minimap — CPE-1091, epic CPE-724).
  *

@@ -28,6 +28,7 @@
   import EmailPreview from "./EmailPreview.svelte";
   import IcalPreview from "./IcalPreview.svelte";
   import VcardPreview from "./VcardPreview.svelte";
+  import NotebookPreview from "./NotebookPreview.svelte";
   import MediaPlayer from "./MediaPlayer.svelte";
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
@@ -1175,6 +1176,10 @@
     <JwtPreview path={entry.path} onValues={onJwtValues} />
   {:else if provider.kind === "cert" && entry}
     <CertPreview path={entry.path} />
+  {:else if provider.kind === "notebook" && entry}
+    <!-- Jupyter notebook viewer (CPE-1616, epic CPE-1568 slice 6): self-contained like CertPreview/
+         FontPreview above — fetches + parses its own content from `path`, no declared action-bar actions. -->
+    <NotebookPreview path={entry.path} />
   {:else if provider.kind === "folder" && entry}
     <!-- Folder peek (CPE-1426): browsable one-level-down listing; row clicks bubble up to the app via
          Svelte's bare `on:` forwarding (this component has no other listeners to conflict with). -->
