@@ -192,3 +192,15 @@ ticket. The actual non-blocking decision is **CPE-1048** (Option E). Worth fixin
 it appears so the next crew reads the right rationale.
 
 QA-Architect owned. Epic CPE-810.
+
+## Work Log
+
+2026-08-10 — Implemented all three changes (screenshot upload artifact on both legs, `known-failing.json` +
+`gui-smoke/lib/ratchet.ts` + `scripts/run-ratchet.ts` gating the Linux leg, Windows leg moved off push/PR onto
+`workflow_dispatch`/nightly `schedule`). Filed CPE-1595 for the known-failing triage follow-up.
+2026-08-10 — Foreman-relayed triage on `network.smoke.ts` (one of the original 7): confirmed a stale test
+selector, not a CPE-1516 product regression — `$("=Network")` maps to WebDriver's "link text" strategy (`<a>`
+only), but `Sidebar.svelte:862` renders the header as a plain `<span class="label fav-title">`. Fixed the
+selector in this PR (matches `saved-search.smoke.ts`'s `$$(".fav-title")` + text-filter convention) rather than
+leaving it in `known-failing.json`, so the committed list carries **6** entries, not 7 — see CPE-1595's "Already
+resolved" section for the full verdict.

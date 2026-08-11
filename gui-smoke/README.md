@@ -421,9 +421,10 @@ throw).
 - ~~**Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
   app code change needed).~~ **Done (CPE-1171)**, and **now the blocking gate (CPE-1594)** — see the
   "CI" section above.
-- **Triage the ratchet's known-failing tail** (CPE-1595): `network.smoke.ts` first (possible real
-  CPE-1516 regression), then `archive-browse`/`archive-password`/`shred-dialog`/`transfer-panel`
-  (`samples`/`saved-search` are CPE-1507's).
+- **Triage the ratchet's known-failing tail** (CPE-1595): `network.smoke.ts` was already triaged and
+  fixed (stale `=text` link-text selector against a `<span>`, not a CPE-1516 regression — see
+  `specs/network.smoke.ts`'s CPE-1594 comment). Remaining: `archive-browse`/`archive-password`/
+  `shred-dialog`/`transfer-panel` (`samples`/`saved-search` are CPE-1507's).
 - **macOS**: stays attended — `tauri-driver` has no WKWebView WebDriver support.
 - **More flows**: Back/Up navigation, dialogs, context menus, tab switching.
 - **Visual regression baselines for more surfaces**: CPE-1170 built the comparator + wired one worked

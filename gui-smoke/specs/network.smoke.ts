@@ -18,7 +18,7 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { $, browser } from "@wdio/globals";
+import { $, $$, browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -40,9 +40,31 @@ describe("CPE-1513/CPE-1516 — headless GUI smoke: Network sidebar section + ad
     await crumb.waitForExist({ timeout: 30_000 });
 
     // The section header itself is always present (CPE-1516) — a peer of Drives.
-    const header = await $("=Network");
-    await header.waitForExist({ timeout: 15_000, timeoutMsg: "expected the permanent Network section header to render" });
-    expect(await header.isDisplayed(), "expected the Network section header to be visible").to.equal(true);
+    //
+    // CPE-1594 fix: this used to be `$("=Network")`. WebdriverIO's bare `=text` locator maps to the
+    // W3C WebDriver "link text" strategy, which by spec matches ONLY `<a>` elements — but Sidebar.svelte
+    // (see the "Network section" block, ~line 862) renders the header as `<span class="label
+    // fav-title">Network</span>`, a plain span. That selector was therefore structurally unmatchable on
+    // ANY OS, not a flake and not a product regression (confirmed: Sidebar.test.ts's "always renders the
+    // Network header, even with zero connections and zero shares" passes on `main`). Fixed to match the
+    // shipped markup using the same `.fav-title` + text-filter convention `saved-search.smoke.ts` already
+    // uses for its own (also non-anchor) section header.
+    let header: WebdriverIO.Element | undefined;
+    await browser.waitUntil(
+      async () => {
+        const candidates = $$(".fav-title");
+        for await (const c of candidates) {
+          if ((await c.getText()) === "Network") {
+            header = c;
+            return true;
+          }
+        }
+        return false;
+      },
+      { timeout: 15_000, timeoutMsg: "expected the permanent Network section header to render" },
+    );
+    expect(header, "expected the Network section header to render").to.not.equal(undefined);
+    expect(await header!.isDisplayed(), "expected the Network section header to be visible").to.equal(true);
 
     const entryPoint = await $('button[title="Add a saved SFTP/WebDAV connection"]');
     await entryPoint.waitForExist({
