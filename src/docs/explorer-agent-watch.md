@@ -94,8 +94,17 @@ same-destination rename divergences across distinct actors the same way.
 
 A cross-session rollup read from a small local history log, loaded once the first time you open the tab
 (not on a timer): totals (sessions, cost, tokens, time, files touched, churn), throughput ratios,
-per-model and per-agent breakdowns with each one's share of total cost, and a bar chart of cost or tokens
-per day. Same advisory framing as the Cost tab.
+per-model and per-agent breakdowns with each one's share of total cost, a **Sessions** list (one row per
+recorded session, newest first), and a bar chart of cost or tokens per day. Same advisory framing as the
+Cost tab.
+
+Each row in the Sessions list carries a status pill: **Clean** for a session that sent a proper "ended"
+signal, or **Ended unexpectedly** (a distinct icon + label, not just a colour, so it reads the same for
+colour-blind users and on a hurried glance) for one whose process was reaped without ever doing so — see
+"Closing the whole Agent Deck…" below. An unexpectedly-ended row's Duration is also prefixed with `~` (a
+best-effort estimate, not a precise measurement), and whenever the list contains at least one such row a
+caveat line above the totals says so, since those totals fold that row's estimated duration in alongside
+every cleanly-measured one.
 
 ## Session history (browse + export)
 
@@ -131,17 +140,13 @@ in the explorer.
 - **Closing the whole Agent Deck still saves what happened so far, honestly labelled.** If you close the
   Agent Deck (or quit the app) while a session is still running, it never gets the chance to send a
   proper "ended" signal — its process is simply stopped. That session's activity up to that moment is
-  still persisted to History, but the row is marked as **not a clean end** (its end time is when the
-  deck closed, not the session's real finish, so wall-clock/throughput numbers for that row may
-  undercount). Nothing here guesses at a real end it never saw.
-
-  **The marker is recorded but not yet shown anywhere.** History today displays only aggregate totals —
-  no per-session rows — so a session that was reaped mid-run is currently folded into those totals
-  looking exactly like one that finished normally, and its duration is measured from when you closed the
-  deck rather than when it actually stopped. Surfacing that distinction, and reporting an honest duration
-  for such a row, is tracked as **CPE-1641**. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning
-  (including why an earlier version of this app kept the watcher running after you left a project, and
-  why that's no longer necessary).
+  still persisted to History, marked as **not a clean end** and shown that way in the Sessions list (see
+  the History section above) rather than looking identical to one that finished normally. Its end time is
+  the last activity actually observed from it (not when the deck happened to be closed, which can be much
+  later), so wall-clock/throughput numbers for that row are an honest, non-inflated best-effort estimate —
+  never a fabricated precise-looking number, and never later than the true end. See `AGENT-WATCH.md`'s
+  Boundaries section for the full reasoning (including why an earlier version of this app kept the watcher
+  running after you left a project, and why that's no longer necessary).
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
   the agent's own printed output, not an authoritative source.
 - **Reads are inferred, not observed.** A filesystem watcher can't see a read; the Consulted list and the

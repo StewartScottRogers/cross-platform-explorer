@@ -51,6 +51,12 @@ export interface SessionAccumulator {
   startedAt: number | null;
   /** Epoch ms when `ended` was folded, or `null` while the session is still live. */
   endedAt: number | null;
+  /** Epoch ms of the most recent observed activity — a folded `started` or `fs-diff` — or `null` if
+   *  nothing has been observed yet. This is the best-effort "last known alive" moment (CPE-1641): a
+   *  forced flush (the whole Agent Deck reaped, no `ended` ever arrives) uses this — NOT flush time —
+   *  as the session's effective end, since the deck can sit open for hours after the agent actually
+   *  died and flush time would silently inflate the persisted duration. */
+  lastActivityAt: number | null;
   /** Distinct paths touched this session (a Set encoded as a lookup record so the store stays a plain
    *  JSON-shaped object, matching the rest of the codebase's fold-store style). */
   filesTouched: Record<string, true>;
@@ -71,6 +77,7 @@ export function emptySessionAccumulator(sessionId: string): SessionAccumulator {
     cwd: "",
     startedAt: null,
     endedAt: null,
+    lastActivityAt: null,
     filesTouched: {},
     editCount: 0,
     churnBytes: 0,
@@ -104,6 +111,7 @@ export function foldSessionStarted(
       model: session.model,
       cwd: session.cwd,
       startedAt: now,
+      lastActivityAt: now,
     },
   };
 }
@@ -135,13 +143,15 @@ export function foldSessionAnnouncement(
 const NON_SESSION_ACTORS = new Set(["user", "unknown"]);
 
 /** Fold a batch of `fs-diff` items into the map (pure), attributing each to its `actor` (a sessionId):
- *  adds the path to `filesTouched`, `editCount++`, `churnBytes += |after.len − before.len|`. Items with
- *  no actor, or an actor of `"user"`/`"unknown"`, are skipped — those aren't agent sessions. An actor
- *  with no existing entry yet (its `started` hasn't arrived, or raced behind this diff) lazily gets a
- *  blank-identity accumulator so no activity is ever dropped. */
+ *  adds the path to `filesTouched`, `editCount++`, `churnBytes += |after.len − before.len|`, and stamps
+ *  `lastActivityAt = now` (CPE-1641 — the best-effort "last known alive" moment a forced flush uses
+ *  instead of flush time). Items with no actor, or an actor of `"user"`/`"unknown"`, are skipped — those
+ *  aren't agent sessions. An actor with no existing entry yet (its `started` hasn't arrived, or raced
+ *  behind this diff) lazily gets a blank-identity accumulator so no activity is ever dropped. */
 export function foldDiffsForMetrics(
   prev: Record<string, SessionAccumulator>,
   items: FsDiff[],
+  now = Date.now(),
 ): Record<string, SessionAccumulator> {
   let next = prev;
   let changed = false;
@@ -162,6 +172,7 @@ export function foldDiffsForMetrics(
       filesTouched,
       editCount: existing.editCount + 1,
       churnBytes: existing.churnBytes + churn,
+      lastActivityAt: now,
     };
   }
   return changed ? next : prev;
@@ -178,8 +189,8 @@ export function ingestSessionAnnouncement(ann: SessionAnnouncement, now = Date.n
 
 /** Fold a normalized `fs-diff` batch into the store (called from `agentDiffs.ts`'s `ingestDiff` — no
  *  listener of its own). Exposed for headless tests. */
-export function ingestDiffsForMetrics(items: FsDiff[]): void {
-  if (items.length) store.update((prev) => foldDiffsForMetrics(prev, items));
+export function ingestDiffsForMetrics(items: FsDiff[], now = Date.now()): void {
+  if (items.length) store.update((prev) => foldDiffsForMetrics(prev, items, now));
 }
 
 /** Test/introspection helper: the current accumulator map synchronously. */
@@ -473,18 +484,30 @@ export async function flushAllSessions(now = Date.now()): Promise<void> {
  *
  *  A session that already has a real `endedAt` flushes exactly as {@link flushSession} would
  *  (`endedCleanly: true`). A session still running gets its CURRENT accumulator persisted as-is — real
- *  activity tallies, nothing fabricated — but with `endedAt` stamped `now` (not its true end, which is
- *  unknowable) and `endedCleanly: false`, so the row is honestly, structurally marked as forced rather
- *  than silently masquerading as a clean end. An incomplete-but-marked row beats losing the session's
- *  activity entirely. Idempotent per session (shares `flushedSessionIds` with {@link flushSession});
- *  errors are swallowed (advisory). */
+ *  activity tallies, nothing fabricated — but with `endedCleanly: false`, so the row is honestly,
+ *  structurally marked as forced rather than silently masquerading as a clean end. An incomplete-but-
+ *  marked row beats losing the session's activity entirely. Idempotent per session (shares
+ *  `flushedSessionIds` with {@link flushSession}); errors are swallowed (advisory).
+ *
+ *  **Duration (CPE-1641):** a forced row's effective end is stamped from `acc.lastActivityAt` — the last
+ *  observed `started`/`fs-diff` — falling back to `startedAt` (a zero-duration lower bound) if nothing
+ *  was ever observed. It is deliberately **never** stamped from `now` (flush time): flush only happens
+ *  when the whole Agent Deck is closed, which can be hours after the agent actually died, and using flush
+ *  time would silently inflate `wallClockMs` (and everything derived from it, like tokens/minute) by
+ *  however long the deck sat open afterward. `lastActivityAt` is a best-effort, honestly-labelled
+ *  estimate — not exact — but it is never later than the true end, so it can only under- rather than
+ *  over-count. */
 export async function flushAllSessionsForcibly(now = Date.now()): Promise<void> {
   for (const id of Object.keys(currentSessionMetrics())) {
     if (flushedSessionIds.has(id)) continue; // already flushed this watch
     const acc = currentSessionMetrics()[id];
     if (!acc) continue; // unknown session
     const endedCleanly = acc.endedAt !== null;
-    const m = deriveSessionMetrics(acc, currentCost()[id], now);
+    // See the doc comment above: a still-running (unclean) session's effective end is the last
+    // observed activity, never flush time — `deriveSessionMetrics`'s `wallClockMs` falls back to `now`
+    // only when `endedAt` is still null, so supplying it here is what keeps duration off flush time.
+    const effectiveAcc = endedCleanly ? acc : { ...acc, endedAt: acc.lastActivityAt ?? acc.startedAt };
+    const m = deriveSessionMetrics(effectiveAcc, currentCost()[id], now);
     if (!sessionMetricsWorthPersisting(m)) continue; // empty / never-started
     flushedSessionIds.add(id); // mark BEFORE the await so a re-reconcile can't double-write
     try {

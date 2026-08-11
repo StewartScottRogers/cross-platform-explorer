@@ -48,7 +48,7 @@
   } from "../bindings.gen";
   import type { DirEntry } from "../types";
   import { stateAtFrom, childrenAt, type FsState } from "../replayFold";
-  import { rollup, overTime } from "../agentMetricsRollup";
+  import { rollup, overTime, sessionRows, uncleanSessionCount, isSessionEndedCleanly } from "../agentMetricsRollup";
   import { resolveOverlay, type ReplaySource } from "../replayOverlay";
 
   export let entries: TimelineEntry[] = [];
@@ -177,6 +177,20 @@
     (m, p) => Math.max(m, historyMetric === "cost" ? p.costUsd : p.totalTokens),
     0,
   );
+  // CPE-1641: per-session rows (newest first) + how many of them ended unexpectedly (crashed/reaped,
+  // forced-flushed without a genuine `ended`) — `endedCleanly` was persisted since CPE-1626 but never
+  // surfaced anywhere in the UI. The per-session list below is the only place a single row's clean/
+  // unclean status has anywhere to attach; `historyUnclean` caveats the fleet-wide totals above, which
+  // fold an unclean row's best-effort duration in right alongside measured ones.
+  $: historySessionRows = historyRecords ? sessionRows(historyRecords) : [];
+  $: historyUnclean = historyRecords ? uncleanSessionCount(historyRecords) : 0;
+
+  /** Session-row duration label (CPE-1641): a leading "~" on an unclean row is a second, non-colour
+   *  signal (alongside the status pill) that the figure is a best-effort estimate — the session's
+   *  effective end is its last observed activity, not a precisely-measured `ended` timestamp. */
+  function historyDurationLabel(r: SessionMetricsRecord): string {
+    return (isSessionEndedCleanly(r) ? "" : "~") + formatDuration(r.wallClockMs);
+  }
 
   /** `part` as a percentage of `total`, division-safe — "—" rather than a bogus/NaN percentage when
    *  `total` is 0 (e.g. every recorded session cost exactly $0). */
@@ -1037,6 +1051,20 @@
           <div class="hd-stat"><span class="hd-stat-label">Churn</span><span class="hd-stat-value">{formatBytes(historyRollup.totals.churnBytes)}</span></div>
         </div>
 
+        <!-- CPE-1641: the totals above fold an unclean (crashed/reaped) row's best-effort duration in
+             right alongside measured ones — say so, rather than let "Total time" read as more precisely
+             measured than it is. Non-alarming (warn-tinted, not danger) — this is expected/handled data,
+             not a failure needing action; see the per-session list below for which rows. -->
+        {#if historyUnclean > 0}
+          <div class="hd-unclean-note" data-testid="history-unclean-note">
+            {historyUnclean} of {historyRollup.totals.sessions} session{historyRollup.totals.sessions === 1 ? "" : "s"}
+            ended unexpectedly (crashed or was reaped) — {historyUnclean === 1 ? "its" : "their"} duration
+            {historyUnclean === 1 ? "is" : "are"} a best-effort estimate from the last observed activity,
+            not a measured end time, so totals above that include {historyUnclean === 1 ? "it" : "them"}
+            are estimates too.
+          </div>
+        {/if}
+
         {#if historyRollup.ratios.tokensPerMinute !== undefined || historyRollup.ratios.usdPerSession !== undefined || historyRollup.ratios.usdPerFile !== undefined || historyRollup.ratios.churnPer1kTokens !== undefined}
           <div class="hd-section-title">Throughput</div>
           <div class="hd-ratios">
@@ -1089,6 +1117,39 @@
                   <td>{formatTokens(row.totalTokens)}</td>
                   <td>{formatUsd(row.costUsd)}</td>
                   <td>{historyShare(row.costUsd, historyRollup.totals.costUsd)}</td>
+                </tr>
+              {/each}
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Sessions (CPE-1641): the per-session list that never existed before this ticket — the only
+             place a single row's clean/unclean end has anywhere to attach. Newest first; a crashed/
+             reaped session (forced-flushed with no genuine `ended`) gets a distinct, non-alarming pill
+             (icon + label, not colour alone — colour-blind/hurried-glance safe) AND a "~" on its
+             duration, since that duration is a best-effort estimate rather than a measured one. -->
+        <div class="hd-section-title">Sessions</div>
+        <div class="hd-table-wrap hd-sessions-wrap">
+          <table class="hd-table hd-sessions-table">
+            <thead>
+              <tr><th>Started</th><th>Agent</th><th>Duration</th><th>Status</th></tr>
+            </thead>
+            <tbody>
+              {#each historySessionRows as row (row.sessionId)}
+                <tr>
+                  <td class="hd-key" title={row.cwd}>{new Date(row.startedAt).toLocaleString()}</td>
+                  <td class="hd-key" title={row.agentName || row.agentId}>{row.agentName || row.agentId || "(unknown)"}</td>
+                  <td data-testid="history-session-duration">{historyDurationLabel(row)}</td>
+                  <td class="hd-status-cell">
+                    <span
+                      class="hd-status-pill"
+                      class:hd-status-unclean={!isSessionEndedCleanly(row)}
+                      data-testid="history-session-status"
+                    >
+                      {#if !isSessionEndedCleanly(row)}<Icon name="info" size={10} />{/if}
+                      {isSessionEndedCleanly(row) ? "Clean" : "Ended unexpectedly"}
+                    </span>
+                  </td>
                 </tr>
               {/each}
             </tbody>
@@ -2032,6 +2093,54 @@
     max-width: 120px;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  /* CPE-1641: caveat shown when the aggregates above include an unclean (crashed/reaped) row's
+     best-effort duration — theme-only tokens (`--border-strong`/`--surface-alt`, both real, always-
+     defined semantic vars, unlike this file's older `var(--warn, <hex>)` fallback idiom), never a
+     hard-coded hex and never the danger/red token — this is expected, handled data, not a failure. */
+  .hd-unclean-note {
+    margin: 6px 0 0;
+    padding: 5px 8px;
+    border-radius: 5px;
+    border: 1px solid var(--border-strong, var(--border));
+    background: var(--surface-alt, transparent);
+    color: var(--text, inherit);
+    font-size: 10.5px;
+    line-height: 1.4;
+  }
+  /* Sessions table (CPE-1641): can grow long, so it scrolls internally rather than pushing the rest of
+     the History tab (Over time chart, etc.) out of easy reach. */
+  .hd-sessions-wrap {
+    max-height: 220px;
+    overflow-y: auto;
+  }
+  .hd-status-cell {
+    text-align: right;
+  }
+  /* Status pill — tick-tack convention (CPE-1641): keeps its text on one line and never shrinks/wraps.
+     A single pill per row (not a row of several), so no separate flex-wrap container is needed here,
+     but the pill itself still follows the same no-wrap/no-shrink rule as every other pill in this file. */
+  .hd-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+    flex: 0 0 auto;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--surface-alt, transparent);
+    color: var(--text, inherit);
+    font-size: 10px;
+    font-weight: 600;
+  }
+  /* Crashed/reaped session: distinguished by the "info" icon glyph + the "Ended unexpectedly" label
+     (never colour alone) plus a stronger border for a hurried-glance cue — deliberately NOT a
+     colour/hue distinction (survives colour-blindness per the ticket's precedent, CPE-1600) and never
+     the danger/red token (this is expected, handled data, not a failure). */
+  .hd-status-pill.hd-status-unclean {
+    border: 1px solid var(--border-strong, var(--border));
+    font-weight: 700;
   }
   .hd-chart-empty {
     padding: 8px 0 0;

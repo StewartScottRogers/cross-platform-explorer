@@ -10,6 +10,7 @@ import { invoke } from "@tauri-apps/api/core";
 import AgentTimeline from "./AgentTimeline.svelte";
 import type { TimelineEntry } from "../agentActivity";
 import type { AgentSession } from "../sidecar";
+import type { SessionMetricsRecord } from "../bindings.gen";
 import { ingestDiff, clearDiffs } from "../agentDiffs";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -937,5 +938,83 @@ describe("AgentTimeline Radar tab — competing renames (CPE-1118)", () => {
 
     expect(screen.queryByText("Competing renames")).toBeNull();
     expect(screen.getByText(/No overlapping activity/i)).toBeTruthy();
+  });
+});
+
+describe("AgentTimeline History tab — crashed session visibility (CPE-1641)", () => {
+  beforeEach(() => invokeMock.mockReset());
+  afterEach(() => vi.useRealTimers());
+
+  const sessionRec = (over: Partial<SessionMetricsRecord> = {}): SessionMetricsRecord => ({
+    sessionId: "s1",
+    agentId: "claude",
+    agentName: "Claude Code",
+    provider: "openrouter",
+    model: "sonnet",
+    cwd: "/work",
+    startedAt: 1_000,
+    endedAt: 4_000,
+    wallClockMs: 3_000,
+    inputTokens: 10,
+    outputTokens: 5,
+    totalTokens: 15,
+    costUsd: 0.1,
+    filesTouched: 1,
+    churnBytes: 20,
+    editCount: 1,
+    endedCleanly: true,
+    ...over,
+  });
+
+  async function openHistoryTab(records: SessionMetricsRecord[]) {
+    invokeMock.mockImplementation(async (cmd: string) => (cmd === "metrics_history" ? records : undefined));
+    render(AgentTimeline, { entries: [], agentName: "Claude Code" });
+    await fireEvent.click(screen.getByRole("tab", { name: "History" }));
+    await flushReplayLoad();
+  }
+
+  it("renders a crashed session distinguishably from a clean one, not just identically in a list", async () => {
+    await openHistoryTab([
+      sessionRec({ sessionId: "clean-1", endedCleanly: true }),
+      sessionRec({ sessionId: "crashed-1", endedCleanly: false }),
+    ]);
+
+    // Two rows in the per-session list, each carrying its OWN distinct status pill — this is the gap
+    // the ticket found: `endedCleanly` was persisted (CPE-1626) but no `.svelte` file ever read it, so
+    // a crashed row rolled up byte-identical to a clean one. Assert both the count and the two distinct
+    // labels actually render, not merely that the field is present in some data structure.
+    expect(screen.getAllByTestId("history-session-status")).toHaveLength(2);
+    expect(screen.getByText("Clean")).toBeTruthy();
+    expect(screen.getByText("Ended unexpectedly")).toBeTruthy();
+  });
+
+  it("shows an unclean-aggregate caveat when a crashed session's duration is folded into the totals", async () => {
+    await openHistoryTab([sessionRec({ sessionId: "crashed-1", endedCleanly: false })]);
+    expect(screen.getByTestId("history-unclean-note")).toBeTruthy();
+  });
+
+  it("shows no caveat when every recorded session ended cleanly", async () => {
+    await openHistoryTab([sessionRec({ endedCleanly: true })]);
+    expect(screen.queryByTestId("history-unclean-note")).toBeNull();
+  });
+
+  it("also treats a pre-CPE-1626 row (missing endedCleanly entirely) as clean, not crashed", async () => {
+    const { endedCleanly: _drop, ...withoutField } = sessionRec();
+    await openHistoryTab([withoutField as SessionMetricsRecord]);
+    expect(screen.getByText("Clean")).toBeTruthy();
+    expect(screen.queryByText("Ended unexpectedly")).toBeNull();
+    expect(screen.queryByTestId("history-unclean-note")).toBeNull();
+  });
+
+  it("marks a crashed session's duration as an estimate (~) rather than a precise measurement", async () => {
+    await openHistoryTab([sessionRec({ sessionId: "crashed-1", endedCleanly: false, wallClockMs: 3_000 })]);
+    // formatDuration(3000) = "3s"; scope to the session row's own duration cell — the totals strip
+    // above (`Total time`) can render the same bare "3s" for a single-session rollup.
+    expect(screen.getByTestId("history-session-duration").textContent).toBe("~3s");
+  });
+
+  it("does NOT prefix a cleanly-ended session's duration with the estimate marker", async () => {
+    await openHistoryTab([sessionRec({ sessionId: "clean-1", endedCleanly: true, wallClockMs: 3_000 })]);
+    expect(screen.getByTestId("history-session-duration").textContent).toBe("3s");
   });
 });

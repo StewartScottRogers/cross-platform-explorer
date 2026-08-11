@@ -135,10 +135,20 @@ pay the cost. Do not trade away visibility for speed, size, or simplicity.
        Fixed by flushing every session **forcibly** right before the store clears
        (`flushAllSessionsForcibly`, called from `closeAllConsoles` in
        `App.svelte`): a session with no real end gets its current activity
-       persisted as-is, with `endedAt` stamped at flush time and a new
-       `endedCleanly: false` marker on the record — real numbers, honestly
-       labelled as not a clean end, never silently dropped and never faked as a
-       normal finish.
+       persisted as-is, with a new `endedCleanly: false` marker on the record —
+       real numbers, honestly labelled as not a clean end, never silently
+       dropped and never faked as a normal finish. `endedAt` is **not** stamped
+       at flush time (CPE-1641 fixed this): the deck can sit open for hours
+       after the agent actually died, so flush time would silently inflate the
+       persisted duration. It's stamped from the accumulator's own
+       `lastActivityAt` instead — the last observed `started`/`fs-diff` for that
+       session, falling back to `startedAt` (a zero-duration lower bound) if
+       nothing else was ever observed — which can only under-, never over-,
+       count the session's real lifetime. CPE-1641 also gave the marker
+       somewhere to be *seen*: the History tab's Sessions list shows each row's
+       clean/unclean status as a pill (icon + label, not colour alone) and
+       prefixes an unclean row's duration with `~`, and the aggregate totals
+       above it note when they include such a row.
     2. **A session that ends while paused, with a sibling still armed**, used to
        sit unflushed — the "stop the removed" loop only ever looked at sessions
        still in the armed set, and a paused session had already left it. Not
