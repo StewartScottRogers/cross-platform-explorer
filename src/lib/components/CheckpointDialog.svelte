@@ -341,8 +341,15 @@
   .backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.25); display: grid; place-items: center; z-index: 200; }
   .dialog { width: 680px; max-width: 95vw; max-height: 90vh; overflow: auto; background: var(--surface); border: 1px solid var(--dialog-border); border-radius: 10px; box-shadow: 0 20px 50px rgba(0, 0, 0, 0.25); padding: 20px; }
   .head-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-  h2 { font-size: 16px; margin-bottom: 8px; }
-  .docs { display: grid; place-items: center; height: 26px; width: 26px; padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
+  /* CPE-1635: a flex item's default `min-width: auto` floors it at its own content width, which can
+     force the row (and, at extreme squeeze, the dialog) wider than intended instead of letting the
+     title give way. `min-width: 0` lets h2 shrink below that floor; the nowrap/ellipsis trio then makes
+     it truncate gracefully rather than wrap or overflow once it actually runs out of room (e.g. a
+     longer translated string at a narrow width). */
+  h2 { font-size: 16px; margin-bottom: 8px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* flex-shrink: 0 (CPE-1635): the title (h2, above) is the one flex sibling that should give way —
+     this icon button must stay at its declared 26x26 instead of also shrinking and distorting the SVG. */
+  .docs { display: grid; place-items: center; height: 26px; width: 26px; padding: 0; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); flex-shrink: 0; }
   p { color: var(--text-dim); font-size: 12.5px; margin-bottom: 12px; line-height: 1.5; }
   .paths, .create-row, .revert-one { display: flex; gap: 8px; margin-bottom: 8px; }
   .path, .label-input, .path-input { flex: 1 1 auto; height: 30px; padding: 0 8px; font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
