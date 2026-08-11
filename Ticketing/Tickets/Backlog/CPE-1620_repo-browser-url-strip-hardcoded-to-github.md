@@ -69,3 +69,16 @@ otherwise add one).
 ## Notes
 Non-destructive UX papercut, not data loss — Medium rather than High. Small, self-contained fix once
 picked up. Model: sonnet (or haiku — mechanical once the fix approach is chosen).
+
+## Work Log
+2026-08-11 — Claim confirmed against `RepoBrowser.svelte` (lines 28-31 as described). Fixed: `browse()`
+now strips whichever host the *selected* provider actually uses (`PROVIDER_HOSTS` map mirroring
+`clone_host()` in `src-tauri/src/lib.rs`), and detects "this still looks like a URL" after the strip
+(wrong provider, or an unrecognized host) to fall back to the existing "Enter a repository as
+owner/name." guidance instead of forwarding the raw URL to `forge_browse`. Added unit tests for
+`stripRepoUrl`/`looksLikeUrl` covering all four named providers (github/gitlab/bitbucket/codeberg) plus
+a foreign-host negative control, and component-level tests pasting each provider's own URL (browses
+correctly) and a foreign-provider URL (shows the friendly guidance, never hits `forge_browse`).
+`npm run check` clean; `npx vitest run` 287 files / 3640 tests green. Updated
+`src/docs/08-repositories.md`'s Limits/notes bullet to describe the fixed behavior. Batched with
+CPE-1622 and CPE-1639 into PR #837 (branch `cpe-1620-1622-1639-small-fixes`).
