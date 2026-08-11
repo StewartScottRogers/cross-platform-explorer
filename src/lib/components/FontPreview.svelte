@@ -257,7 +257,8 @@
       {#if glyphGrid.truncated}
         <p class="fp-note" data-testid="font-glyph-note">
           Showing {glyphGrid.shown.length} of {glyphGrid.total.toLocaleString()} characters this font
-          actually defines, evenly sampled across its coverage.
+          actually defines — its common Latin range first where it has one, then evenly sampled across
+          the rest of its coverage.
         </p>
       {:else}
         <p class="fp-note" data-testid="font-glyph-note">
