@@ -18,13 +18,29 @@
    * "checkpoint before an irreversible batch" pattern `MetadataStudioDialog`/`DeclutterDialog`/
    * `SimilarImagesDialog` already use, so a confirmed overwrite is still recoverable via Checkpoints even
    * though it's deliberately never pushed onto the Ctrl+Z undo stack.
+   *
+   * CPE-1599: that confirm step used to be a **pure frontend invariant** — the engine (`execute_plan_walk`)
+   * had no idea a confirmation was ever required, so any other caller of `batch_media_execute_stream`
+   * (devtools, a future automation surface) could skip it entirely. The engine now refuses an in-place
+   * plan unless `BatchJob.confirmed_overwrite` is set, so this dialog's "Overwrite N files" button (via
+   * {@link confirmOverwriteJob}, `../batchMedia`'s single named seam for setting that flag) is the ONLY
+   * place in the app that can make the backend actually perform an in-place write.
    */
   import { createEventDispatcher, onDestroy } from "svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, unwrap, type StreamChannel } from "../invoke";
-  import { mediaOpLabel, opsToJob, overwritesInPlace, progressPercent, skipRows, uniqueParentDirs } from "../batchMedia";
+  import {
+    confirmOverwriteJob,
+    mediaOpLabel,
+    opsToJob,
+    overwritesInPlace,
+    progressPercent,
+    skipRows,
+    uniqueParentDirs,
+  } from "../batchMedia";
+  import type { CheckpointPartial } from "../batchMedia";
   import { baseName } from "../contentSearch";
 
   /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
@@ -35,11 +51,14 @@
   /** Full paths of the (already image-filtered) selection to operate on. */
   export let paths: string[] = [];
 
-  // `checkpointFailures` rides on BOTH events (CPE-1590): the in-dialog warning is dismissable by Escape
-  // or a backdrop click, so the parent needs it on the cancel path too or a habitual keystroke discards it.
+  // `checkpointFailures`/`checkpointPartial` ride on BOTH events (CPE-1590, extended CPE-1599): the
+  // in-dialog warning is dismissable by Escape or a backdrop click, so the parent needs both on the
+  // cancel path too or a habitual keystroke discards them unread. Kept as two SEPARATE lists — a folder
+  // with NO checkpoint at all is a materially worse outcome than one with a checkpoint missing a few
+  // files, and collapsing them into one list previously blurred that distinction in the copy.
   const dispatch = createEventDispatcher<{
-    apply: { report: BatchReport; checkpointFailures: string[] };
-    cancel: { checkpointFailures: string[] };
+    apply: { report: BatchReport; checkpointFailures: string[]; checkpointPartial: CheckpointPartial[] };
+    cancel: { checkpointFailures: string[]; checkpointPartial: CheckpointPartial[] };
   }>();
 
   // ---- ordered op list ----
@@ -244,12 +263,21 @@
    *  skipped file + reason (CPE-1115), so a skip is never silently dropped. Cleared → the dialog closes via
    *  the parent on "Done". A clean run (no skips) never sets this and closes immediately. */
   let completed: BatchReport | null = null;
-  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED (CPE-1590 code-review follow-up):
-   *  the confirm panel promises a checkpoint as the recovery net for a write that has no other one, so a
-   *  failure must never be silent — a console.error alone is invisible to the user who read that promise
-   *  and consented on the strength of it. A non-empty list forces the dialog to hold open (like a skip)
-   *  so the warning is actually seen, even on an otherwise-clean run. Reset at the start of every apply(). */
+  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED OUTRIGHT (CPE-1590 code-review
+   *  follow-up) — these have NO recovery net at all. Kept strictly separate from `checkpointPartial`
+   *  below (CPE-1599 UAT follow-up): a folder with zero protection is a materially worse outcome than one
+   *  with a checkpoint that's merely missing a few files, and the copy for each must say so plainly rather
+   *  than blur the two into one softened sentence. A non-empty list forces the dialog to hold open (like a
+   *  skip) so the warning is actually seen, even on an otherwise-clean run. Reset at the start of every
+   *  apply(). */
   let checkpointFailures: string[] = [];
+  /** Folders whose pre-overwrite `checkpointCreate` SUCCEEDED but left `skippedCount` file(s) uncaptured
+   *  (oversize/budget) — the checkpoint exists, but doesn't cover everything about to be overwritten
+   *  (CPE-1599 UAT follow-up). The confirm panel promises this checkpoint as the recovery net, so a
+   *  partial one must never be silent either — but it is a strictly better situation than
+   *  `checkpointFailures`, and must read that way, not as "no checkpoint at all". Reset at the start of
+   *  every apply(). */
+  let checkpointPartial: CheckpointPartial[] = [];
 
   function detachChannel() {
     if (activeChannel) activeChannel.onmessage = null;
@@ -269,6 +297,7 @@
     failed = 0;
     total = planned.length;
     checkpointFailures = [];
+    checkpointPartial = [];
 
     if (needsOverwriteConfirm) {
       // Best-effort pre-write checkpoint of every folder about to lose original files (CPE-1590), taken
@@ -276,11 +305,25 @@
       // DeclutterDialog/SimilarImagesDialog's "checkpoint before an irreversible batch" convention. A
       // checkpoint failure must never BLOCK the (now explicitly confirmed) write — the user already
       // consented on the confirm panel — but it must also never be silent: the confirm text promises this
-      // checkpoint as the recovery net for a write that otherwise has none, so a failed one is recorded
-      // in `checkpointFailures` and surfaced in the results panel below, not just logged to devtools.
+      // checkpoint as the recovery net for a write that otherwise has none, so an outright failure is
+      // recorded in `checkpointFailures` (no net at all) and a merely-incomplete one in `checkpointPartial`
+      // (a net that's missing some files) — kept as two separate lists (CPE-1599 UAT follow-up) so the
+      // results panel below can tell the user which situation they're actually in.
       for (const dir of uniqueParentDirs(overwriteItems.map((it) => it.input))) {
         try {
-          unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
+          const created = unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
+          if (created.skipped.length > 0) {
+            // CPE-1599: `checkpoint_create` captures with an unlimited budget today, but its `skipped`
+            // field exists precisely so a future budget cap can't silently omit files from "recovery"
+            // without this call site noticing — inspect it now, before that trap exists, rather than
+            // discarding `created` entirely. The checkpoint DID succeed here, just not completely, so
+            // this is `checkpointPartial`, not `checkpointFailures`.
+            console.warn(
+              `Batch media: pre-overwrite checkpoint for "${dir}" left ${created.skipped.length} file(s) uncaptured (recovery incomplete)`,
+              created.skipped,
+            );
+            checkpointPartial = [...checkpointPartial, { dir, skippedCount: created.skipped.length }];
+          }
         } catch (e) {
           console.error("Batch media: pre-overwrite checkpoint failed (proceeding with confirmed write)", e);
           checkpointFailures = [...checkpointFailures, dir];
@@ -297,27 +340,35 @@
       }
     };
 
+    // CPE-1599: the engine refuses to run an in-place plan without `confirmed_overwrite` set. This is the
+    // ONLY place that flag is ever flipped to true — and only once `apply()` has actually been reached via
+    // the confirm panel's "Overwrite N files" button (the sole caller of `apply()` when
+    // `needsOverwriteConfirm` is true; see `handleApplyClick`). A plan with nothing to confirm sends the
+    // job unchanged (`confirmed_overwrite` stays the `false` `opsToJob` always builds it as).
+    const jobToSend = needsOverwriteConfirm ? confirmOverwriteJob(job) : job;
+
     try {
       // Raw, not the typed `commands.batchMediaExecuteStream` (which routes through the busy-cursor
       // `invoke`) — this dialog renders its own progress, per BUSY-CURSOR.md.
       const report = await rawInvoke<BatchReport>("batch_media_execute_stream", {
         items: planned,
-        job,
+        job: jobToSend,
         onResult: ch,
       });
       detachChannel();
       applying = false;
-      if (report.skipped.length > 0 || checkpointFailures.length > 0) {
+      if (report.skipped.length > 0 || checkpointFailures.length > 0 || checkpointPartial.length > 0) {
         // Hold the dialog open on a results panel so the user sees exactly which files were skipped and
-        // why (CPE-1115), AND — even on an otherwise-clean run — which folder(s) got no pre-overwrite
-        // checkpoint (CPE-1590), instead of either vanishing behind a transient toast or closing outright
-        // while the user still believes the promised recovery net exists. "Done" finishes the flow.
+        // why (CPE-1115), AND — even on an otherwise-clean run — which folder(s) have no pre-overwrite
+        // checkpoint at all or only a partial one (CPE-1590/CPE-1599), instead of either vanishing behind
+        // a transient toast or closing outright while the user still believes the promised recovery net
+        // exists. "Done" finishes the flow.
         completed = report;
       } else {
-        // Nothing skipped and no checkpoint failure (the branch above already held the dialog open for
-        // either) — checkpointFailures is guaranteed empty here, but still passed explicitly so the
-        // parent always receives the same event shape regardless of which path dispatched it.
-        dispatch("apply", { report, checkpointFailures });
+        // Nothing skipped and no checkpoint problem (the branch above already held the dialog open for
+        // any of those) — both lists are guaranteed empty here, but still passed explicitly so the parent
+        // always receives the same event shape regardless of which path dispatched it.
+        dispatch("apply", { report, checkpointFailures, checkpointPartial });
       }
     } catch (e) {
       detachChannel();
@@ -330,10 +381,10 @@
   function finish() {
     const report = completed;
     completed = null;
-    // CPE-1590: carry any checkpoint failures out with the report. The in-dialog warning only reaches a
-    // user who is looking at the screen when the run ends and doesn't reflexively dismiss it; the parent
-    // folds this into the app-level notice so the warning survives every dismissal path.
-    if (report) dispatch("apply", { report, checkpointFailures });
+    // CPE-1590/CPE-1599: carry any checkpoint failures/partials out with the report. The in-dialog warning
+    // only reaches a user who is looking at the screen when the run ends and doesn't reflexively dismiss
+    // it; the parent folds this into the app-level notice so the warning survives every dismissal path.
+    if (report) dispatch("apply", { report, checkpointFailures, checkpointPartial });
   }
 
   /** Back out of the (CPE-1590) overwrite confirm panel without touching anything — the dialog itself
@@ -345,9 +396,10 @@
   function cancel() {
     if (applying) return; // no mid-run cancel in v1 — let it finish rather than leaving a half-applied job
     detachChannel();
-    // CPE-1590: Escape and the backdrop click both land here, including while the checkpoint-failure
-    // warning is showing — so carry it out rather than letting a habitual keystroke discard it unread.
-    dispatch("cancel", { checkpointFailures });
+    // CPE-1590/CPE-1599: Escape and the backdrop click both land here, including while a checkpoint
+    // warning is showing — so carry both lists out rather than letting a habitual keystroke discard them
+    // unread.
+    dispatch("cancel", { checkpointFailures, checkpointPartial });
   }
 </script>
 
@@ -506,12 +558,13 @@
     {/if}
 
     {#if checkpointFailures.length > 0}
-      <!-- CPE-1590 code-review follow-up: the confirm panel promises a pre-overwrite checkpoint as the
-           recovery net for a write that has no other one — a failure to actually take it must never be
-           silent (a console.error alone is invisible), so it holds the dialog open and names exactly
-           which folder(s) have no checkpoint to revert to. The write itself still went ahead (already
-           confirmed), this is purely "here's what your safety net actually covers". -->
-      <div class="checkpoint-warn" data-testid="checkpoint-warning">
+      <!-- CPE-1590 code-review follow-up, kept BLUNT on purpose (CPE-1599 UAT round): this is the "zero
+           protection" case — the confirm panel promises a pre-overwrite checkpoint as the recovery net
+           for a write that has no other one, and here that checkpoint was never taken at all. Softening
+           this copy to match the partial-checkpoint case below would understate real risk on the most
+           destructive operation in the app, so it stays unambiguous: no checkpoint, no net, own backup
+           only. Holds the dialog open and names exactly which folder(s) this applies to. -->
+      <div class="checkpoint-warn checkpoint-warn-failed" data-testid="checkpoint-warning">
         <strong>No checkpoint was taken</strong> for {checkpointFailures.length}
         folder{checkpointFailures.length === 1 ? "" : "s"} before the overwrite — the write went ahead (you
         already confirmed it), but there is nothing to revert to for:
@@ -522,6 +575,28 @@
         </ul>
         Your only recovery for files in {checkpointFailures.length === 1 ? "that folder" : "those folders"}
         now is your own backup.
+      </div>
+    {/if}
+
+    {#if checkpointPartial.length > 0}
+      <!-- CPE-1599 UAT follow-up: deliberately SEPARATE from `checkpoint-warn-failed` above and worded
+           less alarmingly — a checkpoint WAS taken here, it just doesn't cover every file about to be
+           overwritten. True and never overstates protection, but merging this with an outright "no
+           checkpoint at all" folder would make zero protection read as a minor gap, which is the one
+           thing this warning exists to prevent. -->
+      <div class="checkpoint-warn checkpoint-warn-partial" data-testid="checkpoint-warning-partial">
+        <strong>The checkpoint didn't fully cover</strong> {checkpointPartial.length}
+        folder{checkpointPartial.length === 1 ? "" : "s"} before the overwrite — the write went ahead (you
+        already confirmed it), and recovery is incomplete for:
+        <ul class="checkpoint-warn-list">
+          {#each checkpointPartial as p}
+            <li title={p.dir}>
+              {baseName(p.dir) || p.dir} — {p.skippedCount} file{p.skippedCount === 1 ? "" : "s"} not captured
+            </li>
+          {/each}
+        </ul>
+        Everything else in {checkpointPartial.length === 1 ? "that folder" : "those folders"} IS covered by
+        the checkpoint; only the file(s) listed above would need your own backup instead.
       </div>
     {/if}
 

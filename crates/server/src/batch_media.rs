@@ -74,11 +74,23 @@ pub struct BatchJob {
     /// When true (the default/safe mode) outputs never overwrite an input — a suffix is added so the
     /// output name differs, and same-target collisions are disambiguated.
     pub non_destructive: bool,
+    /// **Defence in depth (CPE-1599).** Explicit "yes, I understand this overwrites originals in place"
+    /// flag, checked by [`crate::batch_execute::execute_plan_walk`] before it will run a plan containing
+    /// any item whose planned `output == input`. Defaults to `false` via [`BatchJob::new`] — a caller
+    /// must deliberately opt in. This is **not** meant to be flipped anywhere in the codebase except the
+    /// batch-media confirm panel (`BatchMediaDialog.svelte`'s "Overwrite N files" button, after the user
+    /// has read the danger-styled confirmation) once it has actually shown that confirmation; that is a
+    /// frontend-side promise this field cannot itself enforce, but the engine no longer trusts the
+    /// caller's word for it either way — `non_destructive: false` alone is no longer sufficient to make
+    /// `execute_plan_walk` touch an input file in place. See the module's `batch_execute` doc for the
+    /// refusal this guards.
+    #[serde(default)]
+    pub confirmed_overwrite: bool,
 }
 
 impl BatchJob {
     pub fn new(ops: Vec<MediaOp>) -> Self {
-        Self { ops, non_destructive: true }
+        Self { ops, non_destructive: true, confirmed_overwrite: false }
     }
 }
 

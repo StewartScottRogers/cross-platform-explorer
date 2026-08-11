@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  confirmOverwriteJob,
   mediaOpLabel,
   opsToJob,
   overwritesInPlace,
@@ -31,13 +32,22 @@ describe("mediaOpLabel", () => {
 });
 
 describe("opsToJob", () => {
-  it("wraps an empty op list (no ops chosen yet)", () => {
-    expect(opsToJob([], true)).toEqual({ ops: [], non_destructive: true });
+  it("wraps an empty op list (no ops chosen yet), always starting confirmed_overwrite false", () => {
+    expect(opsToJob([], true)).toEqual({ ops: [], non_destructive: true, confirmed_overwrite: false });
   });
 
   it("preserves op order and the non-destructive flag", () => {
     const ops: MediaOp[] = [{ op: "resize", max_px: 800 }, { op: "strip_metadata" }];
-    expect(opsToJob(ops, false)).toEqual({ ops, non_destructive: false });
+    expect(opsToJob(ops, false)).toEqual({ ops, non_destructive: false, confirmed_overwrite: false });
+  });
+});
+
+describe("confirmOverwriteJob (CPE-1599)", () => {
+  it("returns a copy of the job with confirmed_overwrite flipped to true, leaving the input untouched", () => {
+    const job = opsToJob([{ op: "compress", quality: 80 }], false);
+    const confirmed = confirmOverwriteJob(job);
+    expect(confirmed).toEqual({ ...job, confirmed_overwrite: true });
+    expect(job.confirmed_overwrite).toBe(false); // the original job object is not mutated
   });
 });
 

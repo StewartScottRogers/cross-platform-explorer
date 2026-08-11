@@ -119,6 +119,15 @@ plan and silently applied to a different, later-edited one. A plan where every o
 its input (the default, non-destructive path, or any op combo with its own suffix) is completely
 unaffected — Apply still runs immediately, with no new friction.
 
+**The engine enforces this too, not just the dialog (CPE-1599).** The confirmation isn't only a frontend
+courtesy — the backend batch-execute engine itself refuses to run any plan containing an in-place
+overwrite unless it's told, explicitly, that this exact confirmation was given. In normal use you'll never
+see this: this dialog's "Overwrite N files" button is the only place in the app that ever gives that
+explicit go-ahead, so from here everything behaves exactly as described above. It exists as a defence in
+depth against anything that might one day call the batch-media engine some other way (a scripting/
+automation surface, for instance) — such a caller would get a clear refusal instead of a silent
+in-place write.
+
 ## Applying
 
 **Apply** is enabled once at least one op is added and the plan resolved cleanly. Progress renders
@@ -136,11 +145,19 @@ batch media's writes are still never pushed onto the app's Ctrl+Z undo stack. Th
 net, not a gate**: if the checkpoint itself fails (e.g. the disk is full), the confirmed write still
 proceeds — you already explicitly agreed to it on the confirm panel.
 
-**A failed checkpoint is never silent.** If any affected folder's checkpoint couldn't be taken, the dialog
-holds itself open afterward on a danger-styled warning naming exactly which folder(s) have no checkpoint
-to revert to — the same "stay open until acknowledged" treatment the skipped-files panel uses — instead of
-closing normally while you still believe the promised recovery net exists. Click **Done** once you've read
-it. Your only recovery for a folder in that warning is your own backup.
+**A checkpoint problem is never silent — and the dialog is honest about which kind it is.** Either way, the
+dialog holds itself open afterward on a warning naming exactly which folder(s) are affected — the same
+"stay open until acknowledged" treatment the skipped-files panel uses — instead of closing normally while
+you still believe the promised recovery net exists. Click **Done** once you've read it. There are two
+distinct warnings, worded deliberately differently because they mean very different things for recovery:
+
+- **"No checkpoint was taken"** — the checkpoint attempt failed outright (e.g. the disk was full). That
+  folder has **zero** recovery net; your only recovery for files there is your own backup.
+- **"The checkpoint didn't fully cover…"** — the checkpoint succeeded, but named file(s) inside it were
+  too large to capture (or hit the store's budget) and were left out. Everything else in that folder IS
+  covered by the checkpoint; only the specific file(s) named in the warning would need your own backup.
+
+If a run hits both kinds across different folders, you'll see both warnings.
 
 ## Failures and partial success
 
@@ -188,4 +205,8 @@ You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP
   rather than staying quiet about it. It's still **not** on the [Undo](safety-undo) Ctrl+Z stack — recovery
   after a confirmed overwrite is that checkpoint (see [Checkpoints & Rollback](16-checkpoints)) or your own
   backup, same as before this ticket; only the "no warning at all" gap is fixed.
+- **The confirmation is enforced end-to-end, not just in this dialog (CPE-1599).** The backend refuses to
+  run any plan containing an in-place overwrite unless it's explicitly told this confirmation happened —
+  this dialog's "Overwrite N files" button is the only place that ever does. You won't notice this in
+  normal use; it exists so nothing else that might call the batch-media engine can skip the confirmation.
 - **No command-palette entry or shortcut** — right-click is the only way in.
