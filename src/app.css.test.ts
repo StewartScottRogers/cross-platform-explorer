@@ -189,3 +189,34 @@ describe("component hard-coded-hex ratchet (CPE-1534)", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------------------------
+// CPE-1631 PR review round 2: a real bug shipped in that ticket's first revision and went
+// undetected by every guard test above (all of which regex-parse app.css's TEXT, so they're blind
+// to how a browser actually TOKENIZES it) — a doc comment referenced two `--pal-*` names back to
+// back with only a bare "/" between them (no space), e.g. "--pal-hljs-*/--pal-dark-hljs-*", which
+// spells out the two-character CSS comment-close sequence (asterisk immediately followed by
+// slash) mid-sentence. That silently truncated the surrounding `/* ... */` comment right there,
+// and everything parsed after it — hundreds of real rules, including every `.hljs-*` colour rule
+// this same ticket added — became unparseable garbage to a real CSS engine. Verified in Chrome:
+// `document.styleSheets[0].cssRules.length` read 8 instead of the expected 161. No amount of
+// regex-based text checking catches this (the text is perfectly innocent-looking prose); the only
+// generic, cheap guard is exactly what this test does: count `/*` vs `*/` occurrences file-wide.
+// This can't tell you WHERE a stray one is, but a real mismatch means *something* in the file will
+// silently corrupt however a browser parses everything after it — that alone is worth failing CI
+// over, rather than relying on a human eyeballing a screenshot that happens to still look plausible
+// (exactly what let this ship the first time).
+describe("app.css comment-marker balance (CPE-1631)", () => {
+  it("every /* has a matching */ (an unbalanced count silently truncates a comment and corrupts everything parsed after it)", () => {
+    const opens = (css.match(/\/\*/g) ?? []).length;
+    const closes = (css.match(/\*\//g) ?? []).length;
+    expect(
+      closes,
+      `app.css has ${opens} "/*" but ${closes} "*/" — a mismatch means some comment closes early ` +
+        `(likely a bare "*/" accidentally spelled out mid-sentence, e.g. two --pal-* names joined by ` +
+        `a bare "/" with no space) or never closes, silently corrupting how a real browser parses ` +
+        `everything after that point. Search for a non-whitespace character immediately followed by ` +
+        `"*/" to find the culprit.`,
+    ).toBe(opens);
+  });
+});

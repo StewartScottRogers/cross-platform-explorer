@@ -84,5 +84,33 @@ async function renderNotebookCell() {
   el.innerHTML = highlightCode(PY_SAMPLE, "python");
 }
 
-await Promise.all([renderCodePreview(), renderNotebookCell()]);
+// CPE-1631 PR review round 2: a JSON sample (hljs-attr keys + hljs-punctuation {}:,[] — the two
+// classes that measured 0% coverage before this fix) and a Svelte-shaped XML sample (hljs-attr
+// attribute names on a real in-repo component tag), rendered the same way as the code preview panel.
+const JSON_SAMPLE = `{
+  "name": "cross-platform-explorer",
+  "$comment": "attr keys + punctuation, both previously uncovered",
+  "version": "0.57.64",
+  "retries": 3,
+  "verbose": false,
+  "tags": ["ready", "big-design"]
+}
+`;
+const SVELTE_SAMPLE = `<span class="link-badge" class:broken={isBroken} title={label}>
+  <a href={url} target="_blank" rel="noreferrer">{label}</a>
+</span>
+`;
+
+async function renderJson() {
+  const el = document.getElementById("json-sample")!;
+  await ensureLanguageForName("sample.json");
+  el.innerHTML = highlightForFile(JSON_SAMPLE, "sample.json");
+}
+async function renderSvelte() {
+  const el = document.getElementById("svelte-sample")!;
+  await ensureLanguageForName("sample.svelte");
+  el.innerHTML = highlightForFile(SVELTE_SAMPLE, "sample.svelte");
+}
+
+await Promise.all([renderCodePreview(), renderNotebookCell(), renderJson(), renderSvelte()]);
 (window as unknown as { __hljsHarnessReady?: boolean }).__hljsHarnessReady = true;

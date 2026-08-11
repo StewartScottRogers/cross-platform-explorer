@@ -35,7 +35,7 @@
       /* Harness-local layout only (wrap + monospace + padding) — NOT a reproduction of
          PreviewPane.svelte's/NotebookPreview.svelte's real (Svelte-scoped) rules, see main.ts's
          comment. The colour rules under test (`.hljs-*`) come from the real, unscoped src/app.css. */
-      #code-preview, #nb-cell {
+      #code-preview, #nb-cell, #json-sample, #svelte-sample {
         display: block; white-space: pre-wrap; word-break: break-word;
         font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
         padding: 12px; background: var(--surface); color: var(--text);
@@ -57,6 +57,22 @@
         <div class="nb-cell">
           <pre class="nb-code"><code id="nb-cell"></code></pre>
         </div>
+      </section>
+      <section>
+        <h2>JSON (hljs-attr keys + hljs-punctuation — 0% covered before the round-2 fix)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="json-sample"></code></pre>
+          </div>
+        </aside>
+      </section>
+      <section>
+        <h2>Svelte-shaped XML (hljs-attr on real component attribute names)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="svelte-sample"></code></pre>
+          </div>
+        </aside>
       </section>
     </div>
     <script type="module" src="./main.ts"></script>
