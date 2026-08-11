@@ -139,3 +139,95 @@ rather than retention.
 **Assumptions:** none beyond what's stated above. No new dependencies added. Did not weaken or delete any
 existing test — the old `markVisited`/old-signature `watchTargets` tests were superseded by equivalent-or-
 stronger coverage of the same acceptance criteria under the new, simpler API.
+
+## Work Log — 2026-08-11 (round 2: PR #830 CHANGES REQUESTED — two loss paths, confirmed by both an
+independent Reviewer and a separate UAT harness)
+
+**What was found.** Removing CPE-1606's retention (round 1, above) exposed two ways to lose data that
+were both worse than the original bug:
+
+1. **Loss path 1 — closing the whole Agent Deck wiped a never-ended session's ENTIRE history.**
+   `closeAllConsoles()` (`App.svelte`) reaps the console process, so a still-running session never gets a
+   real `ended` announcement. `flushSession`'s `endedAt` gate correctly refused to persist it (round 1's
+   fix, working as designed) — but `clearAgentSessions()` right after emptied `$agentSessions`, and
+   `reconcileAgentWatch`'s full-stop branch then called `clearAgentSessionMetrics()`, wiping the whole
+   accumulator store with nothing ever persisted. UAT confirmed this is strictly worse than the PRE-CPE-
+   1626 code, which (despite fabricating an inaccurate `endedAt`) at least persisted *something*.
+2. **Loss path 2 — a session that ends while paused, with an armed sibling, sat unflushed.** The "stop the
+   removed" loop only ever iterates `armedWatches.keys()`; a paused session had already left that map, so
+   the loop never even looks at it when it later ends. UAT measured this as *deferred* rather than
+   permanently lost (a later reconcile that drains the armed set to empty does catch it via
+   `flushAllSessions()`), but it's a real visibility-latency gap, and it becomes loss path 1 if the deck
+   closes (or the app quits) before that drain happens.
+
+**The fix — flush follows the session's own lifecycle, not watch/arm state, plus an explicit forced flush
+before any full wipe:**
+- `agentSessions.ts`'s `ingestSessionState` now calls `flushSession(ann.session.sessionId)`
+  (fire-and-forget) the INSTANT a real `ended` announcement is folded — independent of whether that
+  session happens to be currently armed. This is the primary flush trigger now, and it makes loss path 2
+  disappear for free: an ended-while-paused session flushes immediately, with no latency gap, regardless
+  of any sibling's arm state. `reconcileAgentWatch`'s own `flushSession` call (on the armed-set diff)
+  becomes a redundant, harmless backstop (idempotent no-op for anything the new hook already flushed).
+- Added `flushAllSessionsForcibly()` (`agentSessionMetrics.ts`): flushes EVERY currently-known session,
+  including one that never got a real `ended` — for a still-running session it persists the CURRENT
+  accumulator as-is (real activity tallies, nothing fabricated), with `endedAt` stamped at flush time and
+  a new **`endedCleanly: false`** marker so the row is structurally, honestly distinguishable from a clean
+  end (never silently masquerading as one) — per this crew's standing rule (CPE-1591/CPE-1615) that "we
+  don't know" must never look like "it's fine". `closeAllConsoles()` now calls
+  `await flushAllSessionsForcibly()` BEFORE `clearAgentSessions()`, so a never-ended session's activity is
+  captured before the store wipes, beating the pre-CPE-1626 code's bar (which persisted an inaccurate row)
+  rather than merely matching the stricter pause/end gate's refusal.
+- New wire field `endedCleanly: boolean` added to `SessionMetricsRecord` (Rust:
+  `crates/server/src/metrics_journal.rs`, `#[serde(default = "default_ended_cleanly")]` → `true`, so an
+  OLD journal row written before this field existed — every one of which came from a genuine end — still
+  reads as clean, never misread as forced). Regenerated `src/lib/bindings.gen.ts` via
+  `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"` (run from `src-tauri`).
+
+**Negative controls (both run against the pre-this-round branch HEAD — commit `ce86b784`, PR #830's
+current state — via `git stash` of just the source-fix files, keeping the new tests):**
+- Loss path 1 (`src/App.agentWatchPauseMetrics.test.ts`, drives the REAL production path: right-click the
+  "Agent Deck" toolbar button → click "Close all consoles" → `closeAllConsoles()`): observed failure
+  `AssertionError: expected 0 to be greater than 0` — `metrics_record` was never called for a session with
+  2 accrued edits that never announced `ended`. Matches UAT's exact finding.
+- Loss path 2 (same file: a session ends while paused with a sibling still armed, asserting an IMMEDIATE
+  flush within 500ms): observed failure `AssertionError: expected false to be true` — no flush call landed
+  in the window, matching UAT's "deferred, not immediate" measurement.
+- After the fix: same test file, all 5 tests pass (`npx vitest run src/App.agentWatchPauseMetrics.test.ts`
+  → `Test Files 1 passed (1)` / `Tests 5 passed (5)`).
+
+**Re-confirmed still holding after this round's changes** (per the coordinator's explicit ask):
+- CPE-1606 boundary (never-visited session never armed) — `src/lib/agentSessions.test.ts`, still 20/20,
+  plus the integration test's "never navigated into stays fully unarmed" case.
+- CPE-1625 co-location (two sessions sharing one cwd both armed) — same files, unchanged, still passing;
+  the reviewer's note that `.filter()` makes this structural rather than incidental was not touched.
+- Pause/resume headline (paused-then-resumed session → ONE complete row) — unchanged and still covered;
+  UAT independently confirmed `editCount: 3` for a 3-edit pause/resume/end sequence.
+- Single-agent end-while-away (`editCount: 2`, correct `endedAt`) — untouched, still passing.
+- Disarm-on-navigate-away with no debounce — untouched. Per the coordinator: the "no thrash measurements"
+  disclosure was confirmed accurate and fair by the reviewer; **thrash remains unmeasured** — noted here
+  again explicitly as instructed, not re-investigated this round.
+
+**Docs corrected again:** `AGENT-WATCH.md`'s Boundaries section gained a new sub-bullet describing both
+loss paths and their fixes (so the doc doesn't just describe the FIRST fix as if it were the final state).
+`src/docs/explorer-agent-watch.md`'s "Limits/notes" section: the previous wording flatly claimed a
+session's Cost/History row "still covers the session's whole lifetime once it actually ends" — true for a
+real end, but overclaiming for the closed-deck case. Replaced with an explicit statement that closing the
+Agent Deck still saves what happened so far, honestly labelled `endedCleanly: false` rather than silently
+lost or faked as a clean finish.
+
+**Full verification, this round:**
+- `npm run check` → 0 errors, 0 warnings.
+- `npx vitest run` (full suite) → `Test Files 278 passed (278)` / `Tests 3414 passed (3414)`.
+- Rust: `cargo test` in `crates/server` → `1874 passed; 0 failed; 1 ignored` (lib) + all integration test
+  binaries green, including the new `metrics_journal` tests (`ended_cleanly_round_trips_and_defaults_true
+  _for_a_pre_cpe_1626_row`, `camelcase_wire_shape_matches_the_frontend` updated for the new field).
+- `cargo test typed_bindings_are_committed_and_routed_through_busy_cursor` (src-tauri, with
+  `specta-bindings sidecar-platform`) → passes — the committed `bindings.gen.ts` matches the regenerated
+  output.
+- `cargo clippy --all-targets -- -D warnings` clean in BOTH `crates/server` and `src-tauri` (default
+  features AND `sidecar-platform specta-bindings`), per this crew's standing "match CI clippy" rule.
+- No Cargo.lock changes needed (no new dependencies — one new struct field only).
+
+**Could not verify:** real-world `notify`-watcher thrash cost from rapid sibling-folder navigation — still
+no live Tauri host in this environment to measure it; the coordinator confirmed this gap is acceptable and
+the disarm-on-navigate-away decision stands regardless.

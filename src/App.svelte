@@ -25,7 +25,7 @@
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing, ingestActivity } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
   import { initAgentCost, ingestCost } from "./lib/agentCost";
-  import { clearAgentSessionMetrics, flushSession, flushAllSessions } from "./lib/agentSessionMetrics";
+  import { clearAgentSessionMetrics, flushSession, flushAllSessions, flushAllSessionsForcibly } from "./lib/agentSessionMetrics";
   import AgentTimeline from "./lib/components/AgentTimeline.svelte";
   import DiskSpaceView from "./lib/components/DiskSpaceView.svelte";
   import DiagnosticsOverlay from "./lib/components/DiagnosticsOverlay.svelte";
@@ -1287,7 +1287,12 @@
   let agentMenu: { x: number; y: number; label: string; sessionId?: string; sessionLabel?: string } | null = null;
 
   /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves. The console
-      process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457). */
+      process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457).
+      CPE-1626: flush every session's metrics row FIRST, forcibly for anything still running (no
+      `ended` will ever come now the process is gone) — otherwise `clearAgentSessions()` below empties
+      `$agentSessions`, and the reactive full-stop reconcile wipes the whole accumulator store with a
+      still-running session's activity never persisted anywhere. A forced row is honestly marked
+      `endedCleanly: false` rather than fabricated as a clean end (see `flushAllSessionsForcibly`). */
   async function closeAllConsoles() {
     agentMenu = null;
     try {
@@ -1295,6 +1300,7 @@
     } catch (e) {
       console.debug("close consoles failed:", e);
     }
+    await flushAllSessionsForcibly();
     clearAgentSessions();
   }
   /** Close a single agent session (CPE-489) — routes to the Agent Deck's per-session close endpoint
@@ -1453,9 +1459,12 @@
       }
       // Stop the removed: a session no longer desired — either it genuinely ended, or it's still
       // running and was merely disarmed because the explorer navigated away from its folder (a pause).
-      // Call `flushSession` at this seam either way (CPE-1113/CPE-1626): it now tells the two apart
-      // itself via the accumulator's `endedAt`, so a pause is always a safe no-op (the accumulator keeps
-      // accruing, resumable) and only a real end persists a row.
+      // Call `flushSession` at this seam either way (CPE-1113/CPE-1626) as a REDUNDANT backstop — the
+      // primary flush trigger for a real end is now `agentSessions.ts`'s `ingestSessionState`, which
+      // fires the instant the `ended` announcement lands, independent of arm state (fixes the latency gap
+      // where an ended-while-paused session with an armed sibling used to sit unflushed until some later
+      // reconcile drained the armed set). `flushSession` tells a pause from a real end itself via the
+      // accumulator's `endedAt`, so calling it here too is always a safe no-op either way.
       for (const id of [...armedWatches.keys()]) {
         if (!desired.has(id)) {
           await flushSession(id);

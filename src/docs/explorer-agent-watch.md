@@ -126,10 +126,17 @@ in the explorer.
   you *did* have open, the underlying `notify` watcher genuinely stops — it isn't kept running in the
   background. Your Cost/History numbers for that session aren't lost when you leave, though: the
   session is merely **paused**, not ended, so walking back into its folder later picks up right where
-  you left off, and its Cost/History row still covers the session's whole lifetime once it actually
-  ends. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning (including why an earlier
-  version of this app kept the watcher running after you left a project, and why that's no longer
-  necessary).
+  you left off, and its Cost/History row covers the session's whole lifetime once it actually ends —
+  even if it ends while paused, with other agents still running elsewhere.
+- **Closing the whole Agent Deck still saves what happened so far, honestly labelled.** If you close the
+  Agent Deck (or quit the app) while a session is still running, it never gets the chance to send a
+  proper "ended" signal — its process is simply stopped. That session's activity up to that moment is
+  still persisted to History, but the row is marked as **not a clean end** (its end time is when the
+  deck closed, not the session's real finish, so wall-clock/throughput numbers for that row may
+  undercount). A History view that surfaces this can use the marker to tell the two apart; nothing here
+  guesses at a real end it never saw. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning
+  (including why an earlier version of this app kept the watcher running after you left a project, and
+  why that's no longer necessary).
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
   the agent's own printed output, not an authoritative source.
 - **Reads are inferred, not observed.** A filesystem watcher can't see a read; the Consulted list and the

@@ -90,6 +90,8 @@ function mockBackend() {
       case "agent_watch_stop": return null;
       case "agent_watch_stop_all": return null;
       case "metrics_record": return null;
+      case "sidecar_stop": return null;
+      case "sidecar_registry_ids": return [];
       default: return null;
     }
   });
@@ -192,5 +194,71 @@ describe("Agent Watch: pause vs end (CPE-1626 wiring)", () => {
     announce("s2", PROJ);
     await waitFor(() => expect(watchStartCallsFor("s1")).toHaveLength(1));
     await waitFor(() => expect(watchStartCallsFor("s2")).toHaveLength(1));
+  });
+
+  // CPE-1626 loss path 1 (a UAT/reviewer-found regression in this same ticket's original fix): closing
+  // the Agent Deck reaps the console process, so a still-running session NEVER gets a real `ended`
+  // announcement. Pre-fix, `flushSession`'s `endedAt` gate made every flush attempt at this seam a no-op
+  // (correctly refusing to fabricate a clean end), and then `clearAgentSessionMetrics()` wiped the whole
+  // accumulator store — silently losing the session's entire activity. The pre-CPE-1626 code was actually
+  // SAFER here (it persisted an inaccurate-but-present row); this must beat that bar, not just match the
+  // "pause vs end" gate's stricter refusal.
+  it("CPE-1626 loss path 1: closing the Agent Deck with a session that never announced `ended` still persists its activity (honestly marked, not silently wiped)", async () => {
+    await boot();
+    // Query the Agent Deck button BEFORE any session exists — its label text is exactly "Agent Deck" only
+    // while `$agentSessions` is empty; once a session is running a count badge is appended, which would
+    // break an exact getByText("Agent Deck") match taken afterwards. The captured element reference stays
+    // valid for the later right-click regardless of what its text becomes.
+    const deckBtn = await screen.findByText("Agent Deck");
+
+    announce("s1", PROJ);
+    await waitFor(() => expect(watchStartCallsFor("s1")).toHaveLength(1));
+    ingestDiff([{ path: `${PROJ}\\a.txt`, before: "", after: "hello", actor: "s1" }]);
+    ingestDiff([{ path: `${PROJ}\\b.txt`, before: "", after: "world", actor: "s1" }]);
+    // s1 never announces `ended` — simulating the console process being reaped by a deck close.
+
+    await fireEvent.contextMenu(deckBtn);
+    const closeAllBtn = await screen.findByText("Close all consoles");
+    await fireEvent.click(closeAllBtn);
+
+    await waitFor(() => expect(metricsRecordCalls().length).toBeGreaterThan(0));
+    const rec = metricsRecordCalls()[0][1] as { rec: Record<string, unknown> };
+    expect(rec.rec.sessionId).toBe("s1");
+    expect(rec.rec.editCount).toBe(2); // both edits preserved — nothing silently wiped
+    // Honestly marked as NOT a clean end — this must never masquerade as a real session-end row.
+    expect(rec.rec.endedCleanly).toBe(false);
+  });
+
+  // CPE-1626 loss path 2: a session that ends while paused (unarmed, navigated away) must flush the
+  // instant its `ended` announcement lands, even with a sibling session still armed elsewhere — not
+  // deferred until some later reconcile happens to drain the armed set to zero.
+  it("CPE-1626 loss path 2: a session that ends while paused, with a sibling still armed, flushes immediately (no latency gap)", async () => {
+    await boot();
+    announce("s1", PROJ);
+    await waitFor(() => expect(watchStartCallsFor("s1")).toHaveLength(1));
+    ingestDiff([{ path: `${PROJ}\\a.txt`, before: "", after: "hello", actor: "s1" }]); // 1 edit
+
+    // Navigate away: s1 pauses (disarmed), but stays running.
+    const otherBtn = (await screen.findAllByText("Other (D:)"))[0];
+    await fireEvent.click(otherBtn);
+    await waitFor(() => expect(screen.getByText("z.txt")).toBeTruthy());
+    await waitFor(() => expect(watchStopCallsFor("s1")).toHaveLength(1));
+
+    // A sibling session at the CURRENT folder, so the armed set stays non-empty (s2 armed, s1 paused).
+    announce("s2", OTHER);
+    await waitFor(() => expect(watchStartCallsFor("s2")).toHaveLength(1));
+
+    invoke.mockClear(); // isolate calls made from this point on
+    end("s1"); // ends while paused, with s2 still armed — must not sit unflushed
+
+    await waitFor(
+      () =>
+        expect(
+          invoke.mock.calls.some(
+            ([cmd, a]) => cmd === "metrics_record" && (a as { rec?: { sessionId?: string } })?.rec?.sessionId === "s1",
+          ),
+        ).toBe(true),
+      { timeout: 500 },
+    );
   });
 });

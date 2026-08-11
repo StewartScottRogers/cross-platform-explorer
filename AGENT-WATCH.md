@@ -124,6 +124,31 @@ pay the cost. Do not trade away visibility for speed, size, or simplicity.
     boundary is what this doc promises; if real-world telemetry later shows
     watcher thrash from rapid sibling-folder navigation is a material cost, that
     can be revisited with actual numbers.
+  - **Removing retention exposed two more ways to lose data, both worse than the
+    bug CPE-1626 fixed** — found independently by review and UAT on the first
+    version of the CPE-1626 fix, before it merged:
+    1. **Closing the whole Agent Deck reaps the console process**, so a
+       still-running session never gets a real `ended` announcement at all. The
+       `endedAt` gate correctly refused to flush it (it genuinely hadn't ended) —
+       but the deck-close path then wiped the whole metrics store anyway, so the
+       refusal turned into total loss instead of an incomplete-but-honest row.
+       Fixed by flushing every session **forcibly** right before the store clears
+       (`flushAllSessionsForcibly`, called from `closeAllConsoles` in
+       `App.svelte`): a session with no real end gets its current activity
+       persisted as-is, with `endedAt` stamped at flush time and a new
+       `endedCleanly: false` marker on the record — real numbers, honestly
+       labelled as not a clean end, never silently dropped and never faked as a
+       normal finish.
+    2. **A session that ends while paused, with a sibling still armed**, used to
+       sit unflushed — the "stop the removed" loop only ever looked at sessions
+       still in the armed set, and a paused session had already left it. Not
+       permanently lost (a later reconcile that drains the armed set to empty
+       still catches it), but deferred, and at risk of loss path 1 if the deck
+       closed first. Fixed by flushing on the session's own lifecycle event
+       instead of on watch/arm state: `agentSessions.ts`'s `ingestSessionState`
+       now calls `flushSession` the instant a real `ended` announcement lands,
+       regardless of whether that session happens to be armed — which also
+       resolves the deferred-visibility side effect for free.
 - It observes; it does not drive the agent. No agent control surface lives here.
 - It should be implementable as an additive layer over the existing filesystem
   commands rather than a rewrite of them.

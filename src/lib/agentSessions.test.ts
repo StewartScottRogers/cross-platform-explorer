@@ -1,11 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   parseSessionAnnouncement,
   applySessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
+
+// vi.mock is hoisted; the flush-on-ended hook (CPE-1626) calls through to `commands.metricsRecord` —
+// mock it the same way agentSessionMetrics.test.ts does so the hook's real network call is observable.
+const { metricsRecord } = vi.hoisted(() => ({ metricsRecord: vi.fn() }));
+vi.mock("./bindings.gen", () => ({ commands: { metricsRecord } }));
+
 import { watchTargetFor, watchTargets } from "./agentSessions";
 import { ingestSessionState, currentSessions } from "./agentSessions";
+import { clearAgentSessionMetrics, ingestDiffsForMetrics } from "./agentSessionMetrics";
 
 const started = (id: string, cwd = "Z:/repo") =>
   `session:${JSON.stringify({ event: "started", sessionId: id, agentId: "claude", agentName: "Claude Code", provider: "openrouter", model: "sonnet", cwd })}`;
@@ -146,5 +153,43 @@ describe("watchTargets (CPE-1606/1625/1626 — arms exactly the session(s) at th
     const running = [sess("s1", "/work/api")];
     expect(watchTargets(running, "/work/api")).toEqual(running);
     expect(watchTargets([], "/work/api")).toEqual([]); // ended: gone from `sessions` entirely
+  });
+});
+
+describe("ingestSessionState: flush-on-ended hook (CPE-1626 loss path 2)", () => {
+  beforeEach(() => {
+    metricsRecord.mockReset();
+    metricsRecord.mockResolvedValue({ status: "ok", data: null });
+    clearAgentSessionMetrics();
+  });
+
+  it("flushes a session's metrics row the INSTANT its `ended` announcement is ingested, regardless of arm/watch state", async () => {
+    // This module has no idea whether the session is currently armed — that's the point (CPE-1626):
+    // before this hook, the only flush trigger lived in App.svelte's `reconcileAgentWatch`, which never
+    // even looks at a session that's already unarmed (paused). Flushing directly here, at the actual
+    // lifecycle event, makes the flush unconditional on watch/arm state entirely.
+    ingestSessionState(started("s-flush", "/work/api"));
+    ingestDiffsForMetrics([{ path: "/work/api/a.txt", before: "", after: "hello", actor: "s-flush" }]);
+
+    ingestSessionState(ended("s-flush"));
+    // `flushSession` is called fire-and-forget (not awaited by `ingestSessionState`); its synchronous
+    // prefix (guard checks + marking `flushedSessionIds`) has already run by the time this line executes
+    // (JS is single-threaded), but the actual `metricsRecord` call is behind a microtask — flush it.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.sessionId).toBe("s-flush");
+    expect(rec.editCount).toBe(1);
+    expect(rec.endedCleanly).toBe(true); // a real `ended` announcement — never a forced flush
+  });
+
+  it("does not flush on `started` — only a genuine `ended` triggers it", async () => {
+    ingestSessionState(started("s-live", "/work/api"));
+    ingestDiffsForMetrics([{ path: "/work/api/a.txt", before: "", after: "hello", actor: "s-live" }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(metricsRecord).not.toHaveBeenCalled();
   });
 });
