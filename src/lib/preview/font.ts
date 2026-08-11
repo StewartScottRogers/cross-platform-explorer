@@ -57,26 +57,110 @@ export function capGlyphs(codepoints: number[], cap: number = GLYPH_GRID_CAP): G
   };
 }
 
+/** Codepoints a glyph-grid cell should never show even when the font defines a glyph for them: they
+ *  render as blank/invisible tiles, which just wastes a grid cell (CPE-1593 UAT: since `sampleCoverage`'s
+ *  input is sorted ascending, cell 0 was ALWAYS one of these — `U+0020` space for arial, `U+0000` NUL for
+ *  malgun, `U+000C` form feed for seguisym). Covers the Unicode categories that matter in practice — Cc
+ *  (C0/C1 controls), Zs (space separators), and the common Cf ("format", i.e. invisible-by-design)
+ *  characters — not an exhaustive Unicode category database (no new dependency for one). */
+function isDisplayableCodepoint(cp: number): boolean {
+  // Cc: C0 and C1 controls.
+  if (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)) return false;
+  // Zs: space separators.
+  if (cp === 0x20 || cp === 0xa0 || cp === 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp === 0x202f || cp === 0x205f || cp === 0x3000) {
+    return false;
+  }
+  // Cf: the common invisible "format character" cases (soft hyphen, zero-width space/joiners, bidi
+  // marks, BOM, interlinear annotation anchors).
+  if (
+    cp === 0xad ||
+    (cp >= 0x200b && cp <= 0x200f) ||
+    (cp >= 0x202a && cp <= 0x202e) ||
+    (cp >= 0x2060 && cp <= 0x2064) ||
+    (cp >= 0x2066 && cp <= 0x206f) ||
+    cp === 0xfeff ||
+    (cp >= 0xfff9 && cp <= 0xfffb)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/** Unicode ranges reserved a slice of the sample budget, when the font's coverage includes them, ahead of
+ *  evenly sampling the rest — the densely-useful "common Latin" range a user opens a font expecting to
+ *  see first. Checked in codepoint order, so the reserved slice comes out front-loaded with punctuation,
+ *  then digits, then the alphabet, in natural reading order. */
+const RESERVED_LOW_BLOCKS: readonly { start: number; end: number }[] = [
+  { start: 0x21, end: 0x7e }, // Basic Latin, printable (94 codepoints: digits, A–Z, a–z, punctuation)
+  { start: 0xa1, end: 0xff }, // Latin-1 Supplement
+];
+
+/** Share of the cap reserved for {@link RESERVED_LOW_BLOCKS}, capped by however much of those blocks the
+ *  font actually covers — so a font that doesn't cover them (Malgun Gothic "barely touches ASCII") pays
+ *  nothing; the reservation only activates for coverage the font actually has. At the default 200-cell
+ *  cap this reserves up to 100 cells — comfortably more than the full 94-codepoint Basic-Latin-printable
+ *  run, so a font covering ordinary ASCII always gets the complete alphabet + digits, not a diluted
+ *  fragment of it (CPE-1593 UAT: pure even-stride sampling showed Arial only 5 of 200 cells in printable
+ *  ASCII — `1, C, T, f, w` — losing the alphabet/digit run entirely). */
+const RESERVED_LOW_BLOCK_SHARE = 0.5;
+
 /** Evenly sample at most `cap` codepoints across a SORTED coverage list, so a capped grid shows a
  *  representative spread of what the font covers (touching multiple Unicode blocks) rather than an
  *  arbitrary run of consecutive low codepoints from the front of the list — a CJK font's cmap, sorted
  *  ascending, would otherwise show only the first Unicode block it happens to define (CPE-1593: "prefer a
- *  meaningful spread over an arbitrary first-N slice"). */
+ *  meaningful spread over an arbitrary first-N slice"). Two refinements on top of plain even-stride
+ *  sampling (both CPE-1593 UAT findings against real fonts):
+ *
+ *  - Blank/invisible codepoints (control characters, whitespace — see {@link isDisplayableCodepoint}) are
+ *    filtered out before sampling, so a grid cell is never wasted on an invisible tile.
+ *  - A share of the budget is reserved for {@link RESERVED_LOW_BLOCKS} (ordinary printable Latin) when the
+ *    font's coverage includes them, so an ordinary Latin-script font (the common case — Arial is the font
+ *    people preview most) still shows its alphabet up front instead of getting diluted by even-stride
+ *    sampling across its full (often much larger) Unicode coverage. A font whose coverage barely touches
+ *    those blocks (a CJK font like Malgun Gothic) is unaffected — the reservation is capped by what the
+ *    font ACTUALLY covers there, so the rest of its budget still evenly spans its real (e.g. Hangul/Han)
+ *    coverage exactly as before.
+ */
 export function sampleCoverage(codepoints: number[], cap: number = GLYPH_GRID_CAP): GlyphGrid {
-  if (codepoints.length <= cap) {
-    return { shown: codepoints, total: codepoints.length, truncated: false, source: "coverage" };
+  const visible = codepoints.filter(isDisplayableCodepoint);
+  if (visible.length <= cap) {
+    return { shown: visible, total: visible.length, truncated: false, source: "coverage" };
   }
-  const shown: number[] = [];
-  const stride = codepoints.length / cap;
-  for (let i = 0; i < cap; i++) shown.push(codepoints[Math.floor(i * stride)]);
-  return { shown, total: codepoints.length, truncated: true, source: "coverage" };
+
+  const isReservedLowBlock = (cp: number) => RESERVED_LOW_BLOCKS.some((r) => cp >= r.start && cp <= r.end);
+  const reservedPool = visible.filter(isReservedLowBlock); // already ascending — `visible` is sorted
+  const reservedBudget = Math.min(reservedPool.length, Math.ceil(cap * RESERVED_LOW_BLOCK_SHARE));
+  const reservedShown = reservedPool.slice(0, reservedBudget);
+  const reservedShownSet = new Set(reservedShown);
+
+  // The rest of the budget is spent evenly across everything NOT already shown — including any leftover
+  // reserved-block codepoints that didn't fit in reservedBudget, blended in with the font's other coverage
+  // rather than dropped outright.
+  const rest = visible.filter((cp) => !reservedShownSet.has(cp));
+  const remainingCap = cap - reservedShown.length;
+  let restShown: number[];
+  if (rest.length <= remainingCap) {
+    restShown = rest;
+  } else {
+    restShown = [];
+    const stride = rest.length / remainingCap;
+    for (let i = 0; i < remainingCap; i++) restShown.push(rest[Math.floor(i * stride)]);
+  }
+
+  const shown = [...reservedShown, ...restShown].sort((a, b) => a - b);
+  return { shown, total: visible.length, truncated: true, source: "coverage" };
 }
 
-/** Build the glyph grid to render: real `cmap` coverage when available (a non-empty, sorted codepoint
- *  list), otherwise the fixed Latin fallback sample — the single seam `FontPreview.svelte` calls after
- *  attempting to read+parse the font's `cmap` table (CPE-1593). */
+/** Build the glyph grid to render: real `cmap` coverage when available, otherwise the fixed Latin fallback
+ *  sample — the single seam `FontPreview.svelte` calls after attempting to read+parse the font's `cmap`
+ *  table (CPE-1593). Also falls back when coverage is non-empty but entirely non-displayable after
+ *  {@link sampleCoverage}'s filtering (a pathological font whose cmap covers only control/whitespace
+ *  codepoints) — an empty "real coverage" grid would be worse than the honest fallback sample. */
 export function glyphGridFromCoverage(coverage: number[] | null): GlyphGrid {
-  if (coverage && coverage.length > 0) return sampleCoverage(coverage);
+  if (coverage && coverage.length > 0) {
+    const sampled = sampleCoverage(coverage);
+    if (sampled.shown.length > 0) return sampled;
+  }
   return capGlyphs(FONT_GLYPH_CANDIDATES);
 }
 
@@ -401,6 +485,17 @@ function parseCmapFormat4(view: DataView, bytes: Uint8Array, offset: number): nu
   const idDeltaOff = startCodeOff + segCountX2;
   const idRangeOff = idDeltaOff + segCountX2;
   const out: number[] = [];
+  // Bounds the WHOLE traversal by codepoints examined, not codepoints pushed (CPE-1593 code review): the
+  // `idRangeOffset !== 0` indirection branch below can `continue` — skip a codepoint without pushing it —
+  // for every single codepoint in a segment (a crafted glyphId pointer that's always out of bounds), so a
+  // push-only counter never fires and the loop degenerates to the full BMP span per segment. A crafted
+  // ~160 KB cmap with segCount at the MAX_CMAP_ENTRIES ceiling, each segment spanning the BMP via that
+  // indirection with an always-out-of-bounds offset, drove this to ~1.31 BILLION iterations (~8.8s of
+  // synchronous UI-thread freeze) before this counter was added — the preview opens automatically on file
+  // selection, so a hostile downloaded font could freeze the app. `examined` counts every codepoint the
+  // inner loop LOOKS AT, pushed or not, so the cap always fires — a no-op for any real font (100,000 is
+  // comfortably above the BMP's 65,536 codepoints).
+  let examined = 0;
   for (let i = 0; i < segCount; i++) {
     const endCodeAddr = endCodeOff + i * 2;
     const startCodeAddr = startCodeOff + i * 2;
@@ -414,6 +509,7 @@ function parseCmapFormat4(view: DataView, bytes: Uint8Array, offset: number): nu
     if (startCode > endCode) continue; // malformed segment — skip
     if (startCode === 0xffff && endCode === 0xffff) continue; // required terminator segment — no real glyphs
     for (let c = startCode; c <= endCode; c++) {
+      if (++examined > MAX_COVERAGE_CODEPOINTS) return out;
       let glyphId: number;
       if (idRangeOffset === 0) {
         glyphId = (c + idDelta) & 0xffff;
@@ -424,7 +520,6 @@ function parseCmapFormat4(view: DataView, bytes: Uint8Array, offset: number): nu
         glyphId = raw === 0 ? 0 : (raw + idDelta) & 0xffff;
       }
       if (glyphId !== 0) out.push(c); // glyph 0 is always .notdef — not real coverage
-      if (out.length >= MAX_COVERAGE_CODEPOINTS) return out;
     }
   }
   return out;

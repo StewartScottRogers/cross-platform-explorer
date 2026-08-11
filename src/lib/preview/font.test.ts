@@ -59,22 +59,86 @@ describe("capGlyphs", () => {
 
 describe("sampleCoverage", () => {
   it("passes a list at or under the cap through unchanged, tagged as the coverage source", () => {
-    const result = sampleCoverage([10, 20, 30], 5);
-    expect(result).toEqual({ shown: [10, 20, 30], total: 3, truncated: false, source: "coverage" });
+    const result = sampleCoverage([0x41, 0x42, 0x43], 5); // A, B, C — displayable, unlike control codepoints
+    expect(result).toEqual({ shown: [0x41, 0x42, 0x43], total: 3, truncated: false, source: "coverage" });
   });
 
-  it("evenly samples across the full list rather than taking a prefix, when over the cap", () => {
-    // A big sorted range spanning several "blocks" — a prefix slice would only ever show the front.
-    const big = Array.from({ length: 10_000 }, (_, i) => i);
+  it("evenly samples across the REST of the coverage (outside the reserved Latin blocks) rather than taking a prefix, when over the cap", () => {
+    // A big sorted range of CJK-ish codepoints (well above the reserved Latin blocks, and above every
+    // control/whitespace codepoint filtered out below) — isolates the even-sampling behaviour from the
+    // Latin-reservation behaviour covered by its own test below.
+    const big = Array.from({ length: 10_000 }, (_, i) => 0x4e00 + i);
     const result = sampleCoverage(big, 100);
     expect(result.shown.length).toBe(100);
     expect(result.truncated).toBe(true);
     expect(result.total).toBe(10_000);
     // Not a prefix: the sample reaches well past what the first 100 entries of `big` would cover.
-    expect(Math.max(...result.shown)).toBeGreaterThan(9000);
+    expect(Math.max(...result.shown)).toBeGreaterThan(0x4e00 + 9000);
     // Ascending stride means it should still be sorted and touch the low end too.
-    expect(result.shown[0]).toBe(0);
+    expect(result.shown[0]).toBe(0x4e00);
     expect([...result.shown]).toEqual([...result.shown].sort((a, b) => a - b));
+  });
+
+  // --- CPE-1593 UAT regression: Latin sampling bias -----------------------------------------------
+  // Pure even-stride sampling over Arial's full cmap coverage (3,506 codepoints) diluted the 200-cell grid
+  // down to 5 codepoints in printable ASCII — `1, C, T, f, w` — losing the alphabet/digit run entirely.
+  // A user opening the font people preview most (plain Latin-script fonts) should still see the alphabet.
+
+  it("for a font whose coverage includes Basic Latin, the grid contains the full A–Z and 0–9 run", () => {
+    // Simulates Arial-shaped coverage: full Basic Latin printable + Latin-1 Supplement (what a Latin-script
+    // font typically covers), PLUS a large tail of other-script codepoints diluting it — the exact shape
+    // that broke pure even-stride sampling.
+    const latin = [...Array.from({ length: 94 }, (_, i) => 0x21 + i), ...Array.from({ length: 95 }, (_, i) => 0xa1 + i)];
+    const tail = Array.from({ length: 5000 }, (_, i) => 0x0600 + i); // Arabic onward — a large "everything else"
+    const coverage = [...latin, ...tail];
+
+    const result = sampleCoverage(coverage, GLYPH_GRID_CAP);
+    const shown = new Set(result.shown);
+    for (let cp = 0x41; cp <= 0x5a; cp++) expect(shown.has(cp)).toBe(true); // A–Z
+    for (let cp = 0x61; cp <= 0x7a; cp++) expect(shown.has(cp)).toBe(true); // a–z
+    for (let cp = 0x30; cp <= 0x39; cp++) expect(shown.has(cp)).toBe(true); // 0–9
+  });
+
+  it("a font whose coverage barely touches the reserved Latin blocks pays (almost) nothing for the reservation", () => {
+    // Simulates Malgun-Gothic-shaped coverage: essentially no Basic-Latin/Latin-1 overlap, dominated by a
+    // large "Hangul/Han-like" range — the reservation should end up tiny (bounded by what's ACTUALLY
+    // covered there, not a fixed fraction), so the grid still spends its budget on the font's real coverage.
+    const hangulLike = Array.from({ length: 20_000 }, (_, i) => 0xac00 + i);
+    const result = sampleCoverage(hangulLike, GLYPH_GRID_CAP);
+    expect(result.shown.length).toBe(GLYPH_GRID_CAP);
+    // None of the reserved Latin blocks are in this font's coverage at all, so the grid is 100% the font's
+    // real range — spread across it, not clustered near the front.
+    expect(Math.min(...result.shown)).toBeGreaterThanOrEqual(0xac00);
+    expect(Math.max(...result.shown)).toBeGreaterThan(0xac00 + 15_000);
+  });
+
+  // --- CPE-1593 UAT regression: control/whitespace filtering --------------------------------------
+  // Coverage is sorted ascending, so cell 0 was ALWAYS an invisible codepoint before this fix: U+0020
+  // space for arial, U+0000 NUL for malgun, U+000C form feed for seguisym.
+
+  it("never shows a control or whitespace codepoint", () => {
+    // A synthetic coverage set dominated by control/whitespace codepoints at the low end (like every real
+    // font's cmap, sorted ascending) plus real displayable codepoints after them.
+    const controlsAndWhitespace = [
+      ...Array.from({ length: 32 }, (_, i) => i), // C0 controls, U+0000–U+001F
+      0x20, // space
+      0xa0, // NBSP
+      ...Array.from({ length: 33 }, (_, i) => 0x7f + i), // U+007F–U+009F (C1 controls)
+      0x200b, // zero-width space
+      0xfeff, // BOM
+    ];
+    const displayable = Array.from({ length: 500 }, (_, i) => 0x0400 + i); // Cyrillic-ish block
+    const result = sampleCoverage([...controlsAndWhitespace, ...displayable], 50);
+    for (const cp of result.shown) {
+      expect(cp).toBeGreaterThanOrEqual(0x0400); // none of the controls/whitespace survived
+    }
+  });
+
+  it("drops control/whitespace codepoints from `total` too, not just `shown`", () => {
+    const result = sampleCoverage([0x00, 0x20, 0x41, 0x42, 0x43], 200);
+    expect(result.shown).toEqual([0x41, 0x42, 0x43]);
+    expect(result.total).toBe(3);
+    expect(result.truncated).toBe(false);
   });
 });
 
@@ -640,6 +704,52 @@ describe("parseCmapCoverage", () => {
     const subtableOffset = 12; // matches buildCmapTable's layout (4 header + 8 record)
     view.setUint16(subtableOffset + 6, 0xfffe); // implausible segCountX2 against the buffer's real size
     expect(() => parseCmapCoverage(cmap)).not.toThrow();
+  });
+
+  it("bounds the WHOLE traversal by codepoints EXAMINED, not pushed — a crafted format-4 idRangeOffset-indirection attack must return promptly (CPE-1593 code review)", () => {
+    // Attack shape: many segments, each spanning nearly the full BMP, each using the idRangeOffset
+    // indirection path with an offset chosen so EVERY glyph-id lookup lands outside the buffer. Before this
+    // fix, `continue`-without-pushing on that path meant the codepoint cap (then bounded on codepoints
+    // PUSHED) never fired, so the inner loop ran to completion for every segment regardless of the cap —
+    // the reviewer measured ~1.31 BILLION iterations / ~8.8s of synchronous UI-thread freeze at
+    // segCount=20000 (the MAX_CMAP_ENTRIES ceiling); segCount=2000 alone took ~1.4s. The preview opens
+    // automatically on file selection, so a hostile downloaded font could freeze the whole app.
+    const segCount = 2000;
+    const segCountX2 = segCount * 2;
+    const headerLen = 14;
+    const endCodeOff = headerLen;
+    const startCodeOff = endCodeOff + segCountX2 + 2; // +2 skips reservedPad
+    const idDeltaOff = startCodeOff + segCountX2;
+    const idRangeOff = idDeltaOff + segCountX2;
+    const subtableLen = idRangeOff + segCountX2; // no glyphIdArray needed — every indirection lookup misses
+
+    const headerAndRecordLen = 12; // cmap header(4) + one encoding record(8)
+    const buf = new Uint8Array(headerAndRecordLen + subtableLen);
+    const view = new DataView(buf.buffer);
+    view.setUint16(0, 0); // cmap version
+    view.setUint16(2, 1); // numTables
+    view.setUint16(4, 3); // platformID: Windows
+    view.setUint16(6, 1); // encodingID: BMP Unicode
+    view.setUint32(8, headerAndRecordLen); // subtable offset
+
+    const sub = headerAndRecordLen;
+    view.setUint16(sub, 4); // format 4
+    view.setUint16(sub + 6, segCountX2);
+    for (let i = 0; i < segCount; i++) {
+      view.setUint16(sub + endCodeOff + i * 2, 0xfffe); // every segment spans nearly the full BMP
+      view.setUint16(sub + startCodeOff + i * 2, 0);
+      view.setInt16(sub + idDeltaOff + i * 2, 0);
+      view.setUint16(sub + idRangeOff + i * 2, 0xffff); // huge offset — every lookup lands out of bounds
+    }
+
+    const t0 = performance.now();
+    const coverage = parseCmapCoverage(buf);
+    const elapsedMs = performance.now() - t0;
+
+    expect(elapsedMs).toBeLessThan(200); // was ~1.4s pre-fix for this exact shape at segCount=2000
+    // Nothing was pushed (every lookup missed), but the parse still completed promptly — that's the point:
+    // the TRAVERSAL itself is bounded even though the (legitimate) result is empty.
+    expect(coverage).toEqual([]);
   });
 
   it("degrades gracefully (no throw, returns partial coverage) for a format-12 subtable whose declared numGroups runs past EOF", () => {
