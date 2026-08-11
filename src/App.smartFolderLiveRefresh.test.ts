@@ -11,7 +11,7 @@
  * bridge (which doesn't exist in jsdom).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 import App from "./App.svelte";
 import { resetSettings } from "./lib/settings";
 import { savedSearches, addSavedSearch } from "./lib/savedSearchStore";
@@ -184,5 +184,59 @@ describe("tag smart folder live-refresh on filesystem change (CPE-1230)", () => 
       const callsAfter = invoke.mock.calls.filter(([cmd]) => cmd === "entries_for_paths").length;
       expect(callsAfter).toBeGreaterThan(callsBefore);
     }, { timeout: 2000 });
+  });
+});
+
+describe("onDestroy releases the live-refresh debounce/listener even while still open (CPE-1633)", () => {
+  it("cancels the pending debounce timer and unlistens folder-watch when App is destroyed mid-open", async () => {
+    // Spy on the REAL global timer functions BEFORE mounting — `smartRefreshDebounce = new
+    // TrailingDebounce(300)` captures `setTimeout`/`clearTimeout` as constructor-default-parameter
+    // references at component-instance creation time, so a spy installed after `render(App)` would miss
+    // it. No fake timers / no waiting out the 300ms window either — that's the slow, flaky pattern this
+    // ticket exists to remove. We only need to observe whether the scheduled debounce timer gets
+    // cleared, not let it actually fire.
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    const clearTimeoutSpy = vi.spyOn(window, "clearTimeout");
+
+    addSavedSearch("Markdown docs", [{ kind: "ext", exts: ["md"] }], "all", "C:\\d");
+    render(App);
+    await screen.findAllByText("Local Disk (C:)");
+
+    // Baseline BEFORE opening the search — `folder-watch` also has an independent consumer
+    // (`folderWatch.ts`'s watch-rule execution, per CPE-1230's design note), so the fix must be checked
+    // by diffing which handler the search's OWN listener added, not by asserting the whole event's
+    // handler set goes to zero.
+    const baselineHandlers = new Set(listenHandlers.get("folder-watch") ?? []);
+
+    await fireEvent.click(await screen.findByText("Markdown docs"));
+    await waitFor(() => expect(screen.getByText("keep.md")).toBeTruthy());
+
+    // The live-refresh listener is armed while the structured search is open.
+    const armedHandlers = listenHandlers.get("folder-watch")!;
+    const smartRefreshHandler = [...armedHandlers].find((h) => !baselineHandlers.has(h));
+    expect(smartRefreshHandler).toBeDefined(); // sanity: the search really armed its own listener
+
+    setTimeoutSpy.mockClear();
+
+    // Land a relevant folder-watch batch — this SCHEDULES the 300ms trailing debounce
+    // (`smartRefreshDebounce.schedule(...)`) without firing it yet.
+    emitFake("folder-watch", [{ path: "C:\\d\\new.md", kind: "created" }]);
+
+    const debounceCallIndex = setTimeoutSpy.mock.calls.findIndex(([, delay]) => delay === 300);
+    expect(debounceCallIndex).toBeGreaterThanOrEqual(0); // sanity: the debounce really was armed
+    const debounceHandle = setTimeoutSpy.mock.results[debounceCallIndex]!.value;
+
+    // Destroy the component WITHOUT closing the search first — mirrors a window close mid-navigation in
+    // the real app, or @testing-library/svelte's own afterEach(cleanup()) in tests.
+    cleanup();
+
+    // The pending debounce timer must be cancelled on destroy...
+    expect(clearTimeoutSpy).toHaveBeenCalledWith(debounceHandle);
+    // ...and the search's OWN folder-watch listener must be released too (the unrelated baseline
+    // consumer, if any, is out of scope for this ticket and is left alone).
+    expect(armedHandlers.has(smartRefreshHandler!)).toBe(false);
+
+    setTimeoutSpy.mockRestore();
+    clearTimeoutSpy.mockRestore();
   });
 });

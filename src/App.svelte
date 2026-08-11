@@ -6172,6 +6172,8 @@
 
   onDestroy(() => {
     if (verifyTimer) clearInterval(verifyTimer); // CPE-875: stop the periodic integrity re-verify
+    smartRefreshDebounce.cancel(); // CPE-1633: close/close-only teardown missed the destroy-while-open case
+    smartRefreshUnlisten?.();
     unlistenSessions?.();
     unlistenTransferDone?.();
     unlistenOpenDocs?.();
