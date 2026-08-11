@@ -365,6 +365,21 @@ async binaryDisasm(path: string) : Promise<Result<BinaryInstruction[], string>> 
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Structured CLR metadata (assembly identity, `AssemblyRef`s, capped `TypeDef`/`MethodDef` name
+ * listings) for a managed .NET PE (CPE-1596, epic CPE-1562 "Binary Inspector" slice 3) —
+ * `Ok(None)` for a native (non-managed) PE, per [`cpe_server::model::BinaryInfo::is_managed`]'s
+ * contract. Parser lives in `cpe_server::dotnet_metadata::read`; this is a thin `spawn_blocking`
+ * dispatcher, same size guard as [`binary_info`]/[`binary_disasm`].
+ */
+async dotnetMetadata(path: string) : Promise<Result<DotnetMetadata | null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("dotnet_metadata", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async dataBrowserSources(path: string) : Promise<Result<string[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("data_browser_sources", { path }) };
@@ -3588,7 +3603,19 @@ export type BinaryInfo = { format: BinaryFormat;
  * "x86-64", "ARM64"; a Mach-O fat/universal binary joins each slice's label with ", "). `None`
  * when the leading bytes didn't decode to a recognized architecture.
  */
-arch: string | null; is_64: boolean; sections: BinarySection[]; imports: BinaryImport[]; exports: BinaryExport[]; symbols: BinarySymbol[]; 
+arch: string | null; is_64: boolean; 
+/**
+ * `true` when this is a managed .NET/CLR image — a [`BinaryFormat::Pe`] whose data directory
+ * #14 (`IMAGE_COR20_HEADER`, the "CLI header") is present and non-empty (CPE-1596, epic
+ * CPE-1562 "Binary Inspector" slice 3). Always `false` for [`BinaryFormat::Elf`]/[`BinaryFormat::MachO`].
+ * This is the flag that lets a caller tell a managed PE apart from a native one — the concrete
+ * motivation was UAT on CPE-1585 finding that x86 disassembly of `mscorlib.dll` produced 2,048
+ * "instructions" that were really the decoder chewing on CIL bytecode, not native machine code;
+ * a caller can check this flag before trusting `disasm` on a PE. See
+ * [`crate::dotnet_metadata::read`] for the structured CLR metadata itself (assembly identity,
+ * `AssemblyRef`s, `TypeDef`/`MethodDef` names), fetched separately since it's a heavier parse.
+ */
+is_managed: boolean; sections: BinarySection[]; imports: BinaryImport[]; exports: BinaryExport[]; symbols: BinarySymbol[]; 
 /**
  * x86/x64 disassembly of the format's code section (CPE-1581), capped at
  * [`MAX_DISASM_INSTRUCTIONS`]. Empty (never an error) for a non-x86/x64 architecture, a format
@@ -4137,6 +4164,70 @@ export type DocInfoColumn = "Title" | "Author" | "Subject" | "Keywords" | "Creat
  * whether the file cap truncated the walk. Mirrors [`crate::image_similarity::SimResult`].
  */
 export type DocSimResult = { groups: DocGroup[]; files_scanned: number; truncated: boolean }
+/**
+ * The managed assembly's own identity, from the single-row `Assembly` table (ECMA-335 II.22.2).
+ */
+export type DotnetAssemblyIdentity = { name: string; 
+/**
+ * "Major.Minor.Build.Revision", e.g. "4.0.0.0".
+ */
+version: string; 
+/**
+ * `None` for the neutral culture (an empty string in the `#Strings` heap).
+ */
+culture: string | null; 
+/**
+ * The `PublicKey` blob, hex-encoded. `None` when the assembly isn't strong-named (an empty
+ * blob). This is the raw public key blob, not the derived 8-byte "public key token" (deriving
+ * that requires a SHA-1 hash, and this reader adds no new crypto dependency for it).
+ */
+public_key: string | null; 
+/**
+ * Raw `Flags` column (ECMA-335 II.23.1.2 `AssemblyFlags`), exposed unparsed so a caller can
+ * decode bits like `PublicKey` (0x0001) or `Retargetable` (0x0100) as needed.
+ */
+flags: number }
+/**
+ * One row of the `AssemblyRef` table (ECMA-335 II.22.5): a managed assembly this one references.
+ */
+export type DotnetAssemblyRef = { name: string; version: string; culture: string | null; 
+/**
+ * The `PublicKeyOrToken` blob, hex-encoded — usually the compact 8-byte token (e.g.
+ * `b77a5c561934e089` for `mscorlib`), occasionally a full public key when the `PublicKey` flag
+ * bit is set. `None` when the blob is empty (unsigned reference).
+ */
+public_key_token: string | null }
+/**
+ * Structured CLR metadata for a managed PE (CPE-1596), populated by [`crate::dotnet_metadata::read`]
+ * via a hand-rolled ECMA-335 `#~` table-stream walk. `assembly_refs`/`types`/`methods` are each
+ * capped at [`MAX_BINARY_LIST_ENTRIES`] and built skip-on-error/skip-on-overflow, so a
+ * truncated/adversarial assembly degrades to a partial (or empty) result rather than failing the
+ * whole read — mirroring [`BinaryInfo`]'s own contract.
+ */
+export type DotnetMetadata = { 
+/**
+ * The metadata root's version string (ECMA-335 II.24.2.1), e.g. "v4.0.30319" — the CLR runtime
+ * this assembly was compiled against, not necessarily the one running it.
+ */
+runtime_version: string; 
+/**
+ * `None` when the single-row `Assembly` table is absent (a module/netmodule, not an assembly
+ * manifest, or a `#~` stream this reader couldn't locate/parse).
+ */
+assembly: DotnetAssemblyIdentity | null; assembly_refs: DotnetAssemblyRef[]; types: DotnetTypeDef[]; methods: DotnetMethodDef[] }
+/**
+ * One row of the `MethodDef` table (ECMA-335 II.22.26), name-only.
+ */
+export type DotnetMethodDef = { name: string }
+/**
+ * One row of the `TypeDef` table (ECMA-335 II.22.37), name-only (CPE-1596's scope stops at
+ * "legible before the full decompile epic lands" — no field/method-list resolution here).
+ */
+export type DotnetTypeDef = { name: string; 
+/**
+ * Empty for a type in the global namespace.
+ */
+namespace: string }
 /**
  * A set of byte-identical files: their shared size + hash and every path.
  */

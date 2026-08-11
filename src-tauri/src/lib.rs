@@ -955,6 +955,21 @@ async fn binary_disasm(path: String) -> Result<Vec<cpe_server::model::BinaryInst
     .await.map_err(|e| e.to_string())?
 }
 
+/// Structured CLR metadata (assembly identity, `AssemblyRef`s, capped `TypeDef`/`MethodDef` name
+/// listings) for a managed .NET PE (CPE-1596, epic CPE-1562 "Binary Inspector" slice 3) —
+/// `Ok(None)` for a native (non-managed) PE, per [`cpe_server::model::BinaryInfo::is_managed`]'s
+/// contract. Parser lives in `cpe_server::dotnet_metadata::read`; this is a thin `spawn_blocking`
+/// dispatcher, same size guard as [`binary_info`]/[`binary_disasm`].
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn dotnet_metadata(path: String) -> Result<Option<cpe_server::model::DotnetMetadata>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::dotnet_metadata::read(&path)
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
 // Structured-data browser (CPE-849, epic CPE-721): list a data file's sources (SQLite tables/views,
 // Excel/ODS sheets), read a page of typed rows, and run a read-only SQLite query — the interactive-grid
 // counterparts to `read_preview_info`'s text summary. Thin async dispatchers into `cpe_server::data_browser`.
@@ -11105,6 +11120,7 @@ pub fn run() {
             read_preview_info,
             binary_info,
             binary_disasm,
+            dotnet_metadata,
             data_browser_sources,
             data_browser_page,
             data_browser_query,
@@ -11959,6 +11975,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         read_preview_info,
         binary_info,
         binary_disasm,
+        dotnet_metadata,
         data_browser_sources,
         data_browser_page,
         data_browser_query,
@@ -13658,6 +13675,27 @@ overlay / overlay rw,relatime 0 0
 
         let disasm = tauri::async_runtime::block_on(binary_disasm(exe)).expect("binary_disasm dispatches");
         assert_eq!(disasm, info.disasm, "binary_disasm must return the same list embedded in binary_info");
+    }
+
+    // ---- dotnet_metadata command smoke test (CPE-1596, epic CPE-1562) --------------------------------
+    // Confirms the thin dispatcher reaches `cpe_server::dotnet_metadata::read` — the parser itself
+    // (metadata root / `#~` table walk / heap resolution) is exhaustively tested in `cpe-server`.
+
+    #[cfg(windows)]
+    #[test]
+    fn dotnet_metadata_command_dispatches_and_reports_a_native_exe_as_unmanaged() {
+        // The test executable is a native Rust binary, not a managed .NET assembly, so this must
+        // dispatch cleanly to `Ok(None)` rather than erroring — proving both the String->Path plumbing
+        // and `is_managed`'s "native PE -> None" contract through the real command.
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+        let result = tauri::async_runtime::block_on(dotnet_metadata(exe)).expect("dotnet_metadata dispatches");
+        assert!(result.is_none(), "a native Rust test binary must not be reported as managed: {result:?}");
+
+        // `binary_info` on the same file must agree it's not managed (the two entry points read the
+        // same underlying signal).
+        let info = cpe_server::binary_preview::binary_info(&std::env::current_exe().unwrap().to_string_lossy())
+            .expect("binary_info parses the test exe");
+        assert!(!info.is_managed, "binary_info must also report the native test exe as unmanaged");
     }
 
     // doc-text (rtf/docx/odt/epub) tests moved with the code to `cpe_server::doc_text` (CPE-815).

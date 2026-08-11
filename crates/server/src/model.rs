@@ -212,6 +212,16 @@ pub struct BinaryInfo {
     /// when the leading bytes didn't decode to a recognized architecture.
     pub arch: Option<String>,
     pub is_64: bool,
+    /// `true` when this is a managed .NET/CLR image — a [`BinaryFormat::Pe`] whose data directory
+    /// #14 (`IMAGE_COR20_HEADER`, the "CLI header") is present and non-empty (CPE-1596, epic
+    /// CPE-1562 "Binary Inspector" slice 3). Always `false` for [`BinaryFormat::Elf`]/[`BinaryFormat::MachO`].
+    /// This is the flag that lets a caller tell a managed PE apart from a native one — the concrete
+    /// motivation was UAT on CPE-1585 finding that x86 disassembly of `mscorlib.dll` produced 2,048
+    /// "instructions" that were really the decoder chewing on CIL bytecode, not native machine code;
+    /// a caller can check this flag before trusting `disasm` on a PE. See
+    /// [`crate::dotnet_metadata::read`] for the structured CLR metadata itself (assembly identity,
+    /// `AssemblyRef`s, `TypeDef`/`MethodDef` names), fetched separately since it's a heavier parse.
+    pub is_managed: bool,
     pub sections: Vec<BinarySection>,
     pub imports: Vec<BinaryImport>,
     pub exports: Vec<BinaryExport>,
@@ -220,6 +230,80 @@ pub struct BinaryInfo {
     /// [`MAX_DISASM_INSTRUCTIONS`]. Empty (never an error) for a non-x86/x64 architecture, a format
     /// with no locatable code section, or a code section iced-x86 can't decode from.
     pub disasm: Vec<BinaryInstruction>,
+}
+
+// ---------------------------------------------------------------------------------------------
+// .NET/CLR metadata (CPE-1596, epic CPE-1562 "Binary Inspector" slice 3): a hand-rolled ECMA-335
+// reader (`crate::dotnet_metadata`) walks the CLI header + `#~` compressed metadata tables of a
+// managed PE. `dotnetdll` is GPL and cannot be used, so these DTOs and their parser are hand-rolled
+// against the ECMA-335 spec — see that module's doc comment for the format walkthrough.
+// ---------------------------------------------------------------------------------------------
+
+/// The managed assembly's own identity, from the single-row `Assembly` table (ECMA-335 II.22.2).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DotnetAssemblyIdentity {
+    pub name: String,
+    /// "Major.Minor.Build.Revision", e.g. "4.0.0.0".
+    pub version: String,
+    /// `None` for the neutral culture (an empty string in the `#Strings` heap).
+    pub culture: Option<String>,
+    /// The `PublicKey` blob, hex-encoded. `None` when the assembly isn't strong-named (an empty
+    /// blob). This is the raw public key blob, not the derived 8-byte "public key token" (deriving
+    /// that requires a SHA-1 hash, and this reader adds no new crypto dependency for it).
+    pub public_key: Option<String>,
+    /// Raw `Flags` column (ECMA-335 II.23.1.2 `AssemblyFlags`), exposed unparsed so a caller can
+    /// decode bits like `PublicKey` (0x0001) or `Retargetable` (0x0100) as needed.
+    pub flags: u32,
+}
+
+/// One row of the `AssemblyRef` table (ECMA-335 II.22.5): a managed assembly this one references.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DotnetAssemblyRef {
+    pub name: String,
+    pub version: String,
+    pub culture: Option<String>,
+    /// The `PublicKeyOrToken` blob, hex-encoded — usually the compact 8-byte token (e.g.
+    /// `b77a5c561934e089` for `mscorlib`), occasionally a full public key when the `PublicKey` flag
+    /// bit is set. `None` when the blob is empty (unsigned reference).
+    pub public_key_token: Option<String>,
+}
+
+/// One row of the `TypeDef` table (ECMA-335 II.22.37), name-only (CPE-1596's scope stops at
+/// "legible before the full decompile epic lands" — no field/method-list resolution here).
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DotnetTypeDef {
+    pub name: String,
+    /// Empty for a type in the global namespace.
+    pub namespace: String,
+}
+
+/// One row of the `MethodDef` table (ECMA-335 II.22.26), name-only.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DotnetMethodDef {
+    pub name: String,
+}
+
+/// Structured CLR metadata for a managed PE (CPE-1596), populated by [`crate::dotnet_metadata::read`]
+/// via a hand-rolled ECMA-335 `#~` table-stream walk. `assembly_refs`/`types`/`methods` are each
+/// capped at [`MAX_BINARY_LIST_ENTRIES`] and built skip-on-error/skip-on-overflow, so a
+/// truncated/adversarial assembly degrades to a partial (or empty) result rather than failing the
+/// whole read — mirroring [`BinaryInfo`]'s own contract.
+#[derive(Serialize, Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct DotnetMetadata {
+    /// The metadata root's version string (ECMA-335 II.24.2.1), e.g. "v4.0.30319" — the CLR runtime
+    /// this assembly was compiled against, not necessarily the one running it.
+    pub runtime_version: String,
+    /// `None` when the single-row `Assembly` table is absent (a module/netmodule, not an assembly
+    /// manifest, or a `#~` stream this reader couldn't locate/parse).
+    pub assembly: Option<DotnetAssemblyIdentity>,
+    pub assembly_refs: Vec<DotnetAssemblyRef>,
+    pub types: Vec<DotnetTypeDef>,
+    pub methods: Vec<DotnetMethodDef>,
 }
 
 /// Detailed metadata for the Properties dialog: name/size/dir + modified/created (epoch-ms) + the
