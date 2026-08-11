@@ -121,15 +121,27 @@ in the explorer.
 
 ## Limits / notes
 
-- **"Off means off" holds for a project you never open — a session you never navigate the explorer
-  into stays completely unwatched, no matter how long it runs (CPE-1606).** The nuance is what happens
-  once you *do* open it: the underlying `notify` watcher stays armed for that project for the rest of
-  the session's life, even after you navigate elsewhere — including to a sibling agent's project — so
-  the Radar/Cost/History tabs keep working across every project you've actually looked at this run, and
-  a quick hop between two sibling agent folders doesn't repeatedly tear down and re-arm a watcher.
-  Leaving the folder only hides the strip and file-list badges; ending the agent session (not just
-  navigating away from a project you've visited) is what actually stops watching it. See
-  `AGENT-WATCH.md`'s Boundaries section for the full reasoning.
+- **"Off means off" holds literally, both ways (CPE-1606/CPE-1626).** A session you never navigate the
+  explorer into stays completely unwatched, no matter how long it runs. And once you leave a project
+  you *did* have open, the underlying `notify` watcher genuinely stops — it isn't kept running in the
+  background. Your Cost/History numbers for that session aren't lost when you leave, though: the
+  session is merely **paused**, not ended, so walking back into its folder later picks up right where
+  you left off, and its Cost/History row covers the session's whole lifetime once it actually ends —
+  even if it ends while paused, with other agents still running elsewhere.
+- **Closing the whole Agent Deck still saves what happened so far, honestly labelled.** If you close the
+  Agent Deck (or quit the app) while a session is still running, it never gets the chance to send a
+  proper "ended" signal — its process is simply stopped. That session's activity up to that moment is
+  still persisted to History, but the row is marked as **not a clean end** (its end time is when the
+  deck closed, not the session's real finish, so wall-clock/throughput numbers for that row may
+  undercount). Nothing here guesses at a real end it never saw.
+
+  **The marker is recorded but not yet shown anywhere.** History today displays only aggregate totals —
+  no per-session rows — so a session that was reaped mid-run is currently folded into those totals
+  looking exactly like one that finished normally, and its duration is measured from when you closed the
+  deck rather than when it actually stopped. Surfacing that distinction, and reporting an honest duration
+  for such a row, is tracked as **CPE-1641**. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning
+  (including why an earlier version of this app kept the watcher running after you left a project, and
+  why that's no longer necessary).
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
   the agent's own printed output, not an authoritative source.
 - **Reads are inferred, not observed.** A filesystem watcher can't see a read; the Consulted list and the

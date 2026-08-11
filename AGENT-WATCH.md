@@ -21,9 +21,9 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
 - **Left-pane "Agents" section (CPE-397):** running sessions listed; click one to navigate into its
   Project folder.
 - **Filesystem watcher (CPE-398):** a `notify` watcher on the watched folder streams coalesced
-  create/modify/move/delete events (reads excluded — not observable this way). Armed only for a
-  session whose project folder the explorer has navigated into at least once this run, and retained
-  for that session's whole lifetime once armed (CPE-1606 — see Boundaries below).
+  create/modify/move/delete events (reads excluded — not observable this way). Armed only for the
+  session(s) whose project folder the explorer is currently navigated into; leaving disarms it again
+  (CPE-1606/CPE-1626 — see Boundaries below).
 - **Live view (CPE-399):** the file list annotates touched rows (kind badge + accent, fading);
   an activity strip names the agent and shows recent changes.
 - **Live folder refresh (CPE-401):** created files appear and deleted ones vanish without a manual
@@ -91,21 +91,64 @@ pay the cost. Do not trade away visibility for speed, size, or simplicity.
     "watch every currently-running session unconditionally" reading of that
     briefly violated the boundary above: it armed a filesystem watcher for a
     project the explorer had *never* opened, for as long as that agent session
-    ran (CPE-1606). The fix keeps the multi-session value without spending the
-    boundary: a session's watcher only arms once the explorer has navigated into
-    its project folder at least once **this run** (`markVisited` in
-    `src/lib/agentSessions.ts`). A session never opened stays fully idle — genuinely
-    off means off.
-  - Once a project has been visited, its watcher is **retained** for the rest of
-    that session's life, even after the explorer navigates elsewhere — including
-    to a sibling agent's project. This is deliberate, not a residual leak: tearing
-    the watch down on every navigation would thrash a `notify` watcher on rapid
-    back-and-forth between sibling projects, and would prematurely flush that
-    session's Cost/History row as if it had ended (`reconcileAgentWatch` flushes
-    on removal), fragmenting one live session into two metrics rows. Ending the
-    agent session (not just navigating away) is what actually stops watching a
-    visited project — see `src/docs/explorer-agent-watch.md` for the user-facing
-    framing and the `markVisited` doc comment for the full reasoning.
+    ran (CPE-1606).
+  - CPE-1606's first fix kept the multi-session value without spending the
+    boundary for a *never-opened* project, but it still spent the boundary for a
+    *visited-then-left* one: once armed, a session's watcher was **retained** for
+    the rest of that session's life even after navigating away, because tearing
+    it down called `flushSession` as if the session had ended — and a premature
+    flush corrupted the metrics record (see below). The code comment at the time
+    called the risk "fragmenting one live session into two metrics rows"; that
+    was inaccurate. `flushSession` is guarded so a second flush of the same id is
+    a hard no-op — so the actual failure was **one incomplete row persisted, and
+    every edit made after that premature flush silently and permanently lost**,
+    because the real end-of-session flush became the no-op. Not a visible
+    duplicate; silent data loss.
+  - **CPE-1626 fixed this at the source** instead of leaning on retention:
+    `flushSession` (`src/lib/agentSessionMetrics.ts`) now only persists a row once
+    the session's accumulator has an actual `endedAt` (stamped by a genuine
+    `ended` announcement, never by a mere watch teardown). Unwatching a
+    still-running session — because the explorer navigated away — is now always
+    a safe **pause**: no flush, the accumulator keeps accruing untouched, and
+    walking back into that project's folder later **resumes** the same
+    accumulator, so the session's *whole* lifetime still lands in exactly one
+    row when it truly ends. With the coupling gone, the watcher itself now
+    genuinely disarms on navigate-away — `watchTargets` (`src/lib/agentSessions.ts`)
+    arms exactly the session(s) at the CURRENT deepest project match, nothing
+    more, with no sticky "visited this run" set. "Off means off" now holds
+    literally both for a project you never open and for one you've since left.
+    No thrash/watcher-cost measurements were taken to justify keeping retention
+    instead (the environment this fix shipped from has no way to time a live
+    `notify` watcher's arm/disarm cost) — the decision to disarm was made because
+    the data-loss argument for retention no longer applies and the literal
+    boundary is what this doc promises; if real-world telemetry later shows
+    watcher thrash from rapid sibling-folder navigation is a material cost, that
+    can be revisited with actual numbers.
+  - **Removing retention exposed two more ways to lose data, both worse than the
+    bug CPE-1626 fixed** — found independently by review and UAT on the first
+    version of the CPE-1626 fix, before it merged:
+    1. **Closing the whole Agent Deck reaps the console process**, so a
+       still-running session never gets a real `ended` announcement at all. The
+       `endedAt` gate correctly refused to flush it (it genuinely hadn't ended) —
+       but the deck-close path then wiped the whole metrics store anyway, so the
+       refusal turned into total loss instead of an incomplete-but-honest row.
+       Fixed by flushing every session **forcibly** right before the store clears
+       (`flushAllSessionsForcibly`, called from `closeAllConsoles` in
+       `App.svelte`): a session with no real end gets its current activity
+       persisted as-is, with `endedAt` stamped at flush time and a new
+       `endedCleanly: false` marker on the record — real numbers, honestly
+       labelled as not a clean end, never silently dropped and never faked as a
+       normal finish.
+    2. **A session that ends while paused, with a sibling still armed**, used to
+       sit unflushed — the "stop the removed" loop only ever looked at sessions
+       still in the armed set, and a paused session had already left it. Not
+       permanently lost (a later reconcile that drains the armed set to empty
+       still catches it), but deferred, and at risk of loss path 1 if the deck
+       closed first. Fixed by flushing on the session's own lifecycle event
+       instead of on watch/arm state: `agentSessions.ts`'s `ingestSessionState`
+       now calls `flushSession` the instant a real `ended` announcement lands,
+       regardless of whether that session happens to be armed — which also
+       resolves the deferred-visibility side effect for free.
 - It observes; it does not drive the agent. No agent control surface lives here.
 - It should be implementable as an additive layer over the existing filesystem
   commands rather than a rewrite of them.

@@ -1,11 +1,18 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   parseSessionAnnouncement,
   applySessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
-import { watchTargetFor, watchTargets, markVisited } from "./agentSessions";
+
+// vi.mock is hoisted; the flush-on-ended hook (CPE-1626) calls through to `commands.metricsRecord` —
+// mock it the same way agentSessionMetrics.test.ts does so the hook's real network call is observable.
+const { metricsRecord } = vi.hoisted(() => ({ metricsRecord: vi.fn() }));
+vi.mock("./bindings.gen", () => ({ commands: { metricsRecord } }));
+
+import { watchTargetFor, watchTargets } from "./agentSessions";
 import { ingestSessionState, currentSessions } from "./agentSessions";
+import { clearAgentSessionMetrics, ingestDiffsForMetrics } from "./agentSessionMetrics";
 
 const started = (id: string, cwd = "Z:/repo") =>
   `session:${JSON.stringify({ event: "started", sessionId: id, agentId: "claude", agentName: "Claude Code", provider: "openrouter", model: "sonnet", cwd })}`;
@@ -91,93 +98,98 @@ describe("watchTargetFor (CPE-399 — which project am I in)", () => {
   });
 });
 
-describe("watchTargets (CPE-1606 — only visited sessions are armed, replacing CPE-1099's watch-everything)", () => {
+describe("watchTargets (CPE-1606/1625/1626 — arms exactly the session(s) at the CURRENT deepest project match)", () => {
   const sess = (id: string, cwd: string): AgentSession => ({ sessionId: id, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
 
   it("is empty when no agent is running (off means off ⇒ nothing armed)", () => {
-    expect(watchTargets([], new Set())).toEqual([]);
+    expect(watchTargets([], "/anywhere")).toEqual([]);
   });
 
-  it("arms nothing when sessions are running but none has ever been visited", () => {
+  it("arms nothing when sessions are running but the explorer isn't inside any of them", () => {
     const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
     // A session the explorer never navigated into must not be armed, no matter how long it runs —
     // this is the exact CPE-1606 repro: launch an agent, never open its folder, watcher stays idle.
-    expect(watchTargets(sessions, new Set())).toEqual([]);
+    expect(watchTargets(sessions, "/elsewhere")).toEqual([]);
   });
 
-  it("arms only the visited session, leaving an unvisited sibling untouched", () => {
+  it("arms only the session at the current path, leaving a sibling elsewhere untouched", () => {
     const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
-    expect(watchTargets(sessions, new Set(["s1"]))).toEqual([sessions[0]]);
+    expect(watchTargets(sessions, "/work/api/routes")).toEqual([sessions[0]]);
   });
-});
 
-describe("markVisited (CPE-1606 — grows the visited-this-run set that gates watchTargets)", () => {
-  const sess = (id: string, cwd: string): AgentSession => ({ sessionId: id, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
+  it("picks the deepest project when nested agents overlap, arming only that one", () => {
+    const sessions = [sess("s1", "/work"), sess("s2", "/work/api")];
+    expect(watchTargets(sessions, "/work/api/routes")).toEqual([sessions[1]]);
+    expect(watchTargets(sessions, "/work/web")).toEqual([sessions[0]]);
+  });
 
-  it("adds the session whose project the explorer navigates into", () => {
+  it("CPE-1626: disarms immediately on navigate-away — no sticky retention once you leave the folder", () => {
+    // CPE-1606 originally retained a visited session's watch for its whole life, specifically because a
+    // premature `flushSession` call would silently corrupt the metrics record (see agentSessionMetrics.ts
+    // — CPE-1626 fixed that at the source: `flushSession` now only persists a row once a session has
+    // genuinely ended, so unwatching a still-running session here is always safe. With that coupling
+    // gone, `watchTargets` goes back to a pure "what's here right now" computation — no history needed.
     const sessions = [sess("s1", "/work/api")];
-    const visited = markVisited(sessions, "/work/api/routes", new Set());
-    expect(visited).toEqual(new Set(["s1"]));
+    expect(watchTargets(sessions, "/work/api")).toEqual(sessions); // armed while inside
+    expect(watchTargets(sessions, "/elsewhere")).toEqual([]); // disarmed the moment you leave
   });
 
-  it("leaves the visited set untouched (same contents) when navigating somewhere unrelated to any agent", () => {
+  it("re-arms a session when you navigate back into its folder — same session, resumable", () => {
     const sessions = [sess("s1", "/work/api")];
-    const visited = markVisited(sessions, "/elsewhere", new Set());
-    expect(visited).toEqual(new Set());
-  });
-
-  it("does NOT visit a sibling agent's project just because a different one is on screen", () => {
-    const sessions = [sess("s1", "/work/api"), sess("s2", "/work/web")];
-    const visited = markVisited(sessions, "/work/api", new Set());
-    expect(visited).toEqual(new Set(["s1"])); // s2 stays unarmed until its own folder is opened
-  });
-
-  it("retains a visited session after navigating away from it — no watcher thrash on every nav", () => {
-    // Deliberate design choice (CPE-1606 Work Log): tearing the watch down the instant you step out of
-    // the folder would (a) re-arm/disarm a `notify` watcher on every single navigation when hopping
-    // between two sibling agent projects, and (b) prematurely flush that session's Cost/History row as
-    // if it had ended (reconcileAgentWatch flushes on removal), fragmenting one live session's metrics
-    // into two rows. So once a project is visited, it stays in the set — and stays watched — for the
-    // rest of that session's life, even after the explorer navigates elsewhere.
-    const sessions = [sess("s1", "/work/api")];
-    const afterVisit = markVisited(sessions, "/work/api", new Set());
-    const afterLeaving = markVisited(sessions, "/elsewhere", afterVisit);
-    expect(afterLeaving).toEqual(new Set(["s1"]));
-  });
-
-  it("accumulates both sibling projects when you visit each in turn — neither evicts the other", () => {
-    const sessions = [sess("s1", "/work/api"), sess("s2", "/work/web")];
-    const afterApi = markVisited(sessions, "/work/api", new Set());
-    const afterWeb = markVisited(sessions, "/work/web", afterApi);
-    expect(afterWeb).toEqual(new Set(["s1", "s2"]));
-  });
-
-  it("disarms once the session actually ends — leaving (the session's lifetime) genuinely disarms it", () => {
-    const running = [sess("s1", "/work/api")];
-    const visited = markVisited(running, "/work/api", new Set());
-    expect(visited).toEqual(new Set(["s1"]));
-    // The session ends: it drops out of the running-sessions list entirely (App.svelte's reconcile
-    // loop mirrors this via `$agentSessions`). The next markVisited call must prune it — a session
-    // that no longer exists can't stay "armed" forever.
-    const afterEnded = markVisited([], "/elsewhere", visited);
-    expect(afterEnded).toEqual(new Set());
-    expect(watchTargets([], afterEnded)).toEqual([]);
-  });
-
-  it("is a no-op (same Set instance) when nothing changed, so callers can skip redundant reconciles", () => {
-    const sessions = [sess("s1", "/work/api")];
-    const visited = new Set(["s1"]);
-    expect(markVisited(sessions, "/elsewhere", visited)).toBe(visited);
+    expect(watchTargets(sessions, "/elsewhere")).toEqual([]);
+    expect(watchTargets(sessions, "/work/api")).toEqual(sessions);
   });
 
   it("CPE-1625: arms BOTH sessions when two agents share the exact same cwd", () => {
     // Fleets/parallel agents plausibly point two sessions at the identical project folder. Before
     // CPE-1606 every running session was watched unconditionally, so both were visible; CPE-1606's
-    // `sessions.find(...)` narrowed that to the first co-located session only, silently orphaning the
-    // second one from Radar/Cost/History for the rest of the run. Negative control: this failed
-    // against pre-fix code (only "s1" was returned) — see Work Log.
+    // first-cut `.find()` narrowed that to the first co-located session only, silently orphaning the
+    // second one from Radar/Cost/History (fixed by CPE-1625's `.filter()`) — must not regress here.
     const sessions = [sess("s1", "/work/api"), sess("s2", "/work/api")];
-    const visited = markVisited(sessions, "/work/api/routes", new Set());
-    expect(visited).toEqual(new Set(["s1", "s2"]));
+    expect(watchTargets(sessions, "/work/api/routes")).toEqual(sessions);
+  });
+
+  it("a session that actually ends (drops out of the running list) is simply absent — never armed again", () => {
+    const running = [sess("s1", "/work/api")];
+    expect(watchTargets(running, "/work/api")).toEqual(running);
+    expect(watchTargets([], "/work/api")).toEqual([]); // ended: gone from `sessions` entirely
+  });
+});
+
+describe("ingestSessionState: flush-on-ended hook (CPE-1626 loss path 2)", () => {
+  beforeEach(() => {
+    metricsRecord.mockReset();
+    metricsRecord.mockResolvedValue({ status: "ok", data: null });
+    clearAgentSessionMetrics();
+  });
+
+  it("flushes a session's metrics row the INSTANT its `ended` announcement is ingested, regardless of arm/watch state", async () => {
+    // This module has no idea whether the session is currently armed — that's the point (CPE-1626):
+    // before this hook, the only flush trigger lived in App.svelte's `reconcileAgentWatch`, which never
+    // even looks at a session that's already unarmed (paused). Flushing directly here, at the actual
+    // lifecycle event, makes the flush unconditional on watch/arm state entirely.
+    ingestSessionState(started("s-flush", "/work/api"));
+    ingestDiffsForMetrics([{ path: "/work/api/a.txt", before: "", after: "hello", actor: "s-flush" }]);
+
+    ingestSessionState(ended("s-flush"));
+    // `flushSession` is called fire-and-forget (not awaited by `ingestSessionState`); its synchronous
+    // prefix (guard checks + marking `flushedSessionIds`) has already run by the time this line executes
+    // (JS is single-threaded), but the actual `metricsRecord` call is behind a microtask — flush it.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.sessionId).toBe("s-flush");
+    expect(rec.editCount).toBe(1);
+    expect(rec.endedCleanly).toBe(true); // a real `ended` announcement — never a forced flush
+  });
+
+  it("does not flush on `started` — only a genuine `ended` triggers it", async () => {
+    ingestSessionState(started("s-live", "/work/api"));
+    ingestDiffsForMetrics([{ path: "/work/api/a.txt", before: "", after: "hello", actor: "s-live" }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(metricsRecord).not.toHaveBeenCalled();
   });
 });

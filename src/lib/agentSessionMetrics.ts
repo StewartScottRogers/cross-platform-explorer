@@ -344,6 +344,24 @@ export function formatPerMinute(n: number | undefined): string | null {
 // cross-session history (731c). The record is built from the LIVE accumulator (which holds its own
 // cap-immune copy) at the `stopAgentWatch(id)` seam + the full-stop loop, BEFORE the stores clear.
 // Advisory / best-effort — a flush failure is swallowed so it can never break teardown or the live view.
+//
+// Pause vs end (CPE-1626): unwatching a session (`stopAgentWatch`) is NOT the same event as that session
+// ending, and `flushSession` no longer treats them as one. `flushSession` tells the two apart via the
+// accumulator's own `endedAt` (only set by a real `ended` announcement, see `foldSessionEnded`): a pause
+// is always a no-op, the accumulator keeps accruing, and a later resume folds straight back into the same
+// record — one complete row per session, whenever it actually ends.
+//
+// Flush is triggered from TWO independent seams, deliberately decoupled from watch/arm state:
+//   1. `agentSessions.ts`'s `ingestSessionState` calls `flushSession` the INSTANT a real `ended`
+//      announcement lands — regardless of whether that session happens to be currently armed. This is
+//      what a session ending while paused (unarmed, navigated away) needs: it flushes immediately, not
+//      whenever some later reconcile happens to notice the armed set drained.
+//   2. `reconcileAgentWatch` (App.svelte) also calls `flushSession` when a session drops out of the armed
+//      set, as a redundant backstop (idempotent no-op for anything seam 1 already flushed).
+// Neither seam covers a session whose process is reaped without ever sending `ended` at all (the whole
+// Agent Deck closed) — that's `flushAllSessionsForcibly`, called explicitly from `closeAllConsoles`
+// BEFORE the stores clear, so a never-ended session's activity is persisted (honestly marked
+// `endedCleanly: false`) instead of silently wiped.
 // ---------------------------------------------------------------------------------------------
 
 /** Only sessions that actually STARTED and produced *some* signal are worth a row — skip never-started
@@ -360,9 +378,19 @@ export function sessionMetricsWorthPersisting(m: SessionMetrics): boolean {
 }
 
 /** Build the persisted, wire-shaped {@link SessionMetricsRecord} from a derived {@link SessionMetrics}
- *  (pure; injectable `now` for tests). `endedAt`/`wallClockMs` are coerced to concrete numbers — a flush
- *  only happens at/after session end, but if `endedAt` is somehow still null it's stamped `now`. */
-export function buildMetricsRecord(m: SessionMetrics, now = Date.now()): SessionMetricsRecord {
+ *  (pure; injectable `now` for tests). `endedAt`/`wallClockMs` are coerced to concrete numbers — if
+ *  `endedAt` is still null (a forced flush, see `endedCleanly` below), it's stamped `now`.
+ *
+ *  `endedCleanly` (CPE-1626) marks whether this row came from a genuine `ended` announcement (`true`,
+ *  the default — every normal `flushSession` call already gated on `endedAt !== null`) or was forced out
+ *  by {@link flushAllSessionsForcibly} without one (`false`) — e.g. the Agent Deck was closed while the
+ *  session was still running, so its process was reaped and no `ended` will ever arrive. A forced row's
+ *  activity tallies are real (whatever the accumulator holds at flush time) but its `endedAt`/`wallClockMs`
+ *  are stamped at flush time, not the session's true end, so they may undercount. This is deliberately a
+ *  caller-supplied flag, not inferred from `m.endedAt`, so the two flush paths stay structurally distinct
+ *  on the wire — a UI or export reading the journal can always tell a complete row from an honest partial
+ *  one instead of a forced flush silently masquerading as a clean end. */
+export function buildMetricsRecord(m: SessionMetrics, now = Date.now(), endedCleanly = true): SessionMetricsRecord {
   const startedAt = m.startedAt ?? 0;
   const endedAt = m.endedAt ?? now;
   const wallClockMs = Math.max(0, endedAt - startedAt);
@@ -383,29 +411,87 @@ export function buildMetricsRecord(m: SessionMetrics, now = Date.now()): Session
     filesTouched: m.filesTouched,
     churnBytes: m.churnBytes,
     editCount: m.editCount,
+    endedCleanly,
   };
 }
 
-/** Flush one ended session's metrics row to the journal (idempotent — at most once per session end).
+/** Flush one ENDED session's metrics row to the journal (idempotent — at most once per session end).
  *  Reads the live accumulator + its `agentCost` snapshot, builds the record, and appends it. A no-op for
- *  an unknown, already-flushed, or not-worth-persisting session. Errors are swallowed (advisory). */
+ *  an unknown, already-flushed, not-worth-persisting, OR **not-yet-ended** session. Errors are swallowed
+ *  (advisory).
+ *
+ *  **Pause vs end (CPE-1626):** the accumulator's own `endedAt` — not the caller — is what makes a flush
+ *  real, so this is always safe to call speculatively. Two call sites do:
+ *  - `agentSessions.ts`'s `ingestSessionState` calls it the INSTANT a real `ended` announcement is folded
+ *    — the primary trigger, independent of whether the session happens to be currently armed/watched.
+ *    This is what makes a session that ends while paused (unarmed, because the explorer navigated away)
+ *    flush immediately instead of waiting for some later reconcile to notice — the fix also closes what
+ *    would otherwise be a latency gap for a still-armed sibling's session ending around the same time.
+ *  - `reconcileAgentWatch` (App.svelte) also calls it whenever a session drops out of the armed watch
+ *    set, as a backstop — belt-and-suspenders, since the `ingestSessionState` call above already covers
+ *    every real end. That drop can be a genuine end (redundant no-op flush guard skips it) OR the explorer
+ *    navigating away from a still-RUNNING session's folder — a **pause**, not an end.
+ *  Gating on `endedAt` here means a pause is always a safe no-op: nothing is persisted, `flushedSessionIds`
+ *  is never marked, and the accumulator keeps accruing untouched, so a later resume (re-arming the same
+ *  session id) folds straight back into the SAME record. Only the real `ended` flush persists — exactly
+ *  once, with the session's whole lifetime in it. This replaces the old assumption that a premature flush
+ *  would merely produce a second, *fragmented* row: it would not (the flushed-ids guard makes a second
+ *  flush of the same id a no-op) — the actual failure was a single INCOMPLETE row plus silent, permanent
+ *  loss of every edit made after the premature flush.
+ *
+ *  What this function does NOT cover: a session that never gets an `ended` announcement at all because
+ *  the whole console process was reaped (Agent Deck closed) — see {@link flushAllSessionsForcibly}. */
 export async function flushSession(sessionId: string, now = Date.now()): Promise<void> {
   if (flushedSessionIds.has(sessionId)) return; // already flushed this watch
   const acc = currentSessionMetrics()[sessionId];
   if (!acc) return; // unknown session
+  if (acc.endedAt === null) return; // still running — a pause, not an end; leave it resumable
   const m = deriveSessionMetrics(acc, currentCost()[sessionId], now);
   if (!sessionMetricsWorthPersisting(m)) return; // empty / never-started
   flushedSessionIds.add(sessionId); // mark BEFORE the await so a re-reconcile can't double-write
   try {
-    await commands.metricsRecord(buildMetricsRecord(m, now));
+    await commands.metricsRecord(buildMetricsRecord(m, now, true));
   } catch (e) {
     // Advisory/best-effort persistence — never break teardown or the live view on a flush failure.
     console.debug("session metrics flush failed:", e);
   }
 }
 
-/** Flush every currently-known session's metrics row (the full-stop path), each idempotently. Call
- *  BEFORE {@link clearAgentSessionMetrics} so nothing is lost when the whole Agent Deck stops. */
+/** Flush every currently-known session's metrics row that has ACTUALLY ended, each idempotently — a
+ *  no-op for any session still running (see `flushSession`'s `endedAt` gate). A backstop for the direct
+ *  `ingestSessionState` flush trigger, not the primary mechanism; safe to call anytime, including while
+ *  other sessions are still armed and running. */
 export async function flushAllSessions(now = Date.now()): Promise<void> {
   for (const id of Object.keys(currentSessionMetrics())) await flushSession(id, now);
+}
+
+/** Flush EVERY currently-known session's metrics row, unconditionally — including one that never
+ *  received a real `ended` announcement (CPE-1626, loss path 1). Use this ONLY when the whole console
+ *  process is being reaped and no per-session `ended` will ever arrive for a still-running session (the
+ *  Agent Deck is being closed, `closeAllConsoles` in App.svelte) — call it BEFORE `clearAgentSessions()`/
+ *  {@link clearAgentSessionMetrics}, or that data is gone for good, wiped with nothing persisted.
+ *
+ *  A session that already has a real `endedAt` flushes exactly as {@link flushSession} would
+ *  (`endedCleanly: true`). A session still running gets its CURRENT accumulator persisted as-is — real
+ *  activity tallies, nothing fabricated — but with `endedAt` stamped `now` (not its true end, which is
+ *  unknowable) and `endedCleanly: false`, so the row is honestly, structurally marked as forced rather
+ *  than silently masquerading as a clean end. An incomplete-but-marked row beats losing the session's
+ *  activity entirely. Idempotent per session (shares `flushedSessionIds` with {@link flushSession});
+ *  errors are swallowed (advisory). */
+export async function flushAllSessionsForcibly(now = Date.now()): Promise<void> {
+  for (const id of Object.keys(currentSessionMetrics())) {
+    if (flushedSessionIds.has(id)) continue; // already flushed this watch
+    const acc = currentSessionMetrics()[id];
+    if (!acc) continue; // unknown session
+    const endedCleanly = acc.endedAt !== null;
+    const m = deriveSessionMetrics(acc, currentCost()[id], now);
+    if (!sessionMetricsWorthPersisting(m)) continue; // empty / never-started
+    flushedSessionIds.add(id); // mark BEFORE the await so a re-reconcile can't double-write
+    try {
+      await commands.metricsRecord(buildMetricsRecord(m, now, endedCleanly));
+    } catch (e) {
+      // Advisory/best-effort persistence — never break teardown or the live view on a flush failure.
+      console.debug("session metrics forced flush failed:", e);
+    }
+  }
 }

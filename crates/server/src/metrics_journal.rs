@@ -61,6 +61,19 @@ pub struct SessionMetricsRecord {
     pub churn_bytes: u64,
     /// Total fs-diff writes attributed to the session (not deduped by path).
     pub edit_count: u64,
+    /// Whether this row was flushed from a genuine `ended` announcement (`true`) or forced out at an
+    /// earlier point without one — e.g. the whole Agent Deck was closed while the session was still
+    /// running, so its process was reaped with no `ended` ever arriving (CPE-1626, epic CPE-731 slice b).
+    /// A forced row's `ended_at`/`wall_clock_ms` are stamped at flush time, not the session's real end, so
+    /// they may undercount. `#[serde(default = "default_ended_cleanly")]` reads an older row written before
+    /// this field existed as `true` (every row before CPE-1626 came from a real end) — never `false` by
+    /// omission, so an old row is never misread as forced-incomplete.
+    #[serde(default = "default_ended_cleanly")]
+    pub ended_cleanly: bool,
+}
+
+fn default_ended_cleanly() -> bool {
+    true
 }
 
 /// Default cap on session rows retained before the oldest are rotated out. A generous history — a row is
@@ -160,6 +173,7 @@ mod tests {
             files_touched: 3,
             churn_bytes: 2048,
             edit_count: 7,
+            ended_cleanly: true,
         }
     }
 
@@ -230,9 +244,39 @@ mod tests {
         let line = serde_json::to_string(&rec("s1", 1000, 4000)).unwrap();
         for key in ["sessionId", "agentId", "agentName", "startedAt", "endedAt", "wallClockMs",
             "inputTokens", "outputTokens", "totalTokens", "costUsd", "filesTouched", "churnBytes",
-            "editCount"] {
+            "editCount", "endedCleanly"] {
             assert!(line.contains(key), "expected camelCase key `{key}` in {line}");
         }
         assert!(!line.contains("session_id"), "must not emit snake_case keys: {line}");
+    }
+
+    #[test]
+    fn ended_cleanly_round_trips_and_defaults_true_for_a_pre_cpe_1626_row() {
+        // A forced/incomplete row (CPE-1626: Agent Deck closed with a session still running) round-trips
+        // its `false` marker.
+        let base = tmp();
+        let mut forced = rec("s1", 1000, 1500);
+        forced.ended_cleanly = false;
+        append(&base, &forced, MAX_SESSIONS).unwrap();
+        assert!(!read_all(&base)[0].ended_cleanly);
+        fs::remove_dir_all(&base).ok();
+
+        // An OLD row written before this field existed (no `endedCleanly` key at all) must deserialize as
+        // `true` — every row persisted before CPE-1626 came from a genuine `ended` announcement, so a
+        // missing field must never be misread as "forced/incomplete".
+        let base2 = tmp();
+        let file = history_file(&base2);
+        fs::create_dir_all(&base2).unwrap();
+        let old_line = serde_json::json!({
+            "sessionId": "old", "agentId": "claude", "agentName": "Claude Code", "provider": "openrouter",
+            "model": "sonnet", "cwd": "/work", "startedAt": 1000, "endedAt": 1500, "wallClockMs": 500,
+            "inputTokens": 0, "outputTokens": 0, "totalTokens": 0, "costUsd": 0.0, "filesTouched": 0,
+            "churnBytes": 0, "editCount": 0,
+        });
+        fs::write(&file, format!("{}\n", old_line)).unwrap();
+        let got = read_all(&base2);
+        assert_eq!(got.len(), 1, "an old row missing endedCleanly must still parse, not be skipped");
+        assert!(got[0].ended_cleanly);
+        fs::remove_dir_all(&base2).ok();
     }
 }

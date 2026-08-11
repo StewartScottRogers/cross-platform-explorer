@@ -5470,7 +5470,17 @@ churnBytes: number;
 /**
  * Total fs-diff writes attributed to the session (not deduped by path).
  */
-editCount: number }
+editCount: number; 
+/**
+ * Whether this row was flushed from a genuine `ended` announcement (`true`) or forced out at an
+ * earlier point without one — e.g. the whole Agent Deck was closed while the session was still
+ * running, so its process was reaped with no `ended` ever arriving (CPE-1626, epic CPE-731 slice b).
+ * A forced row's `ended_at`/`wall_clock_ms` are stamped at flush time, not the session's real end, so
+ * they may undercount. `#[serde(default = "default_ended_cleanly")]` reads an older row written before
+ * this field existed as `true` (every row before CPE-1626 came from a real end) — never `false` by
+ * omission, so an old row is never misread as forced-incomplete.
+ */
+endedCleanly?: boolean }
 /**
  * Per-path outcome of a [`shred_paths`] batch run — `OpResult`-shaped (`path`/`ok`/`error`) so the
  * frontend can feed it straight into the generic per-path result summary used by every other

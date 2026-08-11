@@ -28,6 +28,7 @@ import {
   buildMetricsRecord,
   flushSession,
   flushAllSessions,
+  flushAllSessionsForcibly,
   type SessionAccumulator,
   type SessionMetrics,
 } from "./agentSessionMetrics";
@@ -402,6 +403,7 @@ describe("buildMetricsRecord (pure, wire-shaped)", () => {
       filesTouched: 2,
       churnBytes: 2048,
       editCount: 3,
+      endedCleanly: true, // default — this is the normal (not forced) flush path
     });
   });
 
@@ -411,6 +413,14 @@ describe("buildMetricsRecord (pure, wire-shaped)", () => {
     const rec = buildMetricsRecord(m, 4000);
     expect(rec.endedAt).toBe(4000);
     expect(rec.wallClockMs).toBe(3000);
+  });
+
+  it("CPE-1626: endedCleanly is caller-supplied, not inferred — a forced flush marks it false", () => {
+    const acc: SessionAccumulator = { ...emptySessionAccumulator("s1"), startedAt: 1000, editCount: 1 };
+    const m = deriveSessionMetrics(acc, undefined, 4000); // still live -> endedAt null (forced-flush shape)
+    const rec = buildMetricsRecord(m, 4000, false);
+    expect(rec.endedCleanly).toBe(false);
+    expect(rec.endedAt).toBe(4000); // stamped at flush time, not a real end
   });
 });
 
@@ -448,6 +458,7 @@ describe("flushSession / flushAllSessions (CPE-1113 flush-on-end)", () => {
       filesTouched: 1,
       churnBytes: 5,
       editCount: 1,
+      endedCleanly: true, // a real `ended` announcement flushed this — never forced
     });
   });
 
@@ -509,5 +520,90 @@ describe("flushSession / flushAllSessions (CPE-1113 flush-on-end)", () => {
     }
     await flushAllSessions();
     expect(metricsRecord).toHaveBeenCalledTimes(2);
+  });
+
+  // CPE-1626: `reconcileAgentWatch`'s "stop the removed" loop (App.svelte) calls `flushSession` for
+  // ANY session dropped from the armed set — including a still-RUNNING session that was merely
+  // disarmed because the explorer navigated away (a "pause", not an end). Before this fix, `flushSession`
+  // had no way to tell a pause from a real end: it would persist whatever was in the accumulator at that
+  // moment (an INCOMPLETE row) and mark the id flushed — so the later, genuine `ended` flush became a
+  // silent no-op (the `flushedSessionIds` guard at L393/L398) and every post-pause edit was dropped from
+  // the journal forever. This is NOT the "two fragmented rows" failure the old code comment described —
+  // it's a single incomplete row plus silent data loss for the rest of the session.
+  it("CPE-1626 (negative control against pre-fix code): a pause (flush called before the session has actually ended) must not persist an incomplete row — the eventual real-end flush must carry ALL the session's activity in ONE row", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")]); // pre-pause activity: 1 edit
+
+    // Simulate `reconcileAgentWatch` disarming this still-running session because the explorer
+    // navigated away — NOT because the session ended. flushSession is called at this "stop the
+    // removed" seam exactly as App.svelte calls it.
+    await flushSession("s1", 5000);
+    expect(metricsRecord).not.toHaveBeenCalled(); // must NOT persist a premature/incomplete row
+
+    // Resume: the explorer navigates back (or the session stays alive regardless); more activity
+    // accrues into the SAME accumulator, since pausing never cleared or flushed it.
+    ingestDiffsForMetrics([diff("/b.txt", "", "post-pause world", "s1")]); // post-pause: 1 more edit
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 9000); // genuine end
+
+    await flushSession("s1", 9000);
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1); // exactly one row for the whole session
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.editCount).toBe(2); // BOTH pre- and post-pause edits present — nothing dropped
+    expect(rec.startedAt).toBe(1000);
+    expect(rec.endedAt).toBe(9000); // the real end, not the pause timestamp
+  });
+});
+
+describe("flushAllSessionsForcibly (CPE-1626 loss path 1 — persist before a full wipe with no `ended`)", () => {
+  beforeEach(() => {
+    metricsRecord.mockReset();
+    metricsRecord.mockResolvedValue({ status: "ok", data: null });
+    clearAgentSessionMetrics();
+    clearAgentCost();
+  });
+
+  it("forcibly flushes a still-running session, honestly marked endedCleanly: false", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")]);
+    ingestDiffsForMetrics([diff("/b.txt", "", "world", "s1")]);
+    // s1 never receives an `ended` announcement — simulates the console process being reaped.
+
+    await flushAllSessionsForcibly(5000);
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.sessionId).toBe("s1");
+    expect(rec.editCount).toBe(2); // both edits present — nothing wiped
+    expect(rec.endedAt).toBe(5000); // stamped at flush time, since there's no real end to read
+    expect(rec.endedCleanly).toBe(false); // honestly marked forced, never a fabricated clean end
+  });
+
+  it("flushes a genuinely-ended session exactly as flushSession would (endedCleanly: true)", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 2000);
+
+    await flushAllSessionsForcibly(9999);
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.endedAt).toBe(2000); // the real end, not the forced-flush timestamp
+    expect(rec.endedCleanly).toBe(true);
+  });
+
+  it("is idempotent alongside flushSession — never double-writes the same session", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s1")]);
+    ingestSessionAnnouncement({ event: "ended", session: session("s1") }, 2000);
+    await flushSession("s1"); // already flushed via the normal path
+    await flushAllSessionsForcibly(); // must not persist a second row for the same id
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips an empty / never-started session (no junk rows), same as flushSession", async () => {
+    ingestDiffsForMetrics([diff("/a.txt", "", "x", "s-race")]); // never-started lazy entry
+    await flushAllSessionsForcibly();
+    expect(metricsRecord).not.toHaveBeenCalled();
   });
 });
