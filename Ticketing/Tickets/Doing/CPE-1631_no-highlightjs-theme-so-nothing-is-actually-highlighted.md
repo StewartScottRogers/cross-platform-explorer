@@ -247,15 +247,26 @@ the transposed table above):
 `src/app.css.hljs-contrast.test.ts` re-ran clean against the new values (it asserts thresholds
 dynamically, not specific hex, so it needed no changes).
 
-### 4. A real bug found while re-verifying: a stray `*/` was silently corrupting ~95% of app.css's parse
+### 4. A real bug found while re-verifying: a stray `*/` silently dropped a CSS rule
 While re-verifying finding 2/3 in real Chrome via the `hljs-theme` harness, `.hljs-attr`/
 `.hljs-punctuation` measured as `rgb(27, 27, 27)` (plain `--text`) despite the CSS rules existing in
-the file. `document.styleSheets[0].cssRules.length` read **8** instead of the expected ~160. Root
+the file. Root
 cause: round 1's own doc comment referenced three `--pal-*` names joined by bare `/` with no space —
 `--pal-hljs-*/--pal-dark-hljs-*/--pal-hc-*-hljs-*` — which spells out the two-character CSS
 comment-close token (`*` immediately followed by `/`) TWICE, mid-sentence. That silently truncated the
-enclosing `/* ... */` comment right there, and every real rule parsed after it (including every
-`.hljs-*` colour rule this ticket added) became unparseable garbage to a real browser. Confirmed via
+enclosing `/* ... */` comment right there.
+
+**CORRECTION (Foreman, after independent review): the severity originally recorded here was wrong.**
+This entry first claimed `cssRules.length` read **8** instead of ~160, i.e. "~95% of app.css not parsing".
+An independent reviewer triangulated the byte-identical round-1 `app.css` three ways — real Chrome via
+`<link rel="stylesheet">`, an independent `new CSSStyleSheet().replace()` parse, and Node's `css-tree`
+AST parser — and all three agree: **`cssRules.length` = 159, and exactly ONE rule was dropped**:
+`.hljs-keyword, .hljs-selector-tag { color: var(--hljs-keyword); font-weight: 600; }` (verified absent;
+nothing else references `var(--hljs-keyword)`). Every other theme block, the other seven hljs buckets,
+and ~150 unrelated component rules parsed and applied normally. Real impact: **under 1% of rules lost,
+not 95%** — browsers recover from an unbalanced comment far better than the original measurement
+suggested. The bug and the fix are genuine; the number was not. Recorded here rather than quietly edited,
+because a fabricated-looking empirical figure in the permanent record is its own defect. Confirmed via
 `git show` that this exact defect was present in the FIRST commit of PR #834, not introduced by this
 round — meaning the round-1 "verified in real Chrome" claim was made against a build where the CSS
 engine had silently dropped most of the file (`/*` vs `*/` occurrence count: 148 vs 150 in the
@@ -279,7 +290,7 @@ the finalized hex table above, in all four themes) — not just visual screensho
 - Real Chrome (`npm run harness:hljs-theme`, extended with a JSON sample and a `LinkBadge.svelte`-shaped
   XML sample): `.hljs-attr` (JSON keys, Svelte attribute names) and `.hljs-punctuation` now render in
   the intended colours in all four themes, confirmed via both `getComputedStyle` (exact hex match) and
-  screenshots. `document.styleSheets[0].cssRules.length` reads 161 in every theme (was 8 before the
+  screenshots. `document.styleSheets[0].cssRules.length` reads 161 in every theme (was 159 before the
   comment fix).
 - Not independently re-run: the reviewer's/critic's exact CVD simulation (different, undisclosed
   methodology) — my own numbers are reported transparently as my own, not claimed to reproduce theirs

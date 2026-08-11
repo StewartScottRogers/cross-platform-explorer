@@ -617,8 +617,8 @@
    `hljs-property` join the `--hljs-tag` bucket (an "identifier that labels something" bucket XML's
    own `attr`/`tag`/`name` already anchored — keeping it separate from `--hljs-string` matters
    because JSON/YAML/TOML keys sit right next to string VALUES, which would be indistinguishable if
-   both were the same colour); `hljs-function` joins `--hljs-title` (pairs with the `title.function_`
-   compound class already in that bucket); `hljs-code` (inline code spans in the `markdown` grammar)
+   both were the same colour); `hljs-punctuation` gets its own rule reusing the EXISTING, already-guarded
+   `hljs-code` (inline code spans in the `markdown` grammar)
    joins `--hljs-string`; `hljs-punctuation` gets its own rule reusing the EXISTING, already-guarded
    `--text-dim` token (deliberately de-emphasised, not a seventh hue — punctuation is structural, not
    semantic, and de-emphasising it is standard practice in accessible syntax themes, matching how
@@ -632,9 +632,12 @@
   color: var(--hljs-keyword);
   font-weight: 600;
 }
+/* Note: there is deliberately no `.hljs-function` rule. highlight.js's dotted-scope convention
+   turns `title.function` into `hljs-title` PLUS a bare, unprefixed `function_` — it never emits a
+   literal `hljs-function` class, so such a rule would be dead CSS. Function names are already
+   coloured by `.hljs-title` below (verified at 100% coverage on a real TypeScript sample). */
 .hljs-title,
-.hljs-section,
-.hljs-function {
+.hljs-section {
   color: var(--hljs-title);
   font-weight: 600;
 }
