@@ -1,0 +1,12 @@
+{
+  "$comment": "CPE-1594 ratchet. A spec listed here is ALLOWED to fail; anything else failing reds the job. Removing an entry is one-way: once a spec passes, the ratchet FAILS until it is deleted from this list. See gui-smoke/README.md 'Reading a CI run' for the exact procedure to retire an entry.",
+  "specs": {
+    "samples.smoke.ts": { "reason": "preview pane never settles for ~15 sample kinds (crypto/*, .eml, .ics, .vcf, .json) on WebKitGTK after 20s", "ticket": "CPE-1507" },
+    "saved-search.smoke.ts": { "reason": "Saved Searches sidebar header never renders on Linux; .fav-title getText() returns empty", "ticket": "CPE-1507" },
+    "network.smoke.ts": { "reason": "permanent Network section header never renders — POSSIBLE REAL REGRESSION in CPE-1516, triage first", "ticket": "CPE-1595" },
+    "archive-browse.smoke.ts": { "reason": "element click intercepted", "ticket": "CPE-1595" },
+    "archive-password.smoke.ts": { "reason": "element not interactable", "ticket": "CPE-1595" },
+    "shred-dialog.smoke.ts": { "reason": "'.ctx button.row' still not clickable after 10s", "ticket": "CPE-1595" },
+    "transfer-panel.smoke.ts": { "reason": "seeded CPE-1226 transfer row never appears", "ticket": "CPE-1595" }
+  }
+}

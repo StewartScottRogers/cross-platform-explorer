@@ -7,12 +7,14 @@
   "scripts": {
     "test": "wdio run ./wdio.conf.ts",
     "test:unit": "tsx --test lib/**/*.test.ts",
-    "typecheck": "tsc --noEmit -p tsconfig.json"
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "ratchet": "tsx scripts/run-ratchet.ts"
   },
   "devDependencies": {
     "@types/chai": "^5.2.3",
     "@wdio/cli": "^9.20.0",
     "@wdio/globals": "^9.20.0",
+    "@wdio/json-reporter": "^9.20.0",
     "@wdio/local-runner": "^9.20.0",
     "@wdio/mocha-framework": "^9.20.0",
     "@wdio/spec-reporter": "^9.20.0",

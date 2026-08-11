@@ -120,22 +120,84 @@ npm test
 
 ## CI
 
-`.github/workflows/gui-smoke.yml` runs this suite on push + PR to `main` in **two** legs, both
-non-blocking (`continue-on-error: true`, see CPE-1048 below):
+`.github/workflows/gui-smoke.yml` runs this suite in **two** legs:
 
+- **`gui-smoke-linux` (ubuntu-latest, CPE-1171)** — runs on every push + PR to `main`. Builds the
+  frontend, does a `tauri build -- --no-bundle`, installs the Linux WebView build deps
+  (`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` — the same set the
+  3-OS `Backend` job in `ci.yml` already builds with) plus `webkit2gtk-driver` (`WebKitWebDriver`,
+  Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and `xvfb`, installs
+  `tauri-driver`, and runs the suite under `xvfb-run` (so GTK/WebKitGTK has a virtual display to
+  initialize against). **This is the BLOCKING gate (CPE-1594)** — see "The ratchet" below for exactly
+  what makes it pass or fail.
 - **`gui-smoke` (windows-latest)** — builds the frontend, does a `tauri build -- --no-bundle`,
-  installs `msedgedriver` + `tauri-driver`, then runs this suite.
-- **`gui-smoke-linux` (ubuntu-latest, CPE-1171)** — same build, then installs the Linux WebView
-  build deps (`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` — the
-  same set the 3-OS `Backend` job in `ci.yml` already builds with) plus `webkit2gtk-driver`
-  (`WebKitWebDriver`, Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and
-  `xvfb`, installs `tauri-driver`, and runs the identical suite under `xvfb-run` (so GTK/WebKitGTK
-  has a virtual display to initialize against). No spec or `wdio.conf.ts` capability changes were
-  needed for the Linux leg — `APP_BINARY`/`TAURI_DRIVER_BIN` already resolve per-OS, and
-  `tauri-driver` itself picks `WebKitWebDriver` vs `msedgedriver.exe` off `PATH`.
+  installs `msedgedriver` + `tauri-driver`, then runs this suite. **Non-blocking
+  (`continue-on-error: true`) and off the push/PR path (CPE-1594)** — see CPE-1048 below for why. It
+  runs only via `workflow_dispatch` (manual) or the nightly `schedule:` trigger.
+
+No spec or `wdio.conf.ts` capability changes are needed per OS — `APP_BINARY`/`TAURI_DRIVER_BIN`
+already resolve per-`process.platform`, and `tauri-driver` itself picks `WebKitWebDriver` vs
+`msedgedriver.exe` off `PATH`.
+
+### The ratchet (CPE-1594) — how the Linux leg's verdict is computed
+
+The Linux leg does **not** require every spec to pass. It requires **no new failures** beyond a
+committed, named list:
+
+- **`gui-smoke/known-failing.json`** — the specs currently allowed to fail, each with a `reason` and
+  an owning `ticket`. Anything failing that ISN'T in this file reds the job.
+- **`gui-smoke/lib/ratchet.ts`** (pure, unit-tested in `ratchet.test.ts`) + **`gui-smoke/scripts/run-ratchet.ts`**
+  (the `npm run ratchet` I/O wrapper the CI step actually runs) compare the suite's real JSON results
+  (`wdio.conf.ts`'s `json` reporter, written to `gui-smoke/.results/`) against that file and decide:
+  1. **`NEW GUI REGRESSION`** — a spec failed that isn't listed. Fix it, or (if intentionally deferring
+     it) add an entry to `known-failing.json` with a reason + ticket.
+  2. **`RATCHET: <spec> now passes`** — a spec listed as known-failing PASSED this run. **Delete its
+     entry from `known-failing.json` in the same PR.** The ratchet is one-way: once a spec is fixed, it
+     can never quietly re-enter the failing column — leaving a passing spec listed would hide a real
+     future regression on it.
+  3. **`SUITE DID NOT COMPLETE`** — fewer specs reported a result than `specs/*.smoke.ts` globs to (a
+     timeout, crash, or hang). This is the specific guard against the exact failure mode CPE-1594 was
+     filed over: 796 straight `cancelled` runs where a dead leg's timeout-kill made the whole workflow
+     unreadable. A truncated run is always RED, never green.
+
+**Retiring a `known-failing.json` entry** (once its spec is actually fixed): reproduce locally
+(`cd gui-smoke && xvfb-run --auto-servernum npm test` on Linux, or just `npm test` if your desktop
+already runs the Linux driver stack), confirm the spec passes, delete its entry from
+`known-failing.json`, and open the PR. `npm run ratchet` will fail loudly (case 2 above) if you forget
+and leave a passing spec listed.
+
+**Testing the ratchet locally without a real `tauri-driver` run** — `npm run ratchet` reads its inputs
+from disk and every path is overridable via env var, so it can be pointed at a saved/synthetic report:
+
+```
+GUI_SMOKE_RESULTS_DIR=/path/to/synthetic/.results \
+GUI_SMOKE_KNOWN_FAILING=/path/to/synthetic/known-failing.json \
+GUI_SMOKE_SPECS_DIR=./specs \
+npm run ratchet
+```
+
+(`gui-smoke/lib/ratchet.test.ts` exercises the pure `evaluate()` function directly, headlessly, with no
+env vars or disk I/O at all — that's the primary test surface; the env-var override above is for
+smoke-testing the `run-ratchet.ts` I/O wrapper itself.)
+
+### Screenshot artifacts (CPE-1594) — unlocks the Visual Critic in CI
+
+Both legs upload `gui-smoke/.screenshots/**` as a build artifact after the suite step, `if: always()`
+(so a failing/timed-out run's `-fail.png` shots — CPE-1149 — still upload). Download with:
+
+```
+gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>
+```
+
+(or `-n gui-smoke-screenshots-windows` for the Windows leg, when it runs). `<run-id>` is in the run's
+URL or `gh run list --workflow=gui-smoke.yml`. This is what lets a reviewer — human or, per CPE-1148
+Part B, a Visual-Critic sub-agent — judge a PR's rendered UI directly from the CI artifact, without a
+Foreman running a local `tauri build` by hand first.
 
 Either leg reds the job's own step output on a regression in launch-or-navigate, instead of needing
-a human to notice — the non-blocking posture just means a flake doesn't red `main`.
+a human to notice. The Windows leg's non-blocking posture (CPE-1048) means a WebView2 crash there
+never reds anything; the Linux leg's blocking posture (CPE-1594, above) means an actual new regression
+does.
 
 ### CPE-1048 — `DevToolsActivePort file doesn't exist` on `windows-latest`
 
@@ -357,10 +419,11 @@ throw).
 ## Follow-ups (not this ticket — see CPE-1045's "Follow-ups" section)
 
 - ~~**Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
-  app code change needed).~~ **Done (CPE-1171)** — see the "CI" section above. Still non-blocking
-  and **not yet proven green on `main`**: it has not run live on GitHub Actions as of this writing
-  (offsite verification pending, no local Actions runner available). Watch the first few `main`
-  runs before considering Manual-Test-Burndown row #4 fully retired.
+  app code change needed).~~ **Done (CPE-1171)**, and **now the blocking gate (CPE-1594)** — see the
+  "CI" section above.
+- **Triage the ratchet's known-failing tail** (CPE-1595): `network.smoke.ts` first (possible real
+  CPE-1516 regression), then `archive-browse`/`archive-password`/`shred-dialog`/`transfer-panel`
+  (`samples`/`saved-search` are CPE-1507's).
 - **macOS**: stays attended — `tauri-driver` has no WKWebView WebDriver support.
 - **More flows**: Back/Up navigation, dialogs, context menus, tab switching.
 - **Visual regression baselines for more surfaces**: CPE-1170 built the comparator + wired one worked

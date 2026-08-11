@@ -19,11 +19,27 @@ name: GUI smoke
 # app and asserts no crash + a rendered/graceful preview for each, reproducing the CPE-1357 PDF-preview
 # crash as a regression guard (`documents/malformed.pdf`, run last in that spec so a still-open crash
 # doesn't blind the rest of the walk — see that file's header comment).
+#
+# CPE-1594: the Linux leg is now the BLOCKING gate (its own `if:`/`continue-on-error` below), pinned by
+# `gui-smoke/lib/ratchet.ts` against `gui-smoke/known-failing.json` rather than requiring every spec to
+# be green — see that file + `gui-smoke/README.md`'s "Reading a CI run" section for how the ratchet
+# works and how to retire a known-failing entry. The Windows leg stays a non-blocking diagnostic (CPE-1048
+# — WebView2 never gets past `session not created: DevToolsActivePort file doesn't exist` on stock
+# `windows-latest`) and is off the push/PR hot path so its 45-minute zero-signal runs stop starving the
+# runner queue and stop stamping every push/PR run `cancelled` — see the `gui-smoke` job's own `if:` below.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
+  # CPE-1594: lets a human kick off the Windows leg on demand (Actions tab -> Run workflow) once
+  # investigating CPE-1048, without it running unattended on every push/PR.
+  workflow_dispatch:
+  # CPE-1594: a nightly, off-hot-path run of BOTH legs. For the Windows leg this is the canary for "has
+  # the hosted `windows-latest` image started giving WebView2 a working DevToolsActivePort" — when it
+  # goes green here, that's the signal to reconsider making it blocking again (see CPE-1048).
+  schedule:
+    - cron: "0 7 * * *"
 
 # CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight run, so rapid pushes
 # don't pile up dozens of gui-smoke runs (which, being flaky, could hang and starve the queue).
@@ -35,22 +51,31 @@ jobs:
   gui-smoke:
     name: GUI smoke (windows-latest) — tauri-driver + WebdriverIO
     runs-on: windows-latest
+    # CPE-1594: taken off the every-push/every-PR hot path. It has NEVER executed a single assertion in
+    # CI (CPE-1048 below) — every session dies before WebDriver even connects — so burning 45 min of
+    # `windows-latest` per push/PR bought zero information and its timeout-kill was what stamped the
+    # WHOLE workflow run `cancelled` (see gui-smoke.yml's header comment and the CPE-1594 ticket's
+    # Actions-API evidence: 796/800 runs `cancelled`, 0 `success`). Runs only on `workflow_dispatch`
+    # (manual) or the nightly `schedule:` trigger above — never on `push`/`pull_request`.
+    if: github.event_name != 'push' && github.event_name != 'pull_request'
     # CPE-1266: hard cap so a hung WebView2 WebDriver session (CPE-1048 flakiness) dies in minutes
     # instead of running to GitHub's 6-hour max and holding a concurrency slot the whole time.
-    # CPE-1481: raised 20 -> 35 (round 1), then -> 45 (round 2). CPE-1479's mouse-CDP fix made specs
-    # actually RUN instead of dying instantly on the first click, so the suite now needs real wall-clock
-    # time. Round 1's 35-min cap still cut the ubuntu leg off: build ~10 min + a SEQUENTIAL (maxInstances:1)
-    # run where the media-heavy back half (thumbnails / similar-images / metadata) is slow left ~18 of 39
-    # specs unrun at 35 min. 45 gives margin for a full run. The real long-term fix is sharding the suite
-    # across matrix jobs (revisit CPE-1266) rather than one ever-growing sequential job.
-    timeout-minutes: 45
+    # CPE-1481 raised this 20 -> 35 -> 45 while the job was still on the hot path, chasing a full run
+    # that never happened (CPE-1048). CPE-1594 drops it back down to 15: taken off the hot path, there is
+    # no reason to let a job that has never produced one assertion burn a full hour when it *should* die
+    # in minutes if DevToolsActivePort is still broken — a nightly canary just needs to fail fast and free
+    # the runner, not stretch out hoping for a different outcome.
+    timeout-minutes: 15
     # CPE-1048 (Option E — non-blocking): the WebView2 `DevToolsActivePort` startup crash on stock
     # `windows-latest` did NOT clear even with `--no-sandbox`/`--disable-gpu` (the canonical fix), so this
-    # job is kept NON-BLOCKING: it still builds + runs the smoke suite (a real diagnostic that a human can
-    # read on every push, and it goes green on a real desktop / self-hosted runner), but a failure no longer
-    # reds `main`. To make this a truly-blocking gate, run it on a self-hosted / interactive-session Windows
-    # runner (see the research Library entry `gui-smoke-devtoolsactiveport-webview2-ci.md`). Until then
-    # burndown #1/#2 stay 🔧, not ✅.
+    # job is kept NON-BLOCKING: it still builds + runs the smoke suite (a real diagnostic a human can read
+    # on a manual/nightly run, and it goes green on a real desktop / self-hosted runner), but a failure
+    # never reds anything (it isn't even wired into a required check). This is a deferral, not a decision
+    # that Windows GUI coverage doesn't matter: the real fix is a self-hosted / interactive-session
+    # Windows runner (see the research Library entry `gui-smoke-devtoolsactiveport-webview2-ci.md`) — the
+    # nightly `schedule:` run above is the canary for when the stock hosted image starts working, at which
+    # point this can move back onto the hot path. Until then burndown #1/#2 stay 🔧 for the Windows
+    # residual (the Linux leg below is what's blocking and ✅, CPE-1594).
     continue-on-error: true
     # CPE-1048: on stock windows-latest the WebView2 browser process crashes at startup (no GPU,
     # restricted CI session) before it can write the DevToolsActivePort file, so WebDriver session
@@ -120,6 +145,19 @@ jobs:
         working-directory: gui-smoke
         run: npm test
 
+      # CPE-1594: this leg is manual/nightly-only (see the job `if:` above), so its screenshots are
+      # rarer than the Linux leg's — but the day CPE-1048 is fixed, a reviewer needs them without
+      # rebuilding locally. `if: always()` matters: the `-fail.png` shots (CPE-1149) captured on a
+      # failing/timed-out run are exactly what's useful for diagnosing CPE-1048 itself.
+      - name: Upload gui-smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-screenshots-windows
+          path: gui-smoke/.screenshots/**
+          retention-days: 14
+          if-no-files-found: warn
+
   gui-smoke-linux:
     name: GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)
     runs-on: ubuntu-latest
@@ -129,15 +167,17 @@ jobs:
     # the CPE-1479 mouse fix made specs actually run; 35 min still left the sequential run's media-heavy
     # back half (~18 of 39 specs) unrun at the cap. 45 gives margin; sharding (CPE-1266) is the real fix.
     timeout-minutes: 45
-    # Non-blocking, same posture as the Windows leg above (CPE-1048): this is a NEW CI leg with no
-    # track record yet, and WebKitGTK-under-Xvfb has its own class of headless-CI flakiness (GPU-less
-    # compositing crashes, first-run cold-start jitter) distinct from — but analogous to — the
-    # WebView2 DevToolsActivePort issue that keeps the Windows leg non-blocking. Keep this
-    # `continue-on-error: true` until it has run green on `main` for a while; it is still a REAL
-    # diagnostic every push/PR (a human — or the next ticket — can read the log), it just doesn't red
-    # `main` on a flake. Burns down Manual-Test-Burndown row #4 (cross-OS GUI) as 🔧 in progress, not
-    # ✅, until it's proven stable.
-    continue-on-error: true
+    # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
+    # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min), so "flaky" was
+    # never the right diagnosis; the fix is a ratchet, not more slack. The suite's own exit code below is
+    # deliberately swallowed (`|| true`) — the "Ratchet — no new GUI regressions" step owns the verdict:
+    # it reds the job on any spec failing that ISN'T in `gui-smoke/known-failing.json`, on a
+    # known-failing spec starting to PASS (the ratchet is one-way — see `gui-smoke/lib/ratchet.ts`), or
+    # on the run not completing at all (fewer specs reporting than `specs/*.smoke.ts` globs to — the
+    # exact "timeout kills the job and the whole run reads as cancelled" failure mode this ticket exists
+    # to fix). WebKitGTK-under-Xvfb's own class of headless-CI flakiness (GPU-less compositing crashes,
+    # cold-start jitter) is still possible — that shows up as an `incomplete` ratchet failure, which is
+    # the correct, honest verdict for it, not a swallowed non-blocking log nobody reads.
     env:
       # Analogous to the Windows leg's WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: a defensive,
       # commonly-recommended mitigation for WebKitGTK compositor crashes on GPU-less/restricted CI
@@ -211,6 +251,38 @@ jobs:
       # `xvfb-run` wraps the whole test command in a fake X display so tauri-driver -> WebKitWebDriver
       # -> the app's GTK/WebKitGTK webview can all initialize headlessly (see the system-deps comment
       # above for why the WHOLE command, not just the app, needs to run under it).
+      # CPE-1594: `|| true` deliberately swallows wdio's own exit code — a run with known-failing specs
+      # is EXPECTED to exit non-zero here, and the "Ratchet" step below is what actually decides pass/
+      # fail (see its comment and `gui-smoke/lib/ratchet.ts`). This also lets the suite step finish
+      # normally (rather than the job aborting) so the JSON reporter output + screenshots below always
+      # exist to upload/ratchet, even on a run with failures.
       - name: Run GUI smoke suite (xvfb-run)
         working-directory: gui-smoke
-        run: xvfb-run --auto-servernum npm test
+        run: xvfb-run --auto-servernum npm test || true
+
+      # CPE-1594: unlocks the CPE-1148 Visual Critic in CI — before this, the ~75 `snap()` calls per run
+      # wrote to a gitignored dir on an ephemeral runner and were simply discarded, so nothing (human or
+      # agent) could ever review a PR's rendered UI without a Foreman rebuilding locally. `if: always()`
+      # matters: a failing run's `<name>-fail.png` shots (CPE-1149) are exactly the ones a reviewer most
+      # wants to see. Retrieve with `gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>`
+      # (see gui-smoke/README.md "Reading a CI run"). `if-no-files-found: error` — this leg always
+      # produces screenshots on a completed run, so a missing gallery is itself a signal something broke
+      # upstream of even getting a screenshot, not something to silently ignore.
+      - name: Upload gui-smoke screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-screenshots-ubuntu
+          path: gui-smoke/.screenshots/**
+          retention-days: 14
+          if-no-files-found: error
+
+      # CPE-1594: the actual gate. Reads the JSON results `wdio.conf.ts`'s `json` reporter just wrote to
+      # `gui-smoke/.results/` and compares against `gui-smoke/known-failing.json`. Exits non-zero (redding
+      # this job, and — unlike every other step here — WITHOUT `continue-on-error` — this is a hard gate)
+      # on a new regression, a stale known-failing entry, or an incomplete run. See
+      # `gui-smoke/lib/ratchet.ts` for the exact rules and `gui-smoke/README.md` for how to retire an
+      # entry once its spec is fixed.
+      - name: Ratchet — no new GUI regressions
+        working-directory: gui-smoke
+        run: npm run ratchet

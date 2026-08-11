@@ -2,3 +2,4 @@ node_modules/
 .smoke-state.json
 wdio-logs/
 .screenshots/
+.results/
