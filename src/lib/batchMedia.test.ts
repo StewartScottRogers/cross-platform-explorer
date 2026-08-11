@@ -1,5 +1,14 @@
 import { describe, it, expect } from "vitest";
-import { mediaOpLabel, opsToJob, partitionEligible, progressPercent, canBatchTransform, skipRows } from "./batchMedia";
+import {
+  mediaOpLabel,
+  opsToJob,
+  overwritesInPlace,
+  partitionEligible,
+  progressPercent,
+  canBatchTransform,
+  skipRows,
+  uniqueParentDirs,
+} from "./batchMedia";
 import type { MediaOp } from "./bindings.gen";
 
 describe("mediaOpLabel", () => {
@@ -117,5 +126,48 @@ describe("skipRows (CPE-1115)", () => {
   it("is empty for a clean report and keeps a path with no separators", () => {
     expect(skipRows({ skipped: [] })).toEqual([]);
     expect(skipRows({ skipped: [["bare.gif", "why"]] })).toEqual([{ name: "bare.gif", reason: "why" }]);
+  });
+});
+
+describe("overwritesInPlace (CPE-1590)", () => {
+  it("returns only the planned items whose output equals their input", () => {
+    const items = [
+      { input: "/pics/a.jpg", output: "/pics/a-1024.jpg", summary: "resize" }, // non-destructive: distinct
+      { input: "/pics/b.jpg", output: "/pics/b.jpg", summary: "compress q80" }, // overwrite-mode: same path
+      { input: "/pics/c.jpg", output: "/pics/c.jpg", summary: "strip-metadata" }, // overwrite-mode: same path
+    ];
+    expect(overwritesInPlace(items)).toEqual([
+      { input: "/pics/b.jpg", output: "/pics/b.jpg", summary: "compress q80" },
+      { input: "/pics/c.jpg", output: "/pics/c.jpg", summary: "strip-metadata" },
+    ]);
+  });
+
+  it("is empty when every planned output differs from its input (the safe/default path)", () => {
+    const items = [
+      { input: "/pics/a.jpg", output: "/pics/a-1024.jpg", summary: "resize" },
+      { input: "/pics/b.png", output: "/pics/b.webp", summary: "convert" },
+    ];
+    expect(overwritesInPlace(items)).toEqual([]);
+  });
+
+  it("is empty for an empty plan", () => {
+    expect(overwritesInPlace([])).toEqual([]);
+  });
+});
+
+describe("uniqueParentDirs (CPE-1590)", () => {
+  it("dedupes parent directories, first-seen order, cross-platform separators", () => {
+    expect(
+      uniqueParentDirs(["/pics/a.jpg", "/pics/b.jpg", "C:\\photos\\c.jpg", "/pics/d.jpg", "C:\\photos\\e.jpg"]),
+    ).toEqual(["/pics", "C:\\photos"]);
+  });
+
+  it("is empty for an empty input", () => {
+    expect(uniqueParentDirs([])).toEqual([]);
+  });
+
+  it("drops a root-level file's empty parent rather than pushing an empty string", () => {
+    // parentDir("/a.jpg") -> "/" (POSIX root case), which IS kept — only a truly empty result is dropped.
+    expect(uniqueParentDirs(["/a.jpg"])).toEqual(["/"]);
   });
 });
