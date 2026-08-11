@@ -19,6 +19,7 @@
   import { commands } from "../bindings.gen";
   import type { Symbol as CodeSymbol, FoldRange, MinimapRow, ModelInfo } from "../bindings.gen";
   import HexView from "./HexView.svelte";
+  import BinaryPreview from "./BinaryPreview.svelte";
   import DataBrowser from "./DataBrowser.svelte";
   import FontPreview from "./FontPreview.svelte";
   import JwtPreview from "./JwtPreview.svelte";
@@ -1154,6 +1155,10 @@
     {:else}
       <pre class="preview-text" bind:this={textContentEl}>{info}</pre>
     {/if}
+  {:else if provider.kind === "binary" && entry}
+    <!-- Binary Inspector (CPE-1597, epic CPE-1562 slice 4): self-contained like FontPreview/CertPreview
+         above — fetches its own data from `path`, no declared action-bar actions. -->
+    <BinaryPreview path={entry.path} size={entry.size} extension={entry.extension} />
   {:else if provider.kind === "hex" && entry}
     <HexView path={entry.path} size={entry.size} />
   {:else if provider.kind === "data-grid" && entry}

@@ -107,9 +107,17 @@ describe("pickProvider", () => {
   });
 
   it("previews binary formats as read-only info text (CPE-210/214/215/216/218)", () => {
-    for (const ext of ["exe", "dll", "wasm", "torrent", "mid", "midi", "bin", "dat"]) {
+    for (const ext of ["wasm", "torrent", "mid", "midi", "bin", "dat"]) {
       const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
       expect(p.kind).toBe("info");
+      expect(p.editable).toBe(false);
+    }
+  });
+
+  it("picks the Binary Inspector for PE/ELF/Mach-O executables and libraries (CPE-1597, epic CPE-1562), not the plain-text info provider", () => {
+    for (const ext of ["exe", "dll", "sys", "efi", "ocx", "scr", "cpl", "so", "dylib"]) {
+      const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));
+      expect(p.kind, `.${ext} should route to the binary provider`).toBe("binary");
       expect(p.editable).toBe(false);
     }
   });
