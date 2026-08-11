@@ -104,7 +104,12 @@ async function walkBinaryInspectorTabs(
   restTabLimit: number,
   fullMatrixSlugContains?: string,
 ): Promise<void> {
-  await $('[data-testid="binary-preview"]').waitForExist({ timeout: 10_000 });
+  // `[data-testid="binary-preview"]` sits on BinaryPreview.svelte's OUTERMOST wrapper (`.bp-preview`),
+  // which is present even while `loading` is still true (it only wraps a "Loading…" `<p>` then) — so
+  // this only proves the component mounted, not that `info` loaded and the tab strip exists yet. Wait
+  // for an actual `.bp-tabs .tab` to exist before touching the strip at all, rather than inferring
+  // readiness from the wrapper.
+  await $(".bp-tabs .tab").waitForExist({ timeout: 10_000 });
   const tabButtons = await $$(".bp-tabs .tab");
   const tabCount = await tabButtons.length;
   expect(tabCount, "expected the Binary Inspector to render at least one tab").to.be.greaterThan(0);
@@ -122,6 +127,13 @@ async function walkBinaryInspectorTabs(
     const useFullMatrix = i === 0 || (!!fullMatrixSlugContains && slug.includes(fullMatrixSlugContains));
     if (!useFullMatrix && restTabsVisited >= restTabLimit) continue; // capped — see doc comment above
 
+    // House convention (cost-history.smoke.ts and every other tab/row click in this suite):
+    // `waitForClickable` before `.click()` as defence-in-depth for a genuine render/paint beat between
+    // the element existing in the DOM and WebKitGTK actually being ready to hit-test it — this spec's
+    // own CI failure (both Binary Inspector walk tests failing with "did not become interactable" on
+    // the very first tab click, on Linux only) was exactly this race, and was the one click site in
+    // this whole harness that had skipped the convention.
+    await button.waitForClickable({ timeout: 10_000 });
     await button.click();
     await $(`.bp-panel[data-tab]`).waitForExist({ timeout: 5_000 });
 
