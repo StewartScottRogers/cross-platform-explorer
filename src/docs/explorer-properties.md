@@ -55,9 +55,16 @@ length**.
 
 ### File inspection
 
-For any non-folder file: **Encoding**, **Line endings**, **File type** — a best-effort sniff of the file's
+For any non-folder file: **Encoding**, **Line endings**, **File type**, **Architecture** — a best-effort sniff of the file's
 real content, plus a separate warning row, **Type mismatch**, shown only when the file's content doesn't
 match what its extension claims (e.g. an executable saved with a `.jpg` extension).
+
+**Architecture** is shown only for recognised executable formats (ELF/PE/Mach-O binaries) and displays the
+detected CPU architecture string. What you see depends on the format: a Windows `.exe` or `.dll` reports
+just the architecture (*"x86-64"*, *"x86"*, *"ARM64"*) because the PE format encodes bitness only
+implicitly, via the machine type; a Linux ELF binary adds the details its header states outright
+(*"x86-64 (64-bit, little-endian)"*); and a macOS universal binary lists every slice it carries
+(*"Universal: x86-64 + ARM64"*). Files that are not executables show no Architecture row.
 
 ### Checksum (SHA-256)
 

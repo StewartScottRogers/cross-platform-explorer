@@ -116,7 +116,7 @@
       ] as [string, string | null][]).filter(([, v]) => v)
     : [];
 
-  // File inspection (CPE-1009) — encoding / line-endings / true type / extension-mismatch for a single
+  // File inspection (CPE-1009) — encoding / line-endings / true type / architecture / extension-mismatch for a single
   // file, auto-loaded best-effort like the image metadata.
   let inspection: FileInspection | null = null;
   $: inspectionRows = inspection
@@ -124,6 +124,7 @@
         [$t("prop.encoding"), inspection.encoding],
         [$t("prop.lineEndings"), inspection.line_endings],
         [$t("prop.fileType"), inspection.file_type],
+        [$t("prop.architecture"), inspection.architecture],
       ] as [string, string | null][]).filter(([, v]) => v)
     : [];
 
