@@ -757,4 +757,161 @@ mod tests {
 
         let _ = fs::remove_dir_all(&d);
     }
+
+    // ---- Link-as-final-component: the directory-text check alone isn't enough (reviewer, PR #828 -------
+    // ---- attempt 3) ---------------------------------------------------------------------------------
+    //
+    // `output_escapes_input_dir`'s `out_dir == dir` fast path used to return `false` the instant the two
+    // directories' TEXT matched — never asking what `output`'s final path component actually IS on disk. A
+    // link whose *name* sits inside the input's own directory can alias data physically outside it. Both
+    // shapes below were demonstrated on the real filesystem (see the module's link-as-final-component doc
+    // paragraph); these are the permanent regression tests, proven by reading bytes off disk, not by
+    // trusting a `Result`. **Negative control:** both failed against the pre-fix branch HEAD (verified
+    // manually before landing this fix — `escapes == false` for the hard-link case, and the dangling-symlink
+    // case sailed through `is_foreign_overwrite` with `confirmed_overwrite` still at its default `false`).
+
+    /// **Hard link (needs no privilege on any platform, any Windows account, same volume).** A hand-built
+    /// `PlannedItem` whose `output` is a hard link to a file OUTSIDE the selected folder, even though
+    /// `output`'s own directory text is textually identical to `input`'s — the exact shape that fooled the
+    /// old fast path. Run WITH `confirmed_overwrite: true` deliberately: this is the finding that falsified
+    /// the earlier claim that flag can never license an out-of-folder write.
+    #[test]
+    fn link_as_final_component_hard_link_alias_is_refused_even_with_confirmed_overwrite() {
+        let d = scratch("link-final-hardlink");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must not be touched".to_vec();
+        fs::write(&victim, &victim_original).unwrap();
+
+        // link.jpg's NAME lives inside `selected` (so its directory TEXT matches `input`'s), but its DATA
+        // is the same file as `victim`, which lives OUTSIDE `selected`.
+        let link = selected.join("link.jpg");
+        crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a hard link".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        job.confirmed_overwrite = true; // the finding's own demonstrated bypass
+
+        let err = execute_plan(&items, &job).expect_err(
+            "an output whose directory text matches the input's own, but whose data is hard-linked to a \
+             file outside it, must be refused — even with confirmed_overwrite",
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+
+        // Byte-level proof, not a trust-the-Result check: read the victim's ACTUAL bytes back off disk.
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_original,
+            "the hard-linked victim file must be byte-for-byte untouched"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **Dangling symlink (needs zero batch-job flags).** `Path::is_file()` on a dangling symlink is
+    /// `false`, so `is_foreign_overwrite` sees "nothing there yet" and `confirmed_overwrite` never needs to
+    /// be set — this must still be refused by the containment re-check alone. Symlink creation needs
+    /// Developer Mode / elevation on Windows; this test skips cleanly (not fails) when that's unavailable,
+    /// matching `links.rs`'s own test pattern — this dev machine has Developer Mode enabled, CI may not.
+    #[test]
+    fn link_as_final_component_dangling_symlink_is_refused_with_no_confirmation_needed() {
+        let d = scratch("link-final-dangling-symlink");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("newly-planted.jpg"); // deliberately does NOT exist yet
+        let link = selected.join("link.jpg");
+        if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            eprintln!(
+                "skipping dangling-symlink containment test: could not create a symlink in this \
+                 environment (Windows needs Developer Mode or elevation) — same skip pattern links.rs uses"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        assert!(!victim.exists(), "sanity: the symlink's target must not exist yet — the dangling case");
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a dangling symlink".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]); // confirmed_overwrite left at its default false
+        assert!(!job.confirmed_overwrite, "sanity: no confirmation given — this must be refused regardless");
+
+        let err = execute_plan(&items, &job).expect_err(
+            "a dangling symlink whose name sits inside the selected folder but whose stored target names a \
+             path outside it must be refused — no batch-job flag should even be necessary",
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+
+        // Byte-level proof: the victim path must never have come into existence at all.
+        assert!(!victim.exists(), "the escaping write through a dangling symlink must never have happened");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Perf regression guard for `execute_plan_walk`'s OWN copy of the containment check (mirrors
+    /// `batch_media::cpe_1623_containment_check_for_a_directory_changing_rename_stays_bounded`, which only
+    /// ever covered `plan()`'s copy — reviewer finding, PR #828 attempt 3's "ALSO" follow-up: there was no
+    /// equivalent guard on the execute side, so a regression there wouldn't be caught by CI). A Rename
+    /// template of `"./{stem}"` changes `out_dir` TEXTUALLY (adds `"./"`) but resolves to the exact same
+    /// real directory, so `execute_plan_walk`'s pre-write containment re-check genuinely runs `path_key`'s
+    /// full resolution for every item (the fast path is skipped), not the near-zero-cost common case.
+    #[test]
+    fn cpe_1623_execute_plan_walk_containment_recheck_stays_bounded() {
+        let d = scratch("cpe1623-execute-containment-perf-guard");
+        let n = 300usize;
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                let p = d.join(format!("photo{i:04}.jpg"));
+                fs::write(&p, png_bytes(4, 4)).unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+
+        // "./{stem}-renamed" changes `out_dir` TEXTUALLY (adds "./", resolving to the same real directory)
+        // AND genuinely renames the file, so every output is both non-in-place (no `confirmed_overwrite`
+        // needed) and non-colliding — isolates the containment re-check's own cost from `is_foreign_overwrite`.
+        let job = BatchJob::new(vec![MediaOp::Rename { template: "./{stem}-renamed".into() }]);
+        let items = plan(&job, &inputs).unwrap();
+        assert_eq!(items.len(), n);
+
+        // Only count canonicalize calls made by execute_plan_walk itself, not plan()'s own (already
+        // separately guarded) resolution above.
+        crate::batch_media::reset_canonicalize_call_count();
+        let report = execute_plan(&items, &job)
+            .unwrap_or_else(|e| panic!("a same-directory rename must not be refused: {e}"));
+        let calls = crate::batch_media::canonicalize_call_count();
+        assert_eq!(report.written, n);
+
+        // Same generous linear bound as plan()'s own guard — O(n) allows a small constant number of
+        // canonicalize calls per file (one path_key resolution per item for each of out_dir/dir, both
+        // memoized after the first). O(n²) would blow far past this even at n=300.
+        assert!(
+            calls <= n * 10,
+            "expected O(n) canonicalize calls for execute_plan_walk's containment re-check (bound {}), got \
+             {calls} for n={n} files — it may have regressed to a per-item uncached resolution",
+            n * 10
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
 }

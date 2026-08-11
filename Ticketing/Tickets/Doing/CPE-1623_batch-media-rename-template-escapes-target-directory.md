@@ -309,3 +309,118 @@ in-place (kept them separate to avoid destabilising an already-established, pass
   `src/lib/batchMedia.ts`, `src/lib/batchMedia.test.ts`, `src/lib/components/BatchMediaDialog.svelte`,
   `src/lib/i18n.ts`, `src/docs/explorer-batch-media.md`. No `Cargo.toml`/`Cargo.lock` change, no new
   dependency, no `bindings.gen.ts` commit needed (zero diff).
+
+---
+
+## Work Log — PR #828, attempt 3: link-as-final-component defeats containment
+
+A fresh audit re-tried every prior finding on this branch (attempt-2 IPC bypass, `shot..final`, `C:foo`,
+extensionless `..`, `Convert.to_ext`) and could not break any of them — all confirmed still holding,
+including that the lexical fallback fails **closed** when `canonicalize` fails on a >260-char path, and
+that a non-existent input directory still fails closed. **One new finding, in the same function:**
+`output_escapes_input_dir` (`batch_media.rs`) short-circuited at `if out_dir == dir { return false; }` — a
+purely **textual** comparison of the two paths' directory portions. It never asked what `output`'s final
+path component actually IS on disk. A link whose *name* sits inside the input's own directory can alias
+data physically outside it, and the directory-text fast path waved that straight through with zero
+resolution — even though `execute_plan_walk` calls this exact function as its "unconditional, not
+waivable" gate.
+
+**Both variants demonstrated on the real Windows filesystem, bytes re-read off disk:**
+
+- **1a — hard link (no privilege needed, any Windows account, same volume).**
+  `fs::hard_link(outside\important.jpg, selected\link.jpg)`, then a `PlannedItem{input:
+  selected\photo.jpg, output: selected\link.jpg}` with `confirmed_overwrite: true` → `Ok(written:1)`, and
+  `outside\important.jpg`'s bytes changed. Falsified the attempt-2 doc's claim that `confirmed_overwrite`
+  can never license an out-of-folder write.
+- **1b — dangling symlink (needs zero batch-job flags).** `create_symlink(target=outside\newly-
+  planted.jpg /* doesn't exist yet */, link=selected\link.jpg)`. `Path::is_file()` on a dangling symlink
+  is `false`, so `is_foreign_overwrite` sees "nothing there" and `confirmed_overwrite` stays at its
+  default `false` → `Ok(written:1)` → a file created outside the selected folder with **no consent flag
+  of any kind**. Also reachable from an ordinary UI-driven batch (not just the IPC bypass): a rename
+  template producing the stem `link` reaches the identical `Path::is_file()` blind spot inside `plan()`'s
+  own collision check.
+
+**Fix, in `output_escapes_input_dir`:** the `out_dir == dir` fast path now calls a new helper,
+`link_alias_escapes(output, input_dir, parent_cache) -> Option<bool>`, before trusting the text match:
+
+- **Symlinks/junctions:** read the link's own stored target via `std::fs::read_link` (not
+  `canonicalize`, which requires the WHOLE chain to exist and therefore fails outright on a dangling
+  symlink — exactly the shape that needs zero flags to exploit). A relative target resolves against the
+  link's own parent directory; the resolved location's directory is compared via the existing
+  `path_key`/`ParentCache` machinery, so this stays O(n)-amortized — no new uncached `canonicalize` per
+  item. An unreadable link (permission/race) fails closed (`Some(true)`), not open.
+- **Hard links — deliberately NOT fully resolved.** A hard link has no "target" to read: every name for
+  the same data is equally real, and there's no cheap way to enumerate a file's OTHER names short of
+  walking every directory on the volume comparing (volume-serial, file-index) identity — disproportionate
+  per planned item, and not attempted. Instead: if a real file sits at `output` and its **link count** is
+  more than 1, some other name for the same data exists somewhere this fn cannot see — might be inside
+  the selected folder, might not, no way to tell without the walk this deliberately skips. **Fails
+  closed: refuses rather than guessing "probably fine."** This is the one gap left open **by design, not
+  oversight** — a batch that writes through an existing multiply-linked file inside the selected folder
+  is refused even when every other link is also harmlessly inside it, because there's no cheap way to
+  know that. Link count is read via `std::os::windows/unix::fs::MetadataExt` on Unix (already-fetched
+  metadata, zero extra syscall) — but Windows's `number_of_links()`/`file_index()`/
+  `volume_serial_number()` are still gated behind the unstable `windows_by_handle` feature
+  (rust-lang/rust#63010) on stable Rust, so Windows falls back to the raw Win32 call
+  (`CreateFileW`+`GetFileInformationByHandle`) via the `windows` crate already vendored for
+  `high_contrast.rs` — **no new dependency**, just two more feature flags (`Win32_Storage_FileSystem`,
+  `Win32_Security`) on the existing pinned `windows = "0.56"` in `crates/server/Cargo.toml`. Confirmed no
+  `Cargo.lock` change in either `crates/server` or `src-tauri` (same resolved crate version, just more of
+  its already-vendored code compiled in).
+- Returns `None` (falls through to the prior `false`, unchanged behaviour) when `output` doesn't exist
+  yet, or exists as an ordinary single-linked file — the overwhelming common case, costing exactly one
+  extra `symlink_metadata` stat, never a canonicalize.
+
+**Negative control (actually run, not asserted):** temporarily reverted just the one fixed line
+(`return link_alias_escapes(...).unwrap_or(false)` back to `return false`) and ran the new tests against
+that state. All 5 new regression tests failed exactly as predicted — `link_as_final_component_hard_link_
+alias_is_refused_even_with_confirmed_overwrite` observed `Ok(BatchReport { written: 1, skipped: [] })`
+(the hard-link write actually went through), `link_as_final_component_dangling_symlink_is_refused_with_
+no_confirmation_needed` likewise, plus the three `batch_media.rs` unit-level assertions on
+`output_escapes_input_dir` itself. Restored the real fix, reran — all green (see full-suite numbers
+below).
+
+**New tests:**
+- `batch_media.rs` (unit-level, direct calls to `output_escapes_input_dir`): `cpe_1623_hard_link_alias_
+  within_the_same_directory_text_escapes`, `cpe_1623_dangling_symlink_alias_within_the_same_directory_
+  text_escapes`, `cpe_1623_live_symlink_alias_within_the_same_directory_text_escapes` (extra coverage
+  beyond the two demonstrated PoCs — the fix is general to any symlink final component), `cpe_1623_
+  symlink_pointing_back_inside_the_same_directory_does_not_escape` (no false positive: a symlink whose
+  target legitimately stays in-folder), `cpe_1623_ordinary_pre_existing_output_file_is_unaffected` (no
+  false positive: a plain existing file, no link involved, handled exactly as before).
+- `batch_execute.rs` (end-to-end via `execute_plan`, byte-level proof off disk): `link_as_final_component_
+  hard_link_alias_is_refused_even_with_confirmed_overwrite`, `link_as_final_component_dangling_symlink_
+  is_refused_with_no_confirmation_needed`. Symlink tests skip cleanly (not fail) if the environment can't
+  create a symlink (Windows Developer Mode) — this machine has it enabled; CI may not.
+- `cpe_1623_execute_plan_walk_containment_recheck_stays_bounded` (`batch_execute.rs`) — the "ALSO" item:
+  there was a perf-regression guard for `plan()`'s copy of the containment check
+  (`cpe_1623_containment_check_for_a_directory_changing_rename_stays_bounded`) but none for `execute_plan_
+  walk`'s own copy of the identical check. Mirrors the same "./{stem}-renamed" trick (forces the
+  `path_key` resolution branch on every item, not the near-zero-cost fast path) at the execute layer,
+  same O(n) bound. Required promoting `reset_canonicalize_call_count`/`canonicalize_call_count` from
+  private to `pub(crate)` (still `#[cfg(test)]`-only) so a test in `batch_execute.rs` can share the same
+  counter.
+
+**Explicitly out of scope, untouched:** the ADS/colon case (confirmed still template-only, stays with
+CPE-1624 unchanged); CPE-1624's TOCTOU per-write re-check; `is_foreign_overwrite`'s pre-existing O(n)
+scan; the cosmetic `lexical_normalize` drive-letter double-prefix quirk (confirmed to produce distinct
+keys, not a fail-open bug).
+
+**Verification (all run synchronously, this environment):**
+- `cargo build` (crates/server) — clean. `cargo build` (src-tauri) — clean.
+- `cargo test --lib` (crates/server) — **1896 passed**, 0 failed, 2 ignored (baseline 1888 + 8 new tests:
+  5 in `batch_media.rs`, 3 in `batch_execute.rs`).
+- `cargo clippy --all-targets -- -D warnings` (crates/server; default, `--features index`, `--features
+  specta`) — all clean, 0 warnings.
+- `cargo clippy --all-targets -- -D warnings` (src-tauri) — clean, 0 warnings.
+- `npm run check` — 0 errors, 0 warnings.
+- `npx vitest run` — **273 files, 3337 tests passed**, 0 failed (no frontend files touched this pass).
+- `cpe_1623_plan_timing_for_2000_files` (release, `--ignored --nocapture`): **219.01ms**, vs. the prior
+  ~164ms baseline — a real but small (~27µs/file) increase from the new `symlink_metadata` stat this fix
+  adds to the `out_dir == dir` fast path; stays clearly linear, not a regression toward quadratic.
+- Canonicalize-count guards green: both `cpe_1613_plan_collision_check_makes_a_bounded_number_of_
+  canonicalize_calls_not_quadratic` and `cpe_1623_containment_check_for_a_directory_changing_rename_
+  stays_bounded`, plus the new `cpe_1623_execute_plan_walk_containment_recheck_stays_bounded`.
+- Files changed this pass: `crates/server/src/batch_media.rs`, `crates/server/src/batch_execute.rs`,
+  `crates/server/Cargo.toml` (two new `windows` crate features on the already-pinned 0.56 dependency, no
+  new dependency, no `Cargo.lock` change in either `crates/server` or `src-tauri`).

@@ -62,6 +62,25 @@
 //! explicitly in [`output_escapes_input_dir`] itself (not just `validate()`'s template-level `:` rejection
 //! above, which only covers the one production call path) — see that fn's doc for the exact conditions.
 //!
+//! **Link-as-final-component defeats the directory-identity comparison itself (reviewer, PR #828 attempt
+//! 3).** `out_dir == dir` (the fast path immediately above, taken when the two directories are textually
+//! identical) trusts the path STRING, never what `output`'s final component actually IS on disk. A link
+//! whose *name* sits inside the input's own directory can still alias data physically outside it: (1) a
+//! **hard link** — `fs::hard_link(outside/important.jpg, selected/link.jpg)`, then a `PlannedItem` whose
+//! `output` is `selected/link.jpg` — passed with `escapes = false` purely because the directory text
+//! matched, and `execute_plan_walk` then happily wrote through it, mutating `outside/important.jpg`'s
+//! actual bytes; demonstrated on Windows even with `confirmed_overwrite: true`, falsifying the earlier
+//! claim that flag can't license an out-of-folder write. (2) A **dangling symlink** —
+//! `create_symlink(target=outside/newly-planted.jpg /* doesn't exist yet */, link=selected/link.jpg)` —
+//! is worse: `Path::is_file()` on a dangling symlink is `false`, so [`crate::batch_execute`]'s
+//! `is_foreign_overwrite` sees "nothing there" and `confirmed_overwrite` never even needs to be set. Both
+//! shapes are reachable off the IPC bypass AND (a rename template producing the stem `link`) an ordinary
+//! UI-driven batch, since `plan()`'s own non-destructive collision check uses the same `Path::is_file()`
+//! blind spot. [`output_escapes_input_dir`] now resolves the final component before trusting `out_dir ==
+//! dir` — see [`link_alias_escapes`] for exactly what each link shape does and does not close, in
+//! particular why a hard link's OTHER name is fundamentally unobservable without a disproportionate
+//! full-volume walk, and why that fails closed instead of guessing.
+//!
 //! **Same-file detection (CPE-1613).** "Does output overwrite input?" must NOT be decided by raw string
 //! equality: `plan()` itself lower-cases a `Convert` target's extension, so `IMG_1.JPG` + Convert→jpg
 //! yields the string `"IMG_1.jpg"` — different text, but the SAME on-disk file on a case-insensitive
@@ -376,12 +395,16 @@ thread_local! {
     /// concurrently-running tests from polluting each other's counts.
     static CANONICALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
+/// `pub(crate)` (not just this module's own tests): [`crate::batch_execute::execute_plan_walk`] re-derives
+/// the identical containment check `plan()` uses, via the shared [`output_escapes_input_dir`] — its own
+/// perf regression guard (PR #828 attempt 3's "ALSO" follow-up: `plan()` had a guard, the execute-side copy
+/// of the exact same check did not) needs this same counter, from a test in a different file.
 #[cfg(test)]
-fn reset_canonicalize_call_count() {
+pub(crate) fn reset_canonicalize_call_count() {
     CANONICALIZE_CALLS.with(|c| c.set(0));
 }
 #[cfg(test)]
-fn canonicalize_call_count() -> usize {
+pub(crate) fn canonicalize_call_count() -> usize {
     CANONICALIZE_CALLS.with(|c| c.get())
 }
 
@@ -508,6 +531,11 @@ pub fn same_file(a: &str, b: &str) -> bool {
 ///   directory itself or its parent) — rejected outright, independent of the directory-identity check.
 ///   (With an extensioned input this can't happen: `join` appends the extension, turning a `".."` stem
 ///   into the literal, harmless filename `"...ext"`.)
+/// - **Finding C — link-as-final-component (PR #828 attempt 3).** Even with A and B guarded, `out_dir ==
+///   dir` was still a bare TEXT comparison — it never asked what `output`'s final component actually IS
+///   on disk. A symlink, junction, or hard link whose *name* sits inside the input's own directory can
+///   still alias data physically outside it, and the fast path waved that straight through with zero
+///   resolution. See [`link_alias_escapes`] for the fix and exactly what it can and cannot prove.
 pub(crate) fn output_escapes_input_dir(input: &str, output: &str, parent_cache: &mut ParentCache) -> bool {
     let out_final = output.rsplit(['/', '\\']).next().unwrap_or(output);
     if out_final == "." || out_final == ".." {
@@ -520,9 +548,136 @@ pub(crate) fn output_escapes_input_dir(input: &str, output: &str, parent_cache: 
         return true;
     }
     if out_dir == dir {
-        return false;
+        // The directory TEXT matches — the common case, and historically an immediate `false` here. But
+        // `output` may already exist on disk as a link whose real identity isn't where its name suggests
+        // (Finding C above); resolve that before trusting the string match. `None` means `output` doesn't
+        // exist yet, or is an ordinary single-linked file — the overwhelming common case, costing exactly
+        // one extra `symlink_metadata` stat and falling through to the prior `false` unchanged.
+        return link_alias_escapes(output, &dir, parent_cache).unwrap_or(false);
     }
     path_key(&out_dir, parent_cache) != path_key(&dir, parent_cache)
+}
+
+/// Resolves whether `output` — already known to sit in the same TEXTUAL directory as the input (the
+/// `out_dir == dir` fast path in [`output_escapes_input_dir`]) — is actually a link whose real data lives
+/// outside `input_dir`. Returns `None` when there is nothing link-shaped to resolve (`output` doesn't
+/// exist yet, or is an ordinary file with a single name), so the caller's prior `false` stands unchanged —
+/// **no new false positives** on a plain output file that merely already exists in the selected folder.
+///
+/// **Symlinks and junctions:** read the link's own stored target ([`std::fs::read_link`]) rather than
+/// `canonicalize`, specifically because `canonicalize` requires the WHOLE chain to exist and therefore
+/// fails outright on a **dangling** symlink (target not created yet) — exactly the shape the audit
+/// demonstrated needs zero batch-job flags to exploit (`Path::is_file()` on a dangling symlink is `false`,
+/// so nothing downstream ever treats it as "already occupied"). A relative target is resolved against
+/// `output`'s own parent directory (the same rule the OS itself uses); the resolved location's directory
+/// is then compared via [`path_key`] against `input_dir`, identically to every other containment decision
+/// in this module. An unreadable link (the `is_symlink()` bit is set but `read_link` itself fails — a
+/// permission error or a TOCTOU race) is **not** treated as "nothing to resolve": failing open on an
+/// unreadable link would be worse than the false positive of refusing it, so this returns `Some(true)`.
+///
+/// **Hard links — deliberately NOT fully resolved.** A hard link has no "target" to read: every name for
+/// the same underlying data is equally real, and there is no directory-entry field that names a file's
+/// OTHER links. The only way to enumerate them is to walk every directory on the volume comparing
+/// (volume-serial, file-index) identity per entry — disproportionate to pay per planned item, and not
+/// attempted here. Instead: if a real file already sits at `output` and its **link count** (the one cheap
+/// signal `std::fs::Metadata` DOES expose, via the platform `MetadataExt` trait — `number_of_links()` on
+/// Windows, `nlink()` on Unix) is more than 1, some other name for this same data exists somewhere this
+/// fn cannot see. It might be inside `input_dir`, or it might not — there is no way to tell without the
+/// walk this deliberately doesn't do — so this fails closed and refuses rather than guessing "probably
+/// fine". **This is the one gap left open by design**, not an oversight: a batch job that plans to write
+/// through an existing multiply-linked file inside the selected folder is refused even when every one of
+/// its other names is also harmlessly inside that same folder, because this fn has no cheap way to know
+/// that. See the module doc's "Link-as-final-component" paragraph for the full reasoning.
+fn link_alias_escapes(output: &str, input_dir: &str, parent_cache: &mut ParentCache) -> Option<bool> {
+    let meta = std::fs::symlink_metadata(output).ok()?;
+    let file_type = meta.file_type();
+
+    if file_type.is_symlink() {
+        return Some(match std::fs::read_link(output) {
+            Ok(target) => {
+                let resolved = if target.is_absolute() {
+                    target
+                } else {
+                    std::path::Path::new(output)
+                        .parent()
+                        .map(|p| p.join(&target))
+                        .unwrap_or(target)
+                };
+                let resolved_str = resolved.to_string_lossy().into_owned();
+                let (resolved_dir, _, _) = split(&resolved_str);
+                path_key(&resolved_dir, parent_cache) != path_key(input_dir, parent_cache)
+            }
+            Err(_) => true,
+        });
+    }
+
+    if file_type.is_file() && hard_link_count(output, &meta) > 1 {
+        return Some(true);
+    }
+
+    None
+}
+
+/// Platform-specific hard link count for [`link_alias_escapes`]'s fail-closed check — bare
+/// [`std::fs::Metadata`] doesn't expose this everywhere. Defaults to `1` (never treated as
+/// multiply-linked) on any platform/error where the count can't be read, matching this module's existing
+/// "resolve where possible, never invent a signal we can't back up" posture elsewhere (e.g. [`fold_case`]);
+/// that default is fine here specifically because it just falls through to the ORIGINAL, already-audited
+/// `out_dir == dir → false` behaviour, not a bypass of a check that used to run.
+///
+/// **Unix:** `MetadataExt::nlink()` reads straight off the already-fetched [`std::fs::Metadata`] — no
+/// extra syscall.
+///
+/// **Windows:** `std::os::windows::fs::MetadataExt::number_of_links()` would be the equivalent one-liner,
+/// but it (and `file_index()`/`volume_serial_number()`, which would be needed for full hard-link identity
+/// resolution) are still gated behind the unstable `windows_by_handle` feature (rust-lang/rust#63010) on
+/// stable Rust. Falls back to the raw Win32 call the std wrapper would eventually make anyway
+/// (`CreateFileW` + `GetFileInformationByHandle`'s `nNumberOfLinks`) via the `windows` crate already
+/// vendored for [`crate::high_contrast`] — one extra open+query, but only when `output` already exists as
+/// an ordinary file (the branch this is called from), never per-item for the common "nothing there yet" case.
+#[cfg(unix)]
+fn hard_link_count(_output: &str, meta: &std::fs::Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.nlink()
+}
+#[cfg(windows)]
+fn hard_link_count(output: &str, _meta: &std::fs::Metadata) -> u64 {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide: Vec<u16> =
+        std::path::Path::new(output).as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. Read-only open
+    // of an already-existing file (`GENERIC_READ` + `OPEN_EXISTING`, full sharing so this never contends
+    // with the batch's own later read/write of the same path) — no create/write/truncate side effect. The
+    // handle is closed on every path before returning.
+    unsafe {
+        let Ok(handle) = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            GENERIC_READ.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            HANDLE::default(),
+        ) else {
+            return 1; // couldn't open (permission/race) — nothing more we can prove, matches the fallback
+        };
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        let links =
+            if GetFileInformationByHandle(handle, &mut info).is_ok() { info.nNumberOfLinks as u64 } else { 1 };
+        let _ = CloseHandle(handle);
+        links
+    }
+}
+#[cfg(not(any(windows, unix)))]
+fn hard_link_count(_output: &str, _meta: &std::fs::Metadata) -> u64 {
+    1
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
@@ -1053,6 +1208,168 @@ mod tests {
              check (bound {}), got {calls} for n={n} files — the containment check may have regressed to \
              a per-item uncached resolution",
             n * 10
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ---- CPE-1623 follow-up: link-as-final-component defeats containment (PR #828 attempt 3) ---------
+    //
+    // `out_dir == dir` (the fast path taken when the output's directory TEXT matches the input's own) used
+    // to return `false` immediately — never asking what `output`'s final component actually IS on disk.
+    // These tests exercise [`output_escapes_input_dir`] directly (unit-level; `batch_execute`'s test module
+    // has the end-to-end byte-proof versions run through `execute_plan`).
+
+    /// **Negative control, confirmed against pre-fix HEAD:** before this fix, a hard link whose NAME sits
+    /// inside `input`'s own directory but whose DATA is the same file as something outside it produced
+    /// `escapes == false` purely because `out_dir == dir` as strings — the exact bypass the finding
+    /// describes. This is the regression test for that: must now report `true`.
+    #[test]
+    fn cpe_1623_hard_link_alias_within_the_same_directory_text_escapes() {
+        let dir = scratch("cpe1623-hardlink-escape");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("link.jpg");
+        crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        // Sanity: the directory TEXT really does match — this is exactly the fast path that used to skip
+        // resolution entirely.
+        assert_eq!(split(&input).0, split(&output).0, "sanity: directory text must match for this test");
+
+        let mut cache = ParentCache::new();
+        assert!(
+            output_escapes_input_dir(&input, &output, &mut cache),
+            "a hard-linked output whose data lives outside the selected folder must be reported as escaping"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **Negative control, confirmed against pre-fix HEAD:** a DANGLING symlink (target doesn't exist yet)
+    /// whose name sits inside `input`'s own directory but whose stored target names a path outside it. Even
+    /// worse than the hard-link case pre-fix: `canonicalize` can't resolve a dangling chain at all, so
+    /// nothing downstream could have caught this via the ordinary `path_key` route either — it needed the
+    /// raw `read_link` handling this fix adds. Symlink creation needs Developer Mode / elevation on
+    /// Windows — skips cleanly (not fails) when unavailable, matching `links.rs`'s own test pattern.
+    #[test]
+    fn cpe_1623_dangling_symlink_alias_within_the_same_directory_text_escapes() {
+        let dir = scratch("cpe1623-dangling-symlink-escape");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("newly-planted.jpg"); // deliberately does not exist yet
+        let link = selected.join("link.jpg");
+        if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            eprintln!(
+                "skipping dangling-symlink containment test: could not create a symlink in this \
+                 environment (Windows needs Developer Mode or elevation)"
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+        assert!(!victim.exists(), "sanity: the target must not exist yet — the dangling case");
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        assert_eq!(split(&input).0, split(&output).0, "sanity: directory text must match for this test");
+
+        let mut cache = ParentCache::new();
+        assert!(
+            output_escapes_input_dir(&input, &output, &mut cache),
+            "a dangling symlink whose stored target names a path outside the selected folder must be \
+             reported as escaping, with no target ever needing to exist on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// Same shape, but a LIVE (non-dangling) symlink — extra coverage beyond the two demonstrated PoCs,
+    /// since the fix is general to any symlink final component, not just the dangling case.
+    #[test]
+    fn cpe_1623_live_symlink_alias_within_the_same_directory_text_escapes() {
+        let dir = scratch("cpe1623-live-symlink-escape");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("link.jpg");
+        if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            eprintln!("skipping live-symlink containment test: could not create a symlink in this environment");
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert!(
+            output_escapes_input_dir(&input, &output, &mut cache),
+            "a live symlink whose target resolves outside the selected folder must be reported as escaping"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **No new false positives, part 1:** a symlink whose target legitimately stays INSIDE the same
+    /// selected directory must not be flagged — only cross-directory aliasing is a containment violation.
+    #[test]
+    fn cpe_1623_symlink_pointing_back_inside_the_same_directory_does_not_escape() {
+        let dir = scratch("cpe1623-symlink-inside");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let real = dir.path().join("real.jpg");
+        std::fs::write(&real, b"data").unwrap();
+        let link = dir.path().join("link.jpg");
+        if crate::links::create_symlink(&real.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            eprintln!("skipping same-directory symlink test: could not create a symlink in this environment");
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        let input = dir.path().join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert!(
+            !output_escapes_input_dir(&input, &output, &mut cache),
+            "a symlink whose target stays inside the selected folder must NOT be reported as escaping"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **No new false positives, part 2 (the common case):** an ordinary output file that merely already
+    /// exists in the selected folder — a plain regular file, exactly one name, no link involved at all —
+    /// must be handled exactly as before: not an escape. This is the overwhelmingly common real-filesystem
+    /// shape the collision-avoidance disambiguation in `plan()` deals with every day.
+    #[test]
+    fn cpe_1623_ordinary_pre_existing_output_file_is_unaffected() {
+        let dir = scratch("cpe1623-ordinary-existing-output");
+        std::fs::create_dir_all(dir.path()).unwrap();
+        let input = dir.path().join("photo.jpg");
+        std::fs::write(&input, b"input").unwrap();
+        let output = dir.path().join("vacation.jpg"); // a real, single-linked, unrelated existing file
+        std::fs::write(&output, b"pre-existing unrelated content").unwrap();
+
+        let mut cache = ParentCache::new();
+        assert!(
+            !output_escapes_input_dir(
+                &input.to_string_lossy(),
+                &output.to_string_lossy(),
+                &mut cache
+            ),
+            "an ordinary pre-existing output file in the same folder must not be flagged as escaping"
         );
 
         let _ = std::fs::remove_dir_all(dir.path());
