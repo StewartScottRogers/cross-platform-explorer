@@ -936,7 +936,7 @@
       if (labels.length > 0) macroParamPromptFor = { macro, labels };
       else beginMacroRun(macro);
     } catch (e) {
-      showNotice("Couldn't load the macro: " + (e instanceof Error ? e.message : String(e)), true);
+      showNotice($t("notice.macroLoadFailed", { error: e instanceof Error ? e.message : String(e) }), true);
     }
   }
 
@@ -1202,7 +1202,7 @@
     try {
       new WebviewWindow(`workbench-browser-${Date.now()}`, { url, title: url, width: 1000, height: 720 });
     } catch {
-      showNotice("Couldn't open the browser window.", true);
+      showNotice($t("notice.browserWindowFailed"), true);
     }
   }
   /** Git sync status of the current folder (CPE-462) — two-way mirror status bar. Null when the
@@ -1264,7 +1264,7 @@
       const actions = autoSyncActions(plan as Parameters<typeof autoSyncActions>[0]);
       if (actions.length === 0) {
         const reason = pausedReason(plan as Parameters<typeof pausedReason>[0]);
-        if (reason) showNotice("Auto-sync paused — " + reason, false);
+        if (reason) showNotice($t("notice.autoSyncPaused", { reason }), false);
         return; // nothing safe to do (or diverged) — don't hammer; wait the interval out
       }
       for (const action of actions) {
@@ -1277,7 +1277,7 @@
       // A failed background sync must never nag repeatedly: back off by marking it "done" for this
       // interval, and surface once.
       lastAutoSync.set(path, Date.now());
-      showNotice("Auto-sync failed: " + (e instanceof Error ? e.message : String(e)), true);
+      showNotice($t("notice.autoSyncFailed", { error: e instanceof Error ? e.message : String(e) }), true);
     } finally {
       autoSyncRunning = false;
     }
@@ -1607,8 +1607,8 @@
     const existing = await WebviewWindow.getByLabel(AI_CONSOLE_LABEL);
     if (existing) {
       await existing.setFocus(); // can't re-scope a live window without disrupting sessions
-      if (ctx.session) showNotice("Agent Deck is already open — click the agent's tab to focus it.", false);
-      else if (ctx.cwd) showNotice("Agent Deck is already open — set the working folder in its toolbar.", false);
+      if (ctx.session) showNotice($t("tb.consoleAlreadyOpenSession"), false);
+      else if (ctx.cwd) showNotice($t("tb.consoleAlreadyOpenCwd"), false);
       return;
     }
     // CPE-860: open directly — no launch-time consent popup. On first launch grant the
@@ -1635,7 +1635,7 @@
 
   async function launchAiConsole() {
     const base = await startAiConsole();
-    if (!base) { showNotice("Agent Deck couldn't start — open Settings → Platform to see why and Repair it.", true); return; }
+    if (!base) { showNotice($t("tb.consoleStartFailed"), true); return; }
     const url = consoleUrlWith(base, consoleContext.cwd, consoleContext.task, consoleContext.session);
     try {
       const win = new WebviewWindow(AI_CONSOLE_LABEL, {
@@ -1648,9 +1648,9 @@
         resizable: true,
         center: true,
       });
-      win.once("tauri://error", () => showNotice("Couldn't open the Agent Deck window.", true));
+      win.once("tauri://error", () => showNotice($t("tb.consoleWindowFailed"), true));
     } catch {
-      showNotice("Couldn't open the Agent Deck window.", true);
+      showNotice($t("tb.consoleWindowFailed"), true);
     }
   }
 
@@ -1687,10 +1687,10 @@
       if (base) {
         try {
           const win = new WebviewWindow(AGENT_BOARD_SIDECAR_LABEL, { url: base, ...AGENT_BOARD_WIN });
-          win.once("tauri://error", () => showNotice("Couldn't open the Agent Board window.", true));
+          win.once("tauri://error", () => showNotice($t("tb.boardWindowFailed"), true));
           return;
         } catch {
-          showNotice("Couldn't open the Agent Board window.", true);
+          showNotice($t("tb.boardWindowFailed"), true);
           return;
         }
       }
@@ -1705,9 +1705,9 @@
     }
     try {
       const win = new WebviewWindow(AGENT_BOARD_LABEL, { url: "index.html?board=1", ...AGENT_BOARD_WIN });
-      win.once("tauri://error", () => showNotice("Couldn't open the Agent Board window.", true));
+      win.once("tauri://error", () => showNotice($t("tb.boardWindowFailed"), true));
     } catch {
-      showNotice("Couldn't open the Agent Board window.", true);
+      showNotice($t("tb.boardWindowFailed"), true);
     }
   }
 
@@ -1904,15 +1904,15 @@
       return true;
     }
     if (structuredSearch) {
-      showNotice("This is a saved search — a read-only view. Open a file's real location to change it.", true);
+      showNotice($t("smart.searchBlockedNotice"), true);
       return true;
     }
     if (archive) {
-      showNotice("This is a read-only view inside an archive.", true);
+      showNotice($t("archive.blockedNotice"), true);
       return true;
     }
     if (replayOverlayEntries !== null) {
-      showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
+      showNotice($t("replay.blockedNotice"), true);
       return true;
     }
     return false;
@@ -2675,7 +2675,7 @@
       // A recent file that no longer opens is removed rather than nagging forever.
       recents = recents.filter((r) => r.path !== path);
       settings.saveRecents(recents);
-      showNotice("That file is no longer available — removed from Recent.", true);
+      showNotice($t("home.recentFileGone"), true);
     }
   }
 
@@ -2995,7 +2995,7 @@
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length < 2) return;
     const { eligible, skipped } = partitionEligible(pane.selectedEntries);
     if (eligible.length < 2) {
-      showNotice("Not enough image files in the selection for batch media.", true);
+      showNotice($t("ctx.batchMediaTooFew"), true);
       return;
     }
     if (skipped > 0) {
@@ -3123,7 +3123,7 @@
     if (blockedInArchive()) return;
     const { entry, rest } = popUndo(undoStack);
     if (!entry) {
-      showNotice("Nothing to undo.");
+      showNotice($t("ctx.undoNothing"));
       return;
     }
     try {
@@ -3739,7 +3739,7 @@
       await navigator.clipboard.writeText(text);
       showNotice(`Copied path${entries.length === 1 ? "" : "s"} to the clipboard.`);
     } catch {
-      showNotice("Couldn't copy the path to the clipboard.", true);
+      showNotice($t("notice.copyPathFailed"), true);
     }
   }
 
@@ -3752,7 +3752,7 @@
       await navigator.clipboard.writeText(entry.name);
       showNotice(`Copied "${entry.name}".`);
     } catch {
-      showNotice("Couldn't copy the name to the clipboard.", true);
+      showNotice($t("notice.copyNameFailed"), true);
     }
   }
 
@@ -3765,7 +3765,7 @@
     try {
       await revealItemInDir(target);
     } catch {
-      showNotice("Couldn't reveal that in the file manager.", true);
+      showNotice($t("notice.revealFailed"), true);
     }
   }
 
@@ -3775,7 +3775,7 @@
     try {
       unwrap(await commands.openTerminal(path));
     } catch {
-      showNotice("Couldn't open a terminal here.", true);
+      showNotice($t("notice.openTerminalFailed"), true);
     }
   }
 
@@ -4202,7 +4202,7 @@
     // Replay mode could silently import into a folder the user only meant to look at in the past — the
     // exact same "read-only means read-only" contract the other guards in this file enforce.
     if (replayOverlayEntries !== null) {
-      showNotice("This is a read-only Replay-mode reconstruction — exit Replay mode to make changes.", true);
+      showNotice($t("replay.blockedNotice"), true);
       return;
     }
     // CPE-1368: an archive browse-view is read-only, but its folder rows still render `[data-drop-path]`
@@ -4211,7 +4211,7 @@
     // resolves to some unexpected on-disk location. Guard it up front, exactly like Replay mode above (the
     // internal-drag path is already blocked via `canDrag={!archive}`; this closes the OS drop-in hole).
     if (archive) {
-      showNotice("This is a read-only view inside an archive — exit the archive to import files.", true);
+      showNotice($t("archive.blockedImportNotice"), true);
       return;
     }
     const dest = folderUnderCursor(pos) || (isHome || smartFolder || structuredSearch ? "" : currentPath);
@@ -4422,7 +4422,7 @@
     const dir = inPaneB ? paneBPath : currentPath;
     if ((!inPaneB && blockedInArchive()) || (inPaneB && dir === HOME) || pane.selectedEntries.length === 0) return;
     if (pane.selectedEntries.some((e) => e.is_dir)) {
-      showNotice("Securely delete only works on files — remove folders from the selection first.", true);
+      showNotice($t("ctx.shredFoldersNotAllowed"), true);
       return;
     }
     const n = pane.selectedEntries.length;
@@ -4734,9 +4734,9 @@
     if (!driveCtxPath) return;
     try {
       await navigator.clipboard.writeText(driveCtxPath);
-      showNotice("Copied path to the clipboard.");
+      showNotice($t("notice.copiedPath"));
     } catch {
-      showNotice("Couldn't copy the path to the clipboard.", true);
+      showNotice($t("notice.copyPathFailed"), true);
     }
   }
 
@@ -4747,7 +4747,7 @@
     try {
       unwrap(await commands.openTerminal(driveCtxPath));
     } catch {
-      showNotice("Couldn't open a terminal here.", true);
+      showNotice($t("notice.openTerminalFailed"), true);
     }
   }
 
@@ -5006,7 +5006,7 @@
   function copyHomeItem() {
     if (!homeCtxPath) return;
     clipboard = stage([homeCtxPath], "copy");
-    showNotice("Copied 1 item.");
+    showNotice($t("home.copiedOneItem"));
   }
 
   /** Copy the home item's path to the OS clipboard. */
@@ -5014,9 +5014,9 @@
     if (!homeCtxPath) return;
     try {
       await navigator.clipboard.writeText(formatPathsForClipboard([homeCtxPath]));
-      showNotice("Copied path to the clipboard.");
+      showNotice($t("notice.copiedPath"));
     } catch {
-      showNotice("Couldn't copy the path to the clipboard.", true);
+      showNotice($t("notice.copyPathFailed"), true);
     }
   }
 
@@ -5026,7 +5026,7 @@
     try {
       await revealItemInDir(homeCtxPath);
     } catch {
-      showNotice("Couldn't reveal that in the file manager.", true);
+      showNotice($t("notice.revealFailed"), true);
     }
   }
 
@@ -5036,7 +5036,7 @@
   async function renameHomeItem() {
     if (!homeCtxPath) return;
     const parent = splitPath(homeCtxPath).at(-2)?.path;
-    if (!parent) { showNotice("Can't rename this item from here.", true); return; }
+    if (!parent) { showNotice($t("home.renameFromHereFailed"), true); return; }
     pendingRenamePath = homeCtxPath;
     await navigate(parent);
   }
@@ -5604,7 +5604,7 @@
   /** Open the file-attributes editor (CPE-786) for the single selected entry. */
   function openAttributes() {
     if (selectedEntries.length === 0) {
-      showNotice("Select one or more items to edit their attributes.");
+      showNotice($t("notice.attributesNeedSelection"));
       return;
     }
     attrTargets = selectedEntries.map((e) => ({ path: e.path, name: e.name, modifiedMs: e.modified }));
@@ -5669,7 +5669,7 @@
   async function popOutPreview() {
     const entry = selectedEntries.length === 1 ? selectedEntries[0] : null;
     if (!entry) {
-      showNotice("Select a single file first, then pop its preview out.", true);
+      showNotice($t("notice.previewPopoutNeedsOne"), true);
       return;
     }
     // Inside an archive the selected entry's path is virtual (CPE-1360). The float window has no archive
@@ -5708,7 +5708,7 @@
       await win.setFocus();
     } catch (e) {
       console.debug("pop out failed:", e);
-      showNotice("Couldn't open the preview in a new window.", true);
+      showNotice($t("notice.previewWindowFailed"), true);
     }
   }
 
@@ -5743,7 +5743,7 @@
   /** Save the current (visible) folder listing to a CSV/TXT file via a native Save dialog (CPE-425). */
   async function saveFileList() {
     if (isHome || visible.length === 0) {
-      showNotice("Nothing to save here.");
+      showNotice($t("notice.nothingToSave"));
       return;
     }
     try {
@@ -5782,7 +5782,7 @@
       if (!picked || typeof picked !== "string") return;
       const json = unwrap(await commands.readFileText(picked, 16 * 1024 * 1024));
       await importTags(json);
-      showNotice("Tags imported.");
+      showNotice($t("tags.imported"));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5791,7 +5791,7 @@
   /** Copy the current (visible) folder listing to the clipboard as text (CPE-422). */
   async function copyListing(text: string, what: string) {
     if (isHome || visible.length === 0) {
-      showNotice("Nothing to copy here.");
+      showNotice($t("notice.nothingToCopy"));
       return;
     }
     try {
@@ -5831,11 +5831,11 @@
       } else if (a.kind === "open-github") {
         const url = await commands.gitRemoteUrl(a.target);
         if (url) await openUrl(url);
-        else showNotice("This repository has no remote URL configured.", true);
+        else showNotice($t("notice.noRemoteUrl"), true);
       }
     } catch (e) {
       console.debug("context action failed:", e);
-      showNotice("Couldn't run that action.", true);
+      showNotice($t("notice.actionFailed"), true);
     }
   }
 
@@ -5844,7 +5844,7 @@
     try {
       await openUrl(url);
     } catch {
-      showNotice("Couldn't open the link.", true);
+      showNotice($t("link.openFailed"), true);
     }
   }
 
@@ -6031,7 +6031,7 @@
       } else {
         loadPath(currentPath).catch(() => {});
       }
-      if (r.cancelled) showNotice("Copy cancelled.");
+      if (r.cancelled) showNotice($t("xfer.cancelled"));
       else if (r.failed > 0) showNotice(`Copied ${r.transferred}, ${r.failed} failed.`, true);
       else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
     }).then((un) => (unlistenTransferDone = un)).catch(() => {});
@@ -6304,7 +6304,7 @@
   on:search={(e) => { search = e.detail; selection = emptySelection(); }}
   on:searchDocs={() => openDocsSlug("12-search")}
   on:searchDeep={(e) => {
-    if (isHome) { showNotice("Open a folder first — Search looks inside the current folder and its subfolders.", false); return; }
+    if (isHome) { showNotice($t("search.deepNeedsFolder"), false); return; }
     deepSearchQuery = e.detail; fileSearchOpen = true;
   }}
 />
