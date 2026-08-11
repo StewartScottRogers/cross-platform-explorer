@@ -126,7 +126,7 @@ describe("VaultCreateDialog — Browse picker", () => {
 });
 
 describe("VaultCreateDialog — backend wiring + dispatch", () => {
-  it("Create calls vault_create with folder/dest/passphrase/shredOriginal and dispatches created", async () => {
+  it("Create calls vault_create with folder/dest/passphrase/shredOriginal/confirmed and dispatches created", async () => {
     const { component } = render(VaultCreateDialog, base);
     const created = vi.fn();
     component.$on("created", (e: CustomEvent<string>) => created(e.detail));
@@ -141,11 +141,34 @@ describe("VaultCreateDialog — backend wiring + dispatch", () => {
         dest: "/home/me/Secrets.cpevault",
         passphrase: "pw",
         shredOriginal: false,
+        confirmed: false,
       }),
     );
     await waitFor(() => expect(created).toHaveBeenCalledWith("/home/me/Secrets.cpevault"));
     // Not remembering by default → no keychain write.
     expect(invoke).not.toHaveBeenCalledWith("vault_remember_passphrase", expect.anything());
+  });
+
+  // CPE-1630: this dialog is the ONE caller allowed to set `confirmed: true` on `vault_create` — the
+  // backend engine now refuses to shred the original unless it's set (mirroring CPE-1611's `shred_paths`
+  // gate). Submitting the form with the shred checkbox checked (and its inline warning shown) IS the
+  // confirmation, so `confirmed` must track `shredOriginal` — never hardcoded `false`.
+  it("passes confirmed: true alongside shredOriginal: true when the shred checkbox is checked", async () => {
+    render(VaultCreateDialog, base);
+    await fireEvent.click(screen.getByTestId("vault-shred"));
+    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
+    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
+    await fireEvent.click(screen.getByTestId("vault-create-confirm"));
+
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("vault_create", {
+        folder: "/home/me/Secrets",
+        dest: "/home/me/Secrets.cpevault",
+        passphrase: "pw",
+        shredOriginal: true,
+        confirmed: true,
+      }),
+    );
   });
 
   it("remembers the passphrase in the keychain when the checkbox is on", async () => {

@@ -3301,10 +3301,15 @@ async vaultIs(path: string) : Promise<Result<boolean, string>> {
  * plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
  * round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
  * `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
+ * 
+ * `confirmed` (CPE-1630) is a distinct flag from `shred_original`, required whenever `shred_original` is
+ * true — mirroring `shred_paths`' `confirmed` gate (CPE-1611). `VaultCreateDialog.svelte` is the one
+ * caller allowed to set it; a devtools/automation call with `shred_original: true, confirmed: false` is
+ * refused by the engine before anything is written or destroyed.
  */
-async vaultCreate(folder: string, dest: string, passphrase: string, shredOriginal: boolean) : Promise<Result<null, string>> {
+async vaultCreate(folder: string, dest: string, passphrase: string, shredOriginal: boolean, confirmed: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("vault_create", { folder, dest, passphrase, shredOriginal }) };
+    return { status: "ok", data: await TAURI_INVOKE("vault_create", { folder, dest, passphrase, shredOriginal, confirmed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

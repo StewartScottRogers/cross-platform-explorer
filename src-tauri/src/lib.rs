@@ -6971,6 +6971,11 @@ async fn vault_is(path: String) -> Result<bool, String> {
 /// plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
 /// round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
 /// `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
+///
+/// `confirmed` (CPE-1630) is a distinct flag from `shred_original`, required whenever `shred_original` is
+/// true — mirroring `shred_paths`' `confirmed` gate (CPE-1611). `VaultCreateDialog.svelte` is the one
+/// caller allowed to set it; a devtools/automation call with `shred_original: true, confirmed: false` is
+/// refused by the engine before anything is written or destroyed.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn vault_create(
@@ -6978,11 +6983,12 @@ async fn vault_create(
     dest: String,
     passphrase: String,
     shred_original: bool,
+    confirmed: bool,
 ) -> Result<(), String> {
     let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
     tauri::async_runtime::spawn_blocking(move || {
         let opts = cpe_server::vault_manager::CreateOpts { shred_original, ..Default::default() };
-        cpe_server::vault_manager::create_vault(Path::new(&folder), Path::new(&dest), &pass, &opts)
+        cpe_server::vault_manager::create_vault(Path::new(&folder), Path::new(&dest), &pass, &opts, confirmed)
             .map_err(|e| e.to_string())
     })
     .await
