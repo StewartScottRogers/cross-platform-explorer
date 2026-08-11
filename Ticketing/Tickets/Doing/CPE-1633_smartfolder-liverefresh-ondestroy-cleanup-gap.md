@@ -2,7 +2,7 @@
 id: CPE-1633
 title: "App.svelte onDestroy never cancels the CPE-1230 smart-folder live-refresh debounce/listener"
 type: Bug
-status: Backlog
+status: Doing
 priority: Low
 component: Frontend
 tags: [ready]
@@ -73,3 +73,33 @@ tolerating.
 **Conflict surface:** `src/App.svelte` (the `onDestroy` block, ~line 6171, and the CPE-1230
 live-refresh block, ~line 1986-2031) plus `src/App.smartFolderLiveRefresh.test.ts`. Small, isolated —
 does not touch `savedSearchStore.ts` or CPE-1628's conflict surface.
+
+## Work Log
+2026-08-11 — Added `smartRefreshDebounce.cancel();` and `smartRefreshUnlisten?.();` to `onDestroy`
+(src/App.svelte:~6174-6176), alongside the existing teardown calls. Added a regression test to
+`src/App.smartFolderLiveRefresh.test.ts` ("onDestroy releases the live-refresh debounce/listener even
+while still open") that opens a structured search, spies on the real global `setTimeout`/`clearTimeout`
+(installed BEFORE `render(App)`, since `TrailingDebounce`'s constructor captures them as default-param
+references at instance-creation time), fires a synthetic `folder-watch` event to arm the 300ms debounce
+without waiting it out, then calls `cleanup()` without closing the search first and asserts (a)
+`clearTimeout` was called with the debounce's own timer handle and (b) the search's own `folder-watch`
+listener (identified by diffing against the baseline handler set, since `folderWatch.ts` has an
+independent consumer of the same event) was removed from the mock's registered-handlers set.
+Negative control: verified the new test FAILS against pre-fix code — first on a sanity assertion (spy
+must be installed before mount), then, after fixing that, on `expect(clearTimeoutSpy).toHaveBeenCalledWith(debounceHandle)`
+(0 calls recorded) — confirming the debounce timer is genuinely never cancelled today. Verification:
+`npm run check` (0 errors/warnings) and `npx vitest run` (279 files / 3423 tests, all green). Also ran
+`npx vitest run --pool=forks --poolOptions.forks.singleFork=true` (the whole suite in one process) as
+the ticket's stress check: 4 files / 10 tests failed, none in this diff's own new test. One failure was
+this file's PRE-EXISTING "tag smart folder live-refresh" test timing out — exactly the contention-
+dependent flake the ticket's evidence section already described and explicitly scoped as not something
+this fix eliminates outright. The other failures (`App.watchLiveGate.test.ts` timeout,
+`KeyboardBindingsDialog.test.ts` + `MacrosDialog.test.ts` "Cannot assign to read only property
+'clipboard'") are unrelated to the smart-folder listener/timer and look like pre-existing single-fork
+cross-test pollution (out of this ticket's scope, same territory as CPE-1628). Scanned the rest of
+`onDestroy` for other declared-but-untorn-down subscriptions/timers of the same shape and found two:
+`unlistenDiffs`/`unlistenCost` (armed/disarmed alongside `unlistenActivity` in the agent-watch reconcile
+block, ~line 1476-1492, but `unlistenActivity` is the only one of the three torn down in `onDestroy`)
+and `noticeTimer` (a `setTimeout`, ~line 2049, never cleared in `onDestroy` — `clearTimeout(noticeTimer)`
+only happens when a NEW notice is shown, not on destroy). Reporting these per the ticket's "while you're
+there" ask rather than expanding this diff; filing as follow-ups is up to the Foreman.
