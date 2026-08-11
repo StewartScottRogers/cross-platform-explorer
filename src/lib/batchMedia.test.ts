@@ -7,6 +7,7 @@ import {
   partitionEligible,
   progressPercent,
   canBatchTransform,
+  sameFile,
   skipRows,
   uniqueParentDirs,
 } from "./batchMedia";
@@ -162,6 +163,65 @@ describe("overwritesInPlace (CPE-1590)", () => {
 
   it("is empty for an empty plan", () => {
     expect(overwritesInPlace([])).toEqual([]);
+  });
+});
+
+describe("sameFile (CPE-1613)", () => {
+  const WIN = "Win32";
+  const MAC = "MacIntel";
+  const LINUX = "Linux x86_64";
+
+  it("the ticket's worked example: a case-only extension difference is platform-gated", () => {
+    // plan() lower-cases only the extension, so "IMG_1.JPG" -> "IMG_1.jpg" — a different STRING but the
+    // SAME FILE on Windows/macOS (case-insensitive filesystems), and a genuinely different possible file
+    // on Linux (case-sensitive).
+    expect(sameFile("/pics/IMG_1.JPG", "/pics/IMG_1.jpg", WIN)).toBe(true);
+    expect(sameFile("/pics/IMG_1.JPG", "/pics/IMG_1.jpg", MAC)).toBe(true);
+    expect(sameFile("/pics/IMG_1.JPG", "/pics/IMG_1.jpg", LINUX)).toBe(false);
+  });
+
+  it("trailing separators are ignored regardless of platform", () => {
+    expect(sameFile("/pics/cat.jpg", "/pics/cat.jpg/", LINUX)).toBe(true);
+    expect(sameFile("C:\\img\\p.png", "C:\\img\\p.png\\", WIN)).toBe(true);
+  });
+
+  it("resolves . and .. segments lexically", () => {
+    expect(sameFile("/pics/x/../cat.jpg", "/pics/cat.jpg", LINUX)).toBe(true);
+    expect(sameFile("/pics/./cat.jpg", "/pics/cat.jpg", LINUX)).toBe(true);
+    expect(sameFile("/pics/a/b/../../cat.jpg", "/pics/cat.jpg", LINUX)).toBe(true);
+    expect(sameFile("/pics/a/cat.jpg", "/pics/b/cat.jpg", LINUX)).toBe(false);
+  });
+
+  it("treats / and \\ as interchangeable separators", () => {
+    expect(sameFile("C:\\img\\p.png", "C:/img/p.png", WIN)).toBe(true);
+    expect(sameFile("/pics/a/cat.jpg", "\\pics\\a\\cat.jpg", LINUX)).toBe(true);
+  });
+
+  it("is reflexive and distinguishes genuinely different names", () => {
+    expect(sameFile("/pics/cat.jpg", "/pics/cat.jpg", LINUX)).toBe(true);
+    expect(sameFile("/pics/cat.jpg", "/pics/dog.jpg", LINUX)).toBe(false);
+    expect(sameFile("/pics/cat.jpg", "/pics/cat.png", LINUX)).toBe(false);
+  });
+
+  it("does not fold case on Linux even for a directory-only case difference", () => {
+    expect(sameFile("/PICS/cat.jpg", "/pics/cat.jpg", LINUX)).toBe(false);
+    expect(sameFile("/PICS/cat.jpg", "/pics/cat.jpg", WIN)).toBe(true);
+  });
+});
+
+describe("overwritesInPlace platform-gated case-only differences (CPE-1613)", () => {
+  it("the worked example: 'IMG_1.JPG' -> 'IMG_1.jpg' via Convert is flagged in-place on Win/mac, not Linux", () => {
+    const items = [{ input: "/pics/IMG_1.JPG", output: "/pics/IMG_1.jpg", summary: "convert→jpg" }];
+    expect(overwritesInPlace(items, "Win32")).toEqual(items);
+    expect(overwritesInPlace(items, "MacIntel")).toEqual(items);
+    expect(overwritesInPlace(items, "Linux x86_64")).toEqual([]);
+  });
+
+  it("a genuinely different extension is never flagged, on any platform", () => {
+    const items = [{ input: "/pics/cat.jpg", output: "/pics/cat.png", summary: "convert→png" }];
+    for (const platform of ["Win32", "MacIntel", "Linux x86_64"]) {
+      expect(overwritesInPlace(items, platform)).toEqual([]);
+    }
   });
 });
 

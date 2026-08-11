@@ -13,20 +13,22 @@
 //! the source file's bytes in place**, same as any other planned write (CPE-1590).
 //!
 //! **The engine itself refuses that, not just the UI (CPE-1599).** Before touching any bytes,
-//! [`execute_plan_walk`] scans `items` for one whose planned `output == input`; if it finds one and
-//! `job.confirmed_overwrite` is not set, it returns `Err` and writes nothing at all — a clean, specific
-//! refusal, not a panic and not a silent no-op that quietly skips the dangerous files. This closes the
-//! gap a purely frontend confirm (`BatchMediaDialog.svelte`'s "Overwrite N files" panel) can't: a
-//! devtools call, a future automation/agent feature, or a new UI surface that invokes
-//! `batch_media_execute_stream` directly no longer gets an in-place overwrite for free just by setting
-//! `non_destructive: false` — it must ALSO carry `confirmed_overwrite: true`, which should only ever be
-//! set by that one confirm panel after showing its warning. See [`BatchJob::confirmed_overwrite`]'s doc
-//! for the ownership of that promise.
+//! [`execute_plan_walk`] scans `items` for one whose planned output is the same file as its input per
+//! [`crate::batch_media::same_file`] — **not** raw string equality (CPE-1613): `plan` lower-cases a `Convert` target's
+//! extension, so a planned output can be textually different yet the SAME file on a case-insensitive
+//! filesystem, and that must be caught too. If it finds one and `job.confirmed_overwrite` is not set, it
+//! returns `Err` and writes nothing at all — a clean, specific refusal, not a panic and not a silent
+//! no-op that quietly skips the dangerous files. This closes the gap a purely frontend confirm
+//! (`BatchMediaDialog.svelte`'s "Overwrite N files" panel) can't: a devtools call, a future
+//! automation/agent feature, or a new UI surface that invokes `batch_media_execute_stream` directly no
+//! longer gets an in-place overwrite for free just by setting `non_destructive: false` — it must ALSO
+//! carry `confirmed_overwrite: true`, which should only ever be set by that one confirm panel after
+//! showing its warning. See [`BatchJob::confirmed_overwrite`]'s doc for the ownership of that promise.
 
 use std::fs;
 use std::path::Path;
 
-use crate::batch_media::{BatchJob, PlannedItem};
+use crate::batch_media::{same_file, BatchJob, PlannedItem};
 use crate::batch_transform;
 use crate::model::OpResult;
 
@@ -39,11 +41,14 @@ pub struct BatchReport {
     pub skipped: Vec<(String /* input */, String /* why */)>,
 }
 
-/// True when running `items` would overwrite at least one input file's bytes in place (planned
-/// `output == input`). Shared by the [`execute_plan_walk`] refusal check and available to any future
-/// caller that wants to ask "would this plan be destructive?" without duplicating the comparison.
+/// True when running `items` would overwrite at least one input file's bytes in place — decided by
+/// [`same_file`] (CPE-1613), **not** raw string equality: `batch_media::plan` lower-cases a `Convert`
+/// target's extension, so a planned `output` can be textually different from `input` yet be the SAME
+/// file on a case-insensitive filesystem (Windows, default macOS). Shared by the [`execute_plan_walk`]
+/// refusal check and available to any future caller that wants to ask "would this plan be destructive?"
+/// without duplicating the comparison.
 pub fn any_in_place(items: &[PlannedItem]) -> bool {
-    items.iter().any(|it| it.input == it.output)
+    items.iter().any(|it| same_file(&it.input, &it.output))
 }
 
 /// Execute a planned batch, calling `flush` with each file's [`OpResult`] as it completes — the shared
@@ -63,7 +68,7 @@ pub fn execute_plan_walk(
     mut flush: impl FnMut(OpResult),
 ) -> Result<BatchReport, String> {
     if !job.confirmed_overwrite && any_in_place(items) {
-        let count = items.iter().filter(|it| it.input == it.output).count();
+        let count = items.iter().filter(|it| same_file(&it.input, &it.output)).count();
         return Err(format!(
             "refusing to run: this plan would overwrite {count} original file{} in place, and \
              `confirmed_overwrite` was not set on the batch job — re-plan with an explicit confirmation \
@@ -434,6 +439,63 @@ mod tests {
             assert!(image::load_from_memory(&bytes).is_ok(), "valid output should decode");
         }
         assert!(!Path::new(&items[2].output).exists(), "no output for the skipped file");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1613: same-file detection, not raw string equality ---------------------------------------
+
+    /// The ticket's exact worked example, end-to-end with a REAL file on disk: `IMG_1.JPG` + Convert→jpg
+    /// with "write to new files" OFF. `plan()` lower-cases only the extension, so the planned output is
+    /// the textually different `"IMG_1.jpg"` — but `any_in_place`/`execute_plan_walk`'s refusal must
+    /// recognise it as the SAME file on a case-insensitive filesystem (Windows, default macOS) and refuse
+    /// without `confirmed_overwrite`, leaving the original byte-for-byte untouched. On a case-sensitive
+    /// filesystem (Linux) these really are two different possible files, so no refusal is needed there —
+    /// per CPE-1613, the check must NOT be unconditionally case-insensitive on Linux.
+    #[test]
+    fn cpe_1613_worked_example_real_file_in_place_detection_is_platform_gated() {
+        let d = scratch("cpe1613-worked-example");
+        let input = d.join("IMG_1.JPG");
+        {
+            let mut buf = Cursor::new(Vec::new());
+            image::RgbImage::from_pixel(6, 6, image::Rgb([1u8, 2, 3]))
+                .write_to(&mut buf, ImageFormat::Jpeg)
+                .unwrap();
+            fs::write(&input, buf.into_inner()).unwrap();
+        }
+
+        let mut job = BatchJob::new(vec![MediaOp::Convert { to_ext: "jpg".into() }]);
+        job.non_destructive = false;
+        let items = plan(&job, &[input.to_string_lossy().to_string()]);
+        assert_eq!(items[0].output, input.with_file_name("IMG_1.jpg").to_string_lossy());
+
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            assert!(
+                any_in_place(&items),
+                "a case-only extension difference must be flagged in-place on {}",
+                std::env::consts::OS
+            );
+            let orig = fs::read(&input).unwrap();
+            let err = execute_plan_walk(&items, &job, |_| {})
+                .expect_err("must refuse an unconfirmed in-place overwrite even though the strings differ");
+            assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+            assert_eq!(fs::read(&input).unwrap(), orig, "a refused plan must never touch the original");
+
+            // Confirmed, it proceeds and genuinely overwrites the original in place.
+            job.confirmed_overwrite = true;
+            let report = execute_plan(&items, &job).expect("a confirmed in-place plan must be allowed to run");
+            assert_eq!(report.written, 1);
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            assert!(
+                !any_in_place(&items),
+                "a case-only extension difference is a DIFFERENT file on a case-sensitive filesystem"
+            );
+            let report = execute_plan(&items, &job).expect("a genuinely distinct output needs no refusal");
+            assert_eq!(report.written, 1);
+        }
 
         let _ = fs::remove_dir_all(&d);
     }
