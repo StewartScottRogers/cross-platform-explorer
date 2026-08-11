@@ -46,7 +46,12 @@ selected, a bordered section appears at the bottom of the editor named after the
 "NTFS alternate data streams", "Finder tags") with two buttons:
 
 - **Pull** — reads that path's OS-native tags/label and merges them into the app's own store
-  (non-destructive; only adds, never removes), then re-seeds the editor from the merged result.
+  (non-destructive; only adds, never removes), then re-seeds the editor from the merged result. Tags
+  are unioned, but the colour **label** follows a narrower rule: the native label is only taken when
+  the item's internal label is currently **empty** — if the item already carries a label, Pull leaves
+  it alone rather than overwriting it. This is the mirror image of **Import** below, where a non-empty
+  incoming label *always* replaces the current one; Pull is deliberately more conservative because it
+  runs silently from a button click, not from a file you chose to import.
 - **Push** — applies whatever's in the editor right now (folding in any half-typed tag first), saves it,
   then writes it out to the OS-native store.
 
