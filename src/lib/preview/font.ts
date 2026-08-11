@@ -148,7 +148,12 @@ function reservedLowBlockBudget(reservedPool: number[], visibleTotal: number, ca
   const latinShare = reservedPool.length / visibleTotal;
   const proportional = Math.ceil(cap * latinShare);
   const maxBudget = Math.ceil(cap * RESERVED_LOW_BLOCK_MAX_SHARE);
-  return Math.min(reservedPool.length, Math.max(alnumCount, Math.min(proportional, maxBudget)));
+  // `cap` is in the outer min deliberately: the alnum FLOOR can otherwise exceed the caller's cap for a
+  // small cap (a 62-codepoint floor against `cap: 50` returned 62), silently breaking `GlyphGrid.shown`'s
+  // "at most `cap` entries" contract — the whole reason the grid can never stall the pane. Unreachable
+  // from `FontPreview.svelte` today (its only call uses GLYPH_GRID_CAP = 200), but the invariant should
+  // hold for every caller, not just the lucky one.
+  return Math.min(reservedPool.length, cap, Math.max(alnumCount, Math.min(proportional, maxBudget)));
 }
 
 /** Evenly sample at most `cap` codepoints across a SORTED coverage list, so a capped grid shows a

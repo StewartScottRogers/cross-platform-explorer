@@ -862,3 +862,22 @@ describe("parseCmapCoverage", () => {
     }
   });
 });
+
+describe("sampleCoverage — the cap is a hard ceiling, even below the alnum floor", () => {
+  it("never returns more than `cap` codepoints when the Latin floor alone would exceed it", () => {
+    // The alnum floor (up to 62 codepoints: 0-9 A-Z a-z) is a FLOOR, and a floor that outranks the
+    // caller's cap silently breaks `GlyphGrid.shown`'s "at most `cap` entries" contract — the invariant
+    // that keeps the grid from stalling the pane. Found by review on CPE-1598: before the fix this
+    // returned 62 for a cap of 50.
+    const alnum = [
+      ...Array.from({ length: 10 }, (_, i) => 0x30 + i),
+      ...Array.from({ length: 26 }, (_, i) => 0x41 + i),
+      ...Array.from({ length: 26 }, (_, i) => 0x61 + i),
+    ];
+    const cjk = Array.from({ length: 1000 }, (_, i) => 0x4e00 + i);
+    for (const cap of [1, 10, 50, 61, 62, 63]) {
+      const grid = sampleCoverage([...alnum, ...cjk], cap);
+      expect(grid.shown.length).toBeLessThanOrEqual(cap);
+    }
+  });
+});
