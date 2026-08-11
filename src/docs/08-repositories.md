@@ -98,8 +98,10 @@ You want to review a teammate's public repo without committing to a full clone, 
   from the status bar) — there's no tree view for a self-hosted or arbitrary remote the way there is for
   the four named providers.
 - **The Repository field expects a bare `owner/name`**, not a URL, for GitHub/GitLab/Bitbucket/Codeberg —
-  unlike Generic Git's URL field. Pasting a full repository URL here can produce a confusing "not found"
-  result instead of a clear "enter owner/name" prompt (tracked as CPE-1620).
+  unlike Generic Git's URL field. Pasting that provider's own repo URL (e.g. a `gitlab.com/...` URL while
+  GitLab is selected) is stripped down to `owner/name` for you automatically; pasting a URL for the wrong
+  provider (or one whose host it doesn't recognize) shows the clear "enter owner/name" prompt instead of a
+  confusing "not found" (fixed in CPE-1620).
 - **Host consent is per-exact-host, not per-URL or wildcard.** Admitting `git.example.com` doesn't admit
   a subdomain or a different port; each new host you reach via Generic Git asks again.
 - **The status-bar sync controls apply to any Git folder**, not just ones cloned from this page — cloning

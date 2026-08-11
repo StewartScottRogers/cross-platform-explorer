@@ -1,3 +1,33 @@
+<script context="module" lang="ts">
+  // Hosts each hosted provider's own repo URLs use — mirrors clone_host() in src-tauri/src/lib.rs.
+  // "generic" and self-hosted-style providers have no fixed host, so they're absent here.
+  const PROVIDER_HOSTS: Record<string, string> = {
+    github: "github.com",
+    gitlab: "gitlab.com",
+    bitbucket: "bitbucket.org",
+    codeberg: "codeberg.org",
+  };
+
+  /** Strip the selected provider's own host prefix (and a trailing `.git`) from a pasted URL. Leaves
+   *  the input untouched if it doesn't match that provider's host (e.g. a foreign-host URL, or one
+   *  already in `owner/name` form). Exported for the test file. */
+  export function stripRepoUrl(input: string, forProvider: string): string {
+    const host = PROVIDER_HOSTS[forProvider];
+    let r = input.trim();
+    if (host) {
+      const escaped = host.replace(/\./g, "\\.");
+      r = r.replace(new RegExp(`^https?://${escaped}/`, "i"), "");
+    }
+    return r.replace(/\.git$/, "");
+  }
+
+  /** True if `r` still looks like a URL rather than a bare `owner/name` — e.g. it kept its scheme
+   *  because it was pasted for the wrong provider, or a host neither strip recognized. */
+  export function looksLikeUrl(r: string): boolean {
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(r);
+  }
+</script>
+
 <script lang="ts">
   // Repositories browser (CPE-434/435): connect to a forge (GitHub first) and browse a repo's tree
   // in-app. Backed by the host-brokered, allow-listed `forge_browse` command (no SSRF). Public repos
@@ -26,8 +56,8 @@
   let loaded = false;
 
   async function browse(toPath = ""): Promise<void> {
-    const r = repo.trim().replace(/^https?:\/\/github\.com\//i, "").replace(/\.git$/, "");
-    if (!r.includes("/")) { error = "Enter a repository as owner/name."; return; }
+    const r = stripRepoUrl(repo, provider);
+    if (!r.includes("/") || looksLikeUrl(r)) { error = "Enter a repository as owner/name."; return; }
     repo = r;
     loading = true; error = "";
     try {
