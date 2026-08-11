@@ -42,6 +42,7 @@
   } from "../batchMedia";
   import type { CheckpointPartial } from "../batchMedia";
   import { baseName } from "../contentSearch";
+  import { recordCheckpointFailure } from "../checkpointFailures";
 
   /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
    *  decode-capable set closely enough for a logo/stamp overlay (a superset of {@link canBatchTransform}
@@ -327,6 +328,9 @@
         } catch (e) {
           console.error("Batch media: pre-overwrite checkpoint failed (proceeding with confirmed write)", e);
           checkpointFailures = [...checkpointFailures, dir];
+          // CPE-1600: durable record alongside the console line + the in-dialog warning, so this doesn't
+          // vanish once the dialog closes and the ~5s `showNotice` banner has scrolled by unread.
+          void recordCheckpointFailure(dir, "Before batch media overwrite", e);
         }
       }
     }

@@ -30,6 +30,7 @@
   import { t } from "../i18n";
   import { baseName, parentDir } from "../contentSearch";
   import { keepsOnePerGroup, pruneGroups } from "../duplicates";
+  import { recordCheckpointFailure } from "../checkpointFailures";
   import type { SimGroup, SimResult } from "../bindings.gen";
 
   export let root = "";
@@ -85,6 +86,8 @@
         unwrap(await commands.checkpointCreate(root, "Before removing similar images"));
       } catch (e) {
         console.error("Similar Images: pre-cleanup checkpoint failed (proceeding with trash move)", e);
+        // CPE-1600: durable record alongside the console line — best-effort, never blocks the move.
+        void recordCheckpointFailure(root, "Before removing similar images", e);
       }
       await commands.deleteToTrash(paths); // returns OpResult[] directly (no Result wrapper)
       groups = pruneGroups(groups, selected);

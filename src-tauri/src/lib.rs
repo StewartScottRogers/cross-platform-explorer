@@ -4062,6 +4062,43 @@ async fn checkpoint_list(
         .map_err(|e| e.to_string())?
 }
 
+/// Record that a best-effort pre-write checkpoint of `root` was attempted and failed (CPE-1600), so the
+/// Checkpoints panel can show it as a durable record alongside checkpoints that did succeed. Called by
+/// every "checkpoint before an irreversible batch" caller (Batch Media, Metadata Studio, Declutter,
+/// Similar Images) from its existing failure `catch`, in addition to the `console.error` it already logs
+/// — never in place of it, and never blocking the write that's already proceeding.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_record_failure(
+    app: tauri::AppHandle,
+    root: String,
+    operation: String,
+    reason: String,
+) -> Result<(), String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::record_checkpoint_failure(&ctx, &root, &operation, &reason)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The failed checkpoint attempts recorded for `root`, newest-first (CPE-1600). Kept as a separate list
+/// from `checkpoint_list` — the frontend renders the two shapes distinctly rather than merging them here.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn checkpoint_failures_list(
+    app: tauri::AppHandle,
+    root: String,
+) -> Result<Vec<cpe_server::checkpoint_store::CheckpointFailure>, String> {
+    let ctx = server_ctx::TauriCtx::new(&app);
+    tauri::async_runtime::spawn_blocking(move || {
+        cpe_server::checkpoint_store::checkpoint_failures_list(&ctx, &root)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Preview reverting `root` to checkpoint `manifest_id`: restore-plan summary + a drift report so the UI
 /// can warn before touching disk. Reads only; nothing destructive.
 #[tauri::command]
@@ -11265,6 +11302,8 @@ pub fn run() {
             replay_load,
             checkpoint_create,
             checkpoint_list,
+            checkpoint_record_failure,
+            checkpoint_failures_list,
             checkpoint_preview_revert,
             checkpoint_revert,
             checkpoint_revert_one,
@@ -12114,6 +12153,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         replay_load,
         checkpoint_create,
         checkpoint_list,
+        checkpoint_record_failure,
+        checkpoint_failures_list,
         checkpoint_preview_revert,
         checkpoint_revert,
         checkpoint_revert_one,

@@ -29,6 +29,8 @@ let checkpointCalls: Array<[string, string]> = [];
 // CPE-1599 adds "skipped": the checkpoint succeeds, but `CheckpointCreated.skipped` names file(s) it left
 // out (oversize/budget) — recovery for those is incomplete even though the call itself didn't reject.
 let checkpointBehavior: "ok" | "reject" | "skipped" = "ok";
+// CPE-1600: a failed `checkpoint_create` also records a durable failure via `checkpoint_record_failure`.
+let recordFailureCalls: Array<{ root: string; operation: string; reason: string }> = [];
 
 const invoke = vi.fn((cmd: string, args?: any) => {
   if (cmd === "batch_media_plan") {
@@ -49,6 +51,10 @@ const invoke = vi.fn((cmd: string, args?: any) => {
       added_bytes: 0,
       skipped,
     });
+  }
+  if (cmd === "checkpoint_record_failure") {
+    recordFailureCalls.push(args);
+    return Promise.resolve(null);
   }
   return Promise.reject(new Error(`unexpected command: ${cmd}`));
 });
@@ -82,6 +88,7 @@ beforeEach(() => {
   execCalls = [];
   checkpointCalls = [];
   checkpointBehavior = "ok";
+  recordFailureCalls = [];
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -478,6 +485,11 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
       checkpointFailures: ["/repo/pics"],
       checkpointPartial: [],
     });
+    // CPE-1600: the failure also gets a durable record via `checkpoint_record_failure`, alongside (not
+    // instead of) the console line and the in-dialog warning.
+    expect(recordFailureCalls).toEqual([
+      { root: "/repo/pics", operation: "Before batch media overwrite", reason: "disk full" },
+    ]);
   });
 
   it("carries the checkpoint failure out on the cancel path too — Escape must not discard it unread", async () => {

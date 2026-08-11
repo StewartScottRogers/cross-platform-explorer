@@ -175,6 +175,14 @@ describe("SimilarImagesDialog (CPE-1202)", () => {
       expect(checkpointCalls).toEqual([["/repo", "Before removing similar images"]]);
       // The failure is surfaced to the console for diagnostics rather than silently vanishing.
       expect(errSpy).toHaveBeenCalled();
+      // CPE-1600: the failure also gets a durable record, alongside (not instead of) the console line.
+      await waitFor(() =>
+        expect(invoke).toHaveBeenCalledWith("checkpoint_record_failure", {
+          root: "/repo",
+          operation: "Before removing similar images",
+          reason: "checkpoint boom (domain error)",
+        }),
+      );
       errSpy.mockRestore();
     },
   );

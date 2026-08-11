@@ -208,6 +208,14 @@ describe("DeclutterDialog — safe move-to-bin (CPE-1329)", () => {
     await waitFor(() => expect(trashCalls).toEqual([["/repo/empty.log"]]));
     await waitFor(() => expect(screen.getByTestId("dc-none")).toBeTruthy());
     expect(errSpy).toHaveBeenCalled();
+    // CPE-1600: the failure is also recorded durably (alongside the console line, not instead of it).
+    await waitFor(() =>
+      expect(calls.some((c) => c.cmd === "checkpoint_record_failure")).toBe(true),
+    );
+    const recorded = calls.find((c) => c.cmd === "checkpoint_record_failure")?.args as
+      | { root: string; operation: string; reason: string }
+      | undefined;
+    expect(recorded).toEqual({ root: "/repo", operation: "Before removing clutter", reason: "disk full" });
     errSpy.mockRestore();
   });
 

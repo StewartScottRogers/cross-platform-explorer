@@ -13,6 +13,7 @@
   import { commands, type MetaField } from "../bindings.gen";
   import { joinFieldKey, buildMetaEdits, stageFieldEdits, isFieldDirty, revertFieldEdit } from "../metaEdits";
   import { parentDir } from "../contentSearch";
+  import { recordCheckpointFailure } from "../checkpointFailures";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import type { DirEntry } from "../types";
@@ -169,6 +170,9 @@
       checkpointed = true;
     } catch (e) {
       console.error("Metadata Studio: pre-save checkpoint failed (proceeding with write)", e);
+      // CPE-1600: durable record alongside the console line, so this doesn't vanish with a dismissed
+      // notice — best-effort, never blocks the write already proceeding.
+      void recordCheckpointFailure(parentDir(primary.path), "Before metadata edit", e);
     }
     try {
       for (const f of targets) {
