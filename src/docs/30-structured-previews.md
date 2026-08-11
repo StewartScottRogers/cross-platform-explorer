@@ -91,11 +91,16 @@ Opens automatically for font files. The pane shows:
   TrueType/OpenType font, its Family, Style, Version, and Glyph count, read straight from the font's own
   name/glyph tables. A WOFF or WOFF2 file — whose tables are compressed — shows Format and File size only;
   a small note explains why the rest isn't available rather than leaving it looking broken.
-- **Glyph grid** — a capped sample of common Latin characters (basic Latin plus Latin-1 Supplement, a
-  couple hundred cells) rendered in the font, so you can eyeball its coverage and style at a glance. The
-  grid is capped rather than trying to enumerate every glyph a font defines, so even an enormous font can't
-  slow the pane down. Click any cell to select it — the section heading shows the selected character and
-  its Unicode codepoint (e.g. `U+0041`).
+- **Glyph grid** — driven by the font's own character coverage (parsed from its `cmap` table), so a CJK
+  font, a symbol font, or any other non-Latin face shows the characters that actually make it distinctive
+  rather than a Latin-only sample. The grid is always capped at a couple hundred cells — never every glyph
+  a font defines, so even an enormous CJK font (tens of thousands of glyphs) can't slow the pane down — and
+  when a font's coverage runs past that cap, the cells shown are evenly sampled across its full range
+  rather than just the first slice, so the grid still touches multiple scripts/blocks instead of getting
+  stuck on one. A note under the grid says which case you're looking at: the real count and whether it was
+  sampled, or — for a font whose coverage couldn't be read (e.g. an unsupported `cmap` subtable format, or
+  it doesn't parse) — that a fixed Latin sample is shown instead. Click any cell to select it — the section
+  heading shows the selected character and its Unicode codepoint (e.g. `U+0041`).
 
 ### Actions
 

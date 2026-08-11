@@ -1,6 +1,6 @@
 <script lang="ts">
   /**
-   * Font preview (CPE-1586, epic CPE-1568 slice 5): specimen + glyph-sample grid + lightweight metadata
+   * Font preview (CPE-1586/CPE-1593, epic CPE-1568 slice 5): specimen + glyph grid + lightweight metadata
    * for `.ttf`/`.otf`/`.woff`/`.woff2`. Self-contained like CertPreview.svelte/JwtPreview.svelte — it
    * loads its own data from `path` and reports its two copyable values (the selected glyph's character
    * and its codepoint) up to PreviewPane's generic action bar (CPE-1570) via `onValues`, keyed to match
@@ -8,26 +8,55 @@
    *
    * The specimen loads the font itself via `FontFace`-from-URL over the `asset://` protocol (`assetUrl`)
    * — this used to live inline in PreviewPane.svelte (CPE-117); moving it here keeps that pane thin, like
-   * every other structured preview. Metadata (format/family/style/version/glyph count) is read separately,
-   * straight off the file's raw bytes fetched from that SAME asset URL (mirroring PreviewPane's own
-   * `copyImageToClipboard`, which already fetches an asset:// URL for its bytes) and parsed by the pure
-   * helpers in `preview/font.ts` — see that module's doc comment for why WOFF/WOFF2 degrade to format +
-   * size only rather than full metadata (no new dependency for a real font parser).
+   * every other structured preview. Metadata (format/family/style/version/glyph count) and the glyph
+   * grid's coverage are read separately, via targeted `read_file_range` byte-range reads (CPE-1593) rather
+   * than re-fetching the whole file a second time: one read for a small leading chunk (sfnt header + table
+   * directory, always near the front), then — for whichever of `name`/`maxp`/`cmap` the directory says
+   * lies OUTSIDE that chunk — one further targeted range read per table (in parallel), each bounded to
+   * that table's own declared extent. Real Windows fonts commonly put `name` right near EOF (verified
+   * against arial.ttf/malgun.ttf/seguisym.ttf, CPE-1593), so that extra read is the norm, not an edge case
+   * — but it's still a handful of small bounded reads, nowhere near the whole file. Parsed by the pure
+   * helpers in `preview/font.ts` — see that module's doc comments for why WOFF/WOFF2 degrade to format +
+   * size only (no new dependency for a real font/decompression parser) and why the grid falls back to a
+   * fixed Latin sample when the font's `cmap` can't be read.
    */
   import { onDestroy } from "svelte";
   import { t } from "../i18n";
   import { formatSize } from "../format";
+  import { commands } from "../bindings.gen";
+  import { unwrap } from "../invoke";
   import {
-    FONT_GLYPH_CANDIDATES,
-    capGlyphs,
+    glyphGridFromCoverage,
     glyphChar,
     codepointLabel,
     sniffFontFormat,
-    parseSfntMetadata,
+    parseMaxpNumGlyphs,
+    parseNameTable,
+    locateSfntTable,
+    parseCmapCoverage,
     formatLabelForExt,
+    FONT_METADATA_HEAD_BYTES,
+    FONT_TABLE_RANGE_MAX_BYTES,
     type FontFormat,
     type SfntMetadata,
+    type SfntTableEntry,
+    type GlyphGrid,
   } from "../preview/font";
+
+  /** Resolve one sfnt table's bytes given its directory entry: reuse the slice from the already-read head
+   *  chunk if it's fully contained there, otherwise issue one targeted `read_file_range` for exactly that
+   *  table's own extent (capped — see FONT_TABLE_RANGE_MAX_BYTES). `null` when there's no entry to resolve
+   *  (table absent from this font). CPE-1593: this is the "second targeted range read" the ticket blesses
+   *  as fine when a table doesn't fall inside the leading chunk. */
+  async function resolveTableBytes(entry: SfntTableEntry | null, head: Uint8Array): Promise<Uint8Array | null> {
+    if (!entry) return null;
+    if (entry.offset >= 0 && entry.offset + entry.length <= head.length) {
+      return head.subarray(entry.offset, entry.offset + entry.length);
+    }
+    const len = Math.min(entry.length, FONT_TABLE_RANGE_MAX_BYTES);
+    const arr = unwrap(await commands.readFileRange(path, entry.offset, len));
+    return new Uint8Array(arr);
+  }
 
   /** The font file's path. */
   export let path: string;
@@ -52,12 +81,14 @@
   let metadata: SfntMetadata | null = null;
   let fontReqId = 0;
 
-  // Capped once — the candidate list is fixed size (see preview/font.ts), so this never actually
-  // truncates today, but the cap is exercised (and unit-tested) independently of that fixed list so a
-  // future larger candidate set can't silently stall the pane with an unbounded grid.
-  const { shown: glyphCells, total: glyphTotal, truncated: glyphTruncated } = capGlyphs(FONT_GLYPH_CANDIDATES);
-
-  let selectedGlyph: number | null = glyphCells[0] ?? null;
+  // Starts as the fixed fallback sample so the grid paints immediately on file change (STREAMING.md); load()
+  // swaps this to the font's real `cmap` coverage once that's been read+parsed, or leaves it as the
+  // fallback if the font's coverage couldn't be determined (CPE-1593).
+  let glyphGrid: GlyphGrid = glyphGridFromCoverage(null);
+  let selectedGlyph: number | null = glyphGrid.shown[0] ?? null;
+  // Once the user has clicked a specific cell, an in-flight coverage upgrade must not steal their
+  // selection out from under them by resetting it back to the new grid's first cell.
+  let userPickedGlyph = false;
 
   // Report the currently selected glyph's copyable values up to PreviewPane whenever it changes (CPE-1570)
   // — mirrors the jwt/json providers' own `values` convention. Nothing to copy until a glyph is selected.
@@ -69,6 +100,7 @@
 
   function selectGlyph(cp: number): void {
     selectedGlyph = cp;
+    userPickedGlyph = true;
   }
 
   // The FontFace this component last registered with the document — removed before adding a new one (or
@@ -86,7 +118,9 @@
   let loadedPath = "";
   $: if (path && path !== loadedPath) {
     loadedPath = path;
-    selectedGlyph = glyphCells[0] ?? null;
+    glyphGrid = glyphGridFromCoverage(null); // reset to the fallback sample; load() upgrades it below
+    selectedGlyph = glyphGrid.shown[0] ?? null;
+    userPickedGlyph = false;
     void load();
   }
 
@@ -119,17 +153,43 @@
       fontState = "idle";
     }
 
-    // Best-effort metadata: a failed/unavailable fetch (or a compressed WOFF/WOFF2 container — see
-    // preview/font.ts's parseSfntMetadata doc comment) just leaves `metadata`/`format` at their graceful
-    // defaults, never an error shown to the user — the specimen/grid above already carries the preview.
+    // Best-effort metadata + coverage: a failed/unavailable read (or a compressed WOFF/WOFF2 container —
+    // see preview/font.ts's doc comments) just leaves `metadata`/`format`/`glyphGrid` at their graceful
+    // defaults, never an error shown to the user — the specimen above already carries the preview. Reads
+    // only small targeted byte ranges, never the whole file (CPE-1593) — the FontFace load above already
+    // fetched the full bytes once for actual rendering; sniffing metadata off a second full read would
+    // double that I/O for no reason.
     try {
-      const resp = await fetch(url);
-      const buf = new Uint8Array(await resp.arrayBuffer());
+      const headArr = unwrap(await commands.readFileRange(path, 0, FONT_METADATA_HEAD_BYTES));
       if (mine !== fontReqId) return;
-      format = sniffFontFormat(buf);
-      metadata = parseSfntMetadata(buf);
+      const head = new Uint8Array(headArr);
+      format = sniffFontFormat(head);
+
+      // Locate all three tables of interest in one small head read, then resolve each one's bytes — reused
+      // from the head chunk if it happens to fall inside, or fetched with its own targeted range read
+      // (in parallel) otherwise. `name` in particular routinely needs the extra read on a real font (see
+      // this component's doc comment) — `maxp` usually doesn't (it's small and typically placed early).
+      const nameEntry = locateSfntTable(head, "name");
+      const maxpEntry = locateSfntTable(head, "maxp");
+      const cmapEntry = locateSfntTable(head, "cmap");
+      const [nameBytes, maxpBytes, cmapBytes] = await Promise.all([
+        resolveTableBytes(nameEntry, head),
+        resolveTableBytes(maxpEntry, head),
+        resolveTableBytes(cmapEntry, head),
+      ]);
+      if (mine !== fontReqId) return;
+
+      if (format === "TrueType" || format === "OpenType") {
+        const numGlyphs = maxpBytes ? parseMaxpNumGlyphs(maxpBytes) : null;
+        const names = nameBytes ? parseNameTable(nameBytes) : {};
+        metadata = { family: names[1] ?? null, style: names[2] ?? null, version: names[5] ?? null, numGlyphs };
+      }
+
+      const coverage = cmapBytes ? parseCmapCoverage(cmapBytes) : null;
+      glyphGrid = glyphGridFromCoverage(coverage);
+      if (!userPickedGlyph) selectedGlyph = glyphGrid.shown[0] ?? null;
     } catch {
-      /* metadata unavailable — degrade gracefully, see doc comment above */
+      /* metadata/coverage unavailable — degrade gracefully, see doc comment above (fallback grid already showing) */
     }
   }
 </script>
@@ -180,7 +240,7 @@
       {/if}
     </div>
     <div class="fp-glyph-grid" data-testid="font-glyph-grid">
-      {#each glyphCells as cp (cp)}
+      {#each glyphGrid.shown as cp (cp)}
         <button
           type="button"
           class="fp-glyph"
@@ -193,8 +253,24 @@
         >{glyphChar(cp)}</button>
       {/each}
     </div>
-    {#if glyphTruncated}
-      <p class="fp-note">Showing {glyphCells.length} of {glyphTotal} sample characters.</p>
+    {#if glyphGrid.source === "coverage"}
+      {#if glyphGrid.truncated}
+        <p class="fp-note" data-testid="font-glyph-note">
+          Showing {glyphGrid.shown.length} of {glyphGrid.total.toLocaleString()} characters this font
+          actually defines — its common Latin range first where it has one, then evenly sampled across
+          the rest of its coverage.
+        </p>
+      {:else}
+        <p class="fp-note" data-testid="font-glyph-note">
+          This font defines {glyphGrid.total.toLocaleString()}
+          {glyphGrid.total === 1 ? "character" : "characters"}, shown here.
+        </p>
+      {/if}
+    {:else}
+      <p class="fp-note" data-testid="font-glyph-note">
+        This font's own character coverage couldn't be read — showing a fixed sample of
+        {glyphGrid.total} common Latin characters instead.
+      </p>
     {/if}
   </div>
 </div>
