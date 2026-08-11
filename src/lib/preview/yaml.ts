@@ -183,12 +183,68 @@ function findClosingDoubleQuote(s: string): number {
 const MAX_QUOTE_FOLD_LINES = 200;
 
 /**
- * YAML double-quoted flow scalars MAY wrap across physical lines ("line folding"): an unescaped line
- * break inside the quotes folds to a single space, and each continuation line's own leading whitespace
- * is not part of the content. This is common in real-world files (a real 403-line Afrikaans locale
- * catalog needed exactly this — CPE-1617 PR #833 review finding #7) — supporting it, rather than
- * reporting "unterminated string" on ordinary valid YAML, is the difference between a false positive and
- * a real feature.
+ * THE single YAML line-folding rule, shared by BOTH double-quoted flow-scalar folding
+ * ({@link foldMultilineDoubleQuoted}) and `>` folded block-scalar folding ({@link consumeBlockScalarBody}):
+ * an ordinary line break between two non-blank lines folds to a single space; a run of `N` consecutive
+ * BLANK lines folds to exactly `N` newlines instead (the space the first break of the run would have
+ * contributed is discarded, and each blank line contributes one line feed).
+ *
+ * **This used to be two separate, independently-wrong implementations** (PR 833 review rounds 2 and 3)
+ * — the flow-scalar path joined every line with a bare space (a blank line became an extra space, not a
+ * newline, verified wrong against PyYAML), and the block-scalar path emitted `N+1` newlines for `N`
+ * blank lines (double-counting: once "entering" the blank line, once "leaving" it — verified wrong
+ * against PyYAML on two real files in this repo's own `hermes-agent/plugins/platforms/{ntfy,photon}/
+ * plugin.yaml`, both real `description: >` fields with one blank line between two paragraphs). Both are
+ * silent WRONG VALUES, not errors or degrades — the worst failure class this ticket has been bounced
+ * for twice. Fixed by implementing the rule ONCE here and having both callers use it, rather than two
+ * variants that can each drift from the spec (and from each other) independently.
+ *
+ * Verified against PyYAML: `"line one\n\nline two"` (one blank line) → `"line one\nline two"` (one
+ * newline); `"line one\n\n\nline two"` (two blank lines) → `"line one\n\nline two"` (two newlines). A
+ * line that's whitespace-only (spaces/tabs, no other characters) counts as BLANK for this purpose, same
+ * as a zero-length line — real YAML strips a continuation line's leading (and, for a blank line, its
+ * only) whitespace before folding, so the two are indistinguishable content, and PyYAML treats them
+ * identically.
+ *
+ * Blank runs are counted and emitted lazily (`pendingBlankRun`) so this handles a blank run of any
+ * length uniformly, INCLUDING a leading run before any real content — reachable for a block scalar
+ * (`text: >` followed immediately by a blank line before the first indented line) even though it never
+ * happens for a double-quoted scalar (whose first "line" is always the non-blank header text) — a
+ * leading blank run contributes `N` literal newlines with no preceding space (there's no prior content
+ * to space away from), never a phantom leading space. A trailing blank run is handled by the caller,
+ * not here: {@link consumeBlockScalarBody} trims trailing blank lines from `lines` before this ever
+ * runs, and `foldMultilineDoubleQuoted`'s own quote-closing scan guarantees its last segment always
+ * holds the closing `"` (never blank) — so this function never actually receives one, but the loop
+ * below still handles it correctly (as `N` trailing newlines) if it ever did.
+ */
+function foldYamlLines(lines: string[]): string {
+  let out = "";
+  let pendingBlankRun = 0;
+  let sawContent = false;
+  for (const line of lines) {
+    if (line === "") {
+      pendingBlankRun++;
+      continue;
+    }
+    if (pendingBlankRun > 0) {
+      out += "\n".repeat(pendingBlankRun);
+    } else if (sawContent) {
+      out += " ";
+    }
+    pendingBlankRun = 0;
+    out += line;
+    sawContent = true;
+  }
+  if (pendingBlankRun > 0) out += "\n".repeat(pendingBlankRun);
+  return out;
+}
+
+/**
+ * YAML double-quoted flow scalars MAY wrap across physical lines ("line folding"): folded per
+ * {@link foldYamlLines} — see its doc comment for the exact, PyYAML-verified rule. This is common in
+ * real-world files (a real 403-line Afrikaans locale catalog needed exactly this — CPE-1617 PR 833
+ * review finding #7) — supporting it, rather than reporting "unterminated string" on ordinary valid
+ * YAML, is the difference between a false positive and a real feature.
  *
  * Only DOUBLE-quoted scalars fold this way here (single-quoted scalars fold too in real YAML, but
  * aren't handled — a documented, bounded gap: unclosed single-quoted values still report "unterminated
@@ -229,7 +285,7 @@ function foldMultilineDoubleQuoted(
     break;
   }
   if (!closed) return null; // never closed (or exceeded the cap) — fall back to normal handling
-  return { content: parts.join(" "), nextPhysicalIndex: i };
+  return { content: foldYamlLines(parts), nextPhysicalIndex: i };
 }
 
 function isSeqItem(content: string): boolean {
@@ -335,19 +391,6 @@ function blockScalarHeader(content: string): { style: "|" | ">"; chomp: "" | "+"
   return m ? { style: m[1] as "|" | ">", chomp: m[2] as "" | "+" | "-" } : null;
 }
 
-/** Folded style (`>`): a line break between two non-blank content lines becomes a single space; a blank
- *  line becomes a real newline (YAML's folding rule). Bounded implementation — doesn't special-case "a
- *  more-indented line stays literal", a real `>` nuance this preview doesn't attempt (documented
- *  simplification, same spirit as `toml.ts`'s date-as-string choice). */
-function foldBlockLines(lines: string[]): string {
-  let out = "";
-  for (let i = 0; i < lines.length; i++) {
-    if (i > 0) out += lines[i] === "" || lines[i - 1] === "" ? "\n" : " ";
-    out += lines[i];
-  }
-  return out;
-}
-
 /**
  * Consumes a block scalar's body directly off the RAW physical lines starting at `startIndex` (NOT the
  * already blank-line-filtered {@link Line} array — blank lines inside a block scalar are significant
@@ -372,6 +415,12 @@ function foldBlockLines(lines: string[]): string {
  * ("keep") is treated the same as clip here — a documented simplification (this parser discards
  * trailing blank lines before chomping ever sees them, so `+`'s "preserve every trailing blank line"
  * nuance isn't reproduced; `+` is the least common of the three chomping indicators in practice).
+ *
+ * `>` (folded) style joins its content lines with {@link foldYamlLines} — the SAME shared rule
+ * double-quoted flow-scalar folding uses (see that function's own doc comment for why these two used to
+ * be separate, independently-wrong implementations, and are now one). Bounded implementation — doesn't
+ * special-case "a more-indented line stays literal", a real `>` nuance this preview doesn't attempt
+ * (documented simplification, same spirit as `toml.ts`'s date-as-string choice).
  */
 function consumeBlockScalarBody(
   physical: string[],
@@ -411,7 +460,7 @@ function consumeBlockScalarBody(
   }
 
   const lines = rawContentLines.map((l) => l ?? "");
-  let text = style === "|" ? lines.join("\n") : foldBlockLines(lines);
+  let text = style === "|" ? lines.join("\n") : foldYamlLines(lines);
 
   if (chomp === "-") {
     text = text.replace(/\n+$/, "");

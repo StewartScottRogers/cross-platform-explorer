@@ -248,6 +248,59 @@ describe("parseYaml — finding #7: multi-line double-quoted scalar folding", ()
   });
 });
 
+// CPE-1617 PR 833 review round 2: `foldMultilineDoubleQuoted` originally joined EVERY physical line
+// with a plain space, including blank ones — a silent WRONG VALUE (not an error, not a degrade), since
+// real YAML folds a blank line to a newline, not a space. Cross-checked against PyYAML: N consecutive
+// blank continuation lines fold to exactly N newlines (an ordinary non-blank break still folds to one
+// space). Each test below is a negative control: with the pre-fix `parts.join(" ")` behaviour, every
+// expected `\n` below would instead be a plain `" "` (a run of spaces for N>1), which is what shipped
+// untested and is exactly the scenario (a multi-paragraph translation-catalog string) that justified
+// adding line-folding support in the first place.
+describe("parseYaml — finding #7 follow-up: blank-line folding inside a double-quoted scalar", () => {
+  it("one blank line folds to exactly one newline (not a space)", () => {
+    // Pre-fix (`parts.join(" ")`): "line one line two" (a single space, no newline at all).
+    const v = ok(['msg: "line one', "", 'line two"'].join("\n"));
+    expect(v).toEqual({ msg: "line one\nline two" });
+  });
+
+  it("two consecutive blank lines fold to exactly two newlines", () => {
+    // Pre-fix: "line one  line two" (two spaces, no newlines).
+    const v = ok(['msg: "line one', "", "", 'line two"'].join("\n"));
+    expect(v).toEqual({ msg: "line one\n\nline two" });
+  });
+
+  it("three consecutive blank lines fold to exactly three newlines", () => {
+    // Pre-fix: "line one   line two" (three spaces, no newlines).
+    const v = ok(['msg: "line one', "", "", "", 'line two"'].join("\n"));
+    expect(v).toEqual({ msg: "line one\n\n\nline two" });
+  });
+
+  it("a blank line at the very START of the folded region (right after the opening quote) folds correctly", () => {
+    // Pre-fix: " text" (a leading space, not a leading newline).
+    const v = ok(['msg: "', "", 'text"'].join("\n"));
+    expect(v).toEqual({ msg: "\ntext" });
+  });
+
+  it("a blank line at the very END of the folded region (right before the closing quote) folds correctly", () => {
+    // Pre-fix: "text " (a trailing space, not a trailing newline).
+    const v = ok(['msg: "text', "", '"'].join("\n"));
+    expect(v).toEqual({ msg: "text\n" });
+  });
+
+  it("a whitespace-only line (spaces, no other characters) counts as blank, same as a truly empty line", () => {
+    // Decision (documented in foldMultilineDoubleQuoted's doc comment): a line that's ALL whitespace is
+    // indistinguishable from a zero-length line once its (only) leading whitespace is stripped — real
+    // YAML/PyYAML treats them identically, so this parser does too.
+    const v = ok(['msg: "line one', "   ", 'line two"'].join("\n"));
+    expect(v).toEqual({ msg: "line one\nline two" });
+  });
+
+  it("an ordinary non-blank-adjacent break still folds to a single space (not disturbed by the fix)", () => {
+    const v = ok(['msg: "line one', 'line two"'].join("\n"));
+    expect(v).toEqual({ msg: "line one line two" });
+  });
+});
+
 // CPE-1617 PR #833 review, finding #8: block scalars were assessed as tractable (unlike anchors/
 // aliases/tags/complex-keys) and implemented — the single biggest real-world driver of "valid YAML
 // degrades to plain text" (every GitHub Actions `run: |` step).
@@ -277,8 +330,13 @@ describe("parseYaml — finding #8: block scalars (| literal, > folded, chomping
   });
 
   it("a folded block scalar's internal blank line becomes a real (paragraph-break) newline, not a space", () => {
+    // PR 833 review round 3: this expectation was WRONG until now — it asserted "para one\n\npara two\n"
+    // (two newlines), matching the pre-fix `foldBlockLines` bug (which double-counted: once entering the
+    // blank line, once leaving it) rather than the real YAML rule. A test written by reading the buggy
+    // code instead of checking against PyYAML/the spec just protects the bug — see the dedicated
+    // describe block below for the full negative-control coverage this shipped without.
     const v = ok(["text: >", "  para one", "", "  para two"].join("\n"));
-    expect(v).toEqual({ text: "para one\n\npara two\n" });
+    expect(v).toEqual({ text: "para one\npara two\n" });
   });
 
   it("a block scalar is correctly followed by a sibling key at the header's own indent", () => {
@@ -306,6 +364,55 @@ describe("parseYaml — finding #8: block scalars (| literal, > folded, chomping
       ),
     );
     expect(v).toEqual({ name: "CI", jobs: { build: { steps: [{ run: "npm ci\nnpm test\n" }] } } });
+  });
+});
+
+// CPE-1617 PR 833 review round 3: `foldBlockLines` (the `>` folded-style joiner) emitted TWO newlines
+// per blank line instead of one — double-counting: once "entering" the blank line, once "leaving" it.
+// Verified wrong against PyYAML on two real files in this repo (`hermes-agent/plugins/platforms/{ntfy,
+// photon}/plugin.yaml`, both real `description: >` fields with one blank line between two paragraphs).
+// The bug was compounded by a test (fixed above, in the "finding #8" block) that had been written to
+// match the buggy output rather than the spec, so the suite actively protected it. Now unified with
+// double-quoted flow-scalar folding behind one shared `foldYamlLines` (see its own doc comment) — each
+// test below is a negative control: with the pre-fix `foldBlockLines`, every expected single `\n` below
+// would instead be `\n\n` (one extra).
+describe("parseYaml — finding #8 follow-up: blank-line folding inside a folded (>) block scalar", () => {
+  it("two consecutive blank lines fold to exactly two newlines", () => {
+    // Pre-fix (`foldBlockLines`): "para one\n\n\npara two\n" (three newlines, one too many).
+    const v = ok(["text: >", "  para one", "", "", "  para two"].join("\n"));
+    expect(v).toEqual({ text: "para one\n\npara two\n" });
+  });
+
+  it("three consecutive blank lines fold to exactly three newlines", () => {
+    // Pre-fix: "para one\n\n\n\npara two\n" (four newlines, one too many).
+    const v = ok(["text: >", "  para one", "", "", "", "  para two"].join("\n"));
+    expect(v).toEqual({ text: "para one\n\n\npara two\n" });
+  });
+
+  it("a blank line at the very START of the folded region (before any content) folds correctly", () => {
+    // Reachable for a block scalar (unlike a double-quoted scalar, whose first "line" is always the
+    // non-blank header) — a blank line right after the `>` header, before the first indented line.
+    // Pre-fix: "\n\npara one\n" (a leading blank contributed via `foldBlockLines`'s own logic, but
+    // still double-counted relative to the single blank line actually present).
+    const v = ok(["text: >", "", "  para one"].join("\n"));
+    expect(v).toEqual({ text: "\npara one\n" });
+  });
+
+  it("a trailing blank line is trimmed before folding, not turned into an extra newline", () => {
+    // Trailing blank lines were already correctly stripped before chomping (pre-existing, confirmed-good
+    // behaviour) — this pins that it stays correct after unifying the fold logic.
+    const v = ok(["text: >", "  para one", "  para two", ""].join("\n"));
+    expect(v).toEqual({ text: "para one para two\n" });
+  });
+
+  it("a whitespace-only line (spaces, no other characters) counts as blank, same as a truly empty line", () => {
+    const v = ok(["text: >", "  para one", "  ", "  para two"].join("\n"));
+    expect(v).toEqual({ text: "para one\npara two\n" });
+  });
+
+  it("an ordinary non-blank-adjacent break still folds to a single space (not disturbed by the fix)", () => {
+    const v = ok(["text: >", "  line one", "  line two"].join("\n"));
+    expect(v).toEqual({ text: "line one line two\n" });
   });
 });
 

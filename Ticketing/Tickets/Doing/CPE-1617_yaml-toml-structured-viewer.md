@@ -166,3 +166,40 @@ NotebookPreview.svelte/LogPreview.svelte already use for the exact same reason.
 block-scalar end-to-end = 5). Re-verified `samples/text/config.{toml,yaml}` still parse cleanly under
 the stricter rules (a throwaway verification test, deleted before commit, confirmed both). Pushed to
 the existing branch/PR #833 — no new PR, per the coordinator's explicit instruction.
+2026-08-11 — PR 833 review round 2: independent re-UAT (20 real files) confirmed 6 of 7 findings fixed
+with no over-correction, plus one blocking regression: `foldMultilineDoubleQuoted`'s blank-line handling
+was a SILENT WRONG VALUE, not an error or degrade — the exact failure class this ticket keeps being
+bounced for. It joined every physical line with a plain space, including blank ones, so a blank line
+inside a double-quoted scalar (the multi-paragraph-catalog scenario that justified adding this feature)
+became an extra space instead of a real newline. Root-caused, fixed, and added the requested coverage:
+one/two/three consecutive blank lines, a blank line at the very start and end of the folded region, and
+a whitespace-only line (decided + documented: counts as blank, matching PyYAML — leading/trailing
+whitespace on a truly-blank line is content-indistinguishable from a zero-length line once stripped).
+Coordinator initially pointed at `foldBlockLines` (the existing `>` block-scalar joiner) as "the correct
+reference logic to reuse" — investigated before reusing it wholesale, since its formula (`N` blank lines
+→ `N+1` newlines, confirmed by direct trace) did not actually match the coordinator's own PyYAML-verified
+worked examples (`N` blank lines → `N` newlines) for the flow-scalar case; implemented the flow-scalar
+fix from the verified examples rather than copying that mismatched formula.
+2026-08-11 — PR 833 review round 3 (the coordinator's own correction, off an INDEPENDENT re-UAT run
+concurrently): `foldBlockLines` was ALSO wrong, confirmed on two real files in THIS repo
+(`hermes-agent/plugins/platforms/{ntfy,photon}/plugin.yaml`, real `description: >` fields) — it
+double-counted, emitting `N+1` newlines for `N` blank lines (once "entering" the blank line, once
+"leaving" it), and the shipped test for it (`a folded block scalar's internal blank line...`) had been
+written to match that buggy output rather than PyYAML/the spec, so the suite actively protected the bug
+— exactly the lesson stated back: a test written by reading the code can only confirm the code. Fixed by
+implementing the SAME shared rule (`N` blank lines → `N` newlines; a lone break → one space) exactly
+ONCE as `foldYamlLines`, used by BOTH the double-quoted flow-scalar path and the `>` block-scalar path —
+no more than one formula to drift from the spec. Corrected the wrong test's expectation
+(`"para one\n\npara two\n"` → `"para one\npara two\n"`) and added the same one/two/three-blank +
+start/end + whitespace-only coverage for the `>` case (a "blank at the very end" case doesn't apply to
+block scalars the same way — trailing blanks are already stripped before chomping by pre-existing,
+confirmed-good logic — so that slot became a test pinning THAT trim behaviour instead). One extra bug
+caught while unifying: the shared function's initial `out = lines[0]` couldn't represent a LEADING blank
+run at all (block scalars, unlike double-quoted scalars, can start with a blank line right after the `>`
+header) — fixed to accumulate blanks from the very first line, verified against a real leading-blank
+block-scalar test.
+2026-08-11 — Final re-verification: `npm run check` — 0 errors, 0 warnings. `npx vitest run` (full
+suite) — **286 files, 3607 tests passed, 0 failed** (up from the 3594 baseline: +13 new tests — 7 for
+double-quoted blank-line folding, 6 for `>` block-scalar blank-line folding). Re-verified
+`samples/text/config.{toml,yaml}` still parse cleanly (throwaway test, deleted before commit). Pushed to
+the existing branch/PR #833 — no new PR.
