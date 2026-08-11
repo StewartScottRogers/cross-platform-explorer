@@ -291,3 +291,23 @@ away during a sprint, so this is exactly the "automation must not hijack the scr
 
 If a stray headless instance can't be identified, leave it — an orphaned background process is a far smaller
 cost than closing the user's browser session.
+
+## Critic technique, refined (2026-08-11) — use an IFRAME, not a sized wrapper div
+
+The earlier note (wrapper div with an explicit CSS width) is **not sufficient** for anything whose CSS depends
+on the *viewport*: `vw` units and `position: fixed` resolve against the true top-level viewport, not a sized
+`<div>`. So a dialog using `max-width: 95vw` and a `position: fixed` backdrop cannot be honestly narrow-tested
+in a wrapper.
+
+**Correct technique:** mount the component inside an `<iframe>` sized to the width under test, inside a large
+(e.g. 1200×900) non-clamped Chrome window. The iframe gets a genuinely separate, correctly-sized CSS viewport.
+Confirm it via `innerWidth` / `getBoundingClientRect` from inside the frame before trusting a screenshot.
+
+**This matters because it has already produced a false defect report.** CPE-1635 was filed off a naive
+`--headless=new --window-size=420,900` screenshot showing the Checkpoints dialog's buttons cut off. A later
+worker could not reproduce it with the iframe method at 420px down to 300px in either theme — and then
+reproduced the *identical-looking* cut-off against unmodified code using the naive method, confirming the
+original finding was the clamping artifact rather than a CSS bug.
+
+Rule: **before filing a layout defect found in headless Chrome, reproduce it with a verified viewport.**
+A false defect costs a worker a full investigation and erodes trust in the visual leg.
