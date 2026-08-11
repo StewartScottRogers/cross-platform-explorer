@@ -40,6 +40,32 @@ These are harder than CPE-1627's batch and need real care rather than a mechanic
   `showNotice`, once these are converted — otherwise the same debt regrows in the form the guard currently
   ignores by design. That extension is the part that makes this stick.
 
+## Two additions from CPE-1627's review (PR #825) — fold these in
+
+**A. A raw literal both greps miss.** `src/App.svelte:2781` has a raw English string inside a **multi-line
+ternary**:
+
+    showNotice(
+      idx.length === 0 ? "No items match that criterion." : ...
+
+Neither the single-line `showNotice("` grep (which CPE-1627 used) nor the template-literal grep catches it,
+so it falls through **both** tickets' stated scopes. It is pre-existing and, as far as the reviewer could
+find, the only instance — but "as far as we could find with a line-based grep" is exactly the weakness here.
+Prefer an **AST/parser-based sweep** over another regex when doing this pass, so multi-line and nested
+expression forms cannot hide.
+
+**B. The regrowth guard's escape hatch is trivially defeatable — demonstrated.** CPE-1627 added
+`App.showNoticeI18nGuard.test.ts`, whose exemption check is a bare substring test
+(`!line.includes("i18n-exempt")`) rather than being comment-syntax-aware. The reviewer defeated it by
+embedding the marker **inside the user-facing string itself**:
+
+    showNotice("This is real English user-facing text i18n-exempt smuggled in string")
+
+The guard passed, and a genuinely untranslated notice would ship. Harden it to require an actual `//`
+comment prefix (and ideally a non-empty reason). Not urgent — the hatch is currently unused, with zero
+exemptions in the shipped code — but a guard that can be bypassed by accident is worse than one that can't,
+because it is trusted.
+
 ## Acceptance criteria
 - No untranslated `showNotice` call of either form remains in `src/App.svelte`; all 12 catalogs at 100%.
 - Interpolated values render correctly and in a natural position in at least ja, ru, de and es — verified by
