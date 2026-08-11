@@ -414,6 +414,11 @@ pub mod data_browser;
 /// sanitized plain-text body (never raw HTML, never remote resources) (CPE-1434, epic CPE-1433).
 pub mod email_preview;
 
+/// Bounded windowed reads for the log preview — reads a single `max_bytes` window (the tail by default,
+/// paged backward from there) instead of refusing whole files above the generic preview cap, so a
+/// multi-megabyte real-world log is actually viewable (CPE-1637, epic CPE-1568 slice 8).
+pub mod log_window;
+
 /// `.ics` iCalendar preview — read-only RFC 5545 viewer: VEVENT/VTODO/VJOURNAL components decoded into
 /// summary/when/where/who + a readable recurrence summary (CPE-1435, epic CPE-1433).
 pub mod ical_preview;

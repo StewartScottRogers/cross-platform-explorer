@@ -16,10 +16,10 @@
    * component ever sees it. Every cap (line count, per-line length, per-line detection scan window) bounds
    * work examined, not just what's rendered — see logViewer.ts's module doc comment.
    */
-  import { commands } from "../bindings.gen";
-  import { unwrap } from "../invoke";
-  import { PREVIEW_MAX_BYTES } from "../preview/loaders";
+  import { loadLogWindow } from "../preview/loaders";
+  import { formatSize } from "../format";
   import { parseLog, filterLines, ALL_LEVELS, type ParsedLog, type LogLevel } from "../preview/logViewer";
+  import type { LogWindow } from "../bindings.gen";
 
   /** The log file's path. */
   export let path: string;
@@ -38,6 +38,19 @@
   let activeLevels: Set<LogLevel> = new Set(ALL_LEVELS);
   let showUnleveled = true;
 
+  // The currently-shown bounded window (CPE-1637) — `read_log_window` reads at most PREVIEW_MAX_BYTES at
+  // a time (the tail by default) instead of `read_file_text`'s all-or-nothing whole-file cap, so a
+  // multi-megabyte real log (CBS.log, dism.log, …) is viewable instead of refused outright. `null` only
+  // while loading/errored — never conflated with "empty file" (that's `log.lines.length === 0`, a
+  // *loaded* zero-byte window) or "read failed" (`loadError`); see the three-state note in the template.
+  let win: LogWindow | null = null;
+
+  // Windows visited this file-open, tail-first (`pages[0]` is the tail; deeper indices are progressively
+  // older). "Load earlier" grows this list on demand (one bounded backend read per new page); "Back to
+  // latest" / re-visiting an already-fetched page is just a pointer move — no re-fetch, no re-scan.
+  let pages: LogWindow[] = [];
+  let pageIndex = 0;
+
   // Request-id guard (mirrors NotebookPreview's reqId): a fast path-change mid-load must stop touching
   // state for the superseded file.
   let reqId = 0;
@@ -45,15 +58,25 @@
   let loadedPath = "";
   $: if (path && path !== loadedPath) { loadedPath = path; void load(); }
 
+  function showPage(w: LogWindow) {
+    win = w;
+    log = parseLog(w.text);
+    activeLevels = new Set(ALL_LEVELS);
+    showUnleveled = true;
+  }
+
   async function load() {
     const mine = ++reqId;
     loading = true;
     loadError = "";
+    win = null;
     log = null;
+    pages = [];
+    pageIndex = 0;
 
-    let text: string;
+    let w: LogWindow;
     try {
-      text = unwrap(await commands.readFileText(path, PREVIEW_MAX_BYTES));
+      w = await loadLogWindow(path, null);
     } catch (e) {
       if (mine === reqId) {
         loadError = String(e);
@@ -63,10 +86,48 @@
     }
     if (mine !== reqId) return;
 
-    log = parseLog(text);
-    activeLevels = new Set(ALL_LEVELS);
-    showUnleveled = true;
+    pages = [w];
+    pageIndex = 0;
+    showPage(w);
     loading = false;
+  }
+
+  /** Page further back (CPE-1637): reuses an already-fetched older page if we've been here before this
+   *  file-open, otherwise issues exactly one more bounded `read_log_window` ending at the current page's
+   *  (already line-aligned) start — never a wider or repeated read of the same bytes. */
+  async function loadOlder() {
+    if (!win || win.at_start || loading) return;
+    if (pageIndex + 1 < pages.length) {
+      pageIndex += 1;
+      showPage(pages[pageIndex]);
+      return;
+    }
+    const mine = ++reqId;
+    loading = true;
+    loadError = "";
+    let w: LogWindow;
+    try {
+      w = await loadLogWindow(path, win.window_start);
+    } catch (e) {
+      if (mine === reqId) {
+        loadError = String(e);
+        loading = false;
+      }
+      return;
+    }
+    if (mine !== reqId) return;
+    pages = [...pages, w];
+    pageIndex = pages.length - 1;
+    showPage(w);
+    loading = false;
+  }
+
+  /** Back to the tail — always cached at `pages[0]` (the very first read this file-open), so this never
+   *  re-fetches. */
+  function jumpToLatest() {
+    if (pageIndex === 0 || loading) return;
+    pageIndex = 0;
+    showPage(pages[0]);
   }
 
   function toggleLevel(level: LogLevel) {
@@ -83,6 +144,10 @@
   $: visibleLines = log ? filterLines(log.lines, { levels: activeLevels, showUnleveled }) : [];
   $: unleveledCount = log ? log.lines.length - ALL_LEVELS.reduce((n, lvl) => n + log!.counts[lvl], 0) : 0;
   $: hasUnleveled = unleveledCount > 0;
+  // `false` whenever the whole file fit in one window (small file, unchanged pre-CPE-1637 behavior) —
+  // only a genuinely partial view (tail of a huge file, or a paged-back earlier page) shows the byte-range
+  // note + paging controls below.
+  $: windowed = win !== null && !(win.at_start && win.at_end);
 </script>
 
 <div class="log-preview" data-testid="log-preview">
@@ -126,9 +191,47 @@
         </span>
       </div>
 
+      {#if windowed && win}
+        <p class="log-note" data-testid="log-window-note">
+          {#if win.at_end}
+            Showing the last {formatSize(win.window_end - win.window_start)} of this {formatSize(win.file_len)} file
+            (bytes {win.window_start.toLocaleString()}–{win.window_end.toLocaleString()} of {win.file_len.toLocaleString()}).
+          {:else}
+            Showing bytes {win.window_start.toLocaleString()}–{win.window_end.toLocaleString()} of
+            {win.file_len.toLocaleString()} ({formatSize(win.file_len)} total) — not the end of the file.
+          {/if}
+          {#if !win.line_aligned}
+            This window has no line break in it, so it starts mid-line.
+          {/if}
+        </p>
+        <div class="log-page-controls" data-testid="log-page-controls">
+          <button
+            type="button"
+            class="log-page-btn"
+            data-testid="log-load-older"
+            disabled={win.at_start || loading}
+            on:click={loadOlder}
+          >
+            ◀ Load earlier
+          </button>
+          {#if !win.at_end}
+            <button
+              type="button"
+              class="log-page-btn"
+              data-testid="log-jump-latest"
+              disabled={loading}
+              on:click={jumpToLatest}
+            >
+              Back to latest ▶
+            </button>
+          {/if}
+        </div>
+      {/if}
+
       {#if log.linesCapped}
         <p class="log-note" data-testid="log-lines-capped">
-          Showing the first {log.lines.length.toLocaleString()} of {log.totalLines.toLocaleString()} lines.
+          Showing the first {log.lines.length.toLocaleString()} of {log.totalLines.toLocaleString()} lines
+          of this window.
         </p>
       {/if}
 
@@ -194,6 +297,19 @@
     color: var(--text); border-color: var(--log-warn);
   }
   .log-count { margin-left: auto; color: var(--text-faint); font-size: 11px; white-space: nowrap; }
+
+  /* Windowed-read paging (CPE-1637) — mirrors HexView's `.pg` prev/next buttons: a plain bordered button,
+     disabled (not hidden) at the boundary it can't page past, so the control's presence itself tells the
+     user paging exists. */
+  .log-page-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+  .log-page-btn {
+    height: 24px; padding: 0 10px;
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--surface); color: var(--text);
+    font-size: 11px; cursor: pointer;
+  }
+  .log-page-btn:hover:not(:disabled) { background: var(--hover); }
+  .log-page-btn:disabled { opacity: 0.4; cursor: default; }
 
   /* Bounded, scrollable region (CPE-1618) — a capped-but-still-large log (up to MAX_LINES rows) scrolls
      within its own container rather than the whole pane, so the filter bar/notes above stay in view. */

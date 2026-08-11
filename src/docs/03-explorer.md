@@ -65,6 +65,15 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   **minimap** down the right edge whose highlighted box tracks your scroll position — click or drag the
   minimap to jump. Select-all and copy still yield the whole file as plain text. Above the code, the
   **symbol outline** strip lets you jump straight to a function or class when one is recognised.
+- **Log preview** — `.log` files get their own read-only view: each line is tinted by its detected
+  severity (Error/Warn/Info/Debug/Trace, or a plain "Other" for lines with no detectable level), with
+  chips to filter the view down to just the levels you want. A big real-world log (an incident's
+  `CBS.log`, `dism.log`, a service's rolling log, …) opens straight to its **last** portion rather than
+  being refused — the note above the log body says exactly which byte range you're looking at (e.g.
+  "Showing the last 256 KB of this 15.4 MB file"), and a **Load earlier** button pages further back a
+  bounded chunk at a time; **Back to latest** jumps straight back to the tail. Reading always stays
+  bounded to that one chunk, never the whole file, so opening a multi-megabyte log is as fast as a small
+  one.
 - **Thumbnails** — in the **icons** view, image files (JPEG, PNG, GIF, WebP, BMP, TIFF, AVIF) show a real
   downscaled thumbnail instead of a generic icon. They load lazily as tiles scroll into view, so a folder
   of hundreds of photos stays responsive; non-image files and the list/details views are unchanged.
