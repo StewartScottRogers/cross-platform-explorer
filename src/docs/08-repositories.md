@@ -26,9 +26,11 @@ folder dialog — cloning doesn't require having browsed first. It clones into
 `⟨folder you chose⟩/⟨repo-name⟩`, and the status line tracks progress ("Cloning owner/repo → target…",
 then "Cloned to target") or reports a failure in place.
 
-Check **Remember token for ⟨provider⟩** to save the token in your OS keychain so you don't retype it —
-successfully browsing with a token also auto-saves it the same way, even without touching the checkbox.
-Unchecking it deletes the saved token for that provider.
+Check **Remember token for ⟨provider⟩** to save the token in your OS keychain so you don't retype it. The
+checkbox is the only thing that saves a token — browsing successfully does **not** quietly keep it, so if
+you leave the box unchecked the token lives only as long as the dialog does. Note the other direction too:
+because the box is re-applied every time you browse, browsing with it **unchecked** deletes any token you
+had previously saved for that provider.
 
 ## Generic Git and self-hosted
 

@@ -51,9 +51,10 @@ the overlay.
 
 Below the titlebar, a single address field lets you open a running app **beside** the diff, so you can
 compare code and behavior without alt-tabbing. Type a URL — a bare host like `localhost:3000` is accepted
-and gets `http://` added automatically — and press **Enter** or click **Open in browser**. Only
-**http/https/localhost/IP** targets are accepted (never `file:`, `javascript:`, or anything else); an
-invalid entry shows "Enter an http/https or localhost URL." instead of opening anything.
+and gets `http://` added automatically, as does any other bare host such as `example.com` — and press
+**Enter** or click **Open in browser**. Only **http** and **https** targets are accepted (never `file:`,
+`javascript:`, or any other scheme); an invalid entry shows "Enter an http/https or localhost URL."
+instead of opening anything.
 
 Each click opens a **new, separate OS-level browser window** (1000×720, titled with the URL) — it is a
 real webview window, not an iframe inside the app, which is what keeps it safe under the app's strict
