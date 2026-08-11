@@ -3,7 +3,7 @@ id: CPE-1611
 title: "Defence in depth for secure delete: add an explicit confirmed flag to shred_paths"
 type: Task
 status: Backlog
-priority: Low
+priority: Medium
 component: Backend
 tags: [ready]
 created: 2026-08-10
@@ -44,3 +44,23 @@ Give `shred_paths` the same "the engine refuses unless told explicitly" treatmen
 Conflict surface: `crates/server/src/secure_shred.rs`, `src-tauri/src/lib.rs` (the `shred_paths` command),
 `src/lib/bindings.gen.ts`, `src/lib/components/ShredConfirmDialog.svelte` +
 `ShredConfirmDialog.test.ts`. Small, self-contained — good pickup for any model.
+
+## Priority raised to Medium — the deferral rationale was backwards (Foreman, 2026-08-10)
+CPE-1599's author deferred this arguing that Batch Media's danger is *conditional* (a plan only sometimes
+resolves in-place, so the engine genuinely needs telling) while `shred_paths` is *unconditionally*
+destructive, so there is no "looks safe but isn't" case to guard.
+
+The independent reviewer on PR #812 judged that argument to answer a different question than the one
+CPE-1599 exists to answer, and I agree. The threat model is **"a caller reaches the engine without ever
+passing the confirmation UI"** — a devtools call, a future automation or agent surface, a new UI entry
+point. That threat is identical for both, conditional danger or not. On the merits `shred_paths` is the
+*stronger* case:
+
+- **Worse blast radius.** Per `ShredConfirmDialog.svelte`'s own doc comment, secure delete has **no trash
+  fallback at all**. A confirmed batch-media overwrite at least gets a best-effort checkpoint; a shred gets
+  nothing.
+- **Smaller fix.** A bare `confirmed: bool` on the command — no plan inspection needed, since every call is
+  destructive by definition.
+
+So this is cheaper to build and protects something less recoverable. Do not re-derive the deferral
+reasoning when picking this up.
