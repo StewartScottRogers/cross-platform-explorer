@@ -169,3 +169,70 @@ rebase + fix as `892af3e6`; also filed and pushed **CPE-1639** (`e4d12b7e`) for 
 `.preview-font` selector found while investigating — real bug, but not the cause of this ratchet
 failure. New CI run (31491876898) kicked off on push; still in progress as of this entry (the Linux
 GUI-smoke leg took ~40 minutes on the prior run) — not yet confirmed green, flagged as unverified.
+
+2026-08-11 — **Attempt 2's fix did NOT hold on Linux CI** (run 31492855405, the completed run of
+892af3e6). Pulled the FULL raw job log via `gh api repos/.../actions/jobs/93783340991/logs` (confirmed
+`gh run view --log`'s text form silently truncates this run; the raw API log, cleaned of ANSI escapes,
+was the reliable source). Real, current error, unchanged in shape from attempt 1 despite the added
+`waitForClickable`:
+```
+Error: element (".bp-tabs .tab") still not clickable after 10000ms
+    at async walkBinaryInspectorTabs (gui-smoke/specs/preview-pane.smoke.ts:136:5)
+    at async Context.<anonymous> (gui-smoke/specs/preview-pane.smoke.ts:200:5)   [native-PE test]
+    at async Context.<anonymous> (gui-smoke/specs/preview-pane.smoke.ts:220:5)   [managed-PE test]
+```
+Both flagship tests fail at the identical point, both times at loop iteration i===0 (the already-active
+"Overview" tab) — the loop never reaches a second tab in either test. The webdriver protocol trace
+leading up to the timeout is the real diagnostic: `getComputedStyle` reports `display: flex` and
+`checkVisibility()` reports `true` for the button THE ENTIRE TIME, but WebDriverIO's own
+`isElementClickable` hit-test (`document.elementFromPoint(centerX, centerY)`, checked against the
+element itself) returns `false` on every single poll for the full 10s — never once true. That is not "a
+render/paint beat that's slow" (which `waitForClickable` would eventually catch), it is "this hit-test
+never resolves the button as the thing at its own center point" under this CI job's
+`WEBKIT_DISABLE_COMPOSITING_MODE: 1` env var (visible in `gui-smoke.yml`), which is documented to alter
+WebKitGTK's non-composited paint/hit-test path — `.bp-tabs` (`overflow-x: auto`) is exactly the kind of
+scroll-container element that path is known to disrupt. Ruled out "wrong tab, not tab 0" as an
+explanation: confirmed both failures are on i===0 specifically, not a general breakage of every tab
+click (the row-click that opens each sample file, `samplesNav.ts#openSampleFile`, uses a PLAIN
+`.click()` with no `waitForClickable` guard and worked fine in the same run — this is specific to
+`.bp-tabs .tab`, not clicking in general).
+
+**Fix**: stopped asking WebDriver to hit-test-and-synthesize a mouse click for this walk at all.
+`button.execute((el) => (el as HTMLElement).click())` — the same idiom `link-badge.smoke.ts` already
+uses to dispatch a `mouseenter` directly at a DOM node — hands the real element into the browser and
+calls its native `.click()` method there, with zero `elementFromPoint` hit-testing involved anywhere in
+the path. Svelte's `on:click` is a plain `addEventListener('click', …)`, so a native `.click()` fires it
+exactly as a hit-tested mouse click would: this is a faithful trigger of the real handler (the component
+genuinely re-renders `.bp-panel[data-tab]`, which the very next line still waits on), not a
+state-setting shortcut, and it still throws (a stale-element-reference error) if the button doesn't
+exist. The failure-loud property the reviewer verified by breaking a selector is unaffected: the
+existence/count checks (`$(".bp-tabs .tab").waitForExist` + `expect(tabCount).to.be.greaterThan(0)`) run
+before the loop touches any button and are untouched by this change.
+
+Rebased cleanly onto latest `main` (9833a7bf — pulled in CPE-1600/#826, CPE-1640, CPE-1641; no
+conflicts). Verified locally (Windows — does not itself prove the Linux leg, called out explicitly):
+`npm run check` clean (0 errors/warnings); `npx vitest run` 278 files / 3412 tests green; `cargo test
+--test sample_fixtures` 16/16 green; `gui-smoke` `npm run typecheck` clean; `gui-smoke` `npm run
+test:unit` 32/32 green. Pushed the fix as `c90bac68`.
+
+**Confirmed green on the real Linux CI runner** — the thing that actually matters here. New run
+31497619208 completed: `GUI smoke (ubuntu-latest)` **pass, 40m5s**. Pulled its raw job log
+(`gh api .../actions/jobs/93799200577/logs`) directly rather than trusting the green checkmark alone:
+`specs/preview-pane.smoke.ts` reports **`6 passing (16.3s)`** (both flagship tests plus the sqlite/font/
+cert/JWT tests, all 6), and the ratchet's own line confirms the baseline: `[gui-smoke ratchet] 41/41
+spec(s) reported — 38 passed, 3 failed, 3 known-failing listed. OK — no new regressions, no stale
+known-failing entries, run completed.` 38 passed (up from the prior run's 37 — exactly `preview-pane.
+smoke.ts` flipping from failing to passing) against the SAME 3 known-failing files/7 specs
+(`samples.smoke.ts`/`saved-search.smoke.ts`/`network.smoke.ts`, all pre-existing CPE-1507/CPE-1595
+Linux/WebKitGTK debt, untouched by this ticket) — `known-failing.json` was not edited; the fallback
+(known-failing entry + new ticket) authorised for this attempt was NOT needed and was not used. Full PR
+check run (`gh pr checks 827`): every job passes (`Backend`/`Server crates`/`Sidecar platform` x3 OSes,
+`Frontend`, `GUI smoke (ubuntu-latest)`); `GUI smoke (windows-latest)` shows `skipping`, which is this
+workflow's existing, pre-existing behaviour (unrelated to this ticket — the Linux leg is the one that
+runs GUI smoke in CI).
+
+Not independently re-verified: a from-scratch local Windows `tauri build` re-run of the spec (skipped —
+the real Linux CI run is the authoritative signal this ticket needed, and re-running the full matrix
+locally on Windows a third time would not have added information the CI run didn't already provide more
+directly). Ticket left in `Doing/` per the crew's disposition convention; PR #827 is green and ready for
+merge.
