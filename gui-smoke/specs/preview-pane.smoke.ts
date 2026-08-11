@@ -127,14 +127,26 @@ async function walkBinaryInspectorTabs(
     const useFullMatrix = i === 0 || (!!fullMatrixSlugContains && slug.includes(fullMatrixSlugContains));
     if (!useFullMatrix && restTabsVisited >= restTabLimit) continue; // capped — see doc comment above
 
-    // House convention (cost-history.smoke.ts and every other tab/row click in this suite):
-    // `waitForClickable` before `.click()` as defence-in-depth for a genuine render/paint beat between
-    // the element existing in the DOM and WebKitGTK actually being ready to hit-test it — this spec's
-    // own CI failure (both Binary Inspector walk tests failing with "did not become interactable" on
-    // the very first tab click, on Linux only) was exactly this race, and was the one click site in
-    // this whole harness that had skipped the convention.
-    await button.waitForClickable({ timeout: 10_000 });
-    await button.click();
+    // CPE-1629 Linux CI failure, attempt 2: adding `waitForClickable` (the house convention —
+    // cost-history.smoke.ts and every other tab/row click in this suite) did NOT fix this. The real job
+    // log (run 31492855405) shows `isElementClickable`'s hit-test (`elementFromPoint` at the button's
+    // own center) returning `false` for the full 10s, even though `getComputedStyle` reports
+    // `display: flex` and `checkVisibility()` reports `true` throughout — the button is real, painted,
+    // and exactly where it should be, but WebKitGTK never resolves it as the hit-test winner at its own
+    // center point. The CI job sets `WEBKIT_DISABLE_COMPOSITING_MODE: 1`, which is documented to change
+    // WebKitGTK's paint/hit-test path; `.bp-tabs` is also a `overflow-x: auto` scroll container, which
+    // is exactly the kind of element whose non-composited hit-testing this env var is known to disrupt.
+    // Confirmed it's not a "wrong tab" bug: both flagship tests fail on this exact line, on iteration
+    // i=0 (the already-active "Overview" tab) every time — the loop never reaches a second tab.
+    //
+    // Fix: don't ask WebDriver to hit-test-and-synthesize a mouse click at all. `button.execute()`
+    // (same idiom link-badge.smoke.ts uses to dispatch a `mouseenter` directly) hands the real DOM node
+    // into the browser and calls its native `.click()` method there — no `elementFromPoint` involved.
+    // Svelte's `on:click` is a plain `addEventListener('click', …)`, which fires on a native `.click()`
+    // exactly as it would on a hit-tested mouse click, so this is a faithful trigger of the same
+    // handler, not a state-setting shortcut. This still requires the button to exist (thrown by a stale
+    // element reference if not) and still exercises the real click path end-to-end.
+    await button.execute((el) => (el as HTMLElement).click());
     await $(`.bp-panel[data-tab]`).waitForExist({ timeout: 5_000 });
 
     if (useFullMatrix) {
