@@ -1033,6 +1033,30 @@ TEXT_FILES = {
         ensure_ascii=False,
     )
     + "\n",
+    # A mixed-level log fixture for the log-preview path (CPE-1618): every recognized shape (bracketed
+    # timestamp + level, ISO timestamp + level, "LEVEL:" prefix, "[LEVEL]" prefix, Android logcat
+    # single-letter), one line that deliberately mentions "error" in prose with no real level marker
+    # (must NOT be misclassified), and one line wrapped in real ANSI SGR colour codes (must render clean,
+    # not literal escape-code garbage).
+    "text/app.log": (
+        "[2026-08-11 09:14:01] INFO  Starting sample-service on port 8080\n"
+        "[2026-08-11 09:14:01] DEBUG Loaded configuration from /etc/sample-service/config.yaml\n"
+        "[2026-08-11 09:14:02] WARN  Config value 'cache_ttl' missing, using default 300s\n"
+        "[2026-08-11 09:14:02] TRACE Socket state transition: CLOSED -> CONNECTING\n"
+        "2026-08-11T09:14:03Z ERROR Failed to connect to database: connection refused\n"
+        "[2026-08-11 09:14:03] DEBUG Retrying connection (attempt 1/3)\n"
+        "[2026-08-11 09:14:04] INFO  Database connection established\n"
+        "E/NetworkClient: Failed to reach api.example.com (timeout after 5000ms)\n"
+        "W/NetworkClient: Falling back to cached response\n"
+        "I/ActivityManager: Displaying com.example.app\n"
+        "ERROR: Unhandled exception in request handler\n"
+        "[WARN] disk usage above 90% on /var\n"
+        "Request payload: userId=42 action=checkout total=59.99\n"
+        "User asked about a checkout error they saw yesterday "
+        "— this line intentionally has no real level marker.\n"
+        "\x1b[31mERROR\x1b[0m Payment gateway timeout after 3 retries\n"
+        "[2026-08-11 09:14:10] INFO  Shutting down gracefully\n"
+    ),
 }
 
 

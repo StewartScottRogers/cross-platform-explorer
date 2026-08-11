@@ -41,6 +41,9 @@
   --pal-okabe-orange: #e69f00;
   --pal-okabe-sky-blue: #56b4e9;
   --pal-purple-500: #6b4fbb;
+
+  /* Log-preview WARN tone (CPE-1618) — 5.93:1 on white / 5.34:1 on --pal-gray-100, clears WCAG AA. */
+  --pal-amber-700: #8a5a00;
 }
 
 /* ---------- Layer 2: semantic tokens — light theme (today's default/fallback) ---------- */
@@ -84,6 +87,11 @@
      consumed only by NotebookPreview.svelte's `.nb-error-output` (CPE-1616); keep it scoped to
      that kind of consumer rather than reaching for it as a general danger-text token. */
   --danger-on-tint: var(--danger);
+
+  /* Log-preview WARN row/badge colour (CPE-1618, epic CPE-1568 slice 8) — scoped to LogPreview.svelte's
+     level-tint only, not a general "warning" token elsewhere. ERROR/INFO reuse --danger/--accent (they
+     already carry the right meaning); amber has no existing semantic token to reuse. */
+  --log-warn: var(--pal-amber-700);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -145,6 +153,7 @@
   --success: var(--pal-green-600);
   --danger-hover: var(--pal-red-700);
   --danger-on-tint: var(--danger);
+  --log-warn: var(--pal-amber-700);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -222,6 +231,10 @@
      notebook traceback ONLY (--danger-on-tint below) — --danger itself no longer references it. */
   --pal-dark-red-450-notebook: #ff7b6f;
 
+  /* Log-preview WARN tone (CPE-1618) — 8.24:1 on --pal-dark-gray-800 (--surface) / 9.48:1 on
+     --pal-dark-gray-900 (--bg), well past WCAG AA. */
+  --pal-dark-amber-300: #ffb84d;
+
   /* Okabe-Ito colour-blind-safe agent set, lightened off the light-theme base hues until each
      clears 3:1 against --pal-dark-gray-800 (--surface) — see the dark-contrast guard test. */
   --pal-dark-okabe-blue: #4095c5;
@@ -260,6 +273,7 @@
      this can't just be --danger. Not consumed by anything else; do not reach for this outside
      NotebookPreview.svelte's `.nb-error-output`. */
   --danger-on-tint: var(--pal-dark-red-450-notebook);
+  --log-warn: var(--pal-dark-amber-300);
 
   --text: var(--pal-dark-gray-100);
   --text-dim: var(--pal-dark-gray-200);
