@@ -77,3 +77,53 @@ other ticket on this bench — safe to build fully in parallel with everything e
 
 ## Notes
 Model: sonnet. Library entry: `binary-studio-engines-delivery-2026-08-10`.
+
+## Work Log
+
+**2026-08-11 — frontend wiring done, PR opened**
+
+Branch `cpe-1615-dotnet-metadata-tab`. Zero backend changes — `dotnet_metadata.rs`, `model.rs`, and the
+`dotnet_metadata` Tauri command were untouched, exactly as scoped.
+
+- `src/lib/preview/binaryInspector.ts` — removed `managedDotNetConfidence`/`ManagedConfidence`/
+  `EMPTY_TABLES_NORMAL_EXTS`/`emptyImportExportIsNormalFor` entirely (no heuristic left behind). Added
+  three small pure formatters for the new tab: `decodeAssemblyFlags` (known ECMA-335 `AssemblyFlags` bits
+  → pill labels), `cultureLabel` (null/empty → "neutral"), `hexOrDash` (null/empty hex blob → em dash).
+- `src/lib/components/BinaryPreview.svelte` — `managed` now reads `info.is_managed` directly (no more
+  hedged "confirmed"/"possible" wording — the backend flag is a real CLR-header read, so the caveat states
+  plainly that a file is/isn't managed). Added a ".NET metadata" tab, shown only when `is_managed`,
+  reusing the same `.tab`/`.tab.active` classes as every other tab (docs/design/TABS.md — no new tab
+  style). Lazy-fetches `commands.dotnetMetadata(path)` the first time the tab is opened, mirroring the
+  Disassembly tab's request-id-guarded lazy-fetch pattern (stale in-flight requests are dropped, state
+  resets on file change). Distinguishes three outcomes explicitly: `loaded` + `dotnetMeta === null`
+  (metadata root absent/unparseable — real, valid "nothing here" response) vs `error` (the command threw —
+  unreadable/malformed) vs the populated case — the null and error states use separate testids
+  (`binary-dotnet-null` vs `binary-dotnet-error`) and never render as a clean/empty table. Assembly
+  identity, referenced-assembly, type, and method tables all go through the existing `capRows`/
+  `BINARY_TABLE_ROW_CAP` capping with an honest "Showing the first N of M" note, same as
+  Sections/Imports/Exports/Symbols. Assembly-flags pills use the reflowing `flex-wrap` container +
+  `white-space:nowrap; flex:0 0 auto` pills per the project's tick-tack convention. All colours are
+  existing semantic tokens already used elsewhere in this file (`--text`, `--text-dim`, `--surface-alt`,
+  `--border`) — no new tokens, so no WCAG-guard-test changes needed.
+- `src/lib/components/PreviewPane.svelte` — dropped the now-dead `extension={entry.extension}` prop passed
+  to `<BinaryPreview>` (the extension-keyed heuristic that consumed it is gone).
+- `src/lib/preview/binaryInspector.test.ts` — replaced the retired heuristic's tests with unit tests for
+  `decodeAssemblyFlags`/`cultureLabel`/`hexOrDash`.
+- `src/lib/components/BinaryPreview.test.ts` — added `dotnetMetadata` to the mocked `commands` object;
+  local `BinaryInfo` mock type gained `is_managed`; rewrote the managed-.NET gating tests to assert on
+  `is_managed` directly (dropped the old confirmed/possible/`.efi`/`.sys`-carve-out cases, since that
+  branching no longer exists); added a new "BinaryPreview — .NET metadata tab" describe block covering:
+  tab hidden for a native binary, tab shown + not fetched until opened for a managed one, populated
+  render (identity/refs/types/methods + flag pill), the null-result state, the error state, the
+  no-assembly-manifest (module) state, empty-list states, a capped-table case, and reset-on-file-change.
+
+**Verification (all run synchronously in the worktree, not backgrounded):**
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- `npx vitest run` (full suite) → `Test Files 272 passed (272)`, `Tests 3312 passed (3312)`.
+- `npx vitest run src/lib/preview/binaryInspector.test.ts src/lib/components/BinaryPreview.test.ts` →
+  `Test Files 2 passed (2)`, `Tests 45 passed (45)`.
+
+No new dependencies. No Rust files touched (`git status --porcelain` shows only the 5 frontend files above
+plus this ticket's move to `Doing/`). Per jsdom's known blind spot for real layout/clipping, these tests
+verify data/state transitions only — the tab's on-screen tab-strip/pill-reflow look still needs the
+screenshot/Visual-Critic pass, not a jsdom claim.

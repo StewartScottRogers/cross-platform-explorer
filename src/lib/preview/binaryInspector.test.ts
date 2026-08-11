@@ -3,12 +3,12 @@ import {
   BINARY_TABLE_ROW_CAP,
   capRows,
   classifyBinaryError,
-  managedDotNetConfidence,
-  emptyImportExportIsNormalFor,
+  decodeAssemblyFlags,
+  cultureLabel,
+  hexOrDash,
   formatLabel,
   hexAddress,
 } from "./binaryInspector";
-import type { BinaryExport, BinaryImport } from "../bindings.gen";
 
 describe("capRows (CPE-1597 — big binaries must not stall the pane)", () => {
   it("does not cap a short list", () => {
@@ -64,118 +64,52 @@ describe("classifyBinaryError (CPE-1597 — calm error states, never a raw dump)
   });
 });
 
-describe("managedDotNetConfidence (CPE-1597 — never present CIL-as-x86 nonsense as fact)", () => {
-  const imp = (library: string | null, name = "Fn"): BinaryImport => ({ name, library });
-  const exp = (name: string): BinaryExport => ({ name, address: 0x1000 });
-
-  it("'confirmed': a PE that imports mscoree.dll", () => {
-    expect(
-      managedDotNetConfidence(
-        { format: "Pe", imports: [imp("KERNEL32.dll"), imp("mscoree.dll")], exports: [] },
-        "dll",
-      ),
-    ).toBe("confirmed");
+describe("decodeAssemblyFlags (CPE-1615 — recognized ECMA-335 AssemblyFlags bits, as pill labels)", () => {
+  it("decodes a single known bit", () => {
+    expect(decodeAssemblyFlags(0x0001)).toEqual(["PublicKey"]);
+    expect(decodeAssemblyFlags(0x0100)).toEqual(["Retargetable"]);
   });
 
-  it("is case-insensitive on the library name", () => {
-    expect(managedDotNetConfidence({ format: "Pe", imports: [imp("MSCOREE.DLL")], exports: [] }, "dll")).toBe(
-      "confirmed",
-    );
+  it("decodes multiple set bits, in declaration order", () => {
+    expect(decodeAssemblyFlags(0x0001 | 0x0100)).toEqual(["PublicKey", "Retargetable"]);
   });
 
-  it("'confirmed': a PE exporting the CLR loader entry points even with no matching import", () => {
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [exp("_CorExeMain")] }, "dll")).toBe(
-      "confirmed",
-    );
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [exp("_CorDllMain")] }, "dll")).toBe(
-      "confirmed",
-    );
+  it("a zero value decodes to no flags", () => {
+    expect(decodeAssemblyFlags(0)).toEqual([]);
   });
 
-  it("'confirmed' applies to ANY extension — real CLR evidence, not format-dependent", () => {
-    // A code-review finding on the first version of this heuristic: don't let a per-format carve-out
-    // (added for the "possible" tier below) accidentally weaken the strong signal too.
-    expect(managedDotNetConfidence({ format: "Pe", imports: [imp("mscoree.dll")], exports: [] }, "efi")).toBe(
-      "confirmed",
-    );
-    expect(managedDotNetConfidence({ format: "Pe", imports: [imp("mscoree.dll")], exports: [] }, "sys")).toBe(
-      "confirmed",
-    );
-  });
-
-  it("'possible': a PE with zero imports AND zero exports — the real mscorlib.dll shape", () => {
-    // Verified against the real 64-bit .NET Framework mscorlib.dll during this ticket's manual testing:
-    // it reports imports:0, exports:0 (a modern x64/AnyCPU pure-IL assembly loads straight off its CLR
-    // header, with no legacy mscoree.dll import-table stub at all) — the "confirmed" signal alone misses
-    // it entirely, which is exactly why this weaker, hedged signal exists.
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [] }, "dll")).toBe("possible");
-  });
-
-  // ---- code-review fix: .efi/.sys must NOT get the "possible" tier for an empty table ----
-  it("'none' — NOT 'possible' — for a .efi with zero imports AND zero exports (UEFI: normal by design, not a signal)", () => {
-    // UEFI drivers/boot apps reach firmware services via EFI_SYSTEM_TABLE, never a PE import table — an
-    // empty import/export table is the NORM for this format, not evidence of anything. Flagging it as
-    // "possibly managed" was a real bug: every legitimate .efi got a wrong caveat and had its real,
-    // valid disassembly hidden behind an unnecessary extra click.
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [] }, "efi")).toBe("none");
-  });
-
-  it("'none' — NOT 'possible' — for a .sys with zero imports AND zero exports (kernel drivers can be near-empty too)", () => {
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [] }, "sys")).toBe("none");
-  });
-
-  it("extension matching for the .efi/.sys carve-out is case-insensitive", () => {
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [] }, "EFI")).toBe("none");
-    expect(managedDotNetConfidence({ format: "Pe", imports: [], exports: [] }, "SYS")).toBe("none");
-  });
-
-  it("'none': an ordinary native PE with real imports and exports", () => {
-    expect(
-      managedDotNetConfidence(
-        {
-          format: "Pe",
-          imports: [imp("KERNEL32.dll"), imp("USER32.dll"), imp(null)],
-          exports: [exp("SomeExport")],
-        },
-        "exe",
-      ),
-    ).toBe("none");
-  });
-
-  it("'none': a native PE with imports but no exports (the common EXE shape) is not flagged", () => {
-    expect(managedDotNetConfidence({ format: "Pe", imports: [imp("KERNEL32.dll")], exports: [] }, "exe")).toBe(
-      "none",
-    );
-  });
-
-  it("never flags a non-PE format, even one that happens to import something named mscoree.dll", () => {
-    expect(managedDotNetConfidence({ format: "Elf", imports: [imp("mscoree.dll")], exports: [] }, "so")).toBe(
-      "none",
-    );
-    expect(managedDotNetConfidence({ format: "MachO", imports: [imp("mscoree.dll")], exports: [] }, "dylib")).toBe(
-      "none",
-    );
-    // Even the zero/zero shape never fires outside PE — Elf/MachO's own linking conventions differ, and
-    // this heuristic is scoped to what's known about CLR-hosted PE images.
-    expect(managedDotNetConfidence({ format: "Elf", imports: [], exports: [] }, "so")).toBe("none");
-    expect(managedDotNetConfidence({ format: "MachO", imports: [], exports: [] }, "dylib")).toBe("none");
+  it("an unrecognized bit contributes nothing (never throws, never a garbage label)", () => {
+    expect(decodeAssemblyFlags(0x8000)).toEqual([]);
+    // A recognized bit alongside unrecognized ones still surfaces cleanly.
+    expect(decodeAssemblyFlags(0x0001 | 0x8000)).toEqual(["PublicKey"]);
   });
 });
 
-describe("emptyImportExportIsNormalFor (CPE-1597 code-review fix)", () => {
-  it("flags .efi and .sys — formats where an empty import/export table is normal by design", () => {
-    expect(emptyImportExportIsNormalFor("efi")).toBe(true);
-    expect(emptyImportExportIsNormalFor("sys")).toBe(true);
+describe("cultureLabel (CPE-1615 — the neutral CLR culture is null/empty, per DotnetAssemblyIdentity/Ref's own doc comments)", () => {
+  it("labels null as 'neutral'", () => {
+    expect(cultureLabel(null)).toBe("neutral");
   });
 
-  it("is case-insensitive", () => {
-    expect(emptyImportExportIsNormalFor("EFI")).toBe(true);
+  it("labels an empty string as 'neutral' too", () => {
+    expect(cultureLabel("")).toBe("neutral");
   });
 
-  it("does not flag exe/dll/so/dylib — an empty table there is genuinely worth a hedged caveat", () => {
-    for (const ext of ["exe", "dll", "so", "dylib", "ocx", "scr", "cpl"]) {
-      expect(emptyImportExportIsNormalFor(ext), ext).toBe(false);
-    }
+  it("passes through a real culture string unchanged", () => {
+    expect(cultureLabel("en-US")).toBe("en-US");
+  });
+});
+
+describe("hexOrDash (CPE-1615 — public_key/public_key_token: null means no key/token present)", () => {
+  it("renders null as an em dash", () => {
+    expect(hexOrDash(null)).toBe("—");
+  });
+
+  it("renders an empty string as an em dash", () => {
+    expect(hexOrDash("")).toBe("—");
+  });
+
+  it("passes through a real hex blob unchanged", () => {
+    expect(hexOrDash("b77a5c561934e089")).toBe("b77a5c561934e089");
   });
 });
 
