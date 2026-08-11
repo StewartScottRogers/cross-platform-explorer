@@ -175,3 +175,42 @@ bug found in `CheckpointDialog.svelte` today. Left in **Doing** (not Done) for a
 close this out as resolved-by-hardening or reopen/retest against the real packaged app if the report
 recurs. The harness (`npm run harness:checkpoint-narrow`) is reusable for that retest, or for auditing
 the three sibling dialogs above.
+
+---
+
+## Outcome (2026-08-11, sprint) — the reported defect did NOT exist
+
+**This ticket's premise was wrong, and that is the most useful thing it produced.**
+
+The worker could not reproduce the overflow. It built a harness mounting the real component inside an
+**iframe** — necessary because `vw` units and the `.backdrop`'s `position: fixed` resolve against the true
+top-level viewport, not a sized wrapper `<div>` — and measured **no overflow at 420px down to 300px**, in
+both themes, with ordinary and stress content. An independent Visual Critic then confirmed it with its own
+CDP driver, measuring the achieved viewport from inside the frame at every width.
+
+It then **reproduced the original finding against unmodified code** using the naive method: requesting
+`--window-size=420,900` under `--headless=new` actually yields a **500×805** viewport, and the screenshot is
+then cropped to a 420×900 canvas — slicing the Close and Preview/Revert buttons off *in the image* while the
+DOM reports no overflow at all. That is precisely what the original report saw.
+
+**Filed off a measurement artifact.** The reviewer confirmed the reasoning from the CSS spec rather than by
+re-running anything: viewport units are defined against the top-level browsing context's initial containing
+block, so no ancestor element can change what they resolve to — only a genuine separate browsing context can.
+
+### What shipped anyway (PR #831)
+A milder, real issue found along the way: a long dialog title wrapped to three lines instead of degrading.
+Fixed with `h2 { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }` and
+`.docs { flex-shrink:0 }`, with a negative control. Plus a **committed, reusable narrow-width harness**
+(`scripts/dev-harness/checkpoint-narrow/`, `vite.harness.config.ts`, `npm run harness:checkpoint-narrow`) —
+verified inert for production builds — so the next person doesn't rebuild one.
+
+### Carried forward
+- The technique and the "reproduce with a verified viewport before filing" rule are recorded in
+  `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md`.
+- `OrganizeDialog.svelte`, `ColumnPickerDialog.svelte` and `CopilotDialog.svelte` share the same header
+  pattern without `min-width:0` (verified by the reviewer). Not fixed; not currently known to misbehave.
+- Nit, not worth its own ticket: the `<h2>` has no `title=` fallback, unlike every other truncating string in
+  that file. Unreachable today — the title is a hardcoded literal too short to truncate — but worth adding if
+  it is ever routed through `$t()`.
+
+**Closing as resolved-by-hardening**, with the premise explicitly recorded as disproven so nobody re-chases it.
