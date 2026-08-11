@@ -47,6 +47,7 @@ use common::{assert_no_panic, run_battery};
 use std::io::Write;
 
 use cpe_server::binary_preview::{binary_info, disassemble, midi_info, pe_info, torrent_info, wasm_info};
+use cpe_server::dotnet_metadata::read as dotnet_metadata_read;
 use cpe_server::camera_raw::read_raw_preview_data_url;
 use cpe_server::data_preview::{spreadsheet_info, sqlite_info};
 use cpe_server::rar::{rar_entries, rar_extract_entry};
@@ -187,6 +188,126 @@ fn binary_info_macho_never_panics() {
         let r = binary_info(path);
         if b.is_empty() {
             assert!(r.is_err(), "binary_info(empty file) must be Err, not a panic");
+        }
+    });
+}
+
+#[test]
+fn dotnet_metadata_read_never_panics() {
+    // A minimal-but-real managed PE prefix (CPE-1596): DOS+COFF+optional headers with 15 data
+    // directories (so #14, the CLR Runtime Header, is present and non-empty), one section, a CLI
+    // header (`IMAGE_COR20_HEADER`) whose `MetaData` directory points at a real `BSJB` metadata root
+    // with one `#~` stream declaring zero tables (`Valid`=0). Real enough to walk `read` past the
+    // `is_managed` gate and into the metadata-root/tables-stream parsing this ticket's own dedicated
+    // fixture tests in `dotnet_metadata.rs` already exercise more thoroughly (a real Assembly/
+    // AssemblyRef/TypeDef/MethodDef payload, targeted RVA/row-count/heap-index corruption) — this
+    // battery instead throws the *shared* generic adversarial sweep (truncation, all-zeros/all-0xFF,
+    // seeded-random, overflowing length fields) at the same entrypoint for cross-coverage.
+    const SECTION_VA: u32 = 0x2000;
+    const SECTION_FILE_OFF: u32 = 0x200;
+    const NUM_RVA_AND_SIZES: u32 = 15;
+    let cli_header_size: u32 = 72;
+    let metadata_rva = SECTION_VA + cli_header_size;
+
+    // Metadata root: signature + version "v1\0\0" (4 bytes, already aligned) + flags + 1 stream ("#~")
+    // whose own header declares zero tables (Reserved(4)+Major(1)+Minor(1)+HeapSizes(1)+Reserved2(1)+
+    // Valid(8)+Sorted(8) = 24 bytes, no row-count array, no row data).
+    let mut tilde = vec![0u8; 24]; // an all-zero 24-byte header is already Valid=0 (no tables)
+    tilde[4] = 1; // MajorVersion
+    let version = b"v1\0\0";
+    let mut root = Vec::new();
+    root.extend_from_slice(b"BSJB");
+    root.extend_from_slice(&1u16.to_le_bytes());
+    root.extend_from_slice(&1u16.to_le_bytes());
+    root.extend_from_slice(&0u32.to_le_bytes());
+    root.extend_from_slice(&(version.len() as u32).to_le_bytes());
+    root.extend_from_slice(version);
+    root.extend_from_slice(&0u16.to_le_bytes()); // Flags
+    root.extend_from_slice(&1u16.to_le_bytes()); // Streams: 1
+    let tilde_off = (root.len() + 12) as u32; // this stream header itself is 4+4+4("#~\0\0")=12 bytes
+    root.extend_from_slice(&tilde_off.to_le_bytes());
+    root.extend_from_slice(&(tilde.len() as u32).to_le_bytes());
+    root.extend_from_slice(b"#~\0\0");
+    root.extend_from_slice(&tilde);
+
+    let mut cli = Vec::new();
+    cli.extend_from_slice(&cli_header_size.to_le_bytes());
+    cli.extend_from_slice(&2u16.to_le_bytes());
+    cli.extend_from_slice(&5u16.to_le_bytes());
+    cli.extend_from_slice(&metadata_rva.to_le_bytes());
+    cli.extend_from_slice(&(root.len() as u32).to_le_bytes());
+    cli.resize(cli_header_size as usize, 0); // remaining CLI header fields: all zero
+
+    let mut section_data = cli;
+    section_data.extend_from_slice(&root);
+
+    let opt_header_size: u16 = (28 + 68 + NUM_RVA_AND_SIZES as usize * 8) as u16;
+    let mut opt = vec![0u8; 28]; // standard fields: irrelevant to this walk, all zero
+    opt[0..2].copy_from_slice(&0x010Bu16.to_le_bytes()); // magic: PE32
+    opt.extend_from_slice(&0x0040_0000u32.to_le_bytes()); // image_base
+    opt.extend_from_slice(&0x1000u32.to_le_bytes()); // section_alignment
+    opt.extend_from_slice(&0x0200u32.to_le_bytes()); // file_alignment
+    opt.resize(28 + 68 - 4, 0); // pad the rest of the windows-specific fields
+    opt.extend_from_slice(&NUM_RVA_AND_SIZES.to_le_bytes()); // number_of_rva_and_sizes (last field)
+    for i in 0..NUM_RVA_AND_SIZES {
+        if i == 14 {
+            opt.extend_from_slice(&SECTION_VA.to_le_bytes());
+            opt.extend_from_slice(&cli_header_size.to_le_bytes());
+        } else {
+            opt.extend_from_slice(&[0u8; 8]);
+        }
+    }
+    assert_eq!(opt.len(), opt_header_size as usize);
+
+    let mut section_header = Vec::new();
+    let mut name = [0u8; 8];
+    name[..5].copy_from_slice(b".cli0");
+    section_header.extend_from_slice(&name);
+    section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes());
+    section_header.extend_from_slice(&SECTION_VA.to_le_bytes());
+    section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes());
+    section_header.extend_from_slice(&SECTION_FILE_OFF.to_le_bytes());
+    section_header.extend_from_slice(&[0u8; 12]);
+    section_header.extend_from_slice(&0x4000_0040u32.to_le_bytes());
+    assert_eq!(section_header.len(), 40);
+
+    let mut coff = Vec::new();
+    coff.extend_from_slice(&0x014Cu16.to_le_bytes());
+    coff.extend_from_slice(&1u16.to_le_bytes()); // number_of_sections
+    coff.extend_from_slice(&[0u8; 12]);
+    coff.extend_from_slice(&opt_header_size.to_le_bytes());
+    coff.extend_from_slice(&0x0102u16.to_le_bytes());
+    assert_eq!(coff.len(), 20);
+
+    const PE_OFFSET: u32 = 0x80;
+    let mut magic = vec![0u8; PE_OFFSET as usize];
+    magic[0] = b'M';
+    magic[1] = b'Z';
+    magic[0x3C..0x40].copy_from_slice(&PE_OFFSET.to_le_bytes());
+    magic.extend_from_slice(b"PE\0\0");
+    magic.extend_from_slice(&coff);
+    magic.extend_from_slice(&opt);
+    magic.extend_from_slice(&section_header);
+    magic.resize(SECTION_FILE_OFF as usize, 0);
+    magic.extend_from_slice(&section_data);
+
+    // Self-check: this magic must actually round-trip through goblin + report managed, and give a
+    // real (Ok(Some(..)), empty) result, before handing it to the battery — otherwise the battery
+    // would just be exercising the "not managed"/error early-outs, not the interesting parse path.
+    let self_check_path = write_temp(&magic, ".dll");
+    let self_check = dotnet_metadata_read(self_check_path.path().to_str().unwrap());
+    assert!(
+        matches!(self_check, Ok(Some(ref m)) if m.assembly.is_none() && m.types.is_empty()),
+        "magic fixture must self-check as a managed PE with zero tables before fuzzing: {self_check:?}"
+    );
+
+    let header_len = magic.len();
+    run_battery("dotnet_metadata::read", &magic, header_len, |b| {
+        let f = write_temp(b, ".dll");
+        let path = f.path().to_str().expect("temp path must be valid UTF-8");
+        let r = dotnet_metadata_read(path);
+        if b.is_empty() {
+            assert!(r.is_err(), "dotnet_metadata::read(empty file) must be Err, not a panic");
         }
     });
 }

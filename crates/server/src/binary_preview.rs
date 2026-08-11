@@ -256,6 +256,7 @@ fn pe_binary_info(pe: &goblin::pe::PE, bytes: &[u8], arch: Option<String>) -> Bi
         format: BinaryFormat::Pe,
         arch,
         is_64: pe.is_64,
+        is_managed: crate::dotnet_metadata::is_managed(pe),
         sections,
         imports,
         exports,
@@ -335,6 +336,9 @@ fn elf_binary_info(elf: &goblin::elf::Elf, bytes: &[u8], arch: Option<String>) -
         format: BinaryFormat::Elf,
         arch,
         is_64: elf.is_64,
+        // .NET-on-ELF (Mono AOT etc.) is out of this slice's scope — a managed CLI header only
+        // exists in a PE's data directory #14, so ELF is never reported managed.
+        is_managed: false,
         sections,
         imports,
         exports,
@@ -359,6 +363,7 @@ fn mach_binary_info(mach: &goblin::mach::Mach, arch: Option<String>) -> BinaryIn
                 format: BinaryFormat::MachO,
                 arch,
                 is_64: false,
+                is_managed: false,
                 sections: Vec::new(),
                 imports: Vec::new(),
                 exports: Vec::new(),
@@ -436,6 +441,7 @@ fn macho_binary_info(macho: &goblin::mach::MachO, arch: Option<String>) -> Binar
         format: BinaryFormat::MachO,
         arch,
         is_64: macho.is_64,
+        is_managed: false,
         sections,
         imports,
         exports,

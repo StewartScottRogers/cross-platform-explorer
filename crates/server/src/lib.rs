@@ -393,6 +393,13 @@ pub mod indent_guides;
 /// Structured binary previews — hex / PE / MIDI / wasm / torrent text summaries (CPE-210/214/215/216/218).
 pub mod binary_preview;
 
+/// Hand-rolled ECMA-335 CLR metadata reader for managed .NET PEs — assembly identity, `AssemblyRef`s,
+/// and capped `TypeDef`/`MethodDef` name listings via the `#~` compressed table stream (CPE-1596,
+/// epic CPE-1562 "Binary Inspector" slice 3). Pure-Rust, no `dotnetdll` (GPL, disallowed) and no new
+/// dependency — `goblin` (already a dep) locates the PE + CLI header, everything past that is
+/// hand-parsed against the spec.
+pub mod dotnet_metadata;
+
 /// Document text extraction — RTF / DOCX / ODT / EPUB → plain text (CPE-070/071/072/077).
 pub mod doc_text;
 
