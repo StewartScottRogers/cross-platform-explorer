@@ -298,8 +298,11 @@ pub struct DotnetMetadata {
     /// The metadata root's version string (ECMA-335 II.24.2.1), e.g. "v4.0.30319" — the CLR runtime
     /// this assembly was compiled against, not necessarily the one running it.
     pub runtime_version: String,
-    /// `None` when the single-row `Assembly` table is absent (a module/netmodule, not an assembly
-    /// manifest, or a `#~` stream this reader couldn't locate/parse).
+    /// `None` when the single-row `Assembly` table is genuinely absent from an otherwise-located
+    /// `#~`/`#-` tables stream — a real module/netmodule, not an assembly manifest. (If the tables
+    /// stream itself couldn't be located/parsed at all, [`crate::dotnet_metadata::read`] reports that
+    /// honestly as `Ok(None)` at the outer `Option<DotnetMetadata>` level instead — see its doc
+    /// comment — rather than this field alone standing in for "nothing was found here".)
     pub assembly: Option<DotnetAssemblyIdentity>,
     pub assembly_refs: Vec<DotnetAssemblyRef>,
     pub types: Vec<DotnetTypeDef>,

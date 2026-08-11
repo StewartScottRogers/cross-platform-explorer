@@ -127,3 +127,95 @@ No new dependencies. No Rust files touched (`git status --porcelain` shows only 
 plus this ticket's move to `Doing/`). Per jsdom's known blind spot for real layout/clipping, these tests
 verify data/state transitions only — the tab's on-screen tab-strip/pill-reflow look still needs the
 screenshot/Visual-Critic pass, not a jsdom claim.
+
+**2026-08-11 — UAT blocking finding fixed: a parse failure was presenting as a clean, empty result**
+
+PR #820 was UAT-tested (structure independently reviewed, appearance Visual-Critic-passed in both
+themes; the separate `AssemblyFlags` bit-value bug was already fixed in `ccd799ae` — not touched here).
+One blocking finding remained: UAT took a real, working, `csc`-compiled managed DLL and corrupted
+*only* its 4-byte `"BSJB"` metadata-root signature (file size, PE headers, and the CLI/CLR directory
+all left intact). The real backend returned `is_managed = true` and
+`read() => Ok(Some(DotnetMetadata{ runtime_version: "", assembly: None, assembly_refs: [], types: [],
+methods: [] }))` — neither `Err` nor `Ok(None)`, so it landed in the frontend's **populated** render
+branch and showed "No assembly manifest", "No referenced assemblies found", "No types found", "No
+methods found" — byte-identical to what a genuine, tiny, valid `.netmodule` produces. Same failure
+shape this crew was burned by before (CPE-1591: "no zip-bomb risk" after reading zero entries): an
+unknown/unreadable state must be structurally distinct from a valid-but-empty one.
+
+**Fix — be honest at the source (`crates/server/src/dotnet_metadata.rs`).** `read_impl`'s return type
+changed from `DotnetMetadata` (always constructed, even on structural failure) to
+`Option<DotnetMetadata>`. `read()` now does `Ok(read_impl(&bytes, &pe))` instead of
+`Ok(Some(read_impl(&bytes, &pe)))`. Four early-return points inside `read_impl` — CLI header
+unparseable, `MetaData` RVA unresolvable to any section, metadata-root parse failure (the exact UAT
+case: bad/missing `"BSJB"` signature), and no `#~`/`#-` tables stream found — all previously did
+`return out` (an empty-but-`Some` struct) and now do `return None` via `?`, uniformly. **Chose
+`Ok(None)` over `Err`**: the frontend (`BinaryPreview.svelte`) already had a dedicated, correctly-worded
+render for exactly this outcome — `data-testid="binary-dotnet-null"`, "this file's CLR header is
+present, but its metadata root couldn't be located or parsed" — built when the tab was first wired in,
+anticipating this exact case; reusing it (rather than inventing a second signal or repurposing `Err`,
+which the frontend renders as "Couldn't read this assembly's .NET metadata", a strictly worse message
+for this situation) is what makes that existing UI honest. No frontend logic changes were needed — only
+the backend's return value.
+
+**The line I drew for "found it, empty" vs "couldn't find it":** once `locate_tables` successfully
+walks the `#~`/`#-` stream header itself, whatever it finds (even zero rows in every one of
+`Assembly`/`AssemblyRef`/`TypeDef`/`MethodDef`) is now `Ok(Some(..))` — that's a real, valid, possibly-a-
+`.netmodule` result. Anything upstream of that succeeding is `Ok(None)`. I deliberately left
+`read_degrades_gracefully_on_absurd_table_row_counts`'s pre-existing behavior alone (a hostile row count
+that overruns the stream mid-walk still yields `Ok(Some(<partial>))`, per `locate_tables`'s own
+documented "stop walking, keep what's located" contract) — that's a different, already-audited
+degradation shape (within a successfully-located stream), not the structural "never even found the
+root" shape UAT reported, and changing it wasn't asked for and adds risk for no reported symptom.
+
+Updated the module doc comment and `DotnetMetadata::assembly`'s field doc (in `crates/server/src/model.rs`,
+a `specta::Type` struct) to state the corrected contract; regenerated `src/lib/bindings.gen.ts`
+(`cargo run --bin export_bindings --features "specta-bindings sidecar-platform"`) — a 5-line diff, doc
+comment only, no `Cargo.lock` changes (no dependency touched).
+
+**Tests added (`crates/server/src/dotnet_metadata.rs`):**
+- `read_reports_ok_none_for_a_corrupted_bsjb_signature_not_a_clean_empty_result` — the exact UAT
+  reproduction: takes the existing `build_minimal_managed_pe()` fixture, corrupts only the 4 bytes at
+  its self-checked `metadata_root_start` offset (added to `ManagedPeOffsets`) from `"BSJB"` to `"XXXX"`,
+  asserts `read()` now returns `Ok(None)`.
+- `read_reports_a_genuinely_empty_module_as_ok_some_not_ok_none` — the "doesn't over-correct" half: a
+  new fixture builder, `build_minimal_managed_pe_no_tables()` (real CLI header, real `"BSJB"` root, real
+  `#~` stream header with `Valid=0`), asserts `read()` still returns `Ok(Some(..))` with empty fields.
+  Building this fixture surfaced a real fixture-sizing gotcha (documented inline): `parse_metadata_root`'s
+  64-byte stream-name NUL scan window must stay in-file, or `bytes.get()` returns `None` and the whole
+  root parse spuriously fails — fixed by appending 128 bytes of trailing padding outside the root's own
+  declared size. The *existing* `crates/server/tests/binary_data_preview_panic_safety.rs::
+  dotnet_metadata_read_never_panics` fixture had the same latent sizing gap (its self-check was passing
+  only because the bug being fixed here was masking it — a too-short zero-table fixture used to
+  round-trip through the old "return empty `Some` on failure" path); patched with the same trailing-padding
+  fix so its self-check now exercises the real parse path it always claimed to.
+- Strengthened `read_degrades_gracefully_on_a_bogus_clr_header_rva` from a soft `if let Ok(Some(meta))`
+  guard to a hard `assert!(result.is_none())`, since that case is now deterministically `Ok(None)` too
+  (same class of fix).
+- Extracted the ~140-line PE-wrapper boilerplate shared by every "genuine managed PE" fixture into
+  `wrap_managed_pe()` so the two fixture builders (with-tables, no-tables) can't drift apart.
+
+**Frontend test (`src/lib/components/BinaryPreview.test.ts`):** two new cases under the CPE-1615
+describe block — "a corrupted-metadata-root (null) result never renders like a genuine empty module"
+(mocks `dotnetMetadata` to `Ok(null)`, asserts `binary-dotnet-null` renders and none of
+`binary-dotnet-no-assembly`/`-refs-empty`/`-types-empty`/`-methods-empty`/`-error` appear) and "a
+genuine, tiny, valid module... renders the populated-empty state, not the null/corrupt state" (mocks a
+real empty-but-populated response, asserts the inverse). Together they prove the two outcomes are
+rendered distinctly, not just that each renders *something*.
+
+**Verification (all run synchronously in the worktree, not backgrounded):**
+- `cargo build` (crates/server) → clean.
+- `cargo test` (crates/server, full suite) → `1859 passed; 0 failed; 1 ignored` (lib tests), plus every
+  integration test binary green, including `binary_data_preview_panic_safety` (22/22, including the
+  patched `dotnet_metadata_read_never_panics`).
+- `cargo clippy --all-targets -- -D warnings` (src-tauri, default features) → clean.
+- `cargo clippy --all-targets --features sidecar-platform -- -D warnings` (src-tauri) → clean.
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- `npx vitest run src/lib/components/BinaryPreview.test.ts` → `Test Files 1 passed (1)`,
+  `Tests 24 passed (24)` (22 pre-existing + 2 new).
+- `npx vitest run` (full suite) → `Test Files 272 passed (272)`, `Tests 3318 passed (3318)` (3316
+  baseline + 2 new).
+
+No `Cargo.lock` changes (no dependency touched — confirmed via `git status --porcelain`, neither
+`Cargo.lock` appears). No new dependencies. No existing test deleted or weakened (one soft guard
+strengthened to a hard assertion; two fixtures gained trailing padding to fix a latent sizing bug, not
+to change what they assert).

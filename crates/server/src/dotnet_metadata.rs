@@ -42,9 +42,14 @@
 //! `checked_add`/`checked_mul`, so a crafted huge value degrades to "stop parsing, return what's been
 //! collected so far" rather than a panic on overflow or a multi-gigabyte allocation attempt. Every
 //! collected list is capped at [`crate::model::MAX_BINARY_LIST_ENTRIES`]. [`read`] itself never panics
-//! and never hangs: a malformed managed PE degrades to a partial or empty [`DotnetMetadata`] (see its
-//! doc comment), matching [`crate::binary_preview::binary_info`]'s own skip-on-error contract — the only
-//! `Err` cases are an unreadable file and bytes goblin can't parse as a PE at all.
+//! and never hangs: a malformed managed PE whose metadata root/tables stream can still be located
+//! degrades to a partial or empty [`DotnetMetadata`], while one whose metadata root or tables stream
+//! *cannot* be located at all (a corrupt `"BSJB"` signature, an unresolvable RVA, …) honestly reports
+//! `Ok(None)` rather than a hollow success (see [`read`]'s doc comment — this distinction is
+//! load-bearing, not cosmetic: CPE-1615 UAT caught an earlier version of this reader collapsing both
+//! cases into the same empty `Ok(Some(..))`, indistinguishable from a genuine tiny module). This
+//! matches [`crate::binary_preview::binary_info`]'s own skip-on-error contract for the *within-a-table*
+//! degradation — the only `Err` cases are an unreadable file and bytes goblin can't parse as a PE at all.
 
 use crate::model::{
     DotnetAssemblyIdentity, DotnetAssemblyRef, DotnetMetadata, DotnetMethodDef, DotnetTypeDef,
@@ -525,31 +530,45 @@ fn locate_tables(bytes: &[u8], tilde_off: usize, tilde_size: usize) -> Option<Lo
 /// Read the CLR metadata of a managed PE at `path`. Returns:
 /// - `Err` only when the file can't be read, or its bytes don't parse as a PE at all (goblin's own
 ///   error) — the same contract [`crate::binary_preview::binary_info`] holds.
-/// - `Ok(None)` when the PE parses but isn't managed (no CLI header) — a native EXE/DLL.
-/// - `Ok(Some(metadata))` for a managed PE, where `metadata` is filled in as far as parsing could get:
-///   a truncated/corrupt managed assembly degrades to a partial or entirely-empty [`DotnetMetadata`]
-///   (empty `runtime_version`, `assembly: None`, empty lists) rather than an `Err`, mirroring
-///   `binary_info`'s "never fail the whole inspection over one malformed table" contract.
+/// - `Ok(None)` when the PE parses but isn't managed (no CLI header) — a native EXE/DLL — **or** when
+///   the CLI header claims the file is managed but no parseable metadata root can actually be located:
+///   an unreadable/truncated `IMAGE_COR20_HEADER`, a `MetaData` RVA that doesn't resolve to any
+///   section, a metadata-root header whose `"BSJB"` signature is missing/invalid or is otherwise
+///   truncated, or no `#~`/`#-` compressed-tables stream. This is a deliberate choice (CPE-1615 UAT):
+///   these are all "we looked and there is nothing parseable here" outcomes, structurally identical in
+///   meaning to "not managed" from the caller's point of view, and the frontend already has a dedicated
+///   rendering for exactly this case (`binary-dotnet-null`, "metadata root couldn't be located or
+///   parsed") — reusing `Ok(None)` here, rather than inventing a second not-managed-shaped signal, is
+///   what makes that existing UI honest. **Never** collapse this case into `Ok(Some(<empty struct>))`:
+///   a bogus/corrupted metadata root must not render identically to a genuine, tiny, valid `.netmodule`
+///   that has real (if empty) tables — that conflation is the exact defect this doc comment exists to
+///   prevent from regressing.
+/// - `Ok(Some(metadata))` for a managed PE whose metadata root *was* located and whose `#~`/`#-` tables
+///   stream *was* successfully walked — i.e. parsing reached real table data, even if that data turns
+///   out to be empty (a `.netmodule` genuinely has no `Assembly` row; a tiny assembly may genuinely have
+///   zero `AssemblyRef`/`TypeDef`/`MethodDef` rows). Past that point, `metadata` is filled in as far as
+///   parsing could get: an individual row/column that can't be resolved (an out-of-range heap index, an
+///   overrun row count) is skipped rather than failing the whole read, mirroring `binary_info`'s "never
+///   fail the whole inspection over one malformed table" contract — but that per-row degradation is only
+///   ever layered on top of a *successfully located* tables stream, never used to paper over failing to
+///   find one at all.
 pub fn read(path: &str) -> Result<Option<DotnetMetadata>, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     let pe = goblin::pe::PE::parse(&bytes).map_err(|e| e.to_string())?;
     if !is_managed(&pe) {
         return Ok(None);
     }
-    Ok(Some(read_impl(&bytes, &pe)))
+    Ok(read_impl(&bytes, &pe))
 }
 
-/// Best-effort parse once we know `pe` is managed — every step is `Option`-based internally and
-/// degrades to leaving fields at their default (empty) rather than aborting, so this function itself
-/// never returns an `Err`.
-fn read_impl(bytes: &[u8], pe: &goblin::pe::PE) -> DotnetMetadata {
-    let mut out =
-        DotnetMetadata { runtime_version: String::new(), assembly: None, assembly_refs: Vec::new(), types: Vec::new(), methods: Vec::new() };
-
-    let Some(clr) = parse_clr_header(bytes, pe) else { return out };
-    let Some(root_off) = rva_to_file_offset(pe, clr.metadata_rva) else { return out };
-    let Some(root) = parse_metadata_root(bytes, root_off, clr.metadata_size) else { return out };
-    out.runtime_version = root.version;
+/// Best-effort parse once we know `pe` is managed. Returns `None` for any failure to locate the
+/// metadata root / tables stream itself (see [`read`]'s doc comment for the exact list) — those are
+/// structural failures, not "found it, and it's empty" — and `Some(metadata)` once the tables stream
+/// has actually been located and walked, however sparse the result turns out to be from there.
+fn read_impl(bytes: &[u8], pe: &goblin::pe::PE) -> Option<DotnetMetadata> {
+    let clr = parse_clr_header(bytes, pe)?;
+    let root_off = rva_to_file_offset(pe, clr.metadata_rva)?;
+    let root = parse_metadata_root(bytes, root_off, clr.metadata_size)?;
 
     let find = |name: &str| {
         root.streams.iter().find(|s| s.name == name).and_then(|s| {
@@ -559,11 +578,18 @@ fn read_impl(bytes: &[u8], pe: &goblin::pe::PE) -> DotnetMetadata {
     };
     // Prefer "#~" (the normal compressed stream); some tools emit the uncompressed "#-" variant
     // instead, which shares the same physical layout for the columns this reader touches.
-    let Some((tilde_off, tilde_size)) = find("#~").or_else(|| find("#-")) else { return out };
+    let (tilde_off, tilde_size) = find("#~").or_else(|| find("#-"))?;
     let strings_heap = find("#Strings");
     let blob_heap = find("#Blob");
 
-    let Some(located) = locate_tables(bytes, tilde_off, tilde_size) else { return out };
+    let located = locate_tables(bytes, tilde_off, tilde_size)?;
+    let mut out = DotnetMetadata {
+        runtime_version: root.version,
+        assembly: None,
+        assembly_refs: Vec::new(),
+        types: Vec::new(),
+        methods: Vec::new(),
+    };
     let str_idx_sz = located.str_sz;
     let blob_idx_sz = located.blob_sz;
 
@@ -661,7 +687,7 @@ fn read_impl(bytes: &[u8], pe: &goblin::pe::PE) -> DotnetMetadata {
         }
     }
 
-    out
+    Some(out)
 }
 
 fn read_index(bytes: &[u8], off: usize, size: usize) -> Option<u32> {
@@ -788,11 +814,133 @@ mod tests {
     struct ManagedPeOffsets {
         /// Data directory #14's `VirtualAddress` field (4 bytes) in the PE optional header.
         clr_dir_va: usize,
+        /// The metadata root's own start — where its 4-byte `"BSJB"` signature lives (ECMA-335
+        /// II.24.2.1). Exposed so an adversarial test can corrupt exactly the same 4 bytes UAT did on a
+        /// real compiled assembly, without disturbing anything else (file size, PE headers, CLI/CLR
+        /// directory all stay intact — only the signature is wrong).
+        metadata_root_start: usize,
         /// The `#~` stream's `TypeDef` row-count `u32` (the first entry in the row-count array, since
         /// `TypeDef`=0x02 sorts before `MethodDef`/`Assembly`/`AssemblyRef` in this fixture's `Valid` set).
         typedef_row_count: usize,
         /// The `Assembly` table's single row's `Name` string-heap index (`u16`).
         assembly_name_index: usize,
+    }
+
+    // Shared PE-fixture geometry: every "genuine managed PE" builder in this module places its single
+    // section at the same VA/file-offset and uses the same 72-byte `IMAGE_COR20_HEADER` size, so the
+    // whole PE-wrapper boilerplate (DOS stub, COFF header, optional header, section header) can live in
+    // one place ([`wrap_managed_pe`]) instead of being copy-pasted per fixture.
+    const FIXTURE_SECTION_VA: u32 = 0x2000;
+    const FIXTURE_SECTION_FILE_OFF: u32 = 0x400;
+    const FIXTURE_CLI_HEADER_SIZE: u32 = 72;
+
+    /// Wrap `section_data` — which must already open with a [`FIXTURE_CLI_HEADER_SIZE`]-byte
+    /// `IMAGE_COR20_HEADER` (its `MetaData` directory pointing at
+    /// `FIXTURE_SECTION_VA + FIXTURE_CLI_HEADER_SIZE`, per how every caller below builds its `cli`
+    /// bytes) — into a minimal, real, structurally-valid PE32: DOS stub, COFF header, PE32 optional
+    /// header with data directory #14 pointing at the CLI header, one `.cli0` section holding
+    /// `section_data`. Returns `(file bytes, data-directory-#14-VirtualAddress file offset, section_data
+    /// file offset)` so callers can locate/self-check/corrupt specific bytes. Every "genuine managed
+    /// PE" fixture in this module differs only in what it puts in `section_data` (the CLI header +
+    /// metadata root bytes) — this wrapper exists exactly once so that boilerplate can't drift between
+    /// fixtures and silently stop testing what it claims to.
+    fn wrap_managed_pe(section_data: &[u8]) -> (Vec<u8>, usize, usize) {
+        const NUM_RVA_AND_SIZES: u32 = 15;
+        let opt_header_size: u16 = (28 + 68 + NUM_RVA_AND_SIZES as usize * 8) as u16;
+
+        let mut opt = Vec::new();
+        opt.extend_from_slice(&0x010Bu16.to_le_bytes()); // magic: PE32
+        opt.push(0); // major_linker_version
+        opt.push(0); // minor_linker_version
+        opt.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_code
+        opt.extend_from_slice(&0u32.to_le_bytes());
+        opt.extend_from_slice(&0u32.to_le_bytes());
+        opt.extend_from_slice(&FIXTURE_SECTION_VA.to_le_bytes()); // address_of_entry_point
+        opt.extend_from_slice(&FIXTURE_SECTION_VA.to_le_bytes()); // base_of_code
+        opt.extend_from_slice(&(FIXTURE_SECTION_VA + 0x1000).to_le_bytes()); // base_of_data
+        assert_eq!(opt.len(), 28);
+        opt.extend_from_slice(&0x0040_0000u32.to_le_bytes()); // image_base
+        opt.extend_from_slice(&0x1000u32.to_le_bytes()); // section_alignment
+        opt.extend_from_slice(&0x0200u32.to_le_bytes()); // file_alignment
+        opt.extend_from_slice(&6u16.to_le_bytes()); // major_os_version
+        opt.extend_from_slice(&0u16.to_le_bytes());
+        opt.extend_from_slice(&0u16.to_le_bytes());
+        opt.extend_from_slice(&0u16.to_le_bytes());
+        opt.extend_from_slice(&6u16.to_le_bytes()); // major_subsystem_version
+        opt.extend_from_slice(&0u16.to_le_bytes());
+        opt.extend_from_slice(&0u32.to_le_bytes()); // win32_version_value
+        opt.extend_from_slice(&(FIXTURE_SECTION_VA + 0x3000).to_le_bytes()); // size_of_image
+        opt.extend_from_slice(&FIXTURE_SECTION_FILE_OFF.to_le_bytes()); // size_of_headers
+        opt.extend_from_slice(&0u32.to_le_bytes()); // checksum
+        opt.extend_from_slice(&3u16.to_le_bytes()); // subsystem: console
+        opt.extend_from_slice(&0u16.to_le_bytes()); // dll_characteristics
+        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes());
+        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes());
+        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes());
+        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes());
+        opt.extend_from_slice(&0u32.to_le_bytes()); // loader_flags
+        opt.extend_from_slice(&NUM_RVA_AND_SIZES.to_le_bytes());
+        assert_eq!(opt.len(), 28 + 68);
+        for i in 0..NUM_RVA_AND_SIZES {
+            if i == 14 {
+                // Data directory #14: CLR Runtime Header (IMAGE_COR20_HEADER itself, not the metadata root).
+                opt.extend_from_slice(&FIXTURE_SECTION_VA.to_le_bytes());
+                opt.extend_from_slice(&FIXTURE_CLI_HEADER_SIZE.to_le_bytes());
+            } else {
+                opt.extend_from_slice(&0u32.to_le_bytes());
+                opt.extend_from_slice(&0u32.to_le_bytes());
+            }
+        }
+        assert_eq!(opt.len(), opt_header_size as usize);
+
+        // ---- Section table (one entry) ----
+        let mut section_header = Vec::new();
+        let mut name = [0u8; 8];
+        name[..5].copy_from_slice(b".cli0");
+        section_header.extend_from_slice(&name);
+        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // virtual_size
+        section_header.extend_from_slice(&FIXTURE_SECTION_VA.to_le_bytes());
+        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_raw_data
+        section_header.extend_from_slice(&FIXTURE_SECTION_FILE_OFF.to_le_bytes());
+        section_header.extend_from_slice(&0u32.to_le_bytes());
+        section_header.extend_from_slice(&0u32.to_le_bytes());
+        section_header.extend_from_slice(&0u16.to_le_bytes());
+        section_header.extend_from_slice(&0u16.to_le_bytes());
+        section_header.extend_from_slice(&0x4000_0040u32.to_le_bytes()); // characteristics: initialized data, readable
+        assert_eq!(section_header.len(), 40);
+
+        // ---- COFF header ----
+        let mut coff = Vec::new();
+        coff.extend_from_slice(&0x014Cu16.to_le_bytes()); // machine: I386
+        coff.extend_from_slice(&1u16.to_le_bytes()); // number_of_sections
+        coff.extend_from_slice(&0u32.to_le_bytes());
+        coff.extend_from_slice(&0u32.to_le_bytes());
+        coff.extend_from_slice(&0u32.to_le_bytes());
+        coff.extend_from_slice(&opt_header_size.to_le_bytes());
+        coff.extend_from_slice(&0x0102u16.to_le_bytes()); // characteristics: executable, 32-bit
+        assert_eq!(coff.len(), 20);
+
+        // ---- DOS stub + PE signature ----
+        const PE_OFFSET: u32 = 0x80;
+        let mut out = vec![0u8; PE_OFFSET as usize];
+        out[0] = b'M';
+        out[1] = b'Z';
+        out[0x3C..0x40].copy_from_slice(&PE_OFFSET.to_le_bytes());
+        out.extend_from_slice(b"PE\0\0");
+        out.extend_from_slice(&coff);
+        out.extend_from_slice(&opt);
+        out.extend_from_slice(&section_header);
+
+        out.resize(FIXTURE_SECTION_FILE_OFF as usize, 0);
+        out.extend_from_slice(section_data);
+
+        // Data directory #14 sits at opt-relative offset (28 standard + 68 windows fields) + 14 * 8
+        // bytes; `opt` itself starts right after the DOS stub + "PE\0\0" signature + COFF header.
+        let opt_start = PE_OFFSET as usize + 4 + coff.len();
+        let clr_dir_va = opt_start + 28 + 68 + 14 * 8;
+        let section_data_start = FIXTURE_SECTION_FILE_OFF as usize;
+        assert_eq!(&out[clr_dir_va..clr_dir_va + 4], &FIXTURE_SECTION_VA.to_le_bytes(), "clr_dir_va offset");
+        (out, clr_dir_va, section_data_start)
     }
 
     /// Build a real, minimal-but-structurally-valid managed PE32: one section holding a CLI header
@@ -904,10 +1052,8 @@ mod tests {
         let assembly_name_field_in_row = 4 + 8 + 4 + 2;
 
         // ---- CLI header (IMAGE_COR20_HEADER, 72 bytes) + section layout ----
-        const SECTION_VA: u32 = 0x2000;
-        const SECTION_FILE_OFF: u32 = 0x400;
-        let cli_header_size = 72u32;
-        let metadata_rva = SECTION_VA + cli_header_size;
+        let cli_header_size = FIXTURE_CLI_HEADER_SIZE;
+        let metadata_rva = FIXTURE_SECTION_VA + cli_header_size;
 
         let mut cli = Vec::new();
         cli.extend_from_slice(&cli_header_size.to_le_bytes()); // cb
@@ -926,113 +1072,26 @@ mod tests {
         let mut section_data = cli;
         section_data.extend_from_slice(&root);
 
-        // ---- Optional header (PE32, 15 data directories so index 14/CLR is present) ----
-        const NUM_RVA_AND_SIZES: u32 = 15;
-        let opt_header_size: u16 = (28 + 68 + NUM_RVA_AND_SIZES as usize * 8) as u16;
+        let (out, clr_dir_va, section_data_start) = wrap_managed_pe(&section_data);
 
-        let mut opt = Vec::new();
-        opt.extend_from_slice(&0x010Bu16.to_le_bytes()); // magic: PE32
-        opt.push(0); // major_linker_version
-        opt.push(0); // minor_linker_version
-        opt.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_code
-        opt.extend_from_slice(&0u32.to_le_bytes());
-        opt.extend_from_slice(&0u32.to_le_bytes());
-        opt.extend_from_slice(&SECTION_VA.to_le_bytes()); // address_of_entry_point
-        opt.extend_from_slice(&SECTION_VA.to_le_bytes()); // base_of_code
-        opt.extend_from_slice(&(SECTION_VA + 0x1000).to_le_bytes()); // base_of_data
-        assert_eq!(opt.len(), 28);
-        opt.extend_from_slice(&0x0040_0000u32.to_le_bytes()); // image_base
-        opt.extend_from_slice(&0x1000u32.to_le_bytes()); // section_alignment
-        opt.extend_from_slice(&0x0200u32.to_le_bytes()); // file_alignment
-        opt.extend_from_slice(&6u16.to_le_bytes()); // major_os_version
-        opt.extend_from_slice(&0u16.to_le_bytes());
-        opt.extend_from_slice(&0u16.to_le_bytes());
-        opt.extend_from_slice(&0u16.to_le_bytes());
-        opt.extend_from_slice(&6u16.to_le_bytes()); // major_subsystem_version
-        opt.extend_from_slice(&0u16.to_le_bytes());
-        opt.extend_from_slice(&0u32.to_le_bytes()); // win32_version_value
-        opt.extend_from_slice(&(SECTION_VA + 0x3000).to_le_bytes()); // size_of_image
-        opt.extend_from_slice(&SECTION_FILE_OFF.to_le_bytes()); // size_of_headers
-        opt.extend_from_slice(&0u32.to_le_bytes()); // checksum
-        opt.extend_from_slice(&3u16.to_le_bytes()); // subsystem: console
-        opt.extend_from_slice(&0u16.to_le_bytes()); // dll_characteristics
-        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes());
-        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes());
-        opt.extend_from_slice(&0x0010_0000u32.to_le_bytes());
-        opt.extend_from_slice(&0x0000_1000u32.to_le_bytes());
-        opt.extend_from_slice(&0u32.to_le_bytes()); // loader_flags
-        opt.extend_from_slice(&NUM_RVA_AND_SIZES.to_le_bytes());
-        assert_eq!(opt.len(), 28 + 68);
-        for i in 0..NUM_RVA_AND_SIZES {
-            if i == 14 {
-                // Data directory #14: CLR Runtime Header (IMAGE_COR20_HEADER itself, not the metadata root).
-                opt.extend_from_slice(&SECTION_VA.to_le_bytes());
-                opt.extend_from_slice(&cli_header_size.to_le_bytes());
-            } else {
-                opt.extend_from_slice(&0u32.to_le_bytes());
-                opt.extend_from_slice(&0u32.to_le_bytes());
-            }
-        }
-        assert_eq!(opt.len(), opt_header_size as usize);
-
-        // ---- Section table (one entry) ----
-        let mut section_header = Vec::new();
-        let mut name = [0u8; 8];
-        name[..5].copy_from_slice(b".cli0");
-        section_header.extend_from_slice(&name);
-        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // virtual_size
-        section_header.extend_from_slice(&SECTION_VA.to_le_bytes());
-        section_header.extend_from_slice(&(section_data.len() as u32).to_le_bytes()); // size_of_raw_data
-        section_header.extend_from_slice(&SECTION_FILE_OFF.to_le_bytes());
-        section_header.extend_from_slice(&0u32.to_le_bytes());
-        section_header.extend_from_slice(&0u32.to_le_bytes());
-        section_header.extend_from_slice(&0u16.to_le_bytes());
-        section_header.extend_from_slice(&0u16.to_le_bytes());
-        section_header.extend_from_slice(&0x4000_0040u32.to_le_bytes()); // characteristics: initialized data, readable
-        assert_eq!(section_header.len(), 40);
-
-        // ---- COFF header ----
-        let mut coff = Vec::new();
-        coff.extend_from_slice(&0x014Cu16.to_le_bytes()); // machine: I386
-        coff.extend_from_slice(&1u16.to_le_bytes()); // number_of_sections
-        coff.extend_from_slice(&0u32.to_le_bytes());
-        coff.extend_from_slice(&0u32.to_le_bytes());
-        coff.extend_from_slice(&0u32.to_le_bytes());
-        coff.extend_from_slice(&opt_header_size.to_le_bytes());
-        coff.extend_from_slice(&0x0102u16.to_le_bytes()); // characteristics: executable, 32-bit
-        assert_eq!(coff.len(), 20);
-
-        // ---- DOS stub + PE signature ----
-        const PE_OFFSET: u32 = 0x80;
-        let mut out = vec![0u8; PE_OFFSET as usize];
-        out[0] = b'M';
-        out[1] = b'Z';
-        out[0x3C..0x40].copy_from_slice(&PE_OFFSET.to_le_bytes());
-        out.extend_from_slice(b"PE\0\0");
-        out.extend_from_slice(&coff);
-        out.extend_from_slice(&opt);
-        out.extend_from_slice(&section_header);
-
-        out.resize(SECTION_FILE_OFF as usize, 0);
-        out.extend_from_slice(&section_data);
-
-        // Data directory #14 sits at opt-relative offset (28 standard + 68 windows fields) + 14 * 8
-        // bytes; `opt` itself starts right after the DOS stub + "PE\0\0" signature + COFF header.
-        let opt_start = PE_OFFSET as usize + 4 + coff.len();
-        let clr_dir_va = opt_start + 28 + 68 + 14 * 8;
-        let section_data_start = SECTION_FILE_OFF as usize;
         let root_start = section_data_start + cli_header_size as usize;
         let tilde_start = root_start + tilde_off as usize;
         let offsets = ManagedPeOffsets {
             clr_dir_va,
+            metadata_root_start: root_start,
             typedef_row_count: tilde_start + typedef_row_count_in_tilde,
             assembly_name_index: tilde_start + assembly_row_start_in_tilde + assembly_name_field_in_row,
         };
 
         // Self-check every computed offset against the value actually written there, so a future
         // change to this builder's layout fails loudly here rather than silently corrupting the wrong
-        // field in an adversarial test.
-        assert_eq!(&out[clr_dir_va..clr_dir_va + 4], &SECTION_VA.to_le_bytes(), "clr_dir_va offset");
+        // field in an adversarial test. (`clr_dir_va` itself was already self-checked inside
+        // `wrap_managed_pe`.)
+        assert_eq!(
+            &out[offsets.metadata_root_start..offsets.metadata_root_start + 4],
+            b"BSJB",
+            "metadata_root_start offset"
+        );
         assert_eq!(
             &out[offsets.typedef_row_count..offsets.typedef_row_count + 4],
             &(typedef_rows.len() as u32).to_le_bytes(),
@@ -1045,6 +1104,96 @@ mod tests {
         );
 
         (out, offsets)
+    }
+
+    /// Build a real, minimal-but-structurally-valid **module** PE32 — every structural piece a
+    /// managed reader needs (CLI header, a metadata root with a genuine `"BSJB"` signature, a `#~`
+    /// stream header) is well-formed and locatable, but the `#~` stream's `Valid` mask declares *no*
+    /// tables at all: no `Assembly` row (so no assembly manifest — this is what `csc /target:module`
+    /// or any genuinely tiny managed image can honestly produce), no `TypeDef`/`MethodDef`/
+    /// `AssemblyRef` rows either. This is the **genuine, valid "nothing here"** counterpart to
+    /// [`build_minimal_managed_pe`]'s corrupted-signature variant used in the adversarial tests below:
+    /// both end up presenting empty assembly/type/method lists, but only one of them actually located
+    /// and parsed a real metadata structure to get there. [`read`] must tell the two apart (CPE-1615
+    /// UAT) — this fixture is what proves the "genuine empty" side of that distinction still reads as
+    /// `Ok(Some(..))`, not `Ok(None)`.
+    fn build_minimal_managed_pe_no_tables() -> Vec<u8> {
+        // ---- Heaps (present but never referenced — no tables means no name/blob lookups happen) ----
+        let strings = vec![0u8]; // index 0: the mandatory empty string
+        let blob = vec![0u8]; // index 0: the mandatory empty blob
+
+        // ---- #~ tables stream: header only, Valid = 0 (no table kind present) ----
+        let mut tilde = Vec::new();
+        tilde.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        tilde.push(1); // MajorVersion
+        tilde.push(0); // MinorVersion
+        tilde.push(0); // HeapSizes: all heap indices are 2 bytes
+        tilde.push(1); // Reserved2
+        tilde.extend_from_slice(&0u64.to_le_bytes()); // Valid: zero bits set — no tables at all
+        tilde.extend_from_slice(&0u64.to_le_bytes()); // Sorted (unused by this reader)
+        assert_eq!(tilde.len(), 24, "Valid=0 means no row-count array and no row data follow the header");
+
+        // ---- Metadata root ----
+        let version = b"v4.0.30319\0\0"; // 12 bytes, already 4-byte aligned
+        assert_eq!(version.len() % 4, 0);
+        let stream_headers =
+            [stream_header(0, 0, "#~"), stream_header(0, 0, "#Strings"), stream_header(0, 0, "#Blob")];
+        let root_fixed_len = 4 + 2 + 2 + 4 + 4 + version.len() + 2 + 2;
+        let streams_start = root_fixed_len + stream_headers.iter().map(Vec::len).sum::<usize>();
+        let tilde_off = streams_start as u32;
+        let strings_off = tilde_off + tilde.len() as u32;
+        let blob_off = strings_off + strings.len() as u32;
+
+        let mut root = Vec::new();
+        root.extend_from_slice(b"BSJB");
+        root.extend_from_slice(&1u16.to_le_bytes()); // MajorVersion
+        root.extend_from_slice(&1u16.to_le_bytes()); // MinorVersion
+        root.extend_from_slice(&0u32.to_le_bytes()); // Reserved
+        root.extend_from_slice(&(version.len() as u32).to_le_bytes()); // Length
+        root.extend_from_slice(version);
+        root.extend_from_slice(&0u16.to_le_bytes()); // Flags
+        root.extend_from_slice(&(stream_headers.len() as u16).to_le_bytes()); // Streams
+        root.extend_from_slice(&stream_header(tilde_off, tilde.len() as u32, "#~"));
+        root.extend_from_slice(&stream_header(strings_off, strings.len() as u32, "#Strings"));
+        root.extend_from_slice(&stream_header(blob_off, blob.len() as u32, "#Blob"));
+        assert_eq!(root.len(), streams_start, "stream data must start exactly where the header list ends");
+        root.extend_from_slice(&tilde);
+        root.extend_from_slice(&strings);
+        root.extend_from_slice(&blob);
+
+        // ---- CLI header (IMAGE_COR20_HEADER, 72 bytes) ----
+        let cli_header_size = FIXTURE_CLI_HEADER_SIZE;
+        let metadata_rva = FIXTURE_SECTION_VA + cli_header_size;
+        let mut cli = Vec::new();
+        cli.extend_from_slice(&cli_header_size.to_le_bytes()); // cb
+        cli.extend_from_slice(&2u16.to_le_bytes()); // MajorRuntimeVersion
+        cli.extend_from_slice(&5u16.to_le_bytes()); // MinorRuntimeVersion
+        cli.extend_from_slice(&metadata_rva.to_le_bytes()); // MetaData.VirtualAddress
+        cli.extend_from_slice(&(root.len() as u32).to_le_bytes()); // MetaData.Size
+        cli.extend_from_slice(&1u32.to_le_bytes()); // Flags: COMIMAGE_FLAGS_ILONLY
+        cli.extend_from_slice(&0u32.to_le_bytes()); // EntryPointToken
+        for _ in 0..6 {
+            cli.extend_from_slice(&0u32.to_le_bytes());
+            cli.extend_from_slice(&0u32.to_le_bytes());
+        }
+        assert_eq!(cli.len(), cli_header_size as usize);
+
+        let mut section_data = cli;
+        section_data.extend_from_slice(&root);
+        // `parse_metadata_root`'s stream-name scan (`MAX_STREAM_NAME_SCAN`, 64 bytes) reads a bounded
+        // window starting at each stream header's name field; `bytes.get()` requires that *whole*
+        // window to be in-file (a partial/truncated window is treated as "None", i.e. malformed) so it
+        // never silently accepts a name scan clipped by EOF. `build_minimal_managed_pe`'s fixture is
+        // naturally long enough (real table row data follows the streams) that this never bites; this
+        // fixture's tables stream is deliberately tiny (Valid=0), so without padding the last stream
+        // header's ("#Blob") name-scan window would run past the file's actual end and the metadata
+        // root would spuriously fail to parse — extra trailing bytes here are *not* part of the
+        // metadata root's own declared size (`root.len()`, used below for `MetaData.Size`), just
+        // physically-present filler so every in-bounds scan window this reader performs stays in-file.
+        section_data.extend_from_slice(&[0u8; 128]);
+
+        let (out, _clr_dir_va, _section_data_start) = wrap_managed_pe(&section_data);
+        out
     }
 
     /// A minimal, real, valid PE32 with zero data directories — a native image, structurally
@@ -1172,6 +1321,58 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
+    #[test]
+    fn read_reports_a_genuinely_empty_module_as_ok_some_not_ok_none() {
+        // CPE-1615 UAT's core distinction, the "doesn't over-correct" half: a real, valid managed image
+        // whose metadata root and #~ tables stream are both well-formed and locatable, but which
+        // genuinely carries zero rows in every table (a .netmodule, or any minimal managed image) must
+        // still read as `Ok(Some(..))` with empty fields — never demoted to `Ok(None)` just because it
+        // has nothing in it. `Ok(None)` is reserved for "couldn't find/parse the structure at all", not
+        // "found it, and it's empty".
+        let bytes = build_minimal_managed_pe_no_tables();
+        let path = write_temp(&bytes, "empty-module");
+        let result = read(&path.to_string_lossy()).expect("a well-formed managed PE must parse");
+        let meta = result.expect(
+            "a genuinely empty-but-valid module must read as Ok(Some(..)), not Ok(None) — \
+             Ok(None) means 'couldn't parse a metadata root', not 'parsed one and it's empty'",
+        );
+        assert_eq!(meta.runtime_version, "v4.0.30319", "the version string must still be read");
+        assert_eq!(meta.assembly, None, "a module has no Assembly table row");
+        assert!(meta.assembly_refs.is_empty());
+        assert!(meta.types.is_empty());
+        assert!(meta.methods.is_empty());
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn read_reports_ok_none_for_a_corrupted_bsjb_signature_not_a_clean_empty_result() {
+        // The exact CPE-1615 UAT reproduction: take a real, working, otherwise-valid managed PE and
+        // corrupt *only* its 4-byte "BSJB" metadata-root signature — file size, PE headers, and the
+        // CLI/CLR directory all stay intact, exactly as UAT described. Before the fix, this landed in
+        // `Ok(Some(DotnetMetadata{ runtime_version: "", assembly: None, assembly_refs: [], types: [],
+        // methods: [] }))` — byte-identical to `read_reports_a_genuinely_empty_module_as_ok_some_not_ok_none`
+        // above, so a user (and the frontend) couldn't tell "genuinely tiny module" from "corrupt file,
+        // nothing was actually read". It must now read as `Ok(None)` — the frontend's dedicated
+        // `binary-dotnet-null` "metadata root couldn't be located or parsed" state — structurally
+        // distinct from the populated/empty-module render.
+        let (mut bytes, offsets) = build_minimal_managed_pe();
+        assert_eq!(
+            &bytes[offsets.metadata_root_start..offsets.metadata_root_start + 4],
+            b"BSJB",
+            "sanity: corrupting the right 4 bytes"
+        );
+        bytes[offsets.metadata_root_start..offsets.metadata_root_start + 4].copy_from_slice(b"XXXX");
+
+        let path = write_temp(&bytes, "corrupted-bsjb");
+        let result = read(&path.to_string_lossy()).expect("PE headers/CLI header are untouched — still parses");
+        assert!(
+            result.is_none(),
+            "a corrupted BSJB metadata-root signature must read as Ok(None) (\"couldn't locate/parse a \
+             metadata root\"), not Ok(Some(<empty struct>)) — got {result:?}"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
     // -----------------------------------------------------------------------------------------
     // Adversarial input — never panic, never hang; a clean Err or an empty/partial Ok is the
     // whole contract (CPE-1596's explicit top fuzz priority).
@@ -1217,15 +1418,15 @@ mod tests {
         bytes[offsets.clr_dir_va..offsets.clr_dir_va + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         let path = write_temp(&bytes, "bogus-clr-rva");
-        // Must not panic; either a clean Err, or Ok(Some(mostly-empty)) since `is_managed` only checks
-        // the directory is non-empty, not that its RVA actually resolves.
-        let result = read(&path.to_string_lossy());
-        if let Ok(Some(meta)) = &result {
-            assert!(meta.assembly.is_none(), "an unresolvable CLR header RVA must yield no assembly identity");
-            assert!(meta.assembly_refs.is_empty());
-            assert!(meta.types.is_empty());
-            assert!(meta.methods.is_empty());
-        }
+        // `is_managed` only checks the directory is non-empty, not that its RVA actually resolves, so
+        // this still dispatches into the managed path — but since the CLI header itself can't be
+        // located, no metadata root can be found either. Per CPE-1615 UAT, that must be reported
+        // honestly as Ok(None), not a hollow Ok(Some(<empty struct>)).
+        let result = read(&path.to_string_lossy()).expect("PE parses fine; only the RVA target is bogus");
+        assert!(
+            result.is_none(),
+            "an unresolvable CLR header RVA means no metadata root can be located — must be Ok(None), got {result:?}"
+        );
         let _ = fs::remove_file(&path);
     }
 

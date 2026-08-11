@@ -370,6 +370,55 @@ describe("BinaryPreview — .NET metadata tab (CPE-1615)", () => {
     expect(screen.queryByTestId("binary-dotnet-error")).toBeNull();
   });
 
+  it("UAT CPE-1615: a corrupted-metadata-root (null) result never renders like a genuine empty module — the two are structurally distinct", async () => {
+    // Reproduces the exact blocking UAT finding: a real managed DLL whose metadata root couldn't be
+    // parsed (backend now honestly reports `Ok(None)` — see crates/server/src/dotnet_metadata.rs)
+    // must NOT be indistinguishable from a genuine, tiny, valid module that legitimately has no
+    // assembly manifest and empty ref/type/method tables. Render both side by side and assert none of
+    // the "populated, just empty" markers ever appear for the corrupt/null case.
+    binaryInfoMock.mockResolvedValueOnce(ok(managedPe));
+    dotnetMetadataMock.mockResolvedValueOnce(ok(null)); // corrupted "BSJB" signature -> Ok(None)
+
+    render(BinaryPreview, { path: "/x/corrupted.dll" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: ".NET metadata" }));
+
+    await waitFor(() => expect(screen.getByTestId("binary-dotnet-null")).toBeTruthy());
+    expect(screen.getByText(/metadata root couldn't be located or parsed/)).toBeTruthy();
+
+    // None of the "we found a real (empty) structure" markers a genuine module renders — see the next
+    // test — may appear here. A corrupt file must never present as a clean/empty result.
+    expect(screen.queryByTestId("binary-dotnet-no-assembly")).toBeNull();
+    expect(screen.queryByTestId("binary-dotnet-refs-empty")).toBeNull();
+    expect(screen.queryByTestId("binary-dotnet-types-empty")).toBeNull();
+    expect(screen.queryByTestId("binary-dotnet-methods-empty")).toBeNull();
+    expect(screen.queryByTestId("binary-dotnet-error")).toBeNull();
+  });
+
+  it("UAT CPE-1615: a genuine, tiny, valid module (real empty result) renders the populated-empty state, not the null/corrupt state", async () => {
+    // The other half of the distinction: a real backend `Ok(Some(..))` for a module with no Assembly
+    // row and empty ref/type/method tables (e.g. a genuinely tiny/valid .netmodule) must still render
+    // as the populated branch with honest per-table empty notes — never demoted to the null/corrupt
+    // rendering just because every field happens to be empty.
+    binaryInfoMock.mockResolvedValueOnce(ok(managedPe));
+    dotnetMetadataMock.mockResolvedValueOnce(
+      ok({ runtime_version: "v2.0.50727", assembly: null, assembly_refs: [], types: [], methods: [] }),
+    );
+
+    render(BinaryPreview, { path: "/x/genuine.netmodule" });
+    await waitFor(() => expect(screen.getByText("PE (Windows executable/library)")).toBeTruthy());
+    await fireEvent.click(screen.getByRole("tab", { name: ".NET metadata" }));
+
+    await waitFor(() => expect(screen.getByTestId("binary-dotnet-no-assembly")).toBeTruthy());
+    expect(screen.getByTestId("binary-dotnet-refs-empty")).toBeTruthy();
+    expect(screen.getByTestId("binary-dotnet-types-empty")).toBeTruthy();
+    expect(screen.getByTestId("binary-dotnet-methods-empty")).toBeTruthy();
+
+    // Structurally distinct from the corrupt/unparseable case above.
+    expect(screen.queryByTestId("binary-dotnet-null")).toBeNull();
+    expect(screen.queryByTestId("binary-dotnet-error")).toBeNull();
+  });
+
   it("a command failure (unreadable/malformed) renders a distinct error state, never mistaken for the null-result case", async () => {
     binaryInfoMock.mockResolvedValueOnce(ok(managedPe));
     dotnetMetadataMock.mockRejectedValueOnce(new Error("truncated metadata stream"));
