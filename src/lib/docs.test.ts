@@ -1,6 +1,6 @@
 // CPE-536: docs library — frontmatter parse, ordered index, search, and the real bundled set.
 import { describe, it, expect } from "vitest";
-import { parseDoc, buildIndex, searchDocs, groupDocs, slugFromPath, DOCS } from "./docs";
+import { parseDoc, buildIndex, searchDocs, groupDocs, slugFromPath, findOrderCollisions, DOCS } from "./docs";
 
 describe("docs library (CPE-536)", () => {
   it("parses frontmatter title/order/category + body; falls back sensibly", () => {
@@ -76,5 +76,37 @@ describe("docs library (CPE-536)", () => {
     expect(DOCS.every((d) => d.title && d.content.length > 40)).toBe(true);
     // Orders are non-decreasing.
     for (let i = 1; i < DOCS.length; i++) expect(DOCS[i].order).toBeGreaterThanOrEqual(DOCS[i - 1].order);
+  });
+
+  it("findOrderCollisions flags docs that share an order within a category (CPE-1607)", () => {
+    // Same order, same category → collision.
+    expect(
+      findOrderCollisions([
+        { slug: "a", title: "A", order: 5, category: "Safety & Recovery", categoryOrder: 5, content: "" },
+        { slug: "b", title: "B", order: 5, category: "Safety & Recovery", categoryOrder: 5, content: "" },
+      ]),
+    ).toEqual(["Safety & Recovery: order 5 used by A, B"]);
+
+    // Same order, different category → no collision (order is only unique per-category).
+    expect(
+      findOrderCollisions([
+        { slug: "a", title: "A", order: 5, category: "Safety & Recovery", categoryOrder: 5, content: "" },
+        { slug: "b", title: "B", order: 5, category: "Explorer", categoryOrder: 2, content: "" },
+      ]),
+    ).toEqual([]);
+
+    // Different order, same category → no collision.
+    expect(
+      findOrderCollisions([
+        { slug: "a", title: "A", order: 5, category: "Safety & Recovery", categoryOrder: 5, content: "" },
+        { slug: "b", title: "B", order: 6, category: "Safety & Recovery", categoryOrder: 5, content: "" },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("the real bundled library has no order collisions within a category (CPE-1607 guard)", () => {
+    // Fails CI the moment two pages in the same category share an `order` again — e.g. the
+    // pre-existing `38-trash.md` / `safety-undo.md` collision this ticket fixed.
+    expect(findOrderCollisions(DOCS)).toEqual([]);
   });
 });

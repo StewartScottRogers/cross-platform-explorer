@@ -91,6 +91,33 @@ export function groupDocs(docs: Doc[]): DocCategory[] {
   return [...byName.values()].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
 }
 
+/**
+ * Find `order` collisions: two or more docs sharing the same `order` within the same `category`.
+ * `buildIndex`/`groupDocs` sort by `order` alone, so a collision leaves the tied docs' relative position
+ * down to whatever the glob happens to yield - stable in practice, arbitrary in principle, and it will
+ * silently mis-order the day that changes (CPE-1607). Returns one message per colliding group, e.g.
+ * "Safety & Recovery: order 38 used by Trash, Undo" (empty array = no collisions).
+ */
+export function findOrderCollisions(docs: Doc[]): string[] {
+  const groups = new Map<string, { category: string; order: number; titles: string[] }>();
+  for (const d of docs) {
+    const key = d.category + "::" + String(d.order);
+    const existing = groups.get(key);
+    if (existing) {
+      existing.titles.push(d.title);
+    } else {
+      groups.set(key, { category: d.category, order: d.order, titles: [d.title] });
+    }
+  }
+  const collisions: string[] = [];
+  for (const g of groups.values()) {
+    if (g.titles.length > 1) {
+      collisions.push(g.category + ": order " + g.order + " used by " + g.titles.join(", "));
+    }
+  }
+  return collisions.sort();
+}
+
 // The bundled library — every `src/docs/*.md`, imported raw at build time.
 const glob = import.meta.glob("../docs/*.md", { query: "?raw", import: "default", eager: true }) as Record<
   string,
