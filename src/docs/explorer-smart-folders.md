@@ -43,7 +43,7 @@ While a smart folder is open, the listing recomputes automatically on two indepe
 
 Opening a real file's location is genuinely the only way to change it — the view enforces this rather than
 just documenting it. Delete, Cut, Copy, Rename, and Paste are all blocked with an explanatory notice
-("This is a smart folder — a saved search view. Open a file's real location to change it."); note that
+("This is a smart folder — a live view of tagged files. Open a file's real location to change it."); note that
 even **Copy** is blocked, not just the operations that would actually mutate something. **Properties**,
 **Reveal**, and navigating into a subfolder shown inside the smart folder all still work, since none of
 those change anything. "Select by…" and "Save search…" are unavailable while a smart folder is open (they

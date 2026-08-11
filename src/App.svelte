@@ -1880,7 +1880,7 @@
    *  new-folder, new-file, paste, ...). */
   function blockedInArchive(): boolean {
     if (smartFolder) {
-      showNotice("This is a smart folder — a saved search view. Open a file's real location to change it.", true);
+      showNotice($t("smart.blockedNotice"), true);
       return true;
     }
     if (structuredSearch) {
