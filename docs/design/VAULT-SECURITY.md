@@ -92,6 +92,15 @@ artifact once sealed.
 - **Orphaned sessions on abnormal exit.** If the app is killed while a vault is unlocked, the session dir
   can linger. **CPE-1252** (filed) adds a startup sweep that securely wipes any `vault-sessions/*` not in
   the live registry (the registry is empty at boot, so all are orphans).
+- **The session dir is contained, not caller-chosen (CPE-1647, closed).** `vault_unlock`'s `session_dir` is
+  untrusted IPC input, and locking *securely shreds* whatever it names — so an unvalidated one was a
+  "shred any directory" primitive (`vault_unlock(blob, pass, "…/Documents")` then `vault_lock(blob)`).
+  `unlock_to_session` now refuses any path that does not resolve **strictly inside**
+  `appCacheDir()/vault-sessions` (`ensure_session_dir_contained`, the same guard shape `create_vault`'s
+  `resolves_inside` uses). Both sides are canonicalized before a component-wise comparison, so `..`,
+  symlinks/junctions and the `vault-sessions` / `vault-sessions-evil` prefix trap are all caught; the root
+  itself is refused (wiping it would destroy every live session); and every resolution failure fails
+  **closed**. A refused unlock records no mapping, so a later `lock` has nothing to act on.
 - **Secure-delete of the original is best-effort.** The optional "securely delete the original after
   sealing" overwrites then removes, but on SSDs, copy-on-write, wear-levelled, or journalled filesystems
   the OS may retain remnants — the UI states this honestly. It only runs **after** the vault is verified
@@ -123,6 +132,12 @@ An **independent** reviewer (not the implementer) adversarially reviewed each sl
 - **Mount/browse (CPE-1249):** found + fixed a re-unlock that orphaned decrypted plaintext (frontend
   already-unlocked guard + backend best-effort superseded-dir wipe) and a failed-lock that stranded the
   retry out of UI reach.
+- **Session containment (CPE-1647):** found + fixed an uncontained `session_dir` on the IPC boundary — a
+  caller with a vault and its passphrase could unlock into any directory and have `lock` shred it. Closed
+  by canonicalizing and requiring strict containment under the app's own `vault-sessions` root (§5). Proven
+  by tests that read the victim's bytes back **off disk** after both the refused unlock and the follow-up
+  lock, cover the `..`/symlink/prefix-sibling/root-itself/unresolvable-root variants, and keep a negative
+  control showing a legitimate fresh session still unlocks and is still wiped.
 - Verify-before-shred is enforced with an injectable verifier and a falsifiable test proving the original
   survives a failed verify.
 

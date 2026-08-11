@@ -6979,6 +6979,17 @@ impl cpe_server::vault_manager::SecretAccess for KeyringBackend {
     }
 }
 
+/// The app's own encrypted-vault session root: `appCacheDir()/vault-sessions`. THE one resolver for that
+/// path — the unlock containment guard (CPE-1647), the startup orphan sweep (CPE-1252) and the frontend's
+/// `defaultAllocSessionDir` (`src/lib/vaultStore.ts`) must all name the same directory, or a legitimate
+/// unlock would be refused (or a hostile one waved through). Pure path arithmetic on Tauri's resolver — no
+/// filesystem I/O — so it is safe to call on the async command thread before `spawn_blocking`.
+fn vault_sessions_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    server_ctx::TauriCtx::new(app)
+        .app_cache_dir()
+        .map(|c| c.join("vault-sessions"))
+}
+
 /// Is `path` a CPE vault? Detected by reading its `CPEVLT1` magic header, not its extension. A quick
 /// bounded read, but still `spawn_blocking` since it opens a (possibly remote/slow) file (CPE-760/761).
 #[tauri::command]
@@ -7020,19 +7031,27 @@ async fn vault_create(
 /// Unlock the vault at `blob_path` with `passphrase`, decrypting its tree into `session_dir` and recording
 /// the unlocked state in the managed registry. Async + `spawn_blocking`: scrypt (~1s) + a full
 /// decrypt/extract to disk (CPE-760/761).
+///
+/// `session_dir` is untrusted IPC input, so it is NOT taken at face value (CPE-1647): the engine refuses
+/// any path that does not resolve strictly inside this app's own `vault-sessions` root (resolved here via
+/// `vault_sessions_root`, the same dir the startup sweep and the frontend's `defaultAllocSessionDir` use).
+/// Without that check a devtools/automation caller holding a vault + its passphrase could point the unlock
+/// at any directory on the machine and then have `vault_lock` securely shred it.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn vault_unlock(
+    app: tauri::AppHandle,
     state: tauri::State<'_, cpe_server::vault_manager::VaultRegistry>,
     blob_path: String,
     passphrase: String,
     session_dir: String,
 ) -> Result<(), String> {
     let registry = state.inner().clone();
+    let sessions_root = vault_sessions_root(&app)?;
     let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
     tauri::async_runtime::spawn_blocking(move || {
         registry
-            .unlock(Path::new(&blob_path), &pass, Path::new(&session_dir))
+            .unlock(Path::new(&blob_path), &pass, Path::new(&session_dir), &sessions_root)
             .map_err(|e| e.to_string())
     })
     .await
@@ -7743,18 +7762,18 @@ fn init_thumbnail_native_dep_dir(app: &tauri::AppHandle) {
 /// killed/crashing while a vault was unlocked — by definition an orphan holding decrypted plaintext.
 /// Model lives in `cpe_server::vault_manager::sweep_orphan_sessions`; this is the thin adapter that
 /// resolves the SAME base dir the frontend allocates (`appCacheDir()` + `"vault-sessions"`, see
-/// `src/lib/vaultStore.ts`'s `defaultAllocSessionDir`) via Tauri's own path resolver, so the sweep
-/// looks in exactly the directory unlock/lock actually use.
+/// `src/lib/vaultStore.ts`'s `defaultAllocSessionDir`) via the shared `vault_sessions_root` helper — the
+/// same one `vault_unlock`'s containment guard uses (CPE-1647) — so the sweep looks in exactly the
+/// directory unlock/lock actually use.
 ///
 /// Runs off the main/setup thread (`spawn`) and does the fs work in `spawn_blocking` (CPE-760/761) so
 /// a large/slow sweep never delays the window coming up; best-effort and never fatal — a failed sweep
 /// (missing cache dir, a permission error) only logs, it must never block or fail app launch.
 fn sweep_orphan_vault_sessions_on_startup(app: &tauri::AppHandle) {
-    let Ok(cache_dir) = server_ctx::TauriCtx::new(app).app_cache_dir() else {
+    let Ok(sessions_root) = vault_sessions_root(app) else {
         eprintln!("cpe: vault-session sweep skipped: could not resolve the app cache dir");
         return;
     };
-    let sessions_root = cache_dir.join("vault-sessions");
     tauri::async_runtime::spawn(async move {
         let outcome = tauri::async_runtime::spawn_blocking(move || {
             cpe_server::vault_manager::sweep_orphan_sessions(&sessions_root)

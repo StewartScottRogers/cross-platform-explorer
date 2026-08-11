@@ -9,9 +9,11 @@
 //!   into [`CreateOpts::shred_original`], it enforces the module's one hard **safety invariant**: the
 //!   plaintext original is destroyed *only after* the persisted encrypted copy is proven recoverable
 //!   by a full decrypt round-trip. `shred_original` defaults to **off**.
-//! - **Unlock / lock** — [`VaultRegistry`] decrypts a blob into a caller-provided *session directory*
-//!   and remembers the unlocked (blob → session) mapping; locking drops that mapping and **securely
-//!   wipes** the session directory (shred each extracted file, then remove the tree).
+//! - **Unlock / lock** — [`VaultRegistry`] decrypts a blob into a *session directory* and remembers the
+//!   unlocked (blob → session) mapping; locking drops that mapping and **securely wipes** the session
+//!   directory (shred each extracted file, then remove the tree). Because locking shreds, the session
+//!   directory is **not** freely caller-chosen: [`ensure_session_dir_contained`] (CPE-1647) refuses any
+//!   path that does not resolve strictly inside the app's own `vault-sessions` root.
 //! - **Passphrase persistence** — [`remember_passphrase`] / [`forget_passphrase`] /
 //!   [`stored_passphrase`] go through the [`SecretAccess`] seam (the OS keychain in production, an
 //!   in-memory fake in tests). The keychain is the **only** place a passphrase may persist — never a
@@ -243,14 +245,112 @@ fn resolves_inside(folder: &Path, dest: &Path) -> Result<bool, VaultError> {
 // Unlock / lock (free functions + the managed registry)
 // ---------------------------------------------------------------------------
 
+/// Resolve `path` to a canonical, symlink-free, `..`-free form suitable for a containment comparison,
+/// **even when it does not exist yet** (a fresh session dir never does).
+///
+/// Walks up to the nearest ancestor that actually exists, canonicalizes *that* (so every symlink,
+/// junction, `..`, `.` and 8.3/verbatim quirk on the existing part is resolved by the OS), then
+/// re-appends the not-yet-existing tail. **Fails closed**: the tail is collected via
+/// [`Path::file_name`], which yields `None` for a `..`/root/prefix component — so any path whose
+/// non-existent tail tries to climb (`sessions/<uuid>/../../Documents`) or that bottoms out at a root
+/// with nothing canonicalizable is rejected outright rather than "resolved" optimistically. That is the
+/// property [`ensure_session_dir_contained`] relies on: a returned path is safe to compare with
+/// [`Path::starts_with`] because it can no longer contain an escape hatch.
+fn resolve_for_containment(path: &Path) -> Result<PathBuf, VaultError> {
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = path.to_path_buf();
+    loop {
+        if let Ok(existing) = std::fs::canonicalize(&cur) {
+            let mut resolved = existing;
+            for name in tail.iter().rev() {
+                resolved.push(name);
+            }
+            return Ok(resolved);
+        }
+        // Not on disk (yet): step up one component and try again. `file_name()` is deliberately the
+        // only way a component is accepted — it returns `None` for `..`, a root, or a drive prefix.
+        let (Some(name), Some(parent)) = (cur.file_name().map(|n| n.to_os_string()), cur.parent())
+        else {
+            return Err(VaultError::Format(format!(
+                "refusing to unlock: session directory {} cannot be resolved to a real location",
+                path.display()
+            )));
+        };
+        if parent.as_os_str().is_empty() {
+            return Err(VaultError::Format(format!(
+                "refusing to unlock: session directory {} cannot be resolved to a real location",
+                path.display()
+            )));
+        }
+        tail.push(name);
+        cur = parent.to_path_buf();
+    }
+}
+
+/// CONTAINMENT GUARD (CPE-1647): refuse a `session_dir` that does not resolve **strictly inside** the
+/// app's own `vault-sessions` root.
+///
+/// This is the same class of guard [`resolves_inside`] applies to `create_vault`'s destination, applied
+/// to the other destructive path in this module. Unlocking writes decrypted plaintext INTO `session_dir`
+/// and locking [`wipe_session_dir`]s it — shredding every file under it, then removing the tree — so an
+/// unvalidated, caller-chosen `session_dir` arriving over IPC is a "shred any directory on this machine"
+/// primitive (`vault_unlock(blob, pass, "C:\\Users\\me\\Documents")` then `vault_lock(blob)`). The
+/// session root is app-owned scratch space that only the frontend's `defaultAllocSessionDir`
+/// (`appCacheDir()/vault-sessions/<uuid>`, `src/lib/vaultStore.ts`) ever allocates into, so a strict
+/// check has no legitimate false positives.
+///
+/// Fails **closed** at every step: an unresolvable root, an unresolvable session path, a `..` escape, a
+/// symlink/junction pointing out of the root, and `session_dir` *being* the root itself (wiping that
+/// would shred every other live session) are all refused. Both sides are canonicalized before the
+/// comparison, and the comparison is [`Path::starts_with`] — component-wise, so the
+/// `vault-sessions` / `vault-sessions-evil` prefix-boundary trick fails too.
+///
+/// The root is created if missing (it is app-owned, and the very first unlock on a fresh machine
+/// legitimately predates it); if it cannot be created it cannot be canonicalized, and the call is
+/// refused rather than waved through.
+pub fn ensure_session_dir_contained(sessions_root: &Path, session_dir: &Path) -> Result<(), VaultError> {
+    if std::fs::create_dir_all(sessions_root).is_err() {
+        return Err(VaultError::Format(
+            "refusing to unlock: the app's own vault-sessions directory could not be created, so the \
+             session directory cannot be checked for containment"
+                .to_string(),
+        ));
+    }
+    let root = std::fs::canonicalize(sessions_root).map_err(|_| {
+        VaultError::Format(
+            "refusing to unlock: the app's own vault-sessions directory could not be resolved, so the \
+             session directory cannot be checked for containment"
+                .to_string(),
+        )
+    })?;
+    let session = resolve_for_containment(session_dir)?;
+    if session == root || !session.starts_with(&root) {
+        return Err(VaultError::Format(format!(
+            "refusing to unlock: session directory {} does not resolve inside the app's own \
+             vault-sessions directory — a session directory holds decrypted plaintext and is securely \
+             shredded when the vault is locked, so it may only be a fresh path allocated under that \
+             app-owned root",
+            session_dir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Decrypt the blob at `blob_path` with `passphrase` into `session_dir` (the crypto core extracts
 /// atomically — a failure leaves `session_dir` untouched). Does not record any state; use
 /// [`VaultRegistry::unlock`] to track the unlocked session.
+///
+/// `sessions_root` is the app's own `vault-sessions` directory; `session_dir` MUST resolve strictly
+/// inside it ([`ensure_session_dir_contained`], CPE-1647). That check runs **first** — before the blob
+/// is read, before anything is decrypted, and long before any wipe — so a rejected call writes nothing
+/// anywhere and leaves no session mapping for a later [`VaultRegistry::lock`] to shred.
 pub fn unlock_to_session(
     blob_path: &Path,
     passphrase: &SecretString,
     session_dir: &Path,
+    sessions_root: &Path,
 ) -> Result<(), VaultError> {
+    ensure_session_dir_contained(sessions_root, session_dir)?;
     let blob = std::fs::read(blob_path)?;
     vault_crypto::decrypt_tree(&blob, passphrase, session_dir)
 }
@@ -341,13 +441,18 @@ impl VaultRegistry {
     /// dir, that prior session dir's plaintext is securely wiped before the mapping is overwritten — so a
     /// direct/double unlock never leaves the old plaintext orphaned on disk. The new decrypt runs first, so
     /// a failed re-unlock leaves the existing unlocked state (and its plaintext) untouched.
+    ///
+    /// `session_dir` must resolve strictly inside `sessions_root`, the app's own `vault-sessions`
+    /// directory (CPE-1647) — see [`ensure_session_dir_contained`]. A refused call records no mapping, so
+    /// [`lock`](Self::lock) can never be steered into shredding a directory outside that root.
     pub fn unlock(
         &self,
         blob_path: &Path,
         passphrase: &SecretString,
         session_dir: &Path,
+        sessions_root: &Path,
     ) -> Result<(), VaultError> {
-        self.unlock_with_wiper(blob_path, passphrase, session_dir, |dir| {
+        self.unlock_with_wiper(blob_path, passphrase, session_dir, sessions_root, |dir| {
             wipe_session_dir(dir, SESSION_WIPE_SCHEME)
         })
     }
@@ -366,11 +471,13 @@ impl VaultRegistry {
         blob_path: &Path,
         passphrase: &SecretString,
         session_dir: &Path,
+        sessions_root: &Path,
         wipe: impl Fn(&Path) -> Result<(), VaultError>,
     ) -> Result<(), VaultError> {
-        // Decrypt into the NEW session dir first — a failed decrypt must leave any existing unlocked state
-        // (and its plaintext) intact, so this happens before we touch the map.
-        unlock_to_session(blob_path, passphrase, session_dir)?;
+        // Containment (CPE-1647) + decrypt into the NEW session dir first — a refused or failed unlock must
+        // leave any existing unlocked state (and its plaintext) intact, so this happens before we touch the
+        // map. An out-of-root `session_dir` therefore never becomes a mapping `lock` would shred.
+        unlock_to_session(blob_path, passphrase, session_dir, sessions_root)?;
         // Record the new mapping, capturing any prior session dir for the same blob. Inserting BEFORE the
         // wipe keeps the (freshly-decrypted) new session always reachable/lockable even if the wipe below
         // fails on a stubborn file — the new plaintext is never the orphan.
@@ -562,6 +669,13 @@ mod tests {
         SecretString::from(s.to_owned())
     }
 
+    /// The app-owned session root every legitimate unlock extracts into — the test stand-in for the
+    /// frontend's `appCacheDir()/vault-sessions` (CPE-1647). Deliberately NOT created here: the
+    /// containment guard creates it on demand, exactly as on a fresh machine's very first unlock.
+    fn sessions_root(dir: &Path) -> PathBuf {
+        dir.join("vault-sessions")
+    }
+
     /// Build a small source folder: a nested dir, a text file, an empty dir. Kept tiny so the (real,
     /// ~1s-calibrated) scrypt KDF dominates test time rather than the payload.
     fn sample_folder(dir: &Path) {
@@ -613,8 +727,9 @@ mod tests {
 
         // Unlock into a session dir → the plaintext tree comes back byte-identical.
         let reg = VaultRegistry::default();
-        let session = dir.path().join("session");
-        reg.unlock(&blob_path, &pass("open sesame"), &session).unwrap();
+        let root = sessions_root(dir.path());
+        let session = root.join("session");
+        reg.unlock(&blob_path, &pass("open sesame"), &session, &root).unwrap();
         assert!(reg.is_unlocked(&blob_path));
         assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
         assert_eq!(
@@ -642,13 +757,14 @@ mod tests {
         create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
-        let session1 = dir.path().join("session1");
-        reg.unlock(&blob_path, &pass("pw"), &session1).unwrap();
+        let root = sessions_root(dir.path());
+        let session1 = root.join("session1");
+        reg.unlock(&blob_path, &pass("pw"), &session1, &root).unwrap();
         assert!(session1.join("top.txt").exists(), "first unlock extracts plaintext");
 
         // Re-unlock into a DIFFERENT session dir.
-        let session2 = dir.path().join("session2");
-        reg.unlock(&blob_path, &pass("pw"), &session2).unwrap();
+        let session2 = root.join("session2");
+        reg.unlock(&blob_path, &pass("pw"), &session2, &root).unwrap();
 
         // The registry now points at the new dir, and the OLD session dir has been wiped away entirely —
         // no lingering, unreferenced plaintext.
@@ -675,12 +791,13 @@ mod tests {
         create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
-        let session1 = dir.path().join("session1");
-        reg.unlock(&blob_path, &pass("pw"), &session1).unwrap();
+        let root = sessions_root(dir.path());
+        let session1 = root.join("session1");
+        reg.unlock(&blob_path, &pass("pw"), &session1, &root).unwrap();
 
         // Re-unlock into a new dir with a wiper that always fails on the OLD dir.
-        let session2 = dir.path().join("session2");
-        let result = reg.unlock_with_wiper(&blob_path, &pass("pw"), &session2, |_| {
+        let session2 = root.join("session2");
+        let result = reg.unlock_with_wiper(&blob_path, &pass("pw"), &session2, &root, |_| {
             Err(VaultError::Io(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "cannot remove",
@@ -704,10 +821,302 @@ mod tests {
         create_vault(&src, &blob_path, &pass("right"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
-        let session = dir.path().join("session");
-        let result = reg.unlock(&blob_path, &pass("wrong"), &session);
+        let root = sessions_root(dir.path());
+        let session = root.join("session");
+        let result = reg.unlock(&blob_path, &pass("wrong"), &session, &root);
         assert!(matches!(result, Err(VaultError::BadPassphrase)), "got {result:?}");
         assert!(!reg.is_unlocked(&blob_path), "a failed unlock must not record unlocked state");
+    }
+
+    // ---- CPE-1647: the session dir is contained, so lock can never shred an arbitrary directory ----
+    //
+    // Threat model these tests encode (from the ticket, not from the implementation): a devtools or
+    // automation caller holding a valid `.cpevault` blob AND its passphrase calls
+    // `vault_unlock(blob, pass, <any directory>)` and then `vault_lock(blob)`. Before the guard, unlock
+    // decrypted into that directory and lock securely SHREDDED everything under it. The required
+    // behaviour is that unlock refuses any `session_dir` that does not resolve strictly inside the app's
+    // own `vault-sessions` root — refusing up front, writing nothing, and recording no mapping — while a
+    // legitimate in-root session still unlocks, is browsable, and is still wiped on lock.
+
+    /// Seal a tiny vault under `dir` (passphrase `pw`) and return the blob path. Every refusal test uses
+    /// a REAL, openable vault so the refusal can only come from the containment guard — with a bogus blob
+    /// the call would fail for an unrelated reason and the test would pass even with the guard removed.
+    fn sealed_vault(dir: &Path) -> PathBuf {
+        let src = dir.join("src");
+        sample_folder(&src);
+        let blob_path = dir.join("v.cpevault");
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+        blob_path
+    }
+
+    /// A directory of the user's own irreplaceable files, well outside any app-owned scratch space —
+    /// the thing an uncontained `session_dir` would have gotten shredded.
+    fn precious_dir(path: &Path) {
+        std::fs::create_dir_all(path.join("nested")).unwrap();
+        std::fs::write(path.join("keepsake.txt"), b"the only copy").unwrap();
+        std::fs::write(path.join("nested/photo.raw"), [7u8; 32]).unwrap();
+    }
+
+    /// Every byte of a [`precious_dir`] is still exactly where it was — read back OFF DISK, never
+    /// inferred from a returned `Err`. Also asserts no vault plaintext was extracted into it.
+    fn assert_precious_intact(path: &Path, why: &str) {
+        assert!(path.is_dir(), "{why}: the directory itself must survive");
+        assert_eq!(
+            std::fs::read(path.join("keepsake.txt")).unwrap(),
+            b"the only copy",
+            "{why}: pre-existing file must be byte-identical"
+        );
+        assert_eq!(
+            std::fs::read(path.join("nested/photo.raw")).unwrap(),
+            vec![7u8; 32],
+            "{why}: pre-existing nested file must be byte-identical"
+        );
+        assert!(
+            !path.join("top.txt").exists(),
+            "{why}: no decrypted vault plaintext may be written here"
+        );
+    }
+
+    /// A refusal must be a clean, specific `Format` error in the CPE-1599/1611/1630 house style
+    /// ("refusing to …") — never a panic, never a bare I/O error, never a silent success.
+    fn assert_refused(result: Result<(), VaultError>, what: &str) {
+        match result {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains("refusing to unlock"),
+                "{what}: the refusal must read like the other destructive-path refusals, got: {msg}"
+            ),
+            other => panic!("{what}: must be refused with a clear Format error, got {other:?}"),
+        }
+    }
+
+    /// Create a directory symlink/junction; `false` when the OS refuses (an unprivileged Windows box
+    /// without Developer Mode) so the caller SKIPS loudly rather than passing silently.
+    fn try_symlink_dir(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(target, link).is_ok()
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    /// THE bug (CPE-1647): an arbitrary out-of-root `session_dir` must be refused, and a following
+    /// `lock` must therefore never shred it. Verified by reading the victim's bytes back off disk after
+    /// BOTH calls.
+    #[test]
+    fn unlock_refuses_an_out_of_root_session_dir_and_lock_never_shreds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+
+        // The victim: a normal user directory that has nothing to do with any vault.
+        let documents = dir.path().join("Documents");
+        precious_dir(&documents);
+
+        let reg = VaultRegistry::default();
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &documents, &root),
+            "unlocking into an arbitrary directory",
+        );
+        assert_precious_intact(&documents, "after a refused unlock");
+        assert!(
+            !reg.is_unlocked(&blob_path),
+            "a refused unlock must record no state — there must be nothing for lock to act on"
+        );
+        assert_eq!(reg.session_dir(&blob_path), None);
+
+        // The second half of the attack: lock now, with the REAL wiper. Nothing was mapped, so nothing
+        // is shredded.
+        reg.lock(&blob_path).expect("locking a vault that never unlocked is a no-op success");
+        assert_precious_intact(&documents, "after the follow-up lock");
+    }
+
+    /// `..` traversal out of the root is refused — both when the escaping path already exists on disk
+    /// and when it climbs through components that do NOT exist (the case a naive
+    /// "canonicalize, else trust it" resolver would wave through).
+    #[test]
+    fn unlock_refuses_dot_dot_traversal_out_of_the_session_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outside = dir.path().join("Outside");
+        precious_dir(&outside);
+
+        let reg = VaultRegistry::default();
+
+        // (a) Every component exists: <root>/../Outside
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &root.join("..").join("Outside"), &root),
+            "a `..` escape through existing components",
+        );
+        assert_precious_intact(&outside, "after a refused `..` escape");
+
+        // (b) The climb passes through a component that does not exist yet:
+        //     <root>/<fresh-uuid>/../../Outside
+        let through_missing = root
+            .join("11111111-1111-1111-1111-111111111111")
+            .join("..")
+            .join("..")
+            .join("Outside");
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &through_missing, &root),
+            "a `..` escape through a not-yet-existing component",
+        );
+        assert_precious_intact(&outside, "after a refused `..` escape through a missing component");
+        assert!(!reg.is_unlocked(&blob_path), "neither escape may record unlocked state");
+    }
+
+    /// A symlink/junction INSIDE the root that points outside it is refused — the reason both sides are
+    /// canonicalized rather than string-compared. Covers the link itself and a not-yet-existing child
+    /// underneath it.
+    #[test]
+    fn unlock_refuses_a_session_dir_that_symlinks_out_of_the_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+
+        let outside = dir.path().join("Outside");
+        precious_dir(&outside);
+
+        let link = root.join("looks-like-a-session");
+        if !try_symlink_dir(&outside, &link) {
+            eprintln!(
+                "SKIPPED unlock_refuses_a_session_dir_that_symlinks_out_of_the_root: this OS/account \
+                 cannot create a directory symlink (on Windows this needs Developer Mode or admin). \
+                 The symlink-escape case was NOT verified on this run."
+            );
+            return;
+        }
+
+        let reg = VaultRegistry::default();
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &link, &root),
+            "unlocking into a symlink that leaves the root",
+        );
+        assert_precious_intact(&outside, "after a refused symlinked session dir");
+
+        // And a fresh, not-yet-existing child under that symlinked ancestor is refused too.
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &link.join("child"), &root),
+            "unlocking into a fresh dir under a symlinked ancestor",
+        );
+        assert_precious_intact(&outside, "after a refused child of a symlinked session dir");
+        assert!(!link.join("child").exists(), "nothing may be created through the escaping link");
+        assert!(!reg.is_unlocked(&blob_path));
+    }
+
+    /// Three more fail-closed boundaries: the root ITSELF (wiping it would shred every other live
+    /// session), a sibling whose name merely starts with the root's name (the `Photos`/`Photos2`
+    /// prefix trap), and a root that cannot be created at all.
+    #[test]
+    fn unlock_refuses_the_root_itself_a_prefix_sibling_and_an_unresolvable_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+
+        // A live session belonging to some OTHER unlocked vault, sitting inside the root.
+        let other_live_session = root.join("22222222-2222-2222-2222-222222222222");
+        std::fs::create_dir_all(&other_live_session).unwrap();
+        std::fs::write(other_live_session.join("someone-elses.txt"), b"live plaintext").unwrap();
+
+        let reg = VaultRegistry::default();
+
+        // (a) The root itself.
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &root, &root),
+            "unlocking into the session root itself",
+        );
+        assert_eq!(
+            std::fs::read(other_live_session.join("someone-elses.txt")).unwrap(),
+            b"live plaintext",
+            "another vault's live session must not be endangered"
+        );
+
+        // (b) A sibling directory whose path is a string prefix match but NOT a component match.
+        let prefix_sibling = dir.path().join("vault-sessions-evil");
+        precious_dir(&prefix_sibling);
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &prefix_sibling, &root),
+            "unlocking into a sibling whose name starts with the root's name",
+        );
+        assert_precious_intact(&prefix_sibling, "after a refused prefix-sibling session dir");
+
+        // (c) A root that cannot exist: its parent is a regular file, so it can neither be created nor
+        //     canonicalized. With no root to compare against, the call must fail CLOSED.
+        let a_file = dir.path().join("not-a-directory");
+        std::fs::write(&a_file, b"x").unwrap();
+        let impossible_root = a_file.join("vault-sessions");
+        let victim = dir.path().join("Victim");
+        precious_dir(&victim);
+        assert_refused(
+            reg.unlock(&blob_path, &pass("pw"), &victim, &impossible_root),
+            "unlocking when the session root cannot be resolved",
+        );
+        assert_precious_intact(&victim, "after a refused unlock with an unresolvable root");
+        assert!(!reg.is_unlocked(&blob_path), "no refusal may record unlocked state");
+    }
+
+    /// NEGATIVE CONTROL: the guard must not break the feature. A legitimate session dir — a fresh UUID
+    /// child of a `vault-sessions` root that does not even exist yet, exactly what
+    /// `vaultStore.ts`'s `defaultAllocSessionDir` allocates on a first-ever unlock — still unlocks, is
+    /// browsable, and is still securely wiped by lock. Without this, "refuse everything" would pass.
+    #[test]
+    fn a_legitimate_fresh_session_dir_still_unlocks_and_is_still_wiped_on_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        assert!(!root.exists(), "the fixture must start with no session root at all");
+
+        let session = root.join("33333333-3333-3333-3333-333333333333");
+        let reg = VaultRegistry::default();
+        reg.unlock(&blob_path, &pass("pw"), &session, &root)
+            .expect("a properly allocated session dir must still unlock");
+
+        assert!(reg.is_unlocked(&blob_path));
+        assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
+        assert_eq!(
+            std::fs::read(session.join("sub/inner.bin")).unwrap(),
+            [0u8, 1, 2, 255, 254],
+            "the whole tree must still come back byte-identical"
+        );
+
+        // A file edited/added while unlocked lives in the session dir too — lock still wipes the lot.
+        std::fs::write(session.join("added-while-unlocked.txt"), b"new work").unwrap();
+
+        reg.lock(&blob_path).expect("locking a contained session must still succeed");
+        assert!(!reg.is_unlocked(&blob_path));
+        assert!(!session.exists(), "lock must still securely wipe the session dir");
+        assert!(root.is_dir(), "wiping a session must never remove the session root itself");
+    }
+
+    /// The guard is enforced by the ENGINE, not by the app adapter: the free function every caller goes
+    /// through refuses too, so a future/alternative caller cannot reintroduce the hole by forgetting a
+    /// check at its own boundary. Also pins that the refusal happens BEFORE the blob is even read.
+    #[test]
+    fn unlock_to_session_itself_refuses_an_out_of_root_target_before_reading_the_blob() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = sessions_root(dir.path());
+        let outside = dir.path().join("Outside");
+        precious_dir(&outside);
+
+        // Note the blob does not exist: if the containment check ran AFTER the read, this would fail
+        // with an I/O error instead of the refusal, and the assertion below would catch it.
+        let missing_blob = dir.path().join("nope.cpevault");
+        assert_refused(
+            unlock_to_session(&missing_blob, &pass("pw"), &outside, &root),
+            "the free function's own containment check",
+        );
+        assert_precious_intact(&outside, "after a refused unlock_to_session");
     }
 
     // ---- CPE-1630: engine-side refusal of an unconfirmed shred_original create_vault call ----------
@@ -770,8 +1179,9 @@ mod tests {
         // The verify-before-shred guarantee still holds end to end: the sealed blob is genuinely
         // recoverable (a real unlock round-trips the plaintext back).
         let reg = VaultRegistry::default();
-        let session = dir.path().join("session");
-        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
+        let root = sessions_root(dir.path());
+        let session = root.join("session");
+        reg.unlock(&blob_path, &pass("pw"), &session, &root).unwrap();
         assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
         reg.lock(&blob_path).unwrap();
     }
@@ -832,8 +1242,9 @@ mod tests {
         assert!(is_vault(&blob_path));
 
         let reg = VaultRegistry::default();
-        let session = dir.path().join("session");
-        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
+        let root = sessions_root(dir.path());
+        let session = root.join("session");
+        reg.unlock(&blob_path, &pass("pw"), &session, &root).unwrap();
         assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
         reg.lock(&blob_path).unwrap();
     }
@@ -943,8 +1354,9 @@ mod tests {
         create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
 
         let reg = VaultRegistry::default();
-        let session = dir.path().join("session");
-        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
+        let root = sessions_root(dir.path());
+        let session = root.join("session");
+        reg.unlock(&blob_path, &pass("pw"), &session, &root).unwrap();
         assert!(reg.is_unlocked(&blob_path));
 
         // Inject a failing wipe.

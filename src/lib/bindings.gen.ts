@@ -3336,6 +3336,12 @@ async vaultCreate(folder: string, dest: string, passphrase: string, shredOrigina
  * Unlock the vault at `blob_path` with `passphrase`, decrypting its tree into `session_dir` and recording
  * the unlocked state in the managed registry. Async + `spawn_blocking`: scrypt (~1s) + a full
  * decrypt/extract to disk (CPE-760/761).
+ * 
+ * `session_dir` is untrusted IPC input, so it is NOT taken at face value (CPE-1647): the engine refuses
+ * any path that does not resolve strictly inside this app's own `vault-sessions` root (resolved here via
+ * `vault_sessions_root`, the same dir the startup sweep and the frontend's `defaultAllocSessionDir` use).
+ * Without that check a devtools/automation caller holding a vault + its passphrase could point the unlock
+ * at any directory on the machine and then have `vault_lock` securely shred it.
  */
 async vaultUnlock(blobPath: string, passphrase: string, sessionDir: string) : Promise<Result<null, string>> {
     try {
