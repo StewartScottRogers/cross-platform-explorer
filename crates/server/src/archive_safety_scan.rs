@@ -20,9 +20,79 @@
 //! past that `Err` with nothing to show for it, so a password-protected zip (every entry unreadable)
 //! collapsed to the same `entries_scanned: 0, unreadable: false` shape as a valid, empty archive — which
 //! [`ArchiveSafetyReport`]'s consumer renders as "No zip-bomb risk detected", having examined nothing.
+//!
+//! ## CPE-1602: metadata is no longer trusted blindly
+//!
+//! Every size above (`compressed_size()`/`size()`) comes straight off the ZIP's **central directory** —
+//! a trailer the archive writes about itself. An independent reviewer demonstrated the obvious problem:
+//! build a real bomb (2,000,000 zero bytes, honestly deflated, ~1023x), then hand-patch the
+//! `uncompressed_size` field down to 100 bytes in **both** the local file header and the central
+//! directory. Nothing about decoding the archive requires those two numbers to be true — `zip` only uses
+//! `compressed_size` to know how many input bytes to feed the decompressor, and DEFLATE finds its own
+//! end. The scan used to report a confident, fully-scanned "safe" over a genuine bomb.
+//!
+//! Three designs were on the table (see the ticket): (1) cross-check the local-file-header size fields
+//! against the central directory's and distrust a mismatch — cheap, but the reviewer patched *both*
+//! copies, so they agree with each other while still lying; (2) decompress every entry through a capped
+//! counter — sound, but taxes the common case (a big, honest archive now costs real I/O to open); (3) a
+//! **hybrid** — trust metadata for the ordinary case, verify by decompression only where it looks
+//! implausible. This module implements (3): [`is_suspicious`] flags an entry when
+//!
+//! - its local-file-header sizes disagree with the central directory's (option 1's cross-check — catches
+//!   a naive single-field patch on its own, cheaply, no I/O beyond a 30-byte peek), **or**
+//! - the entry uses a streamed data-descriptor or a ZIP64 size sentinel, so the local header has nothing
+//!   comparable to offer (ambiguous is treated as suspicious, not as a pass), **or**
+//! - its declared sizes are *structurally impossible* for its compression method — DEFLATE cannot
+//!   legitimately produce a compressed stream much larger than the uncompressed data it encodes (a few
+//!   bytes of store overhead per block, never a large multiple), so `compressed_size` dwarfing
+//!   `uncompressed_size` is a lie independent of any ratio math. This is exactly the reviewer's patch:
+//!   ~1,955 real compressed bytes against a claimed 100 uncompressed catches it even though the forger
+//!   patched *both* copies of the metadata into agreement, because the deception isn't in the
+//!   LFH-vs-CD comparison at all — it's in the number itself being physically impossible, **or**
+//! - the declared ratio is already elevated (past [`archive_safety::RatioLimits::suspicion_ratio`], well
+//!   below the danger threshold) — a forger who tunes the number down to *just under* dangerous, rather
+//!   than leaving it obviously safe, still doesn't get a free pass.
+//!
+//! A suspicious entry is verified by [`verify_by_decompression`]: stream its real decompressed bytes
+//! through a bounded counter capped at `compressed_size.max(floor) * max_entry_ratio`, additionally
+//! clamped by a hard per-entry ceiling and a whole-archive byte/time budget so a crafted archive cannot
+//! turn the *scan itself* into the bomb (see the constants below). Reaching the ratio-derived cap without
+//! finishing proves the entry is dangerous without ever reading further; finishing before the cap yields
+//! the entry's *true* size, superseding whatever the archive claimed. If the scan runs out of its own
+//! budget before an entry can be verified, that entry is counted in `unreadable_entries` — the CPE-1591
+//! tri-state — rather than trusted, so a scan that couldn't finish verifying never renders as "safe".
+//!
+//! An ordinary archive (the overwhelming common case) never triggers any of the above — its local header
+//! agrees with its central directory, its ratios are unremarkable — so it never pays for decompression;
+//! only the metadata pass runs, exactly as before this ticket.
+//!
+//! ## Round 2: `compressed_size` can be forged the *other* way too
+//!
+//! The structural check above only catches `compressed_size` dwarfing `uncompressed_size`. A forger can
+//! instead leave `uncompressed_size` truthful and patch `compressed_size` **up** — the reviewer proved it
+//! by taking the same 2,000,000-zero-byte bomb (real compressed data ≈1,954 bytes) and inflating the
+//! declared `compressed_size` to 1,999,999 in both the local header and the central directory. That costs
+//! the forger nothing (no padding needed) and produced `dangerous: false` even *after* decompression
+//! verification, because the verified (real, correctly-measured) uncompressed byte count was still being
+//! divided by the **declared** compressed size — honest numerator, forgeable denominator.
+//!
+//! The fix is decompression-free and exact: [`analyze_archive_safety_with_limits`] first gathers every
+//! entry's on-disk layout (`header_start`/`data_start`, via [`zip::ZipArchive::by_index_raw`], which needs
+//! no password and does no decompression) and derives a **hard physical ceiling** per entry — the byte gap
+//! from where its compressed data starts to wherever the *next* entry's local header begins in actual file
+//! order (or the central directory's start, for whichever entry is physically last). A forger cannot lie
+//! past that ceiling without literally writing that many extra real bytes to disk, which defeats the whole
+//! point of a cheap bomb. `compressed_for_scoring = cd_compressed.min(physical_max)` replaces the raw
+//! declared `compressed_size` everywhere it would otherwise be trusted: in [`is_suspicious`]'s checks, in
+//! [`verify_by_decompression`]'s ratio-derived cap, and in every [`EntrySizes`] pushed into the final
+//! score. An entry whose declared `compressed_size` exceeds its physical ceiling is suspicious on that
+//! fact alone, independent of any ratio math.
 
+use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -31,7 +101,42 @@ use crate::archive_safety::{self, EntrySizes, RatioLimits, RatioReport};
 /// Cap on entries scored per archive — bounds a maliciously (or just enormously) huge central directory
 /// so the scan stays fast; mirrors the entry/file caps in [`crate::folder_similarity_scan`]. Hitting it
 /// sets `truncated`; the score is still computed from whatever entries were collected before the cap.
+/// CPE-1602: this now bounds *attempts* (the loop index), not just successes — otherwise an archive
+/// whose central directory is packed with entries that all fail to open/verify would never trip it.
 const MAX_ENTRIES: usize = 200_000;
+
+/// CPE-1602 verification pass — the floor, ceilings, and deadline that bound
+/// [`verify_by_decompression`]. The scan must never take a crafted archive's word for a suspicious
+/// entry's size, but verifying it must also never let that archive dictate how much work the *scanner*
+/// does — every one of these is a hard ceiling, not a suggestion.
+///
+/// `ENTRY_VERIFY_FLOOR` keeps the ratio-derived per-entry cap meaningful for a tiny `compressed_size`
+/// (a 10-byte compressed entry claiming a 1KB expansion shouldn't be verified against a cap of 1,000
+/// bytes — that's barely enough to prove anything). `ENTRY_VERIFY_ABS_CAP` is the hard per-entry ceiling
+/// regardless of declared sizes, so a single entry can never cost more than this to verify even if its
+/// own `compressed_size` is itself huge. `TOTAL_VERIFY_BUDGET` bounds the *sum* across every suspicious
+/// entry in one scan, so many small suspicious entries can't add up to unbounded work. `VERIFY_DEADLINE`
+/// is a wall-clock backstop checked during verification, independent of the byte caps, in case I/O is
+/// unexpectedly slow (e.g. a network share).
+const ENTRY_VERIFY_FLOOR: u64 = 4096;
+const ENTRY_VERIFY_ABS_CAP: u64 = 256 * 1024 * 1024;
+const TOTAL_VERIFY_BUDGET: u64 = 512 * 1024 * 1024;
+const VERIFY_DEADLINE: Duration = Duration::from_secs(5);
+const VERIFY_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Fixed byte layout of a ZIP local file header (PKZIP APPNOTE §4.3.7) — read directly off disk,
+/// bypassing the `zip` crate's public API (which only ever surfaces sizes derived from the *central
+/// directory*, never the local header's own copy of them — see [`peek_local_header`]).
+const LOCAL_HEADER_LEN: usize = 30;
+const LOCAL_HEADER_SIGNATURE: [u8; 4] = [0x50, 0x4b, 0x03, 0x04];
+/// General-purpose bit flag 3 ("data descriptor follows"): when set, the local header's size/CRC fields
+/// are legitimately zero placeholders — the real values live in a trailing descriptor written *after*
+/// the entry's compressed data. Not comparable against the central directory at all.
+const GPBF_DATA_DESCRIPTOR: u16 = 0x0008;
+/// The 32-bit ZIP64 sentinel: a size field pinned to this exact value means "see the ZIP64 extra field
+/// instead". This module doesn't parse ZIP64 extra fields, so it treats the sentinel like the streamed
+/// case above — ambiguous, not comparable, always suspicious.
+const ZIP64_SENTINEL: u32 = 0xFFFF_FFFF;
 
 /// The result of scanning a real archive for zip-bomb risk: the pure ratio scoring plus scan bookkeeping
 /// (how many entries were actually considered, and whether [`MAX_ENTRIES`] truncated the scan).
@@ -83,12 +188,52 @@ pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> 
     let Ok(mut zip) = zip::ZipArchive::new(file) else {
         return empty_report(limits, true);
     };
+    // CPE-1602: a second, independent handle used only to peek raw local-file-header bytes. The `zip`
+    // crate's public API only ever surfaces central-directory-derived sizes; peeking the local header
+    // ourselves needs its own seek position so it never fights `zip`'s internal reader for a `&mut`
+    // borrow while an entry is open. Opening it is best-effort — if it fails (rare: an I/O race), every
+    // entry just falls back to the "couldn't peek the header" branch of `is_suspicious`, which treats
+    // that conservatively (verify rather than trust).
+    let mut header_peek = fs::File::open(path).ok();
+
+    // CPE-1602 (round 2): gather every entry's on-disk layout before scoring anything, so a hard
+    // physical ceiling on `compressed_size` can be computed from real byte gaps in the file — see the
+    // module doc comment. `by_index_raw` needs no password and does no decompression, so this pass is
+    // cheap and works even for encrypted entries. Best-effort: an entry whose layout can't be read here
+    // simply gets no physical bound (falls back to trusting its declared size); the main pass below
+    // independently re-opens the same entry via `by_index` and will land it in `unreadable_entries` if
+    // that also fails, so this is not a gap.
+    struct EntryLayout {
+        index: usize,
+        header_start: u64,
+        data_start: u64,
+    }
+    let mut layouts: Vec<EntryLayout> = Vec::new();
+    for i in 0..zip.len().min(MAX_ENTRIES) {
+        if let Ok(raw) = zip.by_index_raw(i) {
+            layouts.push(EntryLayout { index: i, header_start: raw.header_start(), data_start: raw.data_start() });
+        }
+    }
+    // Sort into real on-disk order — the central directory can list entries in any order, but the
+    // physical ceiling for one entry depends on whichever entry actually comes next *in the file*.
+    layouts.sort_by_key(|e| e.data_start);
+    let central_directory_start = zip.central_directory_start();
+    let mut physical_max: HashMap<usize, u64> = HashMap::with_capacity(layouts.len());
+    for (pos, layout) in layouts.iter().enumerate() {
+        let boundary = layouts.get(pos + 1).map_or(central_directory_start, |next| next.header_start);
+        physical_max.insert(layout.index, boundary.saturating_sub(layout.data_start));
+    }
 
     let mut entries: Vec<EntrySizes> = Vec::new();
     let mut truncated = false;
     let mut unreadable_entries: u64 = 0;
+    // Bounds on the verification pass — shared across every suspicious entry in this scan so many small
+    // suspicious entries can't add up to unbounded decompression work (see the constants' doc comment).
+    let mut verify_budget_remaining = TOTAL_VERIFY_BUDGET;
+    let verify_deadline = Instant::now() + VERIFY_DEADLINE;
+
     for i in 0..zip.len() {
-        if entries.len() >= MAX_ENTRIES {
+        if i >= MAX_ENTRIES {
             truncated = true;
             break;
         }
@@ -97,20 +242,205 @@ pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> 
         // the whole scan, mirroring `list_dir`'s skip-on-error discipline. Unlike the pre-fix code, the
         // skip is *counted* rather than silently dropped, so the caller can tell "scanned and clean" from
         // "couldn't check this entry" instead of both collapsing into the same all-zeros report.
-        let Ok(entry) = zip.by_index(i) else {
+        let Ok(mut entry) = zip.by_index(i) else {
             unreadable_entries += 1;
             continue;
         };
-        entries.push(EntrySizes {
-            name: entry.name().to_string(),
-            compressed: entry.compressed_size(),
-            uncompressed: entry.size(),
-        });
+        if entry.is_dir() {
+            continue; // no data to score, and nothing to verify
+        }
+
+        let cd_compressed = entry.compressed_size();
+        let cd_uncompressed = entry.size();
+        // CPE-1602 (round 2): clamp the declared compressed size to the physical ceiling computed above
+        // — a forger inflating `compressed_size` to make the ratio look small no longer gets a free pass
+        // just because they left `uncompressed_size` honest. This is what every downstream use of
+        // "the compressed size" reads from now on, never the raw declared value.
+        let compressed_for_scoring = physical_max.get(&i).map_or(cd_compressed, |&max| cd_compressed.min(max));
+
+        // CPE-1602: don't take the central directory's word for it — cross-check it, and verify by
+        // decompression when it looks implausible. See the module doc comment for the full rationale.
+        let peek = header_peek.as_mut().and_then(|f| peek_local_header(f, entry.header_start()));
+        let suspicious = is_suspicious(
+            cd_compressed,
+            compressed_for_scoring,
+            cd_uncompressed,
+            entry.compression(),
+            peek.as_ref(),
+            limits.suspicion_ratio,
+        );
+
+        if !suspicious {
+            entries.push(EntrySizes { name: entry.name().to_string(), compressed: compressed_for_scoring, uncompressed: cd_uncompressed });
+            continue;
+        }
+
+        if verify_budget_remaining == 0 || Instant::now() >= verify_deadline {
+            // Out of our own budget — honestly "couldn't check this one", never silently "safe".
+            unreadable_entries += 1;
+            continue;
+        }
+        let name = entry.name().to_string();
+        match verify_by_decompression(&mut entry, compressed_for_scoring, limits, verify_budget_remaining, verify_deadline) {
+            VerifyOutcome::Counted { bytes_read, real } => {
+                verify_budget_remaining = verify_budget_remaining.saturating_sub(bytes_read);
+                // The real, measured size supersedes whatever the archive declared; the physically-capped
+                // compressed size supersedes it too, on the other side of the ratio.
+                entries.push(EntrySizes { name, compressed: compressed_for_scoring, uncompressed: real });
+            }
+            VerifyOutcome::DefinitelyDangerous { bytes_read, synthetic_uncompressed } => {
+                verify_budget_remaining = verify_budget_remaining.saturating_sub(bytes_read);
+                // Proven dangerous without reading further — feed a size that scores as such, saturating
+                // toward "more dangerous" per the same discipline `expansion_ratio` already uses.
+                entries.push(EntrySizes { name, compressed: compressed_for_scoring, uncompressed: synthetic_uncompressed });
+            }
+            VerifyOutcome::Inconclusive { bytes_read } => {
+                verify_budget_remaining = verify_budget_remaining.saturating_sub(bytes_read);
+                unreadable_entries += 1; // ran out of budget mid-entry — not "safe", "couldn't check"
+            }
+            VerifyOutcome::ReadError => {
+                unreadable_entries += 1; // the entry failed to decompress at all
+            }
+        }
     }
 
     let entries_scanned = entries.len() as u64;
     let report = archive_safety::expansion_ratio(&entries, limits);
     ArchiveSafetyReport { report, entries_scanned, truncated, unreadable: false, unreadable_entries }
+}
+
+/// The local-file-header size fields [`peek_local_header`] reads directly off disk.
+struct LocalHeaderPeek {
+    flags: u16,
+    compressed_size: u32,
+    uncompressed_size: u32,
+}
+
+/// Read the raw local-file-header size fields at `header_start` (the offset [`zip::read::ZipFile::header_start`]
+/// already reports). `None` on any I/O error or signature mismatch — shouldn't happen for an entry the
+/// `zip` crate just validated, but a scan must never panic on a hostile file, and a failed peek is
+/// itself treated as a reason for suspicion by [`is_suspicious`] rather than an error worth propagating.
+fn peek_local_header(file: &mut fs::File, header_start: u64) -> Option<LocalHeaderPeek> {
+    file.seek(SeekFrom::Start(header_start)).ok()?;
+    let mut buf = [0u8; LOCAL_HEADER_LEN];
+    file.read_exact(&mut buf).ok()?;
+    if buf[0..4] != LOCAL_HEADER_SIGNATURE {
+        return None;
+    }
+    Some(LocalHeaderPeek {
+        flags: u16::from_le_bytes([buf[6], buf[7]]),
+        compressed_size: u32::from_le_bytes([buf[18], buf[19], buf[20], buf[21]]),
+        uncompressed_size: u32::from_le_bytes([buf[22], buf[23], buf[24], buf[25]]),
+    })
+}
+
+/// Whether a central-directory-declared entry deserves verification instead of being trusted outright.
+/// `cd_compressed` is the raw declared value (used only to test self-consistency against the local
+/// header — a forger who patches both copies identically leaves nothing to disagree with there);
+/// `compressed_for_scoring` is that same value clamped to the entry's physical on-disk ceiling (CPE-1602
+/// round 2), used everywhere the *true* usable compressed size matters. See the module doc comment for
+/// the full rationale behind each branch.
+fn is_suspicious(
+    cd_compressed: u64,
+    compressed_for_scoring: u64,
+    cd_uncompressed: u64,
+    method: zip::CompressionMethod,
+    peek: Option<&LocalHeaderPeek>,
+    suspicion_ratio: f64,
+) -> bool {
+    match peek {
+        None => return true, // couldn't read the local header at all — don't take the CD's word alone
+        Some(p) => {
+            let ambiguous = p.flags & GPBF_DATA_DESCRIPTOR != 0
+                || p.compressed_size == ZIP64_SENTINEL
+                || p.uncompressed_size == ZIP64_SENTINEL;
+            if ambiguous {
+                return true;
+            }
+            if u64::from(p.compressed_size) != cd_compressed || u64::from(p.uncompressed_size) != cd_uncompressed {
+                return true; // local header and central directory disagree — a naive single-field forgery
+            }
+        }
+    }
+    // CPE-1602 round 2: a declared `compressed_size` that exceeds what's physically possible given real
+    // on-disk entry boundaries is itself direct proof the metadata lies — independent of any ratio math,
+    // and independent of whether the local header agrees with the central directory (a forger can patch
+    // both consistently, as the reviewer demonstrated with the inflated-`compressed_size` variant).
+    if cd_compressed > compressed_for_scoring {
+        return true;
+    }
+    if method != zip::CompressionMethod::Stored {
+        // DEFLATE (and friends) cannot legitimately shrink the declared uncompressed size to well below
+        // the compressed size it supposedly encodes — the worst-case store overhead is a handful of
+        // bytes per ~32KiB block, never a large multiple. A compressed size that dwarfs the declared
+        // uncompressed size is a structural impossibility, independent of any ratio threshold — exactly
+        // the reviewer's original patch (~1,955 real compressed bytes against a claimed 100 uncompressed),
+        // which stays internally *consistent* between the local header and central directory and so
+        // evades the cross-check above on its own. Uses the physically-clamped size, never the raw
+        // declared one, so an inflated declaration can't dodge this check either.
+        let slack = 64 + cd_uncompressed / 2_000;
+        if compressed_for_scoring > cd_uncompressed.saturating_add(slack) {
+            return true;
+        }
+    }
+    archive_safety::ratio(cd_uncompressed, compressed_for_scoring) >= suspicion_ratio
+}
+
+/// The outcome of [`verify_by_decompression`] — never a bare number, so every caller has to decide what
+/// each shape means rather than accidentally treating "couldn't finish" as "must be fine".
+enum VerifyOutcome {
+    /// Decompression reached EOF before any cap — `real` is the entry's true, measured uncompressed size.
+    Counted { bytes_read: u64, real: u64 },
+    /// The ratio-derived cap was reached without EOF, which alone proves the real ratio is at or beyond
+    /// `limits.max_entry_ratio` — dangerous, without needing to read any further.
+    DefinitelyDangerous { bytes_read: u64, synthetic_uncompressed: u64 },
+    /// The scanner's own resource ceiling (the hard per-entry cap, the whole-scan budget, or the
+    /// deadline) was reached first — genuinely unknown, must not be reported as either safe or dangerous.
+    Inconclusive { bytes_read: u64 },
+    /// The entry failed to decompress at all (corrupt stream, unsupported method actually used, etc.).
+    ReadError,
+}
+
+/// Stream `entry`'s real decompressed bytes through a bounded counter, capped at
+/// `compressed_for_scoring.max(ENTRY_VERIFY_FLOOR) * limits.max_entry_ratio` — the caller passes the
+/// *physically-clamped* compressed size (CPE-1602 round 2), never the raw declared one, so an inflated
+/// `compressed_size` can't blow this cap open — and additionally clamped by the hard per-entry ceiling,
+/// the remaining whole-scan budget, and the wall-clock deadline — whichever is smallest wins, and which
+/// one wins determines how the result is interpreted (see [`VerifyOutcome`]).
+fn verify_by_decompression(
+    entry: &mut zip::read::ZipFile<'_>,
+    compressed_for_scoring: u64,
+    limits: &RatioLimits,
+    budget_remaining: u64,
+    deadline: Instant,
+) -> VerifyOutcome {
+    let ratio_cap = (compressed_for_scoring.max(ENTRY_VERIFY_FLOOR) as f64 * limits.max_entry_ratio) as u64;
+    let entry_cap = ratio_cap.min(ENTRY_VERIFY_ABS_CAP).min(budget_remaining);
+    // Only when the ratio-derived cap is the smallest (binding) bound does hitting it *prove* danger —
+    // otherwise hitting the entry_cap just means our own ceiling was reached first, which says nothing
+    // about the entry's true ratio either way.
+    let ratio_cap_is_binding = ratio_cap <= ENTRY_VERIFY_ABS_CAP && ratio_cap <= budget_remaining;
+
+    let mut buf = [0u8; VERIFY_CHUNK_SIZE];
+    let mut read_total: u64 = 0;
+    loop {
+        if read_total >= entry_cap {
+            return if ratio_cap_is_binding {
+                VerifyOutcome::DefinitelyDangerous { bytes_read: read_total, synthetic_uncompressed: read_total.saturating_add(1) }
+            } else {
+                VerifyOutcome::Inconclusive { bytes_read: read_total }
+            };
+        }
+        if Instant::now() >= deadline {
+            return VerifyOutcome::Inconclusive { bytes_read: read_total };
+        }
+        let want = (entry_cap - read_total).min(VERIFY_CHUNK_SIZE as u64) as usize;
+        match entry.read(&mut buf[..want]) {
+            Ok(0) => return VerifyOutcome::Counted { bytes_read: read_total, real: read_total },
+            Ok(n) => read_total += n as u64,
+            Err(_) => return VerifyOutcome::ReadError,
+        }
+    }
 }
 
 /// The graceful empty result for an archive that couldn't be opened at all. `unreadable` distinguishes
@@ -303,6 +633,200 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// Returns `(header_start, central_header_start)` for the entry named `name` — the two absolute file
+    /// offsets CPE-1602's adversarial tests patch into, found via the same `zip` crate the scanner itself
+    /// uses (so the offsets are exactly where the real reader looks).
+    fn entry_offsets(path: &Path, name: &str) -> (u64, u64) {
+        let file = fs::File::open(path).unwrap();
+        let mut zip = zip::ZipArchive::new(file).unwrap();
+        let entry = zip.by_name(name).unwrap();
+        (entry.header_start(), entry.central_header_start())
+    }
+
+    /// Overwrites a 4-byte little-endian `u32` field at absolute offset `at` with `value` — used to
+    /// hand-patch a local-file-header or central-directory `uncompressed_size` field, exactly like the
+    /// independent reviewer's reproduction. `at` is the *header's* start plus the field's fixed offset
+    /// within it: `+22` for a local-file-header's `uncompressed_size`, `+24` for a central-directory
+    /// header's (see the module's `LOCAL_HEADER_LEN`-adjacent doc comment for the full byte layout).
+    fn patch_u32_le(path: &Path, at: u64, value: u32) {
+        let mut file = fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.seek(SeekFrom::Start(at)).unwrap();
+        file.write_all(&value.to_le_bytes()).unwrap();
+    }
+
+    /// CPE-1602: the independent reviewer's exact reproduction. A real bomb (2,000,000 zero bytes,
+    /// honestly deflated, ~1023x expansion) with `uncompressed_size` hand-patched down to 100 bytes in
+    /// **both** the local file header and the central directory. Before this fix the scan trusted those
+    /// declared sizes outright and reported `overall_ratio ≈ 0.05, dangerous: false` — a confident,
+    /// fully-scanned "safe" verdict over a genuine bomb. Patching both copies keeps them internally
+    /// consistent with each other, so the cheap local-header-vs-central-directory cross-check alone
+    /// (option 1 from the ticket) would NOT catch this on its own — it's caught instead because a
+    /// compressed size that dwarfs a claimed uncompressed size is a structural impossibility for DEFLATE,
+    /// independent of whether the two copies of the metadata agree with each other.
+    #[test]
+    fn the_reviewers_hand_patched_bomb_is_no_longer_reported_safe() {
+        let d = scratch("patched-bomb");
+        let zip_path = d.join("bomb.zip");
+        let bomb = vec![0u8; 2_000_000];
+        write_zip(&zip_path, &[("bomb.bin", &bomb)]);
+
+        let (header_start, central_header_start) = entry_offsets(&zip_path, "bomb.bin");
+        patch_u32_le(&zip_path, header_start + 22, 100);
+        patch_u32_le(&zip_path, central_header_start + 24, 100);
+
+        // Sanity check the patch actually took: both the local header and the central directory must
+        // now read back the lie, so a purely metadata-trusting scan would have scored `100 / ~1955 ≈
+        // 0.05` — comfortably "safe" by the reviewer's own numbers.
+        let peeked = {
+            let file = fs::File::open(&zip_path).unwrap();
+            let mut zip = zip::ZipArchive::new(file).unwrap();
+            let size = zip.by_index(0).unwrap().size();
+            size
+        };
+        assert_eq!(peeked, 100, "the central-directory size must read back as the patched value");
+
+        let result = analyze_archive_safety(&zip_path);
+        assert!(
+            result.report.dangerous,
+            "a real bomb with both declared sizes patched down must still be caught: {:?}",
+            result.report
+        );
+        assert!(!result.unreadable, "the archive opens fine — only its declared metadata lies");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1602: a naive forger who patches only ONE copy of the size metadata (here, just the central
+    /// directory — the local file header still truthfully says ~2,000,000) is caught by the cheap
+    /// local-header-vs-central-directory cross-check alone, with no decompression needed at all.
+    #[test]
+    fn a_local_header_central_directory_mismatch_is_never_reported_safe() {
+        let d = scratch("mismatch");
+        let zip_path = d.join("bomb.zip");
+        let bomb = vec![0u8; 2_000_000];
+        write_zip(&zip_path, &[("bomb.bin", &bomb)]);
+
+        let (_header_start, central_header_start) = entry_offsets(&zip_path, "bomb.bin");
+        patch_u32_le(&zip_path, central_header_start + 24, 100);
+
+        let result = analyze_archive_safety(&zip_path);
+        assert!(result.report.dangerous, "a single-field mismatch must still be caught: {:?}", result.report);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1602 round 2: the code-review finding that reopened the hole. The original fix's structural
+    /// check only catches `compressed_size` dwarfing `uncompressed_size` — a forger can instead leave
+    /// `uncompressed_size` truthful and patch `compressed_size` **up**, in both the local header and the
+    /// central directory, so the two copies still agree with each other. This costs the forger nothing
+    /// (no real bytes need padding), and defeats a naive fix even after decompression verification: the
+    /// verified (honestly measured) uncompressed byte count would still be divided by the inflated,
+    /// never-revalidated declared `compressed_size`. The fix is the physical-ceiling clamp: no forger can
+    /// declare a `compressed_size` larger than the real on-disk gap to the next entry's header (or the
+    /// central directory, for the last entry) without literally writing that many extra bytes.
+    #[test]
+    fn the_reviewers_inflated_compressed_size_bomb_is_no_longer_reported_safe() {
+        let d = scratch("inflated-compressed");
+        let zip_path = d.join("bomb.zip");
+        let bomb = vec![0u8; 2_000_000];
+        write_zip(&zip_path, &[("bomb.bin", &bomb)]);
+
+        let (header_start, central_header_start) = entry_offsets(&zip_path, "bomb.bin");
+        // Patch ONLY compressed_size, upward, in both copies — uncompressed_size (the truth: 2,000,000)
+        // is left untouched in both, so the two copies of compressed_size still agree with each other,
+        // and the two copies of uncompressed_size still agree with each other and with reality.
+        patch_u32_le(&zip_path, header_start + 18, 1_999_999);
+        patch_u32_le(&zip_path, central_header_start + 20, 1_999_999);
+
+        // Sanity check: the naive metadata-only ratio (2,000,000 / 1,999,999) would have scored ~1.0 —
+        // comfortably "safe" — had the physical ceiling not clamped the declared compressed size back
+        // down to what the file can actually hold at that offset.
+        let (peeked_uncompressed, peeked_compressed) = {
+            let file = fs::File::open(&zip_path).unwrap();
+            let mut zip = zip::ZipArchive::new(file).unwrap();
+            let entry = zip.by_index(0).unwrap();
+            (entry.size(), entry.compressed_size())
+        };
+        assert_eq!(peeked_uncompressed, 2_000_000);
+        assert_eq!(peeked_compressed, 1_999_999);
+
+        let result = analyze_archive_safety(&zip_path);
+        assert!(
+            result.report.dangerous,
+            "a bomb with compressed_size inflated (not uncompressed_size deflated) must still be caught: {:?}",
+            result.report
+        );
+        assert!(!result.unreadable);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1602 round 2 false-positive guard: the physical-ceiling clamp derives each entry's bound from
+    /// the real byte gap to whatever comes next in the file, so a multi-entry archive with varied
+    /// compression methods, sizes, and file-name lengths (all of which shift where each entry's data
+    /// actually starts/ends) must still score every entry as safe — clamping to a physical ceiling that
+    /// happens to be generous (an honest archive's declared size never exceeds it) must never manufacture
+    /// a false "dangerous".
+    #[test]
+    fn physical_ceiling_clamp_does_not_false_positive_on_a_varied_multi_entry_archive() {
+        let d = scratch("varied");
+        let zip_path = d.join("varied.zip");
+        let pseudo_random: Vec<u8> = (0..5_000_000u32).map(|i| (i.wrapping_mul(2654435761) >> 16) as u8).collect();
+        let file = fs::File::create(&zip_path).unwrap();
+        let mut w = zip::ZipWriter::new(file);
+        let stored: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let deflated: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        w.start_file("empty.txt", stored).unwrap();
+        w.start_file("a-name-that-is-considerably-longer-than-the-others-on-purpose.bin", stored).unwrap();
+        w.write_all(b"short stored payload").unwrap();
+        w.start_file("log.txt", deflated).unwrap();
+        w.write_all(&b"repeated log line, very compressible text content\n".repeat(200)).unwrap();
+        w.start_file("already-compressed.bin", deflated).unwrap();
+        w.write_all(&pseudo_random).unwrap();
+        w.finish().unwrap();
+
+        let result = analyze_archive_safety(&zip_path);
+        assert_eq!(result.entries_scanned, 4, "every entry should be scored, not skipped");
+        assert!(!result.report.dangerous, "an ordinary varied archive must not be flagged: {:?}", result.report);
+        assert!(result.report.flagged.is_empty(), "no individual entry should be flagged: {:?}", result.report.flagged);
+        assert_eq!(result.unreadable_entries, 0);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1602 DoS-bound proof. Not part of the default suite (a ~512MB fixture isn't worth building on
+    /// every CI run) — run explicitly via `cargo test -p cpe-server -- --ignored --nocapture
+    /// a_decompression_bomb_against_the_scanner_itself_is_bounded`. Proves the verification pass's own
+    /// cap holds: an entry whose true decompressed size (512MB) vastly exceeds every cap must still be
+    /// caught, and caught within a small fraction of the time a naive "fully decompress to verify" scan
+    /// would take, because the scanner stops at the ratio-derived cap rather than reading to EOF.
+    #[test]
+    #[ignore]
+    fn a_decompression_bomb_against_the_scanner_itself_is_bounded() {
+        let d = scratch("scanner-bomb");
+        let zip_path = d.join("huge.zip");
+        let huge = vec![0u8; 512_000_000]; // 512MB of zeros — deflates to well under 1MB
+        write_zip(&zip_path, &[("huge.bin", &huge)]);
+        drop(huge);
+
+        let (header_start, central_header_start) = entry_offsets(&zip_path, "huge.bin");
+        // Patch the declared size down so metadata alone would look safe, forcing the scan to do real
+        // verification work — the scenario this test proves a bound on.
+        patch_u32_le(&zip_path, header_start + 22, 1024);
+        patch_u32_le(&zip_path, central_header_start + 24, 1024);
+
+        let started = Instant::now();
+        let result = analyze_archive_safety(&zip_path);
+        let elapsed = started.elapsed();
+        eprintln!("scanner-bomb: verified in {:?}, report = {:?}", elapsed, result.report);
+
+        assert!(result.report.dangerous, "the patched huge entry must still be caught: {:?}", result.report);
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "verification must be bounded by the cap, not by the entry's true 512MB size: took {:?}",
+            elapsed
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn explicit_limits_are_honoured() {
         let d = scratch("limits");
@@ -315,7 +839,7 @@ mod tests {
         let default_result = analyze_archive_safety(&zip_path);
         assert!(!default_result.report.dangerous, "ratio 1.0 is well under the generous default limits");
 
-        let strict = RatioLimits::new(0.5, 0.5);
+        let strict = RatioLimits::new(0.5, 0.5, archive_safety::DEFAULT_SUSPICION_RATIO);
         let strict_result = analyze_archive_safety_with_limits(&zip_path, &strict);
         assert!(strict_result.report.dangerous, "a 0.5x limit should flag a ratio of exactly 1.0");
         let _ = fs::remove_dir_all(&d);
