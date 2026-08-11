@@ -999,7 +999,22 @@ export const config: WebdriverIO.Config = {
   // — not a fix for a hard sandbox/GPU crash on its own, just headroom so a slow-but-successful
   // session isn't misread as a failure.
   connectionRetryTimeout: 180_000,
-  reporters: ["spec"],
+  // CPE-1594: "spec" stays for a human-readable log; the "json" reporter writes one machine-readable
+  // result file per spec-file worker into `.results/` (gitignored — run output, same treatment as
+  // `.screenshots/`) — `scripts/run-ratchet.ts` reads those files as the ratchet's source of truth
+  // instead of parsing the "spec" reporter's text, which is not a contract. `outputFileFormat` names
+  // each file after its worker `cid` so `maxInstances: 1`'s sequential-but-still-one-worker-per-spec
+  // runs never clobber each other's output.
+  reporters: [
+    "spec",
+    [
+      "json",
+      {
+        outputDir: "./.results",
+        outputFileFormat: (opts: { cid: string }) => `wdio-${opts.cid}.json`,
+      },
+    ],
+  ],
   mochaOpts: {
     ui: "bdd",
     // CPE-1481: already generous (90s per `it`, well under the 35-min job cap raised by this same

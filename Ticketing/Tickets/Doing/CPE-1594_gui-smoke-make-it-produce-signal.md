@@ -192,3 +192,33 @@ ticket. The actual non-blocking decision is **CPE-1048** (Option E). Worth fixin
 it appears so the next crew reads the right rationale.
 
 QA-Architect owned. Epic CPE-810.
+
+## Work Log
+
+2026-08-10 — Implemented all three changes (screenshot upload artifact on both legs, `known-failing.json` +
+`gui-smoke/lib/ratchet.ts` + `scripts/run-ratchet.ts` gating the Linux leg, Windows leg moved off push/PR onto
+`workflow_dispatch`/nightly `schedule`). Filed CPE-1595 for the known-failing triage follow-up.
+2026-08-10 — Foreman-relayed triage on `network.smoke.ts` (one of the original 7): confirmed a stale test
+selector, not a CPE-1516 product regression — `$("=Network")` maps to WebDriver's "link text" strategy (`<a>`
+only), but `Sidebar.svelte:862` renders the header as a plain `<span class="label fav-title">`. Fixed the
+selector in this PR (matches `saved-search.smoke.ts`'s `$$(".fav-title")` + text-filter convention).
+2026-08-10 — Reviewer flagged the `network.smoke.ts` fix as unverified against a live Linux run before it could
+be trusted to leave `known-failing.json`; pushed a hedge commit keeping it listed (7 entries) until confirmed.
+Correct call — see next entry.
+2026-08-10 — PR #801's own first live `gui-smoke-linux` CI run (31446269217, job 93641134303) came back RED, but
+for two reasons, not one:
+  1. **Confirms the hedge was right**: `Spec Files: 33 passed, 7 failed, 40 total (100% completed) in 00:28:04`
+     — exactly the 7-entry baseline. `network.smoke.ts`'s corrected selector still times out live
+     (`expected the permanent Network section header to render`) — the same class of `.fav-title getText()`
+     issue `saved-search.smoke.ts` is already known-failing for. Filed the working theory (shared root cause)
+     in CPE-1595 and left the entry listed with an updated reason.
+  2. **Two real workflow bugs, found via the raw job log** (`gh api .../jobs/93641134303/logs`): (a) the
+     screenshot upload matched **zero files** — `##[error]No files were found with the provided path:
+     gui-smoke/.screenshots/**` — root-caused to `actions/upload-artifact@v4`'s documented default of excluding
+     any path under a dot-prefixed folder ("hidden files"), confirmed via the action's own docs; needs
+     `include-hidden-files: true`. (b) that upload step's `if-no-files-found: error` **aborted the job before
+     the Ratchet step ever ran** — no ratchet output anywhere in the log — because GitHub Actions steps default
+     to running only if every prior step succeeded. Fixed both: added `include-hidden-files: true` to both
+     legs' upload steps, downgraded Linux's `if-no-files-found` to `warn`, and reordered the Linux leg so
+     `Ratchet` runs immediately after the suite (which always "succeeds" via `|| true`) and the screenshot
+     upload runs last — so the gate can never again be silently skipped by an unrelated step's failure.
