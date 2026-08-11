@@ -336,6 +336,35 @@ async readPreviewInfo(path: string) : Promise<Result<string, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Structured PE/ELF/Mach-O summary (format, arch, sections/imports/exports/symbols, x86/x64 disasm)
+ * for the Binary Inspector (CPE-1572 DTO + CPE-1581 disasm, epic CPE-1562 "Binary Inspector"). Model
+ * lives in `cpe_server::binary_preview::binary_info`; this is a thin `spawn_blocking` dispatcher.
+ */
+async binaryInfo(path: string) : Promise<Result<BinaryInfo, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("binary_info", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * x86/x64 disassembly of a PE/ELF/Mach-O binary's code section (CPE-1581, epic CPE-1562 "Binary
+ * Inspector" slice 2) — the same list embedded in [`binary_info`]'s `disasm` field, exposed on its
+ * own so the Binary Inspector's disassembly tab can fetch it without also paying for the
+ * sections/imports/exports/symbols tables. `cpe_server::binary_preview` has no separate path-based
+ * disasm entry point (its `disassemble` fn decodes already-located code bytes, not a path), so this
+ * thin `spawn_blocking` dispatcher reuses `binary_info`'s parse and returns just its `disasm` list.
+ */
+async binaryDisasm(path: string) : Promise<Result<BinaryInstruction[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("binary_disasm", { path }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async dataBrowserSources(path: string) : Promise<Result<string[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("data_browser_sources", { path }) };
@@ -3523,6 +3552,84 @@ non_destructive: boolean }
  * short human reason each). Skipped items are never fatal to the batch.
  */
 export type BatchReport = { written: number; skipped: ([string, string])[] }
+/**
+ * One exported symbol.
+ */
+export type BinaryExport = { name: string; 
+/**
+ * Virtual address of the export, when known.
+ */
+address: number | null }
+/**
+ * Recognized executable/object container formats a [`BinaryInfo`] can describe (CPE-1572, epic
+ * CPE-1562 "Binary Inspector" slice 1).
+ */
+export type BinaryFormat = "Pe" | "Elf" | "MachO"
+/**
+ * One imported symbol.
+ */
+export type BinaryImport = { name: string; 
+/**
+ * Owning library/DLL/dylib, when the format ties an individual import to one (PE, Mach-O).
+ * `None` for ELF — its dynamic-symbol table doesn't record a per-symbol source library.
+ */
+library: string | null }
+/**
+ * Structured summary of a PE/ELF/Mach-O binary (CPE-1572, epic CPE-1562 "Binary Inspector" slice
+ * 1): format + architecture, plus bounded Sections/Imports/Exports/Symbols tables. Populated by
+ * [`crate::binary_preview::binary_info`] via goblin, with parity across all three formats. Each
+ * list is capped at [`MAX_BINARY_LIST_ENTRIES`] and built skip-on-error per entry, so a
+ * truncated/adversarial file degrades to a partial (or empty) `BinaryInfo` rather than failing the
+ * whole parse.
+ */
+export type BinaryInfo = { format: BinaryFormat; 
+/**
+ * Human-readable CPU architecture label(s) from [`crate::bin_arch::detect_arch`] (e.g.
+ * "x86-64", "ARM64"; a Mach-O fat/universal binary joins each slice's label with ", "). `None`
+ * when the leading bytes didn't decode to a recognized architecture.
+ */
+arch: string | null; is_64: boolean; sections: BinarySection[]; imports: BinaryImport[]; exports: BinaryExport[]; symbols: BinarySymbol[]; 
+/**
+ * x86/x64 disassembly of the format's code section (CPE-1581), capped at
+ * [`MAX_DISASM_INSTRUCTIONS`]. Empty (never an error) for a non-x86/x64 architecture, a format
+ * with no locatable code section, or a code section iced-x86 can't decode from.
+ */
+disasm: BinaryInstruction[] }
+/**
+ * One decoded machine-code instruction (CPE-1581, epic CPE-1562 "Binary Inspector" slice 2).
+ */
+export type BinaryInstruction = { 
+/**
+ * Virtual address of this instruction's first byte.
+ */
+address: number; 
+/**
+ * The instruction's raw encoded bytes, as lowercase hex (e.g. "48 89 e5" — space-separated
+ * byte pairs, matching the conventional disassembler-listing look).
+ */
+bytes: string; 
+/**
+ * Formatted mnemonic + operands (e.g. "mov rbp, rsp"), via iced-x86's NASM-style formatter.
+ */
+text: string }
+/**
+ * One section/segment entry (name + virtual address/size) in a [`BinaryInfo`] listing.
+ */
+export type BinarySection = { name: string; 
+/**
+ * Virtual address: PE's RVA, ELF's `sh_addr`, Mach-O's `addr`.
+ */
+address: number; 
+/**
+ * Virtual/in-memory size in bytes.
+ */
+size: number }
+/**
+ * One entry from a format's own symbol table (ELF `.symtab`, Mach-O's `LC_SYMTAB`). PE carries no
+ * equivalent for a typical EXE/DLL (only object files/PDBs do), so [`BinaryInfo::symbols`] is
+ * always empty for [`BinaryFormat::Pe`].
+ */
+export type BinarySymbol = { name: string; address: number | null }
 /**
  * What a [`Index::build`] crawl covered — how many directories it scanned and whether a cap truncated it.
  * Serialisable so it can be the `index_build` command return + progress-channel payload (CPE-1137).

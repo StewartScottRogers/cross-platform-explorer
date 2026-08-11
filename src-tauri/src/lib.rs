@@ -926,6 +926,35 @@ fn read_preview_info_impl(path: String) -> Result<String, String> {
     }
 }
 
+/// Structured PE/ELF/Mach-O summary (format, arch, sections/imports/exports/symbols, x86/x64 disasm)
+/// for the Binary Inspector (CPE-1572 DTO + CPE-1581 disasm, epic CPE-1562 "Binary Inspector"). Model
+/// lives in `cpe_server::binary_preview::binary_info`; this is a thin `spawn_blocking` dispatcher.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn binary_info(path: String) -> Result<cpe_server::model::BinaryInfo, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::binary_preview::binary_info(&path)
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
+/// x86/x64 disassembly of a PE/ELF/Mach-O binary's code section (CPE-1581, epic CPE-1562 "Binary
+/// Inspector" slice 2) — the same list embedded in [`binary_info`]'s `disasm` field, exposed on its
+/// own so the Binary Inspector's disassembly tab can fetch it without also paying for the
+/// sections/imports/exports/symbols tables. `cpe_server::binary_preview` has no separate path-based
+/// disasm entry point (its `disassemble` fn decodes already-located code bytes, not a path), so this
+/// thin `spawn_blocking` dispatcher reuses `binary_info`'s parse and returns just its `disasm` list.
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+async fn binary_disasm(path: String) -> Result<Vec<cpe_server::model::BinaryInstruction>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ensure_previewable_size(&path, PREVIEW_INFO_MAX_BYTES)?;
+        cpe_server::binary_preview::binary_info(&path).map(|info| info.disasm)
+    })
+    .await.map_err(|e| e.to_string())?
+}
+
 // Structured-data browser (CPE-849, epic CPE-721): list a data file's sources (SQLite tables/views,
 // Excel/ODS sheets), read a page of typed rows, and run a read-only SQLite query — the interactive-grid
 // counterparts to `read_preview_info`'s text summary. Thin async dispatchers into `cpe_server::data_browser`.
@@ -11074,6 +11103,8 @@ pub fn run() {
             write_file_text,
             read_archive_entries,
             read_preview_info,
+            binary_info,
+            binary_disasm,
             data_browser_sources,
             data_browser_page,
             data_browser_query,
@@ -11926,6 +11957,8 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         write_file_text,
         read_archive_entries,
         read_preview_info,
+        binary_info,
+        binary_disasm,
         data_browser_sources,
         data_browser_page,
         data_browser_query,
@@ -13606,6 +13639,25 @@ overlay / overlay rw,relatime 0 0
         let info = cpe_server::binary_preview::pe_info(&exe.to_string_lossy()).unwrap();
         assert!(info.contains("PE32"), "identifies the PE image");
         assert!(info.contains("Sections:"), "lists sections");
+    }
+
+    // ---- binary_info / binary_disasm command smoke test (CPE-1585, epic CPE-1562) --------------------
+    // Confirms both thin dispatchers actually reach `cpe_server::binary_preview::binary_info` (String->Path
+    // conversion, spawn_blocking, error mapping, command registration) — the parser itself (CPE-1572's DTO,
+    // CPE-1581's iced-x86 disasm) is exhaustively tested in `cpe-server`.
+
+    #[cfg(windows)]
+    #[test]
+    fn binary_info_and_binary_disasm_commands_dispatch_into_their_adapter() {
+        // The test executable itself is a real PE on Windows.
+        let exe = std::env::current_exe().unwrap().to_string_lossy().into_owned();
+
+        let info = tauri::async_runtime::block_on(binary_info(exe.clone())).expect("binary_info dispatches");
+        assert_eq!(info.format, cpe_server::model::BinaryFormat::Pe, "identifies the PE image");
+        assert!(!info.sections.is_empty(), "a real PE has sections");
+
+        let disasm = tauri::async_runtime::block_on(binary_disasm(exe)).expect("binary_disasm dispatches");
+        assert_eq!(disasm, info.disasm, "binary_disasm must return the same list embedded in binary_info");
     }
 
     // doc-text (rtf/docx/odt/epub) tests moved with the code to `cpe_server::doc_text` (CPE-815).
