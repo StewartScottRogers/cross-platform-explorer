@@ -20,6 +20,7 @@
   import type { Symbol as CodeSymbol, FoldRange, MinimapRow, ModelInfo } from "../bindings.gen";
   import HexView from "./HexView.svelte";
   import DataBrowser from "./DataBrowser.svelte";
+  import FontPreview from "./FontPreview.svelte";
   import JwtPreview from "./JwtPreview.svelte";
   import JsonTree from "./JsonTree.svelte";
   import CertPreview from "./CertPreview.svelte";
@@ -147,12 +148,6 @@
    *  means the WebView2 PDF plugin is hung on this file, not just being slow. */
   const PDF_LOAD_TIMEOUT_MS = 15_000;
 
-  let fontFamily = "";
-  let fontState: "idle" | "loading" | "error" = "idle";
-  let fontReqId = 0;
-  const FONT_SAMPLE = "The quick brown fox jumps over the lazy dog";
-  const FONT_SIZES = [12, 18, 24, 36, 48];
-
   // ---- generic provider action bar (CPE-1570, epic CPE-1568) ----
   // Providers declare `actions` in `preview/provider.ts`; this renders them uniformly instead of each
   // preview component wiring up its own ad hoc buttons. A self-contained preview component (JWT,
@@ -164,6 +159,14 @@
    *  `$: onValues(...)` statement (it depends on the prop) on every unrelated update, looping forever. */
   function onJwtValues(v: Record<string, string>) {
     jwtValues = v;
+  }
+
+  // Font glyph grid (CPE-1586, epic CPE-1568): `FontPreview.svelte` reports the currently-selected
+  // glyph's character + codepoint up whenever the selection changes (always-reactive, like JWT above —
+  // it defaults to the grid's first glyph on load rather than requiring an explicit click first).
+  let fontValues: Record<string, string> = {};
+  function onFontValues(v: Record<string, string>) {
+    fontValues = v;
   }
 
   // JSON tree (CPE-1573, epic CPE-1568): the tree only reports a value when the user clicks a node (see
@@ -263,6 +266,7 @@
         values:
           provider.kind === "jwt" ? jwtValues
           : provider.kind === "json" ? jsonValues
+          : provider.kind === "font" ? fontValues
           : imageCopyUrl ? { "copy-image": imageCopyUrl }
           : {},
         copyToClipboard,
@@ -530,31 +534,6 @@
     } catch {
       if (mine !== dicomTagsReqId) return;
       dicomTags = []; // never an error toast — the section is just omitted
-    }
-  }
-
-  $: if (entry && provider.kind === "font") loadFontFor(entry);
-
-  async function loadFontFor(e: DirEntry) {
-    const mine = ++fontReqId;
-    fontState = "loading";
-    // jsdom (tests) has no FontFace; degrade to a plain specimen.
-    if (typeof FontFace === "undefined") {
-      fontFamily = "";
-      fontState = "idle";
-      return;
-    }
-    const family = `preview-font-${mine}`;
-    try {
-      const face = new FontFace(family, `url("${assetUrl(e.path)}")`);
-      await face.load();
-      if (mine !== fontReqId) return;
-      (document as Document & { fonts: FontFaceSet }).fonts.add(face);
-      fontFamily = family;
-      fontState = "idle";
-    } catch {
-      if (mine !== fontReqId) return;
-      fontState = "error";
     }
   }
 
@@ -1144,15 +1123,9 @@
       ></iframe>
     {/if}
   {:else if provider.kind === "font" && entry}
-    {#if fontState === "error"}
-      <p class="preview-note">{$t("pv.cantFont")}</p>
-    {:else}
-      <div class="preview-font">
-        {#each FONT_SIZES as size}
-          <p style="font-family: {fontFamily || 'inherit'}; font-size: {size}px">{FONT_SAMPLE}</p>
-        {/each}
-      </div>
-    {/if}
+    <!-- Font specimen + glyph grid + metadata (CPE-1586, epic CPE-1568 slice 5): self-contained like
+         JwtPreview/CertPreview — reports its selected glyph's copyable values up via onValues. -->
+    <FontPreview path={entry.path} extension={entry.extension} size={entry.size} {assetUrl} onValues={onFontValues} />
   {:else if provider.kind === "archive" && entry}
     {#if entriesState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>
@@ -1557,15 +1530,6 @@
     margin: auto;
     color: var(--text-faint);
     padding: 12px;
-  }
-  .preview-font {
-    padding: 16px;
-    overflow-wrap: anywhere;
-  }
-  .preview-font p {
-    margin: 0 0 12px;
-    line-height: 1.3;
-    color: var(--text);
   }
   .text-ctx {
     position: fixed;

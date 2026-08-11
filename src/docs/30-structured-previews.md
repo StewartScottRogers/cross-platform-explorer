@@ -80,3 +80,30 @@ moving heavy binary blobs through a preview.
 
 A malformed or truncated `.vcf` file degrades gracefully — you still get whatever contacts and fields
 could be parsed, with a note when no contact block was found — rather than an error or a crash.
+
+## Font preview (`.ttf`, `.otf`, `.woff`, `.woff2`)
+
+Opens automatically for font files. The pane shows:
+
+- **Specimen** — a sample line (edit the text box to try your own) rendered live in the actual font at
+  several sizes, so you can see it the way it will look on the page.
+- **Metadata** — Format (TrueType, OpenType, WOFF, or WOFF2), and, when the file is a plain (uncompressed)
+  TrueType/OpenType font, its Family, Style, Version, and Glyph count, read straight from the font's own
+  name/glyph tables. A WOFF or WOFF2 file — whose tables are compressed — shows Format and File size only;
+  a small note explains why the rest isn't available rather than leaving it looking broken.
+- **Glyph grid** — a capped sample of common Latin characters (basic Latin plus Latin-1 Supplement, a
+  couple hundred cells) rendered in the font, so you can eyeball its coverage and style at a glance. The
+  grid is capped rather than trying to enumerate every glyph a font defines, so even an enormous font can't
+  slow the pane down. Click any cell to select it — the section heading shows the selected character and
+  its Unicode codepoint (e.g. `U+0041`).
+
+### Actions
+
+With a glyph selected, the action bar offers:
+
+- **Copy glyph** — copies the selected character itself to the clipboard.
+- **Copy codepoint** — copies its Unicode codepoint (`U+XXXX` form) to the clipboard.
+
+A malformed or unloadable font degrades gracefully — the pane still shows what metadata it could read
+rather than an error, and only shows a "can't preview" note if the browser couldn't render the specimen
+at all.
