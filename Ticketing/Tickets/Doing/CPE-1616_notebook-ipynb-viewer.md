@@ -211,3 +211,72 @@ in Chrome, both themes, 900/460/260px, and returned 4 findings. Fixed:
   DOM-content and CSS-declaration/contrast-math halves of these fixes were verified here.
 
 Pushed to `cpe-1616-notebook-viewer`; PR #822 updated (same PR, not a new one).
+
+### 2026-08-11 — correction: revert the shared token move, fix the traceback locally instead
+
+Finding 3's fix above nudged **`--pal-dark-red-400`** — the dark-theme `--danger` token in
+`src/app.css`, a token backing ~80 files app-wide, not something scoped to this ticket. A follow-up
+Visual Critic re-check measured the knock-on effect on a surface nobody was looking at: white text on a
+**solid** `--danger` background (`ConfirmDialog`/`ShredConfirmDialog`/`CheckpointDialog`/
+`BatchMediaDialog`'s primary destructive buttons, `.agent-badge.removed`/`.tl-badge.removed` pills,
+`Sidebar`'s `.drive-bar-fill.full`) — white on `#ff6659` measured 2.88:1, white on the nudged `#ff7b6f`
+measured 2.53:1. Both already fail WCAG's 3:1 floor for non-text UI (a pre-existing gap, filed separately
+as **CPE-1632**, not fixed here), but the nudge measurably widened the gap and made the app-wide
+destructive red read visibly softer/more pastel everywhere it's used — a notebook ticket should not move
+an app-wide theme token, and definitely shouldn't leave an unrelated destructive-action surface worse
+than it found it.
+
+**Fix:**
+- Reverted `--pal-dark-red-400` (`src/app.css`) back to its original `#ff6659`. Confirmed via `grep` that
+  it's the ONLY change to the shared token layer — no other palette/semantic token moved.
+- Added a new token, **`--danger-on-tint`**, scoped to "text that must render on a
+  `color-mix(--danger, --surface)`-tinted background" rather than a plain surface/bg. Defined in all
+  five theme blocks (bare `:root` fallback, `light`, `dark`, `hc-light`, `hc-dark`) per the app's
+  three-tier palette/semantic convention — required by `app.css.dark-contrast.test.ts`'s symmetric
+  token-completeness check (a token in one theme block but not the others fails that guard). Resolves to
+  plain `--danger` in every theme except dark, where it resolves to a new dark-only palette primitive
+  `--pal-dark-red-450-notebook` (`#ff7b6f` — the same hex the reverted shared-token nudge used, just no
+  longer shared). Currently consumed ONLY by `NotebookPreview.svelte`'s `.nb-error-output` — not a
+  general-purpose danger-text token, and the doc comments on both the new palette primitive and the new
+  semantic token say so explicitly, to discourage a future reach-for-it-anywhere.
+- `NotebookPreview.svelte`'s `.nb-error-output` rule now reads `color: var(--danger-on-tint)` instead of
+  `color: var(--danger)`. The background (`color-mix(in srgb, var(--danger) 8%, var(--surface))`) and
+  border (`var(--danger)`) are unchanged — only the text colour is scoped locally.
+- Retargeted the dedicated contrast guard in `NotebookPreview.test.ts` from `--danger` to
+  `--danger-on-tint`, generalized its hex-resolver to follow either one or two hops of `var()`
+  indirection (needed because light theme's `--danger-on-tint` aliases back to `--danger`, itself a
+  palette reference — two hops — while dark theme's resolves straight to the new palette primitive — one
+  hop), and added a companion light-theme assertion (light was always fine and is unchanged by this fix,
+  but the ticket asked for both themes measured/pinned, and the light guard costs nothing extra to keep
+  it honest against regression).
+
+**Measured ratios (reading live app.css values, same `color-mix` reimplementation as the existing
+`app.css.dark-contrast.test.ts`/`app.css.hc-contrast.test.ts` guards):**
+- Dark theme: `--danger-on-tint` (`#ff7b6f`) on the real 8%-mixed background (`#3c302f`, mixed from the
+  now-reverted `--danger` `#ff6659`) = **5.02:1** — clears the 4.5:1 AA floor, and with more margin than
+  the original shared-token nudge had (4.97:1 against a background that, at the time, was ALSO mixed from
+  the nudged red; now that the background reverts to the darker original red, the same lighter text
+  measures slightly better against it).
+- Light theme (untouched): `--danger-on-tint` == `--danger` (`#c42b1c`) on its 8%-mixed background
+  (`#faeeed`) = **4.99:1**, unchanged from before this whole finding was ever raised.
+- jsdom cannot see colour or layout — these are computed from the literal hex values app.css declares,
+  not a rendered screenshot. The on-screen result (does the traceback text still read clearly, does the
+  destructive-button red look right again) still needs the Visual Critic's eyes, same as every other
+  colour claim in this ticket.
+
+**Verification:**
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- Targeted run (`NotebookPreview.test.ts` + `app.css.dark-contrast.test.ts` + `app.css.hc-contrast.test.ts`
+  + `app.css.test.ts`) → 51/51 green, including both new/retargeted contrast assertions.
+  - Caught and fixed one thing myself before it became a CI surprise: the first draft of the new
+    `.nb-error-output` doc comment in `NotebookPreview.svelte` quoted the literal hex `#ff6659` in prose —
+    `app.css.test.ts`'s hard-coded-hex ratchet regexes the whole file (doesn't strip comments), so that
+    literal counted as a new hex occurrence and briefly broke the ratchet (91 files vs. the 90 baseline).
+    Reworded the comment to say "hex ff6659" (no `#`) instead — no functional change, comment-only.
+- `npx vitest run` (full suite) → **`Test Files 274 passed (274)`, `Tests 3370 passed (3370)`** — up from
+  the 274/3369 baseline by exactly +1 (the new light-theme companion contrast assertion; the dark one was
+  retargeted in place, not added). No existing test touched or weakened.
+- Cross-reference: the pre-existing white-on-solid-danger contrast failure this correction surfaced (but
+  did not introduce and does not fix) is tracked separately as **CPE-1632**.
+
+Pushed to `cpe-1616-notebook-viewer`; PR #822 updated (same PR, not a new one). Ticket left in `Doing/`.

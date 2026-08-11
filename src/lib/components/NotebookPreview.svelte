@@ -248,8 +248,20 @@
   }
   .nb-stream.stderr { color: var(--danger); }
   .nb-output-image { max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); }
+  /* CPE-1616 correction: this used to read `color: var(--danger)`. The traceback's real background is
+     `color-mix(in srgb, var(--danger) 8%, var(--surface))` below (a slight red tint of --surface, not
+     --surface itself), and in dark theme --danger (hex ff6659) only measured 4.41:1 against that specific
+     blended background — under the 4.5:1 AA floor for normal text. An earlier revision "fixed" this by
+     nudging the SHARED --pal-dark-red-400 (--danger) token itself, which silently regressed an unrelated,
+     already-failing surface app-wide (white text on solid --danger buttons/pills/fills, tracked
+     separately as CPE-1632) while softening the app-wide destructive red. Reverted that shared-token
+     move and switched this rule to `--danger-on-tint` instead (src/app.css) — a token that resolves to
+     --danger everywhere except dark theme, where it resolves to a slightly lighter red used ONLY here.
+     Measured after the fix: 5.02:1 in dark theme against the real 8%-mixed background (up from 4.41:1,
+     using the reverted/original --danger for the background itself); light theme unchanged at 4.99:1.
+     See src/lib/components/NotebookPreview.test.ts's dedicated contrast guard, retargeted to this token. */
   .nb-error-output {
-    padding: 6px 8px; border-radius: var(--radius); color: var(--danger);
+    padding: 6px 8px; border-radius: var(--radius); color: var(--danger-on-tint);
     background: color-mix(in srgb, var(--danger) 8%, var(--surface));
     border: 1px solid var(--danger);
   }

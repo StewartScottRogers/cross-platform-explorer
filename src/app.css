@@ -77,6 +77,13 @@
   --danger: var(--pal-red-600);
   --success: var(--pal-green-600);
   --danger-hover: var(--pal-red-700);
+  /* Text-only tint for a component that must render dark-theme text ON a `color-mix(--danger,
+     --surface)`-tinted background (as opposed to a plain --surface/--bg) — see the dark block
+     below for why this can't just be --danger. Defaults to --danger in light (already clears
+     AA against its own tinted background there — no light-theme adjustment needed). Currently
+     consumed only by NotebookPreview.svelte's `.nb-error-output` (CPE-1616); keep it scoped to
+     that kind of consumer rather than reaching for it as a general danger-text token. */
+  --danger-on-tint: var(--danger);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -137,6 +144,7 @@
   --danger: var(--pal-red-600);
   --success: var(--pal-green-600);
   --danger-hover: var(--pal-red-700);
+  --danger-on-tint: var(--danger);
 
   --text: var(--pal-gray-900);
   --text-dim: var(--pal-gray-700);
@@ -198,17 +206,21 @@
                                      under-contrasts on a dark surface */
   --pal-dark-blue-300: #60cdff; /* accent-hover */
 
-  /* danger — CPE-1616 Visual Critic finding: the notebook viewer's error-output background is
-     `color-mix(in srgb, var(--danger) 8%, var(--surface))` (a slight red tint of --surface, not
-     --surface itself), and the original #ff6659 measured only 4.41:1 against that specific blended
-     background — under the 4.5:1 AA floor for normal text (--danger vs plain --surface was already
-     fine at 4.92:1, which is what the existing dark-contrast guard test below checks; it just wasn't
-     testing this particular mixed-background consumer). Nudged lighter to clear the mixed background
-     too: #ff7b6f measures 4.97:1 against the 8%-mixed background, 5.61:1 against plain --surface,
-     6.45:1 against --bg — see src/lib/components/NotebookPreview.test.ts's dedicated contrast guard. */
-  --pal-dark-red-400: #ff7b6f;  /* danger */
+  --pal-dark-red-400: #ff6659;  /* danger */
   --pal-dark-red-300: #ff8a80;  /* danger-hover */
   --pal-dark-green-400: #6bcf7f; /* success */
+  /* CPE-1616 correction: an earlier revision of this ticket nudged the SHARED --pal-dark-red-400
+     (--danger) above from #ff6659 to #ff7b6f to lift the notebook traceback's contrast against its
+     own `color-mix(var(--danger) 8%, var(--surface))`-tinted background. --danger backs ~80 files
+     app-wide, including the white-text-on-solid-danger pattern (ConfirmDialog/ShredConfirmDialog/
+     CheckpointDialog/BatchMediaDialog primary destructive buttons, .agent-badge.removed/
+     .tl-badge.removed pills, Sidebar's .drive-bar-fill.full) — that surface was ALREADY under
+     WCAG's 3:1 non-text floor (2.88:1 white-on-#ff6659) and the nudge silently widened the gap
+     (2.53:1 white-on-#ff7b6f) while softening the app-wide destructive red into something more
+     pastel. Reverted --pal-dark-red-400 to its original #ff6659; that pre-existing white-on-danger
+     failure is tracked separately as CPE-1632 and is NOT fixed here. This primitive backs the
+     notebook traceback ONLY (--danger-on-tint below) — --danger itself no longer references it. */
+  --pal-dark-red-450-notebook: #ff7b6f;
 
   /* Okabe-Ito colour-blind-safe agent set, lightened off the light-theme base hues until each
      clears 3:1 against --pal-dark-gray-800 (--surface) — see the dark-contrast guard test. */
@@ -244,6 +256,10 @@
   --danger: var(--pal-dark-red-400);
   --success: var(--pal-dark-green-400);
   --danger-hover: var(--pal-dark-red-300);
+  /* Notebook-traceback-only text tint (CPE-1616) — see --pal-dark-red-450-notebook above for why
+     this can't just be --danger. Not consumed by anything else; do not reach for this outside
+     NotebookPreview.svelte's `.nb-error-output`. */
+  --danger-on-tint: var(--pal-dark-red-450-notebook);
 
   --text: var(--pal-dark-gray-100);
   --text-dim: var(--pal-dark-gray-200);
@@ -369,6 +385,7 @@
   --danger: var(--pal-hc-light-red-900);
   --success: var(--pal-hc-light-green-900);
   --danger-hover: var(--pal-hc-light-red-950);
+  --danger-on-tint: var(--danger);
 
   --text: var(--pal-hc-light-black);
   --text-dim: var(--pal-hc-light-gray-800);
@@ -418,6 +435,7 @@
   --danger: var(--pal-hc-dark-red-300);
   --success: var(--pal-hc-dark-green-300);
   --danger-hover: var(--pal-hc-dark-red-200);
+  --danger-on-tint: var(--danger);
 
   --text: var(--pal-hc-dark-white);
   --text-dim: var(--pal-hc-dark-gray-700);

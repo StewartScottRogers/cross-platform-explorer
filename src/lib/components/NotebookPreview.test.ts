@@ -266,10 +266,20 @@ describe("NotebookPreview (CPE-1616)", () => {
 // `color-mix(in srgb, var(--danger) 8%, var(--surface))` (NotebookPreview.svelte's `.nb-error-output`
 // rule), not plain `--surface`. src/app.css.dark-contrast.test.ts already guards `--danger` vs plain
 // `--bg`/`--surface`, but that pairing doesn't reflect this component's actual mixed background, so this
-// is a dedicated guard tied to the real formula this component uses. Same inline WCAG contrast math as
-// app.css.dark-contrast.test.ts / app.css.hc-contrast.test.ts (no shared util exists yet — matches that
-// file-local convention) and reads the live hex values out of app.css so it can never silently drift.
-describe("NotebookPreview dark-theme traceback contrast (CPE-1616 finding 3)", () => {
+// is a dedicated guard tied to the real formula this component uses.
+//
+// CPE-1616 correction: an earlier revision "fixed" this by nudging the SHARED dark `--danger` token
+// itself (`--pal-dark-red-400`), which silently regressed an unrelated, already-failing surface app-wide
+// (white text on solid --danger buttons/pills/fills — tracked separately as CPE-1632) while softening the
+// app-wide destructive red. That shared-token move was reverted; `--danger` is back to its original
+// #ff6659. `.nb-error-output`'s text colour now reads a dedicated `--danger-on-tint` token (src/app.css)
+// that resolves to `--danger` everywhere except dark theme, where it resolves to a slightly lighter red
+// used ONLY by this component — so this guard now measures `--danger-on-tint` against a background mixed
+// from the (reverted) `--danger`, exactly matching what `.nb-error-output` actually renders. Same inline
+// WCAG contrast math as app.css.dark-contrast.test.ts / app.css.hc-contrast.test.ts (no shared util exists
+// yet — matches that file-local convention) and reads the live hex values out of app.css so it can never
+// silently drift.
+describe("NotebookPreview traceback contrast against its real tinted background (CPE-1616)", () => {
   const appCss = readFileSync(join(__dirname, "..", "..", "app.css"), "utf8");
 
   function hexToRgb(hex: string): [number, number, number] {
@@ -299,28 +309,59 @@ describe("NotebookPreview dark-theme traceback contrast (CPE-1616 finding 3)", (
     return "#" + rgb.map((x) => x.toString(16).padStart(2, "0")).join("");
   }
 
-  function extractHex(varName: string): string {
-    // NotebookPreview.svelte's .nb-error-output background/.nb-traceback text both resolve to --danger
-    // and --surface from the dark semantic block; read the live authored hex straight out of app.css.
-    // No nested braces inside a custom-property block, so a plain non-greedy match to the next `}` is safe.
-    const darkBlockMatch = appCss.match(/:root\[data-theme="dark"\]\s*\{([^}]*)\}/);
-    expect(darkBlockMatch, ':root[data-theme="dark"] block not found in app.css').toBeTruthy();
-    const block = darkBlockMatch![1];
-    const declMatch = block.match(new RegExp(`${varName}\\s*:\\s*var\\((--[a-zA-Z0-9-]+)\\)`));
-    expect(declMatch, `${varName} not found in :root[data-theme="dark"]`).toBeTruthy();
-    const paletteVar = declMatch![1];
-    const paletteMatch = appCss.match(new RegExp(`${paletteVar}\\s*:\\s*(#[0-9a-fA-F]{6})`));
-    expect(paletteMatch, `${paletteVar} not found as a hex literal in app.css`).toBeTruthy();
+  /** Resolves a token declared within a given `:root[data-theme="X"]` block down to its concrete hex
+   *  literal in app.css, following `var(--...)` indirection until it lands on a literal — one hop for
+   *  most tokens (semantic -> palette, e.g. `--danger` -> `--pal-dark-red-400` -> `#ff6659`), two for
+   *  `--danger-on-tint` in light theme (`--danger-on-tint` -> `--danger` -> `--pal-red-600` -> a hex),
+   *  since light theme just aliases it back to the plain `--danger` token. */
+  function resolveToHex(varName: string, block: string, depth = 0): string {
+    expect(depth, `${varName}: too much indirection resolving to a hex literal`).toBeLessThan(5);
+    const declMatch = block.match(new RegExp(`${varName}\\s*:\\s*([^;]+);`));
+    expect(declMatch, `${varName} not declared in this theme block`).toBeTruthy();
+    const value = declMatch![1].trim();
+    const hexMatch = value.match(/^#[0-9a-fA-F]{6}$/);
+    if (hexMatch) return value;
+    const varMatch = value.match(/^var\((--[a-zA-Z0-9-]+)\)$/);
+    expect(varMatch, `${varName}'s value "${value}" is neither a hex literal nor a var() reference`).toBeTruthy();
+    const nextName = varMatch![1];
+    // Prefer resolving within the SAME theme block first (handles semantic -> semantic aliasing, e.g.
+    // --danger-on-tint -> --danger in the light block); fall back to a bare palette hex declared
+    // elsewhere in app.css (the palette layer) for the common semantic -> palette case.
+    if (new RegExp(`${nextName}\\s*:`).test(block)) return resolveToHex(nextName, block, depth + 1);
+    const paletteMatch = appCss.match(new RegExp(`${nextName}\\s*:\\s*(#[0-9a-fA-F]{6})`));
+    expect(paletteMatch, `${nextName} not found as a hex literal in app.css`).toBeTruthy();
     return paletteMatch![1];
   }
 
-  it("--danger on the .nb-error-output's actual 8%-mixed background clears 4.5:1 AA in dark theme", () => {
-    const danger = extractHex("--danger");
-    const surface = extractHex("--surface");
+  function extractHex(varName: string, themeAttr: string): string {
+    const blockMatch = appCss.match(new RegExp(`:root\\[data-theme="${themeAttr}"\\]\\s*\\{([^}]*)\\}`));
+    expect(blockMatch, `:root[data-theme="${themeAttr}"] block not found in app.css`).toBeTruthy();
+    return resolveToHex(varName, blockMatch![1]);
+  }
+
+  it("--danger-on-tint on the .nb-error-output's actual 8%-mixed background clears 4.5:1 AA in dark theme", () => {
+    const danger = extractHex("--danger", "dark"); // the mixed background is color-mix'd from --danger
+    const surface = extractHex("--surface", "dark");
+    const textColor = extractHex("--danger-on-tint", "dark");
     const tracebackBg = mix(danger, 0.08, surface); // matches color-mix(in srgb, var(--danger) 8%, var(--surface))
-    const ratio = contrastRatio(danger, tracebackBg);
+    const ratio = contrastRatio(textColor, tracebackBg);
     // eslint-disable-next-line no-console -- the ticket asks for the measured ratio to be reported.
-    console.log(`NotebookPreview dark-theme traceback contrast: ${ratio.toFixed(2)}:1 (danger ${danger} on ${tracebackBg})`);
+    console.log(
+      `NotebookPreview dark-theme traceback contrast: ${ratio.toFixed(2)}:1 (--danger-on-tint ${textColor} on ${tracebackBg}, mixed from --danger ${danger})`,
+    );
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("--danger-on-tint on the .nb-error-output's actual 8%-mixed background clears 4.5:1 AA in light theme (unchanged by this fix)", () => {
+    const danger = extractHex("--danger", "light");
+    const surface = extractHex("--surface", "light");
+    const textColor = extractHex("--danger-on-tint", "light");
+    const tracebackBg = mix(danger, 0.08, surface);
+    const ratio = contrastRatio(textColor, tracebackBg);
+    // eslint-disable-next-line no-console -- the ticket asks for the measured ratio to be reported.
+    console.log(
+      `NotebookPreview light-theme traceback contrast: ${ratio.toFixed(2)}:1 (--danger-on-tint ${textColor} on ${tracebackBg}, mixed from --danger ${danger})`,
+    );
     expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 });
