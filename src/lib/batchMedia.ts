@@ -59,9 +59,29 @@ export function mediaOpLabel(op: MediaOp): string {
   }
 }
 
-/** Build the `BatchJob` the backend expects from the ordered op list + the non-destructive toggle. */
+/**
+ * Build the `BatchJob` the backend expects from the ordered op list + the non-destructive toggle.
+ * `confirmed_overwrite` always starts `false` here — this is the job used for the live plan preview
+ * and for the initial (pre-confirmation) build of every apply. See {@link confirmOverwriteJob} for the
+ * ONLY place in the codebase allowed to flip it to `true`.
+ */
 export function opsToJob(ops: MediaOp[], nonDestructive: boolean): BatchJob {
-  return { ops, non_destructive: nonDestructive };
+  return { ops, non_destructive: nonDestructive, confirmed_overwrite: false };
+}
+
+/**
+ * CPE-1599: the engine now refuses to run any plan containing an in-place overwrite (planned
+ * `output === input`) unless `BatchJob.confirmed_overwrite` is `true` — a backend-side backstop for the
+ * `showOverwriteConfirm` panel this file's {@link overwritesInPlace} already gates. This function is the
+ * **single, named seam** that is allowed to set that flag: `BatchMediaDialog.svelte`'s `apply()` calls it
+ * ONLY once the user has actually clicked "Overwrite N files" on the confirm panel (i.e. only when
+ * {@link overwritesInPlace} found at least one in-place item AND the panel's own button was the thing
+ * that invoked `apply()`). No other call site in the app should ever construct a job with
+ * `confirmed_overwrite: true` by hand — route through here so a reviewer only has to audit this one
+ * function's callers, not every place a `BatchJob` literal could be written.
+ */
+export function confirmOverwriteJob(job: BatchJob): BatchJob {
+  return { ...job, confirmed_overwrite: true };
 }
 
 /** The result of {@link partitionEligible}: which selected entries the batch engine can operate on,

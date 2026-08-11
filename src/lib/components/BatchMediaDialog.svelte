@@ -18,13 +18,28 @@
    * "checkpoint before an irreversible batch" pattern `MetadataStudioDialog`/`DeclutterDialog`/
    * `SimilarImagesDialog` already use, so a confirmed overwrite is still recoverable via Checkpoints even
    * though it's deliberately never pushed onto the Ctrl+Z undo stack.
+   *
+   * CPE-1599: that confirm step used to be a **pure frontend invariant** — the engine (`execute_plan_walk`)
+   * had no idea a confirmation was ever required, so any other caller of `batch_media_execute_stream`
+   * (devtools, a future automation surface) could skip it entirely. The engine now refuses an in-place
+   * plan unless `BatchJob.confirmed_overwrite` is set, so this dialog's "Overwrite N files" button (via
+   * {@link confirmOverwriteJob}, `../batchMedia`'s single named seam for setting that flag) is the ONLY
+   * place in the app that can make the backend actually perform an in-place write.
    */
   import { createEventDispatcher, onDestroy } from "svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, unwrap, type StreamChannel } from "../invoke";
-  import { mediaOpLabel, opsToJob, overwritesInPlace, progressPercent, skipRows, uniqueParentDirs } from "../batchMedia";
+  import {
+    confirmOverwriteJob,
+    mediaOpLabel,
+    opsToJob,
+    overwritesInPlace,
+    progressPercent,
+    skipRows,
+    uniqueParentDirs,
+  } from "../batchMedia";
   import { baseName } from "../contentSearch";
 
   /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
@@ -244,11 +259,13 @@
    *  skipped file + reason (CPE-1115), so a skip is never silently dropped. Cleared → the dialog closes via
    *  the parent on "Done". A clean run (no skips) never sets this and closes immediately. */
   let completed: BatchReport | null = null;
-  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED (CPE-1590 code-review follow-up):
-   *  the confirm panel promises a checkpoint as the recovery net for a write that has no other one, so a
-   *  failure must never be silent — a console.error alone is invisible to the user who read that promise
-   *  and consented on the strength of it. A non-empty list forces the dialog to hold open (like a skip)
-   *  so the warning is actually seen, even on an otherwise-clean run. Reset at the start of every apply(). */
+  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED, OR completed but left some file(s)
+   *  out (CPE-1590 code-review follow-up; CPE-1599 extends this to the "skipped" case): the confirm panel
+   *  promises a checkpoint as the recovery net for a write that has no other one, so neither an outright
+   *  failure nor a checkpoint that silently omitted an oversize file may be silent — a console.error/warn
+   *  alone is invisible to the user who read that promise and consented on the strength of it. A non-empty
+   *  list forces the dialog to hold open (like a skip) so the warning is actually seen, even on an
+   *  otherwise-clean run. Reset at the start of every apply(). */
   let checkpointFailures: string[] = [];
 
   function detachChannel() {
@@ -280,7 +297,19 @@
       // in `checkpointFailures` and surfaced in the results panel below, not just logged to devtools.
       for (const dir of uniqueParentDirs(overwriteItems.map((it) => it.input))) {
         try {
-          unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
+          const created = unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
+          if (created.skipped.length > 0) {
+            // CPE-1599: `checkpoint_create` captures with an unlimited budget today, but its `skipped`
+            // field exists precisely so a future budget cap can't silently omit files from "recovery"
+            // without this call site noticing — inspect it now, before that trap exists, rather than
+            // discarding `created` entirely. Same "promised recovery net, must never go quiet" reasoning
+            // as an outright checkpoint failure below, so it reuses the exact same warning path.
+            console.warn(
+              `Batch media: pre-overwrite checkpoint for "${dir}" left ${created.skipped.length} file(s) uncaptured (recovery incomplete)`,
+              created.skipped,
+            );
+            checkpointFailures = [...checkpointFailures, dir];
+          }
         } catch (e) {
           console.error("Batch media: pre-overwrite checkpoint failed (proceeding with confirmed write)", e);
           checkpointFailures = [...checkpointFailures, dir];
@@ -297,12 +326,19 @@
       }
     };
 
+    // CPE-1599: the engine refuses to run an in-place plan without `confirmed_overwrite` set. This is the
+    // ONLY place that flag is ever flipped to true — and only once `apply()` has actually been reached via
+    // the confirm panel's "Overwrite N files" button (the sole caller of `apply()` when
+    // `needsOverwriteConfirm` is true; see `handleApplyClick`). A plan with nothing to confirm sends the
+    // job unchanged (`confirmed_overwrite` stays the `false` `opsToJob` always builds it as).
+    const jobToSend = needsOverwriteConfirm ? confirmOverwriteJob(job) : job;
+
     try {
       // Raw, not the typed `commands.batchMediaExecuteStream` (which routes through the busy-cursor
       // `invoke`) — this dialog renders its own progress, per BUSY-CURSOR.md.
       const report = await rawInvoke<BatchReport>("batch_media_execute_stream", {
         items: planned,
-        job,
+        job: jobToSend,
         onResult: ch,
       });
       detachChannel();
@@ -506,21 +542,23 @@
     {/if}
 
     {#if checkpointFailures.length > 0}
-      <!-- CPE-1590 code-review follow-up: the confirm panel promises a pre-overwrite checkpoint as the
-           recovery net for a write that has no other one — a failure to actually take it must never be
-           silent (a console.error alone is invisible), so it holds the dialog open and names exactly
-           which folder(s) have no checkpoint to revert to. The write itself still went ahead (already
-           confirmed), this is purely "here's what your safety net actually covers". -->
+      <!-- CPE-1590 code-review follow-up (extended by CPE-1599 to the "checkpoint succeeded but skipped a
+           file" case): the confirm panel promises a pre-overwrite checkpoint as the recovery net for a
+           write that has no other one — neither an outright failure to take it NOR a checkpoint that
+           silently left some file(s) uncaptured may be silent (a console.error/warn alone is invisible),
+           so both hold the dialog open and name exactly which folder(s) aren't fully covered. The write
+           itself still went ahead (already confirmed), this is purely "here's what your safety net
+           actually covers". -->
       <div class="checkpoint-warn" data-testid="checkpoint-warning">
-        <strong>No checkpoint was taken</strong> for {checkpointFailures.length}
-        folder{checkpointFailures.length === 1 ? "" : "s"} before the overwrite — the write went ahead (you
-        already confirmed it), but there is nothing to revert to for:
+        The pre-overwrite checkpoint <strong>didn't fully cover</strong> {checkpointFailures.length}
+        folder{checkpointFailures.length === 1 ? "" : "s"} — the write went ahead (you already confirmed
+        it), but recovery may be incomplete for:
         <ul class="checkpoint-warn-list">
           {#each checkpointFailures as dir}
             <li title={dir}>{baseName(dir) || dir}</li>
           {/each}
         </ul>
-        Your only recovery for files in {checkpointFailures.length === 1 ? "that folder" : "those folders"}
+        Your only guaranteed recovery for files in {checkpointFailures.length === 1 ? "that folder" : "those folders"}
         now is your own backup.
       </div>
     {/if}

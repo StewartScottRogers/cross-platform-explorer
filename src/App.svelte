@@ -2983,13 +2983,16 @@
    *  outcome, refresh the pane `beginBatchMedia` snapshot targeted (CPE-1384), and close. */
   /** CPE-1590: a folder whose checkpoint failed before an in-place overwrite has NO recovery net, so that
    *  warning outranks the ordinary converted/skipped summary — it must reach the user even if they
-   *  dismissed the dialog's own warning panel on reflex (Escape / backdrop click both route here too). */
+   *  dismissed the dialog's own warning panel on reflex (Escape / backdrop click both route here too).
+   *  CPE-1599: also covers a checkpoint that succeeded but left some file(s) uncaptured (`skipped`) —
+   *  `BatchMediaDialog` folds that case into the same `checkpointFailures` list it always has, so this
+   *  one function and its wording ("may be incomplete", not "no checkpoint at all") cover both. */
   function noticeCheckpointFailures(dirs: string[]): boolean {
     if (dirs.length === 0) return false;
     const name = dirs[0].split(/[\\/]/).pop() || dirs[0];
     const rest = dirs.length === 1 ? "" : ` (+${dirs.length - 1} more)`;
     showNotice(
-      `No checkpoint was taken for "${name}"${rest} — the originals there were overwritten with no recovery net.`,
+      `The pre-overwrite checkpoint for "${name}"${rest} didn't fully cover the originals there — recovery may be incomplete.`,
       true,
     );
     return true;

@@ -2988,6 +2988,11 @@ async fn batch_media_plan(
 /// `apply_backup_plan_stream` above. `on_result` is a raw transport channel — the Batch-Media dialog
 /// renders its own progress, so this is not routed through the busy-cursor wrapper. Returns the aggregate
 /// `BatchReport` once every item has run. No cancellation in v1.
+///
+/// **CPE-1599:** `execute_plan_walk` itself now refuses (returns `Err`, writes nothing, `on_result` never
+/// fires) a plan containing an in-place overwrite unless `job.confirmed_overwrite` is set — this thin
+/// dispatcher does nothing special to enforce that; it's the engine's own gate. The error propagates
+/// straight out to the frontend `Result`, same as any other command failure.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn batch_media_execute_stream(
@@ -2997,7 +3002,7 @@ async fn batch_media_execute_stream(
 ) -> Result<cpe_server::batch_execute::BatchReport, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut batch: Vec<OpResult> = Vec::new();
-        let report = cpe_server::batch_execute::execute_plan_walk(&items, &job, |r| {
+        let result = cpe_server::batch_execute::execute_plan_walk(&items, &job, |r| {
             batch.push(r);
             if batch.len() >= 16 {
                 let _ = on_result.send(std::mem::take(&mut batch));
@@ -3006,10 +3011,10 @@ async fn batch_media_execute_stream(
         if !batch.is_empty() {
             let _ = on_result.send(batch);
         }
-        report
+        result
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Detailed metadata for the Properties dialog. Model lives in `cpe_server::model` (CPE-815); this is a

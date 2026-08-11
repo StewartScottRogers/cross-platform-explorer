@@ -26,7 +26,9 @@ let execCalls: Deferred[] = [];
 // CPE-1590: `apply()` best-effort checkpoints every affected folder before an in-place-overwrite run —
 // mirrors the `checkpoint_create` mock in `NearDuplicatesDialog.test.ts`/`SimilarImagesDialog.test.ts`.
 let checkpointCalls: Array<[string, string]> = [];
-let checkpointBehavior: "ok" | "reject" = "ok";
+// CPE-1599 adds "skipped": the checkpoint succeeds, but `CheckpointCreated.skipped` names file(s) it left
+// out (oversize/budget) — recovery for those is incomplete even though the call itself didn't reject.
+let checkpointBehavior: "ok" | "reject" | "skipped" = "ok";
 
 const invoke = vi.fn((cmd: string, args?: any) => {
   if (cmd === "batch_media_plan") {
@@ -38,7 +40,15 @@ const invoke = vi.fn((cmd: string, args?: any) => {
   if (cmd === "checkpoint_create") {
     checkpointCalls.push([args.root, args.label]);
     if (checkpointBehavior === "reject") return Promise.reject(new Error("disk full"));
-    return Promise.resolve({ checkpoint: { manifest_id: "m1", label: args.label, taken_at: 0 } });
+    const skipped =
+      checkpointBehavior === "skipped" ? [{ path: `${args.root}/huge.jpg`, size: 999999999, reason: "oversize" }] : [];
+    return Promise.resolve({
+      checkpoint: { manifest_id: "m1", label: args.label, ts: 0 },
+      new_blobs: 0,
+      reused_blobs: 0,
+      added_bytes: 0,
+      skipped,
+    });
   }
   return Promise.reject(new Error(`unexpected command: ${cmd}`));
 });
@@ -141,7 +151,7 @@ describe("BatchMediaDialog plan preview (debounced + generation-tokened)", () =>
     await vi.advanceTimersByTimeAsync(200);
 
     expect(invoke).toHaveBeenCalledWith("batch_media_plan", {
-      job: { ops: [{ op: "resize", max_px: 1024 }], non_destructive: true },
+      job: { ops: [{ op: "resize", max_px: 1024 }], non_destructive: true, confirmed_overwrite: false },
       inputs: ["/repo/a.png", "/repo/b.png"],
     });
     expect(planCalls).toHaveLength(1);
@@ -249,7 +259,7 @@ describe("BatchMediaDialog apply + streamed progress", () => {
           { input: "/repo/a.png", output: "/repo/a-1024.png", summary: "s1" },
           { input: "/repo/b.png", output: "/repo/b-1024.png", summary: "s2" },
         ],
-        job: { ops: [{ op: "resize", max_px: 1024 }], non_destructive: true },
+        job: { ops: [{ op: "resize", max_px: 1024 }], non_destructive: true, confirmed_overwrite: false },
       }),
     );
     expect(execCalls).toHaveLength(1);
@@ -447,7 +457,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
     expect(onApply).not.toHaveBeenCalled(); // held open, not auto-dispatched/closed
     const warning = screen.getByTestId("checkpoint-warning");
-    expect(warning.textContent).toContain("No checkpoint was taken");
+    expect(warning.textContent).toContain("didn't fully cover");
     expect(warning.textContent).toContain("pics"); // names the affected folder, not just a generic notice
     expect(screen.getByTestId("batch-media-done")).toBeTruthy();
 
@@ -524,5 +534,60 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     expect(screen.queryByTestId("overwrite-confirm")).toBeNull();
     expect(execCalls).toHaveLength(1); // runs immediately, exactly as before this ticket
     expect(checkpointCalls).toHaveLength(0); // no overwrite ⇒ no pre-write checkpoint either
+  });
+
+  // ---- CPE-1599: confirmed_overwrite threading -------------------------------------------------------
+
+  it("sends confirmed_overwrite: true ONLY after the confirm panel's own button is clicked", async () => {
+    await planOverwriteReady(["/repo/a.jpg"]);
+    await fireEvent.click(applyButton());
+    expect(execCalls).toHaveLength(0); // first Apply click never reaches the backend
+
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    await settle();
+
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.job.confirmed_overwrite).toBe(true);
+    expect(execCalls[0].args.job.non_destructive).toBe(false);
+  });
+
+  it("a non-overwrite plan always sends confirmed_overwrite: false — the flag is never set outside the confirm path", async () => {
+    render(BatchMediaDialog, { paths: ["/repo/a.jpg"] });
+    await fireEvent.click(addButton()); // resize, default non_destructive: true — no in-place items
+    await vi.advanceTimersByTimeAsync(200);
+    planCalls[0].resolve([{ input: "/repo/a.jpg", output: "/repo/a-1024.jpg", summary: "resize" }]);
+    await settle();
+
+    await fireEvent.click(applyButton());
+    expect(execCalls).toHaveLength(1);
+    expect(execCalls[0].args.job.confirmed_overwrite).toBe(false);
+  });
+
+  // ---- CPE-1599: the pre-overwrite checkpoint's `skipped` field is inspected, not discarded -----------
+
+  it("surfaces a checkpoint that SUCCEEDED but left file(s) uncaptured, via the same warning path as an outright failure", async () => {
+    checkpointBehavior = "skipped";
+    const { component } = await planOverwriteReady(["/repo/pics/a.jpg"]);
+    const onApply = vi.fn();
+    component.$on("apply", (e: CustomEvent) => onApply(e.detail));
+
+    await fireEvent.click(applyButton());
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    expect(checkpointCalls).toEqual([["/repo/pics", "Before batch media overwrite"]]);
+    expect(execCalls).toHaveLength(1); // the checkpoint call itself resolved — proceeds like a success
+
+    execCalls[0].resolve({ written: 1, skipped: [] });
+    await settle();
+
+    // Held open exactly like a hard checkpoint failure, even though `checkpoint_create` never rejected.
+    expect(onApply).not.toHaveBeenCalled();
+    const warning = screen.getByTestId("checkpoint-warning");
+    expect(warning.textContent).toContain("pics");
+
+    await fireEvent.click(screen.getByTestId("batch-media-done"));
+    expect(onApply).toHaveBeenCalledWith({
+      report: { written: 1, skipped: [] },
+      checkpointFailures: ["/repo/pics"],
+    });
   });
 });

@@ -10,10 +10,18 @@
 //! *different* planned output. When the caller sets `job.non_destructive = false`, `plan` drops that
 //! guarantee — for an op combo with no dedicated output-renaming suffix (a lone Compress, Strip
 //! metadata, or Watermark) the planned output can equal the input, and this module then **overwrites
-//! the source file's bytes in place**, same as any other planned write (CPE-1590). This module itself
-//! has no concept of "confirm the user actually wants that" — by the time a plan reaches here, gating
-//! an in-place overwrite behind an explicit confirmation is the caller's job (the batch-media dialog,
-//! `BatchMediaDialog.svelte`); see its CPE-1590 doc comment for the guard.
+//! the source file's bytes in place**, same as any other planned write (CPE-1590).
+//!
+//! **The engine itself refuses that, not just the UI (CPE-1599).** Before touching any bytes,
+//! [`execute_plan_walk`] scans `items` for one whose planned `output == input`; if it finds one and
+//! `job.confirmed_overwrite` is not set, it returns `Err` and writes nothing at all — a clean, specific
+//! refusal, not a panic and not a silent no-op that quietly skips the dangerous files. This closes the
+//! gap a purely frontend confirm (`BatchMediaDialog.svelte`'s "Overwrite N files" panel) can't: a
+//! devtools call, a future automation/agent feature, or a new UI surface that invokes
+//! `batch_media_execute_stream` directly no longer gets an in-place overwrite for free just by setting
+//! `non_destructive: false` — it must ALSO carry `confirmed_overwrite: true`, which should only ever be
+//! set by that one confirm panel after showing its warning. See [`BatchJob::confirmed_overwrite`]'s doc
+//! for the ownership of that promise.
 
 use std::fs;
 use std::path::Path;
@@ -31,6 +39,13 @@ pub struct BatchReport {
     pub skipped: Vec<(String /* input */, String /* why */)>,
 }
 
+/// True when running `items` would overwrite at least one input file's bytes in place (planned
+/// `output == input`). Shared by the [`execute_plan_walk`] refusal check and available to any future
+/// caller that wants to ask "would this plan be destructive?" without duplicating the comparison.
+pub fn any_in_place(items: &[PlannedItem]) -> bool {
+    items.iter().any(|it| it.input == it.output)
+}
+
 /// Execute a planned batch, calling `flush` with each file's [`OpResult`] as it completes — the shared
 /// walker behind both the blocking [`execute_plan`] (test/no-progress path) and the streaming Tauri
 /// command (`batch_media_execute_stream`), per the "one walker, both callers" streaming convention. For
@@ -38,9 +53,25 @@ pub struct BatchReport {
 /// writes the result to the item's planned output (creating the output's parent directory as needed). A
 /// failing item — unreadable input, a non-image or otherwise rejected transform, or a failed write — is
 /// recorded in the returned report and reported to `flush` with a reason; it never aborts the run.
-/// **Input files are modified in place whenever the planned `output == input`** — see the module doc
-/// (CPE-1590) for when `plan` allows that (`job.non_destructive == false`).
-pub fn execute_plan_walk(items: &[PlannedItem], job: &BatchJob, mut flush: impl FnMut(OpResult)) -> BatchReport {
+///
+/// **Refuses up front** ([`Err`], nothing written, `flush` never called) when any planned `output ==
+/// input` and `job.confirmed_overwrite` is `false` — see the module doc (CPE-1590/CPE-1599). Otherwise,
+/// input files ARE modified in place wherever the planned `output == input`.
+pub fn execute_plan_walk(
+    items: &[PlannedItem],
+    job: &BatchJob,
+    mut flush: impl FnMut(OpResult),
+) -> Result<BatchReport, String> {
+    if !job.confirmed_overwrite && any_in_place(items) {
+        let count = items.iter().filter(|it| it.input == it.output).count();
+        return Err(format!(
+            "refusing to run: this plan would overwrite {count} original file{} in place, and \
+             `confirmed_overwrite` was not set on the batch job — re-plan with an explicit confirmation \
+             or change the job so every output differs from its input",
+            if count == 1 { "" } else { "s" }
+        ));
+    }
+
     let mut report = BatchReport::default();
     for item in items {
         match execute_one(item, job) {
@@ -54,12 +85,12 @@ pub fn execute_plan_walk(items: &[PlannedItem], job: &BatchJob, mut flush: impl 
             }
         }
     }
-    report
+    Ok(report)
 }
 
 /// Execute a planned batch without streaming per-file progress — the cargo-test correctness path.
 /// Delegates to [`execute_plan_walk`] with a no-op flush so there is exactly one implementation.
-pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> BatchReport {
+pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> Result<BatchReport, String> {
     execute_plan_walk(items, job, |_| {})
 }
 
@@ -130,7 +161,7 @@ mod tests {
         let items = plan(&job, &inputs);
         assert_eq!(items.len(), 3);
 
-        let report = execute_plan(&items, &job);
+        let report = execute_plan(&items, &job).unwrap();
 
         assert_eq!(report.written, 2, "the two PNGs should succeed");
         assert_eq!(report.skipped.len(), 1, "the .txt should be skipped, not fatal");
@@ -163,7 +194,7 @@ mod tests {
         let missing = d.join("nope.png").to_string_lossy().to_string();
         let items = plan(&job, std::slice::from_ref(&missing));
 
-        let report = execute_plan(&items, &job);
+        let report = execute_plan(&items, &job).unwrap();
 
         assert_eq!(report.written, 0);
         assert_eq!(report.skipped.len(), 1);
@@ -189,7 +220,7 @@ mod tests {
         let inputs = vec![a.to_string_lossy().to_string()];
         let items = plan(&job, &inputs);
 
-        let report = execute_plan(&items, &job);
+        let report = execute_plan(&items, &job).unwrap();
         assert_eq!(report.written, 0);
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].0, a.to_string_lossy().to_string());
@@ -203,7 +234,7 @@ mod tests {
     #[test]
     fn empty_plan_yields_an_empty_report_with_no_panic() {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
-        let report = execute_plan(&[], &job);
+        let report = execute_plan(&[], &job).unwrap();
         assert_eq!(report, BatchReport::default());
     }
 
@@ -211,9 +242,94 @@ mod tests {
     fn execute_plan_walk_empty_input_never_panics_and_never_flushes() {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
         let mut flushed = 0usize;
-        let report = execute_plan_walk(&[], &job, |_| flushed += 1);
+        let report = execute_plan_walk(&[], &job, |_| flushed += 1).unwrap();
         assert_eq!(report, BatchReport::default());
         assert_eq!(flushed, 0);
+    }
+
+    // ---- CPE-1599: engine-side refusal of an unconfirmed in-place overwrite ---------------------------
+
+    /// The core defence-in-depth guarantee: a plan whose planned `output == input` for at least one item
+    /// is REFUSED — `Err`, nothing written, `flush` never called — when `job.confirmed_overwrite` is
+    /// left at its default `false`. This must hold even though `job.non_destructive` was explicitly set
+    /// to `false` (the only way `plan()` ever produces an in-place output in the first place): setting
+    /// `non_destructive: false` alone is no longer sufficient to get an in-place write out of the engine.
+    #[test]
+    fn refuses_an_in_place_plan_without_confirmed_overwrite() {
+        let d = scratch("refuse-unconfirmed");
+        let a = d.join("a.jpg");
+        fs::write(&a, png_bytes(10, 10)).unwrap();
+        let orig = fs::read(&a).unwrap();
+
+        let mut job = BatchJob::new(vec![MediaOp::Compress { quality: 80 }]); // no rename suffix
+        job.non_destructive = false; // the only way plan() can resolve output == input
+        assert!(!job.confirmed_overwrite, "confirmed_overwrite must default to false");
+
+        let inputs = vec![a.to_string_lossy().to_string()];
+        let items = plan(&job, &inputs);
+        assert_eq!(items[0].input, items[0].output, "sanity: this plan IS in-place");
+
+        let mut flushed = 0usize;
+        let err = execute_plan_walk(&items, &job, |_| flushed += 1)
+            .expect_err("an unconfirmed in-place plan must be refused, not executed");
+
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+        assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+        assert_eq!(flushed, 0, "flush must never fire on a refused plan");
+        // The original file must be COMPLETELY untouched — the refusal is a no-op, not a partial write.
+        assert_eq!(fs::read(&a).unwrap(), orig);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The flip side: the identical in-place plan proceeds and actually overwrites the input once
+    /// `confirmed_overwrite` is explicitly set — proving the flag is load-bearing, not decorative.
+    #[test]
+    fn an_in_place_plan_proceeds_once_confirmed_overwrite_is_set() {
+        let d = scratch("refuse-confirmed");
+        let a = d.join("a.png");
+        fs::write(&a, png_bytes(12, 12)).unwrap();
+
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]); // no rename suffix
+        job.non_destructive = false;
+        job.confirmed_overwrite = true;
+
+        let inputs = vec![a.to_string_lossy().to_string()];
+        let items = plan(&job, &inputs);
+        assert_eq!(items[0].input, items[0].output, "sanity: this plan IS in-place");
+
+        let report = execute_plan(&items, &job).expect("a confirmed in-place plan must be allowed to run");
+        assert_eq!(report.written, 1);
+        assert!(report.skipped.is_empty());
+        // The file still exists at the same path (it was overwritten in place, not left alone).
+        assert!(a.exists());
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A non-destructive plan (every output != input) is unaffected by `confirmed_overwrite` either
+    /// way — the refusal check only ever fires for a plan that actually contains an in-place item.
+    #[test]
+    fn a_non_destructive_plan_runs_regardless_of_confirmed_overwrite() {
+        for confirmed in [false, true] {
+            let d = scratch(if confirmed { "nondestructive-confirmed" } else { "nondestructive-unconfirmed" });
+            let a = d.join("a.png");
+            fs::write(&a, png_bytes(8, 8)).unwrap();
+
+            let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 4 }]); // default non_destructive: true
+            job.confirmed_overwrite = confirmed;
+            assert!(job.non_destructive);
+
+            let inputs = vec![a.to_string_lossy().to_string()];
+            let items = plan(&job, &inputs);
+            assert_ne!(items[0].input, items[0].output, "sanity: this plan is NOT in-place");
+
+            let report = execute_plan(&items, &job)
+                .unwrap_or_else(|e| panic!("a non-destructive plan must never be refused (confirmed={confirmed}): {e}"));
+            assert_eq!(report.written, 1);
+
+            let _ = fs::remove_dir_all(&d);
+        }
     }
 
     /// Streamed outcomes (`execute_plan_walk` + a collecting `flush`) must match a direct `execute_plan`
@@ -236,7 +352,7 @@ mod tests {
             t.to_string_lossy().to_string(),
         ];
         let items_direct = plan(&job, &inputs);
-        let direct_report = execute_plan(&items_direct, &job);
+        let direct_report = execute_plan(&items_direct, &job).unwrap();
 
         // Re-plan into a sibling scratch dir so the streamed run doesn't clash with the direct run's
         // already-written outputs (both plans are non-destructive but share the same source dir).
@@ -255,7 +371,7 @@ mod tests {
         let items_streamed = plan(&job, &inputs2);
 
         let mut streamed_results: Vec<OpResult> = Vec::new();
-        let streamed_report = execute_plan_walk(&items_streamed, &job, |r| streamed_results.push(r));
+        let streamed_report = execute_plan_walk(&items_streamed, &job, |r| streamed_results.push(r)).unwrap();
 
         assert_eq!(streamed_report.written, direct_report.written);
         assert_eq!(streamed_report.skipped.len(), direct_report.skipped.len());
@@ -306,7 +422,7 @@ mod tests {
         let items = plan(&job, &inputs);
         assert_eq!(items.len(), 3, "one planned item per input");
 
-        let report = execute_plan(&items, &job);
+        let report = execute_plan(&items, &job).unwrap();
         assert_eq!(report.written, 2, "the two valid images are written");
         assert_eq!(report.skipped.len(), 1, "the undecodable jpg is skipped, not fatal to the batch");
         assert_eq!(report.skipped[0].0, bad_jpg.to_string_lossy().to_string());
