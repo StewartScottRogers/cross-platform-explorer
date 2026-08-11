@@ -13,6 +13,13 @@
 //! directory) or an entry that fails to read yields a graceful empty/non-dangerous report rather than an
 //! `Err` — a safety scan is a best-effort advisory pass, not something that should abort a caller's sweep
 //! over many files just because one of them turns out to be garbage.
+//!
+//! CPE-1591: a per-entry read failure is **counted**, not silently discarded — an AES/ZipCrypto-encrypted
+//! entry can't be read without its password, and `ZipArchive::by_index()` returns `Err` for it exactly
+//! like it does for a genuinely malformed local-file header. Before this fix the loop below `continue`d
+//! past that `Err` with nothing to show for it, so a password-protected zip (every entry unreadable)
+//! collapsed to the same `entries_scanned: 0, unreadable: false` shape as a valid, empty archive — which
+//! [`ArchiveSafetyReport`]'s consumer renders as "No zip-bomb risk detected", having examined nothing.
 
 use std::fs;
 use std::path::Path;
@@ -36,6 +43,18 @@ const MAX_ENTRIES: usize = 200_000;
 /// a zip, corrupt/truncated central directory) — the rest of the report is a placeholder, not a real
 /// scan, and callers must not read it as "safe". `unreadable == false` means the archive opened fine (an
 /// empty archive still reports `entries_scanned: 0`, but with `unreadable: false`).
+///
+/// `unreadable_entries` (CPE-1591) is the sibling signal for the case `unreadable` doesn't cover: the
+/// archive itself opened fine (its central directory is readable), but one or more *individual entries*
+/// couldn't be read — overwhelmingly because they're AES/ZipCrypto-encrypted and no password was
+/// supplied, though the same field would also catch a one-off malformed local-file header. A skipped
+/// entry contributes nothing to `report` (it was never sized or scored), so **`report.dangerous == false`
+/// does not mean "safe" when `unreadable_entries > 0`** — it can just as easily mean "we couldn't check".
+/// A fully password-protected zip scans zero entries and reports `unreadable_entries` equal to the
+/// archive's whole entry count; a caller must treat any `unreadable_entries > 0` as "not fully assessed"
+/// and never render the plain safe banner for it, mirroring how `unreadable` already gates the corrupt
+/// case. `unreadable_entries == 0` (with `unreadable == false`) means every entry that exists was
+/// actually scored — the only shape a "no zip-bomb risk" verdict is honest for.
 #[derive(Debug, Clone, Serialize)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct ArchiveSafetyReport {
@@ -43,6 +62,7 @@ pub struct ArchiveSafetyReport {
     pub entries_scanned: u64,
     pub truncated: bool,
     pub unreadable: bool,
+    pub unreadable_entries: u64,
 }
 
 /// Score `path` (a ZIP archive) for zip-bomb-like expansion ratio, using
@@ -66,14 +86,21 @@ pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> 
 
     let mut entries: Vec<EntrySizes> = Vec::new();
     let mut truncated = false;
+    let mut unreadable_entries: u64 = 0;
     for i in 0..zip.len() {
         if entries.len() >= MAX_ENTRIES {
             truncated = true;
             break;
         }
-        // Skip (not abort) an entry the `zip` crate can't read — a single malformed local-file header
-        // shouldn't take down the whole scan, mirroring `list_dir`'s skip-on-error discipline.
-        let Ok(entry) = zip.by_index(i) else { continue };
+        // Skip (not abort) an entry the `zip` crate can't read — a single malformed local-file header,
+        // or (CPE-1591) an AES/ZipCrypto-encrypted entry with no password supplied, shouldn't take down
+        // the whole scan, mirroring `list_dir`'s skip-on-error discipline. Unlike the pre-fix code, the
+        // skip is *counted* rather than silently dropped, so the caller can tell "scanned and clean" from
+        // "couldn't check this entry" instead of both collapsing into the same all-zeros report.
+        let Ok(entry) = zip.by_index(i) else {
+            unreadable_entries += 1;
+            continue;
+        };
         entries.push(EntrySizes {
             name: entry.name().to_string(),
             compressed: entry.compressed_size(),
@@ -83,7 +110,7 @@ pub fn analyze_archive_safety_with_limits(path: &Path, limits: &RatioLimits) -> 
 
     let entries_scanned = entries.len() as u64;
     let report = archive_safety::expansion_ratio(&entries, limits);
-    ArchiveSafetyReport { report, entries_scanned, truncated, unreadable: false }
+    ArchiveSafetyReport { report, entries_scanned, truncated, unreadable: false, unreadable_entries }
 }
 
 /// The graceful empty result for an archive that couldn't be opened at all. `unreadable` distinguishes
@@ -98,6 +125,7 @@ fn empty_report(limits: &RatioLimits, unreadable: bool) -> ArchiveSafetyReport {
         entries_scanned: 0,
         truncated: false,
         unreadable,
+        unreadable_entries: 0,
     }
 }
 
@@ -153,6 +181,7 @@ mod tests {
         assert!(result.report.flagged.is_empty(), "flagged: {:?}", result.report.flagged);
         assert!(!result.report.dangerous);
         assert!(!result.unreadable, "a successfully opened archive is not unreadable");
+        assert_eq!(result.unreadable_entries, 0, "every entry in a normal archive was readable");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -173,6 +202,46 @@ mod tests {
         assert!(result.report.flagged[0].ratio > 100.0);
         assert!(result.report.dangerous);
         assert!(!result.unreadable, "a successfully opened archive is not unreadable, even a dangerous one");
+        assert_eq!(result.unreadable_entries, 0, "every entry in this archive was readable");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1591: a password-protected (AES-256) zip opens fine (its central directory needs no password),
+    /// but every entry inside it needs the password to read — before this fix, `by_index()`'s per-entry
+    /// `Err` was silently `continue`d past, so the scan finished having examined nothing and reported the
+    /// same `entries_scanned: 0, unreadable: false, report.dangerous: false` shape as a genuinely safe,
+    /// empty archive. This proves an encrypted zip that's actually full of a would-be-dangerous entry does
+    /// NOT silently report `dangerous: false` — it now surfaces via `unreadable_entries > 0` that nothing
+    /// was actually scored, so a caller can't mistake this for "scanned and safe".
+    #[test]
+    fn a_password_protected_zip_reports_unreadable_entries_not_silently_safe() {
+        let d = scratch("encrypted");
+        let zip_path = d.join("secret.zip");
+        // A large, highly-compressible payload — if this could be read without the password, it would
+        // trip the zip-bomb flag. Encrypted, it must instead show up as an unreadable entry.
+        let bomb = vec![0u8; 2_000_000];
+        let payload_path = d.join("bomb.bin");
+        fs::write(&payload_path, &bomb).unwrap();
+        crate::archive::compress_to_zip_encrypted(
+            &[payload_path.to_string_lossy().to_string()],
+            zip_path.to_str().unwrap(),
+            "correct horse battery staple",
+        )
+        .unwrap();
+
+        let result = analyze_archive_safety(&zip_path);
+        assert_eq!(result.entries_scanned, 0, "no entry could be read without the password");
+        assert!(!result.truncated);
+        assert!(result.report.flagged.is_empty(), "nothing was scored, so nothing can be flagged");
+        assert!(
+            !result.report.dangerous,
+            "the pure ratio score over zero entries is (correctly) not dangerous on its own"
+        );
+        assert!(!result.unreadable, "the archive itself opened fine — only its entries are unreadable");
+        assert_eq!(
+            result.unreadable_entries, 1,
+            "the single encrypted entry must be counted as unreadable, not silently skipped"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -205,6 +274,7 @@ mod tests {
         assert!(!result.truncated);
         assert!(!result.report.dangerous);
         assert!(result.unreadable, "a missing file couldn't be opened, so it's unreadable too");
+        assert_eq!(result.unreadable_entries, 0, "we never got as far as reading any entries");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -212,6 +282,12 @@ mod tests {
     /// unreadable — only an open-failure sets that flag. This is the contrast case for
     /// `a_corrupt_zip_is_reported_unreadable_not_silently_safe`: same `entries_scanned == 0`, same
     /// `report.dangerous == false`, but `unreadable` differs because one archive actually opened.
+    ///
+    /// It's also the contrast case for CPE-1591's
+    /// `a_password_protected_zip_reports_unreadable_entries_not_silently_safe`: this archive has the same
+    /// `entries_scanned == 0` too, but `unreadable_entries == 0` here (there was nothing to fail to read),
+    /// versus `unreadable_entries == 1` there (an entry existed but couldn't be read) — the field that
+    /// tells "genuinely nothing to scan" apart from "something existed but we couldn't check it".
     #[test]
     fn a_valid_empty_zip_is_not_flagged_unreadable() {
         let d = scratch("valid-empty");
@@ -223,6 +299,7 @@ mod tests {
         assert!(!result.truncated);
         assert!(!result.report.dangerous);
         assert!(!result.unreadable, "a validly-opened empty archive is not unreadable");
+        assert_eq!(result.unreadable_entries, 0, "a genuinely empty archive has no entries to fail on");
         let _ = fs::remove_dir_all(&d);
     }
 

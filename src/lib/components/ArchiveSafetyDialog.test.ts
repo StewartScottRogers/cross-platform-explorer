@@ -32,6 +32,7 @@ const SAFE_REPORT = {
   entries_scanned: 3,
   truncated: false,
   unreadable: false,
+  unreadable_entries: 0,
 };
 
 const DANGEROUS_REPORT = {
@@ -45,6 +46,7 @@ const DANGEROUS_REPORT = {
   entries_scanned: 2,
   truncated: false,
   unreadable: false,
+  unreadable_entries: 0,
 };
 
 // CPE-1320: a corrupt/unreadable ZIP — `analyze_archive_safety` can't tell "never opened" from "opened,
@@ -56,6 +58,36 @@ const UNREADABLE_REPORT = {
   entries_scanned: 0,
   truncated: false,
   unreadable: true,
+  unreadable_entries: 0,
+};
+
+// CPE-1591: a password-protected ZIP opens fine (unreadable stays false) but every entry inside needs a
+// password the scan doesn't have — before the fix this collapsed to the exact shape of SAFE_REPORT
+// (entries_scanned: 0, dangerous: false, unreadable: false), so the dialog rendered the reassuring safe
+// banner having examined nothing. `unreadable_entries` makes this case structurally distinct.
+const ENCRYPTED_REPORT = {
+  report: { total_compressed: 0, total_uncompressed: 0, overall_ratio: 0, flagged: [], dangerous: false },
+  entries_scanned: 0,
+  truncated: false,
+  unreadable: false,
+  unreadable_entries: 3,
+};
+
+// A mix: some entries were readable and one tripped the danger threshold, but other entries in the same
+// archive couldn't be read (encrypted). The danger verdict must still lead — it's real signal — while the
+// dialog also discloses that the scan was incomplete.
+const DANGEROUS_WITH_ENCRYPTED_REPORT = {
+  report: {
+    total_compressed: 1024,
+    total_uncompressed: 200_000_000,
+    overall_ratio: 195312.5,
+    flagged: [{ name: "bomb.bin", ratio: 200000.0 }],
+    dangerous: true,
+  },
+  entries_scanned: 2,
+  truncated: false,
+  unreadable: false,
+  unreadable_entries: 1,
 };
 
 describe("ArchiveSafetyDialog (CPE-1318)", () => {
@@ -130,6 +162,30 @@ describe("ArchiveSafetyDialog (CPE-1318)", () => {
     expect(screen.queryByTestId("as-danger")).toBeNull();
     expect(screen.queryByTestId("as-entries")).toBeNull();
     expect(screen.queryByTestId("as-none-flagged")).toBeNull();
+  });
+
+  it("shows a 'couldn't be assessed' state (not the safe banner) for a password-protected archive with no readable entries (CPE-1591)", async () => {
+    responder = () => ENCRYPTED_REPORT;
+    render(ArchiveSafetyDialog, { path: "/repo/secret.zip" });
+
+    await waitFor(() => expect(screen.getByTestId("as-encrypted")).toBeTruthy());
+    expect(screen.getByTestId("as-encrypted").textContent).toContain("3");
+    // Must NOT render as safe or dangerous — the archive was never actually scanned.
+    expect(screen.queryByTestId("as-safe")).toBeNull();
+    expect(screen.queryByTestId("as-danger")).toBeNull();
+    expect(screen.queryByTestId("as-unreadable")).toBeNull();
+  });
+
+  it("still leads with the DANGER banner when danger was found among readable entries, even if some entries were unreadable (CPE-1591)", async () => {
+    responder = () => DANGEROUS_WITH_ENCRYPTED_REPORT;
+    render(ArchiveSafetyDialog, { path: "/repo/mixed.zip" });
+
+    await waitFor(() => expect(screen.getByTestId("as-danger")).toBeTruthy());
+    expect(screen.queryByTestId("as-safe")).toBeNull();
+    expect(screen.queryByTestId("as-encrypted")).toBeNull();
+    // The incomplete-scan note is still surfaced, alongside the real danger verdict.
+    expect(screen.getByTestId("as-partial-note")).toBeTruthy();
+    expect(screen.getByTestId("as-unreadable-entries").textContent).toBe("1");
   });
 
   it("closing dispatches close", async () => {
