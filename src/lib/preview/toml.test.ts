@@ -192,6 +192,61 @@ describe("parseToml — malformed input reports a real, specific error", () => {
   });
 });
 
+// CPE-1617 PR #833 review, findings #2-#5: five real inputs that PREVIOUSLY parsed WRONG (accepted as
+// valid, silently producing a mis-shapen tree) rather than erroring — exactly the failure mode the
+// ticket named as worse than not supporting a format at all. Each test is a negative control: it failed
+// against the pre-fix code (documented inline) and must pass now.
+describe("parseToml — findings #2-#5 (invalid input previously accepted, now rejected)", () => {
+  it("finding #2: a leading-zero integer is rejected, not silently parsed as the number without its zero", () => {
+    // Pre-fix: `parseToml("a = 007")` returned `{ok:true, value:{a:7}}`. TOML spec: "Leading zeros are
+    // not allowed."
+    expect(fails("a = 007")).toMatch(/invalid value/i);
+    expect(fails("a = 010")).toMatch(/invalid value/i);
+  });
+
+  it("finding #2: a leading-zero float's integer part is rejected", () => {
+    // Pre-fix: `parseToml("a = 03.14")` returned `{ok:true, value:{a:3.14}}`.
+    expect(fails("a = 03.14")).toMatch(/invalid value/i);
+  });
+
+  it("finding #2: '0' alone and a non-zero-leading number both still parse correctly (not over-corrected)", () => {
+    expect(ok("a = 0\nb = 0.5\nc = 100")).toEqual({ a: 0, b: 0.5, c: 100 });
+  });
+
+  it("finding #3: reopening an already-defined [table] is rejected, not silently merged", () => {
+    // Pre-fix: `parseToml("[a]\nb=1\n[a]\nc=2")` returned `{ok:true, value:{a:{b:1,c:2}}}`. TOML spec:
+    // "tables cannot be defined more than once."
+    expect(fails("[a]\nb=1\n[a]\nc=2")).toMatch(/defined more than once/i);
+  });
+
+  it("finding #4: a [table] header colliding with a dotted-key-established table is rejected", () => {
+    // Pre-fix: `parseToml("a.b = 1\n[a]\nc = 2")` returned `{ok:true, value:{a:{b:1,c:2}}}`. This is the
+    // TOML spec's own worked "DO NOT DO THIS" example shape (`[fruit]\napple.color="red"\n[fruit.apple]`).
+    expect(fails("a.b = 1\n[a]\nc = 2")).toMatch(/redefine a table already defined via dotted keys/i);
+  });
+
+  it("finding #4: a super-table defined AFTER a header sub-table remains legal (not over-corrected)", () => {
+    // Spec: "you do not need to specify all the super-tables... defining a super-table afterward is ok".
+    expect(ok(["[x.y.z.w]", "a = 1", "", "[x]", "b = 2"].join("\n"))).toEqual({
+      x: { b: 2, y: { z: { w: { a: 1 } } } },
+    });
+  });
+
+  it("finding #5: a [table] header colliding with an established [[array of tables]] is rejected", () => {
+    // Pre-fix: `parseToml("[[a]]\nx=1\n[a]\ny=2")` returned `{ok:true, value:{a:[{x:1,y:2}]}}` — it
+    // silently descended into the array's last entry instead of erroring. TOML spec: defining a normal
+    // table with the same name as an established array "must produce an error".
+    expect(fails("[[a]]\nx=1\n[a]\ny=2")).toMatch(/already an array of tables/i);
+  });
+
+  it("finding #5: descending INTO an array-of-tables to reach a deeper sub-table remains legal", () => {
+    // `[fruit.physical]` after `[[fruit]]` is the normal, spec-legal way to add a nested table to the
+    // array's LAST entry — must not be broken by the finding #5 fix.
+    const v = ok(["[[fruit]]", 'name = "apple"', "", "[fruit.physical]", 'color = "red"'].join("\n"));
+    expect(v).toEqual({ fruit: [{ name: "apple", physical: { color: "red" } }] });
+  });
+});
+
 describe("parseToml — untrusted-input safety", () => {
   it("a '__proto__' key never pollutes Object.prototype", () => {
     const v = ok('"__proto__" = { polluted = true }');

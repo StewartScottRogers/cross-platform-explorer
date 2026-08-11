@@ -3,37 +3,58 @@
  * same "pure module behind the preview component" convention as `toml.ts`/`jsonTree.ts`/`notebook.ts`.
  *
  * **This is deliberately NOT a full YAML implementation.** Full YAML (anchors/aliases/merge keys, tags,
- * block scalars, multi-document streams, complex mapping keys, flow collections spanning lines, …) is
- * genuinely hard to get right, and a half-correct parser that silently mis-parses a construct it
- * doesn't fully understand is worse than no structured view at all — it would show a confidently wrong
- * tree for someone's real config. Rather than attempt full coverage, {@link parseYaml} recognises a
- * BOUNDED SUBSET that covers ordinary, hand-written config shapes:
+ * multi-document streams, complex mapping keys, flow collections spanning lines, …) is genuinely hard to
+ * get right, and a half-correct parser that silently mis-parses a construct it doesn't fully understand
+ * is worse than no structured view at all — it would show a confidently wrong tree for someone's real
+ * config. Rather than attempt full coverage, {@link parseYaml} recognises a BOUNDED SUBSET covering
+ * ordinary, hand-written config shapes AND the constructs a PR #833 review round found were common
+ * enough in real files (a 20-real-file UAT) to be worth the extra work:
  *
- *   - block mappings (`key: value`, nested by indentation) and block sequences (`- item`, including
- *     the common `- key: value` shorthand that starts a mapping on the dash's own line)
- *   - plain/single/double-quoted scalars, `null`/`~`/empty, `true`/`false`, integers, floats
+ *   - block mappings (`key: value`, nested by indentation) and block sequences (`- item`, including the
+ *     common `- key: value` shorthand that starts a mapping on the dash's own line)
+ *   - **indentless sequences** (`status:\n- item\n- item` — the sequence sits at the SAME column as its
+ *     own key, not indented under it). Standard, spec-legal YAML and extremely common in hand-written
+ *     config; PyYAML parses it fine, and an earlier revision of this parser wrongly reported "unexpected
+ *     indentation" on it (real file: a repo's own `gateway/assets/status_phrases.yaml`).
+ *   - **block scalars** (`|` literal, `>` folded, with `-`/`+` chomping indicators) — see the dedicated
+ *     doc comment on {@link consumeBlockScalarBody} for the full assessment of why these are tractable
+ *     (unlike anchors/aliases/tags) and were added: they're everywhere in real YAML (every GitHub
+ *     Actions `run: |` step) and are simple enough with this parser's line-based design to implement
+ *     honestly, without the "guess and hope" risk anchors/tags/complex-keys carry.
+ *   - plain/single/double-quoted scalars, `null`/`~`/empty, `true`/`false`, integers, floats. A
+ *     double-quoted scalar MAY fold across physical lines (YAML line-folding) — see
+ *     {@link foldMultilineDoubleQuoted}'s doc comment for the exact bounded support and its one
+ *     documented risk. Single-quoted multi-line folding is NOT supported (rarer in practice; falls to
+ *     the existing "unterminated string" error like before).
  *   - single-LINE flow collections (`[a, b]`, `{a: 1, b: 2}`) — flow collections that span multiple
  *     physical lines are explicitly unsupported (see below), not guessed at
  *   - `#` comments, blank lines, and a single leading `---` document-start marker
  *
- * **Anything outside that subset degrades EXPLICITLY, with a stated reason, rather than being ignored
- * or mis-rendered.** {@link YamlParseResult} distinguishes two failure shapes: `unsupported: true` for
- * a construct this parser recognises but deliberately doesn't implement (anchors `&`, aliases `*`,
- * explicit tags `!`, block scalars `|`/`>`, complex `? key` mappings, multiple `---` documents, tab
- * indentation, a flow collection spanning lines), and `unsupported: false` for a genuine syntax error
- * (bad indentation, an unterminated quote, a malformed flow collection, …). The preview component
- * (`YamlTomlPreview.svelte`) renders both as "can't show a structured view: <reason>" plus the raw text
- * — never as an empty/blank pane, and never silently rendering a guessed, possibly-wrong tree.
+ * **Anything outside that subset degrades EXPLICITLY, with a stated reason, rather than being ignored or
+ * mis-rendered.** {@link YamlParseResult} distinguishes two failure shapes: `unsupported: true` for a
+ * construct this parser recognises but deliberately doesn't implement (anchors `&`, aliases `*`,
+ * explicit tags `!`, a block scalar's rare explicit-numeric-indentation-indicator form (`|2`), complex
+ * `? key` mappings, multiple `---` documents, tab indentation, a flow collection spanning lines), and
+ * `unsupported: false` for a genuine syntax error (bad indentation, an unterminated quote, `key: value:
+ * value` — a bare unquoted colon inside a value, which every real YAML tool also rejects — a malformed
+ * flow collection, …). **This distinction is deliberately kept sharp**: invalid input is always a syntax
+ * error, never a silent "degrade" — conflating the two would hide a genuine mistake in someone's file
+ * behind the same soft "not supported" framing a merely-unimplemented construct gets. The preview
+ * component (`YamlTomlPreview.svelte`) renders both as "can't show a structured view: <reason>" plus the
+ * raw text — never as an empty/blank pane, and never silently rendering a guessed, possibly-wrong tree.
  *
  * **Untrusted input / DoS safety**, same discipline as `toml.ts`: mapping objects use
  * `Object.create(null)` (no `__proto__` key footgun on attacker-controlled key strings), and both block
- * recursion and flow-collection recursion are bounded by {@link MAX_DEPTH} / the flow parser's own
- * depth cap, so a pathological file (deeply nested sequences, or thousands of nested `[[[[…` on one
- * line) fails with a clear error instead of a stack overflow. Line splitting + per-line scanning is a
- * single linear pass over the (already read-capped, see `PREVIEW_MAX_BYTES`) input text — no separate
+ * recursion and flow-collection recursion are bounded by {@link MAX_DEPTH} / the flow parser's own depth
+ * cap, so a pathological file (deeply nested sequences, or thousands of nested `[[[[…` on one line)
+ * fails with a clear error instead of a stack overflow. Line splitting + per-line scanning is a single
+ * linear pass over the (already read-capped, see `PREVIEW_MAX_BYTES`) input text — no separate
  * line-count cap is needed here (unlike `logViewer.ts`'s `MAX_LINES`): the rendered TREE is what could
  * blow up the DOM, and that's already bounded by `jsonTree.ts`'s `MAX_CHILDREN`/`AUTO_COLLAPSE_DEPTH`,
- * reused as-is by feeding the parsed value through `JsonTree.svelte`.
+ * reused as-is by feeding the parsed value through `JsonTree.svelte`. The multi-line quote fold
+ * ({@link foldMultilineDoubleQuoted}) and block-scalar consumption ({@link consumeBlockScalarBody}) both
+ * still only ever advance forward through the physical-line array once — no re-scanning — so neither
+ * changes this module's overall linear-time bound.
  */
 
 export type YamlParseResult =
@@ -50,6 +71,11 @@ interface Line {
   indent: number;
   content: string;
   lineNo: number;
+  /** Set only when {@link tokenizeLines} recognised this line's value as a block-scalar header (`|`/
+   *  `>`, optionally chomped) and already consumed + resolved its body from the raw physical lines —
+   *  the parse-phase (`parseMapping`/`parseSequence`) reads this directly instead of treating `content`
+   *  as an ordinary scalar/nested-block trigger. See {@link consumeBlockScalarBody}. */
+  blockScalarValue?: string;
 }
 
 /** Strips a `#` comment, respecting single/double-quoted runs so a `#` inside a string isn't treated
@@ -93,28 +119,117 @@ function stripComment(s: string): string {
   return s;
 }
 
-/** Splits raw text into non-blank, comment-stripped logical lines with their indent depth. Throws
- *  {@link YamlUnsupported} for tab-indented lines or a directive line (`%YAML`, `%TAG`) — both real
- *  YAML constructs this parser doesn't attempt. */
-function tokenizeLines(raw: string): Line[] {
-  const physical = raw.split(/\r\n|\n/);
-  const out: Line[] = [];
-  for (let i = 0; i < physical.length; i++) {
-    const rawLine = physical[i];
-    if (rawLine.trim() === "") continue;
-    const leading = /^[ \t]*/.exec(rawLine)?.[0] ?? "";
-    if (leading.includes("\t")) {
-      throw new YamlUnsupported("tab characters in indentation are not supported by this preview");
+/** Whether `s` (a line already run through {@link stripComment}) ends while still "inside" an open
+ *  double-quote — i.e. it contains an opening `"` with no matching close on the same line. Reuses the
+ *  same single/double quote state machine as `stripComment` (so the two never disagree about where a
+ *  quote starts) and honours `\"`/`\\` escapes. Used to detect a double-quoted scalar that needs
+ *  {@link foldMultilineDoubleQuoted} to fold in continuation lines (finding #7, CPE-1617 PR #833
+ *  review). Safe to call on a line whose quote DOES close normally — `stripComment` never alters
+ *  anything while a quote is open, so this sees exactly the same quote boundaries either function would. */
+function endsInsideDoubleQuote(s: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (inSingle) {
+      if (c === "'") {
+        if (s[i + 1] === "'") {
+          i++;
+          continue;
+        }
+        inSingle = false;
+      }
+      continue;
     }
-    const indent = leading.length;
-    const content = stripComment(rawLine.slice(indent)).replace(/\s+$/, "");
-    if (content === "") continue;
-    if (indent === 0 && content.startsWith("%")) {
-      throw new YamlUnsupported("YAML directives are not supported by this preview");
+    if (inDouble) {
+      if (c === "\\") {
+        i++;
+        continue;
+      }
+      if (c === '"') inDouble = false;
+      continue;
     }
-    out.push({ indent, content, lineNo: i + 1 });
+    if (c === "'") {
+      inSingle = true;
+      continue;
+    }
+    if (c === '"') {
+      inDouble = true;
+      continue;
+    }
   }
-  return out;
+  return inDouble;
+}
+
+/** Index of the `"` that closes an ALREADY-OPEN double-quoted span within `s` (i.e. `s` is read as if
+ *  scanning started already inside the quote) — honours `\"`/`\\` escapes. -1 if `s` doesn't close it. */
+function findClosingDoubleQuote(s: string): number {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === "\\") {
+      i++;
+      continue;
+    }
+    if (s[i] === '"') return i;
+  }
+  return -1;
+}
+
+/** Safety valve for {@link foldMultilineDoubleQuoted}: how many CONTINUATION physical lines one folded
+ *  scalar may consume before this parser gives up folding and falls back to normal (single-line)
+ *  handling — which then surfaces the pre-existing "unterminated double-quoted string" error, same as
+ *  before this feature existed. Real folded strings (translation catalogs, long descriptions) wrap
+ *  across a handful of lines; this is generous headroom without risking an ACTUALLY unterminated quote
+ *  silently swallowing hundreds of unrelated subsequent lines into one bogus scalar. */
+const MAX_QUOTE_FOLD_LINES = 200;
+
+/**
+ * YAML double-quoted flow scalars MAY wrap across physical lines ("line folding"): an unescaped line
+ * break inside the quotes folds to a single space, and each continuation line's own leading whitespace
+ * is not part of the content. This is common in real-world files (a real 403-line Afrikaans locale
+ * catalog needed exactly this — CPE-1617 PR #833 review finding #7) — supporting it, rather than
+ * reporting "unterminated string" on ordinary valid YAML, is the difference between a false positive and
+ * a real feature.
+ *
+ * Only DOUBLE-quoted scalars fold this way here (single-quoted scalars fold too in real YAML, but
+ * aren't handled — a documented, bounded gap: unclosed single-quoted values still report "unterminated
+ * string" as before). A `#` inside the fold is literal, never a comment, so continuation lines are read
+ * from the RAW physical text (never through {@link stripComment}).
+ *
+ * **Known limitation, stated plainly**: this is a heuristic, not a real multi-line-aware tokenizer — it
+ * decides "does this line need folding" purely from whether it ends with an unclosed `"`, then keeps
+ * consuming subsequent RAW physical lines until one closes it. A genuinely unterminated quote (a real
+ * mistake in the file) could in principle keep matching some LATER unrelated `"` and silently fold
+ * unrelated lines together instead of erroring — {@link MAX_QUOTE_FOLD_LINES} bounds how far this can
+ * run before giving up and falling back to the normal (safe) "unterminated string" error path.
+ *
+ * Returns `null` when `content` doesn't end with an open double quote (the common case, no folding
+ * needed) OR the fold never closes within the line cap (falls back to normal single-line handling).
+ */
+function foldMultilineDoubleQuoted(
+  physical: string[],
+  startIndex: number,
+  content: string,
+): { content: string; nextPhysicalIndex: number } | null {
+  if (!endsInsideDoubleQuote(content)) return null;
+
+  const parts = [content];
+  let i = startIndex + 1;
+  let closed = false;
+  while (i < physical.length && parts.length <= MAX_QUOTE_FOLD_LINES) {
+    const raw = physical[i].replace(/^[ \t]+/, "");
+    const close = findClosingDoubleQuote(raw);
+    if (close === -1) {
+      parts.push(raw);
+      i++;
+      continue;
+    }
+    parts.push(raw.slice(0, close + 1));
+    closed = true;
+    i++;
+    break;
+  }
+  if (!closed) return null; // never closed (or exceeded the cap) — fall back to normal handling
+  return { content: parts.join(" "), nextPhysicalIndex: i };
 }
 
 function isSeqItem(content: string): boolean {
@@ -199,17 +314,181 @@ function splitKeyValue(content: string): { key: string; rest: string } | null {
   return null;
 }
 
+/** Block-scalar header pattern (no explicit numeric indentation indicator — see the module doc comment
+ *  and `rejectUnsupportedPrefix` for why that rarer form stays an explicit "unsupported" degrade). */
+const BLOCK_SCALAR_HEADER_RE = /^([|>])([+-]?)$/;
+
+/** Whether `content`'s VALUE portion (after a mapping key's `key:`, after a sequence item's `- `, or
+ *  `content` itself for a bare top-level line) is exactly a block-scalar header (`|`, `>`, `|-`, `|+`,
+ *  `>-`, `>+`). Reuses `splitKeyValue`/`isSeqItem` (safe to call from the tokenizer — both are pure
+ *  functions of a single line's text) so this recognises the SAME two shapes `parseMapping`/
+ *  `parseSequence` would otherwise treat as an ordinary scalar value, including the `- key: |` dash
+ *  shorthand. */
+function blockScalarHeader(content: string): { style: "|" | ">"; chomp: "" | "+" | "-" } | null {
+  let candidate = content;
+  if (isSeqItem(content)) {
+    candidate = content === "-" ? "" : content.slice(1).trimStart();
+  }
+  const kv = splitKeyValue(candidate);
+  if (kv) candidate = kv.rest;
+  const m = BLOCK_SCALAR_HEADER_RE.exec(candidate);
+  return m ? { style: m[1] as "|" | ">", chomp: m[2] as "" | "+" | "-" } : null;
+}
+
+/** Folded style (`>`): a line break between two non-blank content lines becomes a single space; a blank
+ *  line becomes a real newline (YAML's folding rule). Bounded implementation — doesn't special-case "a
+ *  more-indented line stays literal", a real `>` nuance this preview doesn't attempt (documented
+ *  simplification, same spirit as `toml.ts`'s date-as-string choice). */
+function foldBlockLines(lines: string[]): string {
+  let out = "";
+  for (let i = 0; i < lines.length; i++) {
+    if (i > 0) out += lines[i] === "" || lines[i - 1] === "" ? "\n" : " ";
+    out += lines[i];
+  }
+  return out;
+}
+
+/**
+ * Consumes a block scalar's body directly off the RAW physical lines starting at `startIndex` (NOT the
+ * already blank-line-filtered {@link Line} array — blank lines inside a block scalar are significant
+ * content, unlike blank lines between ordinary block-mapping/sequence entries, which is exactly why this
+ * has to run during {@link tokenizeLines}'s raw pass rather than later against the filtered stream).
+ *
+ * **Why block scalars were worth doing (and anchors/aliases/tags weren't):** a PR #833 review asked for
+ * a deliberate assessment, not silence. Unlike anchors/aliases (which need a document-wide symbol table
+ * and reference resolution) or tags (open-ended, arbitrary semantics) or complex `? key` mappings
+ * (fundamentally break the "one physical line, one logical unit" model this whole parser is built on),
+ * a block scalar's body is just "the physical lines indented more than the header, joined by one of two
+ * simple rules, then chomped" — a linear scan this line-based design already does naturally. It's also
+ * the single biggest real-world payoff: every GitHub Actions workflow's `run: |` step is a block scalar,
+ * and it was the largest driver of "valid YAML degrades to plain text" in real repos.
+ *
+ * Indentation is auto-detected from the first non-blank content line (must be indented more than
+ * `parentIndent`, i.e. the block-scalar HEADER's own column) — a content line indented further still
+ * than that detected base keeps its extra leading whitespace as literal text (e.g. a nested `if` block
+ * inside a `run: |` shell script). Trailing blank lines are never treated as part of the scalar's own
+ * content (they're the gap before whatever comes next); chomping then governs exactly how many trailing
+ * newlines the final value keeps: default ("clip") keeps exactly one, `-` ("strip") keeps none, and `+`
+ * ("keep") is treated the same as clip here — a documented simplification (this parser discards
+ * trailing blank lines before chomping ever sees them, so `+`'s "preserve every trailing blank line"
+ * nuance isn't reproduced; `+` is the least common of the three chomping indicators in practice).
+ */
+function consumeBlockScalarBody(
+  physical: string[],
+  startIndex: number,
+  parentIndent: number,
+  style: "|" | ">",
+  chomp: "" | "+" | "-",
+): { value: string; next: number } {
+  let i = startIndex;
+  let blockIndent = -1;
+  const rawContentLines: (string | null)[] = []; // null marks a blank line
+
+  while (i < physical.length) {
+    const line = physical[i];
+    if (line.trim() === "") {
+      rawContentLines.push(null);
+      i++;
+      continue;
+    }
+    const leading = /^[ \t]*/.exec(line)?.[0] ?? "";
+    const indent = leading.length;
+    if (blockIndent === -1) {
+      if (indent <= parentIndent) break; // no content lines at all — an empty block scalar
+      blockIndent = indent;
+    }
+    if (indent < blockIndent) break; // dedent — end of this block scalar's span
+    rawContentLines.push(line.slice(blockIndent));
+    i++;
+  }
+
+  // Trailing blank lines collected above but not followed by more real content aren't part of the
+  // span — give the corresponding physical lines back to the normal tokenizer (harmless: they're
+  // blank, so it just skips them) and let chomping alone decide the value's trailing newline count.
+  while (rawContentLines.length > 0 && rawContentLines[rawContentLines.length - 1] === null) {
+    rawContentLines.pop();
+    i--;
+  }
+
+  const lines = rawContentLines.map((l) => l ?? "");
+  let text = style === "|" ? lines.join("\n") : foldBlockLines(lines);
+
+  if (chomp === "-") {
+    text = text.replace(/\n+$/, "");
+  } else {
+    // Default ("clip") and "+" ("keep", simplified to clip — see doc comment): exactly one trailing
+    // newline when there was any content at all, none for a genuinely empty block scalar.
+    text = lines.length > 0 ? text.replace(/\n+$/, "") + "\n" : "";
+  }
+
+  return { value: text, next: i };
+}
+
+/** Splits raw text into non-blank, comment-stripped logical lines with their indent depth — folding a
+ *  multi-line double-quoted scalar ({@link foldMultilineDoubleQuoted}) or consuming a block scalar's
+ *  body ({@link consumeBlockScalarBody}) into a single logical {@link Line} entry where applicable.
+ *  Throws {@link YamlUnsupported} for tab-indented lines or a directive line (`%YAML`, `%TAG`) — both
+ *  real YAML constructs this parser doesn't attempt. */
+function tokenizeLines(raw: string): Line[] {
+  const physical = raw.split(/\r\n|\n/);
+  const out: Line[] = [];
+  let i = 0;
+  while (i < physical.length) {
+    const rawLine = physical[i];
+    if (rawLine.trim() === "") {
+      i++;
+      continue;
+    }
+    const leading = /^[ \t]*/.exec(rawLine)?.[0] ?? "";
+    if (leading.includes("\t")) {
+      throw new YamlUnsupported("tab characters in indentation are not supported by this preview");
+    }
+    const indent = leading.length;
+    const content = stripComment(rawLine.slice(indent)).replace(/\s+$/, "");
+    if (content === "") {
+      i++;
+      continue;
+    }
+    if (indent === 0 && content.startsWith("%")) {
+      throw new YamlUnsupported("YAML directives are not supported by this preview");
+    }
+
+    const folded = foldMultilineDoubleQuoted(physical, i, content);
+    if (folded) {
+      out.push({ indent, content: folded.content, lineNo: i + 1 });
+      i = folded.nextPhysicalIndex;
+      continue;
+    }
+
+    const header = blockScalarHeader(content);
+    if (header) {
+      const body = consumeBlockScalarBody(physical, i + 1, indent, header.style, header.chomp);
+      out.push({ indent, content, lineNo: i + 1, blockScalarValue: body.value });
+      i = body.next;
+      continue;
+    }
+
+    out.push({ indent, content, lineNo: i + 1 });
+    i++;
+  }
+  return out;
+}
+
 /** Throws {@link YamlUnsupported} when `rest` (a value, right after `:` or `- `) starts with a
  *  construct this parser deliberately doesn't implement. Bounded detection — see the module doc
  *  comment: this catches the common case (the construct appearing at the point of assignment), not
- *  every position a real YAML anchor/tag could legally appear. */
+ *  every position a real YAML anchor/tag could legally appear. The plain (no-digit) block-scalar forms
+ *  are handled earlier, in `tokenizeLines`/`blockScalarHeader` — by the time `rest` reaches this
+ *  function, only the rarer explicit-numeric-indentation-indicator form (`|2`, `>1-`) can still match. */
 function rejectUnsupportedPrefix(rest: string): void {
   if (rest === "") return;
   if (rest[0] === "&") throw new YamlUnsupported("YAML anchors (&) are not supported by this preview");
   if (rest[0] === "*") throw new YamlUnsupported("YAML aliases (*) are not supported by this preview");
   if (rest[0] === "!") throw new YamlUnsupported("YAML tags (!) are not supported by this preview");
-  if (/^[|>][+-]?\d*$/.test(rest)) {
-    throw new YamlUnsupported("block scalars (| and >) are not supported by this preview");
+  if (/^[|>][+-]?\d+$/.test(rest)) {
+    throw new YamlUnsupported(
+      "a block scalar's explicit numeric indentation indicator (e.g. |2) is not supported by this preview",
+    );
   }
 }
 
@@ -354,6 +633,15 @@ function parseFlow(text: string): unknown {
   return value;
 }
 
+/** A bare (unquoted) colon-space (or a trailing bare colon) inside a plain scalar VALUE is invalid YAML
+ *  — every real tool (js-yaml, PyYAML) rejects it, because it's indistinguishable from the start of a
+ *  nested mapping key that isn't actually indented as one (`message: Error: file not found` needs the
+ *  value quoted). This is *the* classic YAML gotcha (CPE-1617 PR #833 review finding #1) — treated as a
+ *  genuine syntax error (never a silent accept, never an "unsupported" degrade: it's invalid input, not
+ *  an unimplemented construct). A colon NOT followed by a space and not at the very end (`http://x:8080`)
+ *  is unaffected — only the ambiguous `": "`/trailing-`":"` shape is rejected. */
+const BARE_MAPPING_COLON_RE = /: |:$/;
+
 function parseScalarOrFlow(rest: string): unknown {
   rejectUnsupportedPrefix(rest);
   if (rest[0] === "[" || rest[0] === "{") return parseFlow(rest);
@@ -362,6 +650,11 @@ function parseScalarOrFlow(rest: string): unknown {
     const trailing = rest.slice(q.end).trim();
     if (trailing !== "") throw new YamlSyntaxError(`unexpected content after quoted string: ${trailing}`);
     return q.value;
+  }
+  if (BARE_MAPPING_COLON_RE.test(rest)) {
+    throw new YamlSyntaxError(
+      `mapping values are not allowed here — quote the value if the colon is intentional: ${JSON.stringify(rest)}`,
+    );
   }
   return interpretPlainScalar(rest);
 }
@@ -426,6 +719,21 @@ function parseSequence(
       rest = afterDash.trimStart();
       contentCol = indent + 1 + spaceCount;
     }
+
+    // A block scalar consumed at tokenize time (finding #8) — see `blockScalarValue`'s doc comment.
+    // Guarded by `BLOCK_SCALAR_HEADER_RE.test(rest)`: this only claims the item when the DASH ITSELF
+    // directly holds the block header (`- |`) — a bare block scalar as the sequence item's own value.
+    // When the dash instead introduces an inline key whose value is a block scalar (`- run: |`), `rest`
+    // is `"run: |"`, not a bare header — that case falls through to the `looksLikeMappingEntry` branch
+    // below, which recurses into `parseMapping` for this SAME physical line; `parseMapping` finds
+    // `lines[i].blockScalarValue` there and attaches it to the `run` key correctly, one level down.
+    const blockValue = i < lines.length ? lines[i].blockScalarValue : undefined;
+    if (blockValue !== undefined && BLOCK_SCALAR_HEADER_RE.test(rest)) {
+      arr.push(blockValue);
+      i += 1;
+      continue;
+    }
+
     rejectUnsupportedPrefix(rest);
 
     if (rest === "") {
@@ -471,23 +779,40 @@ function parseMapping(
       throw new YamlSyntaxError(`Line ${lineNo}: expected "key: value"`);
     }
     const { key, rest } = split;
-    rejectUnsupportedPrefix(rest);
     if (key in obj) throw new YamlSyntaxError(`duplicate key '${key}'`);
 
     let value: unknown;
-    if (rest === "") {
-      const next = i + 1;
-      if (next < lines.length && lines[next].indent > indent) {
-        const sub = parseBlock(lines, next, lines[next].indent, undefined, depth + 1);
-        value = sub.value;
-        i = sub.next;
-      } else {
-        value = null;
-        i = next;
-      }
-    } else {
-      value = parseScalarOrFlow(rest);
+    // A block scalar consumed at tokenize time (finding #8) — see `blockScalarValue`'s doc comment.
+    const blockValue = i < lines.length ? lines[i].blockScalarValue : undefined;
+    if (blockValue !== undefined) {
+      value = blockValue;
       i += 1;
+    } else {
+      rejectUnsupportedPrefix(rest);
+      if (rest === "") {
+        const next = i + 1;
+        if (next < lines.length && lines[next].indent > indent) {
+          // Ordinarily-nested value: the next line is indented MORE than this key.
+          const sub = parseBlock(lines, next, lines[next].indent, undefined, depth + 1);
+          value = sub.value;
+          i = sub.next;
+        } else if (next < lines.length && lines[next].indent === indent && isSeqItem(lines[next].content)) {
+          // Indentless sequence (finding #6): a block sequence written at the SAME column as its own
+          // key, not indented under it — spec-legal YAML (`status:\n- item\n- item`), extremely common
+          // in hand-written config. Parse it as a sequence at THIS key's own indent; `parseSequence`'s
+          // own indent check naturally stops it at the first line that isn't a same-indent dash, so
+          // control returns to this mapping's loop for the next sibling key exactly as normal.
+          const sub = parseSequence(lines, next, indent, undefined, depth + 1);
+          value = sub.value;
+          i = sub.next;
+        } else {
+          value = null;
+          i = next;
+        }
+      } else {
+        value = parseScalarOrFlow(rest);
+        i += 1;
+      }
     }
     obj[key] = value;
   }

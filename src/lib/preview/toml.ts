@@ -17,6 +17,13 @@
  * 2}`, matching the TOML spec's own restriction that inline tables can't span lines), integers (dec/hex
  * /oct/bin, with `_` digit separators), floats (incl. `inf`/`nan`), and booleans.
  *
+ * Also enforces TOML's table-redefinition rules as real parse errors, not silent merges (CPE-1617 PR
+ * #833 review): a `[table]` opened twice, a `[table]` that collides with a name already established as
+ * an `[[array.of.tables]]`, and a `[table]` that tries to redefine a table already created via a
+ * dotted-key assignment (the spec's own "DO NOT DO THIS" example) are all rejected — see the `Parser`
+ * class's `explicitTables`/`dottedKeyTables` doc comment for the one bit of bookkeeping that covers all
+ * three. A super-table defined AFTER its own sub-table (`[x.y.z]` then `[x]`) remains legal, per spec.
+ *
  * **Deliberately out of scope**, each surfaced as a clear, specific parse error rather than a silent
  * mis-parse (never guess): multi-line basic/literal strings (`"""…"""`/`'''…'''`). Dates/times ARE
  * accepted (TOML's offset/local date-time and date/time-only forms) but represented as their literal
@@ -48,6 +55,23 @@ class Parser {
   private pos = 0;
   private line = 1;
   private readonly len: number;
+
+  // Table-origin tracking (CPE-1617 PR #833 review findings #3/#4/#5): TOML forbids redefining a table
+  // once it's been "closed" against a `[header]`, but three DIFFERENT prior events can close it, so one
+  // bit of bookkeeping (not three special cases) covers all of them:
+  //  - `explicitTables`: this exact node was already the target of a `[header]` (or is a fresh
+  //    `[[array]]` entry) — a SECOND `[header]` for the same path is "tables cannot be defined more than
+  //    once" (finding #3).
+  //  - `dottedKeyTables`: this exact node was created/touched as an intermediate parent while resolving
+  //    a dotted-key assignment (`a.b = 1`) — the TOML spec's own worked "DO NOT DO THIS" example
+  //    (`[fruit]\napple.color = "red"\n[fruit.apple] # INVALID`) forbids a later `[header]` from
+  //    targeting that same node (finding #4).
+  // A table that's only ever been an IMPLICIT parent of a `[table.sub]` HEADER path (never touched by a
+  // dotted-key assignment) is deliberately NOT tagged — the spec explicitly allows "defining a
+  // super-table afterward" (`[x.y.z.w]` then `[x]`), so only nodes reached via `assign()`'s dotted-key
+  // traversal (never via `navigateTable`'s header-path traversal) go into `dottedKeyTables`.
+  private readonly explicitTables = new WeakSet<object>();
+  private readonly dottedKeyTables = new WeakSet<object>();
 
   constructor(private readonly s: string) {
     this.len = s.length;
@@ -292,13 +316,17 @@ class Parser {
   private classifyBare(raw: string): unknown {
     if (raw === "true") return true;
     if (raw === "false") return false;
-    if (/^[+-]?\d(_?\d)*$/.test(raw)) return Number(raw.replace(/_/g, ""));
+    // TOML spec: "Leading zeros are not allowed" for a decimal integer, and the same rule applies to a
+    // float's integer part — `007`/`010`/`03.14` must all be rejected (a real parser error), not
+    // silently accepted as 7/10/3.14 (CPE-1617 PR #833 review finding #2). INT_PART is `0` on its own,
+    // or a non-zero first digit followed by any further digits/underscores.
+    if (/^[+-]?(0|[1-9](_?\d)*)$/.test(raw)) return Number(raw.replace(/_/g, ""));
     if (/^[+-]?0x[0-9A-Fa-f](_?[0-9A-Fa-f])*$/i.test(raw)) return parseInt(raw.replace(/_/g, ""), 16);
     if (/^0o[0-7](_?[0-7])*$/.test(raw)) return parseInt(raw.slice(2).replace(/_/g, ""), 8);
     if (/^0b[01](_?[01])*$/.test(raw)) return parseInt(raw.slice(2).replace(/_/g, ""), 2);
     if (
-      /^[+-]?(\d(_?\d)*)?\.\d(_?\d)*([eE][+-]?\d+)?$/.test(raw) ||
-      /^[+-]?\d(_?\d)*[eE][+-]?\d+$/.test(raw)
+      /^[+-]?(0|[1-9](_?\d)*)\.\d(_?\d)*([eE][+-]?\d+)?$/.test(raw) ||
+      /^[+-]?(0|[1-9](_?\d)*)[eE][+-]?\d+$/.test(raw)
     ) {
       return Number(raw.replace(/_/g, ""));
     }
@@ -323,6 +351,10 @@ class Parser {
         this.err(`cannot use '${k}' as a table: already defined as a different type`);
       }
       node = next as Record<string, unknown>;
+      // Every node a dotted key's path passes through (intermediate OR the final container the leaf
+      // value lands in) is now "defined through its dotted keys" — closed against a later `[header]`
+      // redefinition (finding #4; see the class-level doc comment on `dottedKeyTables`).
+      this.dottedKeyTables.add(node);
     }
     const finalKey = path[path.length - 1];
     if (finalKey in node) this.err(`duplicate key '${finalKey}'`);
@@ -331,15 +363,30 @@ class Parser {
 
   /** Walks/creates nested tables for a `[table]`/`[[array.of.tables]]` header path, returning the
    *  object subsequent key/value lines should be written into. Descends into the LAST element when a
-   *  path segment resolves to an array (nested array-of-tables). */
-  private navigateTable(root: Record<string, unknown>, path: string[]): Record<string, unknown> {
+   *  path segment resolves to an array (nested array-of-tables) — that's always correct for an
+   *  INTERMEDIATE segment (e.g. `[fruit.physical]` descending through an already-`[[fruit]]`'d array to
+   *  reach a new `physical` sub-table in its last entry). It's only wrong for the FINAL segment of a
+   *  PLAIN `[table]` header, where landing on an array means that exact name already denotes an
+   *  array-of-tables, not a table — `requireTable` (true only for `parseTableHeader`'s full path, false
+   *  for `parseArrayTableHeader`'s parent-path-only call, where every segment is by construction
+   *  intermediate) gates that check (finding #5). */
+  private navigateTable(
+    root: Record<string, unknown>,
+    path: string[],
+    requireTable: boolean,
+  ): Record<string, unknown> {
     if (path.length === 0) this.err("malformed table header: empty name");
     if (path.length > MAX_DEPTH) this.err("table path nested too deeply");
     let node = root;
-    for (const key of path) {
+    for (let i = 0; i < path.length; i++) {
+      const key = path[i];
+      const isLast = i === path.length - 1;
       if (!(key in node)) node[key] = Object.create(null);
       const existing = node[key];
       if (Array.isArray(existing)) {
+        if (isLast && requireTable) {
+          this.err(`cannot use '${key}' as a table: it's already an array of tables`);
+        }
         const last = existing[existing.length - 1];
         if (typeof last !== "object" || last === null || Array.isArray(last)) {
           this.err(`cannot use '${key}' as a table: it's an array of non-table values`);
@@ -362,7 +409,21 @@ class Parser {
     if (this.peek() !== "]") this.err("malformed table header: expected ']'");
     this.pos++;
     this.consumeNewlineOrEof();
-    return this.navigateTable(root, path);
+    const node = this.navigateTable(root, path, true);
+    // Finding #3: this exact table was already the target of an earlier `[header]` (or `[[array]]`
+    // entry) — TOML forbids defining the same table twice.
+    if (this.explicitTables.has(node)) {
+      this.err(`table '${path.join(".")}' is defined more than once`);
+    }
+    // Finding #4: this exact table was created/touched via a dotted-key assignment — the spec's own
+    // "DO NOT DO THIS" example. A table that was only ever an IMPLICIT parent of another [header] path
+    // (never touched by a dotted key) is NOT in this set, so "defining a super-table afterward" stays
+    // legal, per spec.
+    if (this.dottedKeyTables.has(node)) {
+      this.err(`cannot use '[${path.join(".")}]' to redefine a table already defined via dotted keys`);
+    }
+    this.explicitTables.add(node);
+    return node;
   }
 
   private parseArrayTableHeader(root: Record<string, unknown>): Record<string, unknown> {
@@ -378,7 +439,7 @@ class Parser {
     if (path.length === 0) this.err("malformed array-of-tables header: empty name");
     const parentPath = path.slice(0, -1);
     const lastKey = path[path.length - 1];
-    const parent = parentPath.length ? this.navigateTable(root, parentPath) : root;
+    const parent = parentPath.length ? this.navigateTable(root, parentPath, false) : root;
     let arr = parent[lastKey];
     if (arr === undefined) {
       arr = [];

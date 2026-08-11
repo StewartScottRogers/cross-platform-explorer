@@ -112,3 +112,57 @@ provider) — not run locally (needs a real `tauri build` + `tauri-driver`/WebDr
 2026-08-11 — `npm run check`: 0 errors, 0 warnings. `npx vitest run`: 286 files, 3556 tests passed, 0
 failed (60 new parser tests + 8 new component tests). No `crates/server/`, `src-tauri/`, or `Cargo.*`
 file touched — confirmed via `git status`, satisfying the ticket's frontend-only acceptance criterion.
+2026-08-11 — PR #833 review round 1 (CHANGES REQUESTED): five real inputs previously parsed WRONG
+(accepted as valid) instead of erroring — the exact failure mode the ticket named as worse than not
+supporting a format. Fixed all five, each with a negative-control test documenting the pre-fix failure:
+(1) YAML `key: value: value` (a bare, unquoted mapping-colon inside a value) now rejected — every real
+tool (js-yaml, PyYAML) rejects it too; (2) TOML leading-zero integers/floats (`007`, `03.14`) now
+rejected per spec ("Leading zeros are not allowed"); (3) TOML re-opening an already-`[table]`'d name now
+rejected ("tables cannot be defined more than once"); (4) a TOML `[table]` header colliding with a table
+already established via a dotted-key assignment now rejected — the spec's own worked "DO NOT DO THIS"
+example; (5) a TOML `[table]` header colliding with an established `[[array of tables]]` now rejected.
+Findings 3-5 share one mechanism: `Parser`'s new `explicitTables`/`dottedKeyTables` WeakSets track HOW
+each table node came into existence (explicit header / array-of-tables entry / dotted-key touch) so
+illegal transitions are rejected without three bolted-on special cases — a legal "super-table defined
+afterward" (`[x.y.z]` then `[x]`) stays legal, confirmed by its own test.
+2026-08-11 — Same PR, a second UAT pass (20 real config files off-machine: TOML 7/7 correct, YAML 4/13
+structured / 7/13 honestly degraded / 2/13 falsely called broken) surfaced the INVERSE failure mode —
+valid YAML wrongly rejected or wrongly degraded. Fixed both, each with a negative-control test: (6)
+indentless sequences (`status:\n- item\n- item` — spec-legal, PyYAML parses it fine) previously reported
+"unexpected indentation"; now parsed via a same-indent `parseSequence` call from the mapping's own
+`rest===""` branch. (7) a double-quoted scalar wrapping across physical lines (YAML line-folding, found
+on a real 403-line locale catalog) previously reported "unterminated string"; `tokenizeLines` now folds
+it during the raw physical-line pass (bounded to `MAX_QUOTE_FOLD_LINES=200` continuation lines as a
+safety valve against a GENUINELY unterminated quote silently swallowing unrelated lines — falls back to
+the pre-existing safe error path if the cap is hit). (8) Assessed block scalars (`|`/`>` + chomping) as
+TRACTABLE — unlike anchors/aliases/tags/complex-keys, a block scalar's body is just "physical lines
+indented more than the header, joined by one of two rules, then chomped", a linear scan this line-based
+parser already does — and the single biggest real-world driver of YAML degrading to plain text (every
+GitHub Actions `run: |` step). Implemented it: `tokenizeLines` detects a block-scalar header (bare `|`,
+`>`, `|-`, `|+`, `>-`, `>+` — the rarer explicit-numeric-indentation-indicator form like `|2` stays an
+honest "unsupported" degrade) and consumes the body directly off the RAW physical lines (blank lines
+inside a block scalar are significant content, unlike between ordinary mapping/sequence entries, which
+is why this can't run against the already-blank-filtered `Line[]` array). One real bug caught mid-
+implementation and fixed before landing: the block-value check in `parseSequence` initially fired for
+ANY dash line carrying a resolved block value, incorrectly stealing the `- key: |` (dash + inline key)
+shape away from the nested-mapping parse that should own it — guarded with
+`BLOCK_SCALAR_HEADER_RE.test(rest)` so only a BARE `- |` dash item claims it directly; `- key: |` now
+correctly recurses into `parseMapping`, which attaches the block value to the `key`. Verified against a
+3-level-deep synthetic GitHub Actions shape (`jobs.build.steps[0].run: |`) end to end.
+2026-08-11 — Two trivial fixes from the same review: (9) the degrade/error banners read as run-on
+sentences ("...this preview Showing the raw file..." with no punctuation) — added a period between the
+interpolated reason and the follow-up sentence in both banners. (10) A whitespace/comment-only file
+(non-zero bytes) parsed successfully (YAML → `null`, TOML → `{}`) but rendered a bare degenerate tree
+node instead of the same explicit "empty" state a truly empty file gets — `load()` now folds that case
+into the empty state too.
+2026-08-11 — Caught and fixed an unrelated ratchet regression before it could land: `src/app.css.test.ts`'s
+hard-coded-hex-literal guard (CPE-1534) flagged `YamlTomlPreview.svelte` because its own doc comments
+wrote "PR #833" — the guard's regex (`#[0-9a-fA-F]{3,8}`) treats "#833" as a false-positive hex literal
+(all three digits are valid hex chars). Reworded to "PR 833" (no `#`), matching the convention
+NotebookPreview.svelte/LogPreview.svelte already use for the exact same reason.
+2026-08-11 — Re-verification after all nine findings fixed: `npm run check` — 0 errors, 0 warnings.
+`npx vitest run` (full suite) — **286 files, 3594 tests passed, 0 failed** (up from the 3556 baseline:
++38 new tests — TOML findings #2-#5 = 8, YAML findings #1/#6/#7/#8 = 25, component findings #9/#10 +
+block-scalar end-to-end = 5). Re-verified `samples/text/config.{toml,yaml}` still parse cleanly under
+the stricter rules (a throwaway verification test, deleted before commit, confirmed both). Pushed to
+the existing branch/PR #833 — no new PR, per the coordinator's explicit instruction.

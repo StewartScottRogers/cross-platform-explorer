@@ -112,12 +112,10 @@ describe("parseYaml — deliberately unsupported constructs degrade explicitly w
     expect(unsupported("a: !!str 123")).toMatch(/tag/i);
   });
 
-  it("block scalars (literal |)", () => {
-    expect(unsupported(["desc: |", "  line one", "  line two"].join("\n"))).toMatch(/block scalar/i);
-  });
-
-  it("block scalars (folded >)", () => {
-    expect(unsupported(["desc: >", "  folded text"].join("\n"))).toMatch(/block scalar/i);
+  it("a block scalar's explicit numeric indentation indicator (|2) remains unsupported", () => {
+    // The plain `|`/`>` forms are now SUPPORTED (finding #8, PR #833 review) — only this rarer explicit
+    // form still degrades. See the "block scalars" describe block below for the supported forms.
+    expect(unsupported(["desc: |2", "    line one"].join("\n"))).toMatch(/block scalar/i);
   });
 
   it("complex mapping keys", () => {
@@ -153,6 +151,161 @@ describe("parseYaml — genuine syntax errors are structurally distinct from 'un
 
   it("a duplicate key reports a real error", () => {
     expect(syntaxError("a: 1\na: 2")).toMatch(/duplicate key/i);
+  });
+});
+
+// CPE-1617 PR #833 review, finding #1: `key: value: value` PREVIOUSLY parsed as `{ok:true, value:{key:
+// "value: value"}}` — the classic YAML gotcha every real tool (js-yaml, PyYAML) rejects. Negative
+// control: the assertions below fail against the pre-fix code.
+describe("parseYaml — finding #1: a bare mapping colon inside a value is rejected", () => {
+  it("'a: b: c' is a real syntax error, not a silently accepted string value", () => {
+    // Pre-fix: `parseYaml("a: b: c")` returned `{ok:true, value:{a:"b: c"}}`.
+    expect(syntaxError("a: b: c")).toMatch(/mapping values are not allowed/i);
+  });
+
+  it("a trailing bare colon in a value is also rejected", () => {
+    expect(syntaxError("a: ends with colon:")).toMatch(/mapping values are not allowed/i);
+  });
+
+  it("quoting the value sidesteps the rejection, as real YAML requires", () => {
+    expect(ok('a: "b: c"')).toEqual({ a: "b: c" });
+  });
+
+  it("a colon NOT followed by a space (a URL) is unaffected", () => {
+    expect(ok("url: http://example.com:8080/path")).toEqual({ url: "http://example.com:8080/path" });
+  });
+
+  it("a time-like plain scalar (colon-digit, no space) is unaffected", () => {
+    expect(ok("time: 07:32:00")).toEqual({ time: "07:32:00" });
+  });
+});
+
+// CPE-1617 PR #833 review, finding #6: an indentless sequence PREVIOUSLY reported "unexpected
+// indentation" — standard, spec-legal YAML, found on a real 53-line file
+// (`gateway/assets/status_phrases.yaml`). Negative control: the first assertion fails against the
+// pre-fix code with that exact message.
+describe("parseYaml — finding #6: indentless sequences", () => {
+  it("a sequence at the SAME indent as its own key parses instead of erroring", () => {
+    // Pre-fix: `parseYaml("status:\n- item\n- item")` returned a syntax error, "Line 2: unexpected
+    // indentation".
+    expect(ok(["status:", "- item", "- item"].join("\n"))).toEqual({ status: ["item", "item"] });
+  });
+
+  it("a sibling key at the same indent after the indentless sequence continues the mapping", () => {
+    expect(ok(["status:", "- a", "- b", "next_key: 5"].join("\n"))).toEqual({
+      status: ["a", "b"],
+      next_key: 5,
+    });
+  });
+
+  it("an indentless sequence of mappings (the dash-shorthand) also parses", () => {
+    const v = ok(["items:", "- name: x", "  qty: 1", "- name: y", "  qty: 2"].join("\n"));
+    expect(v).toEqual({
+      items: [
+        { name: "x", qty: 1 },
+        { name: "y", qty: 2 },
+      ],
+    });
+  });
+
+  it("a normally-indented sequence is unaffected by the fix", () => {
+    expect(ok(["fruits:", "  - apple", "  - banana"].join("\n"))).toEqual({ fruits: ["apple", "banana"] });
+  });
+
+  it("a sibling key after an indentless sequence nested inside another mapping still works", () => {
+    const v = ok(["outer:", "  status:", "  - a", "  - b", "  other: 1"].join("\n"));
+    expect(v).toEqual({ outer: { status: ["a", "b"], other: 1 } });
+  });
+});
+
+// CPE-1617 PR #833 review, finding #7: a double-quoted value legitimately wrapping across two physical
+// lines (YAML line-folding) PREVIOUSLY reported "unterminated double-quoted string" — found on a real
+// 403-line Afrikaans locale file (`locales/af.yaml`), which PyYAML parses to a clean 2-key dict.
+// Negative control: the first assertion fails against the pre-fix code.
+describe("parseYaml — finding #7: multi-line double-quoted scalar folding", () => {
+  it("a double-quoted value wrapping across two physical lines folds instead of erroring", () => {
+    // Pre-fix: reported "unterminated double-quoted string" on this ordinary YAML shape.
+    const v = ok(['msg: "some very long text', 'that continues on the next line"'].join("\n"));
+    expect(v).toEqual({ msg: "some very long text that continues on the next line" });
+  });
+
+  it("folds across more than two lines, stripping each continuation line's leading whitespace", () => {
+    const v = ok(['msg: "line one', '  line two', '  line three"'].join("\n"));
+    expect(v).toEqual({ msg: "line one line two line three" });
+  });
+
+  it("a '#' inside a folded quote is literal content, never treated as a comment", () => {
+    const v = ok(['msg: "text with a # inside', 'more text"'].join("\n"));
+    expect(v).toEqual({ msg: "text with a # inside more text" });
+  });
+
+  it("an ordinary single-line quoted value is unaffected", () => {
+    expect(ok('a: "one line"')).toEqual({ a: "one line" });
+  });
+
+  it("a genuinely unterminated quote (never closes) still reports a real error, not a silent guess", () => {
+    expect(syntaxError('a: "never closes\nb: 2')).toMatch(/unterminated/i);
+  });
+});
+
+// CPE-1617 PR #833 review, finding #8: block scalars were assessed as tractable (unlike anchors/
+// aliases/tags/complex-keys) and implemented — the single biggest real-world driver of "valid YAML
+// degrades to plain text" (every GitHub Actions `run: |` step).
+describe("parseYaml — finding #8: block scalars (| literal, > folded, chomping indicators)", () => {
+  it("a literal block scalar (|) preserves internal line breaks, with default clip chomping", () => {
+    const v = ok(["run: |", "  echo hello", "  echo world"].join("\n"));
+    expect(v).toEqual({ run: "echo hello\necho world\n" });
+  });
+
+  it("a folded block scalar (>) joins lines with a single space", () => {
+    const v = ok(["desc: >", "  line one", "  line two"].join("\n"));
+    expect(v).toEqual({ desc: "line one line two\n" });
+  });
+
+  it("strip chomping (|-) removes the trailing newline entirely", () => {
+    expect(ok(["run: |-", "  echo hello"].join("\n"))).toEqual({ run: "echo hello" });
+  });
+
+  it("a block scalar's more-indented lines keep their extra leading whitespace as literal text", () => {
+    const v = ok(["run: |", "  if true; then", "    echo yes", "  fi"].join("\n"));
+    expect(v).toEqual({ run: "if true; then\n  echo yes\nfi\n" });
+  });
+
+  it("an internal blank line inside a literal block scalar is preserved", () => {
+    const v = ok(["text: |", "  para one", "", "  para two"].join("\n"));
+    expect(v).toEqual({ text: "para one\n\npara two\n" });
+  });
+
+  it("a folded block scalar's internal blank line becomes a real (paragraph-break) newline, not a space", () => {
+    const v = ok(["text: >", "  para one", "", "  para two"].join("\n"));
+    expect(v).toEqual({ text: "para one\n\npara two\n" });
+  });
+
+  it("a block scalar is correctly followed by a sibling key at the header's own indent", () => {
+    expect(ok(["run: |", "  echo hi", "next: 5"].join("\n"))).toEqual({ run: "echo hi\n", next: 5 });
+  });
+
+  it("a bare dash sequence item can itself be a block scalar", () => {
+    const v = ok(["items:", "  - |", "    line1", "    line2", "  - |", "    other"].join("\n"));
+    expect(v).toEqual({ items: ["line1\nline2\n", "other\n"] });
+  });
+
+  it("the dash-shorthand's inline key can itself be block-scalar-valued", () => {
+    const v = ok(["steps:", "  - run: |", "      echo one", "    name: step1"].join("\n"));
+    expect(v).toEqual({ steps: [{ run: "echo one\n", name: "step1" }] });
+  });
+
+  it("an empty block scalar (no indented content follows) yields an empty string", () => {
+    expect(ok(["a: |", "b: 2"].join("\n"))).toEqual({ a: "", b: 2 });
+  });
+
+  it("a real GitHub Actions 'run: |' shape parses end to end", () => {
+    const v = ok(
+      ["name: CI", "jobs:", "  build:", "    steps:", "      - run: |", "          npm ci", "          npm test"].join(
+        "\n",
+      ),
+    );
+    expect(v).toEqual({ name: "CI", jobs: { build: { steps: [{ run: "npm ci\nnpm test\n" }] } } });
   });
 });
 

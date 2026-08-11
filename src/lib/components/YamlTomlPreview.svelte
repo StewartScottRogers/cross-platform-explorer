@@ -23,7 +23,10 @@
    * **Never conflates a parse failure with an empty file** (this crew's own repeated lesson — see
    * `preview/notebook.ts`'s doc comment): an empty file, a load error, a genuine parse error, an
    * unsupported-construct degrade, and a real structured tree are five structurally distinct states
-   * below, each with its own `data-testid`.
+   * below, each with its own `data-testid`. "Empty" also covers a whitespace/comment-only file (PR 833
+   * review finding #10) — that parses SUCCESSFULLY (YAML: `null`; TOML: `{}`) but renders no more
+   * usefully than a truly empty file, so `load()` folds that case into the same state rather than
+   * showing a bare degenerate tree node.
    */
   import { commands } from "../bindings.gen";
   import { unwrap } from "../invoke";
@@ -124,6 +127,22 @@
       return;
     }
 
+    // A whitespace/comment-only file (non-zero bytes, so the `text.length === 0` check above didn't
+    // catch it) parses SUCCESSFULLY but to nothing meaningful: YAML resolves an all-comment document to
+    // `null`, TOML resolves an all-comment file to `{}`. Rendering that as a lone "null" tree node or an
+    // empty-braces tree is technically correct but reads as broken to a user who just opened a comment-
+    // only file — treat "parsed successfully but contains nothing" as the same explicit empty state as a
+    // truly empty file, rather than a bare/degenerate tree (CPE-1617 PR 833 review finding #10).
+    const isEffectivelyEmpty =
+      format === "yaml"
+        ? value === null
+        : typeof value === "object" && value !== null && Object.keys(value as object).length === 0;
+    if (isEffectivelyEmpty) {
+      isEmpty = true;
+      loading = false;
+      return;
+    }
+
     jsonText = JSON.stringify(value);
     loading = false;
   }
@@ -143,12 +162,12 @@
   {:else}
     {#if parseUnsupported}
       <div class="yt-banner" data-testid="yamltoml-unsupported">
-        <span>Can't show a structured view: {parseErrorMessage} Showing the raw file content instead.</span>
+        <span>Can't show a structured view: {parseErrorMessage}. Showing the raw file content instead.</span>
       </div>
     {:else}
       <div class="yt-banner warn" data-testid="yamltoml-parse-error">
         <span>
-          This doesn't look like valid {format === "yaml" ? "YAML" : "TOML"}: {parseErrorMessage} Showing
+          This doesn't look like valid {format === "yaml" ? "YAML" : "TOML"}: {parseErrorMessage}. Showing
           the raw file content instead.
         </span>
       </div>
