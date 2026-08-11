@@ -243,6 +243,32 @@ fn mini_dll_parses_as_a_real_pe_with_disassembly() {
     assert!(!info.disasm.is_empty(), "the .text bytes must disassemble to real x86 instructions: {info:?}");
 }
 
+/// The minimal-but-valid synthetic MANAGED PE32 (`other/mini-dotnet.dll`, CPE-1629's gui-smoke coverage
+/// fixture for the Binary Inspector's ".NET metadata" tab, CPE-1615) — byte-for-byte the same well-formed
+/// shape as `dotnet_metadata.rs`'s own `build_minimal_managed_pe()` test helper (one CLI header, four
+/// `#~` tables: `TypeDef`/`MethodDef`/`Assembly`/`AssemblyRef`), reproduced as a standalone generator so
+/// no test-only code had to move — same "throwaway Rust program" convention `other/mini.dll` itself
+/// documents in `samples/README.md`. `binary_info` must see a populated CLR data directory (`is_managed`
+/// true) and `dotnet_metadata::read` must resolve the assembly identity and its two `AssemblyRef` rows.
+#[test]
+fn mini_dotnet_dll_parses_as_a_real_managed_pe() {
+    use cpe_server::binary_preview::binary_info;
+    let info = binary_info(&sample_path("other/mini-dotnet.dll")).expect("a well-formed minimal managed PE must parse");
+    assert_eq!(info.format, cpe_server::model::BinaryFormat::Pe);
+    assert!(!info.is_64, "this fixture is PE32, not PE32+");
+
+    let meta = cpe_server::dotnet_metadata::read(&sample_path("other/mini-dotnet.dll"))
+        .expect("dotnet_metadata::read must not error on a well-formed managed PE")
+        .expect("a populated CLR header must yield Some(DotnetMetadata)");
+    let assembly = meta.assembly.expect("expected a single Assembly row");
+    assert_eq!(assembly.name, "MyAssembly");
+    assert_eq!(meta.assembly_refs.len(), 2, "expected mscorlib + System.Core: {:?}", meta.assembly_refs);
+    assert!(meta.assembly_refs.iter().any(|r| r.name == "mscorlib"));
+    assert!(meta.assembly_refs.iter().any(|r| r.name == "System.Core"));
+    assert_eq!(meta.types.len(), 2, "expected MyType1 + MyType2: {:?}", meta.types);
+    assert_eq!(meta.methods.len(), 2, "expected Method1 + Method2: {:?}", meta.methods);
+}
+
 /// The TIFF decodes and transcodes to a PNG data URL (decoded-image preview path).
 #[test]
 fn tiff_transcodes_to_png_data_url() {

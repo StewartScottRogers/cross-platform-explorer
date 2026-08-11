@@ -1,0 +1,69 @@
+---
+id: CPE-1639
+title: "gui-smoke's PREVIEW_CONTENT_SELECTOR carries a dead \".preview-font\" class — the font case settles by luck, not by the selector meant to catch it"
+type: Bug
+status: Backlog
+priority: Medium
+component: Testing
+tags: [ready]
+created: 2026-08-11
+closed:
+---
+
+## Why
+Found by the independent Reviewer verifying PR #827 (CPE-1629, gui-smoke preview-pane screenshot specs)
+against a real Windows build. While stress-testing `gui-smoke/lib/samplesNav.ts` under realistic load
+(~a dozen concurrent cargo/rustc/node processes from other sprint workers, ~66% CPU), a standalone
+`specs/samples.smoke.ts` run hit ~15 settle-timeouts. All but one matched the already-documented
+CPE-1507 known-failing set (`crypto/*`, `.ics`, `.vcf`). The outlier was `fonts/mini.ttf`.
+
+## The gap
+`PREVIEW_CONTENT_SELECTOR` (`gui-smoke/lib/samplesNav.ts`, extracted byte-identical from
+`specs/samples.smoke.ts` by CPE-1629) includes `.preview-font` as one of the "definite content"
+selectors `waitForPreviewToSettle` polls for:
+
+    export const PREVIEW_CONTENT_SELECTOR = [
+      ".preview-img", ".mp-media", ".preview-pdf", ".preview-font", ".preview-table-wrap",
+      ".preview-markdown", ".code-view", "pre.preview-text", ".preview-editor",
+      '[data-testid="hexview"]', ".data-browser", "aside.details",
+    ].join(", ");
+
+`.preview-font` is not a real CSS class anywhere in the current frontend. `grep -rn "preview-font" src/`
+finds it in exactly one place, `FontPreview.svelte`'s dynamically generated `@font-face` family name
+(`` `preview-font-${mine}` ``) — a JS string, never applied as an element's `class`. The component's
+actual root is `<div class="font-preview" data-testid="font-preview">` (note: `font-preview`, not
+`preview-font` — the two words are swapped). So for the entire life of this selector list, the
+`fonts/*` case in `waitForPreviewToSettle` has never matched on `.preview-font`; it has only ever
+"passed" via the loop's other exit condition (`.preview-note` reaching a non-loading terminal state, or
+one of the other 11 selectors incidentally matching first if the DOM order/timing lines up). That's a
+settle condition that can be satisfied by an unrelated coincidence rather than by the thing it claims to
+detect — exactly the shape of "passes when the machine is fast/idle, times out when it's loaded," which
+is what the Reviewer's stress run reproduced.
+
+`specs/preview-pane.smoke.ts` (CPE-1629) is NOT affected in practice: its font test passes its own
+working `extraSelectors: ['[data-testid="font-preview"]']` and separately asserts on that real testid
+directly, so it never depended on the dead `.preview-font` entry. But `specs/samples.smoke.ts` — the
+suite `PREVIEW_CONTENT_SELECTOR` was written for — has no such extra selector for the `fonts/` case, so
+it depends entirely on the dead entry (plus luck).
+
+## Fix
+Change `.preview-font` to `.font-preview` (or `[data-testid="font-preview"]`, matching the testid
+convention the rest of the list already leans on for hexview/data-browser) in
+`gui-smoke/lib/samplesNav.ts`'s `PREVIEW_CONTENT_SELECTOR`.
+
+Per samplesNav.ts's own header comment, this constant is deliberately byte-identical to what
+`samples.smoke.ts` measured its `known-failing.json` entry (CPE-1507) against — changing it changes
+what that spec considers "settled" for the `fonts/mini.ttf` case, so re-verify `samples.smoke.ts`
+against a real build afterward (ideally under load, matching how this bug was found) and update the
+CPE-1507 known-failing reason/verification if the fonts case's behavior under that entry changes.
+
+## Acceptance criteria
+- `PREVIEW_CONTENT_SELECTOR` in `gui-smoke/lib/samplesNav.ts` no longer contains a selector matching
+  zero elements anywhere in the shipped frontend — audit the other 11 entries for the same class of bug
+  while in there (this ticket found one by accident, not by a systematic check).
+- `specs/samples.smoke.ts`'s `fonts/mini.ttf` case settles on the corrected, real selector — verified by
+  a real build run, not just by the test passing (a coincidental pass looks identical to a real one).
+- No change to `specs/preview-pane.smoke.ts`'s own behavior (it doesn't depend on this entry).
+
+**Conflict surface:** `gui-smoke/lib/samplesNav.ts` only (one exported constant). Touches the same file
+CPE-1629 just extracted; sequence after that PR lands to avoid a rebase collision on the same lines.

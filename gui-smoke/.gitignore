@@ -3,3 +3,7 @@ node_modules/
 wdio-logs/
 .screenshots/
 .results/
+# Local msedgedriver.exe fetched to match this machine's installed Edge/WebView2 build (README
+# "Running this locally") — never a checked-in dependency, and the pinned .cargo/bin copy is often a
+# version behind after an Edge auto-update.
+msedgedriver.exe
