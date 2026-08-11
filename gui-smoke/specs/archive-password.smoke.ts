@@ -42,14 +42,44 @@ const WRONG_PASSWORD = "definitely-not-it";
  *  for the full rationale (CPE-1253's below-the-fold hit-test failure). This spec right-clicks TWO
  *  different rows across two tests (the archive row, then — after that row's own scroll position —
  *  the marker row), so a stale scroll offset left over from the first is exactly the kind of gap this
- *  guards against. */
+ *  guards against.
+ *
+ *  CPE-1595: a live run (PR #801/CPE-1594, job 93649941153) failed the FIRST right-click of this spec
+ *  with `WebDriverError: move target out of bounds` from the Actions-fallback `rightClick`'s bare
+ *  `pointerMove` (gui-smoke/lib/mouse.ts) — meaning the point this fn returned was, by the time the
+ *  actual pointer command reached the driver, no longer inside the window. `pointOfRow` already proved
+ *  a point could go stale between two round trips once (CPE-1481's whole reason for existing); this
+ *  hardens the SAME primitive with a re-check-and-retry loop rather than trusting a single scroll +
+ *  fixed pause to have fully settled, on the theory that CI-runner scheduling jitter (this suite runs
+ *  under `xvfb-run` alongside 39 other spec files' worth of CPU/IO contention) can stretch the gap
+ *  between "scrolled" and "laid out" past a fixed 150ms on a slow tick. */
 async function pointOfRow(name: string): Promise<Point | null> {
-  await browser.execute((n) => {
-    const rows = Array.from(document.querySelectorAll(".rows .row"));
-    const row = rows.find((r) => (r.innerHTML || "").includes(n));
-    row?.scrollIntoView({ block: "center" });
-  }, name);
-  await browser.pause(150);
+  const MAX_ATTEMPTS = 4;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    await browser.execute((n) => {
+      const rows = Array.from(document.querySelectorAll(".rows .row"));
+      const row = rows.find((r) => (r.innerHTML || "").includes(n));
+      row?.scrollIntoView({ block: "center" });
+    }, name);
+    await browser.pause(150);
+    const result = (await browser.execute((n) => {
+      const rows = Array.from(document.querySelectorAll(".rows .row"));
+      const row = rows.find((r) => (r.innerHTML || "").includes(n));
+      if (!row) return null;
+      const rect = row.getBoundingClientRect();
+      return {
+        x: Math.round(rect.left + rect.width / 2),
+        y: Math.round(rect.top + rect.height / 2),
+        inBounds: rect.top >= 0 && rect.bottom <= window.innerHeight && rect.left >= 0 && rect.right <= window.innerWidth,
+      };
+    }, name)) as { x: number; y: number; inBounds: boolean } | null;
+    if (result === null) return null; // row genuinely doesn't exist — no point retrying a scroll
+    if (result.inBounds) return { x: result.x, y: result.y };
+    // Not settled yet (or the row's own height exceeds the viewport) — give layout another tick.
+    await browser.pause(150);
+  }
+  // Out of attempts: return the last-known point anyway rather than `null`, so a caller sees the SAME
+  // "move target out of bounds" this was written to diagnose instead of a misleading "row not found".
   return browser.execute((n) => {
     const rows = Array.from(document.querySelectorAll(".rows .row"));
     const row = rows.find((r) => (r.innerHTML || "").includes(n));

@@ -1,12 +1,17 @@
 {
   "$comment": "CPE-1594 ratchet. A spec listed here is ALLOWED to fail; anything else failing reds the job. Removing an entry is one-way: once a spec passes, the ratchet FAILS until it is deleted from this list. See gui-smoke/README.md 'Reading a CI run' for the exact procedure to retire an entry.",
   "specs": {
-    "samples.smoke.ts": { "reason": "preview pane never settles for ~15 sample kinds (crypto/*, .eml, .ics, .vcf, .json) on WebKitGTK after 20s", "ticket": "CPE-1507" },
-    "saved-search.smoke.ts": { "reason": "Saved Searches sidebar header never renders on Linux; .fav-title getText() returns empty", "ticket": "CPE-1507" },
-    "network.smoke.ts": { "reason": "selector fixed in CPE-1594 (the old $(\"=Network\") link-text locator could never match a <span>), but UNVERIFIED on a live Linux run: the replacement uses the same .fav-title + getText() pattern that saved-search.smoke.ts is known-failing for on this WebKitGTK/Xvfb stack. Delete this entry once a real main run shows it green.", "ticket": "CPE-1595" },
-    "archive-browse.smoke.ts": { "reason": "element click intercepted", "ticket": "CPE-1595" },
-    "archive-password.smoke.ts": { "reason": "element not interactable", "ticket": "CPE-1595" },
-    "shred-dialog.smoke.ts": { "reason": "'.ctx button.row' still not clickable after 10s", "ticket": "CPE-1595" },
-    "transfer-panel.smoke.ts": { "reason": "seeded CPE-1226 transfer row never appears", "ticket": "CPE-1595" }
+    "samples.smoke.ts": {
+      "reason": "preview pane never settles for ~15 sample kinds (crypto/*, .eml, .ics, .vcf, .json) on WebKitGTK after 20s",
+      "ticket": "CPE-1507"
+    },
+    "saved-search.smoke.ts": {
+      "reason": "Saved Searches sidebar header never renders on Linux; .fav-title getText() returns empty",
+      "ticket": "CPE-1507"
+    },
+    "network.smoke.ts": {
+      "reason": "CPE-1595 CONFIRMED (not just a theory): the .fav-title + getText() selector is correct and the header DOES paint — the run-31449236678 failure screenshot (network-fail.png) shows 'Network' rendered, visible, on-screen at the exact moment the 15s wait timed out. getText() nonetheless returned something other than 'Network' for every retry in that window. Same symptom as saved-search.smoke.ts (CPE-1507): a WebKitGTK/Xvfb classic-WebDriver GetElementText quirk for this Sidebar.svelte '<span class=\"label fav-title\">' header shape, not a rendering gap, not a selector bug (Sidebar.test.ts's jsdom render passes) and not fixable by another selector change. Left listed pending a WebKitGTK-specific investigation (root cause still open); see CPE-1507.",
+      "ticket": "CPE-1595"
+    }
   }
 }

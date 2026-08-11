@@ -146,7 +146,10 @@
     dispatch("close");
   }
 
-  // Keep the menu on screen — a menu that opens half off the edge is useless.
+  // Keep the menu on screen — a menu that opens half off the edge is useless. The `.ctx` container's
+  // own `max-height`/`overflow-y: auto` (below) caps `rect.height` at the viewport height BEFORE this
+  // runs, so this clamp only has to reposition, never squeeze — see the CPE-1601 comment on `.ctx` for
+  // why that CSS is load-bearing, not cosmetic.
   onMount(() => {
     const rect = el.getBoundingClientRect();
     const pad = 6;
@@ -745,6 +748,30 @@
     position: fixed;
     z-index: 100;
     min-width: 210px;
+    /* CPE-1601: a rich item menu (compress family + tags + macros + the separated Securely-delete
+       group) can genuinely be taller than the window — MENUS.md already promises a menu is "clamped
+       into the viewport (never clipped off-screen)", but the JS clamp in onMount above only ever
+       REPOSITIONED the menu; it never accounted for the menu's own height exceeding the viewport, so a
+       tall menu simply overflowed past the bottom edge with no way to reach the rows below the fold —
+       confirmed live (gui-smoke's shred-dialog.smoke.ts: "Securely delete…" sat below
+       `window.innerHeight`, so every clickability check WebdriverIO ran — which itself works by calling
+       the DOM's own `scrollIntoView()` — was a no-op, because `.ctx` wasn't a scroll container for it to
+       scroll: `.ctx` has no `overflow` set, so scrollIntoView bubbled to the (non-scrolling) page and did
+       nothing, and the row stayed permanently unreachable, not just temporarily off-screen). Making
+       `.ctx` its own scroll container (capped to the viewport height) is what actually fixes it: now
+       `scrollIntoView()` — WebdriverIO's OR a real user's mouse-wheel/keyboard nav — has a container that
+       can scroll, so every row becomes reachable regardless of how tall the menu's content is.
+
+       FOLLOW-UP TRAP (caught in review before merge, not shipped): making `.ctx` a scroll container on
+       ONE axis (`overflow-y`) makes the OTHER axis compute to `auto` too, per the CSS Overflow spec's
+       "a `visible` value becomes `auto` when the other axis isn't `visible`" rule — `overflow-x: visible`
+       does NOT opt back out (verified directly: it still resolves to `auto` via getComputedStyle). That
+       silently turned `.ctx` into a horizontal clipping box too, which clipped Submenu.svelte's `.flyout`
+       (New ▸ / View ▸ / Sort by ▸ / Run macro ▸ / Run command ▸) to nothing — see Submenu.svelte's own
+       `.flyout` comment for the fix (`position: fixed`, computed from the parent row's rect, so the
+       flyout escapes `.ctx`'s scrollable-overflow region entirely instead of being clipped by it). */
+    max-height: calc(100vh - 12px);
+    overflow-y: auto;
     padding: 5px;
     background: var(--surface);
     border: 1px solid var(--border-strong);

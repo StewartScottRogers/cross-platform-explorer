@@ -19,11 +19,7 @@ const KNOWN_FAILING: KnownFailingFile = {
   specs: {
     "samples.smoke.ts": { reason: "preview pane never settles on WebKitGTK", ticket: "CPE-1507" },
     "saved-search.smoke.ts": { reason: "sidebar header never renders on Linux", ticket: "CPE-1507" },
-    "network.smoke.ts": { reason: "selector fixed but unverified on a live Linux run", ticket: "CPE-1595" },
-    "archive-browse.smoke.ts": { reason: "element click intercepted", ticket: "CPE-1595" },
-    "archive-password.smoke.ts": { reason: "element not interactable", ticket: "CPE-1595" },
-    "shred-dialog.smoke.ts": { reason: "'.ctx button.row' still not clickable after 10s", ticket: "CPE-1595" },
-    "transfer-panel.smoke.ts": { reason: "seeded CPE-1226 transfer row never appears", ticket: "CPE-1595" },
+    "network.smoke.ts": { reason: "same .fav-title getText() quirk as saved-search", ticket: "CPE-1595" },
   },
 };
 
@@ -70,7 +66,7 @@ const ALL_40_SPECS = [
   "vault-create.smoke.ts",
 ];
 
-/** The real, current `main` state: 33 pass, the 7 KNOWN_FAILING specs fail, all 40 report. */
+/** The real, current `main` state: 37 pass, the 3 KNOWN_FAILING specs fail, all 40 report. */
 function mainStateResults(): SpecResult[] {
   const knownFailingNames = new Set(Object.keys(KNOWN_FAILING.specs));
   return ALL_40_SPECS.map((spec) => ({
@@ -80,7 +76,7 @@ function mainStateResults(): SpecResult[] {
 }
 
 describe("evaluate — the known-failing baseline (current main state)", () => {
-  it("is green: 33 pass, 7 known-failing, all 40 report", () => {
+  it("is green: 37 pass, 3 known-failing, all 40 report", () => {
     const result = evaluate({
       results: mainStateResults(),
       knownFailing: KNOWN_FAILING,
@@ -95,7 +91,7 @@ describe("evaluate — the known-failing baseline (current main state)", () => {
   });
 });
 
-describe("evaluate — clause 1: NEW GUI REGRESSION (an 8th failing spec)", () => {
+describe("evaluate — clause 1: NEW GUI REGRESSION (a 4th failing spec)", () => {
   it("goes red when a spec outside known-failing.json fails", () => {
     const results = mainStateResults().map((r) =>
       r.spec === "open-dir.smoke.ts" ? { ...r, status: "failed" as const } : r,
@@ -110,7 +106,7 @@ describe("evaluate — clause 1: NEW GUI REGRESSION (an 8th failing spec)", () =
     assert.ok(result.messages.some((m) => m.includes("NEW GUI REGRESSION") && m.includes("open-dir.smoke.ts")));
   });
 
-  it("reports every new failure, not just the first, when multiple 8th+ specs fail", () => {
+  it("reports every new failure, not just the first, when multiple 4th+ specs fail", () => {
     const results = mainStateResults().map((r) =>
       r.spec === "open-dir.smoke.ts" || r.spec === "vault.smoke.ts" ? { ...r, status: "failed" as const } : r,
     );
@@ -125,29 +121,29 @@ describe("evaluate — clause 1: NEW GUI REGRESSION (an 8th failing spec)", () =
 describe("evaluate — clause 2: one-way ratchet (a known-failing spec starts passing)", () => {
   it("goes red when a listed spec passes, even though nothing else regressed", () => {
     const results = mainStateResults().map((r) =>
-      r.spec === "archive-browse.smoke.ts" ? { ...r, status: "passed" as const } : r,
+      r.spec === "samples.smoke.ts" ? { ...r, status: "passed" as const } : r,
     );
 
     const result = evaluate({ results, knownFailing: KNOWN_FAILING, expectedSpecCount: 40 });
 
     assert.equal(result.ok, false);
     assert.deepEqual(result.newFailures, []);
-    assert.deepEqual(result.fixedButStillListed, ["archive-browse.smoke.ts"]);
+    assert.deepEqual(result.fixedButStillListed, ["samples.smoke.ts"]);
     assert.equal(result.incomplete, false);
     assert.ok(
       result.messages.some(
-        (m) => m.includes("RATCHET") && m.includes("archive-browse.smoke.ts") && m.includes("delete its entry"),
+        (m) => m.includes("RATCHET") && m.includes("samples.smoke.ts") && m.includes("delete its entry"),
       ),
     );
   });
 
   it("passes clean once the fixed spec's entry is actually removed from known-failing.json", () => {
-    const { "archive-browse.smoke.ts": removed, ...rest } = KNOWN_FAILING.specs;
+    const { "samples.smoke.ts": removed, ...rest } = KNOWN_FAILING.specs;
     void removed;
     const trimmed: KnownFailingFile = { specs: rest };
 
     const results = mainStateResults().map((r) =>
-      r.spec === "archive-browse.smoke.ts" ? { ...r, status: "passed" as const } : r,
+      r.spec === "samples.smoke.ts" ? { ...r, status: "passed" as const } : r,
     );
 
     const result = evaluate({ results, knownFailing: trimmed, expectedSpecCount: 40 });
@@ -196,7 +192,7 @@ describe("evaluate — clause 3: SUITE DID NOT COMPLETE (the CPE-1594 regression
 describe("evaluate — combined failure modes in one run", () => {
   it("reports incomplete + newFailures + fixedButStillListed all at once when all three happen together", () => {
     const results = mainStateResults()
-      .map((r) => (r.spec === "archive-browse.smoke.ts" ? { ...r, status: "passed" as const } : r)) // ratchet fires
+      .map((r) => (r.spec === "samples.smoke.ts" ? { ...r, status: "passed" as const } : r)) // ratchet fires
       .map((r) => (r.spec === "open-dir.smoke.ts" ? { ...r, status: "failed" as const } : r)) // new regression
       .slice(0, 39); // and the run didn't complete
 
@@ -204,7 +200,7 @@ describe("evaluate — combined failure modes in one run", () => {
 
     assert.equal(result.ok, false);
     assert.equal(result.incomplete, true);
-    assert.deepEqual(result.fixedButStillListed, ["archive-browse.smoke.ts"]);
+    assert.deepEqual(result.fixedButStillListed, ["samples.smoke.ts"]);
     assert.deepEqual(result.newFailures, ["open-dir.smoke.ts"]);
     assert.equal(result.messages.length, 3);
   });

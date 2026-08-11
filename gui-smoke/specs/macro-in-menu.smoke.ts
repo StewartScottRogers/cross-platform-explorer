@@ -148,6 +148,37 @@ describe("CPE-1191 — headless GUI smoke: a bound macro appears in the right-cl
     const flyoutHtml = await flyout.getHTML({ includeSelectorTag: false });
     expect(flyoutHtml, `expected "${MACRO_NAME}" in the Run-macro submenu`).to.include(MACRO_NAME);
 
+    // CPE-1601 follow-up: `waitForExist` + `getHTML` above only prove the flyout is IN THE DOM with
+    // the right markup — they say nothing about whether it's actually PAINTED. A CSS clipping bug
+    // (`.ctx`'s `overflow-y: auto` implicitly computing `overflow-x: auto` too, per the CSS Overflow
+    // spec's "a `visible` axis becomes `auto` when the other isn't" rule, silently clipping this exact
+    // `.ctx .flyout` to a zero-size box) slipped straight through this assertion shape in review before
+    // it ever reached CI. Assert real, on-screen geometry instead: nonzero size AND fully inside the
+    // viewport — the same "did it actually paint, not just mount" check `pointOfRowNamed`/`pointByText`
+    // above already rely on via `getBoundingClientRect()`.
+    interface Rect {
+      width: number;
+      height: number;
+      top: number;
+      left: number;
+      right: number;
+      bottom: number;
+    }
+    const flyoutRect = (await flyout.execute((el) => {
+      const r = (el as HTMLElement).getBoundingClientRect();
+      return { width: r.width, height: r.height, top: r.top, left: r.left, right: r.right, bottom: r.bottom };
+    })) as Rect;
+    expect(flyoutRect.width, "expected the Run-macro flyout to have real, nonzero width (not CSS-clipped)").to.be.greaterThan(0);
+    expect(flyoutRect.height, "expected the Run-macro flyout to have real, nonzero height (not CSS-clipped)").to.be.greaterThan(0);
+    const viewport = (await browser.execute(() => ({ w: window.innerWidth, h: window.innerHeight }))) as {
+      w: number;
+      h: number;
+    };
+    expect(flyoutRect.left, "expected the flyout's left edge on-screen").to.be.at.least(0);
+    expect(flyoutRect.right, "expected the flyout's right edge on-screen").to.be.at.most(viewport.w);
+    expect(flyoutRect.top, "expected the flyout's top edge on-screen").to.be.at.least(0);
+    expect(flyoutRect.bottom, "expected the flyout's bottom edge on-screen").to.be.at.most(viewport.h);
+
     // CPE-1148 Part A: capture the open submenu before dismissing it below.
     await snap("macro-in-menu");
 
