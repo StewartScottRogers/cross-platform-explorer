@@ -160,3 +160,84 @@ jsdom asserts DOM/CSS-rule presence only, per the structural-guard convention; n
 screenshot pass like every other layout claim in this codebase.
 
 Pushed to `cpe-1618-log-viewer`; PR opened. Ticket left in `Doing/`.
+
+### 2026-08-11 — Visual Critic follow-up on PR #829 (3 of 4 findings fixed)
+
+PR #829 was code-review APPROVED and UAT PASS (13 real log files off-machine), CI green. A Visual
+Critic then screenshotted the real component in both themes at 900/460/260px and returned 4 findings.
+Fixed 3 (in scope); left the 4th (`--text-faint` contrast on the TRACE badge/gutter) untouched — it's a
+**pre-existing, app-wide token** already tracked separately, not introduced by this PR.
+
+**Fix 1 — active filter-chip label contrast (AA fail in 4 of 6 combinations).** The chip's active state
+tinted its background via `color-mix(in srgb, <level-color> 16%, var(--surface))` and rendered the
+label in that SAME level colour. Measured (script, matches the critic's numbers almost exactly):
+light generic (accent) 4.49:1, light error (danger) 4.39:1, dark generic 4.19:1, dark error 3.94:1 — all
+four under AA's 4.5:1 floor for normal text. (Warn was already fine: 4.72 light / 5.74 dark.) Fixed by
+changing the label's `color:` to `var(--text)` in all three `.log-chip...active` rules — the tinted
+background + coloured border still carry the level identity (border only needs the 3:1 non-text floor,
+which it already cleared and this didn't touch). No new/changed token; scoped entirely to
+`LogPreview.svelte`. **Measured after the fix** (`--text` on the real `color-mix` background, both
+themes): light generic 13.60:1, light error 13.35:1, light warn 13.71:1, dark generic 9.82:1, dark error
+10.17:1, dark warn 8.90:1 — all comfortably clear 4.5:1.
+
+**Fix 2 — log body unreachable by keyboard.** `.log-body` had no `tabindex`, so Tab reached the filter
+chips and then nothing — no arrow keys/Page Down, only mouse wheel/scrollbar drag. Added `tabindex="0"`
+to `.log-body` (single tab stop for the region, not per-row — WCAG SCR29 "scrollable region" technique)
+plus a `:focus-visible` ring matching the app-wide `button:focus-visible` treatment
+(`outline: 2px solid var(--accent); outline-offset: -2px`) instead of inventing a new one. Native
+browser behaviour then makes arrow keys/Page Up/Page Down scroll the focused region — no extra JS
+needed. Added `<!-- svelte-ignore a11y-no-noninteractive-tabindex -->` with an explanatory comment,
+since this is a deliberate, correct pattern the linter doesn't recognise by default (no existing
+scrollable-region precedent elsewhere in this codebase — the other `tabindex="0"` usages, e.g.
+`FolderBrowser.svelte`/`JsonTreeNode.svelte`, are all `role="button"` click targets, a different case).
+
+**Fix 3 — filter chips didn't announce their state.** Added `aria-pressed={activeLevels.has(level)}` to
+each level chip and `aria-pressed={showUnleveled}` to the "Other" chip, so a screen reader now hears
+"Error, button, pressed" / "not pressed" instead of just "button, Error 4". Also added
+`aria-live="polite"` to the "Showing N of M lines" count span so a filter's *effect* (which rows
+disappear) is announced too, not just the button's own pressed state.
+
+**Tests added** (`LogPreview.contrast.test.ts`, new file, 6 tests; `LogPreview.test.ts`, +3 tests):
+- `LogPreview.contrast.test.ts` regex-parses the REAL `app.css` token values (light + dark, through the
+  palette layer, same technique as `app.css.dark-contrast.test.ts`) and the REAL `LogPreview.svelte`
+  `<style>` block (extracts the actual `color-mix` mix-var/percentage and the actual label `color:` var
+  from each `.log-chip...active` rule) — so it computes against the real background and the real
+  declared colour, not hand-copied numbers. **Negative control, run and observed**: temporarily reverted
+  the three `color:` declarations back to today's pre-fix values (`var(--accent)`/`var(--danger)`/
+  `var(--log-warn)`) and reran — 4 of 6 tests failed with `expected 4.487157883031404 to be >= 4.5`
+  (light generic), `4.389854987136596` (light error), `4.189197623960621` (dark generic),
+  `3.938234371223469` (dark error) — matching the critic's measurements to two decimal places. Restored
+  the fix; all 6 pass.
+- `LogPreview.test.ts`: `aria-pressed` starts `"true"` for every chip, flips to `"false"`/back to
+  `"true"` on click, matches `activeLevels`/`showUnleveled`; the count span carries
+  `aria-live="polite"`; `.log-body` has `tabindex="0"`, is actually focusable
+  (`document.activeElement === body` after `.focus()`), and individual `.log-row` elements carry no
+  `tabindex` (confirms only one tab stop, not one per row).
+
+**A11y lint caught a real gap of my own**: adding `tabindex="0"` to `.log-body` without a `role`
+initially tripped svelte's `a11y-no-noninteractive-tabindex` warning (0 warnings before my change, 1
+after) — confirmed by `git stash`/reapply that it was specifically the tabindex line, not pre-existing.
+Resolved with the `svelte-ignore` comment above rather than adding a misleading `role="region"` (which
+made the SAME warning fire for a different reason — non-interactive landmark role + tabindex — so I
+dropped it and kept `aria-label` alone for the accessible name).
+
+**A hex-literal false positive, caught and fixed**: my first draft of the code comments referenced
+"PR #829" three times; `#829` parses as a valid 3-hex-digit literal and tripped
+`app.css.test.ts`'s component hard-coded-hex ratchet (90 → 91 files). Reworded to "PR 829" (no `#`) —
+zero functional change, ratchet back to 90.
+
+**Verification** (all commands run synchronously in this worktree, rebased onto latest `main` first —
+rebase was clean, no conflicts):
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- `npx vitest run` (full suite, post-rebase) → **`Test Files 281 passed (281)`, `Tests 3471 passed
+  (3471)`** (up from the ticket's original 277/3450 baseline — several sibling PRs merged into `main`
+  overnight, picked up by the rebase; nothing of mine failed or was skipped).
+- Targeted: `LogPreview.test.ts` 16/16 (13 original + 3 new), `LogPreview.contrast.test.ts` 6/6 (new).
+
+**Not independently verified**: the actual on-screen rendering (contrast as perceived, focus ring
+visibility, screen-reader announcement) in a real browser — jsdom can't see layout or colour, so this
+needs the Visual Critic's own re-check against the live component, per its own methodology note about
+headless Chrome's `--window-size` not reliably setting the CSS viewport.
+
+Pushed to `cpe-1618-log-viewer`; PR #829 updated (not a new PR). Ticket left in `Doing/` pending the
+Visual Critic's re-check and CI.

@@ -101,6 +101,7 @@
             class="log-chip"
             data-level={level}
             class:active={activeLevels.has(level)}
+            aria-pressed={activeLevels.has(level)}
             data-testid="log-filter-chip-{level}"
             on:click={() => toggleLevel(level)}
           >
@@ -113,13 +114,14 @@
             class="log-chip"
             data-level="none"
             class:active={showUnleveled}
+            aria-pressed={showUnleveled}
             data-testid="log-filter-chip-unleveled"
             on:click={toggleUnleveled}
           >
             Other ({unleveledCount})
           </button>
         {/if}
-        <span class="log-count" data-testid="log-visible-count">
+        <span class="log-count" data-testid="log-visible-count" aria-live="polite">
           Showing {visibleLines.length} of {log.lines.length} line{log.lines.length === 1 ? "" : "s"}
         </span>
       </div>
@@ -130,7 +132,12 @@
         </p>
       {/if}
 
-      <div class="log-body" data-testid="log-body">
+      <!-- svelte-ignore a11y-no-noninteractive-tabindex -- deliberate WCAG SCR29 "scrollable region"
+           technique (Visual Critic finding on PR 829): before this, a keyboard user could Tab through
+           the filter chips and then had no way to reach or scroll the log body at all (mouse wheel /
+           scrollbar drag only). tabindex=0 makes this DIV a single, real tab stop that native arrow
+           keys/Page Up/Page Down scroll once focused — individual rows are NOT tab stops. -->
+      <div class="log-body" data-testid="log-body" tabindex="0" aria-label="Log output">
         {#each visibleLines as line (line.index)}
           <div class="log-row" data-level={line.level ?? "none"} data-testid="log-row">
             <span class="log-gutter">{line.index + 1}</span>
@@ -166,19 +173,25 @@
     cursor: pointer;
   }
   .log-chip:hover { background: var(--hover); }
-  /* Active state: a tinted fill + coloured text/border (never solid-fill + white text) — sidesteps the
-     white-on-solid-colour contrast gap already tracked separately as CPE-1632, and needs no new token. */
+  /* Active state: a tinted fill + coloured border carries the level identity (never solid-fill + white
+     text) — sidesteps the white-on-solid-colour contrast gap already tracked separately as CPE-1632, and
+     needs no new token. The LABEL itself renders in --text rather than the level colour (Visual Critic
+     finding on PR 829): the level colour at 16% tint only clears ~4.2-4.5:1 against its own tinted
+     background in some theme/level combinations (measured), short of WCAG AA's 4.5:1 floor for normal
+     text in both themes. --text against the same tint is >=8.9:1 in every combination (see
+     LogPreview.contrast.test.ts), and the border + tinted fill remain the level's colour signal — the
+     border alone only needs the 3:1 non-text floor, which it already clears. */
   .log-chip.active {
     background: color-mix(in srgb, var(--accent) 16%, var(--surface));
-    color: var(--accent); border-color: var(--accent); font-weight: 600;
+    color: var(--text); border-color: var(--accent); font-weight: 600;
   }
   .log-chip[data-level="error"].active {
     background: color-mix(in srgb, var(--danger) 16%, var(--surface));
-    color: var(--danger); border-color: var(--danger);
+    color: var(--text); border-color: var(--danger);
   }
   .log-chip[data-level="warn"].active {
     background: color-mix(in srgb, var(--log-warn) 16%, var(--surface));
-    color: var(--log-warn); border-color: var(--log-warn);
+    color: var(--text); border-color: var(--log-warn);
   }
   .log-count { margin-left: auto; color: var(--text-faint); font-size: 11px; white-space: nowrap; }
 
@@ -189,6 +202,13 @@
     border: 1px solid var(--border); border-radius: var(--radius);
     background: var(--surface);
     font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
+  }
+  /* Keyboard-reachable scroll region (Visual Critic finding on PR 829): `tabindex="0"` on the div above
+     makes it a single tab stop (not every row) that arrow keys/Page Down/Page Up natively scroll once
+     focused. Focus ring matches the app-wide button:focus-visible treatment (app.css) rather than
+     inventing a new one. */
+  .log-body:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px;
   }
   .log-row {
     display: flex; align-items: baseline; gap: 8px;

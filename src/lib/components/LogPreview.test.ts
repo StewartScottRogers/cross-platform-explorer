@@ -145,6 +145,59 @@ describe("LogPreview (CPE-1618)", () => {
     expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(0);
   });
 
+  it("filter chips carry aria-pressed reflecting whether that level is currently active (CPE-1618 Visual Critic)", async () => {
+    readFileTextMock.mockResolvedValueOnce(ok(MIXED_LOG));
+
+    const { container } = render(LogPreview, { path: "/x/app.log" });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(5));
+
+    const errorChip = container.querySelector('[data-testid="log-filter-chip-error"]')!;
+    const unleveledChip = container.querySelector('[data-testid="log-filter-chip-unleveled"]')!;
+
+    // All levels + "Other" start active.
+    for (const level of ["error", "warn", "info", "debug", "trace"]) {
+      expect(container.querySelector(`[data-testid="log-filter-chip-${level}"]`)!.getAttribute("aria-pressed")).toBe(
+        "true",
+      );
+    }
+    expect(unleveledChip.getAttribute("aria-pressed")).toBe("true");
+
+    await fireEvent.click(errorChip);
+    expect(errorChip.getAttribute("aria-pressed")).toBe("false");
+
+    await fireEvent.click(errorChip);
+    expect(errorChip.getAttribute("aria-pressed")).toBe("true");
+
+    await fireEvent.click(unleveledChip);
+    expect(unleveledChip.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("the 'Showing N of M' count is a live region so a screen reader hears filter changes (CPE-1618 Visual Critic)", async () => {
+    readFileTextMock.mockResolvedValueOnce(ok(MIXED_LOG));
+
+    const { container } = render(LogPreview, { path: "/x/app.log" });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(5));
+
+    const count = container.querySelector('[data-testid="log-visible-count"]')!;
+    expect(count.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("the log body is a single, focusable, keyboard-scrollable tab stop (CPE-1618 Visual Critic)", async () => {
+    readFileTextMock.mockResolvedValueOnce(ok(MIXED_LOG));
+
+    const { container } = render(LogPreview, { path: "/x/app.log" });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(5));
+
+    const body = container.querySelector('[data-testid="log-body"]')! as HTMLElement;
+    expect(body.getAttribute("tabindex")).toBe("0");
+    body.focus();
+    expect(document.activeElement).toBe(body);
+
+    // Individual rows must NOT be extra tab stops — only the region itself.
+    const rows = Array.from(container.querySelectorAll('[data-testid="log-row"]'));
+    for (const row of rows) expect(row.getAttribute("tabindex")).toBeNull();
+  });
+
   it("switching to a new path re-loads and replaces the previous file's rows", async () => {
     readFileTextMock.mockResolvedValueOnce(ok("ERROR first file"));
     const { container, rerender } = render(LogPreview, { path: "/x/a.log" });
