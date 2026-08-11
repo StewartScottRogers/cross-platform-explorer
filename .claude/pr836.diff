@@ -1,0 +1,654 @@
+diff --git a/Ticketing/Tickets/Backlog/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md b/Ticketing/Tickets/Backlog/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md
+deleted file mode 100644
+index 9a640a31..00000000
+--- a/Ticketing/Tickets/Backlog/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md
++++ /dev/null
+@@ -1,66 +0,0 @@
+----
+-id: CPE-1630
+-title: "Vault create's \"securely delete the original\" has no confirmed flag — the second door into irreversible shredding, still open after CPE-1611"
+-type: Task
+-status: Backlog
+-priority: Medium
+-component: Backend
+-tags: [ready]
+-created: 2026-08-11
+-closed:
+----
+-
+-## Why
+-Found by the independent Reviewer of CPE-1611 (PR #819), and independently by that PR's UAT tester. CPE-1611
+-gave `shred_paths` an explicit `confirmed: bool` so the engine refuses unless told — closing the same class
+-of gap CPE-1599 closed for Batch Media. But `shred_paths` turns out not to be the only door.
+-
+-## The gap
+-`vault_manager::shred_tree` (`crates/server/src/vault_manager.rs:466-479`) calls
+-`secure_shred::shred_file` **directly**, bypassing `shred_paths` and therefore the new gate entirely.
+-
+-Upstream, `vault_create` (`src-tauri/src/lib.rs:6912-6928`, `crates/server/src/vault_manager.rs:134-170`)
+-takes `shred_original: bool` straight from `VaultCreateDialog.svelte`'s checkbox
+-(`src/lib/components/VaultCreateDialog.svelte:40,75,208`) with **no separate confirm flag layered on top of
+-that intent bool**. A devtools or automation caller can invoke `vault_create(folder, dest, pass, true)` and
+-skip the dialog's warning panel completely.
+-
+-This is architecturally identical to the pre-CPE-1599 batch-media gap and the pre-CPE-1611 `shred_paths`
+-gap: `shred_original`'s danger is **conditional** (only when true), which is exactly the shape CPE-1599
+-established needs a distinct `confirmed` parameter rather than one intent flag doing double duty.
+-
+-## What already mitigates it (so scope this proportionately)
+-This is **not** the same severity as an unguarded `shred_paths`. `vault_create` already:
+-- defaults `shred_original` to `false`,
+-- refuses if the destination blob resolves **inside** the folder being shredded, and
+-- performs a full decrypt round-trip verification of the on-disk encrypted copy **before** shredding the
+-  plaintext original — with dedicated tests (`shred_original_refuses_to_shred_when_verify_fails`,
+-  `shred_original_refuses_when_dest_is_inside_the_folder_to_be_shredded`).
+-
+-So data is not *lost* — a recoverable copy is proven to exist first. But the plaintext original is still
+-irreversibly destroyed with no trash fallback, which is the same blast-radius class as `shred_paths`.
+-
+-## Goal
+-One consistent rule across every destructive engine entry point: **the engine refuses unless explicitly
+-told, separately from the caller's intent flag.**
+-
+-## Scope
+-- Add a `confirmed: bool` to `vault_create` (and thread it into `vault_manager::create_vault`), required
+-  only when `shred_original` is true; refuse cleanly with a specific error otherwise — never a panic, never
+-  a partial shred, and never a vault created but a shred silently skipped without saying so.
+-- `VaultCreateDialog.svelte` is the one and only caller allowed to pass `true`.
+-- Match CPE-1599's and CPE-1611's error shape and naming so all three refusals read alike.
+-- Regenerate `bindings.gen.ts` (the command signature changes) or the typed-bindings drift guard fails.
+-- While here, **audit for any third door**: grep for every direct `secure_shred::` / `shred_file` /
+-  `shred_tree` caller and list them in the work log, so the next person doesn't have to rediscover this.
+-
+-## Acceptance criteria
+-- `vault_create(..., shred_original: true, confirmed: false)` shreds nothing and returns a specific error;
+-  a test verifies the originals' **bytes are intact on disk**, not merely that an `Err` came back.
+-- The confirmed path still works end-to-end, including the existing verify-before-shred guarantee.
+-- The audit list of all direct shred callers appears in the work log.
+-- Tests must not assert exact filesystem byte counts (CI runs Linux + macOS + Windows).
+-
+-**Conflict surface:** `crates/server/src/vault_manager.rs`, `src-tauri/src/lib.rs` (the `vault_create`
+-command + `generate_handler!`), `src/lib/bindings.gen.ts`, `src/lib/components/VaultCreateDialog.svelte`,
+-plus tests. Touches `lib.rs` and `bindings.gen.ts` — do not run in parallel with other command-signature work.
+diff --git a/Ticketing/Tickets/Doing/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md b/Ticketing/Tickets/Doing/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md
+new file mode 100644
+index 00000000..57f7f848
+--- /dev/null
++++ b/Ticketing/Tickets/Doing/CPE-1630_vault-create-shred-original-has-no-confirmed-flag.md
+@@ -0,0 +1,171 @@
++---
++id: CPE-1630
++title: "Vault create's \"securely delete the original\" has no confirmed flag — the second door into irreversible shredding, still open after CPE-1611"
++type: Task
++status: Doing
++priority: Medium
++component: Backend
++tags: [ready]
++created: 2026-08-11
++closed:
++---
++
++## Why
++Found by the independent Reviewer of CPE-1611 (PR #819), and independently by that PR's UAT tester. CPE-1611
++gave `shred_paths` an explicit `confirmed: bool` so the engine refuses unless told — closing the same class
++of gap CPE-1599 closed for Batch Media. But `shred_paths` turns out not to be the only door.
++
++## The gap
++`vault_manager::shred_tree` (`crates/server/src/vault_manager.rs:466-479`) calls
++`secure_shred::shred_file` **directly**, bypassing `shred_paths` and therefore the new gate entirely.
++
++Upstream, `vault_create` (`src-tauri/src/lib.rs:6912-6928`, `crates/server/src/vault_manager.rs:134-170`)
++takes `shred_original: bool` straight from `VaultCreateDialog.svelte`'s checkbox
++(`src/lib/components/VaultCreateDialog.svelte:40,75,208`) with **no separate confirm flag layered on top of
++that intent bool**. A devtools or automation caller can invoke `vault_create(folder, dest, pass, true)` and
++skip the dialog's warning panel completely.
++
++This is architecturally identical to the pre-CPE-1599 batch-media gap and the pre-CPE-1611 `shred_paths`
++gap: `shred_original`'s danger is **conditional** (only when true), which is exactly the shape CPE-1599
++established needs a distinct `confirmed` parameter rather than one intent flag doing double duty.
++
++## What already mitigates it (so scope this proportionately)
++This is **not** the same severity as an unguarded `shred_paths`. `vault_create` already:
++- defaults `shred_original` to `false`,
++- refuses if the destination blob resolves **inside** the folder being shredded, and
++- performs a full decrypt round-trip verification of the on-disk encrypted copy **before** shredding the
++  plaintext original — with dedicated tests (`shred_original_refuses_to_shred_when_verify_fails`,
++  `shred_original_refuses_when_dest_is_inside_the_folder_to_be_shredded`).
++
++So data is not *lost* — a recoverable copy is proven to exist first. But the plaintext original is still
++irreversibly destroyed with no trash fallback, which is the same blast-radius class as `shred_paths`.
++
++## Goal
++One consistent rule across every destructive engine entry point: **the engine refuses unless explicitly
++told, separately from the caller's intent flag.**
++
++## Scope
++- Add a `confirmed: bool` to `vault_create` (and thread it into `vault_manager::create_vault`), required
++  only when `shred_original` is true; refuse cleanly with a specific error otherwise — never a panic, never
++  a partial shred, and never a vault created but a shred silently skipped without saying so.
++- `VaultCreateDialog.svelte` is the one and only caller allowed to pass `true`.
++- Match CPE-1599's and CPE-1611's error shape and naming so all three refusals read alike.
++- Regenerate `bindings.gen.ts` (the command signature changes) or the typed-bindings drift guard fails.
++- While here, **audit for any third door**: grep for every direct `secure_shred::` / `shred_file` /
++  `shred_tree` caller and list them in the work log, so the next person doesn't have to rediscover this.
++
++## Acceptance criteria
++- `vault_create(..., shred_original: true, confirmed: false)` shreds nothing and returns a specific error;
++  a test verifies the originals' **bytes are intact on disk**, not merely that an `Err` came back.
++- The confirmed path still works end-to-end, including the existing verify-before-shred guarantee.
++- The audit list of all direct shred callers appears in the work log.
++- Tests must not assert exact filesystem byte counts (CI runs Linux + macOS + Windows).
++
++**Conflict surface:** `crates/server/src/vault_manager.rs`, `src-tauri/src/lib.rs` (the `vault_create`
++command + `generate_handler!`), `src/lib/bindings.gen.ts`, `src/lib/components/VaultCreateDialog.svelte`,
++plus tests. Touches `lib.rs` and `bindings.gen.ts` — do not run in parallel with other command-signature work.
++
++## Work Log
++
++**2026-08-11 — implemented, tested, PR opened (sprint worker).**
++
++Matched CPE-1599's / CPE-1611's shape exactly:
++
++- `crates/server/src/vault_manager.rs`: `create_vault` (and the injectable `create_vault_with_verifier`)
++  now take a `confirmed: bool` parameter, separate from `opts.shred_original`. When `shred_original` is
++  `true` and `confirmed` is `false`, `create_vault` returns `Err(VaultError::Format(...))` **before
++  sealing even starts** — no blob is written, nothing is encrypted, the plaintext original is completely
++  untouched. The refusal message follows `shred_paths`' wording pattern (contains "confirm", names the
++  one authorized caller). When `shred_original` is `false`, `confirmed` is ignored (sealing without
++  shredding always succeeds regardless of its value) — matches the ticket's "required only when
++  `shred_original` is true". The pre-existing checks (dest-inside-folder guard, then encrypt, then
++  verify-before-shred, then the actual `shred_tree`) are unchanged and still run in the same order,
++  strictly after the new confirm gate.
++- `src-tauri/src/lib.rs`: the `vault_create` Tauri command gained a `confirmed: bool` parameter and
++  threads it straight into `cpe_server::vault_manager::create_vault`. Still a thin one-line dispatcher.
++  Confirmed registered by name in **both** `generate_handler!` call sites (line ~11466 in `run()` and
++  line ~12283 in `export_bindings`) — neither needed edits since they list commands by bare identifier,
++  not by signature.
++- `src/lib/components/VaultCreateDialog.svelte`: `create()` now calls
++  `commands.vaultCreate(folderPath, dest, passphrase, shredOriginal, shredOriginal)` — this dialog is the
++  ONE place in the codebase allowed to pass `confirmed: true`, and its own submit (checkbox + inline
++  warning already rendered above the button) IS the confirmation, so `confirmed` tracks `shredOriginal`
++  rather than being a separate UI control. Doc comment updated to explain the CPE-1630 gate.
++- `src/lib/bindings.gen.ts`: regenerated via `cargo run --bin export_bindings --features
++  "specta-bindings sidecar-platform"` from `src-tauri/` — not hand-edited. Only the `vaultCreate` entry
++  changed (new `confirmed` param + doc comment); diff is 7 insertions / 2 deletions.
++- Tests added in `crates/server/src/vault_manager.rs`:
++  - `create_vault_refuses_the_whole_call_when_shred_original_is_not_confirmed` — `shred_original: true,
++    confirmed: false` → `Err` (message contains "confirm"), then reads the original files' **bytes back
++    off disk** (`top.txt` == `b"top secret"`, `sub/inner.bin` == the exact fixture bytes) rather than
++    trusting the `Err`, and asserts no vault blob was written at all.
++  - `create_vault_proceeds_and_still_verifies_before_shred_once_confirmed_is_true` — the identical call
++    with `confirmed: true` succeeds, the original is gone, and the sealed blob still round-trips through
++    a real unlock (proves CPE-1630 doesn't regress CPE-1248's verify-before-shred invariant).
++  - `confirmed_is_ignored_when_shred_original_is_off` — `shred_original: false, confirmed: false`
++    succeeds normally and never touches the original.
++  - The 14 pre-existing `create_vault`/`create_vault_with_verifier` call sites in this file's test module
++    were all updated to pass the new `confirmed` argument (`false` where `shred_original` is off/default,
++    `true` where an existing test is specifically exercising the dest-inside-folder guard, the
++    unextractable-name refusal, or the verify-before-shred invariant — so those tests keep testing what
++    they were named for, not the new confirm gate).
++- `src/lib/components/VaultCreateDialog.test.ts`: the existing invoke-args assertion for `vault_create`
++  now expects `confirmed: false` (shred unchecked); added a new test
++  (`passes confirmed: true alongside shredOriginal: true when the shred checkbox is checked`) asserting
++  the dialog wires `confirmed` to `shredOriginal`, not a hardcoded value.
++- No changes needed to `src/App.paneBArchiveVault.test.ts` — its mock reads only `folder`/`dest`/
++  `shredOriginal` off the invoke args by name (doesn't do a full-object equality against the raw IPC
++  payload), so it's unaffected by the new `confirmed` argument; ran it anyway to confirm (see below).
++- No locale/`$t()` changes: like `ShredConfirmDialog.svelte`'s CPE-1611 precedent, `VaultCreateDialog.svelte`
++  surfaces the raw backend error string directly (`error = String(e)`) rather than through `$t()` — neither
++  dialog calls `$t()` anywhere, so there was nothing to add to the 12 locale catalogs.
++
++**Negative control (run before committing the fix):** temporarily neutered the new guard
++(`if !confirmed && false /* ... */`) and re-ran
++`cargo test create_vault_refuses_the_whole_call_when_shred_original_is_not_confirmed` — it FAILED as
++expected:
++```
++thread '...create_vault_refuses_the_whole_call_when_shred_original_is_not_confirmed' panicked at
++src\vault_manager.rs:729:14:
++an unconfirmed shred_original create_vault call must be refused, not executed: ()
++```
++i.e. without the gate, the call silently succeeded and shredded the original — proving the test isn't
++vacuously true. Restored the guard immediately after and re-ran green.
++
++**Third-door audit (the ticket's ask) — every direct `secure_shred::` / `shred_file` / `shred_tree` /
++`shred_paths` caller in the tree** (excluded sibling agent worktrees under `.claude/worktrees/*`, which
++are other in-flight sessions' copies of the same files, not separate call sites):
++
++| Caller | File | Gated? |
++|---|---|---|
++| `secure_shred::shred_paths` (public API, dispatched by the `shred_paths` Tauri command) | `crates/server/src/secure_shred.rs` / `src-tauri/src/lib.rs:2138` | Yes — `confirmed: bool` since CPE-1611 |
++| `vault_manager::shred_tree` → `secure_shred::shred_file` (the ONE place `shred_file` is called directly, bypassing `shred_paths`) | `crates/server/src/vault_manager.rs:474` (line numbers pre-CPE-1630; now further down after the new gate) | **This ticket** — gated indirectly: `shred_tree`'s only two callers are `create_vault` (now gated by the new `confirmed` check, added above) and `wipe_session_dir` (see next row) |
++| `vault_manager::wipe_session_dir` → `shred_tree` | `crates/server/src/vault_manager.rs` (called from `VaultRegistry::lock`/`unlock_with_wiper`'s stale-session cleanup and `sweep_orphan_sessions`) | **Not gated, and intentionally not in scope.** This wipes an already-*extracted session directory* (a transient decrypt artifact the app itself created when unlocking a vault) — not a user's original file — as part of the ordinary "lock a vault" / "clean up an orphaned session on startup" flow. There is no user intent to confirm here: locking IS supposed to wipe the plaintext session copy, every time, by design (see the module's own doc comment on the "mount tradeoff"). Flagging this for awareness, not as a follow-up ticket — it's a different risk class (transient app-owned scratch data, not a user's file) from `shred_paths`/`create_vault`'s original-file destruction. |
++
++No other crate (`crates/{contract,ftp,mdns,net,security,sftp,updater-verify,vfs,webdav}`,
++`sidecar/{agent-board,ai-console,contract,host,repos}`) references `secure_shred`, `shred_file`,
++`shred_tree`, or `shred_paths` at all — `cpe-server` and `src-tauri` are the only two crates that touch
++this module. So as of this ticket, every conditionally-destructive shred entry point that a caller
++outside its own confirm dialog could reach (`shred_paths`, `vault_create`) now refuses without an
++explicit `confirmed: true`.
++
++**Verification (all run synchronously in the worktree, from
++`Z:\repos\cross-platform-explorer\.claude\worktrees\agent-ab16d802bd6343fee`):**
++- `cargo build` (crates/server) — pass.
++- `cargo test vault_manager` (crates/server) — 23 passed, 0 failed (20 pre-existing + 3 new).
++- `cargo test` (crates/server, full suite) — 1906 passed, 0 failed, 2 ignored.
++- `cargo clippy --all-targets -- -D warnings` (crates/server, default features) — clean.
++- `cargo clippy --all-targets --features specta -- -D warnings` (crates/server) — clean.
++- `cargo build` (src-tauri, default features) — pass.
++- `cargo test` (src-tauri) — 144 passed, 0 failed.
++- `cargo clippy --all-targets -- -D warnings` (src-tauri, default features) — clean.
++- `cargo clippy --all-targets --features sidecar-platform -- -D warnings` (src-tauri) — clean.
++- `cargo run --bin export_bindings --features "specta-bindings sidecar-platform"` (src-tauri) — pass,
++  regenerated `bindings.gen.ts` (minimal diff: `vaultCreate` gains `confirmed`).
++- `npm run check` — 0 errors, 0 warnings.
++- `npx vitest run` (full suite) — 283 files / 3490 passed, 0 failed (baseline before this ticket's new
++  tests: 3488 passed, 1 failing on the stale invoke-args assertion this ticket fixes).
++
++No new dependencies added; no `Cargo.lock` changes. Diff kept to the conflict surface the ticket named
++plus the two test files (`vault_manager.rs`'s inline `#[cfg(test)] mod tests` and
++`VaultCreateDialog.test.ts`) that needed updating for the new parameter.
+diff --git a/crates/server/src/vault_manager.rs b/crates/server/src/vault_manager.rs
+index 5658d159..e8580b23 100644
+--- a/crates/server/src/vault_manager.rs
++++ b/crates/server/src/vault_manager.rs
+@@ -130,14 +130,25 @@ pub fn is_vault(path: &Path) -> bool {
+ /// passphrase — the original is left completely intact and the error is returned. The encrypted copy
+ /// is never trusted, and the plaintext is never destroyed, until recovery is proven.
+ ///
+-/// With `shred_original` off (the default) the plaintext is left untouched and no verification runs.
++/// With `shred_original` off (the default) the plaintext is left untouched and no verification runs,
++/// and `confirmed` is ignored.
++///
++/// `confirmed` (CPE-1630, following CPE-1611's identical treatment of `secure_shred::shred_paths`) is
++/// **required, separately from `shred_original`, whenever `shred_original` is true**: sealing itself
++/// always proceeds, but the destructive shred of the plaintext original refuses up front — before the
++/// folder is even encrypted — unless `confirmed` is also `true`. This closes the same class of gap
++/// CPE-1611 closed for `shred_paths`: without a distinct confirm flag, a devtools or automation caller
++/// could invoke `vault_create(folder, dest, pass, true)` and skip `VaultCreateDialog.svelte`'s warning
++/// entirely. `VaultCreateDialog.svelte` — the one place in the codebase allowed to set `confirmed: true`
++/// — is now the only thing that can make the backend actually shred the original.
+ pub fn create_vault(
+     folder: &Path,
+     dest_blob_path: &Path,
+     passphrase: &SecretString,
+     opts: &CreateOpts,
++    confirmed: bool,
+ ) -> Result<(), VaultError> {
+-    create_vault_with_verifier(folder, dest_blob_path, passphrase, opts, verify_recoverable)
++    create_vault_with_verifier(folder, dest_blob_path, passphrase, opts, confirmed, verify_recoverable)
+ }
+ 
+ /// [`create_vault`] with the recoverability check injected, so tests can force the verify step to
+@@ -148,9 +159,24 @@ fn create_vault_with_verifier(
+     dest_blob_path: &Path,
+     passphrase: &SecretString,
+     opts: &CreateOpts,
++    confirmed: bool,
+     verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
+ ) -> Result<(), VaultError> {
+     if opts.shred_original {
++        // CONFIRM GATE (CPE-1630): checked first, before anything is written, encrypted, or destroyed —
++        // a distinct `confirmed` flag, separate from the caller's `shred_original` intent, exactly the
++        // shape CPE-1599/CPE-1611 established for every other conditionally-destructive engine entry
++        // point. Refuses cleanly; never a panic, never a partial shred, never a silently-skipped one.
++        if !confirmed {
++            return Err(VaultError::Format(
++                "refusing to shred: `confirmed` was not set on this vault_create call — shredding the \
++                 original is a permanent, non-recoverable operation with no trash fallback, so it must \
++                 be re-invoked with an explicit confirmation (only VaultCreateDialog's \"Create vault\" \
++                 button, submitted with \"Securely delete the original folder\" checked, should ever \
++                 set it)"
++                    .to_string(),
++            ));
++        }
+         // DATA-LOSS GUARD (checked BEFORE anything is written or destroyed): refuse to shred when the
+         // destination blob would live INSIDE the folder we're about to `remove_dir_all`. Otherwise the
+         // just-verified encrypted copy would be shredded along with the plaintext, losing both.
+@@ -554,7 +580,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("data.cpevault");
+-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+         assert!(is_vault(&blob_path), "a real sealed blob must be detected");
+ 
+         // A non-vault file (even with the extension) is rejected — detection is by content.
+@@ -581,7 +607,7 @@ mod tests {
+         let blob_path = dir.path().join("v.cpevault");
+ 
+         // Create does NOT touch the original by default.
+-        create_vault(&src, &blob_path, &pass("open sesame"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("open sesame"), &CreateOpts::default(), false).unwrap();
+         assert!(src.join("top.txt").exists(), "default create must not shred the original");
+         assert!(is_vault(&blob_path));
+ 
+@@ -613,7 +639,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+ 
+         let reg = VaultRegistry::default();
+         let session1 = dir.path().join("session1");
+@@ -646,7 +672,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+ 
+         let reg = VaultRegistry::default();
+         let session1 = dir.path().join("session1");
+@@ -675,7 +701,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+-        create_vault(&src, &blob_path, &pass("right"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("right"), &CreateOpts::default(), false).unwrap();
+ 
+         let reg = VaultRegistry::default();
+         let session = dir.path().join("session");
+@@ -684,6 +710,89 @@ mod tests {
+         assert!(!reg.is_unlocked(&blob_path), "a failed unlock must not record unlocked state");
+     }
+ 
++    // ---- CPE-1630: engine-side refusal of an unconfirmed shred_original create_vault call ----------
++
++    /// The core defence-in-depth guarantee (mirrors CPE-1611's `shred_paths_refuses_the_whole_batch_
++    /// when_not_confirmed`): `shred_original: true, confirmed: false` refuses the WHOLE call — `Err`,
++    /// nothing written and nothing shredded, not even a partial vault blob — with a specific reason, not
++    /// a panic and not a "vault created but shred silently skipped". Verified by reading the originals'
++    /// **bytes back off disk**, not by trusting the `Err`.
++    #[test]
++    fn create_vault_refuses_the_whole_call_when_shred_original_is_not_confirmed() {
++        let dir = tempfile::tempdir().unwrap();
++        let src = dir.path().join("src");
++        sample_folder(&src);
++        let blob_path = dir.path().join("v.cpevault");
++
++        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
++        let err = create_vault(&src, &blob_path, &pass("pw"), &opts, false)
++            .expect_err("an unconfirmed shred_original create_vault call must be refused, not executed");
++
++        let msg = err.to_string();
++        assert!(!msg.is_empty(), "the refusal must carry a specific reason");
++        assert!(msg.to_lowercase().contains("confirm"), "refusal reason: {msg}");
++
++        // Nothing was shredded: read the original bytes back off disk (not merely `Err`, and not merely
++        // `exists()` — the actual plaintext content must be intact).
++        assert!(src.exists(), "the original folder must survive an unconfirmed call");
++        assert_eq!(
++            std::fs::read(src.join("top.txt")).unwrap(),
++            b"top secret",
++            "top.txt bytes must be untouched by a refused shred"
++        );
++        assert_eq!(
++            std::fs::read(src.join("sub/inner.bin")).unwrap(),
++            [0u8, 1, 2, 255, 254],
++            "sub/inner.bin bytes must be untouched by a refused shred"
++        );
++        // Nothing was written either: no vault blob, no partial encrypt — the whole call is refused up
++        // front, before sealing even runs.
++        assert!(!blob_path.exists(), "no vault blob should be written when the shred is refused");
++    }
++
++    /// The flip side: the identical call proceeds — including the existing verify-before-shred
++    /// guarantee — once `confirmed` is explicitly `true`, proving the flag is load-bearing, not
++    /// decorative, and that CPE-1630 doesn't regress CPE-1248's invariant.
++    #[test]
++    fn create_vault_proceeds_and_still_verifies_before_shred_once_confirmed_is_true() {
++        let dir = tempfile::tempdir().unwrap();
++        let src = dir.path().join("src");
++        sample_folder(&src);
++        let blob_path = dir.path().join("v.cpevault");
++
++        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
++        create_vault(&src, &blob_path, &pass("pw"), &opts, true)
++            .expect("a confirmed shred_original create_vault call must be allowed to run");
++
++        assert!(!src.exists(), "a confirmed call must actually shred the original away");
++        assert!(is_vault(&blob_path));
++
++        // The verify-before-shred guarantee still holds end to end: the sealed blob is genuinely
++        // recoverable (a real unlock round-trips the plaintext back).
++        let reg = VaultRegistry::default();
++        let session = dir.path().join("session");
++        reg.unlock(&blob_path, &pass("pw"), &session).unwrap();
++        assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"top secret");
++        reg.lock(&blob_path).unwrap();
++    }
++
++    /// `confirmed` is a no-op when `shred_original` is off — the common case. A caller that (say)
++    /// hardcodes `confirmed: false` for every non-destructive create must not be penalised: sealing
++    /// succeeds normally and the original (never at risk) is left alone.
++    #[test]
++    fn confirmed_is_ignored_when_shred_original_is_off() {
++        let dir = tempfile::tempdir().unwrap();
++        let src = dir.path().join("src");
++        sample_folder(&src);
++        let blob_path = dir.path().join("v.cpevault");
++
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false)
++            .expect("shred_original: false must succeed regardless of confirmed");
++        assert!(is_vault(&blob_path));
++        assert!(src.exists(), "shred_original: false must never touch the original");
++        assert_eq!(std::fs::read(src.join("top.txt")).unwrap(), b"top secret");
++    }
++
+     // ---- verify-before-shred safety invariant ---------------------------
+ 
+     #[test]
+@@ -695,7 +804,7 @@ mod tests {
+ 
+         // Inject a verifier that always fails: the plaintext MUST survive.
+         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+-        let result = create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, |_, _| {
++        let result = create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, true, |_, _| {
+             Err(VaultError::Corrupt)
+         });
+ 
+@@ -718,7 +827,7 @@ mod tests {
+         // Real verifier, real round-trip: after this returns, the original is gone AND the blob is
+         // provably recoverable (unlock below succeeds).
+         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+-        create_vault(&src, &blob_path, &pass("pw"), &opts).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &opts, true).unwrap();
+         assert!(!src.exists(), "a good verify must let the original be shredded away");
+         assert!(is_vault(&blob_path));
+ 
+@@ -742,7 +851,7 @@ mod tests {
+         std::fs::write(&dest_inside, b"pre-existing bytes").unwrap();
+ 
+         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+-        let result = create_vault(&folder, &dest_inside, &pass("pw"), &opts);
++        let result = create_vault(&folder, &dest_inside, &pass("pw"), &opts, true);
+         assert!(matches!(result, Err(VaultError::Format(_))), "must refuse a dest inside the folder: {result:?}");
+ 
+         // Nothing was shredded or overwritten: plaintext AND the pre-existing blob both survive intact.
+@@ -752,14 +861,14 @@ mod tests {
+         // A nested-inside dest is refused too (guard is by canonicalized path prefix, not name match).
+         let nested = folder.join("sub").join("deep.cpevault");
+         assert!(matches!(
+-            create_vault(&folder, &nested, &pass("pw"), &opts),
++            create_vault(&folder, &nested, &pass("pw"), &opts, true),
+             Err(VaultError::Format(_))
+         ));
+         assert_eq!(std::fs::read(folder.join("top.txt")).unwrap(), b"top secret");
+ 
+         // A sibling dest just OUTSIDE the folder (shared name prefix) is allowed and shreds cleanly.
+         let sibling = dir.path().join("secret.cpevault");
+-        create_vault(&folder, &sibling, &pass("pw"), &opts).unwrap();
++        create_vault(&folder, &sibling, &pass("pw"), &opts, true).unwrap();
+         assert!(!folder.exists(), "an outside dest must still let the folder be shredded");
+         assert!(is_vault(&sibling));
+     }
+@@ -779,7 +888,7 @@ mod tests {
+         let blob_path = dir.path().join("v.cpevault");
+ 
+         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+-        let result = create_vault(&src, &blob_path, &pass("pw"), &opts);
++        let result = create_vault(&src, &blob_path, &pass("pw"), &opts, true);
+         assert!(matches!(result, Err(VaultError::Format(_))), "must refuse an unsealable name: {result:?}");
+ 
+         // Nothing was written or shredded: the original survives and no blob was produced.
+@@ -801,7 +910,7 @@ mod tests {
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+-        create_vault(&src, &blob_path, &pass("pw"), &opts).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &opts, true).unwrap();
+ 
+         assert_eq!(
+             before,
+@@ -831,7 +940,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+ 
+         let reg = VaultRegistry::default();
+         let session = dir.path().join("session");
+@@ -895,7 +1004,7 @@ mod tests {
+         let src = dir.path().join("src");
+         sample_folder(&src);
+         let blob_path = dir.path().join("v.cpevault");
+-        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default()).unwrap();
++        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+ 
+         let access = MemAccess::default();
+ 
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 63276bd3..186120fe 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -6971,6 +6971,11 @@ async fn vault_is(path: String) -> Result<bool, String> {
+ /// plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
+ /// round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
+ /// `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
++///
++/// `confirmed` (CPE-1630) is a distinct flag from `shred_original`, required whenever `shred_original` is
++/// true — mirroring `shred_paths`' `confirmed` gate (CPE-1611). `VaultCreateDialog.svelte` is the one
++/// caller allowed to set it; a devtools/automation call with `shred_original: true, confirmed: false` is
++/// refused by the engine before anything is written or destroyed.
+ #[tauri::command]
+ #[cfg_attr(feature = "specta-bindings", specta::specta)]
+ async fn vault_create(
+@@ -6978,11 +6983,12 @@ async fn vault_create(
+     dest: String,
+     passphrase: String,
+     shred_original: bool,
++    confirmed: bool,
+ ) -> Result<(), String> {
+     let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
+     tauri::async_runtime::spawn_blocking(move || {
+         let opts = cpe_server::vault_manager::CreateOpts { shred_original, ..Default::default() };
+-        cpe_server::vault_manager::create_vault(Path::new(&folder), Path::new(&dest), &pass, &opts)
++        cpe_server::vault_manager::create_vault(Path::new(&folder), Path::new(&dest), &pass, &opts, confirmed)
+             .map_err(|e| e.to_string())
+     })
+     .await
+diff --git a/src/lib/bindings.gen.ts b/src/lib/bindings.gen.ts
+index cee5389f..152aede5 100644
+--- a/src/lib/bindings.gen.ts
++++ b/src/lib/bindings.gen.ts
+@@ -3301,10 +3301,15 @@ async vaultIs(path: string) : Promise<Result<boolean, string>> {
+  * plaintext original — but ONLY after the encrypted copy is proven recoverable by a full decrypt
+  * round-trip (the verify-before-shred safety invariant lives in `vault_manager::create_vault`). Async +
+  * `spawn_blocking`: scrypt KDF (~1s) + a full tree walk/encrypt/write (CPE-760/761).
++ * 
++ * `confirmed` (CPE-1630) is a distinct flag from `shred_original`, required whenever `shred_original` is
++ * true — mirroring `shred_paths`' `confirmed` gate (CPE-1611). `VaultCreateDialog.svelte` is the one
++ * caller allowed to set it; a devtools/automation call with `shred_original: true, confirmed: false` is
++ * refused by the engine before anything is written or destroyed.
+  */
+-async vaultCreate(folder: string, dest: string, passphrase: string, shredOriginal: boolean) : Promise<Result<null, string>> {
++async vaultCreate(folder: string, dest: string, passphrase: string, shredOriginal: boolean, confirmed: boolean) : Promise<Result<null, string>> {
+     try {
+-    return { status: "ok", data: await TAURI_INVOKE("vault_create", { folder, dest, passphrase, shredOriginal }) };
++    return { status: "ok", data: await TAURI_INVOKE("vault_create", { folder, dest, passphrase, shredOriginal, confirmed }) };
+ } catch (e) {
+     if(e instanceof Error) throw e;
+     else return { status: "error", error: e  as any };
+diff --git a/src/lib/components/VaultCreateDialog.svelte b/src/lib/components/VaultCreateDialog.svelte
+index 836e9bf1..d26e6fe9 100644
+--- a/src/lib/components/VaultCreateDialog.svelte
++++ b/src/lib/components/VaultCreateDialog.svelte
+@@ -17,6 +17,14 @@
+    * only shreds AFTER a full decrypt round-trip proves the encrypted copy is recoverable
+    * (verify-before-shred, vault_manager::create_vault). The default destination is a SIBLING of the
+    * folder, never inside it, because the backend refuses an inside-the-folder dest when shredding.
++   *
++   * **CPE-1630:** the backend engine (`vault_manager::create_vault`) now refuses to shred the original
++   * unless a `confirmed: true` flag is passed too — separate from the `shredOriginal` intent bool —
++   * mirroring CPE-1611's identical gate on `shred_paths`. This component is the ONE place in the
++   * codebase allowed to pass it: submitting this form with the checkbox checked (and its inline
++   * warning shown) IS the confirmation, so `create()` below passes `confirmed: shredOriginal`. That
++   * closes the gap where a devtools/automation call could invoke `vault_create(..., true)` directly and
++   * skip this dialog's warning entirely.
+    */
+   import { createEventDispatcher, onMount, tick } from "svelte";
+   import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+@@ -72,7 +80,10 @@
+     busy = true;
+     error = "";
+     try {
+-      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal));
++      // `confirmed` mirrors `shredOriginal`: this dialog's submit IS the confirmation (checkbox +
++      // inline warning already shown above), and the flag is a no-op on the backend unless
++      // `shredOriginal` is also true (CPE-1630) — see the header doc comment.
++      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal, shredOriginal));
+       // Opt-in keychain persistence — keyed to the NEW blob path, exactly what CPE-1249's unlock looks up.
+       if (remember) unwrap(await commands.vaultRememberPassphrase(dest, passphrase));
+       dispatch("created", dest);
+diff --git a/src/lib/components/VaultCreateDialog.test.ts b/src/lib/components/VaultCreateDialog.test.ts
+index 7ffd5d1d..abba8bdd 100644
+--- a/src/lib/components/VaultCreateDialog.test.ts
++++ b/src/lib/components/VaultCreateDialog.test.ts
+@@ -126,7 +126,7 @@ describe("VaultCreateDialog — Browse picker", () => {
+ });
+ 
+ describe("VaultCreateDialog — backend wiring + dispatch", () => {
+-  it("Create calls vault_create with folder/dest/passphrase/shredOriginal and dispatches created", async () => {
++  it("Create calls vault_create with folder/dest/passphrase/shredOriginal/confirmed and dispatches created", async () => {
+     const { component } = render(VaultCreateDialog, base);
+     const created = vi.fn();
+     component.$on("created", (e: CustomEvent<string>) => created(e.detail));
+@@ -141,6 +141,7 @@ describe("VaultCreateDialog — backend wiring + dispatch", () => {
+         dest: "/home/me/Secrets.cpevault",
+         passphrase: "pw",
+         shredOriginal: false,
++        confirmed: false,
+       }),
+     );
+     await waitFor(() => expect(created).toHaveBeenCalledWith("/home/me/Secrets.cpevault"));
+@@ -148,6 +149,28 @@ describe("VaultCreateDialog — backend wiring + dispatch", () => {
+     expect(invoke).not.toHaveBeenCalledWith("vault_remember_passphrase", expect.anything());
+   });
+ 
++  // CPE-1630: this dialog is the ONE caller allowed to set `confirmed: true` on `vault_create` — the
++  // backend engine now refuses to shred the original unless it's set (mirroring CPE-1611's `shred_paths`
++  // gate). Submitting the form with the shred checkbox checked (and its inline warning shown) IS the
++  // confirmation, so `confirmed` must track `shredOriginal` — never hardcoded `false`.
++  it("passes confirmed: true alongside shredOriginal: true when the shred checkbox is checked", async () => {
++    render(VaultCreateDialog, base);
++    await fireEvent.click(screen.getByTestId("vault-shred"));
++    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
++    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
++    await fireEvent.click(screen.getByTestId("vault-create-confirm"));
++
++    await waitFor(() =>
++      expect(invoke).toHaveBeenCalledWith("vault_create", {
++        folder: "/home/me/Secrets",
++        dest: "/home/me/Secrets.cpevault",
++        passphrase: "pw",
++        shredOriginal: true,
++        confirmed: true,
++      }),
++    );
++  });
++
+   it("remembers the passphrase in the keychain when the checkbox is on", async () => {
+     render(VaultCreateDialog, { ...base, rememberDefault: true });
+     await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
