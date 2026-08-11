@@ -15,8 +15,10 @@ on that page rather than here.
 
 ## Opening the quick cheat sheet in-app
 
-Press **?** at any time to pop open a read-only shortcuts list right over the explorer — the same
-groups and rows as this page, for a quick glance without leaving what you're doing. **F1** opens this
+Press **?** to pop open a read-only shortcuts list right over the explorer — the same groups and rows
+as this page, for a quick glance without leaving what you're doing. It fires whenever the file list has
+keyboard focus; while you're typing in a text field (search, the address bar, an in-progress rename) a
+bare `?` types a literal question mark there instead, same as any other printable key. **F1** opens this
 Documents library to the page for whatever section is currently focused.
 
 ## Navigation
@@ -113,7 +115,9 @@ on this page — is the one that actually fires.
   rebind dialog (the dialog tracks a single chord per action) — the other stays fixed.
 - **A few keys are context-sensitive rather than plain shortcuts** and are excluded from rebinding for
   that reason: `Enter` behaves differently depending on what's focused, `Esc` clears whatever the current
-  context needs cleared, and `?` always opens the cheat sheet regardless of focus.
+  context needs cleared, and `?` opens the cheat sheet whenever the file list has keyboard focus — but
+  types a literal `?` instead while a text field (search, address bar, an in-progress rename, …) is
+  focused, same as any other printable key.
 - **Navigation Mode uses a different key set entirely.** With the opt-in vim-style
   [Navigation Mode](37-navigation-mode) turned on, single letters like `h`/`j`/`k`/`l` and `d`/`y`/`p`
   take on their own vim-style meanings layered over the file list — those bindings live on that page,

@@ -139,7 +139,7 @@ describe("UserCommandsDialog — add-form Save gating (CPE-1409)", () => {
 });
 
 describe("UserCommandsDialog — saving the add form commits + dispatches `change` (CPE-1409)", () => {
-  it("Save adds a new command with the entered name/template, default mode 'each', default surfaces ['context'], and closes the editor", async () => {
+  it("Save adds a new command with the entered name/template, default mode 'each', default surfaces ['context', 'palette'] (CPE-1577), and closes the editor", async () => {
     const { component } = render(UserCommandsDialog, { commands: [] });
     const change = vi.fn();
     component.$on("change", change);
@@ -152,7 +152,7 @@ describe("UserCommandsDialog — saving the add form commits + dispatches `chang
     expect(change).toHaveBeenCalledTimes(1);
     const payload: UserCommand[] = change.mock.calls[0][0].detail;
     expect(payload).toHaveLength(1);
-    expect(payload[0]).toMatchObject({ name: "Open in VS Code", template: "code {path}", mode: "each", surfaces: ["context"] });
+    expect(payload[0]).toMatchObject({ name: "Open in VS Code", template: "code {path}", mode: "each", surfaces: ["context", "palette"] });
 
     // Editor closed (form fields no longer rendered) and the new row shows.
     expect(screen.queryByLabelText("Name")).toBeNull();
@@ -175,25 +175,26 @@ describe("UserCommandsDialog — saving the add form commits + dispatches `chang
   });
 });
 
-describe("UserCommandsDialog — toggleSurface (CPE-1409)", () => {
-  it("checking an additional surface appends it, preserving the default 'context'", async () => {
+describe("UserCommandsDialog — toggleSurface (CPE-1409, defaults updated for CPE-1577)", () => {
+  it("checking an additional surface appends it, preserving the defaults 'context' + 'palette'", async () => {
     const { component } = render(UserCommandsDialog, { commands: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.click(screen.getByRole("button", { name: "+ New command" }));
-    // Default fSurfaces is ["context"] — assert the checkbox reflects that before touching anything.
+    // Default fSurfaces is ["context", "palette"] (CPE-1577: not invisible out of the box) — assert
+    // the checkboxes reflect that before touching anything.
     expect((screen.getByLabelText("context") as HTMLInputElement).checked).toBe(true);
     expect((screen.getByLabelText("toolbar") as HTMLInputElement).checked).toBe(false);
-    expect((screen.getByLabelText("palette") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("palette") as HTMLInputElement).checked).toBe(true);
 
-    await fireEvent.click(screen.getByLabelText("palette"));
+    await fireEvent.click(screen.getByLabelText("toolbar"));
     await fireEvent.input(nameInput(), { target: { value: "N" } });
     await fireEvent.input(tplInput(), { target: { value: "T" } });
     await fireEvent.click(saveBtn());
 
     const payload: UserCommand[] = change.mock.calls[0][0].detail;
-    expect(payload[0].surfaces).toEqual(["context", "palette"]);
+    expect(payload[0].surfaces).toEqual(["context", "palette", "toolbar"]);
   });
 
   it("unchecking a surface removes it", async () => {
@@ -202,23 +203,24 @@ describe("UserCommandsDialog — toggleSurface (CPE-1409)", () => {
     component.$on("change", change);
 
     await fireEvent.click(screen.getByRole("button", { name: "+ New command" }));
-    await fireEvent.click(screen.getByLabelText("toolbar")); // -> ["context", "toolbar"]
-    await fireEvent.click(screen.getByLabelText("context")); // -> ["toolbar"]
+    await fireEvent.click(screen.getByLabelText("toolbar")); // -> ["context", "palette", "toolbar"]
+    await fireEvent.click(screen.getByLabelText("context")); // -> ["palette", "toolbar"]
     await fireEvent.input(nameInput(), { target: { value: "N" } });
     await fireEvent.input(tplInput(), { target: { value: "T" } });
     await fireEvent.click(saveBtn());
 
     const payload: UserCommand[] = change.mock.calls[0][0].detail;
-    expect(payload[0].surfaces).toEqual(["toolbar"]);
+    expect(payload[0].surfaces).toEqual(["palette", "toolbar"]);
   });
 
-  it("unchecking every surface falls back to ['context'] at save time (saveForm's empty-surfaces guard)", async () => {
+  it("unchecking every surface falls back to the default ['context', 'palette'] at save time (saveForm's empty-surfaces guard)", async () => {
     const { component } = render(UserCommandsDialog, { commands: [] });
     const change = vi.fn();
     component.$on("change", change);
 
     await fireEvent.click(screen.getByRole("button", { name: "+ New command" }));
-    await fireEvent.click(screen.getByLabelText("context")); // the only default-checked one -> []
+    await fireEvent.click(screen.getByLabelText("context")); // -> ["palette"]
+    await fireEvent.click(screen.getByLabelText("palette")); // -> [] — every default-checked one now off
     expect((screen.getByLabelText("context") as HTMLInputElement).checked).toBe(false);
     expect((screen.getByLabelText("toolbar") as HTMLInputElement).checked).toBe(false);
     expect((screen.getByLabelText("palette") as HTMLInputElement).checked).toBe(false);
@@ -231,7 +233,7 @@ describe("UserCommandsDialog — toggleSurface (CPE-1409)", () => {
     await fireEvent.click(saveBtn());
 
     const payload: UserCommand[] = change.mock.calls[0][0].detail;
-    expect(payload[0].surfaces).toEqual(["context"]);
+    expect(payload[0].surfaces).toEqual(["context", "palette"]);
   });
 });
 

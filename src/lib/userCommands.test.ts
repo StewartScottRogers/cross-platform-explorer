@@ -18,13 +18,13 @@ const e = (path: string, name: string): DirEntry =>
 const ids = (list: UserCommand[]) => list.map((c) => c.id);
 
 describe("userCommands CRUD (CPE-783)", () => {
-  it("adds with defaults (mode each, context surface) and a generated id, immutably", () => {
+  it("adds with defaults (mode each, context+palette surfaces) and a generated id, immutably (CPE-1577: not invisible out of the box)", () => {
     const before: UserCommand[] = [];
     const after = addCommand(before, "Git add", "git add {path}");
     expect(before).toEqual([]);
     expect(after[0].id).toMatch(/^uc_/);
     expect(after[0].mode).toBe("each");
-    expect(after[0].surfaces).toEqual(["context"]);
+    expect(after[0].surfaces).toEqual(["context", "palette"]);
   });
 
   it("updates by id without touching the id or siblings", () => {

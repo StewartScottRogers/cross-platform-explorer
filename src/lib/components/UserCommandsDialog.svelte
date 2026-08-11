@@ -6,7 +6,15 @@
    * command is the separate, confirmed `RunCommandConfirm` flow.
    */
   import { createEventDispatcher } from "svelte";
-  import { addCommand, updateCommand, removeCommand, moveCommand, type UserCommand, type CommandSurface } from "../userCommands";
+  import {
+    addCommand,
+    updateCommand,
+    removeCommand,
+    moveCommand,
+    DEFAULT_COMMAND_SURFACES,
+    type UserCommand,
+    type CommandSurface,
+  } from "../userCommands";
   import Icon from "./Icon.svelte";
 
   export let commands: UserCommand[] = [];
@@ -18,7 +26,9 @@
   let fName = "";
   let fTemplate = "";
   let fMode: "each" | "joined" = "each";
-  let fSurfaces: CommandSurface[] = ["context"];
+  // Default surfaces for a new command (CPE-1577): Context + Palette, so it's reachable both by
+  // right-click and by search the instant it's saved — see DEFAULT_COMMAND_SURFACES for why.
+  let fSurfaces: CommandSurface[] = [...DEFAULT_COMMAND_SURFACES];
 
   function commit(list: UserCommand[]) {
     commands = list;
@@ -29,7 +39,7 @@
     fName = "";
     fTemplate = "";
     fMode = "each";
-    fSurfaces = ["context"];
+    fSurfaces = [...DEFAULT_COMMAND_SURFACES];
   }
   function startEdit(c: UserCommand) {
     editingId = c.id;
@@ -45,7 +55,9 @@
     const name = fName.trim();
     const template = fTemplate.trim();
     if (!name || !template) return;
-    const surfaces = fSurfaces.length ? fSurfaces : ["context" as CommandSurface];
+    // A command saved with every surface unchecked would otherwise persist invisible everywhere
+    // (CPE-1577) — fall back to the same default a brand-new command starts with.
+    const surfaces = fSurfaces.length ? fSurfaces : [...DEFAULT_COMMAND_SURFACES];
     if (editingId === "new") commit(addCommand(commands, name, template, { mode: fMode, surfaces }));
     else if (editingId) commit(updateCommand(commands, editingId, { name, template, mode: fMode, surfaces }));
     editingId = null;

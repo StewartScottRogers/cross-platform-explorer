@@ -8,9 +8,10 @@ categoryOrder: 3
 # User-Defined Commands
 
 A **user command** is a named, reusable **shell command template** you define once — e.g. `code
-"{path}"` named "Open in VS Code" — and run over the current selection from the command palette. Every
-run shows you the exact, fully-resolved command line(s) it's about to execute and requires an explicit
-click before anything runs.
+"{path}"` named "Open in VS Code" — and run over the current selection from wherever you've chosen it
+to surface: the command palette, the right-click context menu, and/or the toolbar. Every run shows you
+the exact, fully-resolved command line(s) it's about to execute and requires an explicit click before
+anything runs.
 
 > **Safety framing — this runs real shell commands.** A user command is passed to your OS's shell
 > exactly as written: `cmd /C` on Windows, `sh -c` on macOS/Linux. Anything valid in that shell — pipes,
@@ -31,14 +32,19 @@ click before anything runs.
 
 - Command palette (**Ctrl+Shift+P**) → **"Manage user commands…"** — the only way to open the manager
   itself; there's no menu item and no dedicated shortcut for it.
-- **Running** a saved command: the command palette lists it by the exact **Name** you gave it — pick it
-  to jump straight to the confirm dialog. (See *Limits* below — Palette is the only surface that
-  currently does anything, even though the manager also offers Toolbar/Context checkboxes.)
+- **Running** a saved command: pick it up on whichever surface(s) you checked for it —
+  - **Palette** — the command palette lists it by the exact **Name** you gave it.
+  - **Context** — right-click a selection; bound commands appear under a **"Run command ▸"** submenu
+    (hidden entirely if none are bound to Context).
+  - **Toolbar** — a button per bound command appears on the toolbar, labelled with its **Name**.
+
+  Every surface runs the same command over the same selection and opens the same confirm dialog.
 
 ## The manager
 
 - **+ New command** reveals the editor; **✎** on an existing row re-opens it for editing.
-- **Name** — the label shown wherever the command surfaces (currently: the command palette).
+- **Name** — the label shown wherever the command surfaces (the palette entry, the context-menu row, and
+  the toolbar button all use it).
 - **Command template** — the literal command line. Placeholders, substituted per selected item:
 
   | Token | Value |
@@ -55,8 +61,11 @@ click before anything runs.
   **once (joined)** (the template is expanded **once**, with each known token replaced by every selected
   entry's value, space-joined and individually double-quoted — e.g. `sha256sum {path}` over two files
   becomes one line, `sha256sum "a" "b"`).
-- **Show in** — **toolbar** / **context** / **palette** checkboxes; a command's row displays a pill per
-  surface it's checked for, plus a pill for its run mode.
+- **Show in** — **toolbar** / **context** / **palette** checkboxes, each independently wired (check any
+  combination); a command's row displays a pill per surface it's checked for, plus a pill for its run
+  mode. A brand-new command starts with **Context** and **Palette** both checked, so it's reachable
+  immediately by right-click and by search — clearing every checkbox before saving falls back to that
+  same pair rather than persisting a command bound to nothing.
 - **↑ / ↓** reorder a command (its order in whichever surface shows it); the trash icon removes it
   immediately, no confirmation (this only deletes the saved *template* — see *Limits*).
 - Closing the manager: the header's **✕**, **Esc**, or clicking outside the dialog — there's no separate
@@ -81,19 +90,22 @@ You want a one-click way to open a file in VS Code from inside the app:
 
 1. Command palette → **"Manage user commands…"** → **+ New command**.
 2. Name: `Open in VS Code`. Template: `code "{path}"`. Leave **Run** as **once per item**.
-3. Check **Palette** (this is the surface that actually works today — see *Limits*). **Save**.
-4. Select two files, command palette → **"Open in VS Code"**.
+3. Leave **Palette** checked (the default) and also check **Context** if you'd rather reach it from a
+   right-click. **Save**.
+4. Select two files, then either command palette → **"Open in VS Code"**, or right-click the selection →
+   **Run command ▸** → **Open in VS Code**.
 5. The confirm dialog lists two lines, one per file (`code "C:\...\a.txt"`, `code "C:\...\b.txt"`).
 6. Click **Run** — both files open in VS Code, and the dialog then shows each command's exit code so you
    can confirm both succeeded.
 
 ## Limits / notes
 
-- **Only the Palette surface is wired up today.** The manager offers **toolbar** and **context**
-  checkboxes and saves your choice, but neither currently adds the command anywhere in the running
-  app — only **Palette** does. A brand-new command defaults to **Context** alone (if you clear every
-  checkbox, it's forced back to Context), so **a freshly created command is invisible everywhere until
-  you also check Palette**.
+- **All three surfaces run the exact same flow.** Palette, Context, and Toolbar each just add another
+  entry point to the same confirm-before-launch dialog over the same selection — there's no per-surface
+  behavior difference to remember.
+- **The Toolbar surface has no submenu.** Unlike Context (which tucks bound commands under one
+  "Run command ▸" row so it never crowds the menu), every Toolbar-bound command gets its own always-
+  visible button. Bind a command to Toolbar sparingly if you have many of them.
 - **No sandbox, no allow-list.** The command runs through a full OS shell with the app's own privileges;
   the confirm dialog showing the literal line is the entire safety gate — there's no second warning for
   a command that looks destructive.

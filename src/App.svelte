@@ -857,6 +857,18 @@
   function openRunCommand(cmd: UserCommand) {
     runConfirm = { title: cmd.name, commands: resolveCommand(cmd, selectedEntries), cwd: isHome ? "" : currentPath };
   }
+  // Context/Toolbar surfaces (CPE-1577): the id+name pairs each surface needs to render its rows, kept
+  // in list order like the Palette surface already does via `commandsForSurface`.
+  $: userCommandsContext = commandsForSurface(userCommands, "context").map((c) => ({ id: c.id, name: c.name }));
+  $: userCommandsToolbar = commandsForSurface(userCommands, "toolbar").map((c) => ({ id: c.id, name: c.name }));
+  /** Run a user command by id — the single dispatch target for the Context menu's "Run command ▸"
+   *  submenu AND the Toolbar's per-command buttons (both route the `uc:<id>` action here via
+   *  `runAction`). An id that no longer resolves (a command removed between render and click) is a
+   *  silent no-op, matching the macro-hotkey precedent elsewhere in this file. */
+  function runUserCommandById(id: string) {
+    const cmd = userCommands.find((c) => c.id === id);
+    if (cmd) openRunCommand(cmd);
+  }
 
   // Scriptable macros (CPE-1189/1190/1191, epic CPE-739): the library dialog, the persisted
   // surface/hotkey bindings, and the run flow — {ask:label} prompt (if any) -> dry-run confirm
@@ -4438,6 +4450,13 @@
       void startMacro(action.slice(6));
       return;
     }
+    // Run a user-defined command from the Context menu's "Run command ▸" submenu or a Toolbar button
+    // (CPE-1577, epic CPE-711) — same confirm-before-launch gate the Palette surface already uses.
+    // `slice(3)` (not `split(":")`) so an id embedding a colon still round-trips intact.
+    if (action.startsWith("uc:")) {
+      runUserCommandById(action.slice(3));
+      return;
+    }
     // CPE-1377: which pane the OPEN menu was opened over (`ctx?.inPaneB`) — NOT the live `activePane`,
     // since a right-click doesn't focus a pane (see the `ctx` declaration's comment). Read once, up
     // front, synchronously — before any `await` — exactly like `askDelete` already snapshots its own
@@ -5238,6 +5257,14 @@
     const mappedAction = actionForChord($keymapStore, chordFromEvent(event));
     if (mappedAction && dispatchMappedAction(mappedAction, event, pane, inPaneB)) return;
 
+    // "?" opens the keyboard-shortcuts cheat sheet (CPE-1584 fix) — special-cased HERE, ahead of the
+    // type-ahead block below, because type-ahead greedily claims every bare single-character printable
+    // key (event.key.length === 1) INCLUDING "?", so a literal `case "?"` further down the switch could
+    // never be reached. No INPUT/TEXTAREA/rename/confirm/quick-look context is focused at this point —
+    // every one of those already returned earlier in this handler — so a bare "?" unambiguously means
+    // "open the cheat sheet," never "type a question mark."
+    if (!ctrl && !event.altKey && event.key === "?") { event.preventDefault(); shortcutsOpen = true; return; }
+
     // Type-ahead find: a printable key with no modifier jumps to the next match.
     if (!ctrl && !event.altKey && event.key.length === 1 && /\S/.test(event.key)) {
       event.preventDefault();
@@ -5257,14 +5284,11 @@
     }
 
     // NOTE: F1 (docsHelp), F5 (refresh), F2 (rename), Delete/Shift+Delete (deleteToTrash/deletePermanent),
-    // and "?" (shortcutsCheatSheet) used to live in this switch. The first four are now remappable and
-    // resolved above via the keymap dispatch (removed here to avoid double-firing). "?" stays UNMIGRATED:
-    // a bare "?" is caught by the type-ahead block above (length-1, no modifier) before it could ever reach
-    // this switch, so it never opened the cheat sheet here today — routing it through the keymap would
-    // CHANGE that default behavior, which this ticket forbids. (This case is left for documentation; it is,
-    // as before, unreachable for a bare "?".)
+    // and "?" (shortcutsCheatSheet) used to live in this switch. The first four are remappable and
+    // resolved above via the keymap dispatch (removed here to avoid double-firing). "?" is ALSO handled
+    // above now (CPE-1584 fix) — special-cased ahead of the type-ahead block that used to shadow it, not
+    // routed through the keymap since it stays a fixed, non-remappable key (like Enter/Escape below).
     switch (event.key) {
-      case "?": event.preventDefault(); shortcutsOpen = true; break; // keyboard shortcuts (shadowed by type-ahead — see note above)
       case "Escape":
         // CPE-1370 review: route through the active pane like every other case here, so Escape clears
         // pane B's selection when it's the one focused instead of always hard-clearing pane A's.
@@ -6230,6 +6254,7 @@
   {fileFilter}
   {foldersFirst}
   {showTerminal}
+  userCommands={userCommandsToolbar}
   on:action={(e) => runAction(e.detail)}
   on:sort={(e) => {
     sortKey = e.detail.key; sortDir = e.detail.dir;
@@ -6666,6 +6691,7 @@
     homeIsDir={homeCtxIsDir}
     homeStale={homeCtxStale}
     macros={ctx.target === "item" ? macroContextNames : []}
+    userCommands={ctx.target === "item" ? userCommandsContext : []}
     linkBroken={ctx.target === "item" ? ctxLinkBroken : false}
     driveEjectable={ctx.target === "drive" && !!driveRemovable[driveCtxPath]}
     on:action={(e) => runAction(e.detail)}

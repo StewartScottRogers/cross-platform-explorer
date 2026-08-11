@@ -30,13 +30,20 @@ function newId(): string {
 }
 
 /** Append a new command. Returns a new list. */
+/** A new command's default surfaces (CPE-1577): Context AND Palette, so a freshly-created command is
+ *  immediately reachable both by right-clicking a selection and by searching the command palette —
+ *  never the invisible-everywhere trap a lone default of `["context"]` was before Toolbar/Context were
+ *  wired up. Shared with `UserCommandsDialog`'s add form and its "every surface unchecked" save-time
+ *  fallback, so the two paths to a new command can never disagree. */
+export const DEFAULT_COMMAND_SURFACES: CommandSurface[] = ["context", "palette"];
+
 export function addCommand(
   list: UserCommand[],
   name: string,
   template: string,
   opts: { mode?: "each" | "joined"; surfaces?: CommandSurface[] } = {},
 ): UserCommand[] {
-  const { mode = "each", surfaces = ["context"] } = opts;
+  const { mode = "each", surfaces = DEFAULT_COMMAND_SURFACES } = opts;
   return [...list, { id: newId(), name, template, mode, surfaces }];
 }
 
