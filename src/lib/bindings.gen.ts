@@ -1127,9 +1127,20 @@ async emptyTrash(ids: string[] | null) : Promise<Result<null, string>> {
  * report, so one path's failure doesn't lose the others' results. Async + `spawn_blocking` per
  * CPE-760/761 — a multi-pass overwrite is heavy, potentially slow disk I/O and must not freeze the
  * main thread.
+ * 
+ * **CPE-1611:** `cpe_server::secure_shred::shred_paths` itself now refuses (returns `Err`, shreds
+ * nothing) unless `confirmed` is `true` — this thin dispatcher does nothing special to enforce that;
+ * it's the engine's own gate, same treatment CPE-1599 gave `batch_media_execute_stream`. The error
+ * propagates straight out to the frontend `Result`. `ShredConfirmDialog.svelte`'s "Shred permanently"
+ * button is the one and only call site allowed to pass `confirmed: true`.
  */
-async shredPaths(paths: string[], scheme: ShredScheme) : Promise<ShredResult[]> {
-    return await TAURI_INVOKE("shred_paths", { paths, scheme });
+async shredPaths(paths: string[], scheme: ShredScheme, confirmed: boolean) : Promise<Result<ShredResult[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("shred_paths", { paths, scheme, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * Copy entries into `dest`, auto-renaming on collision.

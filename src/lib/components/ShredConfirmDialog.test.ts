@@ -99,6 +99,7 @@ describe("ShredConfirmDialog wiring (CPE-1240)", () => {
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("shred_paths", {
       paths: ["/repo/secret.txt"],
       scheme: "dod_3",
+      confirmed: true,
     }));
     await waitFor(() => expect(done).toHaveBeenCalledTimes(1));
     expect(done.mock.calls[0][0]).toEqual([
