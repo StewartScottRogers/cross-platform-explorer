@@ -31,6 +31,7 @@
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
   import { rawInvoke, createChannel, unwrap, type StreamChannel } from "../invoke";
+  import { t } from "../i18n";
   import {
     confirmOverwriteJob,
     mediaOpLabel,
@@ -38,6 +39,7 @@
     overwritesInPlace,
     progressPercent,
     skipRows,
+    templateEscapesDirectory,
     uniqueParentDirs,
   } from "../batchMedia";
   import type { CheckpointPartial } from "../batchMedia";
@@ -106,16 +108,22 @@
       case "resize":
         return Number.isFinite(maxPx) && maxPx > 0 ? { op: "resize", max_px: Math.round(maxPx) } : null;
       case "convert": {
+        // CPE-1623 follow-up: to_ext feeds the exact same joined output path as a Rename template did —
+        // reject an escaping extension here too, before "+ Add" is even enabled, mirroring the backend's
+        // now-broadened validate() rejection (previously Convert's extension went unchecked at this layer).
         const e = ext.trim().replace(/^\.+/, "");
-        return e ? { op: "convert", to_ext: e } : null;
+        return e && !templateEscapesDirectory(e) ? { op: "convert", to_ext: e } : null;
       }
       case "rotate":
         return { op: "rotate", degrees: Number(degrees) as 90 | 180 | 270 };
       case "flip":
         return { op: "flip", horizontal: flip === "horizontal" };
       case "rename": {
-        const t = template.trim();
-        return t ? { op: "rename", template: t } : null;
+        // CPE-1623: a template containing a path separator or ".." could move the computed output
+        // outside the folder the user picked — reject it here (before "+ Add" is even enabled) so the
+        // user is told before they click, mirroring the backend's own validate() rejection.
+        const trimmed = template.trim();
+        return trimmed && !templateEscapesDirectory(trimmed) ? { op: "rename", template: trimmed } : null;
       }
       case "strip_metadata":
         return { op: "strip_metadata" };
@@ -473,6 +481,18 @@
         {/if}
         <button class="btn" data-testid="add-op-btn" disabled={!pendingOp} on:click={addOp}>+ Add</button>
       </div>
+
+      {#if opKind === "rename" && renameTemplate.trim() && templateEscapesDirectory(renameTemplate.trim())}
+        <!-- CPE-1623: told before they click — "+ Add" above is already disabled via `pendingOp`, this
+             names WHY so the user isn't left guessing at a silently-disabled button. -->
+        <div class="overwrite-hint" data-testid="rename-escape-hint">{$t("bm.renameEscapes")}</div>
+      {/if}
+      {#if opKind === "convert" && convertExt.trim().replace(/^\.+/, "") && templateEscapesDirectory(convertExt.trim().replace(/^\.+/, ""))}
+        <!-- CPE-1623 follow-up: same rule, same warning shape, for the Convert extension field — it feeds
+             the exact same joined output path a Rename template does, and previously had no field-level
+             warning at all even though the backend now rejects it too. -->
+        <div class="overwrite-hint" data-testid="convert-escape-hint">{$t("bm.convertEscapes")}</div>
+      {/if}
 
       {#if ops.length > 0}
         <div class="pills" data-testid="op-pills">

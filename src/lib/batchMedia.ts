@@ -26,6 +26,30 @@ export function canBatchTransform(name: string): boolean {
 }
 
 /**
+ * CPE-1623: true when a Rename (or Convert `to_ext`) template could move the computed output into a
+ * different directory than its input, or off the volume its input's own directory names entirely — a
+ * path separator (`/` or `\`) anywhere, a `:` anywhere, or a **whole-segment** `..` traversal. Mirrors
+ * `crates/server/src/batch_media.rs`'s `template_escapes_directory()`/`validate()` rejection exactly
+ * (kept in lockstep — see that fn's doc for the reasoning behind each character), so the dialog can
+ * disable "+ Add" and explain why *before* the user ever reaches the backend — the engine
+ * (`validate()`/`plan()`) remains the actual enforcement point either way; this is purely a friendlier,
+ * earlier echo of the same rule. The template only ever substitutes into the file's STEM (or, for
+ * Convert, the extension) — see `plan()`'s `Rename`/`Convert` arms — so it has no legitimate reason to
+ * name a directory or a drive at all.
+ *
+ * **`..` is only a traversal risk as a whole path segment (UAT follow-up), not any occurrence:** an
+ * earlier cut of this check flagged `..` as a bare substring, which wrongly rejected ordinary filenames
+ * like `"shot..final"` or a version stamp `"v1..2"` — see the ticket's acceptance criterion "ordinary
+ * rename templates (no separators) are unaffected". Once any separator/`:` has already returned `true`
+ * above, the template is guaranteed to contain none of them, so "is `..` a whole segment" reduces to "is
+ * the (trimmed) template exactly `..`".
+ */
+export function templateEscapesDirectory(template: string): boolean {
+  if (template.includes("/") || template.includes("\\") || template.includes(":")) return true;
+  return template.trim() === "..";
+}
+
+/**
  * A short one-line pill label for a single op, in the order it will run, e.g. `"Resize 1024px"`,
  * `"Convert → webp"`, `"Rotate 90°"`. Mirrors the wording `batch_media::plan`'s summary uses on the
  * backend, so the pill and the live-preview summary read consistently.

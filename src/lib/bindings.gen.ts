@@ -1192,8 +1192,12 @@ async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
  * Plan a batch-media job (CPE-1092, epic CPE-723): the backend enablement for the Batch-Media dialog
  * (GUI #2). Validates the job (rejects an empty op list, a bad rotate angle, an empty convert extension
  * or rename template) and, when valid, computes each input's collision-safe planned output path + a
- * one-line summary — this IS the dialog's live preview data. Pure/in-memory; thin dispatcher into
- * `cpe_server::batch_media`, kept `async` for convention parity with the other filesystem commands.
+ * one-line summary — this IS the dialog's live preview data. Thin dispatcher into `cpe_server::batch_media`.
+ * 
+ * **Not pure/in-memory as of CPE-1613/CPE-1623:** `plan()` canonicalizes paths (same-file detection) and
+ * stats candidate outputs (real-filesystem collision + containment guards), so — unlike when this
+ * dispatcher was first written — it now does genuine blocking I/O. `spawn_blocking` (CPE-760/761's
+ * async-command convention) keeps that off the async executor thread, same as `entry_info` below.
  */
 async batchMediaPlan(job: BatchJob, inputs: string[]) : Promise<Result<PlannedItem[], string>> {
     try {

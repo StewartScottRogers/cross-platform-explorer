@@ -9,6 +9,7 @@ import {
   canBatchTransform,
   sameFile,
   skipRows,
+  templateEscapesDirectory,
   uniqueParentDirs,
 } from "./batchMedia";
 import type { MediaOp } from "./bindings.gen";
@@ -222,6 +223,38 @@ describe("overwritesInPlace platform-gated case-only differences (CPE-1613)", ()
     for (const platform of ["Win32", "MacIntel", "Linux x86_64"]) {
       expect(overwritesInPlace(items, platform)).toEqual([]);
     }
+  });
+});
+
+describe("templateEscapesDirectory (CPE-1623)", () => {
+  it("rejects the ticket's exact traversal template", () => {
+    expect(templateEscapesDirectory("..\\..\\cpe1613_traversal_victim\\important")).toBe(true);
+  });
+
+  it("rejects any path separator, forward or backward, a colon, and a whole-segment '..'", () => {
+    expect(templateEscapesDirectory("sub/name")).toBe(true);
+    expect(templateEscapesDirectory("sub\\name")).toBe(true);
+    expect(templateEscapesDirectory("..")).toBe(true);
+    expect(templateEscapesDirectory(" .. ")).toBe(true); // whole segment once trimmed
+    expect(templateEscapesDirectory("../x")).toBe(true);
+    expect(templateEscapesDirectory("..\\x")).toBe(true);
+    expect(templateEscapesDirectory("a/../../b")).toBe(true);
+    expect(templateEscapesDirectory("x/..")).toBe(true);
+    expect(templateEscapesDirectory("C:foo")).toBe(true); // reviewer finding A: drive-relative reference
+    expect(templateEscapesDirectory("secrets:hidden")).toBe(true); // colon anywhere
+  });
+
+  it("accepts ordinary templates with no separators/colon or whole-segment traversal (UAT follow-up)", () => {
+    // ".." inside an otherwise ordinary filename, with no separator anywhere, can never walk anywhere —
+    // the ticket's own acceptance criterion: "ordinary rename templates (no separators) are unaffected".
+    expect(templateEscapesDirectory("{stem}")).toBe(false);
+    expect(templateEscapesDirectory("{stem}-{n}")).toBe(false);
+    expect(templateEscapesDirectory("photo-{n}")).toBe(false);
+    expect(templateEscapesDirectory("vacation 2024")).toBe(false);
+    expect(templateEscapesDirectory("shot..final")).toBe(false);
+    expect(templateEscapesDirectory("v1..2")).toBe(false);
+    expect(templateEscapesDirectory("a..b")).toBe(false);
+    expect(templateEscapesDirectory("...")).toBe(false);
   });
 });
 
