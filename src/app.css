@@ -198,7 +198,15 @@
                                      under-contrasts on a dark surface */
   --pal-dark-blue-300: #60cdff; /* accent-hover */
 
-  --pal-dark-red-400: #ff6659;  /* danger */
+  /* danger — CPE-1616 Visual Critic finding: the notebook viewer's error-output background is
+     `color-mix(in srgb, var(--danger) 8%, var(--surface))` (a slight red tint of --surface, not
+     --surface itself), and the original #ff6659 measured only 4.41:1 against that specific blended
+     background — under the 4.5:1 AA floor for normal text (--danger vs plain --surface was already
+     fine at 4.92:1, which is what the existing dark-contrast guard test below checks; it just wasn't
+     testing this particular mixed-background consumer). Nudged lighter to clear the mixed background
+     too: #ff7b6f measures 4.97:1 against the 8%-mixed background, 5.61:1 against plain --surface,
+     6.45:1 against --bg — see src/lib/components/NotebookPreview.test.ts's dedicated contrast guard. */
+  --pal-dark-red-400: #ff7b6f;  /* danger */
   --pal-dark-red-300: #ff8a80;  /* danger-hover */
   --pal-dark-green-400: #6bcf7f; /* success */
 

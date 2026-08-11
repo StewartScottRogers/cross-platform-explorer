@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseNotebook,
+  stripAnsi,
   MAX_CELLS,
   MAX_CELL_SOURCE_CHARS,
   MAX_OUTPUTS_PER_CELL,
@@ -366,5 +367,150 @@ describe("parseNotebook — outputs", () => {
   it("a non-code cell with an outputs array is untouched (outputs only apply to code cells in practice, but this still must not throw)", () => {
     const result = parseNotebook(nb({ cells: [{ cell_type: "markdown", source: "# hi", outputs: [{ output_type: "stream", text: "x" }] }] }));
     expect(result.ok).toBe(true);
+  });
+});
+
+// CPE-1616 Visual Critic finding (must-fix): a real Jupyter traceback/stream is routinely colourised with
+// raw ANSI escape codes by the kernel (IPython's exception formatter, colorama, tqdm, …). Unstripped, the
+// view renders literal garbage like `[0;31m` interleaved with the real message — confirmed in both themes
+// at every width. `stripAnsi` (and its use inside `parseOutput`) must remove these from stream text,
+// text/plain results, and error tracebacks, since that's what reaches the `<pre>` in NotebookPreview.svelte.
+describe("stripAnsi", () => {
+  it("removes a single SGR colour-code sequence", () => {
+    expect(stripAnsi("\x1b[0;31mred text\x1b[0m")).toBe("red text");
+  });
+
+  it("removes multi-parameter SGR sequences (256-colour / truecolor-style codes)", () => {
+    // Real Jupyter output uses these for syntax-highlighted tracebacks, e.g. `\x1b[38;5;241;43m1\x1b[39;49m`.
+    expect(stripAnsi("\x1b[38;5;241;43m1\x1b[39;49m")).toBe("1");
+  });
+
+  it("leaves plain text with no escape codes untouched", () => {
+    expect(stripAnsi("ZeroDivisionError: division by zero")).toBe("ZeroDivisionError: division by zero");
+  });
+
+  it("leaves an empty string untouched and never throws", () => {
+    expect(() => stripAnsi("")).not.toThrow();
+    expect(stripAnsi("")).toBe("");
+  });
+
+  it("strips a real-shaped multi-line Jupyter traceback down to readable text", () => {
+    // Shaped like an actual `python -c "1/0"` traceback captured under IPython's colourised formatter —
+    // the exact kind of fragment the Visual Critic saw on screen as literal `[0;31m` garbage.
+    const raw = [
+      "\x1b[0;31m---------------------------------------------------------------------------\x1b[0m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m                         Traceback (most recent call last)",
+      "\x1b[0;32mCell \x1b[0;36mIn[3], line 1\x1b[0m",
+      "\x1b[0;32m----> 1\x1b[0m \x1b[38;5;241;43m1\x1b[39;49m \x1b[38;5;241;43m/\x1b[39;49m \x1b[38;5;241;43m0\x1b[39;49m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m: division by zero",
+    ].join("\n");
+    const cleaned = stripAnsi(raw);
+    expect(cleaned).not.toMatch(/\x1b/);
+    expect(cleaned).not.toContain("[0;31m");
+    expect(cleaned).not.toContain("[38;5;241;43m");
+    expect(cleaned).toContain("ZeroDivisionError");
+    expect(cleaned).toContain("division by zero");
+    expect(cleaned).toContain("Cell In[3], line 1");
+    expect(cleaned).toContain("1 / 0");
+  });
+});
+
+describe("parseNotebook — ANSI escape codes are stripped from every text-bearing output kind", () => {
+  it("strips ANSI codes from a stream output's text", () => {
+    const result = parseNotebook(
+      nb({
+        cells: [
+          {
+            cell_type: "code",
+            source: "print('hi')",
+            outputs: [{ output_type: "stream", name: "stdout", text: ["\x1b[32mhi\x1b[0m\n"] }],
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.notebook.cells[0].outputs[0];
+    expect(out.kind).toBe("stream");
+    if (out.kind === "stream") {
+      expect(out.text).toBe("hi\n");
+      expect(out.text).not.toContain("\x1b");
+    }
+  });
+
+  it("strips ANSI codes from an execute_result's text/plain", () => {
+    const result = parseNotebook(
+      nb({
+        cells: [
+          {
+            cell_type: "code",
+            source: "x",
+            outputs: [{ output_type: "execute_result", data: { "text/plain": ["\x1b[1m2\x1b[0m"] } }],
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.notebook.cells[0].outputs[0] as NotebookOutputResult;
+    expect(out.text).toBe("2");
+  });
+
+  it("strips a real-shaped ANSI traceback from an error output, leaving the message readable", () => {
+    const traceback = [
+      "\x1b[0;31m---------------------------------------------------------------------------\x1b[0m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m                         Traceback (most recent call last)",
+      "\x1b[0;32mCell \x1b[0;36mIn[3], line 1\x1b[0m",
+      "\x1b[0;32m----> 1\x1b[0m \x1b[38;5;241;43m1\x1b[39;49m \x1b[38;5;241;43m/\x1b[39;49m \x1b[38;5;241;43m0\x1b[39;49m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m: division by zero",
+    ];
+    const result = parseNotebook(
+      nb({
+        cells: [
+          {
+            cell_type: "code",
+            source: "1/0",
+            outputs: [{ output_type: "error", ename: "ZeroDivisionError", evalue: "division by zero", traceback }],
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.notebook.cells[0].outputs[0];
+    expect(out.kind).toBe("error");
+    if (out.kind === "error") {
+      expect(out.traceback).not.toMatch(/\x1b/);
+      expect(out.traceback).not.toContain("[0;31m");
+      expect(out.traceback).toContain("ZeroDivisionError");
+      expect(out.traceback).toContain("Cell In[3], line 1");
+      expect(out.traceback).toContain("1 / 0");
+    }
+  });
+
+  it("still truncates and flags an enormous ANSI-laden traceback at MAX_OUTPUT_TEXT_CHARS", () => {
+    // The colour codes are stripped BEFORE the length cap is applied, so the cap reflects the length of
+    // what's actually rendered, not the raw (longer, escape-code-inflated) source text.
+    const hugeTraceback = "\x1b[0;31m".repeat(1) + "y".repeat(MAX_OUTPUT_TEXT_CHARS + 500) + "\x1b[0m";
+    const result = parseNotebook(
+      nb({
+        cells: [
+          {
+            cell_type: "code",
+            source: "x",
+            outputs: [{ output_type: "error", ename: "E", evalue: "v", traceback: [hugeTraceback] }],
+          },
+        ],
+      }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const out = result.notebook.cells[0].outputs[0];
+    expect(out.kind).toBe("error");
+    if (out.kind === "error") {
+      expect(out.traceback).toHaveLength(MAX_OUTPUT_TEXT_CHARS);
+      expect(out.truncated).toBe(true);
+      expect(out.traceback).not.toContain("\x1b");
+    }
   });
 });

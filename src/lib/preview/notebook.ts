@@ -15,6 +15,17 @@
  * is ever handed to markdown rendering or syntax highlighting — the same "cap must bound items examined,
  * not just items emitted" discipline this crew learned the hard way from a font-cache bug that froze the
  * UI for 8.8s despite an output cap, because the cap only trimmed what was shown, not what was computed.
+ *
+ * **ANSI escape codes** (CPE-1616 Visual Critic finding): a real Jupyter traceback/stream is routinely
+ * colourised by the kernel (IPython's exception formatter, `colorama`, `tqdm`, …) with raw ANSI SGR/CSI
+ * escape sequences (e.g. `ESC[0;31m`). Left untouched, those render as literal garbage — `[0;31m`
+ * fragments interleaved with the real message — since the view puts this text straight into a `<pre>`
+ * (auto-escaped, not `{@html}`). {@link stripAnsi} removes them so the text is readable; rendering them as
+ * real colour was considered and rejected for v1 — it would need `{@html}` plus very careful sanitisation
+ * of attacker-controlled SGR parameters to stay safe, for a "nice to have" over the readability floor this
+ * ticket actually needs. Applied to stream text, `text/plain` results, and error tracebacks — anywhere raw
+ * captured-terminal text reaches the view — same discipline as the size caps: stripped, never trusted as
+ * already-clean.
  */
 
 export type NotebookCellType = "markdown" | "code" | "raw" | "unknown";
@@ -118,6 +129,25 @@ function capText(text: string, max: number): { text: string; truncated: boolean 
   return text.length > max ? { text: text.slice(0, max), truncated: true } : { text, truncated: false };
 }
 
+/** Matches an ANSI escape sequence: CSI forms (the common `ESC [ ... <letter>` SGR colour-code shape a
+ *  Jupyter kernel emits, e.g. `ESC[0;31m`) and OSC forms terminated by BEL. Same shape as the well-known
+ *  `strip-ansi` npm package's regex (reimplemented inline — a one-line regex doesn't earn a dependency,
+ *  per this repo's lean-core rule), so it covers more than the bare colour-code subset the fixtures
+ *  exercise — cursor moves, erase-line, etc. — anything a real captured terminal stream might contain.
+ *  Built via `new RegExp(string)` with `\u` escapes (not literal control bytes) so this source file stays
+ *  plain ASCII on disk. */
+const ANSI_ESCAPE_PATTERN =
+  "[\\u001B\\u009B][[\\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\\d/#&.:=?%@~_]+)*|" +
+  "[a-zA-Z\\d]+(?:;[-a-zA-Z\\d/#&.:=?%@~_]*)*)?\\u0007)|" +
+  "(?:(?:\\d{1,4}(?:;\\d{0,4})*)?[\\dA-PR-TZcf-ntqry=><~]))";
+const ANSI_ESCAPE_REGEX = new RegExp(ANSI_ESCAPE_PATTERN, "g");
+
+/** Strips ANSI escape sequences from text. `.ipynb` traceback/stream text is untrusted, captured-terminal
+ *  input — see the module doc comment. Never throws (a plain regex replace on a string can't). */
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_ESCAPE_REGEX, "");
+}
+
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
@@ -146,7 +176,7 @@ function parseOutput(raw: unknown): NotebookOutput | null {
 
   if (outputType === "stream") {
     const name = typeof raw.name === "string" ? raw.name : "stdout";
-    const { text, truncated } = capText(joinSource(raw.text), MAX_OUTPUT_TEXT_CHARS);
+    const { text, truncated } = capText(stripAnsi(joinSource(raw.text)), MAX_OUTPUT_TEXT_CHARS);
     return { kind: "stream", name, text, truncated };
   }
 
@@ -156,7 +186,7 @@ function parseOutput(raw: unknown): NotebookOutput | null {
     const tb = Array.isArray(raw.traceback)
       ? raw.traceback.filter((s): s is string => typeof s === "string").join("\n")
       : "";
-    const { text: traceback, truncated } = capText(tb, MAX_OUTPUT_TEXT_CHARS);
+    const { text: traceback, truncated } = capText(stripAnsi(tb), MAX_OUTPUT_TEXT_CHARS);
     return { kind: "error", ename, evalue, traceback, truncated };
   }
 
@@ -168,7 +198,7 @@ function parseOutput(raw: unknown): NotebookOutput | null {
     let text: string | null = null;
     let truncated = false;
     if ("text/plain" in data) {
-      const cap = capText(joinSource(data["text/plain"]), MAX_OUTPUT_TEXT_CHARS);
+      const cap = capText(stripAnsi(joinSource(data["text/plain"])), MAX_OUTPUT_TEXT_CHARS);
       text = cap.text;
       truncated = cap.truncated;
     }

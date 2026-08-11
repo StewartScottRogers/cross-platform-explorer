@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { render, screen, waitFor } from "@testing-library/svelte";
 import NotebookPreview from "./NotebookPreview.svelte";
 
@@ -153,5 +155,172 @@ describe("NotebookPreview (CPE-1616)", () => {
 
     await waitFor(() => expect(container.textContent).toMatch(/not shown/i));
     expect(container.textContent).toContain("text/html");
+  });
+
+  // CPE-1616 Visual Critic finding (must-fix): a real executed traceback embeds raw ANSI escape codes.
+  // Confirms the end-to-end path (parseNotebook -> stripAnsi -> the rendered <pre>) never leaks the raw
+  // escape garbage into what the user actually sees.
+  it("renders an error traceback with ANSI escape codes stripped to readable text", async () => {
+    const traceback = [
+      "\x1b[0;31m---------------------------------------------------------------------------\x1b[0m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m                         Traceback (most recent call last)",
+      "\x1b[0;32mCell \x1b[0;36mIn[3], line 1\x1b[0m",
+      "\x1b[0;32m----> 1\x1b[0m \x1b[38;5;241;43m1\x1b[39;49m \x1b[38;5;241;43m/\x1b[39;49m \x1b[38;5;241;43m0\x1b[39;49m",
+      "\x1b[0;31mZeroDivisionError\x1b[0m: division by zero",
+    ];
+    readFileTextMock.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          cells: [
+            {
+              cell_type: "code",
+              source: "1/0",
+              outputs: [{ output_type: "error", ename: "ZeroDivisionError", evalue: "division by zero", traceback }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { container } = render(NotebookPreview, { path: "/x/ansi-traceback.ipynb" });
+
+    await waitFor(() => expect(container.querySelector('[data-testid="notebook-error-output"]')).toBeTruthy());
+    const errOut = container.querySelector('[data-testid="notebook-error-output"]')!;
+    // Not just "no raw ESC byte" (jsdom's textContent wouldn't show it anyway) — assert the specific
+    // literal-garbage fragments the Visual Critic actually saw on screen are gone from the rendered text.
+    expect(errOut.textContent).not.toContain("[0;31m");
+    expect(errOut.textContent).not.toContain("[0;32m");
+    expect(errOut.textContent).not.toContain("[38;5;241;43m");
+    expect(errOut.textContent).not.toContain("[39;49m");
+    expect(errOut.textContent).toContain("ZeroDivisionError");
+    expect(errOut.textContent).toContain("Cell In[3], line 1");
+    expect(errOut.textContent).toContain("1 / 0");
+  });
+
+  it("renders a stream output with ANSI colour codes stripped", async () => {
+    readFileTextMock.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          cells: [
+            {
+              cell_type: "code",
+              source: "print('hi')",
+              outputs: [{ output_type: "stream", name: "stdout", text: ["\x1b[32mgreen line\x1b[0m\n"] }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    const { container } = render(NotebookPreview, { path: "/x/ansi-stream.ipynb" });
+
+    await waitFor(() => expect(container.querySelector(".nb-stream")).toBeTruthy());
+    expect(container.querySelector(".nb-stream")!.textContent).toBe("green line\n");
+  });
+
+  // CPE-1616 Visual Critic finding (must-fix): an unbounded long output used to push the rest of the
+  // notebook off-screen. jsdom cannot see layout/scroll, so this only proves the DATA-integrity half of
+  // the fix — every line of a long-but-uncapped output is still present in the DOM (nothing was silently
+  // dropped) — not the visual bound itself. The visual claim (a real max-height + scroll region appears in
+  // the browser) needs the screenshot/Visual-Critic pass, same as every other layout claim in this suite.
+  it("keeps every line of a long (but uncapped) stream output in the DOM — bounding is a CSS/visual concern, not a data one", async () => {
+    const lines = Array.from({ length: 300 }, (_, i) => `line ${i}\n`);
+    readFileTextMock.mockResolvedValueOnce(
+      ok(
+        JSON.stringify({
+          cells: [{ cell_type: "code", source: "x", outputs: [{ output_type: "stream", name: "stdout", text: lines }] }],
+        }),
+      ),
+    );
+
+    const { container } = render(NotebookPreview, { path: "/x/long-output.ipynb" });
+
+    await waitFor(() => expect(container.querySelector(".nb-stream")).toBeTruthy());
+    const text = container.querySelector(".nb-stream")!.textContent ?? "";
+    expect(text).toContain("line 0\n");
+    expect(text).toContain("line 299\n");
+    // Well under MAX_OUTPUT_TEXT_CHARS (20,000), so the cap's own truncation note must NOT be the thing
+    // bounding this — confirms the height bound is a separate, additional concern from the text-length cap.
+    expect(container.querySelector('[data-testid="notebook-cell"]')?.textContent).not.toMatch(/output truncated/i);
+  });
+
+  // Structural guard (not a visual one — see the note above): asserts the CSS rule that bounds a long
+  // output actually exists and applies to the right selectors, without depending on jsdom layout, which
+  // can't compute a real max-height/scrollbar. This is the "test what is testable" half of the fix; a
+  // human/Visual-Critic screenshot pass is still what confirms it looks right on screen.
+  it("the .nb-output rule declares a bounded, scrollable region (structural CSS guard, not a visual proof)", () => {
+    const src = readFileSync(join(__dirname, "NotebookPreview.svelte"), "utf8");
+    const styleMatch = src.match(/<style>([\s\S]*)<\/style>/);
+    expect(styleMatch, "NotebookPreview.svelte must have a <style> block").toBeTruthy();
+    const css = styleMatch![1];
+    const ruleMatch = css.match(/\.nb-output\s*\{([^}]*)\}/);
+    expect(ruleMatch, ".nb-output rule not found in NotebookPreview.svelte").toBeTruthy();
+    const rule = ruleMatch![1];
+    expect(rule, ".nb-output must declare a bounded height").toMatch(/max-height\s*:/);
+    expect(rule, ".nb-output must be its own scroll region, not silently clipped").toMatch(/overflow-y\s*:\s*auto/);
+  });
+});
+
+// CPE-1616 Visual Critic finding (must-fix): dark-theme traceback contrast measured 4.41:1 — under the
+// 4.5:1 AA floor for normal text — because the traceback's actual background is
+// `color-mix(in srgb, var(--danger) 8%, var(--surface))` (NotebookPreview.svelte's `.nb-error-output`
+// rule), not plain `--surface`. src/app.css.dark-contrast.test.ts already guards `--danger` vs plain
+// `--bg`/`--surface`, but that pairing doesn't reflect this component's actual mixed background, so this
+// is a dedicated guard tied to the real formula this component uses. Same inline WCAG contrast math as
+// app.css.dark-contrast.test.ts / app.css.hc-contrast.test.ts (no shared util exists yet — matches that
+// file-local convention) and reads the live hex values out of app.css so it can never silently drift.
+describe("NotebookPreview dark-theme traceback contrast (CPE-1616 finding 3)", () => {
+  const appCss = readFileSync(join(__dirname, "..", "..", "app.css"), "utf8");
+
+  function hexToRgb(hex: string): [number, number, number] {
+    let h = hex.replace("#", "");
+    if (h.length === 3) h = h.split("").map((c) => c + c).join("");
+    return [parseInt(h.substring(0, 2), 16), parseInt(h.substring(2, 4), 16), parseInt(h.substring(4, 6), 16)];
+  }
+  function relativeLuminance(hex: string): number {
+    const [r, g, b] = hexToRgb(hex).map((c) => {
+      const s = c / 255;
+      return s <= 0.03928 ? s / 12.92 : Math.pow((s + 0.055) / 1.055, 2.4);
+    });
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  }
+  function contrastRatio(hexA: string, hexB: string): number {
+    const lA = relativeLuminance(hexA);
+    const lB = relativeLuminance(hexB);
+    const lighter = Math.max(lA, lB);
+    const darker = Math.min(lA, lB);
+    return (lighter + 0.05) / (darker + 0.05);
+  }
+  /** Mirrors CSS `color-mix(in srgb, colorA pctA%, colorB)` for two opaque sRGB hex colours. */
+  function mix(hexA: string, pctA: number, hexB: string): string {
+    const a = hexToRgb(hexA);
+    const b = hexToRgb(hexB);
+    const rgb = [0, 1, 2].map((i) => Math.round(a[i] * pctA + b[i] * (1 - pctA)));
+    return "#" + rgb.map((x) => x.toString(16).padStart(2, "0")).join("");
+  }
+
+  function extractHex(varName: string): string {
+    // NotebookPreview.svelte's .nb-error-output background/.nb-traceback text both resolve to --danger
+    // and --surface from the dark semantic block; read the live authored hex straight out of app.css.
+    // No nested braces inside a custom-property block, so a plain non-greedy match to the next `}` is safe.
+    const darkBlockMatch = appCss.match(/:root\[data-theme="dark"\]\s*\{([^}]*)\}/);
+    expect(darkBlockMatch, ':root[data-theme="dark"] block not found in app.css').toBeTruthy();
+    const block = darkBlockMatch![1];
+    const declMatch = block.match(new RegExp(`${varName}\\s*:\\s*var\\((--[a-zA-Z0-9-]+)\\)`));
+    expect(declMatch, `${varName} not found in :root[data-theme="dark"]`).toBeTruthy();
+    const paletteVar = declMatch![1];
+    const paletteMatch = appCss.match(new RegExp(`${paletteVar}\\s*:\\s*(#[0-9a-fA-F]{6})`));
+    expect(paletteMatch, `${paletteVar} not found as a hex literal in app.css`).toBeTruthy();
+    return paletteMatch![1];
+  }
+
+  it("--danger on the .nb-error-output's actual 8%-mixed background clears 4.5:1 AA in dark theme", () => {
+    const danger = extractHex("--danger");
+    const surface = extractHex("--surface");
+    const tracebackBg = mix(danger, 0.08, surface); // matches color-mix(in srgb, var(--danger) 8%, var(--surface))
+    const ratio = contrastRatio(danger, tracebackBg);
+    // eslint-disable-next-line no-console -- the ticket asks for the measured ratio to be reported.
+    console.log(`NotebookPreview dark-theme traceback contrast: ${ratio.toFixed(2)}:1 (danger ${danger} on ${tracebackBg})`);
+    expect(ratio).toBeGreaterThanOrEqual(4.5);
   });
 });

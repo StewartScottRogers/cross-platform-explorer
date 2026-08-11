@@ -135,3 +135,79 @@ notebook markdown is no more of an injection vector than a plain `.md` file.
 - jsdom cannot see layout, so no visual claim is made — only parsing/robustness/DOM-content assertions.
 
 Branch `cpe-1616-notebook-viewer`, PR opened against `main`.
+
+**Correction (2026-08-11, before the visual-fix pass below):** the "code cells syntax-highlighted via
+`highlight.ts`" claim above is misleading as stated. `highlightCode`/`highlightForFile` genuinely run
+highlight.js and emit `hljs-*`-classed markup, but **no stylesheet anywhere in the app defines any
+`.hljs-*` rule**, so on screen every code cell (notebook or plain-text preview) renders flat monochrome in
+both themes — a pre-existing, app-wide gap this ticket didn't cause, just made visible (a notebook is
+mostly code). Filed separately as **CPE-1631**; not fixed here. PR description corrected to match.
+
+### 2026-08-11 — Visual Critic fixes (blocking findings on PR #822)
+
+An independent Reviewer approved the code (caps genuinely bound work, sanitisation is sound, parsing
+never throws — see above, unchanged). A separate Visual Critic then looked at the real rendered component
+in Chrome, both themes, 900/460/260px, and returned 4 findings. Fixed:
+
+- **Finding 1 (must-fix) — ANSI escape codes rendered as literal garbage.** A real Jupyter
+  traceback/stream is routinely colourised by the kernel (IPython's exception formatter, `colorama`,
+  `tqdm`, …) with raw ANSI escape codes; unstripped, the view showed fragments like `[0;31m` interleaved
+  with the real message. Added `stripAnsi()` to `src/lib/preview/notebook.ts` — a small inline regex (no
+  new dependency; same shape as the `strip-ansi` npm package, reimplemented rather than added), applied to
+  stream text, `text/plain` results, and error tracebacks, run BEFORE the existing `MAX_OUTPUT_TEXT_CHARS`
+  cap (so the cap reflects what's actually rendered, not the raw escape-code-inflated source). **Chose
+  stripping over colourising**: rendering real ANSI colour would need switching the traceback `<pre>` to
+  `{@html}` plus careful sanitisation of attacker-controlled SGR parameters to stay safe — a "nice to
+  have" not worth the injection-surface risk for what this ticket actually needs (a readable traceback).
+  Stripping keeps the existing safe `<pre>{text}</pre>` (auto-escaped) untouched. 9 new tests in
+  `notebook.test.ts` (direct `stripAnsi` unit tests + `parseNotebook` integration for stream/result/error,
+  including a real-shaped multi-line traceback fixture with actual `\x1b[` sequences) + 3 new tests in
+  `NotebookPreview.test.ts` (end-to-end: traceback and stream rendering with ANSI stripped).
+- **Finding 2 (must-fix) — unbounded output height buries the notebook.** `.nb-output` (covers stream,
+  result text, AND the error/traceback block, which shares the class) had no `max-height`, so e.g. a
+  300-line stream (well within the 20,000-char text cap, so never marked `truncated`) rendered every line
+  inline, forcing a scroll through the whole dump to reach the next cell. Added `max-height: 260px;
+  overflow-y: auto; resize: vertical` to `.nb-output` in `NotebookPreview.svelte`. Short outputs are
+  unaffected (never reach the height cap, no scrollbar appears). The `resize: vertical` handle is a
+  deliberate, visible "there's more, drag me" affordance (native browser corner-drag icon) on top of the
+  native scrollbar, so the bound reads as designed, not as silent truncation — and nothing is actually cut:
+  every byte within the existing text-length cap stays in the DOM. Added a DOM-content test proving a
+  300-line output's full text (first AND last line) is still present — the data-integrity half of the fix
+  that jsdom *can* verify; the visual bound itself (an actual `max-height`/scrollbar rendering) needs the
+  screenshot/Visual-Critic pass, same as every other layout claim in this suite — plus a structural guard
+  test that reads the component's own `<style>` block and asserts the `.nb-output` rule declares
+  `max-height`/`overflow-y: auto`.
+- **Finding 3 (fix while here) — dark-theme traceback contrast 4.41:1, under the 4.5:1 AA floor.** The
+  traceback's real background is `color-mix(in srgb, var(--danger) 8%, var(--surface))` (`.nb-error-output`
+  in `NotebookPreview.svelte`), not plain `--surface` — the existing `app.css.dark-contrast.test.ts` guard
+  checks `--danger` against plain `--bg`/`--surface` (4.92:1, already fine) but not this component's actual
+  mixed background. Nudged `--pal-dark-red-400` (the dark `--danger` token, `src/app.css`) from `#ff6659`
+  to `#ff7b6f`. **Measured after the change: 4.97:1** against the real 8%-mixed traceback background
+  (up from 4.41:1), 5.61:1 against plain `--surface` (up from 4.92:1), 6.45:1 against `--bg`. Added a
+  dedicated regression guard in `NotebookPreview.test.ts` that reads the live hex values out of `app.css`
+  and reimplements `color-mix` in JS (same file-local WCAG-math convention as
+  `app.css.dark-contrast.test.ts`/`app.css.hc-contrast.test.ts` — no shared util exists yet) so this can't
+  silently drift back under 4.5:1. Light theme was already fine (4.99:1), untouched. The existing
+  `app.css.dark-contrast.test.ts` `--danger` assertions still pass (now 5.61:1/6.45:1, both improved).
+- **Finding 4 (do not fix here) — "no syntax highlighting" claim corrected, not the underlying gap.**
+  Confirmed via `grep -r "\.hljs" src/` → no matches anywhere in the app; the Critic's finding is accurate
+  and pre-existing/app-wide, tracked as CPE-1631 (already filed on `main`). Left the highlight.js
+  integration itself untouched. Corrected: this ticket's Work Log entry above, `NotebookPreview.svelte`'s
+  top doc comment (now states plainly that highlighting is currently invisible + points at CPE-1631), and
+  the PR #822 description (removed the "syntax-highlighted" claim, added a CPE-1631 reference).
+
+**Verification:**
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- `npx vitest run` (full suite) → `Test Files 274 passed (274)`, `Tests 3369 passed (3369)` — up from the
+  274/3355 baseline by exactly the 14 new tests added here (9 in `notebook.test.ts`, 5 in
+  `NotebookPreview.test.ts`), no existing test touched or weakened.
+- Targeted re-run of `notebook.test.ts` + `NotebookPreview.test.ts` → 55/55 green; `app.css.dark-contrast
+  .test.ts` + `app.css.hc-contrast.test.ts` + `app.css.test.ts` → 38/38 green (dark-contrast `--danger`
+  assertions improved, not regressed).
+- No new npm dependency added (`package.json`/`package-lock.json` untouched) — the ANSI stripper is a
+  ~10-line inline regex.
+- Still needs an actual screenshot/Visual-Critic re-pass to confirm the max-height/scroll bound and the
+  now-brighter dark-theme red *look* right on screen — jsdom cannot see layout or colour, only the
+  DOM-content and CSS-declaration/contrast-math halves of these fixes were verified here.
+
+Pushed to `cpe-1616-notebook-viewer`; PR #822 updated (same PR, not a new one).

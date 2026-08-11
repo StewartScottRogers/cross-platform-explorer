@@ -2,16 +2,25 @@
   /**
    * Jupyter `.ipynb` notebook preview (CPE-1616, epic CPE-1568 slice 6): renders a notebook as an
    * ordered list of cells — markdown rendered via the same sanitized `marked` pipeline as the markdown
-   * provider, code syntax-highlighted via the shared `highlight.ts` grammars, and outputs (stream text,
-   * text/plain + image/png results, error tracebacks) shown per cell. Self-contained like
+   * provider, code cells run through the shared `highlight.ts` grammars (`highlightCode`), and outputs
+   * (stream text, text/plain + image/png results, error tracebacks) shown per cell. Self-contained like
    * CertPreview.svelte/FontPreview.svelte — fetches its own file content from `path` rather than routing
    * through PreviewPane's shared text-loading state.
+   *
+   * **Syntax highlighting is currently invisible** (CPE-1631, found by the Visual Critic reviewing this
+   * ticket): `highlightCode` genuinely runs highlight.js and emits `hljs-*` classed markup, but no
+   * stylesheet in the app defines any `.hljs-*` rule, so every code cell renders flat monochrome in both
+   * themes. This is a pre-existing, app-wide gap — every surface that routes through `highlight.ts` is
+   * affected, not something this ticket introduced or fixes — tracked separately as CPE-1631.
    *
    * A `.ipynb` is untrusted input: `parseNotebook` (preview/notebook.ts) never throws, and a parse
    * failure here degrades to the raw file text (same idea as the plain text/JSON view) with a clear
    * reason banner, rather than a blank pane. Rendered markdown reuses `renderMarkdown`, which sanitizes
    * with DOMPurify before returning — the same sanitization every other markdown surface in the app
-   * relies on, so notebook markdown is no more of an injection vector than a plain `.md` file.
+   * relies on, so notebook markdown is no more of an injection vector than a plain `.md` file. Stream
+   * text, `text/plain` results, and error tracebacks are run through `stripAnsi` (preview/notebook.ts)
+   * before they ever reach this component, so raw ANSI colour-code garbage (`[0;31m`, …) that a real
+   * executed notebook routinely embeds never reaches the `<pre>` — see that module's doc comment.
    */
   import { commands } from "../bindings.gen";
   import { unwrap } from "../invoke";
@@ -222,10 +231,20 @@
     font-family: var(--mono, ui-monospace, monospace); font-size: 12px; color: var(--text);
   }
   .nb-outputs { border-top: 1px dashed var(--border); padding: 6px 12px 8px; display: flex; flex-direction: column; gap: 6px; }
+  /* CPE-1616 Visual Critic finding: an unbounded output (e.g. a 300-line stream, well within the
+     20,000-char cap so never marked `truncated`) used to render every line inline, forcing the user to
+     scroll past the whole dump in the notebook's own scroll container to reach the next cell. Bounded to
+     a fixed height + its own scroll region so one noisy cell can't bury the rest of the notebook — short
+     outputs are unaffected (they never reach this height, so no scrollbar appears). `resize: vertical`
+     adds a visible drag handle (native browser affordance) so the bound reads as a deliberate, reachable
+     "more below" rather than silent truncation; the content itself is never cut — every byte within the
+     text cap is still in the DOM, just scrolled/resized into view. Applies to stream/result text AND the
+     error/traceback block (`.nb-error-output` shares this class), so a giant traceback is bounded too. */
   .nb-output {
     margin: 0; padding: 6px 8px; background: var(--surface-alt); border-radius: var(--radius);
     white-space: pre-wrap; overflow-wrap: anywhere; overflow-x: auto;
     font-family: var(--mono, ui-monospace, monospace); font-size: 11.5px; color: var(--text-dim);
+    max-height: 260px; overflow-y: auto; resize: vertical;
   }
   .nb-stream.stderr { color: var(--danger); }
   .nb-output-image { max-width: 100%; border-radius: var(--radius); border: 1px solid var(--border); }
