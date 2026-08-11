@@ -957,6 +957,9 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Couldn't open the link.",
     "xfer.cancelled": "Copy cancelled.",
     "search.deepNeedsFolder": "Open a folder first — Search looks inside the current folder and its subfolders.",
+    // Checkpoints panel — failed attempt record (CPE-1600): a durable trace of a pre-write checkpoint
+    // that was attempted and failed, shown alongside checkpoints that did succeed.
+    "ckpt.failedTitle": "Checkpoint attempt failed",
   },
   es: {
     "app.newTab": "Nueva pestaña",
@@ -1794,6 +1797,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "No se pudo abrir el enlace.",
     "xfer.cancelled": "Copia cancelada.",
     "search.deepNeedsFolder": "Abre una carpeta primero — la búsqueda examina la carpeta actual y sus subcarpetas.",
+    "ckpt.failedTitle": "El intento de checkpoint falló",
   },
   de: {
     "app.newTab": "Neuer Tab",
@@ -2631,6 +2635,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Der Link konnte nicht geöffnet werden.",
     "xfer.cancelled": "Kopieren abgebrochen.",
     "search.deepNeedsFolder": "Öffne zuerst einen Ordner — die Suche durchsucht den aktuellen Ordner und seine Unterordner.",
+    "ckpt.failedTitle": "Checkpoint-Versuch fehlgeschlagen",
   },
   fr: {
     "app.newTab": "Nouvel onglet",
@@ -3468,6 +3473,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Impossible d'ouvrir le lien.",
     "xfer.cancelled": "Copie annulée.",
     "search.deepNeedsFolder": "Ouvrez d'abord un dossier — la recherche explore le dossier actuel et ses sous-dossiers.",
+    "ckpt.failedTitle": "La tentative de point de contrôle a échoué",
   },
   it: {
     "app.newTab": "Nuova scheda",
@@ -4295,6 +4301,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Impossibile aprire il collegamento.",
     "xfer.cancelled": "Copia annullata.",
     "search.deepNeedsFolder": "Apri prima una cartella — la ricerca esamina la cartella corrente e le sue sottocartelle.",
+    "ckpt.failedTitle": "Tentativo di checkpoint non riuscito",
   },
   pt: {
     "app.newTab": "Nova aba",
@@ -5122,6 +5129,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Não foi possível abrir o link.",
     "xfer.cancelled": "Cópia cancelada.",
     "search.deepNeedsFolder": "Abra uma pasta primeiro — a busca examina a pasta atual e suas subpastas.",
+    "ckpt.failedTitle": "Tentativa de checkpoint falhou",
   },
   nl: {
     "app.newTab": "Nieuw tabblad",
@@ -5949,6 +5957,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Kan de koppeling niet openen.",
     "xfer.cancelled": "Kopiëren geannuleerd.",
     "search.deepNeedsFolder": "Open eerst een map — zoeken doorzoekt de huidige map en submappen.",
+    "ckpt.failedTitle": "Checkpointpoging mislukt",
   },
   pl: {
     "app.newTab": "Nowa karta",
@@ -6776,6 +6785,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Nie można otworzyć łącza.",
     "xfer.cancelled": "Kopiowanie anulowane.",
     "search.deepNeedsFolder": "Najpierw otwórz folder — wyszukiwanie przeszukuje bieżący folder i jego podfoldery.",
+    "ckpt.failedTitle": "Próba utworzenia punktu kontrolnego nie powiodła się",
   },
   ru: {
     "app.newTab": "Новая вкладка",
@@ -7603,6 +7613,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "Не удалось открыть ссылку.",
     "xfer.cancelled": "Копирование отменено.",
     "search.deepNeedsFolder": "Сначала откройте папку — поиск ищет в текущей папке и её подпапках.",
+    "ckpt.failedTitle": "Попытка создания контрольной точки не удалась",
   },
   zh: {
     "app.newTab": "新标签页",
@@ -8430,6 +8441,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "无法打开该链接。",
     "xfer.cancelled": "复制已取消。",
     "search.deepNeedsFolder": "请先打开一个文件夹 — 搜索会在当前文件夹及其子文件夹中查找。",
+    "ckpt.failedTitle": "检查点尝试失败",
   },
   ja: {
     "app.newTab": "新しいタブ",
@@ -9257,6 +9269,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "リンクを開けませんでした。",
     "xfer.cancelled": "コピーがキャンセルされました。",
     "search.deepNeedsFolder": "まずフォルダーを開いてください — 検索は現在のフォルダーとそのサブフォルダーの中を探します。",
+    "ckpt.failedTitle": "チェックポイントの試行に失敗しました",
   },
   ko: {
     "app.newTab": "새 탭",
@@ -10084,6 +10097,7 @@ const messages: Record<Locale, Record<string, string>> = {
     "link.openFailed": "링크를 열 수 없습니다.",
     "xfer.cancelled": "복사가 취소되었습니다.",
     "search.deepNeedsFolder": "먼저 폴더를 여세요 — 검색은 현재 폴더와 하위 폴더 안을 찾습니다.",
+    "ckpt.failedTitle": "체크포인트 시도 실패",
   },
 };
 

@@ -49,6 +49,20 @@ so both arm a confirmation panel first, restating what will happen. Nothing reve
 After a revert, the dialog reports how many changes were applied and how many were skipped (e.g. a locked
 or missing file); a skip never fails the rest of the revert.
 
+## When a pre-write checkpoint fails
+
+Several tools — Batch Media (overwriting originals in place), Metadata Studio, Declutter, and Similar
+Images — take a best-effort checkpoint of the affected folder immediately before an otherwise-irreversible
+write, so you have a way back even without Undo. A checkpoint failure never blocks that write (the
+checkpoint is a bonus safety net, not a gate), but it's important information: it means no recovery net
+was created for that attempt.
+
+That failure now leaves a durable record right here, in this list, alongside the checkpoints that *did*
+succeed — not just a banner you had to be watching for. A failed attempt is shown distinctly, with a
+different marker, no timestamp-matched restore point, and **no Preview or Revert buttons at all** — it
+can never be selected or mistaken for a real checkpoint, because nothing was actually captured. Hovering
+it shows the reason the attempt failed.
+
 ## Scheduled snapshots
 
 Instead of taking every checkpoint by hand, you can have a folder snapshot itself on an interval. Open

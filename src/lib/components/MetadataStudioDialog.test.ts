@@ -111,6 +111,14 @@ describe("MetadataStudioDialog checkpoint-before-save (CPE-1325)", () => {
     await waitFor(() => expect(screen.getByText(/Saved/)).toBeTruthy());
     // The suffix must NOT lie: a thrown-Error checkpoint failure is not a success.
     expect(screen.queryByText(/checkpoint saved/)).toBeNull();
+    // CPE-1600: the failure also gets a durable record, alongside (not instead of) the console line.
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("checkpoint_record_failure", {
+        root: "/repo/music",
+        operation: "Before metadata edit",
+        reason: "checkpoint boom",
+      }),
+    );
     errSpy.mockRestore();
   });
 

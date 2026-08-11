@@ -1836,6 +1836,33 @@ async checkpointList(root: string) : Promise<Result<Checkpoint[], string>> {
 }
 },
 /**
+ * Record that a best-effort pre-write checkpoint of `root` was attempted and failed (CPE-1600), so the
+ * Checkpoints panel can show it as a durable record alongside checkpoints that did succeed. Called by
+ * every "checkpoint before an irreversible batch" caller (Batch Media, Metadata Studio, Declutter,
+ * Similar Images) from its existing failure `catch`, in addition to the `console.error` it already logs
+ * — never in place of it, and never blocking the write that's already proceeding.
+ */
+async checkpointRecordFailure(root: string, operation: string, reason: string) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_record_failure", { root, operation, reason }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * The failed checkpoint attempts recorded for `root`, newest-first (CPE-1600). Kept as a separate list
+ * from `checkpoint_list` — the frontend renders the two shapes distinctly rather than merging them here.
+ */
+async checkpointFailuresList(root: string) : Promise<Result<CheckpointFailure[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("checkpoint_failures_list", { root }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Preview reverting `root` to checkpoint `manifest_id`: restore-plan summary + a drift report so the UI
  * can warn before touching disk. Reads only; nothing destructive.
  */
@@ -3892,6 +3919,35 @@ added_bytes: number;
  * Files whose content was skipped (never silently dropped).
  */
 skipped: SkippedInfo[] }
+/**
+ * A best-effort pre-write checkpoint that was **attempted and failed** — the row appended to /
+ * read from `checkpoint_failures.json` (CPE-1600). Every caller of the "checkpoint before an
+ * irreversible batch" pattern (Batch Media, Metadata Studio, Declutter, Similar Images) takes a
+ * best-effort [`checkpoint_create`] before it overwrites/moves originals; a checkpoint failure never
+ * blocks that write (it's a bonus safety net, not a gate), but until now the ONLY trace of "I tried to
+ * protect this folder and couldn't" was a `showNotice` banner that auto-dismisses in ~5s. This gives it
+ * a durable home next to the checkpoints that did succeed.
+ * 
+ * Deliberately **not** a [`Checkpoint`]: it carries no `manifest_id` because nothing was captured, so
+ * it can never be passed to `checkpoint_preview_revert`/`checkpoint_revert`/`checkpoint_revert_one` —
+ * there is nothing there to revert to. The frontend keys off this distinct shape to render a failed
+ * attempt with no restore affordances at all, so it can never be mistaken for a real restore point.
+ */
+export type CheckpointFailure = { 
+/**
+ * What prompted the attempt ("Before batch media overwrite", "Before metadata edit", …) — the
+ * same label convention [`Checkpoint::label`] uses for a successful checkpoint's caller, so the
+ * panel reads "tried to protect this folder before X and couldn't".
+ */
+operation: string; 
+/**
+ * Why the attempt failed — the error string from the failed `checkpoint_create` call, verbatim.
+ */
+reason: string; 
+/**
+ * When the attempt was made, epoch milliseconds.
+ */
+ts: number }
 /**
  * A file's checksum baseline entry (CPE-791) — matches the frontend `ChecksumEntry` (CPE-790).
  * `modified` is epoch-ms.

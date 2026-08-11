@@ -62,6 +62,31 @@ pub struct Checkpoint {
     pub ts: u64,
 }
 
+/// A best-effort pre-write checkpoint that was **attempted and failed** — the row appended to /
+/// read from `checkpoint_failures.json` (CPE-1600). Every caller of the "checkpoint before an
+/// irreversible batch" pattern (Batch Media, Metadata Studio, Declutter, Similar Images) takes a
+/// best-effort [`checkpoint_create`] before it overwrites/moves originals; a checkpoint failure never
+/// blocks that write (it's a bonus safety net, not a gate), but until now the ONLY trace of "I tried to
+/// protect this folder and couldn't" was a `showNotice` banner that auto-dismisses in ~5s. This gives it
+/// a durable home next to the checkpoints that did succeed.
+///
+/// Deliberately **not** a [`Checkpoint`]: it carries no `manifest_id` because nothing was captured, so
+/// it can never be passed to `checkpoint_preview_revert`/`checkpoint_revert`/`checkpoint_revert_one` —
+/// there is nothing there to revert to. The frontend keys off this distinct shape to render a failed
+/// attempt with no restore affordances at all, so it can never be mistaken for a real restore point.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct CheckpointFailure {
+    /// What prompted the attempt ("Before batch media overwrite", "Before metadata edit", …) — the
+    /// same label convention [`Checkpoint::label`] uses for a successful checkpoint's caller, so the
+    /// panel reads "tried to protect this folder before X and couldn't".
+    pub operation: String,
+    /// Why the attempt failed — the error string from the failed `checkpoint_create` call, verbatim.
+    pub reason: String,
+    /// When the attempt was made, epoch milliseconds.
+    pub ts: u64,
+}
+
 /// A file the capture left out (oversize / over budget), surfaced so the caller can warn a checkpoint is
 /// incomplete rather than silently dropping content. The string form of [`crate::snapshot::SkipReason`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -185,6 +210,23 @@ fn index_file(store_dir: &Path) -> PathBuf {
     store_dir.join("checkpoints.json")
 }
 
+/// The failed-checkpoint-attempts index file inside a per-root store dir — deliberately a SEPARATE file
+/// from `checkpoints.json` (not a differently-shaped row in the same file): a torn/malformed line in one
+/// can never affect the other, and [`checkpoint_list`] (the restore surface) never has to filter out
+/// failure rows from what it returns — it simply never sees them.
+fn failures_file(store_dir: &Path) -> PathBuf {
+    store_dir.join("checkpoint_failures.json")
+}
+
+/// How many failed-attempt rows a root's `checkpoint_failures.json` retains before the oldest are
+/// rotated out (CPE-1600). Deliberately far smaller than [`audit_journal::MAX_EVENTS_PER_SESSION`]: a
+/// checkpoint attempt happens at most once per user-initiated irreversible batch (never per-file, never
+/// in a tight retry loop — see [`record_checkpoint_failure`]'s doc), so even a persistently broken root
+/// (e.g. a read-only drive hit repeatedly over days) accumulates one row per attempt, not a flood. 50 is
+/// generous headroom for that while keeping the panel a "what needs my attention" list rather than an
+/// unbounded log a user has to scroll past.
+pub const MAX_CHECKPOINT_FAILURES: usize = 50;
+
 // ---- tolerant JSON-lines index (pure over an explicit store dir) -----------------------------------
 
 /// Append one checkpoint row to `store_dir`'s index (creating the dir if needed), flushed before return.
@@ -215,6 +257,57 @@ pub fn read_checkpoints(store_dir: &Path) -> Vec<Checkpoint> {
         .filter_map(|l| serde_json::from_str::<Checkpoint>(l).ok())
         .collect();
     out.reverse(); // append order is oldest-first; the UI wants newest-first
+    out
+}
+
+/// Append one failed-attempt row to `store_dir`'s failures index (creating the dir if needed), then trim
+/// the file to its last [`MAX_CHECKPOINT_FAILURES`] lines (oldest rotated out first) — mirrors
+/// `audit_journal::trim`'s crash-safe temp-file + rename rewrite so a rotation can never leave a
+/// half-written file. Flushed before return, same durability as [`append_checkpoint`].
+pub fn append_checkpoint_failure(store_dir: &Path, cf: &CheckpointFailure) -> Result<(), String> {
+    fs::create_dir_all(store_dir).map_err(|e| e.to_string())?;
+    let file = failures_file(store_dir);
+    let line = serde_json::to_string(cf).map_err(|e| e.to_string())?;
+    {
+        let mut f = OpenOptions::new().create(true).append(true).open(&file).map_err(|e| e.to_string())?;
+        writeln!(f, "{line}").map_err(|e| e.to_string())?;
+        f.flush().map_err(|e| e.to_string())?;
+    }
+    trim_failures(&file, MAX_CHECKPOINT_FAILURES)
+}
+
+/// Keep only the last `max` non-empty lines of a failures file (rotate the oldest out first).
+fn trim_failures(file: &Path, max: usize) -> Result<(), String> {
+    let content = match fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(_) => return Ok(()), // nothing written yet — nothing to trim
+    };
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.len() <= max {
+        return Ok(());
+    }
+    let keep = &lines[lines.len() - max..];
+    let tmp = file.with_extension("json.tmp");
+    let mut body = keep.join("\n");
+    body.push('\n');
+    fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, file).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Read `store_dir`'s failed-attempts index back **newest-first**, skipping malformed lines — same
+/// tolerant-read contract as [`read_checkpoints`]. A missing file → empty list.
+pub fn read_checkpoint_failures(store_dir: &Path) -> Vec<CheckpointFailure> {
+    let content = match fs::read_to_string(failures_file(store_dir)) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+    let mut out: Vec<CheckpointFailure> = content
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<CheckpointFailure>(l).ok())
+        .collect();
+    out.reverse();
     out
 }
 
@@ -250,6 +343,37 @@ pub fn checkpoint_create(
 /// The checkpoints recorded for `root`, newest-first. Missing store → empty.
 pub fn checkpoint_list(ctx: &dyn ServerCtx, root: &str) -> Result<Vec<Checkpoint>, String> {
     Ok(read_checkpoints(&store_dir_for(ctx, root)?))
+}
+
+/// Record that a best-effort pre-write checkpoint of `root` was **attempted and failed** (CPE-1600) —
+/// called by every "checkpoint before an irreversible batch" caller from its own `catch`, alongside the
+/// `console.error` it already logs, so the failure gets a durable home in `root`'s store next to the
+/// checkpoints that did succeed. `operation` is the caller-supplied label ("Before batch media
+/// overwrite", …); `reason` is the error text from the failed `checkpoint_create` call.
+///
+/// This function itself is infallible-in-spirit but still returns `Result` because it touches disk (the
+/// store dir could be unwritable — plausibly the SAME root cause as the checkpoint that just failed);
+/// every caller treats a failure here as best-effort too (log and move on), so recording a failure can
+/// never itself block or surface a second error to the user.
+pub fn record_checkpoint_failure(
+    ctx: &dyn ServerCtx,
+    root: &str,
+    operation: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let store_dir = store_dir_for(ctx, root)?;
+    let ts = to_epoch_ms(SystemTime::now()).unwrap_or(0);
+    append_checkpoint_failure(
+        &store_dir,
+        &CheckpointFailure { operation: operation.to_string(), reason: reason.to_string(), ts },
+    )
+}
+
+/// The failed checkpoint attempts recorded for `root`, newest-first. Missing store → empty. Kept
+/// strictly separate from [`checkpoint_list`] — the Checkpoints panel calls both and renders the two
+/// shapes distinctly rather than this layer conflating them into one list.
+pub fn checkpoint_failures_list(ctx: &dyn ServerCtx, root: &str) -> Result<Vec<CheckpointFailure>, String> {
+    Ok(read_checkpoint_failures(&store_dir_for(ctx, root)?))
 }
 
 /// Preview reverting `root` to checkpoint `manifest_id`: diff the captured checkpoint against a fresh scan
@@ -848,6 +972,109 @@ mod tests {
         // Not in the checkpoint (never scanned as "../secret"), so this is refused on lookup already, but
         // also exercises that a traversal-shaped rel_path never reaches `safe_target`'s live-file read.
         assert!(checkpoint_diff_file(&ctx, &root_s, &created.checkpoint.manifest_id, "../secret").is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    // ---- failed checkpoint attempts (CPE-1600) --------------------------------------------------
+
+    #[test]
+    fn recorded_failure_is_listed_newest_first_and_is_separate_from_the_checkpoint_list() {
+        let app = scratch("app-data-fail");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-fail");
+        let root_s = root.to_string_lossy().to_string();
+        fs::write(root.join("a.txt"), b"a").unwrap();
+
+        // A real checkpoint succeeds too, so the failure list and the checkpoint list can be told apart.
+        let created = checkpoint_create(&ctx, &root_s, "ok one").unwrap();
+
+        record_checkpoint_failure(&ctx, &root_s, "Before batch media overwrite", "disk is read-only")
+            .unwrap();
+        record_checkpoint_failure(&ctx, &root_s, "Before removing clutter", "permission denied").unwrap();
+
+        let failures = checkpoint_failures_list(&ctx, &root_s).unwrap();
+        assert_eq!(failures.len(), 2, "both attempts recorded");
+        // Newest first.
+        assert_eq!(failures[0].operation, "Before removing clutter");
+        assert_eq!(failures[0].reason, "permission denied");
+        assert_eq!(failures[1].operation, "Before batch media overwrite");
+        assert_eq!(failures[1].reason, "disk is read-only");
+
+        // The success and the failures never mix: `checkpoint_list` still shows only the one real
+        // checkpoint, and nothing about it resembles a `Checkpoint` (no `manifest_id` field at all —
+        // this is a compile-time guarantee, not just a runtime one, since `CheckpointFailure` has no
+        // such field to check).
+        let checkpoints = checkpoint_list(&ctx, &root_s).unwrap();
+        assert_eq!(checkpoints.len(), 1);
+        assert_eq!(checkpoints[0].manifest_id, created.checkpoint.manifest_id);
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn a_missing_failures_file_degrades_to_an_empty_list() {
+        let app = scratch("app-data-fail-empty");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-fail-empty");
+        let root_s = root.to_string_lossy().to_string();
+
+        // Never recorded a failure for this root — no store dir exists at all yet.
+        assert!(checkpoint_failures_list(&ctx, &root_s).unwrap().is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn repeated_failures_rotate_at_the_cap_keeping_the_newest() {
+        // CPE-1600 volume guard: a persistently broken root (e.g. a read-only drive hit on every batch
+        // run) must not grow the failures index without limit — it rotates at `MAX_CHECKPOINT_FAILURES`,
+        // same shape as the audit journal's per-session cap.
+        let app = scratch("app-data-fail-rotate");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-fail-rotate");
+        let root_s = root.to_string_lossy().to_string();
+
+        for i in 0..(MAX_CHECKPOINT_FAILURES + 10) {
+            record_checkpoint_failure(&ctx, &root_s, "Before batch media overwrite", &format!("attempt {i}"))
+                .unwrap();
+        }
+
+        let failures = checkpoint_failures_list(&ctx, &root_s).unwrap();
+        assert_eq!(failures.len(), MAX_CHECKPOINT_FAILURES, "capped, oldest rotated out");
+        // Newest-first: the very last attempt recorded is first in the list.
+        assert_eq!(failures[0].reason, format!("attempt {}", MAX_CHECKPOINT_FAILURES + 9));
+        // The oldest surviving entry is exactly the cap's worth back from the newest — the first 10
+        // attempts (0..10) were rotated out.
+        assert_eq!(failures.last().unwrap().reason, "attempt 10");
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&app);
+    }
+
+    #[test]
+    fn a_malformed_failure_line_is_skipped_not_fatal() {
+        let app = scratch("app-data-fail-torn");
+        let ctx = HeadlessCtx::new(&app);
+        let root = scratch("root-fail-torn");
+        let root_s = root.to_string_lossy().to_string();
+
+        record_checkpoint_failure(&ctx, &root_s, "Before metadata edit", "locked file").unwrap();
+        let store_dir = store_dir_for(&ctx, &root_s).unwrap();
+        {
+            let mut f = OpenOptions::new().append(true).open(failures_file(&store_dir)).unwrap();
+            writeln!(f, "{{ not valid json").unwrap();
+        }
+        record_checkpoint_failure(&ctx, &root_s, "Before removing similar images", "network drive gone")
+            .unwrap();
+
+        let failures = checkpoint_failures_list(&ctx, &root_s).unwrap();
+        assert_eq!(failures.len(), 2, "the torn line is skipped, not counted or fatal");
+        assert_eq!(failures[0].operation, "Before removing similar images");
+        assert_eq!(failures[1].operation, "Before metadata edit");
 
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_dir_all(&app);

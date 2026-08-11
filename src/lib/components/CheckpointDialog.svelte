@@ -12,9 +12,10 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
-  import type { Checkpoint, RevertPreview, RevertOutcome, FileDiff } from "../bindings.gen";
+  import type { Checkpoint, CheckpointFailure, RevertPreview, RevertOutcome, FileDiff } from "../bindings.gen";
   import Icon from "./Icon.svelte";
   import DiffPeek from "./DiffPeek.svelte"; // reused as-is (CPE-1197 frontend half, epic CPE-735)
+  import { t } from "../i18n";
 
   /** Root folder to checkpoint/revert (pre-filled with the current folder by App). */
   export let initialPath = "";
@@ -26,6 +27,13 @@
   let revertOnePath = "";
 
   let checkpoints: Checkpoint[] = [];
+  /** Failed pre-write checkpoint attempts for `path` (CPE-1600) — kept in a SEPARATE list from
+   *  `checkpoints`, never merged into that shape: a `CheckpointFailure` carries no `manifest_id`, so it
+   *  structurally cannot be passed to `doPreview`/`armRevert` (both take a `Checkpoint`). Rendered
+   *  interleaved with `checkpoints` by timestamp (see {@link rows}) so a failed attempt shows up exactly
+   *  where a real checkpoint would have been, but with a visibly different row and no action buttons at
+   *  all — not merely disabled ones — so it can never be mistaken for a restore point. */
+  let checkpointFailures: CheckpointFailure[] = [];
   let selected: Checkpoint | null = null;
   let preview: RevertPreview | null = null;
   let outcome: RevertOutcome | null = null;
@@ -45,14 +53,34 @@
   let diffError = "";
 
   async function loadList() {
-    if (!path.trim()) { checkpoints = []; return; }
+    if (!path.trim()) { checkpoints = []; checkpointFailures = []; return; }
     loading = true; error = "";
     try {
-      checkpoints = unwrap(await commands.checkpointList(path.trim()));
+      // Two independent reads (CPE-1600): a failure to load the failures list must not blank the real
+      // checkpoints (and vice versa) — `Promise.allSettled`, not `Promise.all`, so one side's error
+      // can't hide the other's data.
+      const [cpResult, cfResult] = await Promise.allSettled([
+        commands.checkpointList(path.trim()),
+        commands.checkpointFailuresList(path.trim()),
+      ]);
+      checkpoints = cpResult.status === "fulfilled" ? unwrap(cpResult.value) ?? [] : [];
+      checkpointFailures = cfResult.status === "fulfilled" ? unwrap(cfResult.value) ?? [] : [];
+      if (cpResult.status === "rejected") throw cpResult.reason;
+      if (cfResult.status === "rejected") throw cfResult.reason;
     } catch (e) { error = String(e); } finally { loading = false; }
   }
 
   onMount(loadList);
+
+  /** One row in the merged, newest-first list: either a real checkpoint (selectable, previewable,
+   *  revertable) or a failed attempt (display-only — see `checkpointFailures`'s doc). A discriminated
+   *  union rather than one shared shape, so the template can never wire a revert/preview action to a
+   *  failure row by accident — there's no `manifest_id` field on that branch to pass one. */
+  type Row = { kind: "ok"; cp: Checkpoint } | { kind: "failed"; cf: CheckpointFailure; key: string };
+  $: rows = ([
+    ...checkpoints.map((cp): Row => ({ kind: "ok", cp })),
+    ...checkpointFailures.map((cf, i): Row => ({ kind: "failed", cf, key: `${cf.ts}-${i}` })),
+  ] as Row[]).sort((a, b) => (b.kind === "ok" ? b.cp.ts : b.cf.ts) - (a.kind === "ok" ? a.cp.ts : a.cf.ts));
 
   function resetOutcome() {
     preview = null;
@@ -191,22 +219,40 @@
     <div class="list" data-testid="checkpoint-list">
       {#if !path.trim()}
         <div class="empty">Enter a folder to see its checkpoints.</div>
-      {:else if loading && checkpoints.length === 0}
+      {:else if loading && rows.length === 0}
         <div class="empty">Loading…</div>
-      {:else if checkpoints.length === 0}
+      {:else if rows.length === 0}
         <div class="empty">No checkpoints yet — create one above.</div>
       {:else}
-        {#each checkpoints as cp (cp.manifest_id)}
-          <div class="cp-row" class:selected={selected?.manifest_id === cp.manifest_id} data-testid="cp-{cp.manifest_id}">
-            <div class="cp-info">
-              <span class="cp-label">{cp.label || shortId(cp.manifest_id)}</span>
-              <span class="cp-meta">{fmtTime(cp.ts)} · {shortId(cp.manifest_id)}</span>
+        {#each rows as row (row.kind === "ok" ? row.cp.manifest_id : row.key)}
+          {#if row.kind === "ok"}
+            {@const cp = row.cp}
+            <div class="cp-row" class:selected={selected?.manifest_id === cp.manifest_id} data-testid="cp-{cp.manifest_id}">
+              <div class="cp-info">
+                <span class="cp-label">{cp.label || shortId(cp.manifest_id)}</span>
+                <span class="cp-meta">{fmtTime(cp.ts)} · {shortId(cp.manifest_id)}</span>
+              </div>
+              <div class="cp-actions">
+                <button class="mini" data-testid="preview-btn-{cp.manifest_id}" disabled={loading} on:click={() => doPreview(cp)}>Preview</button>
+                <button class="mini danger" data-testid="revert-btn-{cp.manifest_id}" disabled={loading} on:click={() => armRevert(cp)}>Revert…</button>
+              </div>
             </div>
-            <div class="cp-actions">
-              <button class="mini" data-testid="preview-btn-{cp.manifest_id}" disabled={loading} on:click={() => doPreview(cp)}>Preview</button>
-              <button class="mini danger" data-testid="revert-btn-{cp.manifest_id}" disabled={loading} on:click={() => armRevert(cp)}>Revert…</button>
+          {:else}
+            {@const cf = row.cf}
+            <!-- CPE-1600: structurally distinct from a `cp-row` — no manifest id, no Preview/Revert
+                 buttons at all (not disabled ones: ABSENT), a "ban" icon, and danger-tinted styling, so
+                 this can never read as "here's a checkpoint you could restore". `title` restates the
+                 failure as a tooltip since there's no room for the full reason inline. -->
+            <div class="cp-row cp-row-failed" data-testid="cpf-{row.key}"
+              title="{$t('ckpt.failedTitle')}: {cf.reason}">
+              <Icon name="ban" size={16} />
+              <div class="cp-info">
+                <span class="cp-label cp-label-failed">{$t("ckpt.failedTitle")}</span>
+                <span class="cp-meta">{fmtTime(cf.ts)} · {cf.operation}</span>
+                <span class="cp-reason">{cf.reason}</span>
+              </div>
             </div>
-          </div>
+          {/if}
         {/each}
       {/if}
     </div>
@@ -311,6 +357,13 @@
   .cp-label { font-size: 13px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .cp-meta { font-size: 11px; color: var(--text-dim); }
   .cp-actions { display: flex; gap: 6px; flex: 0 0 auto; }
+  /* CPE-1600: a failed checkpoint attempt must never read like a restorable one — danger-tinted left
+     border + background (same color-mix recipe `.confirm` below already uses for a destructive-action
+     panel), a bold danger-colored heading instead of a checkpoint label, and — most importantly — no
+     `.cp-actions` at all, so there's nothing here to click into a preview/revert flow. */
+  .cp-row-failed { align-items: flex-start; gap: 8px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); color: var(--danger); }
+  .cp-label-failed { color: var(--danger); font-weight: 600; }
+  .cp-reason { font-size: 11.5px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .mini { height: 26px; padding: 0 10px; font-size: 12px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .mini.danger:not(:disabled) { border-color: var(--danger); color: var(--danger); }
   .mini:disabled { opacity: 0.4; }

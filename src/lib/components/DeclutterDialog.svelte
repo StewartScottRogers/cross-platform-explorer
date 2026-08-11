@@ -36,6 +36,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName } from "../contentSearch";
+  import { recordCheckpointFailure } from "../checkpointFailures";
 
   export let root = "";
 
@@ -119,6 +120,8 @@
         unwrap(await commands.checkpointCreate(root, "Before removing clutter"));
       } catch (e) {
         console.error("Declutter: pre-cleanup checkpoint failed (proceeding with trash move)", e);
+        // CPE-1600: durable record alongside the console line — best-effort, never blocks the move.
+        void recordCheckpointFailure(root, "Before removing clutter", e);
       }
       await commands.deleteToTrash(paths); // returns OpResult[] directly (no Result wrapper)
       const removed = new Set(paths);

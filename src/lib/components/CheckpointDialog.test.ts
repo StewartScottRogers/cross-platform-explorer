@@ -28,6 +28,9 @@ beforeEach(() => {
   invokeMock.mockReset();
   invokeMock.mockImplementation(async (cmd: string) => {
     if (cmd === "checkpoint_list") return CHECKPOINTS;
+    // CPE-1600: `loadList` always reads both lists — an unhandled-by-a-test-case default of `[]`
+    // (not `null`) matches what the real backend returns for a root with no failed attempts.
+    if (cmd === "checkpoint_failures_list") return [];
     return null;
   });
 });
@@ -252,6 +255,87 @@ describe("CheckpointDialog (CPE-1125)", () => {
       const bAfter = screen.getByTestId("diff-panel-b.txt");
       expect(bAfter.textContent).toContain("B-before");
       expect(bAfter.textContent).not.toContain("A-before");
+    });
+  });
+
+  describe("failed checkpoint attempts (CPE-1600)", () => {
+    const FAILURES = [
+      { operation: "Before batch media overwrite", reason: "disk is read-only", ts: 2500 },
+      { operation: "Before removing clutter", reason: "permission denied", ts: 500 },
+    ];
+
+    it("reads checkpoint_failures_list for the root and renders failed attempts distinctly, with no restore actions", async () => {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        if (cmd === "checkpoint_failures_list") return FAILURES;
+        return null;
+      });
+
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+      expect(invokeMock).toHaveBeenCalledWith("checkpoint_failures_list", { root: "/work/proj" });
+
+      // Both failed attempts render, each with a distinct row testid namespace (never `cp-<manifest_id>`,
+      // since a failure has no manifest id) and no Preview/Revert buttons at all.
+      const rows = screen.getAllByTestId(/^cpf-/);
+      expect(rows.length).toBe(2);
+      for (const row of rows) {
+        expect(row.querySelector('[data-testid^="preview-btn-"]')).toBeNull();
+        expect(row.querySelector('[data-testid^="revert-btn-"]')).toBeNull();
+      }
+      // The reason and operation both surface in the row text.
+      expect(screen.getByText("disk is read-only")).toBeTruthy();
+      expect(screen.getByText("permission denied")).toBeTruthy();
+    });
+
+    it("interleaves failed attempts with real checkpoints newest-first by timestamp", async () => {
+      // FAILURES[0].ts=2500 sits between CHECKPOINTS' m-2 (ts=2000) and nothing newer; FAILURES[1].ts=500
+      // sits older than both real checkpoints (m-1 ts=1000). Expected order: failure(2500), cp m-2(2000),
+      // cp m-1(1000), failure(500).
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        if (cmd === "checkpoint_failures_list") return FAILURES;
+        return null;
+      });
+
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+
+      const list = screen.getByTestId("checkpoint-list");
+      const ids = Array.from(list.querySelectorAll("[data-testid]")).map((el) => el.getAttribute("data-testid"));
+      const failureIdx = ids.findIndex((id) => id?.startsWith("cpf-"));
+      const m2Idx = ids.indexOf("cp-m-2");
+      const m1Idx = ids.indexOf("cp-m-1");
+      const lastFailureIdx = ids.map((id, i) => (id?.startsWith("cpf-") ? i : -1)).filter((i) => i >= 0).pop();
+      expect(failureIdx).toBeLessThan(m2Idx);
+      expect(m2Idx).toBeLessThan(m1Idx);
+      expect(m1Idx).toBeLessThan(lastFailureIdx as number);
+    });
+
+    it("a checkpoint-list failure doesn't blank an already-loaded failures list, and vice versa", async () => {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_list") throw new Error("root not readable");
+        if (cmd === "checkpoint_failures_list") return FAILURES;
+        return null;
+      });
+
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      // The failure rows still render even though `checkpoint_list` rejected.
+      expect(await screen.findByText("disk is read-only")).toBeTruthy();
+      expect(screen.queryByTestId("cp-m-2")).toBeNull();
+    });
+
+    it("renders no failure rows and no crash when checkpoint_failures_list returns nothing (defensive null guard)", async () => {
+      invokeMock.mockImplementation(async (cmd: string) => {
+        if (cmd === "checkpoint_list") return CHECKPOINTS;
+        // Simulate a lenient/older backend response shape that resolves to `null` rather than `[]`.
+        if (cmd === "checkpoint_failures_list") return null;
+        return null;
+      });
+
+      render(CheckpointDialog, { initialPath: "/work/proj" });
+      await screen.findByTestId("cp-m-2");
+      expect(screen.queryAllByTestId(/^cpf-/).length).toBe(0);
     });
   });
 });
