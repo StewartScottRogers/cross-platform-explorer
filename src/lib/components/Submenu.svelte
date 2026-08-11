@@ -57,6 +57,13 @@
     // dimensions are known — matching the original's identical "no-op until measured" behaviour.
     flip = pr.right + fw > window.innerWidth - pad && fw > 0;
     left = flip ? pr.left - fw : pr.right;
+    // CPE-1601 round 3: the flip above is a bare binary choice with no floor/ceiling of its own — a
+    // narrow viewport (or, found live: a right-edge menu whose flip lands the flyout further left than
+    // the screen itself) could still put `left` off either edge. Clamp it the same way `top` already
+    // is below, instead of trusting the flip alone to land on-screen.
+    if (fw > 0) {
+      left = Math.max(pad, Math.min(left, window.innerWidth - fw - pad));
+    }
 
     top = pr.top - 6;
     // Vertical clamp — the original CSS never handled a flyout taller than the viewport; worth having
@@ -67,8 +74,46 @@
     top = Math.max(pad, top);
   }
 
+  /** True once the parent row has scrolled fully outside `ancestor`'s visible box — i.e. the row a
+   *  flyout is anchored to is no longer on screen at all (not just partially clipped). */
+  function anchorScrolledOut(parentRect: DOMRect, ancestorRect: DOMRect): boolean {
+    return parentRect.bottom < ancestorRect.top || parentRect.top > ancestorRect.bottom;
+  }
+
+  /** Nearest ancestor that actually clips/scrolls its content (`overflow-y: auto|scroll|hidden`) —
+   *  `.ctx` today (the only caller of this component), found generically rather than hard-coded to
+   *  that class name so this keeps working if `Submenu` is ever reused inside a different scroll
+   *  container (`AgentMenu`/`TabMenu` per docs/design/MENUS.md's shared `.ctx` pattern). `null` if none
+   *  (nothing to orphan the flyout FROM, in which case scroll can't hide the anchor row this way). */
+  function nearestScrollAncestor(el: HTMLElement | null): HTMLElement | null {
+    let node = el?.parentElement ?? null;
+    while (node) {
+      const oy = getComputedStyle(node).overflowY;
+      if (oy === "auto" || oy === "scroll" || oy === "hidden") return node;
+      node = node.parentElement;
+    }
+    return null;
+  }
+
+  /** CPE-1601 round 3: scrolling `.ctx` used to only ever REPOSITION the (now-tracking)
+   *  `position:fixed` flyout — it never asked whether the anchor row was still visible at all. Drag
+   *  the scrollbar thumb, or a fast trackpad/momentum scroll, and the row can scroll fully out of
+   *  `.ctx`'s visible box while the cursor never leaves the row or the scrollbar track — neither
+   *  triggers `mouseleave`, so the flyout was left floating, clamped to the top of the menu, adjacent
+   *  to nothing and overlapping unrelated rows: a menu detached from the thing that opened it.
+   *  Confirmed live (real Chrome): scrolled a tall menu until the "Run macro" row's rect was
+   *  `top:-87, bottom:-55` (fully scrolled away) and the flyout stayed open at `top:6`. Fix: close
+   *  instead of reposition once the anchor itself is gone. */
   function onAncestorScroll() {
-    if (open) positionFlyout();
+    if (!open) return;
+    if (parentEl) {
+      const ancestor = nearestScrollAncestor(parentEl);
+      if (ancestor && anchorScrolledOut(parentEl.getBoundingClientRect(), ancestor.getBoundingClientRect())) {
+        closeMenu(false);
+        return;
+      }
+    }
+    positionFlyout();
   }
 
   // Capture phase: catches scroll on ANY ancestor, including `.ctx` itself, even though element
@@ -194,10 +239,27 @@
      computed in JS (`positionFlyout()`) from the parent row's `getBoundingClientRect()` — a fixed
      element's `%` offsets resolve against the viewport, not the parent, so the old CSS percentages
      couldn't carry over as-is. */
+  /* CPE-1601 round 3: this is CPE-1601's OWN original bug, one level deeper. `macros`/`userCommands`
+     (ContextMenu.svelte props feeding a Submenu's slot) are unbounded lists — a long one renders a
+     flyout taller than the viewport, and with no `max-height`/`overflow-y` here it simply ran off the
+     bottom with nothing to scroll it into view (found live: a 40-row flyout at 1292px tall in an 853px
+     viewport, 445px past the bottom edge — `positionFlyout()`'s vertical clamp only pins `top`, it
+     can't shrink a box that's taller than the screen).
+
+     TRAP (the exact one round 1 hit on `.ctx` — repeating it here deliberately, with eyes open):
+     setting `overflow-y` on an element whose `overflow-x` is `visible` makes `overflow-x` compute to
+     `auto` too (CSS Overflow spec — a `visible` axis becomes `auto` the moment the other isn't). That
+     makes `.flyout` a clipping box on BOTH axes. This is safe here ONLY because `.flyout` today has NO
+     nested submenu of its own — nothing inside it needs to escape sideways the way `.flyout` itself
+     escapes `.ctx`. If a submenu is ever nested inside a flyout (a "New ▸" inside a "Run macro ▸", say),
+     whatever renders IT must repeat this same `position:fixed`-anchored-to-parent-rect treatment, not
+     rely on CSS overflow/positioning — revisit this exact comment first. */
   .flyout {
     position: fixed;
     z-index: 101;
     min-width: 190px;
+    max-height: calc(100vh - 12px);
+    overflow-y: auto;
     padding: 5px;
     background: var(--surface);
     border: 1px solid var(--border-strong);

@@ -121,9 +121,69 @@ suite was green while the round-1 regression was live. Verified instead:
    same "did it actually paint, not just mount" check this ticket's own real-browser repro relies on.
    Not verified on live CI (this session cannot run `tauri-driver`/WebKitGTK — see CPE-1595's Notes).
 
+## Round 3 — orphaned flyout on scroll, unclamped left flip, and CPE-1601's own bug one level deeper
+PR #808 round 2's code-reviewer pass approved; UAT failed it on a third, narrower issue both agents found
+independently with their own real-browser repros, which the coordinator adjudicated as blocking. Two
+more were folded in from the same review pass (filed as CPE-1610; now resolved here — see below).
+
+1. **Orphaned flyout (the blocking one).** Round 2's `window` scroll listener only ever
+   *repositioned* the `position:fixed` flyout — it never asked whether the anchor row was still visible
+   at all. Scroll `.ctx` (dragging the scrollbar thumb, or a fast trackpad/momentum scroll — neither
+   triggers `mouseleave`, since the cursor never leaves the row or the scrollbar track) far enough that
+   the anchor row's rect goes fully outside `.ctx`'s box (e.g. `top:-87, bottom:-55`), and the flyout
+   stayed open, clamped to `top:6px`, floating adjacent to nothing and overlapping unrelated rows — a
+   popup detached from the thing that opened it. Fix: `Submenu.svelte`'s `onAncestorScroll` now walks up
+   from the parent row to find the nearest actual scroll/clip ancestor (`nearestScrollAncestor` — found
+   generically via computed `overflow-y`, not hard-coded to `.ctx`, so this keeps working if `Submenu` is
+   ever reused elsewhere) and, if the anchor row's rect falls fully outside that ancestor's box
+   (`anchorScrolledOut`: `pr.bottom < cr.top || pr.top > cr.bottom`), **closes** the submenu instead of
+   repositioning it.
+2. **Left flip had no bounds check.** `positionFlyout()` clamped `top` but computed `left` as a bare
+   binary flip with no floor/ceiling — reproduced live at `left: -184px` (off-screen, nothing pulling it
+   back) using a `.ctx` wide enough and close enough to the left edge to trigger the flip while its own
+   left edge sat near `x:0`. Fixed with the same `Math.max(pad, Math.min(...))` clamp `top` already used.
+3. **A flyout taller than the viewport had no scrollbar — CPE-1601's own bug, one level deeper.**
+   `.flyout` had no `max-height`/`overflow-y`; `macros`/`userCommands` are unbounded lists, and a long
+   one (tested: 40 rows) rendered past the bottom of the window with nothing to scroll it into view.
+   Fixed with `max-height: calc(100vh - 12px); overflow-y: auto;` — the exact fix `.ctx` itself got in
+   round 1, deliberately re-applied here with a comment naming the round-1 overflow-x-becomes-auto trap
+   explicitly, and noting it's safe ONLY because `.flyout` has no nested submenu of its own today; a
+   future nested flyout must repeat the `position:fixed`-anchored-to-parent-rect treatment, not lean on
+   CSS overflow/positioning, or it will hit the exact bug round 2 did.
+
+**Verification (round 3):** real Chrome again (jsdom can't detect any of these three — geometry-blind).
+Rebuilt the repro harness with the fixed `positionFlyout()`/`onAncestorScroll()` logic ported verbatim:
+- **Orphan fix + negative control**: scrolled a tall `.ctx` far enough that the anchor row's rect (`top:
+  256, bottom: 288`) fell fully outside the `.ctx` box (`top: 400, bottom: 550`). With the fix: flyout
+  closed (`isOpen() === false`, removed from DOM). With the OLD (round-2) reposition-only logic run
+  side-by-side in the same page: the flyout stayed open, repositioned to `top: 250`, screenshotted
+  floating in empty space with no connection to any visible row — the exact reported defect, reproduced
+  on demand, then shown resolved.
+- **Left clamp**: a wide `.ctx` positioned near the left edge, sized to also trigger the flip, produced
+  a pre-clamp `left: -184` (would-be off-screen); the shipped clamp brought it to `left: 6` (`right: 196`,
+  fully inside a 984px-wide viewport).
+- **Tall flyout**: a 40-row flyout rendered at exactly `height: 509px` in a 521px-tall viewport (`100vh -
+  12px` = `521 - 12 = 509`, an exact match), `bottom: 515 <= 521` (fits), `scrollHeight: 1290 >
+  clientHeight: 507` (internally scrollable — every row still reachable).
+- Also reconfirmed round 1/2 still hold (short menu no spurious scrollbars, tall-menu tracking, right-edge
+  flip) — none of that regressed.
+
+**Coverage added:** two jsdom tests in `ContextMenu.test.ts` (stubbing `getBoundingClientRect` directly,
+no real layout needed) pinning the orphan-close logic itself — one asserting the flyout closes once the
+anchor's rect is fully outside `.ctx`'s, one asserting a still-(partially)-visible anchor does NOT close
+its flyout (guards against an over-eager close). `ContextMenu.test.ts` now 54/54. Did not extend
+`gui-smoke/specs/macro-in-menu.smoke.ts` further for the orphan case specifically — that spec's fixture
+(a single right-click, not inside a pre-populated tall/scrolled menu) doesn't naturally reach a
+scroll-out state without a contrived setup; flagged as a possible future addition rather than forced in
+here.
+
+**CPE-1610** (filed by the sprint process from this same review round, covering items 2 and 3 above plus
+this ticket's own orphan item under a shared "same file, same class of bug" umbrella) is resolved by this
+round and deleted from `Ticketing/Tickets/Backlog/` in the same commit — nothing in it remains open.
+
 ## Still open
-Live CI confirmation. `gui-smoke/known-failing.json`'s `shred-dialog.smoke.ts` entry stays listed until
-a real Linux CI run confirms the spec passes.
+Live CI confirmation, across all three rounds. `gui-smoke/known-failing.json`'s `shred-dialog.smoke.ts`
+entry stays listed until a real Linux CI run confirms the spec passes.
 
 ## Follow-up (not done here, out of this ticket's evidence base)
 `AgentMenu.svelte` and `TabMenu.svelte` also define their own local `.ctx` with no `max-height`/

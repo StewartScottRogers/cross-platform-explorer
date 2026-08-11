@@ -249,6 +249,59 @@ describe("Submenu flyout positioning — CPE-1601 follow-up (clipped-by-.ctx reg
     expect(flyout).toBeTruthy();
     expect(flyout.style.position, "the flyout must be position:fixed, not absolute").toBe("fixed");
   });
+
+  // CPE-1601 round 3: a `position:fixed` flyout that only ever REPOSITIONS on ancestor scroll (never
+  // asking whether the anchor row is still visible) goes orphaned — floating on screen, adjacent to
+  // nothing — once the row it's anchored to scrolls fully out of `.ctx`'s visible box (dragging the
+  // scrollbar thumb or a fast trackpad scroll; neither triggers `mouseleave`, since the cursor never
+  // leaves the row/track). jsdom can't do real layout, but `getBoundingClientRect` is a plain function
+  // property on every element — stubbing it directly (no real layout needed) is enough to drive the
+  // exact orphan condition (`Submenu.svelte`'s `anchorScrolledOut`) and assert the fix: close, don't
+  // reposition. Real-browser confirmation (both that the ORIGINAL code orphans and that this fix
+  // closes it) lives in this ticket's evidence (CPE-1601) rather than in jsdom.
+  it("closes the flyout (instead of leaving it floating) once its anchor row scrolls fully out of .ctx", async () => {
+    render(ContextMenu, { props: { ...base, folderSelected: false } });
+    await openSubmenu("New");
+    expect(document.querySelector(".flyout"), "flyout should be open before the scroll").toBeTruthy();
+
+    const ctx = document.querySelector(".ctx") as HTMLElement;
+    const parentRow = screen.getByText("New").closest("button") as HTMLElement;
+    // Force the computed style `nearestScrollAncestor` reads, independent of whether jsdom's CSS engine
+    // resolves the scoped `.ctx { overflow-y: auto }` rule from the compiled `<style>` block — this test
+    // is about the scroll-out CLOSE logic, not a second assertion that `.ctx` scrolls (already covered
+    // by CPE-1601 round 1/2's own tests and the real-browser evidence).
+    ctx.style.overflowY = "auto";
+    ctx.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 400, left: 0, right: 200, width: 200, height: 400, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    // The exact live-repro shape: the anchor row has scrolled fully above `.ctx`'s visible top (its
+    // `bottom` is negative, well short of `.ctx`'s `top: 0`).
+    parentRow.getBoundingClientRect = () =>
+      ({ top: -87, bottom: -55, left: 0, right: 190, width: 190, height: 32, x: 0, y: -87, toJSON: () => ({}) }) as DOMRect;
+
+    window.dispatchEvent(new Event("scroll"));
+    await new Promise((r) => setTimeout(r, 0)); // flush Svelte's reactivity after the state change
+
+    expect(document.querySelector(".flyout"), "flyout should close, not stay floating, once its anchor is gone").toBeNull();
+  });
+
+  it("does NOT close the flyout on a scroll where the anchor row is still (even partially) visible", async () => {
+    render(ContextMenu, { props: { ...base, folderSelected: false } });
+    await openSubmenu("New");
+
+    const ctx = document.querySelector(".ctx") as HTMLElement;
+    const parentRow = screen.getByText("New").closest("button") as HTMLElement;
+    ctx.style.overflowY = "auto";
+    ctx.getBoundingClientRect = () =>
+      ({ top: 0, bottom: 400, left: 0, right: 200, width: 200, height: 400, x: 0, y: 0, toJSON: () => ({}) }) as DOMRect;
+    // Still (partially) overlapping .ctx's [0, 400] band — must NOT be treated as orphaned.
+    parentRow.getBoundingClientRect = () =>
+      ({ top: -10, bottom: 22, left: 0, right: 190, width: 190, height: 32, x: 0, y: -10, toJSON: () => ({}) }) as DOMRect;
+
+    window.dispatchEvent(new Event("scroll"));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(document.querySelector(".flyout"), "a still-(partially)-visible anchor must not close its flyout").toBeTruthy();
+  });
 });
 
 describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
