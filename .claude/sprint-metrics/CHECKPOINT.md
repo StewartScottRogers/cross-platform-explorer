@@ -1,64 +1,66 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-10/11 (CLI resume, BATCHED "up to 50") — 22/50 — CLEAN HAND-OFF AT THE BUDGET LINE
-**State:** `main` clean, everything merged, **zero PRs of ours open** (only the pre-existing Gource PR #738,
-which awaits the user). Worktrees pruned to 1 (the repo itself); 39 stale scratch branches deleted. Sub-agent
-budget ~130/200 → handing off to a fresh session for headroom. Lock released + wakeup cancelled at hand-off.
-**Zero escaped defects** across all 22 merges.
+## RUN 2026-08-11 (CLI resume, BATCHED "up to 50") — 43/50 — CLEAN HAND-OFF
+**State:** `main` clean and pushed, **every PR merged, zero of ours open** (only the pre-existing Gource
+PR #738, which awaits the user). Worktrees pruned to 2 (one is locked by a dead agent process — harmless,
+prune on resume). Sub-agent budget ~133/200 → handing off for headroom. Lock released, wakeups cancelled.
+**Zero escaped defects across all 21 merges.**
 
 ### FIRST ACTION ON RESUME
-Nothing is blocked or half-built. Pick up **CPE-1613 first** — it is the only High on the board and it is a
-live data-loss path on the user's own platform (see below). Then work down the ready list.
+Nothing is blocked or half-built. Pick up **CPE-1642** or **CPE-1647** first — both are High, both are
+security-shaped, and they overlap each other's design space (see below). Then work down the ready list.
 
-### Merged this session (22 batches)
-- **Binary Studio (epic CPE-1562)**: CPE-1581 x86/x64 disasm (#796), CPE-1585 command dispatchers + bindings
-  (#800), CPE-1596 hand-rolled ECMA-335 .NET metadata reader (#806), CPE-1597 tabbed Binary Inspector UI (#804).
-- **gui-smoke turned from noise into a gate**: CPE-1594 (#801), CPE-1595 triage (#808), CPE-1601 context-menu
-  reachability (#808).
-- **Safety/data-loss**: CPE-1590 batch-media overwrite confirm (#805), CPE-1599 engine-side refusal (#812),
-  CPE-1591 encrypted-zip false-safe (#809), CPE-1602 zip scan verifies declared sizes (#811).
-- **Preview**: CPE-1586 font preview (#798), CPE-1593 real cmap coverage + DoS fix (#802), CPE-1598 reservation
-  scaling (#807).
-- **Docs (epic CPE-1569)**: CPE-1587 Tier-2 depth (#799), CPE-1604 Tags/Smart-folders/Saved-searches split +
-  Agent Watch page (#810), CPE-1607 order guard + Pull-label rule (#814).
-- **Bugs**: CPE-1577 + CPE-1584 (#797), CPE-1592 Properties architecture (#803), CPE-1605 + CPE-1612 string
-  accuracy (#813).
+### Merged this session (21)
+Agent Watch "off means off" (CPE-1606) · smart-folder notice, now correct + 12 locales (CPE-1614) · File
+Health honours unreadable archives (CPE-1603) · `shred_paths` confirm gate (CPE-1611) · co-located agent
+sessions both visible (CPE-1625) · docs depth pass (CPE-1619) · **same-file canonicalisation, the High
+data-loss fix (CPE-1613)** · .NET metadata tab (CPE-1615) · notebook viewer (CPE-1616) · 45 notices → 12
+languages (CPE-1627) · durable checkpoint-failure records (CPE-1600) · pause-vs-end metrics (CPE-1626) ·
+log viewer (CPE-1618) · preview-pane screenshot harness (CPE-1629) · **batch-media output containment, High
+(CPE-1623)** · onDestroy teardown (CPE-1633) · CPE-1635 (premise disproven — hardening + reusable harness
+shipped) · vault_create confirm gate (CPE-1630) · bounded log window (CPE-1637) · YAML/TOML viewer
+(CPE-1617) · syntax highlighting (CPE-1631).
 
-### READY QUEUE — ordered, nothing blocked
-1. **CPE-1613 (High)** — `output == input` is compared as **raw strings**, so `IMG_1.JPG` + Convert→jpg is a
-   *different string* but the **same file** on Windows/macOS. The new engine guard doesn't fire, AND
-   `plan()`'s non-destructive promise has always used the same comparison — so **"write to new files" can
-   still overwrite an original**. Fix both call sites with one shared canonicalisation.
-2. **CPE-1611 (Medium, raised from Low)** — `shred_paths` backend confirm flag. No trash fallback at all and a
-   smaller fix than batch-media's; the original deferral rationale is refuted in the ticket.
-3. **CPE-1606 (Medium)** — Agent Watch arms watchers from *every* running session, not from the folder you're
-   viewing, so leaving only hides the strip. Contradicts AGENT-WATCH.md's "off means off"; that design doc is
-   also stale post-CPE-1099 and should be reconciled either way.
-4. **CPE-1614 / CPE-1600 / CPE-1603 / CPE-1518** — blocked-notice conflation + hardcoded English; persistent
-   record for failed checkpoints; File-Health archive path must honour `unreadable`; QNAP e2e (needs the NAS).
-5. **Epic frontier** — CPE-1562 slices remaining (frontend for .NET metadata now the flag/reader exist),
-   CPE-1568 slices 6-8 (notebook/YAML-TOML/log viewers), CPE-1569 slice 10 + 12 (Agent Deck/Workbench/Repos
-   depth; screenshot pass — now genuinely possible, artifacts upload).
+### READY QUEUE — ordered, nothing blocked (20 tickets)
+1. **CPE-1642 (High)** — Batch Media containment still pattern-matches *link shapes*; symlink **chains** and a
+   hard-link check that **fails open under file contention** both escape, demonstrated. The durable fix is to
+   resolve the output's true filesystem identity once (volume serial + file index / dev+ino) and compare
+   identities. **Design with CPE-1624** (TOCTOU per-write re-check + ADS colons), same files.
+2. **CPE-1647 (High)** — `vault_unlock` takes `session_dir` straight off the IPC boundary with **no
+   containment check**, so `lock` → `wipe_session_dir` can shred an arbitrary directory. Fix is containment
+   (mirror `create_vault`'s existing `resolves_inside`), **not** a confirm flag. **Design with CPE-1645.**
+3. **CPE-1645 (High)** — Locking a vault **silently destroys edits made while unlocked**; nothing ever
+   re-encrypts, despite `src/docs/20-vaults.md` promising "re-seal". Decide the product behaviour first.
+4. **CPE-1624** — batch-media per-write re-check (TOCTOU) + ADS: a colon **anywhere** in a rename template
+   writes a hidden NTFS stream onto a same-named file, reachable from the UI.
+5. **CPE-1632** — the contrast guard's blind spots (white-on-solid-danger 2.88:1; `--text-faint` 3.45:1).
+   The deliverable is **the guard**, not two colours — two failures have now been found by eye.
+6. **CPE-1634** — 62 templated `showNotice` calls still untranslated, + a raw literal hiding in a multi-line
+   ternary, + the regrowth guard is defeatable by embedding its own marker in the string.
+7. **CPE-1636 / 1638 / 1644** — log viewer follow-ups: prose false-positives; filtering hides a stack
+   trace's own frames; UTF-16 decode + endianness label + unbounded page cache + stale "Back to latest".
+8. **CPE-1641** — a crashed agent session is recorded but **never shown**; its duration is measured from
+   deck-close, so History overstates it.
+9. **CPE-1643 / 1646 / 1648 / 1639 / 1640 / 1620 / 1621 / 1622 / 1628(Deferred) / 1518(needs NAS)**.
 
 ### Owed to the USER (async, non-blocking)
-- **Visual/taste glance** on everything shipped tonight: Binary Inspector tabs, font specimen + glyph grid
-  (light **and** dark), context menu + submenu scrolling, batch-media confirm panel, archive-safety banners,
-  Trash view. All passed automated checks; only look/feel remains.
-- **`main` has no branch protection**, so the new blocking GUI gate isn't enforced at the merge button. Repo
-  setting, user's call.
+- **Visual/taste glance** on everything shipped: syntax highlighting in all four themes, YAML/TOML tree,
+  notebook viewer, log viewer + its filter chips, .NET metadata tab, checkpoint-failure rows.
+- **`main` has no branch protection**, so the GUI gate isn't enforced at the merge button. Repo setting.
+- A critic's cleanup **closed the user's Chrome session** (rule now recorded); a stray reviewer scratch file
+  was committed and removed.
 - Gource PR #738 still open, pre-existing.
 
 ### Lessons (full version in history.md — read its tail at kickoff)
-- **jsdom cannot see layout.** 3,231 tests passed while every submenu was clipped invisible. Verify any
-  visual/layout claim in a real browser, and run a **negative control** (reproduce with the old code) before
-  believing a green result.
-- **Allow a 3rd round when each round finds something NEW; park when findings repeat.** Two tickets earned it.
-- **Foreman-apply exactly-prescribed fixes** — did so ~6 times at 0 agents.
-- **Tell sub-agents to run everything synchronously.** One stalled awaiting a background notification that
-  never comes; restart such an agent with SendMessage.
-- **Hold dispatch when the merge queue backs up** — adding PRs lengthens the same CI jam.
-- gui-smoke gate: Linux is blocking + ratcheted (baseline now **3** known-failing); Windows leg is
-  dispatch/schedule-only; screenshots upload (needs `include-hidden-files: true` — dot-dirs are excluded by
-  default).
+- **Ask for a number, not an impression** — coverage %, files-that-parse, byte-level proof.
+- **Real inputs, never the committed fixture** — it was written by the same author as the code.
+- **A negative control or it didn't happen.**
+- **A test written by reading the code can only confirm the code** — derive expectations from a spec or
+  reference implementation. One test here encoded the bug as its expected value.
+- **"We don't know" must never look like "it's fine"** — hit four separate ways.
+- **Approve the code, don't approve the record** — a worker overstated a bug as "95% of the stylesheet dead";
+  triangulation showed one rule. Correct the record in place.
+- **Headless Chrome's `--window-size` lies** (clamps to ~500px, rescales the screenshot) — it produced a
+  *false defect report*. Use an iframe, verify the width from inside. **Never `taskkill /IM chrome.exe`.**
 
-### To RESUME: fresh session → "resume the sprint" → start at CPE-1613, batch count continues at 22/50.
+### To RESUME: fresh session → "resume the sprint" → start at CPE-1642/1647, batch count continues at 43/50.
