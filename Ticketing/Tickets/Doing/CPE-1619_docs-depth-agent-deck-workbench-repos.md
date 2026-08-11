@@ -74,3 +74,48 @@ shared file, fully parallel-safe.
 ## Notes
 Model: sonnet. Library entry: `docs-completeness-audit-2026-08-10` (rubric + house style + the
 verify-against-code lesson).
+
+## Work Log
+
+**2026-08-11 — depth pass done, three bugs found and filed.**
+
+Expanded all three pages, verifying every claim against the live source before writing it:
+
+- `src/docs/04-ai-console.md` (Agent Deck): 268 → 1,914 words. Read `sidecar/ai-console/src/launcher.html`
+  in full plus `agents.rs`, `presets.rs`, `vault.rs`, `swarm_team.rs`, `console.rs`, `SidecarManager.svelte`,
+  and the relevant `App.svelte` ranges (launch/close/Repair/toolbar-gating/CPE-313). Added real coverage of
+  the Account picker, Manage agents ▾ (update/pin/reset/rollback), Recent… (relaunch + redacted transcript),
+  "Work on this in Agent Deck" (CPE-313), and Settings → Platform's Repair flow — all shipped, none
+  previously documented anywhere.
+- `src/docs/07-workbench.md`: 161 → 1,101 words. Read `WorkbenchView.svelte`, `workbench.ts`, `diff.ts`, and
+  the `workbench_diff` Rust command in full.
+- `src/docs/08-repositories.md`: 180 → 1,200 words. Read `RepoBrowser.svelte`, `SyncDialog.svelte`,
+  `ConflictDialog.svelte`, `syncPolicy.ts`, `autoMirror.ts`, `StatusBar.svelte`'s git section, and the
+  `forge_*` Rust commands in full.
+
+**Bugs found while verifying (not fixed here — docs-only ticket):**
+
+1. **CPE-1621** (High) — "Close all consoles" from the sidebar/toolbar calls `sidecar_stop("ai-console")`,
+   which only drops the host's connection to the console UI sidecar (`src-tauri/src/lib.rs:7972-7979`) — it
+   never touches `state.daemon`, the separate host-owned process that actually holds every agent's PTY
+   (`HostSessionDaemon`, reaped only on app exit per its own doc comment). The function's own comment claims
+   "all running agents" are closed; they aren't. Contrast with the Agent Deck's own in-console "Close all"
+   button, which really does terminate agents. Documented as a caveat in the new "Limits / notes" section
+   rather than silently written up as working.
+2. **CPE-1622** (Low) — the Model dropdown's `populateModels()` (`launcher.html:1948-1949`) always queries
+   `/api/models?reseller=<Provider value>`; for a tool's built-in ("native") login — which has no model
+   list at all — this hits the live-fetch fallback, fails, and shows an alarming "Couldn't load models."
+   with a Refresh button that can never succeed. The Model field itself still works as free text.
+3. **CPE-1620** (Medium) — `RepoBrowser.svelte`'s URL-paste convenience (`browse()`,
+   `src/lib/components/RepoBrowser.svelte:29`) strips a `github.com` host prefix unconditionally, regardless
+   of the selected Provider — so pasting a GitLab/Bitbucket/Codeberg URL isn't recognized as a URL, isn't
+   stripped, still passes the "contains a slash" owner/name check, and gets sent to the backend as a fake
+   repo name, producing a confusing "not found" instead of the existing friendly "Enter a repository as
+   owner/name." guidance.
+
+**Verification:**
+- `npm run check` → `svelte-check found 0 errors and 0 warnings`.
+- `npm run test` (full vitest run) → **272 test files passed, 3311 tests passed**, 0 failed. Includes
+  `src/lib/docs.test.ts` (9/9, the ordering guard) and `src/lib/sectionDocs.test.ts` (2/2, the section→doc
+  registry guard) — reconfirmed in isolation: both green.
+- No `sectionDocs.ts` change needed (all three sections already mapped); no app code touched.
