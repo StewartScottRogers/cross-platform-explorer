@@ -121,6 +121,7 @@ describe("buildFileHealth per-category counts (CPE-1293)", () => {
     expect(report.byCategory).toEqual({
       "type-mismatch": 2,
       "zip-bomb": 0,
+      "archive-unreadable": 0,
       "dangling-link": 1,
       "orphaned-sidecar": 0,
       "empty-folder": 0,
@@ -143,6 +144,7 @@ describe("buildFileHealth empty-state (CPE-1293)", () => {
     expect(report.byCategory).toEqual({
       "type-mismatch": 0,
       "zip-bomb": 0,
+      "archive-unreadable": 0,
       "dangling-link": 0,
       "orphaned-sidecar": 0,
       "empty-folder": 0,
@@ -155,6 +157,78 @@ describe("buildFileHealth empty-state (CPE-1293)", () => {
     expect(report.status).toBe("healthy");
     expect(report.findings).toEqual([]);
     expect(report.truncated).toBe(false);
+  });
+});
+
+// CPE-1603: the archive path must honour `unreadable`/`unreadable_entries` the same way
+// `ArchiveSafetyDialog` already does — an archive that couldn't be (fully) read is a structurally
+// distinct "couldn't be checked" result, never a silent "zero findings" that a caller could mistake for
+// "scanned and clean". Currently dead code (no production caller populates `FileHealthInputs.archive`
+// with an archive tab yet), but the projection itself must already be correct.
+describe("buildFileHealth archive unreadable/unreadable_entries (CPE-1603)", () => {
+  it("a whole-archive open failure (unreadable: true) with zero flagged entries is NOT reported healthy", () => {
+    const report = buildFileHealth({
+      archive: archive({
+        report: { total_compressed: 0, total_uncompressed: 0, overall_ratio: 0, flagged: [], dangerous: false },
+        entries_scanned: 0,
+        unreadable: true,
+      }),
+    });
+    expect(report.status).toBe("issues");
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].category).toBe("archive-unreadable");
+    expect(report.findings[0].severity).toBe("medium");
+    expect(report.findings[0].summary).toMatch(/could not be opened/);
+    expect(report.byCategory["archive-unreadable"]).toBe(1);
+    // Structurally distinct from a confirmed zip-bomb finding, never counted as one.
+    expect(report.byCategory["zip-bomb"]).toBe(0);
+  });
+
+  it("unreadable_entries > 0 with no flagged entries is NOT reported healthy/empty (acceptance criterion)", () => {
+    const report = buildFileHealth({
+      archive: archive({
+        report: { total_compressed: 10, total_uncompressed: 10, overall_ratio: 1, flagged: [], dangerous: false },
+        entries_scanned: 3,
+        unreadable: false,
+        unreadable_entries: 4,
+      }),
+    });
+    expect(report.status).toBe("issues");
+    expect(report.findings).not.toEqual([]);
+    expect(report.findings).toHaveLength(1);
+    expect(report.findings[0].category).toBe("archive-unreadable");
+    expect(report.findings[0].summary).toBe("4 entries could not be read — archive safety not fully checked");
+  });
+
+  it("singular-count entry wording for exactly one unreadable entry", () => {
+    const report = buildFileHealth({
+      archive: archive({
+        report: { total_compressed: 10, total_uncompressed: 10, overall_ratio: 1, flagged: [], dangerous: false },
+        unreadable: false,
+        unreadable_entries: 1,
+      }),
+    });
+    expect(report.findings[0].summary).toBe("1 entry could not be read — archive safety not fully checked");
+  });
+
+  it("a real flagged zip-bomb entry alongside unreadable_entries produces BOTH findings, not one replacing the other", () => {
+    const report = buildFileHealth({
+      archive: archive({ unreadable_entries: 2 }), // default archive() already flags "payload.bin"
+    });
+    const categories = report.findings.map((f) => f.category).sort();
+    expect(categories).toEqual(["archive-unreadable", "zip-bomb"]);
+  });
+
+  it("unreadable: false and unreadable_entries: 0 (fully assessed, clean) stays healthy — no false positive", () => {
+    const report = buildFileHealth({
+      archive: archive({
+        report: { total_compressed: 1, total_uncompressed: 1, overall_ratio: 1, flagged: [], dangerous: false },
+        unreadable: false,
+        unreadable_entries: 0,
+      }),
+    });
+    expect(report.status).toBe("healthy");
+    expect(report.findings).toEqual([]);
   });
 });
 

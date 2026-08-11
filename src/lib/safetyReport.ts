@@ -15,13 +15,17 @@ import type {
   OrphanSidecarResult,
 } from "./bindings.gen";
 
-/** One category of file-health finding. */
-export type Category = "type-mismatch" | "zip-bomb" | "dangling-link" | "orphaned-sidecar" | "empty-folder";
+/** One category of file-health finding. `"archive-unreadable"` (CPE-1603) is deliberately NOT the same
+ *  bucket as `"zip-bomb"`: it means the archive path couldn't be assessed at all (or only partially),
+ *  never that a bomb was actually found — see `archiveFindings`. */
+export type Category = "type-mismatch" | "zip-bomb" | "dangling-link" | "orphaned-sidecar" | "empty-folder" | "archive-unreadable";
 
 /**
  * Severity ranking, highest risk first: a disguised file (extension/content mismatch) or a zip-bomb
- * entry is a security concern (`"high"`); a dangling/cyclic link is `"medium"`; an orphaned sidecar is
- * `"low"` (tidiness, not risk); an empty folder is purely informational (`"info"`).
+ * entry is a security concern (`"high"`); an archive that couldn't be (fully) assessed is `"medium"` —
+ * genuinely unknown, not confirmed dangerous, but not nothing either (CPE-1603); a dangling/cyclic link
+ * is also `"medium"`; an orphaned sidecar is `"low"` (tidiness, not risk); an empty folder is purely
+ * informational (`"info"`).
  */
 export type Severity = "high" | "medium" | "low" | "info";
 
@@ -35,6 +39,7 @@ const ordinalCmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0
 const CATEGORY_SEVERITY: Record<Category, Severity> = {
   "type-mismatch": "high",
   "zip-bomb": "high",
+  "archive-unreadable": "medium",
   "dangling-link": "medium",
   "orphaned-sidecar": "low",
   "empty-folder": "info",
@@ -83,11 +88,36 @@ function danglingSummary(reason: DanglingReason): string {
   return reason === "Cyclic" ? "link → cyclic reference" : "link → missing target";
 }
 
+/**
+ * CPE-1603: mirrors `ArchiveSafetyDialog`'s tri-state rather than reading only `report.flagged`. Two
+ * "couldn't actually scan this" signals must never collapse into zero findings (which `buildFileHealth`
+ * reads as a clean bill of health): `report.unreadable` (CPE-1320) means the archive itself couldn't be
+ * opened at all; `report.unreadable_entries > 0` (CPE-1591, widened by CPE-1602) means it opened but one
+ * or more entries inside it couldn't be read (encrypted, or a bounded verification that ran out of
+ * budget) — in both cases `dangerous: false` on the readable portion means "we don't know", not "safe".
+ * Emitted under the dedicated `"archive-unreadable"` category (never `"zip-bomb"`) so a genuinely unknown
+ * result stays structurally distinct from a confirmed one. The report type carries no archive path of its
+ * own (CPE-1603 is landing ahead of the archive-tab slice that will supply one), so these two findings use
+ * an empty `path` — the caller that eventually wires an archive tab in should thread the real path through.
+ */
 function archiveFindings(report: ArchiveSafetyReport | undefined): Finding[] {
   if (!report) return [];
-  return report.report.flagged.map((entry: FlaggedEntry) =>
+  const findings: Finding[] = report.report.flagged.map((entry: FlaggedEntry) =>
     finding("zip-bomb", entry.name, `archive expands ${Math.round(entry.ratio)}x`),
   );
+  if (report.unreadable) {
+    findings.push(finding("archive-unreadable", "", "archive could not be opened — safety not checked"));
+  } else if (report.unreadable_entries > 0) {
+    const n = report.unreadable_entries;
+    findings.push(
+      finding(
+        "archive-unreadable",
+        "",
+        `${n} ${n === 1 ? "entry" : "entries"} could not be read — archive safety not fully checked`,
+      ),
+    );
+  }
+  return findings;
 }
 
 function emptyDirFindings(report: EmptyDirsReport | undefined): Finding[] {
@@ -132,6 +162,7 @@ export function buildFileHealth(inputs: FileHealthInputs): FileHealthReport {
   const byCategory: Record<Category, number> = {
     "type-mismatch": 0,
     "zip-bomb": 0,
+    "archive-unreadable": 0,
     "dangling-link": 0,
     "orphaned-sidecar": 0,
     "empty-folder": 0,
