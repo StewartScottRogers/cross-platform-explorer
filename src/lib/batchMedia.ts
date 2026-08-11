@@ -145,17 +145,90 @@ export function skipRows(report: { skipped: [string, string][] }): { name: strin
 }
 
 /**
- * CPE-1590: the planned items that would **overwrite their own input file in place** — i.e. the backend
- * planner (`batch_media::plan`) resolved `output === input`. This only happens with "Write to new files"
- * unchecked (`non_destructive: false`) *and* an op combination with no dedicated output-renaming suffix
- * (a lone Compress, Strip metadata, or Watermark — see `batch_media.rs`'s `plan()`). Comparing the
- * concrete planned paths directly (rather than re-deriving "which op combos are suffix-less" on the
- * frontend) is robust to any future op the backend adds — if the planner ever resolves a same-path
- * output for ANY reason, this still catches it. Pure; used to gate the destructive-overwrite confirm
- * step before Apply is allowed to run.
+ * The live `navigator.platform`/`navigator.userAgent` sniff, mirroring `terminalClient.ts`'s
+ * `shellChoicesFor` pattern (a pure function taking `platform: string`, defaulted here from the DOM so
+ * production call sites need no argument while tests can pass an explicit platform string). Empty string
+ * when `navigator` isn't available (e.g. a non-DOM test runner) — {@link isCaseInsensitivePlatform}
+ * treats that as "assume case-sensitive", the conservative direction (never wrongly folds a real
+ * distinction away).
  */
-export function overwritesInPlace(items: PlannedItem[]): PlannedItem[] {
-  return items.filter((it) => it.input === it.output);
+function defaultPlatform(): string {
+  if (typeof navigator === "undefined") return "";
+  return navigator.platform || navigator.userAgent || "";
+}
+
+/**
+ * True for the platforms whose DEFAULT filesystem is case-insensitive (Windows, macOS) — never for
+ * Linux/other Unix, where folding case would wrongly treat two distinct, real files as one. Mirrors
+ * `crates/server/src/batch_media.rs`'s `fold_case` `#[cfg(...)]` gate (CPE-1613): this is a platform
+ * default assumption, not a live filesystem probe.
+ */
+function isCaseInsensitivePlatform(platform: string): boolean {
+  return /win/i.test(platform) || /mac/i.test(platform);
+}
+
+/**
+ * Normalize a path string into `/`-joined components, resolving `.` and lexical `..` segments — purely
+ * textual, mirrors `crates/server/src/batch_media.rs`'s `lexical_normalize`. Treats both `/` and `\` as
+ * separators so a Windows-style path normalizes sanely regardless of which OS the browser/webview thinks
+ * it's on. Preserves a leading root marker (POSIX `/`, or an uppercased `C:/`-style drive prefix) so an
+ * absolute and a relative path never lexically collide.
+ */
+function lexicalNormalize(path: string): string {
+  let root = "";
+  if (path.startsWith("/") || path.startsWith("\\")) {
+    root = "/";
+  } else if (/^[a-zA-Z]:/.test(path)) {
+    root = `${path[0].toUpperCase()}:/`;
+  }
+
+  const parts: string[] = [];
+  for (const raw of path.split(/[\\/]/)) {
+    if (raw === "" || raw === ".") continue;
+    if (raw === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") {
+        parts.pop();
+      } else if (!root) {
+        parts.push("..");
+      }
+      continue; // ".." above an absolute root is lexically discarded — can't go any higher
+    }
+    parts.push(raw);
+  }
+  return root + parts.join("/");
+}
+
+/**
+ * CPE-1613: decide whether two path STRINGS the backend planner produced refer to the same underlying
+ * file — mirroring `crates/server/src/batch_media.rs`'s `same_file` definition so the frontend guard
+ * ({@link overwritesInPlace}) and the engine's `confirmed_overwrite` refusal check agree. Fixing one and
+ * not the other just moves the hole (see the ticket). Unlike the Rust side, the frontend has no
+ * synchronous filesystem access to canonicalize a real path or resolve symlinks/junctions, so this is a
+ * **lexical-only** approximation: normalize separators and resolve `.`/`..` segments
+ * ({@link lexicalNormalize}), then fold case ONLY on the platforms that default to a case-insensitive
+ * filesystem ({@link isCaseInsensitivePlatform}). `platform` defaults to the live navigator sniff; pass
+ * it explicitly in tests.
+ */
+export function sameFile(a: string, b: string, platform: string = defaultPlatform()): boolean {
+  if (a === b) return true;
+  const fold = isCaseInsensitivePlatform(platform) ? (s: string) => s.toLowerCase() : (s: string) => s;
+  return fold(lexicalNormalize(a)) === fold(lexicalNormalize(b));
+}
+
+/**
+ * CPE-1590: the planned items that would **overwrite their own input file in place** — i.e. the backend
+ * planner (`batch_media::plan`) resolved an output {@link sameFile} as its input. This only happens with
+ * "Write to new files" unchecked (`non_destructive: false`) *and* an op combination with no dedicated
+ * output-renaming suffix (a lone Compress, Strip metadata, or Watermark — see `batch_media.rs`'s
+ * `plan()`), OR — the CPE-1613 fix — a `Convert` whose target extension differs from the input's only by
+ * case on a case-insensitive filesystem. Comparing the concrete planned paths via {@link sameFile}
+ * (rather than re-deriving "which op combos are suffix-less" on the frontend) is robust to any future op
+ * the backend adds — if the planner ever resolves a same-file output for ANY reason, this still catches
+ * it. Pure; used to gate the destructive-overwrite confirm step before Apply is allowed to run.
+ * `platform` defaults to the live navigator sniff; pass it explicitly in tests.
+ */
+export function overwritesInPlace(items: PlannedItem[], platform: string = defaultPlatform()): PlannedItem[] {
+  return items.filter((it) => sameFile(it.input, it.output, platform));
 }
 
 /**

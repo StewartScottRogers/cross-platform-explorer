@@ -91,10 +91,14 @@ persistent reminder appears under the checkbox the moment it's unchecked, spelli
 that affects, so the risk is visible before you've even built a plan that triggers it. Resize, Rotate,
 Flip, Convert, and Rename **usually** produce a differently-named file too, but not as an absolute
 guarantee: **Convert** to the extension a file already has, or **Rename** left at its pre-filled default
-`{stem}` template, can still resolve to the same name as the input. Whichever op combination you use, the
-live plan preview always shows the real planned path, and Apply always confirms first whenever the actual
-plan would overwrite something — that check (see next section) is what you can rely on, not a mental list
-of "safe" ops.
+`{stem}` template, can still resolve to the same name as the input. This is judged by **same underlying
+file**, not exact text (CPE-1613): Convert always lower-cases its target extension, so converting
+`IMG_1.JPG` to `jpg` plans `IMG_1.jpg` — a different-looking name that is still the identical file on
+Windows and default macOS (case-insensitive filesystems), so it's treated as in-place there exactly like
+an unchanged extension would be; on Linux, where filenames are case-sensitive, that pair is two distinct
+possible files and isn't flagged. Whichever op combination you use, the live plan preview always shows the
+real planned path, and Apply always confirms first whenever the actual plan would overwrite something —
+that check (see next section) is what you can rely on, not a mental list of "safe" ops.
 
 There is **no subfolder option** — outputs always sit alongside their inputs.
 
