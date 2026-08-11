@@ -344,6 +344,14 @@ export function formatPerMinute(n: number | undefined): string | null {
 // cross-session history (731c). The record is built from the LIVE accumulator (which holds its own
 // cap-immune copy) at the `stopAgentWatch(id)` seam + the full-stop loop, BEFORE the stores clear.
 // Advisory / best-effort — a flush failure is swallowed so it can never break teardown or the live view.
+//
+// Pause vs end (CPE-1626): unwatching a session (`stopAgentWatch`) is NOT the same event as that session
+// ending, and `flushSession` no longer treats them as one. `reconcileAgentWatch` disarms a session both
+// when it genuinely ends AND when the explorer simply navigates away from a still-running one (a pause) —
+// it calls `flushSession` at both seams. `flushSession` tells them apart via the accumulator's own
+// `endedAt` (only set by a real `ended` announcement, see `foldSessionEnded`): a pause is always a no-op,
+// the accumulator keeps accruing, and a later resume folds straight back into the same record — one
+// complete row per session, whenever it actually ends.
 // ---------------------------------------------------------------------------------------------
 
 /** Only sessions that actually STARTED and produced *some* signal are worth a row — skip never-started
@@ -386,13 +394,28 @@ export function buildMetricsRecord(m: SessionMetrics, now = Date.now()): Session
   };
 }
 
-/** Flush one ended session's metrics row to the journal (idempotent — at most once per session end).
+/** Flush one ENDED session's metrics row to the journal (idempotent — at most once per session end).
  *  Reads the live accumulator + its `agentCost` snapshot, builds the record, and appends it. A no-op for
- *  an unknown, already-flushed, or not-worth-persisting session. Errors are swallowed (advisory). */
+ *  an unknown, already-flushed, not-worth-persisting, OR **not-yet-ended** session. Errors are swallowed
+ *  (advisory).
+ *
+ *  **Pause vs end (CPE-1626):** the accumulator's own `endedAt` — not the caller — is what makes a flush
+ *  real. `reconcileAgentWatch` (App.svelte) calls this function every time a session drops out of the
+ *  armed watch set, and that happens for two different reasons: the session genuinely ended (`endedAt`
+ *  was stamped by `foldSessionEnded`, via a real `ended` announcement), or the explorer merely navigated
+ *  away from a still-RUNNING session's folder — a **pause**, not an end. Gating on `endedAt` here means
+ *  a pause is always a safe no-op: nothing is persisted, `flushedSessionIds` is never marked, and the
+ *  accumulator keeps accruing untouched, so a later resume (re-arming the same session id) folds
+ *  straight back into the SAME record. Only the real `ended` flush persists — exactly once, with the
+ *  session's whole lifetime in it. This replaces the old assumption that a premature flush would merely
+ *  produce a second, *fragmented* row: it would not (the flushed-ids guard makes a second flush of the
+ *  same id a no-op) — the actual failure was a single INCOMPLETE row plus silent, permanent loss of every
+ *  edit made after the premature flush. */
 export async function flushSession(sessionId: string, now = Date.now()): Promise<void> {
   if (flushedSessionIds.has(sessionId)) return; // already flushed this watch
   const acc = currentSessionMetrics()[sessionId];
   if (!acc) return; // unknown session
+  if (acc.endedAt === null) return; // still running — a pause, not an end; leave it resumable
   const m = deriveSessionMetrics(acc, currentCost()[sessionId], now);
   if (!sessionMetricsWorthPersisting(m)) return; // empty / never-started
   flushedSessionIds.add(sessionId); // mark BEFORE the await so a re-reconcile can't double-write

@@ -121,15 +121,15 @@ in the explorer.
 
 ## Limits / notes
 
-- **"Off means off" holds for a project you never open — a session you never navigate the explorer
-  into stays completely unwatched, no matter how long it runs (CPE-1606).** The nuance is what happens
-  once you *do* open it: the underlying `notify` watcher stays armed for that project for the rest of
-  the session's life, even after you navigate elsewhere — including to a sibling agent's project — so
-  the Radar/Cost/History tabs keep working across every project you've actually looked at this run, and
-  a quick hop between two sibling agent folders doesn't repeatedly tear down and re-arm a watcher.
-  Leaving the folder only hides the strip and file-list badges; ending the agent session (not just
-  navigating away from a project you've visited) is what actually stops watching it. See
-  `AGENT-WATCH.md`'s Boundaries section for the full reasoning.
+- **"Off means off" holds literally, both ways (CPE-1606/CPE-1626).** A session you never navigate the
+  explorer into stays completely unwatched, no matter how long it runs. And once you leave a project
+  you *did* have open, the underlying `notify` watcher genuinely stops — it isn't kept running in the
+  background. Your Cost/History numbers for that session aren't lost when you leave, though: the
+  session is merely **paused**, not ended, so walking back into its folder later picks up right where
+  you left off, and its Cost/History row still covers the session's whole lifetime once it actually
+  ends. See `AGENT-WATCH.md`'s Boundaries section for the full reasoning (including why an earlier
+  version of this app kept the watcher running after you left a project, and why that's no longer
+  necessary).
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
   the agent's own printed output, not an authoritative source.
 - **Reads are inferred, not observed.** A filesystem watcher can't see a read; the Consulted list and the

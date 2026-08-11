@@ -20,7 +20,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, markVisited, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing, ingestActivity } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
@@ -1430,18 +1430,19 @@
   let reconcileInFlight = false;
   let reconcilePending = false;
 
-  /** Reconcile the live filesystem watches against the *visited* session set (CPE-1606, replacing the
-   *  CPE-1099 "watch every running session" behavior): start a watch for each newly-visited (or
-   *  re-homed) session, stop the ones that ended, and keep exactly ONE shared fs-activity + fs-diff
-   *  (+ cost) listener pair alive while anything is armed — never one per session. A running session the
-   *  explorer has never navigated into is never in `desired`, so it's never armed at all — that's the
-   *  "off means off" boundary. When the armed set returns to empty, every listener is removed. */
-  async function reconcileAgentWatch(sessions: AgentSession[], visited: ReadonlySet<string>) {
+  /** Reconcile the live filesystem watches against the CURRENT watch target (CPE-1606, revised by
+   *  CPE-1626): start a watch for each newly-armed (or re-homed) session, stop the ones no longer
+   *  desired, and keep exactly ONE shared fs-activity + fs-diff (+ cost) listener pair alive while
+   *  anything is armed — never one per session. A session the explorer has never navigated into is never
+   *  in `desired`, so it's never armed at all; a session the explorer HAS since navigated away from is
+   *  disarmed too (a pause, not an end — see `flushSession`'s doc, CPE-1626) — "off means off" holds
+   *  literally in both cases. When the armed set returns to empty, every listener is removed. */
+  async function reconcileAgentWatch(sessions: AgentSession[], current: string) {
     if (reconcileInFlight) { reconcilePending = true; return; }
     reconcileInFlight = true;
     try {
       const desired = new Map<string, string>();
-      for (const s of watchTargets(sessions, visited)) if (s.cwd) desired.set(s.sessionId, s.cwd);
+      for (const s of watchTargets(sessions, current)) if (s.cwd) desired.set(s.sessionId, s.cwd);
 
       // Start the delta: a new session, or one whose cwd changed (re-arming drops the old watch).
       for (const [id, cwd] of desired) {
@@ -1450,9 +1451,11 @@
           armedWatches.set(id, cwd);
         }
       }
-      // Stop the removed: sessions that are no longer running. Flush each ended session's metrics row to
-      // the journal FIRST (CPE-1113) — the live accumulator + agentCost are still present at this seam
-      // (per-session stop doesn't clear them); the flush is idempotent + errors are swallowed.
+      // Stop the removed: a session no longer desired — either it genuinely ended, or it's still
+      // running and was merely disarmed because the explorer navigated away from its folder (a pause).
+      // Call `flushSession` at this seam either way (CPE-1113/CPE-1626): it now tells the two apart
+      // itself via the accumulator's `endedAt`, so a pause is always a safe no-op (the accumulator keeps
+      // accruing, resumable) and only a real end persists a row.
       for (const id of [...armedWatches.keys()]) {
         if (!desired.has(id)) {
           await flushSession(id);
@@ -1466,44 +1469,34 @@
         if (!unlistenDiffs) unlistenDiffs = await initAgentDiffs();
         if (!unlistenCost) unlistenCost = await initAgentCost();
       } else {
-        // Full stop: flush any not-yet-flushed session rows BEFORE the stores clear (CPE-1113,
-        // belt-and-suspenders — the removed-loop above already flushed each ended session), then tear
-        // down. `agentCost` is still present until `unlistenCost()` runs below, so flush first.
+        // Nothing currently armed. Tear down the shared listeners regardless — "off means off" for the
+        // OS-level watcher applies whether every session ended OR every session is merely paused
+        // (unarmed while still running; no backend watch means no events would arrive anyway). Only
+        // reset the METRICS STORE when no session is running at all (CPE-1626): a paused-but-still-alive
+        // session's accumulator must survive so a later re-visit resumes it instead of starting a fresh,
+        // incomplete row. `flushAllSessions` is a no-op for any session still running (see
+        // `flushSession`'s `endedAt` gate) — belt-and-suspenders for genuinely-ended ones the loop above
+        // already flushed.
         await flushAllSessions();
         unlistenActivity?.(); unlistenActivity = null;
         unlistenDiffs?.(); unlistenDiffs = null;
         unlistenCost?.(); unlistenCost = null;
-        clearAgentSessionMetrics(); // CPE-1107: no listener of its own — clear alongside the others
+        if (sessions.length === 0) clearAgentSessionMetrics(); // CPE-1107: true full-stop only
         if (watchRefreshTimer) { clearTimeout(watchRefreshTimer); watchRefreshTimer = null; }
       }
     } finally {
       reconcileInFlight = false;
-      if (reconcilePending) { reconcilePending = false; reconcileAgentWatch(currentSessions(), visitedSessionIds); }
+      if (reconcilePending) { reconcilePending = false; reconcileAgentWatch(currentSessions(), currentPath); }
     }
   }
 
-  /** Sessions whose project folder the explorer has actually navigated into at least once this run
-   *  (CPE-1606) — the gate for `reconcileAgentWatch`. Grown by `markVisited` (agentSessions.ts) as
-   *  `currentPath` moves; a session, once visited, is retained here (and stays watched) for the rest of
-   *  its life even after navigating away, so hopping between sibling agent projects doesn't thrash the
-   *  underlying `notify` watcher and Radar/Cost/History don't lose data for a project you looked at
-   *  earlier this run. A session never navigated into never appears here — never watched. */
-  let visitedSessionIds = new Set<string>();
-  /** Update the visited set for the current session/path pair, then reconcile watches against it. A
-   *  plain function (not a second `$:` block assigning `visitedSessionIds` from itself) so the
-   *  read-then-write stays unambiguous under Svelte's reactivity — see markVisited's doc for why the
-   *  set only grows, never shrinks, while a session is still running. */
-  function reconcileVisitedAndWatch(sessions: AgentSession[], current: string) {
-    const next = markVisited(sessions, current, visitedSessionIds);
-    if (next !== visitedSessionIds) visitedSessionIds = next;
-    reconcileAgentWatch(sessions, visitedSessionIds);
-  }
-  // Watch only the sessions the explorer has actually visited this run (CPE-1606); re-run on any
-  // session change or newly-visited project.
-  $: reconcileVisitedAndWatch($agentSessions, currentPath);
-  // The on-screen drawer still describes just the project the explorer is inside (CPE-399); leaving
-  // every watched project closes the timeline (CPE-400) but does NOT stop watching a project visited
-  // earlier this run (retained — see markVisited/reconcileVisitedAndWatch above).
+  // Watch only the session(s) at the CURRENT deepest project match (CPE-1606/CPE-1625/CPE-1626); re-run
+  // on any session change or navigation. Navigating away disarms a still-running session (a pause, not
+  // an end) rather than retaining it for the rest of its life — see `reconcileAgentWatch`'s doc for why
+  // retention is no longer needed now that a pause can never lose data.
+  $: reconcileAgentWatch($agentSessions, currentPath);
+  // The on-screen drawer describes just the project the explorer is inside (CPE-399); leaving the
+  // watched project closes the timeline (CPE-400) — and, since CPE-1626, stops the underlying watcher.
   $: activeWatchCwd = watchTargetFor($agentSessions, currentPath);
   $: if (!activeWatchCwd) showTimeline = false;
   $: watchedAgentName =
