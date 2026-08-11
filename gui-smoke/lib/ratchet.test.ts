@@ -95,7 +95,7 @@ describe("evaluate — the known-failing baseline (current main state)", () => {
   });
 });
 
-describe("evaluate — clause 1: NEW GUI REGRESSION (a 7th failing spec)", () => {
+describe("evaluate — clause 1: NEW GUI REGRESSION (an 8th failing spec)", () => {
   it("goes red when a spec outside known-failing.json fails", () => {
     const results = mainStateResults().map((r) =>
       r.spec === "open-dir.smoke.ts" ? { ...r, status: "failed" as const } : r,
@@ -110,7 +110,7 @@ describe("evaluate — clause 1: NEW GUI REGRESSION (a 7th failing spec)", () =>
     assert.ok(result.messages.some((m) => m.includes("NEW GUI REGRESSION") && m.includes("open-dir.smoke.ts")));
   });
 
-  it("reports every new failure, not just the first, when multiple 7th+ specs fail", () => {
+  it("reports every new failure, not just the first, when multiple 8th+ specs fail", () => {
     const results = mainStateResults().map((r) =>
       r.spec === "open-dir.smoke.ts" || r.spec === "vault.smoke.ts" ? { ...r, status: "failed" as const } : r,
     );

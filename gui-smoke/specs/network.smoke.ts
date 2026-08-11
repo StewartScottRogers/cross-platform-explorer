@@ -49,6 +49,14 @@ describe("CPE-1513/CPE-1516 — headless GUI smoke: Network sidebar section + ad
     // Network header, even with zero connections and zero shares" passes on `main`). Fixed to match the
     // shipped markup using the same `.fav-title` + text-filter convention `saved-search.smoke.ts` already
     // uses for its own (also non-anchor) section header.
+    //
+    // STATUS (CPE-1595): the corrected selector is still failing on the live `gui-smoke-linux` CI leg
+    // (PR #801, run 31446269217 — timeout waiting for this exact `waitForFn`) — the same class of
+    // WebKitGTK/Xvfb issue `saved-search.smoke.ts` is already known-failing for (`.fav-title`
+    // `getElementText()` returning empty for the sidebar section headers on that stack, per CPE-1507).
+    // The selector fix is real and correct (see above) and should stay; this spec remains listed in
+    // `gui-smoke/known-failing.json` until a live run shows it green. Do not "fix" this again without
+    // new evidence — the open question is the WebKitGTK/Xvfb `getText()` timing, not this locator.
     let header: WebdriverIO.Element | undefined;
     await browser.waitUntil(
       async () => {

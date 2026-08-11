@@ -149,6 +149,13 @@ jobs:
       # rarer than the Linux leg's — but the day CPE-1048 is fixed, a reviewer needs them without
       # rebuilding locally. `if: always()` matters: the `-fail.png` shots (CPE-1149) captured on a
       # failing/timed-out run are exactly what's useful for diagnosing CPE-1048 itself.
+      # `include-hidden-files: true` — REQUIRED. `gui-smoke/.screenshots/` starts with a dot, and
+      # `actions/upload-artifact@v4` treats any path under a dot-prefixed folder as "hidden" and
+      # silently excludes it from the glob by default (confirmed via the action's own docs: "any file
+      # beginning with `.` or files within folders beginning with `.`" — this bit the Linux leg on PR
+      # #801's first live run: "No files were found ... gui-smoke/.screenshots/**" even though the
+      # suite ran to completion and the directory is real and gitignored-but-present). Without this
+      # flag the whole artifact step is a no-op on both legs, defeating the ticket's core promise.
       - name: Upload gui-smoke screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -157,6 +164,7 @@ jobs:
           path: gui-smoke/.screenshots/**
           retention-days: 14
           if-no-files-found: warn
+          include-hidden-files: true
 
   gui-smoke-linux:
     name: GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)
@@ -168,10 +176,12 @@ jobs:
     # back half (~18 of 39 specs) unrun at the cap. 45 gives margin; sharding (CPE-1266) is the real fix.
     timeout-minutes: 45
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
-    # 40-spec suite to completion in CI (pre-fix measurement: 33 passed / 7 failed / 100% completed,
-    # ~28 min — one of those 7, `network.smoke.ts`, was a stale test selector fixed in this same PR, so
-    # `known-failing.json` now carries 6 entries, not 7), so "flaky" was never the right diagnosis; the
-    # fix is a ratchet, not more slack. The suite's own exit code below is
+    # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
+    # PR #801's own live run — one of those 7, `network.smoke.ts`, had a stale test selector fixed in
+    # this same PR, but the corrected selector STILL fails live on this WebKitGTK/Xvfb stack, the same
+    # class of `.fav-title` `getText()` issue `saved-search.smoke.ts` is already known-failing for — see
+    # `gui-smoke/known-failing.json`'s entry for it — so the baseline stays 7, not 6), so "flaky" was
+    # never the right diagnosis; the fix is a ratchet, not more slack. The suite's own exit code below is
     # deliberately swallowed (`|| true`) — the "Ratchet — no new GUI regressions" step owns the verdict:
     # it reds the job on any spec failing that ISN'T in `gui-smoke/known-failing.json`, on a
     # known-failing spec starting to PASS (the ratchet is one-way — see `gui-smoke/lib/ratchet.ts`), or
@@ -262,14 +272,37 @@ jobs:
         working-directory: gui-smoke
         run: xvfb-run --auto-servernum npm test || true
 
+      # CPE-1594: the actual gate, and DELIBERATELY the very next step after the suite — nothing that
+      # can fail (like the screenshot upload below) is allowed to sit between the suite finishing and
+      # this step running, because that would let an unrelated step's failure silently skip the verdict
+      # (default step conditions require the previous step to have succeeded — see PR #801's first live
+      # run, where `if-no-files-found: error` on the OLD upload-before-ratchet ordering aborted the job
+      # before the ratchet ever executed: no ratchet output anywhere in that log). Reads the JSON results
+      # `wdio.conf.ts`'s `json` reporter just wrote to `gui-smoke/.results/` and compares against
+      # `gui-smoke/known-failing.json`. Exits non-zero (redding this job, and — unlike every other step
+      # here — WITHOUT `continue-on-error` — this is a hard gate) on a new regression, a stale
+      # known-failing entry, or an incomplete run. See `gui-smoke/lib/ratchet.ts` for the exact rules and
+      # `gui-smoke/README.md` for how to retire an entry once its spec is fixed.
+      - name: Ratchet — no new GUI regressions
+        working-directory: gui-smoke
+        run: npm run ratchet
+
       # CPE-1594: unlocks the CPE-1148 Visual Critic in CI — before this, the ~75 `snap()` calls per run
       # wrote to a gitignored dir on an ephemeral runner and were simply discarded, so nothing (human or
       # agent) could ever review a PR's rendered UI without a Foreman rebuilding locally. `if: always()`
-      # matters: a failing run's `<name>-fail.png` shots (CPE-1149) are exactly the ones a reviewer most
-      # wants to see. Retrieve with `gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>`
-      # (see gui-smoke/README.md "Reading a CI run"). `if-no-files-found: error` — this leg always
-      # produces screenshots on a completed run, so a missing gallery is itself a signal something broke
-      # upstream of even getting a screenshot, not something to silently ignore.
+      # matters both for running after a RATCHET failure (screenshots are still useful evidence when the
+      # gate reds) and for running after a suite crash. `include-hidden-files: true` — REQUIRED.
+      # `gui-smoke/.screenshots/` starts with a dot, and `actions/upload-artifact@v4` treats any path
+      # under a dot-prefixed folder as "hidden" and silently excludes it from the glob by default
+      # (confirmed via the action's own docs: "any file beginning with `.` or files within folders
+      # beginning with `.`"). This bit PR #801's first live run: "No files were found ...
+      # gui-smoke/.screenshots/**" even though the suite ran to completion and genuinely wrote PNGs —
+      # without this flag the artifact step is a silent no-op on every run, defeating the ticket's core
+      # promise. `if-no-files-found: warn` (not `error`, unlike the PR #801 original) — a missing gallery
+      # is now a loud step warning, not something that can ever again abort the job and mask the ratchet
+      # verdict above; the ratchet, not the screenshot upload, owns whether this leg is red or green.
+      # Retrieve with `gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>` (see
+      # gui-smoke/README.md "Reading a CI run").
       - name: Upload gui-smoke screenshots
         if: always()
         uses: actions/upload-artifact@v4
@@ -277,14 +310,5 @@ jobs:
           name: gui-smoke-screenshots-ubuntu
           path: gui-smoke/.screenshots/**
           retention-days: 14
-          if-no-files-found: error
-
-      # CPE-1594: the actual gate. Reads the JSON results `wdio.conf.ts`'s `json` reporter just wrote to
-      # `gui-smoke/.results/` and compares against `gui-smoke/known-failing.json`. Exits non-zero (redding
-      # this job, and — unlike every other step here — WITHOUT `continue-on-error` — this is a hard gate)
-      # on a new regression, a stale known-failing entry, or an incomplete run. See
-      # `gui-smoke/lib/ratchet.ts` for the exact rules and `gui-smoke/README.md` for how to retire an
-      # entry once its spec is fixed.
-      - name: Ratchet — no new GUI regressions
-        working-directory: gui-smoke
-        run: npm run ratchet
+          if-no-files-found: warn
+          include-hidden-files: true

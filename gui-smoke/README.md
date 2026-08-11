@@ -182,8 +182,8 @@ smoke-testing the `run-ratchet.ts` I/O wrapper itself.)
 
 ### Screenshot artifacts (CPE-1594) — unlocks the Visual Critic in CI
 
-Both legs upload `gui-smoke/.screenshots/**` as a build artifact after the suite step, `if: always()`
-(so a failing/timed-out run's `-fail.png` shots — CPE-1149 — still upload). Download with:
+Both legs upload `gui-smoke/.screenshots/**` as a build artifact, `if: always()` (so a failing/timed-out
+run's `-fail.png` shots — CPE-1149 — still upload). Download with:
 
 ```
 gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>
@@ -193,6 +193,23 @@ gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>
 URL or `gh run list --workflow=gui-smoke.yml`. This is what lets a reviewer — human or, per CPE-1148
 Part B, a Visual-Critic sub-agent — judge a PR's rendered UI directly from the CI artifact, without a
 Foreman running a local `tauri build` by hand first.
+
+**Two ordering/config details that PR #801's first live run got wrong and had to fix — worth knowing if
+this step ever looks broken again:**
+
+- **`include-hidden-files: true` is required.** `gui-smoke/.screenshots/` starts with a dot, and
+  `actions/upload-artifact@v4` excludes anything under a dot-prefixed folder by default ("any file
+  beginning with `.` or files within folders beginning with `.`" — the action's own docs). Without this
+  flag the step silently uploads nothing and logs `No files were found with the provided path` — the
+  suite can genuinely be writing every PNG correctly and this step still reports empty.
+- **On the Linux leg, the upload step runs AFTER the `Ratchet` step, not before.** The suite step always
+  "succeeds" (`|| true` swallows its exit code) so the Ratchet step — the real gate — always runs next
+  unconditionally. The screenshot upload comes last with `if: always()` and `if-no-files-found: warn`
+  (not `error`): if it ever fails or finds nothing, that must never take down the job before the ratchet
+  verdict has been computed. Putting a can-fail, `error`-severity artifact step BETWEEN the suite and the
+  ratchet is exactly what silently skipped the ratchet on PR #801's first run — GitHub Actions steps
+  default to running only if every prior step succeeded, so an aborted upload step meant "no ratchet
+  output anywhere in the log" even though the suite itself had completed cleanly.
 
 Either leg reds the job's own step output on a regression in launch-or-navigate, instead of needing
 a human to notice. The Windows leg's non-blocking posture (CPE-1048) means a WebView2 crash there
@@ -421,10 +438,12 @@ throw).
 - ~~**Linux CI leg**: add an `ubuntu-latest` matrix arm using `webkit2gtk-driver` + `xvfb-run` (no
   app code change needed).~~ **Done (CPE-1171)**, and **now the blocking gate (CPE-1594)** — see the
   "CI" section above.
-- **Triage the ratchet's known-failing tail** (CPE-1595): `network.smoke.ts` was already triaged and
-  fixed (stale `=text` link-text selector against a `<span>`, not a CPE-1516 regression — see
-  `specs/network.smoke.ts`'s CPE-1594 comment). Remaining: `archive-browse`/`archive-password`/
-  `shred-dialog`/`transfer-panel` (`samples`/`saved-search` are CPE-1507's).
+- **Triage the ratchet's known-failing tail** (CPE-1595): `network.smoke.ts`'s selector was already
+  fixed (stale `=text` link-text locator against a `<span>`, not a CPE-1516 regression — see
+  `specs/network.smoke.ts`'s CPE-1594 comment), but it still fails live on WebKitGTK/Xvfb — same class
+  of `.fav-title getText()` issue `saved-search.smoke.ts` is known-failing for; CPE-1595 has the working
+  theory of a shared root cause. Also: `archive-browse`/`archive-password`/`shred-dialog`/
+  `transfer-panel` (`samples`/`saved-search` are CPE-1507's).
 - **macOS**: stays attended — `tauri-driver` has no WKWebView WebDriver support.
 - **More flows**: Back/Up navigation, dialogs, context menus, tab switching.
 - **Visual regression baselines for more surfaces**: CPE-1170 built the comparator + wired one worked
