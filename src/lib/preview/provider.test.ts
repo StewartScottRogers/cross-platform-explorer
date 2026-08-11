@@ -109,6 +109,12 @@ describe("pickProvider", () => {
     expect(nb.editable).toBe(false);
   });
 
+  it("previews .log files with the dedicated level-highlight provider, not raw text (CPE-1618)", () => {
+    const log = pickProvider(entry({ name: "app.log", extension: "log" }));
+    expect(log.kind).toBe("log");
+    expect(log.editable).toBe(false);
+  });
+
   it("previews binary formats as read-only info text (CPE-210/214/215/216/218)", () => {
     for (const ext of ["wasm", "torrent", "mid", "midi", "bin", "dat"]) {
       const p = pickProvider(entry({ name: `a.${ext}`, extension: ext }));

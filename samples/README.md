@@ -68,6 +68,7 @@ All media files carry this fixed metadata (the single source of truth is the top
 | `mail/sample.eml`   | RFC 822 / MIME  | `multipart/mixed` email: encoded-word Subject, quoted-printable body, one base64 attachment (`hello.txt`) — the structured `.eml` preview (CPE-1434) |
 | `text/notes.txt`, `readme.md`, `data.json`, `table.csv`, `table.tsv`, `hello.py` | Text | Plain-text/markdown/JSON/CSV/TSV/code preview + line/word counts |
 | `text/notebook.ipynb` | Jupyter notebook | Markdown + code cells and every rendered output kind (stream stdout, `execute_result` text/plain, `display_data` image/png, an error traceback) plus a raw cell — the notebook preview (CPE-1616) |
+| `text/app.log` | Log file | Every recognized level shape (bracketed/ISO timestamp, `LEVEL:`, `[LEVEL]`, Android logcat), a prose line mentioning "error" with no real level marker (must not be misclassified), and an ANSI-colour-coded line — the log preview's level highlight + filter (CPE-1618) |
 
 Beyond the metadata baseline, the tree also carries substantial non-metadata fixtures:
 `archives/sample.zip` + `archives/sample.rar` (a real `docs/`+`images/`+`data/`+`src/`+`docs/sub/` tree),
@@ -142,6 +143,7 @@ opening any format the app claims to support has real fixture coverage:
 | `binary`         | `other/mini.dll` (a real, parseable synthetic PE32 — see "`other/mini.dll` — synthetic PE fixture" above) |
 | `markdown`       | `text/readme.md`                                        |
 | `text`           | `text/notes.txt`, `text/hello.py`                        |
+| `log`            | `text/app.log`                                           |
 | `hex`            | `other/blob.pak` (any file no richer provider claims falls back to the hex view) |
 
 The headless guard is `src/lib/sampleCoverage.test.ts` (vitest): it computes the real preview-provider

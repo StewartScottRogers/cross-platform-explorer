@@ -23,6 +23,7 @@ export type PreviewKind =
   | "pdf"
   | "json"
   | "notebook"
+  | "log"
   | "csv"
   | "tsv"
   | "archive"
@@ -714,6 +715,17 @@ export const providers: PreviewProvider[] = [
     kind: "info",
     editable: false,
     canPreview: (e) => !e.is_dir && INFO_EXT.has(e.extension),
+  },
+  // Must precede the generic text provider: .log categorises as "text" in filetypes.ts and would
+  // otherwise render as an undifferentiated blob (accesslog syntax colour only, no level structure)
+  // instead of the level-highlighted + filterable per-line view (CPE-1618, epic CPE-1568 slice 8).
+  // Self-contained like notebook/jwt/cert above — LogPreview.svelte fetches + parses its own content.
+  {
+    id: "log",
+    label: "Log",
+    kind: "log",
+    editable: false,
+    canPreview: (e) => !e.is_dir && e.extension === "log",
   },
   {
     id: "markdown",
