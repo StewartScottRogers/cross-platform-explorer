@@ -1,0 +1,45 @@
+<!doctype html>
+<!--
+  CPE-1635 narrow-width verification harness — OUTER shell. Sizes an <iframe> (loading inner.html,
+  which mounts the real CheckpointDialog.svelte) to an explicit CSS width so the achieved viewport can
+  be confirmed via `getBoundingClientRect`/`innerWidth` before trusting any screenshot — the real
+  Chrome window stays large (1200x900) since headless Chrome's `--window-size` does not reliably set
+  the CSS viewport under `--headless=new` (it clamps to ~500px internally and rescales the screenshot).
+
+  Why an iframe rather than a plain sized <div>: `vw`/`vh` units (and `.dialog`'s own `position:fixed`
+  backdrop) resolve against the REAL top-level browser viewport, not any wrapper element's box — see
+  inner.html's header comment for the empirical proof. An <iframe> is a genuinely separate browsing
+  context with its own viewport sized to the iframe's box, so it's the only way to make `95vw` actually
+  mean 95% of a simulated 420px window while keeping the outer Chrome window large enough to dodge the
+  headless clamp.
+
+  Usage: load `index.html?w=420&theme=dark` (defaults: w=420, theme=light).
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1635 harness — CheckpointDialog narrow width</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #888; font-family: monospace; }
+      #readout {
+        background: #000; color: #0f0; font-size: 12px; padding: 4px 6px; white-space: pre-wrap;
+      }
+      #frame-wrap {
+        display: inline-block;
+        border: 2px solid magenta;
+        /* visible so a genuinely overflowing inner document (horizontal scrollbar / painted content
+           past its own bounds) is still evident from the outer page rather than clipped away. */
+        overflow: visible;
+      }
+      iframe { display: block; border: none; }
+    </style>
+  </head>
+  <body>
+    <div id="readout">booting…</div>
+    <div id="frame-wrap">
+      <iframe id="stage-frame" title="CheckpointDialog under test"></iframe>
+    </div>
+    <script type="module" src="./outer-main.ts"></script>
+  </body>
+</html>

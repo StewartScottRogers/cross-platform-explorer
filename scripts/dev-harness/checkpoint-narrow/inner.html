@@ -1,0 +1,35 @@
+<!doctype html>
+<!--
+  CPE-1635 narrow-width verification harness — INNER document, loaded inside index.html's <iframe>.
+  Mounts the REAL CheckpointDialog.svelte (its `../bindings.gen` / `../invoke` imports are aliased to
+  canned mocks by ../../../vite.harness.config.ts) with the app's real src/app.css.
+
+  Why an iframe and not just a sized <div> in the top-level page: `vw`/`vh` CSS units — and the
+  `position:fixed` containing block .backdrop relies on — resolve against the REAL top-level browser
+  viewport, full stop; no wrapper element, however sized or `transform`-anchored, changes what `vw`
+  means in that document. `.dialog`'s own `max-width: 95vw` (the exact rule this ticket is about) would
+  therefore silently no-op in a wrapper-div harness at a large real window size — verified empirically:
+  an early version of this harness measured `.dialog` rendering at its full 680px declared width even
+  inside a 420px-wide wrapper, because 95vw of a 1184px real Chrome window is ~1125px, nowhere near
+  constraining. An <iframe> is a genuinely separate browsing context with its OWN viewport sized to the
+  iframe's box — `vw` and `position:fixed` inside it resolve against the iframe's dimensions, exactly
+  like a real narrow OS window would. This document is the thing that actually goes inside that iframe;
+  index.html sizes the iframe and reads back this document's diagnostics.
+
+  Dev-only; not part of the production build (vite build's default entry is the repo-root index.html,
+  which this file is not referenced from).
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1635 inner</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #dcdcdc; }
+    </style>
+  </head>
+  <body>
+    <div id="mount"></div>
+    <script type="module" src="./inner-main.ts"></script>
+  </body>
+</html>
