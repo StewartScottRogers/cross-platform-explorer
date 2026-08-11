@@ -760,7 +760,16 @@
        nothing, and the row stayed permanently unreachable, not just temporarily off-screen). Making
        `.ctx` its own scroll container (capped to the viewport height) is what actually fixes it: now
        `scrollIntoView()` — WebdriverIO's OR a real user's mouse-wheel/keyboard nav — has a container that
-       can scroll, so every row becomes reachable regardless of how tall the menu's content is. */
+       can scroll, so every row becomes reachable regardless of how tall the menu's content is.
+
+       FOLLOW-UP TRAP (caught in review before merge, not shipped): making `.ctx` a scroll container on
+       ONE axis (`overflow-y`) makes the OTHER axis compute to `auto` too, per the CSS Overflow spec's
+       "a `visible` value becomes `auto` when the other axis isn't `visible`" rule — `overflow-x: visible`
+       does NOT opt back out (verified directly: it still resolves to `auto` via getComputedStyle). That
+       silently turned `.ctx` into a horizontal clipping box too, which clipped Submenu.svelte's `.flyout`
+       (New ▸ / View ▸ / Sort by ▸ / Run macro ▸ / Run command ▸) to nothing — see Submenu.svelte's own
+       `.flyout` comment for the fix (`position: fixed`, computed from the parent row's rect, so the
+       flyout escapes `.ctx`'s scrollable-overflow region entirely instead of being clipped by it). */
     max-height: calc(100vh - 12px);
     overflow-y: auto;
     padding: 5px;

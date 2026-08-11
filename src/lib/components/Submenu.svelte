@@ -15,6 +15,7 @@
    * colours come only from theme variables, identical light/dark.
    */
   import { tick } from "svelte";
+  import { onDestroy } from "svelte";
   import Icon from "./Icon.svelte";
 
   export let label: string;
@@ -25,6 +26,10 @@
   let wrapEl: HTMLDivElement;
   let parentEl: HTMLButtonElement;
   let flyoutEl: HTMLDivElement;
+  // CPE-1601 follow-up: viewport-space coordinates, NOT CSS-percent offsets — see the `.flyout` style
+  // comment below for why `position: fixed` + explicit px replaced `position: absolute` + `left: 100%`.
+  let top = 0;
+  let left = 0;
 
   function items(): HTMLButtonElement[] {
     if (!flyoutEl) return [];
@@ -33,16 +38,53 @@
     );
   }
 
+  /** Anchors the (viewport-`position:fixed`) flyout to the parent row's CURRENT on-screen rect —
+   *  called on open, and again on every scroll of any ancestor (including `.ctx` itself, now that
+   *  CPE-1601 made it internally scrollable) so the flyout tracks its row instead of drifting. Mirrors
+   *  the OLD `top:-6px; left:100%` relative offsets, just computed in px since `position:fixed`
+   *  percentages resolve against the viewport, not the parent element. */
+  function positionFlyout() {
+    if (!parentEl) return;
+    const pad = 6;
+    const pr = parentEl.getBoundingClientRect();
+    const fw = flyoutEl?.getBoundingClientRect().width ?? 0;
+    const fh = flyoutEl?.getBoundingClientRect().height ?? 0;
+
+    // Clamp on-screen: if opening rightward (the default) would overflow the viewport's right edge,
+    // flip to open leftward instead — same rule as before, just measured against the viewport instead
+    // of relying on the (now-clipping) `.ctx` ancestor's box. `fw` is 0 on the FIRST call of a given
+    // open (flyout not measured yet) and in jsdom (no real layout), so this only flips once real
+    // dimensions are known — matching the original's identical "no-op until measured" behaviour.
+    flip = pr.right + fw > window.innerWidth - pad && fw > 0;
+    left = flip ? pr.left - fw : pr.right;
+
+    top = pr.top - 6;
+    // Vertical clamp — the original CSS never handled a flyout taller than the viewport; worth having
+    // now that this fn already does the viewport-space math the flip check needs.
+    if (fh > 0) {
+      top = Math.min(top, window.innerHeight - fh - pad);
+    }
+    top = Math.max(pad, top);
+  }
+
+  function onAncestorScroll() {
+    if (open) positionFlyout();
+  }
+
+  // Capture phase: catches scroll on ANY ancestor, including `.ctx` itself, even though element
+  // `scroll` events don't reliably bubble across every engine this app targets (wry/WebKitGTK
+  // included) — the standard technique for "some scrollable ancestor scrolled" without knowing which
+  // one ahead of time. Registered once; guarded by the `open` check above so it's a no-op while closed.
+  if (typeof window !== "undefined") {
+    window.addEventListener("scroll", onAncestorScroll, true);
+    onDestroy(() => window.removeEventListener("scroll", onAncestorScroll, true));
+  }
+
   async function openMenu(focusFirst = false) {
     open = true;
+    positionFlyout(); // rough pass (pre-measurement) so the first paint isn't at (0,0)
     await tick();
-    // Clamp on-screen: if the flyout (opened rightward at left:100%) would overflow the viewport's
-    // right edge, flip it to open leftward instead. In jsdom rects are 0 so this is a no-op there.
-    if (flyoutEl) {
-      const r = flyoutEl.getBoundingClientRect();
-      const pad = 6;
-      flip = r.right > window.innerWidth - pad && r.width > 0;
-    }
+    positionFlyout(); // real pass — flyoutEl now exists, so the flip/vertical-clamp math has real dimensions
     if (focusFirst) items()[0]?.focus();
   }
 
@@ -101,9 +143,10 @@
     <!-- svelte-ignore a11y-no-noninteractive-element-interactions -->
     <div
       class="flyout"
-      class:flip
       role="menu"
       tabindex="-1"
+      data-flip={flip}
+      style="position:fixed; top:{top}px; left:{left}px"
       bind:this={flyoutEl}
       on:keydown={onFlyoutKey}
     >
@@ -134,11 +177,25 @@
     display: inline-flex;
     color: var(--text-faint);
   }
-  /* The flyout reuses the exact container treatment from MENUS.md (the `.ctx` table). */
+  /* The flyout reuses the exact container treatment from MENUS.md (the `.ctx` table). CPE-1601
+     follow-up: `position: fixed` (was `absolute` with CSS `top:-6px; left:100%`) is load-bearing, not
+     cosmetic — `.ctx` (ContextMenu.svelte) is now an `overflow-y:auto` scroll container (CPE-1601's
+     original fix), and per the CSS Overflow spec a `visible` `overflow-x` computes to `auto` the moment
+     the OTHER axis isn't `visible` — `overflow-x: visible` cannot opt back out (verified directly: it
+     still resolves to `auto`). So `.ctx` clips BOTH axes now, and an absolutely-positioned descendant
+     (this flyout, `left:100%` deliberately escaping `.submenu`'s own box) would be clipped to nothing —
+     confirmed live in a real engine, not just reasoned about. `position: fixed` sidesteps the whole
+     problem: a fixed-position box is positioned against the viewport (the INITIAL containing block),
+     not against `.ctx`'s box, and — critically — is NOT part of `.ctx`'s scrollable-overflow region at
+     all, so it paints on top, uncropped, regardless of `.ctx`'s scroll position or clip. (This only
+     holds because no ancestor between here and the viewport sets `transform`/`filter`/`perspective`/
+     `will-change:transform`/`contain:paint`, any of which would make THAT ancestor the fixed
+     containing block instead — none of `.ctx`/`.submenu`'s ancestors do.) `top`/`left` are therefore
+     computed in JS (`positionFlyout()`) from the parent row's `getBoundingClientRect()` — a fixed
+     element's `%` offsets resolve against the viewport, not the parent, so the old CSS percentages
+     couldn't carry over as-is. */
   .flyout {
-    position: absolute;
-    top: -6px;
-    left: 100%;
+    position: fixed;
     z-index: 101;
     min-width: 190px;
     padding: 5px;
@@ -147,9 +204,5 @@
     border-radius: var(--radius-lg);
     box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16);
     outline: none;
-  }
-  .flyout.flip {
-    left: auto;
-    right: 100%;
   }
 </style>

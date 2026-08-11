@@ -109,19 +109,26 @@ raw job log pulled via `gh api .../actions/jobs/93649941153/logs`, and the spec 
    settled) rather than guess at one specific cause — genuinely unsure whether this is a CI-load timing
    gap or a WebKitGTK Actions-fallback quirk, so I did not claim more confidence than the evidence
    supports. Entry left in place.
-4. **`shred-dialog.smoke.ts` — (a) genuine product bug, FIXED (filed + closed as CPE-1601).**
-   `ContextMenu.svelte`'s `.ctx` had no `overflow`/`max-height` — a rich file's menu (this fixture is
-   shreddable, so the separated "Securely delete…" group renders) can be taller than the window, and the
-   `onMount` clamp only ever repositioned the menu, never accounted for its own height exceeding the
-   viewport. The failure screenshot (`shred-dialog-fail.png`) shows the menu's last visible row
-   ("Metadata Studio…") sitting right at the window edge with "Securely delete…" pushed off the bottom —
-   and because `.ctx` wasn't a scroll container, `scrollIntoView()` (which WebdriverIO's own
-   clickability check, and a real user's scroll/keyboard nav, both rely on) had nothing to scroll, so the
-   row was **permanently** unreachable. Fixed with `max-height: calc(100vh - 12px); overflow-y: auto;` on
-   `.ctx` — this also brings the component into compliance with docs/design/MENUS.md's own already-stated
-   container rule ("clamped into the viewport (never clipped off-screen)"), which the height-only clamp
-   was silently violating. `ContextMenu.test.ts`'s 51 tests still pass. Entry left in
-   `known-failing.json` (cannot verify live) — see CPE-1601 for the full writeup.
+4. **`shred-dialog.smoke.ts` — (a) genuine product bug, FIXED (filed as CPE-1601, still open — see
+   below).** `ContextMenu.svelte`'s `.ctx` had no `overflow`/`max-height` — a rich file's menu (this
+   fixture is shreddable, so the separated "Securely delete…" group renders) can be taller than the
+   window, and the `onMount` clamp only ever repositioned the menu, never accounted for its own height
+   exceeding the viewport. The failure screenshot (`shred-dialog-fail.png`) shows the menu's last visible
+   row ("Metadata Studio…") sitting right at the window edge with "Securely delete…" pushed off the
+   bottom. Fixed with `max-height: calc(100vh - 12px); overflow-y: auto;` on `.ctx`.
+   **Round-1 caveat, caught by UAT + independent review before merge (not shipped broken):** making
+   `.ctx` scroll on the Y axis makes the X axis implicitly compute to `auto` too (CSS Overflow spec),
+   which clipped `Submenu.svelte`'s `.flyout` (New ▸ / Run macro ▸ / etc. — an absolutely-positioned
+   descendant escaping via `left:100%`) to nothing on EVERY context menu, not just tall ones. Round 2:
+   `.flyout` is now `position: fixed`, anchored to its parent row's `getBoundingClientRect()` in JS,
+   which escapes `.ctx`'s scrollable-overflow region entirely instead of being clipped by it. Verified in
+   real Chrome (jsdom can't do layout) across short/tall-scrolled/right-edge-flip scenarios plus a
+   negative control proving the repro methodology actually detects the original clipping bug; strengthened
+   `gui-smoke/specs/macro-in-menu.smoke.ts`'s existing "Run macro ▸" assertion to check real
+   `getBoundingClientRect()` geometry instead of just DOM existence, since existence-only checks are
+   structurally blind to this class of bug. `ContextMenu.test.ts` now 52/52 (added a jsdom structural
+   guard pinning `position:fixed`). Entry left in `known-failing.json` (cannot verify live) — see CPE-1601
+   (still open in `Doing/`, not closed — the fix needed a second round) for the full writeup.
 5. **`transfer-panel.smoke.ts` — (b) stale/incorrect test, FIXED.** Real failure: `expected a row for the
    seeded "CPE-1226-transfer-panel-folder": expected null to not equal null` on the spec's VERY FIRST
    step (before any right-click/compress logic runs at all) — the same batch-streaming race as

@@ -231,6 +231,26 @@ async function openSubmenu(label: string): Promise<HTMLElement> {
   return flyout;
 }
 
+describe("Submenu flyout positioning — CPE-1601 follow-up (clipped-by-.ctx regression guard)", () => {
+  // jsdom returns zero-size rects for everything (no real layout engine), so this CANNOT verify the
+  // flyout actually paints outside `.ctx`'s clip region — that needs a real browser (verified manually
+  // against Chrome for this PR; see gui-smoke's macro-in-menu.smoke.ts for the live, real-engine
+  // geometry assertion this fix also added). What THIS test pins is the structural choice itself: the
+  // flyout must stay `position: fixed` (anchored to the parent row's own rect, escaping `.ctx`'s
+  // scrollable-overflow region entirely) rather than reverting to `position: absolute` (a child of
+  // `.ctx`'s containing-block chain, and therefore clipped by `.ctx`'s `overflow-y: auto` — which, per
+  // the CSS Overflow spec, also computes `overflow-x` to `auto`). A future edit that silently swaps
+  // this back to `absolute` breaks every flyout (New ▸ / View ▸ / Sort by ▸ / Run macro ▸ / Run
+  // command ▸) in every context menu in the app; this test fails loudly instead.
+  it("renders the flyout as position:fixed (not a clippable position:absolute descendant of .ctx)", async () => {
+    render(ContextMenu, { props: { ...base, folderSelected: false } });
+    await openSubmenu("New");
+    const flyout = document.querySelector(".flyout") as HTMLElement;
+    expect(flyout).toBeTruthy();
+    expect(flyout.style.position, "the flyout must be position:fixed, not absolute").toBe("fixed");
+  });
+});
+
 describe("ContextMenu empty-area Windows 11 parity (CPE-1153)", () => {
   it("New ▸ opens and its items dispatch new-folder / new-file", async () => {
     const { component } = render(ContextMenu, { props: { ...empty } });
