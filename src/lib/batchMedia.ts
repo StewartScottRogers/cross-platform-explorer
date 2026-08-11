@@ -6,7 +6,8 @@
  * split between pure planning logic and the component that renders it.
  */
 
-import type { BatchJob, MediaOp } from "./bindings.gen";
+import type { BatchJob, MediaOp, PlannedItem } from "./bindings.gen";
+import { parentDir } from "./contentSearch";
 
 /**
  * Extensions the batch-media **encoder** can actually write, mirroring `batch_transform.rs`'s
@@ -109,4 +110,37 @@ export function skipRows(report: { skipped: [string, string][] }): { name: strin
     name: path.split(/[\\/]/).pop() || path,
     reason,
   }));
+}
+
+/**
+ * CPE-1590: the planned items that would **overwrite their own input file in place** — i.e. the backend
+ * planner (`batch_media::plan`) resolved `output === input`. This only happens with "Write to new files"
+ * unchecked (`non_destructive: false`) *and* an op combination with no dedicated output-renaming suffix
+ * (a lone Compress, Strip metadata, or Watermark — see `batch_media.rs`'s `plan()`). Comparing the
+ * concrete planned paths directly (rather than re-deriving "which op combos are suffix-less" on the
+ * frontend) is robust to any future op the backend adds — if the planner ever resolves a same-path
+ * output for ANY reason, this still catches it. Pure; used to gate the destructive-overwrite confirm
+ * step before Apply is allowed to run.
+ */
+export function overwritesInPlace(items: PlannedItem[]): PlannedItem[] {
+  return items.filter((it) => it.input === it.output);
+}
+
+/**
+ * The distinct parent directories of `paths`, in first-seen order — used to take a best-effort
+ * pre-overwrite checkpoint of every folder about to lose original files (CPE-1590), mirroring the
+ * single-checkpoint-before-the-batch pattern `MetadataStudioDialog`/`DeclutterDialog`/
+ * `SimilarImagesDialog` already use via `commands.checkpointCreate`. Pure.
+ */
+export function uniqueParentDirs(paths: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of paths) {
+    const dir = parentDir(p);
+    if (dir && !seen.has(dir)) {
+      seen.add(dir);
+      out.push(dir);
+    }
+  }
+  return out;
 }

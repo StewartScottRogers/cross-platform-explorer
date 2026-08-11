@@ -8,13 +8,23 @@
    * Rust, `cpe_server::batch_media::plan`), so the live preview is a debounced, generation-tokened IPC call
    * rather than pure client-side logic — and Apply is a *streamed* execute the dialog watches to completion
    * before telling the parent to report + refresh + close (CPE-1092 supplies both commands).
+   *
+   * CPE-1590: unchecking "Write to new files" arms a **silent, irreversible overwrite** of the selected
+   * originals for any op combo with no dedicated output-renaming suffix (a lone Compress, Strip metadata,
+   * or Watermark — `batch_media::plan` only guarantees `output != input` when `non_destructive` is true).
+   * Apply now gates that case behind an explicit, can't-miss-it confirm step (mirrors `ShredConfirmDialog`'s
+   * "no trash fallback" treatment) naming exactly how many originals will be overwritten, and — on
+   * confirm — takes a best-effort pre-write `checkpointCreate` of every affected folder first, the same
+   * "checkpoint before an irreversible batch" pattern `MetadataStudioDialog`/`DeclutterDialog`/
+   * `SimilarImagesDialog` already use, so a confirmed overwrite is still recoverable via Checkpoints even
+   * though it's deliberately never pushed onto the Ctrl+Z undo stack.
    */
   import { createEventDispatcher, onDestroy } from "svelte";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { commands } from "../bindings.gen";
   import type { BatchReport, Corner, MediaOp, OpResult, PlannedItem } from "../bindings.gen";
-  import { rawInvoke, createChannel, type StreamChannel } from "../invoke";
-  import { mediaOpLabel, opsToJob, progressPercent, skipRows } from "../batchMedia";
+  import { rawInvoke, createChannel, unwrap, type StreamChannel } from "../invoke";
+  import { mediaOpLabel, opsToJob, overwritesInPlace, progressPercent, skipRows, uniqueParentDirs } from "../batchMedia";
   import { baseName } from "../contentSearch";
 
   /** Extensions the native "choose a watermark image" picker offers — mirrors the batch-media encoder's
@@ -25,7 +35,12 @@
   /** Full paths of the (already image-filtered) selection to operate on. */
   export let paths: string[] = [];
 
-  const dispatch = createEventDispatcher<{ apply: { report: BatchReport }; cancel: void }>();
+  // `checkpointFailures` rides on BOTH events (CPE-1590): the in-dialog warning is dismissable by Escape
+  // or a backdrop click, so the parent needs it on the cancel path too or a habitual keystroke discards it.
+  const dispatch = createEventDispatcher<{
+    apply: { report: BatchReport; checkpointFailures: string[] };
+    cancel: { checkpointFailures: string[] };
+  }>();
 
   // ---- ordered op list ----
   let ops: MediaOp[] = [];
@@ -37,7 +52,12 @@
   let convertExt = "webp";
   let rotateDegrees: "90" | "180" | "270" = "90";
   let flipDir: "horizontal" | "vertical" = "horizontal";
-  let renameTemplate = "{stem}";
+  /** The Rename op's pre-filled default template — a plain JS constant (not embedded literally in markup,
+   *  which Svelte would otherwise try to parse `{tokens}` in as mustache expressions). Left at this
+   *  default, Rename reproduces the input's stem verbatim — a narrow overwrite-in-place edge case the
+   *  CPE-1590 overwrite-hint copy below calls out by referencing this same constant. */
+  const RENAME_DEFAULT_TEMPLATE = "{stem}";
+  let renameTemplate = RENAME_DEFAULT_TEMPLATE;
   let compressQuality = 80;
   let watermarkImage = "";
   let watermarkPosition: Corner = "bottom_right";
@@ -141,12 +161,18 @@
   let planning = false;
   let planGen = 0;
   let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+  /** True once the user has clicked Apply on a plan that would overwrite originals in place, revealing
+   *  the (CPE-1590) confirm panel below — reset on any change that could invalidate it. */
+  let showOverwriteConfirm = false;
 
   // Both `job` and `paths` are referenced directly here so this re-runs on either changing.
   $: {
     job;
     paths;
     scheduleReplan();
+    // Any edit that can change the plan invalidates a prior overwrite confirmation — never let a
+    // confirm granted for one op combo silently carry over to a different (re-planned) one.
+    showOverwriteConfirm = false;
   }
 
   function scheduleReplan() {
@@ -189,6 +215,24 @@
   $: previewCappedTotal = planned.length > MAX_PREVIEW ? planned.length : 0;
   $: canApply = ops.length > 0 && planError === null && planned.length > 0 && !planning && !applying;
 
+  // ---- CPE-1590: destructive-overwrite guard ----
+  // Computed straight off the concrete planned paths (not re-derived op-combo heuristics), so it's
+  // exact and robust to future ops: whenever the planner resolves output === input, that file's bytes
+  // will be replaced in place with no way back through this dialog.
+  $: overwriteItems = overwritesInPlace(planned);
+  $: needsOverwriteConfirm = overwriteItems.length > 0;
+
+  /** Apply button click: a plan that would overwrite originals in place opens the confirm panel instead
+   *  of running immediately — the panel's own danger button is the one that actually calls {@link apply}. */
+  function handleApplyClick() {
+    if (!canApply) return;
+    if (needsOverwriteConfirm) {
+      showOverwriteConfirm = true;
+    } else {
+      apply();
+    }
+  }
+
   // ---- apply: streamed execute, progress rendered inside the dialog ----
   let applying = false;
   let applyError: string | null = null;
@@ -200,6 +244,12 @@
    *  skipped file + reason (CPE-1115), so a skip is never silently dropped. Cleared → the dialog closes via
    *  the parent on "Done". A clean run (no skips) never sets this and closes immediately. */
   let completed: BatchReport | null = null;
+  /** Folders whose best-effort pre-overwrite `checkpointCreate` FAILED (CPE-1590 code-review follow-up):
+   *  the confirm panel promises a checkpoint as the recovery net for a write that has no other one, so a
+   *  failure must never be silent — a console.error alone is invisible to the user who read that promise
+   *  and consented on the strength of it. A non-empty list forces the dialog to hold open (like a skip)
+   *  so the warning is actually seen, even on an otherwise-clean run. Reset at the start of every apply(). */
+  let checkpointFailures: string[] = [];
 
   function detachChannel() {
     if (activeChannel) activeChannel.onmessage = null;
@@ -212,11 +262,31 @@
 
   async function apply() {
     if (!canApply) return;
+    showOverwriteConfirm = false;
     applying = true;
     applyError = null;
     done = 0;
     failed = 0;
     total = planned.length;
+    checkpointFailures = [];
+
+    if (needsOverwriteConfirm) {
+      // Best-effort pre-write checkpoint of every folder about to lose original files (CPE-1590), taken
+      // ONCE per affected folder before any byte is touched — mirrors MetadataStudioDialog/
+      // DeclutterDialog/SimilarImagesDialog's "checkpoint before an irreversible batch" convention. A
+      // checkpoint failure must never BLOCK the (now explicitly confirmed) write — the user already
+      // consented on the confirm panel — but it must also never be silent: the confirm text promises this
+      // checkpoint as the recovery net for a write that otherwise has none, so a failed one is recorded
+      // in `checkpointFailures` and surfaced in the results panel below, not just logged to devtools.
+      for (const dir of uniqueParentDirs(overwriteItems.map((it) => it.input))) {
+        try {
+          unwrap(await commands.checkpointCreate(dir, "Before batch media overwrite"));
+        } catch (e) {
+          console.error("Batch media: pre-overwrite checkpoint failed (proceeding with confirmed write)", e);
+          checkpointFailures = [...checkpointFailures, dir];
+        }
+      }
+    }
 
     const ch = createChannel<OpResult[]>();
     activeChannel = ch;
@@ -237,12 +307,17 @@
       });
       detachChannel();
       applying = false;
-      if (report.skipped.length > 0) {
+      if (report.skipped.length > 0 || checkpointFailures.length > 0) {
         // Hold the dialog open on a results panel so the user sees exactly which files were skipped and
-        // why, instead of a transient toast showing only the first (CPE-1115). "Done" finishes the flow.
+        // why (CPE-1115), AND — even on an otherwise-clean run — which folder(s) got no pre-overwrite
+        // checkpoint (CPE-1590), instead of either vanishing behind a transient toast or closing outright
+        // while the user still believes the promised recovery net exists. "Done" finishes the flow.
         completed = report;
       } else {
-        dispatch("apply", { report });
+        // Nothing skipped and no checkpoint failure (the branch above already held the dialog open for
+        // either) — checkpointFailures is guaranteed empty here, but still passed explicitly so the
+        // parent always receives the same event shape regardless of which path dispatched it.
+        dispatch("apply", { report, checkpointFailures });
       }
     } catch (e) {
       detachChannel();
@@ -255,17 +330,36 @@
   function finish() {
     const report = completed;
     completed = null;
-    if (report) dispatch("apply", { report });
+    // CPE-1590: carry any checkpoint failures out with the report. The in-dialog warning only reaches a
+    // user who is looking at the screen when the run ends and doesn't reflexively dismiss it; the parent
+    // folds this into the app-level notice so the warning survives every dismissal path.
+    if (report) dispatch("apply", { report, checkpointFailures });
+  }
+
+  /** Back out of the (CPE-1590) overwrite confirm panel without touching anything — the dialog itself
+   *  stays open on the op list/preview exactly as it was. */
+  function cancelOverwriteConfirm() {
+    showOverwriteConfirm = false;
   }
 
   function cancel() {
     if (applying) return; // no mid-run cancel in v1 — let it finish rather than leaving a half-applied job
     detachChannel();
-    dispatch("cancel");
+    // CPE-1590: Escape and the backdrop click both land here, including while the checkpoint-failure
+    // warning is showing — so carry it out rather than letting a habitual keystroke discard it unread.
+    dispatch("cancel", { checkpointFailures });
   }
 </script>
 
-<svelte:window on:keydown={(e) => e.key === "Escape" && cancel()} />
+<svelte:window
+  on:keydown={(e) => {
+    if (e.key !== "Escape") return;
+    // Escape backs out of the overwrite confirm panel first, one level at a time, rather than closing
+    // the whole dialog straight through it.
+    if (showOverwriteConfirm) cancelOverwriteConfirm();
+    else cancel();
+  }}
+/>
 
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={cancel}>
@@ -339,6 +433,20 @@
         <input type="checkbox" bind:checked={nonDestructive} />
         Write to new files (non-destructive)
       </label>
+      {#if !nonDestructive}
+        <!-- CPE-1590: clearer labelling of what unchecking this actually does, always visible while
+             unchecked (not only once a live overwriting plan is computed) so the risk is legible before
+             you've even added an op that triggers it. -->
+        <div class="overwrite-hint" data-testid="overwrite-hint">
+          Unchecked: Compress, Strip metadata, and Watermark (alone or combined, with no other op that
+          renames the output) overwrite your original files instead of creating new ones. Resize, Rotate,
+          Flip, Convert, and Rename usually produce a differently-named file too — though a narrow edge
+          case (Convert to the extension a file already has, or Rename left at its default
+          "{RENAME_DEFAULT_TEMPLATE}" template) can still land on the same name. Either way, the plan
+          preview below always shows the real planned path, and Apply always confirms first whenever it
+          would actually overwrite something.
+        </div>
+      {/if}
     </div>
 
     <div class="preview" data-testid="plan-preview">
@@ -397,14 +505,58 @@
       </div>
     {/if}
 
-    <div class="actions">
-      {#if completed}
-        <button class="btn primary" on:click={finish} data-testid="batch-media-done">Done</button>
-      {:else}
-        <button class="btn" data-testid="cancel-btn" disabled={applying} on:click={cancel}>Cancel</button>
-        <button class="btn primary" data-testid="apply-btn" disabled={!canApply} on:click={apply}>{applying ? "Applying…" : "Apply"}</button>
-      {/if}
-    </div>
+    {#if checkpointFailures.length > 0}
+      <!-- CPE-1590 code-review follow-up: the confirm panel promises a pre-overwrite checkpoint as the
+           recovery net for a write that has no other one — a failure to actually take it must never be
+           silent (a console.error alone is invisible), so it holds the dialog open and names exactly
+           which folder(s) have no checkpoint to revert to. The write itself still went ahead (already
+           confirmed), this is purely "here's what your safety net actually covers". -->
+      <div class="checkpoint-warn" data-testid="checkpoint-warning">
+        <strong>No checkpoint was taken</strong> for {checkpointFailures.length}
+        folder{checkpointFailures.length === 1 ? "" : "s"} before the overwrite — the write went ahead (you
+        already confirmed it), but there is nothing to revert to for:
+        <ul class="checkpoint-warn-list">
+          {#each checkpointFailures as dir}
+            <li title={dir}>{baseName(dir) || dir}</li>
+          {/each}
+        </ul>
+        Your only recovery for files in {checkpointFailures.length === 1 ? "that folder" : "those folders"}
+        now is your own backup.
+      </div>
+    {/if}
+
+    {#if showOverwriteConfirm}
+      <!-- CPE-1590: the destructive-overwrite confirm — replaces the normal action row so Apply can't
+           still be clicked underneath it, names exactly how many originals will be overwritten, and
+           requires its own explicit danger-styled click (not dismissible by a stray Enter/click on
+           where Apply used to be). -->
+      <div class="overwrite-confirm" data-testid="overwrite-confirm">
+        <p class="overwrite-confirm-text">
+          <strong>{overwriteItems.length}</strong> original file{overwriteItems.length === 1 ? "" : "s"}
+          will be overwritten in place — the edited bytes replace the source file, and this is
+          <strong>not on the Undo (Ctrl+Z) stack</strong>. The app will attempt to checkpoint the affected
+          folder{uniqueParentDirs(overwriteItems.map((it) => it.input)).length === 1 ? "" : "s"} first as a
+          recovery net — if that fails you'll see a clear warning naming which folder(s) it didn't cover,
+          rather than it failing silently — but the write itself proceeds either way once you confirm, so
+          the only guaranteed way back is your own backup.
+        </p>
+        <div class="overwrite-confirm-actions">
+          <button class="btn" data-testid="overwrite-confirm-cancel" on:click={cancelOverwriteConfirm}>Cancel</button>
+          <button class="btn primary danger" data-testid="overwrite-confirm-go" on:click={apply}>
+            Overwrite {overwriteItems.length} file{overwriteItems.length === 1 ? "" : "s"}
+          </button>
+        </div>
+      </div>
+    {:else}
+      <div class="actions">
+        {#if completed}
+          <button class="btn primary" on:click={finish} data-testid="batch-media-done">Done</button>
+        {:else}
+          <button class="btn" data-testid="cancel-btn" disabled={applying} on:click={cancel}>Cancel</button>
+          <button class="btn primary" data-testid="apply-btn" disabled={!canApply} on:click={handleApplyClick}>{applying ? "Applying…" : "Apply"}</button>
+        {/if}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -503,6 +655,17 @@
     color: var(--text-dim);
   }
 
+  /* CPE-1590: ambient reminder of what the unchecked box actually does, shown right below it. */
+  .overwrite-hint {
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--danger);
+    background: var(--surface-alt);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+  }
+
   .preview {
     max-height: 200px;
     overflow: auto;
@@ -557,6 +720,43 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
   .btn:disabled { opacity: 0.5; }
+  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+  .btn.primary.danger:hover:not(:disabled) { background: var(--danger-hover); }
+
+  /* CPE-1590: the destructive-overwrite confirm panel — replaces the normal action row rather than
+     floating another backdrop over it, so there's exactly one thing to click either way. */
+  .overwrite-confirm {
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+    padding: 10px 12px;
+    margin-bottom: 4px;
+  }
+  .overwrite-confirm-text {
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--text);
+    margin: 0 0 10px;
+  }
+  .overwrite-confirm-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* CPE-1590 code-review follow-up: a failed pre-overwrite checkpoint must be as visible as the promise
+     of it was — same danger-toned treatment as the confirm panel, shown in the post-run results area. */
+  .checkpoint-warn {
+    margin-bottom: 14px;
+    border: 1px solid var(--danger);
+    border-radius: var(--radius);
+    background: var(--surface-alt);
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  .checkpoint-warn-list {
+    margin: 4px 0;
+    padding-left: 18px;
+  }
+  .checkpoint-warn-list li { color: var(--text); font-weight: 500; }
 
   /* CPE-1115: prominent skipped-files results panel — a skip is never silently dropped. */
   .skips {
