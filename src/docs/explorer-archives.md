@@ -136,12 +136,15 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
 - **RAR can only give you back an uncompressed (STORE) entry**, one file at a time via "open" or Alt-drag —
   a genuinely compressed RAR entry refuses with a clear error rather than corrupting output.
 - **"Check archive safety…" is ZIP-family only** and never gates Extract — see *Safety limits* above.
-- **A password-protected ZIP can't be safety-checked today — and the result looks reassuring anyway.**
-  The safety scan needs to read every entry's size metadata, and an encrypted entry can't be read without
-  its password. The scan skips those entries silently, so it finishes having examined *nothing* and reports
-  the same green **"No zip-bomb risk detected"** banner you'd get for a genuinely safe archive. **Treat a
-  clean safety result on a password-protected archive as "not checked", not as "safe."** This is a known
-  bug, tracked separately.
+- **A password-protected ZIP can't be safety-checked today — and the dialog says so honestly.** The
+  safety scan needs to read every entry's size metadata, and an encrypted entry can't be read without its
+  password. The scan still opens the archive and counts how many entries it couldn't read; when that count
+  is non-zero, the dialog shows a dedicated **"couldn't be read (likely password-protected) — this
+  archive's safety could not be checked"** state instead of the green safe banner — it never claims "No
+  zip-bomb risk detected" for an archive it only partially (or never) examined. If some entries *were*
+  readable and one of those trips the danger threshold, the **DANGER** banner still leads, with a note
+  that other entries couldn't be assessed. There's still no password prompt in this dialog, so an
+  all-encrypted zip always reports as unassessed rather than safe or dangerous.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit is fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
   a very large archive's listing has no built-in ceiling.

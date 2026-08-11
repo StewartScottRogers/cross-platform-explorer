@@ -19,6 +19,7 @@ const archive = (over: Partial<ArchiveSafetyReport> = {}): ArchiveSafetyReport =
   entries_scanned: 10,
   truncated: false,
   unreadable: false,
+  unreadable_entries: 0,
   ...over,
 });
 
