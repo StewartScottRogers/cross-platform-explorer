@@ -44,24 +44,41 @@ pub struct RatioReport {
 pub struct RatioLimits {
     pub max_entry_ratio: f64,
     pub max_overall_ratio: f64,
+    /// CPE-1602: the ratio computed from an archive's own *declared* metadata, at or above which
+    /// [`crate::archive_safety_scan`] no longer takes that metadata's word for it and instead verifies
+    /// the entry's real uncompressed size via a capped, streaming decompression. Deliberately well
+    /// below `max_entry_ratio` — a forger who tunes a bomb's declared ratio to sit just under the
+    /// danger line (rather than leaving it obviously over) must still get caught. This field is inert
+    /// to [`expansion_ratio`] itself (a pure function over sizes it's already given); it exists here so
+    /// one `RatioLimits` configures the whole scan.
+    pub suspicion_ratio: f64,
 }
 
 /// Default per-entry expansion-ratio threshold (see [`RatioLimits`] doc for the reasoning).
 pub const DEFAULT_MAX_ENTRY_RATIO: f64 = 100.0;
 /// Default overall (whole-archive) expansion-ratio threshold.
 pub const DEFAULT_MAX_OVERALL_RATIO: f64 = 100.0;
+/// Default verification-trigger ratio (see [`RatioLimits::suspicion_ratio`]) — a fifth of the default
+/// danger threshold, comfortably above the ~2-10x a legitimate mixed-content archive typically shows
+/// (per the module doc comment) so ordinary archives skip verification entirely, but low enough that a
+/// forger has no safe margin to hide a real bomb's ratio under.
+pub const DEFAULT_SUSPICION_RATIO: f64 = 20.0;
 
 impl Default for RatioLimits {
     fn default() -> Self {
-        RatioLimits { max_entry_ratio: DEFAULT_MAX_ENTRY_RATIO, max_overall_ratio: DEFAULT_MAX_OVERALL_RATIO }
+        RatioLimits {
+            max_entry_ratio: DEFAULT_MAX_ENTRY_RATIO,
+            max_overall_ratio: DEFAULT_MAX_OVERALL_RATIO,
+            suspicion_ratio: DEFAULT_SUSPICION_RATIO,
+        }
     }
 }
 
 impl RatioLimits {
     /// Build limits with explicit thresholds (for a caller that wants stricter/looser scoring than
     /// the [`Default`]).
-    pub const fn new(max_entry_ratio: f64, max_overall_ratio: f64) -> Self {
-        RatioLimits { max_entry_ratio, max_overall_ratio }
+    pub const fn new(max_entry_ratio: f64, max_overall_ratio: f64, suspicion_ratio: f64) -> Self {
+        RatioLimits { max_entry_ratio, max_overall_ratio, suspicion_ratio }
     }
 }
 
@@ -70,7 +87,7 @@ impl RatioLimits {
 /// (nothing expanded — not dangerous); `compressed == 0` and `uncompressed > 0` scores
 /// [`f64::INFINITY`] (infinite expansion from zero bytes — always flagged as the most dangerous
 /// case). Both branches are exact and can never produce `NaN`.
-fn ratio(uncompressed: u64, compressed: u64) -> f64 {
+pub(crate) fn ratio(uncompressed: u64, compressed: u64) -> f64 {
     if compressed == 0 {
         if uncompressed == 0 {
             0.0
@@ -185,7 +202,7 @@ mod tests {
             entry("b", 1, 90), // 90x, under the 100x entry threshold
             entry("c", 1, 90), // 90x, under the 100x entry threshold
         ];
-        let limits = RatioLimits::new(100.0, 50.0);
+        let limits = RatioLimits::new(100.0, 50.0, DEFAULT_SUSPICION_RATIO);
         let report = expansion_ratio(&entries, &limits);
 
         assert!(report.flagged.is_empty(), "no entry individually crosses max_entry_ratio");
