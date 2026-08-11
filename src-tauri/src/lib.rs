@@ -2127,15 +2127,28 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
 /// report, so one path's failure doesn't lose the others' results. Async + `spawn_blocking` per
 /// CPE-760/761 — a multi-pass overwrite is heavy, potentially slow disk I/O and must not freeze the
 /// main thread.
+///
+/// **CPE-1611:** `cpe_server::secure_shred::shred_paths` itself now refuses (returns `Err`, shreds
+/// nothing) unless `confirmed` is `true` — this thin dispatcher does nothing special to enforce that;
+/// it's the engine's own gate, same treatment CPE-1599 gave `batch_media_execute_stream`. The error
+/// propagates straight out to the frontend `Result`. `ShredConfirmDialog.svelte`'s "Shred permanently"
+/// button is the one and only call site allowed to pass `confirmed: true`.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn shred_paths(app: tauri::AppHandle, paths: Vec<String>, scheme: ShredScheme) -> Vec<ShredResult> {
+async fn shred_paths(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    scheme: ShredScheme,
+    confirmed: bool,
+) -> Result<Vec<ShredResult>, String> {
     // Same as its siblings `delete_to_trash`/`delete_permanent` — a shred is the user's doing too, not
-    // the owning agent session (CPE-1102 pattern).
-    note_app_op(&app, || paths.clone());
-    tauri::async_runtime::spawn_blocking(move || cpe_server::secure_shred::shred_paths(&paths, scheme))
+    // the owning agent session (CPE-1102 pattern). Only worth noting once we're actually about to shred.
+    if confirmed {
+        note_app_op(&app, || paths.clone());
+    }
+    tauri::async_runtime::spawn_blocking(move || cpe_server::secure_shred::shred_paths(&paths, scheme, confirmed))
         .await
-        .unwrap()
+        .map_err(|e| e.to_string())?
 }
 
 /// Copy entries into `dest`, auto-renaming on collision.

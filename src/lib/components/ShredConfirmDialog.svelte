@@ -19,6 +19,12 @@
    * requires the explicit danger-button confirm (the safeguard called for since there's no trash
    * fallback), calls `commands.shredPaths`, and dispatches `done` with the per-path results for the
    * caller to summarize + refresh the listing.
+   *
+   * **CPE-1611:** the backend engine (`secure_shred::shred_paths`) now refuses the whole call unless
+   * `confirmed: true` is passed — this dialog's `confirmShred`, fired only by the "Shred permanently"
+   * button below, is the ONE place in the codebase allowed to pass it. That closes the gap where the
+   * dialog was a pure frontend invariant: a devtools call or a future automation surface could invoke
+   * `shred_paths` directly and skip this confirm entirely.
    */
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
@@ -49,8 +55,14 @@
     busy = true;
     error = "";
     try {
-      const results = await commands.shredPaths(paths, scheme);
-      dispatch("done", results);
+      const res = await commands.shredPaths(paths, scheme, true);
+      if (res.status === "ok") {
+        dispatch("done", res.data);
+      } else {
+        const message = String(res.error);
+        error = message;
+        dispatch("error", message);
+      }
     } catch (e) {
       const message = String(e);
       error = message;

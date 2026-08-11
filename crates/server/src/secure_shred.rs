@@ -121,8 +121,30 @@ impl ShredResult {
 /// wrapper the `shred_paths` Tauri command dispatches straight into (CPE-1240); rejects remote paths
 /// via [`crate::fs_route::require_local`] up front, same guard `delete_permanent` uses, since shredding
 /// a remote file makes no sense (there's nothing local to overwrite).
-pub fn shred_paths(paths: &[String], scheme: ShredScheme) -> Vec<ShredResult> {
-    paths
+///
+/// **Refuses the whole batch up front** ([`Err`], nothing touched) when `confirmed` is `false`
+/// (CPE-1611, following CPE-1599's identical treatment of `batch_media_execute_stream`). Every call to
+/// this function is unconditionally destructive — unlike batch-media's plan, which only *sometimes*
+/// resolves to an in-place overwrite, `shred_paths` always overwrites-then-unlinks every path it's
+/// given, and does so with **no trash fallback at all** — so there is no "safe" plan to distinguish;
+/// the flag itself is the entire gate. This closes the same gap CPE-1599 closed: the confirm dialog
+/// (`ShredConfirmDialog.svelte`) was previously the *only* thing standing between a caller and an
+/// irreversible shred, so a devtools call or a future automation surface could invoke the command
+/// directly and skip it. `ShredConfirmDialog.svelte`'s "Shred permanently" button — the one place in
+/// the codebase allowed to set `confirmed: true` — is now the only thing that can make the backend
+/// actually shred a file.
+pub fn shred_paths(paths: &[String], scheme: ShredScheme, confirmed: bool) -> Result<Vec<ShredResult>, String> {
+    if !confirmed {
+        return Err(
+            "refusing to shred: `confirmed` was not set on this shred_paths call — this is a \
+             permanent, non-recoverable operation with no trash fallback, so it must be re-invoked \
+             with an explicit confirmation (only ShredConfirmDialog's \"Shred permanently\" button \
+             should ever set it)"
+                .to_string(),
+        );
+    }
+
+    Ok(paths
         .iter()
         .map(|p| {
             if let Err(e) = crate::fs_route::require_local(p) {
@@ -133,7 +155,7 @@ pub fn shred_paths(paths: &[String], scheme: ShredScheme) -> Vec<ShredResult> {
                 Err(e) => ShredResult::from_err(p, e),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Run a single overwrite pass: open `path` for writing, seek to 0, overwrite exactly `size` bytes
@@ -336,7 +358,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "one.txt", &[0x42; 256]);
 
-        let results = shred_paths(std::slice::from_ref(&path), ShredScheme::Zero);
+        let results = shred_paths(std::slice::from_ref(&path), ShredScheme::Zero, true).unwrap();
 
         assert_eq!(results.len(), 1);
         assert!(results[0].ok, "expected ok, got error: {}", results[0].error);
@@ -353,7 +375,7 @@ mod tests {
         let good = write_temp(&dir, "good.txt", &[0x01; 64]);
         let missing = dir.path().join("nope.txt").to_string_lossy().to_string();
 
-        let results = shred_paths(&[missing.clone(), good.clone()], ShredScheme::Zero);
+        let results = shred_paths(&[missing.clone(), good.clone()], ShredScheme::Zero, true).unwrap();
 
         assert_eq!(results.len(), 2);
         assert!(!results[0].ok);
@@ -368,9 +390,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_temp(&dir, "d.bin", &[0x77; 100]);
 
-        let results = shred_paths(&[path], ShredScheme::Dod3);
+        let results = shred_paths(&[path], ShredScheme::Dod3, true).unwrap();
 
         assert_eq!(results[0].passes_run, 3);
         assert_eq!(results[0].bytes_written, 300);
+    }
+
+    // --- CPE-1611: engine-side refusal of an unconfirmed shred_paths call -------------------------
+
+    /// The core defence-in-depth guarantee: `confirmed: false` refuses the WHOLE batch — `Err`,
+    /// nothing shredded, not even the paths that would otherwise have succeeded — with a specific
+    /// reason, not a panic and not a silent no-op.
+    #[test]
+    fn shred_paths_refuses_the_whole_batch_when_not_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_temp(&dir, "a.txt", &[0x42; 64]);
+        let b = write_temp(&dir, "b.txt", &[0x43; 64]);
+
+        let err = shred_paths(&[a.clone(), b.clone()], ShredScheme::Zero, false)
+            .expect_err("an unconfirmed shred_paths call must be refused, not executed");
+
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+        assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+        // Nothing touched: both files still exist with their original bytes.
+        assert!(std::path::Path::new(&a).exists(), "a.txt must be untouched by a refused batch");
+        assert!(std::path::Path::new(&b).exists(), "b.txt must be untouched by a refused batch");
+        assert_eq!(std::fs::read(&a).unwrap(), vec![0x42; 64]);
+        assert_eq!(std::fs::read(&b).unwrap(), vec![0x43; 64]);
+    }
+
+    /// The flip side: the identical call proceeds and actually shreds every path once `confirmed` is
+    /// explicitly `true` — proving the flag is load-bearing, not decorative.
+    #[test]
+    fn shred_paths_proceeds_once_confirmed_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = write_temp(&dir, "a.txt", &[0x11; 64]);
+
+        let results = shred_paths(std::slice::from_ref(&a), ShredScheme::Zero, true)
+            .expect("a confirmed shred_paths call must be allowed to run");
+
+        assert_eq!(results.len(), 1);
+        assert!(results[0].ok, "expected ok, got error: {}", results[0].error);
+        assert!(!std::path::Path::new(&a).exists(), "a confirmed shred must actually remove the file");
     }
 }
