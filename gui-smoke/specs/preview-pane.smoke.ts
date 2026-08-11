@@ -179,11 +179,13 @@ describe("CPE-1629 — headless GUI smoke: preview-pane provider screenshots", f
   this.timeout(240_000);
 
   let samplesRootAbs = "";
+  let tmpDirAbs = "";
 
   before(() => {
     const state = JSON.parse(fs.readFileSync(STATE_FILE, "utf-8")) as { tmpDir?: string };
     if (!state.tmpDir) throw new Error("expected STATE_FILE to carry the seeded tmpDir");
     samplesRootAbs = path.join(state.tmpDir, SAMPLES_DIR_NAME);
+    tmpDirAbs = state.tmpDir;
   });
 
   afterEach(async function () {
@@ -328,5 +330,43 @@ describe("CPE-1629 — headless GUI smoke: preview-pane provider screenshots", f
     await snap("preview-pane-toml-light-wide");
 
     await assertAppStillAlive("previewing text/config.yaml + text/config.toml");
+  });
+
+  it("the plain code preview renders syntax-highlighted `.hljs-*` markup, not flat monochrome (CPE-1631)", async function () {
+    // CPE-1631: before this ticket, `highlight.ts` genuinely ran highlight.js and emitted `hljs-*`
+    // classed markup, but NOTHING in the app defined a `.hljs-*` CSS rule — every code view rendered
+    // flat monochrome in both themes, invisible to the whole test suite because jsdom can't see
+    // colour. This spec can't assert colour either (still no real rasterizer here), but it CAN pin
+    // down that the fix's markup contract holds (a real `.hljs-*`-classed span exists in the DOM) and
+    // — the actual point of this file — leave a permanent screenshot of both themes in CI, so a
+    // future regression (e.g. a token rename that silently orphans the CSS rules) is visible to a
+    // Visual Critic reviewing the artifact instead of requiring another from-scratch manual harness.
+    //
+    // Reuses the CPE-1096-fixture.rs already seeded by wdio.conf.ts#onPrepare into the root tmpDir
+    // (not the CPE-1358-samples subdir) for the code-preview outline/rows/minimap coverage in
+    // open-dir.smoke.ts — kept as a duplicated literal here rather than an import from wdio.conf.ts,
+    // matching this suite's existing convention (see open-dir.smoke.ts's identical note) of not
+    // reaching across the runner/worker process boundary. Its real Rust source (a struct + two fns)
+    // already exercises keyword/string/comment/number/type token classes.
+    const fixtureName = "CPE-1096-fixture.rs";
+    await openSampleFile(tmpDirAbs, fixtureName);
+
+    // `.cl-row[data-line="1"]` existing proves the highlighted `<code>` actually rendered (same
+    // assertion open-dir.smoke.ts uses); go one step further and confirm a REAL `.hljs-*` class
+    // landed in the DOM, not just escaped plain text (the CPE-1631 bug's exact failure mode would
+    // still pass a markup-only check that stopped at "some span exists").
+    const firstLine = await $('.cl-row[data-line="1"]');
+    await firstLine.waitForExist({ timeout: 15_000, timeoutMsg: "expected the code preview's first line to render" });
+    const codeHtml = await (await $(".cl-code")).getHTML({ includeSelectorTag: false });
+    expect(codeHtml, "expected highlight.js to emit at least one hljs-* class").to.match(/class="hljs-/);
+
+    for (const combo of [
+      { theme: "dark" as const, widthPx: NARROW, suffix: "dark-narrow" },
+      { theme: "light" as const, widthPx: WIDE, suffix: "light-wide" },
+    ]) {
+      await applyCombo(combo);
+      await snap(`preview-pane-code-highlight-${combo.suffix}`);
+    }
+    await assertAppStillAlive(`previewing ${fixtureName}`);
   });
 });
