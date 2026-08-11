@@ -45,14 +45,52 @@ export function watchTargetFor(sessions: AgentSession[], current: string): strin
 }
 
 /**
- * The set of running-agent sessions to watch: **all of them** (CPE-1099 conflict-radar enablement).
- * Agent Watch now watches every running session concurrently (keyed by sessionId), not just the one
- * whose project the explorer is inside — cwd-overlap is the radar's *frontend fold*, not a
- * watch-selection concern. Kept pure and identity so it stays trivially testable and preserves
- * off-means-off: no sessions ⇒ empty ⇒ nothing is ever armed.
+ * Grows the "visited this run" set that gates which sessions actually get an armed filesystem watcher
+ * (CPE-1606). If `current` falls inside a running session's project, that session's id is added — once
+ * a project is visited, it stays watched for the rest of the session's life, even after the explorer
+ * navigates away. That retention is deliberate: without it, hopping between two sibling agent projects
+ * (`/work/api` then `/work/web`, both running agents) would tear down and re-arm a `notify` watcher on
+ * every single navigation, and it would silently truncate the Radar/Cost/History tabs (CPE-1099/1107) to
+ * whatever the explorer happens to be looking at *right now* instead of everything you've actually
+ * looked at this run. A session you never open, on the other hand, is never added here, so it never gets
+ * a watcher — restoring the "off means off" boundary `AGENT-WATCH.md` promises: watching costs nothing
+ * for a project you haven't opened.
+ *
+ * Also prunes ids for sessions that are no longer running, so the set can't grow without bound across a
+ * long-lived app session. Pure, and returns the same `visited` instance when nothing changes, so callers
+ * (and tests) can rely on reference equality to skip redundant reconcile work.
  */
-export function watchTargets(sessions: AgentSession[]): AgentSession[] {
-  return sessions;
+export function markVisited(
+  sessions: AgentSession[],
+  current: string,
+  visited: ReadonlySet<string>,
+): Set<string> {
+  const running = new Set(sessions.map((s) => s.sessionId));
+  const target = watchTargetFor(sessions, current);
+  const hitId = target
+    ? sessions.find((s) => normalizePath(s.cwd) === normalizePath(target))?.sessionId
+    : undefined;
+
+  let changed = hitId !== undefined && !visited.has(hitId);
+  if (!changed) for (const id of visited) if (!running.has(id)) { changed = true; break; }
+  if (!changed) return visited as Set<string>;
+
+  const next = new Set<string>();
+  for (const id of visited) if (running.has(id)) next.add(id);
+  if (hitId) next.add(hitId);
+  return next;
+}
+
+/**
+ * The set of running-agent sessions to actually watch (CPE-1606): only sessions whose project folder
+ * the explorer has visited at least once this run — i.e. `visited` (grown by `markVisited` as
+ * navigation happens) — not "every currently-running session" (the CPE-1099 behavior this replaces,
+ * which kept a watcher armed for a project the explorer never opened; see AGENT-WATCH.md's "off means
+ * off" boundary). Kept pure and identity-shaped so it stays trivially testable: no sessions, or nothing
+ * visited yet, ⇒ empty ⇒ nothing is ever armed.
+ */
+export function watchTargets(sessions: AgentSession[], visited: ReadonlySet<string>): AgentSession[] {
+  return sessions.filter((s) => visited.has(s.sessionId));
 }
 
 /** Test/introspection helper: the current session list synchronously. */

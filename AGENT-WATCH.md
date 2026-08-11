@@ -21,7 +21,9 @@ feature-gated behind `sidecar-platform`; with no agent running the plain explore
 - **Left-pane "Agents" section (CPE-397):** running sessions listed; click one to navigate into its
   Project folder.
 - **Filesystem watcher (CPE-398):** a `notify` watcher on the watched folder streams coalesced
-  create/modify/move/delete events (reads excluded — not observable this way).
+  create/modify/move/delete events (reads excluded — not observable this way). Armed only for a
+  session whose project folder the explorer has navigated into at least once this run, and retained
+  for that session's whole lifetime once armed (CPE-1606 — see Boundaries below).
 - **Live view (CPE-399):** the file list annotates touched rows (kind badge + accent, fading);
   an activity strip names the agent and shows recent changes.
 - **Live folder refresh (CPE-401):** created files appear and deleted ones vanish without a manual
@@ -80,9 +82,30 @@ pay the cost. Do not trade away visibility for speed, size, or simplicity.
 
 ## Boundaries
 
-- **Off means off.** With Agent Watch disabled, the plain explorer must still be
-  fast, small, and predictable. Watchers idle, no background polling, no startup
-  penalty. This is the one constraint the mode may not spend.
+- **Off means off.** With Agent Watch disabled, or for a coding-agent project you
+  never navigate the explorer into, the plain explorer must still be fast, small,
+  and predictable: no watcher, no background polling, no startup penalty. This is
+  the one constraint the mode may not spend.
+  - CPE-1099 added concurrent multi-session watching (the Radar/Cost/History tabs
+    fold data across every session, not just the on-screen one) — but a naive
+    "watch every currently-running session unconditionally" reading of that
+    briefly violated the boundary above: it armed a filesystem watcher for a
+    project the explorer had *never* opened, for as long as that agent session
+    ran (CPE-1606). The fix keeps the multi-session value without spending the
+    boundary: a session's watcher only arms once the explorer has navigated into
+    its project folder at least once **this run** (`markVisited` in
+    `src/lib/agentSessions.ts`). A session never opened stays fully idle — genuinely
+    off means off.
+  - Once a project has been visited, its watcher is **retained** for the rest of
+    that session's life, even after the explorer navigates elsewhere — including
+    to a sibling agent's project. This is deliberate, not a residual leak: tearing
+    the watch down on every navigation would thrash a `notify` watcher on rapid
+    back-and-forth between sibling projects, and would prematurely flush that
+    session's Cost/History row as if it had ended (`reconcileAgentWatch` flushes
+    on removal), fragmenting one live session into two metrics rows. Ending the
+    agent session (not just navigating away) is what actually stops watching a
+    visited project — see `src/docs/explorer-agent-watch.md` for the user-facing
+    framing and the `markVisited` doc comment for the full reasoning.
 - It observes; it does not drive the agent. No agent control surface lives here.
 - It should be implementable as an additive layer over the existing filesystem
   commands rather than a rewrite of them.

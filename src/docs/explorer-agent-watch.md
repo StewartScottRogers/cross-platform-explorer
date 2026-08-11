@@ -121,13 +121,15 @@ in the explorer.
 
 ## Limits / notes
 
-- **"Off means off" is true for the strip and row annotations, not for the underlying watcher.** Leaving
-  the folder (or never opening it) hides the strip and file-list badges, but the app watches **every
-  currently-running agent session's project folder concurrently** — not just the one whose folder you
-  happen to be looking at — for as long as that session stays alive, so the Radar/Cost/History tabs work
-  across sessions. Ending the agent session (not just navigating away) is what actually stops watching it.
-  This is a real, intentional divergence from `AGENT-WATCH.md`'s "off means off" framing (tracked as
-  CPE-1606, filed alongside this page).
+- **"Off means off" holds for a project you never open — a session you never navigate the explorer
+  into stays completely unwatched, no matter how long it runs (CPE-1606).** The nuance is what happens
+  once you *do* open it: the underlying `notify` watcher stays armed for that project for the rest of
+  the session's life, even after you navigate elsewhere — including to a sibling agent's project — so
+  the Radar/Cost/History tabs keep working across every project you've actually looked at this run, and
+  a quick hop between two sibling agent folders doesn't repeatedly tear down and re-arm a watcher.
+  Leaving the folder only hides the strip and file-list badges; ending the agent session (not just
+  navigating away from a project you've visited) is what actually stops watching it. See
+  `AGENT-WATCH.md`'s Boundaries section for the full reasoning.
 - **Advisory numbers, never billing.** Every dollar/token figure across Cost and History is scraped from
   the agent's own printed output, not an authoritative source.
 - **Reads are inferred, not observed.** A filesystem watcher can't see a read; the Consulted list and the
