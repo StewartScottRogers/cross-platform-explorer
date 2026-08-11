@@ -99,6 +99,19 @@ decodable x86 instructions (`push ebp; mov ebp, esp; xor eax, eax; pop ebp; ret`
 goblin exactly like a real EXE/DLL would, so the Binary Inspector's tabs and the disassembly view all have
 something real to show rather than a hand-typed byte blob's worth of nothing.
 
+### `other/mini-dotnet.dll` — synthetic MANAGED PE fixture (CPE-1629)
+
+Same convention as `other/mini.dll` above (a throwaway Rust program, not a shipped dependency), reproducing
+`dotnet_metadata.rs`'s own `build_minimal_managed_pe()` test helper byte-for-byte: a minimal PE32 with a
+populated CLR data directory (`IMAGE_COR20_HEADER`) and a `#~` metadata stream declaring four tables —
+`TypeDef` (`MyType1`/`MyType2`), `MethodDef` (`Method1`/`Method2`), `Assembly` (`MyAssembly`), and
+`AssemblyRef` (`mscorlib`, `System.Core`). `binary_info` reports it managed (`is_managed` true) and
+`dotnet_metadata::read` resolves the full assembly identity — see
+`crates/server/tests/sample_fixtures.rs::mini_dotnet_dll_parses_as_a_real_managed_pe`. Exists specifically
+so the Binary Inspector's ".NET metadata" tab (CPE-1615) has a real sample to render against once that
+tab ships — the tab only appears for a managed assembly, and `mini.dll` (native) deliberately never
+triggers it.
+
 ## PDF fixtures (CPE-1357/1358)
 
 `documents/doc.pdf` used to be a **degenerate** fixture (`/Kids [] /Count 0`, no `xref` table at all) —

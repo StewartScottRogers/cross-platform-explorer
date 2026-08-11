@@ -55,6 +55,15 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    like every other file — it stays last as a defense-in-depth regression pin, not because it's currently
    expected to fail. Pairs with the headless coverage ratchet `src/lib/sampleCoverage.test.ts`, which
    asserts every supported preview kind has a sample in the first place.
+7. **Preview-pane provider surfaces render, in BOTH themes and BOTH pane widths (CPE-1629)** —
+   `specs/preview-pane.smoke.ts` opens the preview pane against committed `samples/` files and
+   `snap()`s each structured provider: the Binary Inspector's tabs (data-driven off whatever
+   `.bp-tabs .tab` buttons actually render, walked against both a native PE — `other/mini.dll` — and a
+   managed .NET PE — `other/mini-dotnet.dll`, CPE-1629's own fixture — including CPE-1615's ".NET
+   metadata" tab, picked up automatically with zero spec changes when that PR merged), the sqlite
+   data-grid, the font glyph-grid specimen, and the certificate/JWT previews' EXPIRED badges. See
+   "Preview-pane provider screenshots" below for the full write-up and the one-line recipe for adding a
+   new provider.
 
 ## Prerequisites
 
@@ -269,6 +278,12 @@ app's main screens** at `gui-smoke/.screenshots/<name>.png`. Two shared helpers 
 | `samples-font.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The new `fonts/mini.ttf` sample rendering in the font-specimen preview |
 | `samples-data-grid.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The new `data/mini.sqlite` sample rendering in the data-grid preview |
 | `samples-pdf-malformed.png` | `samples-walk-fail.png` | `samples.smoke.ts` | The CPE-1357 crash-regression fixture (`documents/malformed.pdf`) — the app surviving via the `pdf_validity` reject → metadata-pane fallback |
+| `binary-native-<tab>-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | Binary Inspector tabs over a native PE (`other/mini.dll`) — `<tab>` is whatever `.bp-tabs .tab` renders (Overview in all 4 `<combo>`s: `light-wide`/`light-narrow`/`dark-wide`/`dark-narrow`; up to 2 more tabs once, at a shared combo — `restTabLimit`, see `walkBinaryInspectorTabs`'s doc comment) |
+| `binary-managed-<tab>-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | Binary Inspector tabs over a MANAGED .NET PE (`other/mini-dotnet.dll`, CPE-1629) — same data-driven walk; includes CPE-1615's real ".NET metadata" tab (`binary-managed-net-metadata-*.png`, full flagship depth, picked up automatically once that PR merged — real assembly identity + referenced-assemblies table) |
+| `preview-pane-data-grid-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | The sqlite data-grid preview (`database/mini.sqlite`), `light-wide` + `dark-narrow` |
+| `preview-pane-font-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | The font glyph-grid specimen (`fonts/mini.ttf`), `dark-wide` + `light-narrow` — a real pill-reflow surface |
+| `preview-pane-cert-*-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | Certificate preview: `expired.pem`'s EXPIRED badge at `dark-narrow` (the pill-clipping case) + `chain.pem` at `light-wide` |
+| `preview-pane-jwt-*-<combo>.png` | `preview-pane-…-fail.png` | `preview-pane.smoke.ts` | JWT preview: `expired.jwt`'s EXPIRED badge at `dark-narrow` + `rich-claims.jwt` at `light-wide` |
 
 `.screenshots/` is gitignored — these are run artifacts, never committed. Both helpers swallow their
 own errors (a screenshot is observability, not an assertion — it must never fail or mask a real
@@ -290,7 +305,78 @@ way to get a screenshot is still to add one (see any file in `specs/` for the pa
 surface the same way a user does, assert something real about it, `snap()` inline, and wire the
 `afterEach` fail-shot). Run the harness locally (`cd gui-smoke && npm test`, prerequisites above) and
 the PNG lands in `.screenshots/` for a reviewer — human or, per CPE-1148 Part B, a future
-Visual-Critic sub-agent — to open directly.
+Visual-Critic sub-agent — to open directly. **If the surface renders in the PREVIEW PANE specifically**
+(a new file-preview provider, or a new tab/section inside an existing one like the Binary Inspector),
+see the next section — `specs/preview-pane.smoke.ts` is the one file that already owns that pattern,
+and adding to it is usually cheaper than a whole new spec.
+
+## Preview-pane provider screenshots — `specs/preview-pane.smoke.ts` (CPE-1629)
+
+Before this spec, `gui-smoke` had **zero coverage of the preview pane's structured providers**. When
+the Binary Inspector (CPE-1597) gained a whole new tab (CPE-1615's ".NET metadata" tab), CI produced
+no screenshot of it — the only way to actually look at the change was a reviewer hand-building a
+throwaway Vite + real-Chrome harness, mounting the component against canned data, then throwing the
+harness away. This spec is that coverage, made permanent and reusable: it opens the preview pane
+against the same committed `CPE-1358-samples` copy `samples.smoke.ts` walks (`wdio.conf.ts
+#seedSamplesFixture` — new samples are picked up automatically, no fixture-list to maintain) and
+`snap()`s each structured provider surface, **in both light and dark theme, and at both a narrow and a
+comfortable pane width** — the narrow case is deliberate: that's where clipping and pill-reflow
+defects actually show up (CLAUDE.md's "tick-tacks reflow" convention; the cert/JWT EXPIRED badges and
+the font glyph-grid are exactly that shape of surface).
+
+**Two small, reusable helpers make the theme/width axes cheap to drive from any spec:**
+- `lib/theme.ts#setTheme("light" | "dark")` — stamps `document.documentElement.dataset.theme` directly
+  (the same DOM effect `src/lib/theme.ts#applyTheme` produces at runtime), skipping a
+  `localStorage`+reload round-trip.
+- `lib/paneWidth.ts#setPreviewPaneWidth(px)` — drives the preview pane's own Toolbar "Pane width"
+  number input through its settings popover (open the gear, set the value the same faithful way
+  `lib/samplesNav.ts#navigateTo` sets the address bar, close the popover). `PREVIEW_PANE_NARROW_PX`
+  (220, `App.svelte`'s `RIGHT_MIN`) and `PREVIEW_PANE_COMFORTABLE_PX` (400) are exported constants.
+
+**Cost is real — respect it when adding a surface.** Each (theme, width) combo change is a genuine
+popover round trip against a live WebView2/WebKitGTK session (multiple seconds observed on a real
+`tauri build`, not a jsdom mock) — multiplying that by "every combo × every tab/section" blew the
+suite's 90s-per-test `mochaOpts.timeout` the first time this spec was written (see the Binary Inspector
+tab walk's own header comment for the exact fix: only ONE flagship tab/section gets the full 2×2
+matrix; every other tab is capped at `restTabLimit` and captured at a SINGLE shared combo applied once,
+not re-toggled per tab). `preview-pane.smoke.ts`'s own `describe` block also widens every test's mocha
+timeout to 240s (`this.timeout(240_000)` at the SUITE level — note: a `beforeEach` hook's own
+`this.timeout()` only widens that hook's timeout, not the following test's, a real bug this spec's first
+real-app run caught) as headroom for this cost on a loaded CI runner. Even with those two fixes, this
+spec's own full run took ~9-10 minutes on a real `tauri build` — noticeably heavier than most of this
+suite's other specs; budget for that if the Linux leg's overall 45-minute job cap (CPE-1481/1594) is
+ever felt to be tight.
+
+### Adding a spec for a new preview provider — the one-line recipe
+
+Most new preview providers need only ONE more `it()` in `specs/preview-pane.smoke.ts`, following the
+data-grid/font/cert/jwt tests as the template:
+
+```ts
+it("the <your provider> preview renders <what> (samples/<path>)", async function () {
+  await openSampleFile(path.join(samplesRootAbs, "<subdir>"), "<sample-file>", {
+    extraSelectors: ['[data-testid="your-provider-preview"]'], // only if not already in
+  });                                                            // PREVIEW_CONTENT_SELECTOR
+  await $('[data-testid="your-provider-preview"]').waitForExist({ timeout: 10_000 });
+
+  await applyCombo({ theme: "dark", widthPx: NARROW, suffix: "dark-narrow" }); // the pill/reflow case
+  await snap("preview-pane-<your-provider>-dark-narrow");
+
+  await applyCombo({ theme: "light", widthPx: WIDE, suffix: "light-wide" });   // a comfortable/roomy pass
+  await snap("preview-pane-<your-provider>-light-wide");
+
+  await assertAppStillAlive("previewing samples/<path>");
+});
+```
+
+Reuse an EXISTING `samples/` fixture if one already exercises your provider (check
+`samples/README.md`'s coverage table first); add one, following that file's conventions, only if none
+does. For a MULTI-TAB/MULTI-SECTION provider (like the Binary Inspector), reuse
+`walkBinaryInspectorTabs` as the pattern — query the tab strip's own buttons rather than hardcoding tab
+names, so a future tab is captured automatically with zero changes here. Proven, not hypothetical:
+CPE-1615's ".NET metadata" tab merged into `main` WHILE this spec was being written, and this exact
+mechanism picked it up automatically at full flagship depth with zero code changes — see the managed-PE
+walk test's own comment and `binary-managed-net-metadata-*.png`.
 
 ## Faithful mouse input — `lib/mouse.ts` (CDP, NON-grabbing) — CPE-1155
 

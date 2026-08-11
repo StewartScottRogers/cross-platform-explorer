@@ -38,8 +38,9 @@ import { expect } from "chai";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { $, $$, browser } from "@wdio/globals";
+import { browser } from "@wdio/globals";
 import { snap, snapFailure } from "../lib/snap.js";
+import { assertAppStillAlive, findRowContaining, navigateTo, waitForPreviewToSettle } from "../lib/samplesNav.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const STATE_FILE = path.resolve(__dirname, "..", ".smoke-state.json");
@@ -72,176 +73,14 @@ function listSampleFiles(dir: string): string[] {
 const ALL_SAMPLES = listSampleFiles(REAL_SAMPLES_DIR);
 const WALK_FILES = ALL_SAMPLES.filter((f) => f !== MALFORMED_PDF_REL);
 
-// A definite "the preview rendered real content" indicator, one selector per PreviewKind's success
-// markup (PreviewPane.svelte): image/decoded-image/raw-image/heic/dicom -> `.preview-img`; media
-// (audio/video, MediaPlayer.svelte) -> `.mp-media`; pdf -> `.preview-pdf`; font -> `.preview-font`; archive/csv/tsv ->
-// `.preview-table-wrap`; markdown -> `.preview-markdown`; text/code -> `.code-view`; json AND the `info`
-// kind's own success view -> a bare `pre.preview-text` (NEITHER wraps in `.preview-note` on success — no
-// loading/error sibling to fall back to, so this selector is load-bearing, not decorative: without it,
-// `waitForPreviewToSettle` would spin to its timeout and misreport a "stuck spinner" for every JSON/info
-// sample even though the preview genuinely rendered); an active text editor -> `.preview-editor`; hex ->
-// `HexView.svelte`'s `[data-testid="hexview"]`; data-grid -> `DataBrowser.svelte`'s `.data-browser`. All
-// of these mount synchronously except for the async-loading kinds (decoded-image/raw-image/heic/dicom/
-// archive/info/data-grid/json/csv/tsv/markdown/text), which show a transient `.preview-note` "Loading
-// preview…" first — see `waitForPreviewToSettle` below.
-//
-// `aside.details` (DetailsPane.svelte) is ALSO a valid terminal state, not just decorative extra
-// coverage: CPE-1357's validate-before-embed fix renders `<slot />` — App.svelte passes a `<DetailsPane>`
-// as PreviewPane's default slot content — when a PDF fails structural validation (`pdfState === "error"`,
-// PreviewPane.svelte), rather than a `.preview-note`. `documents/malformed.pdf` (no resolvable
-// `startxref`) hits exactly this path, so without `aside.details` here, `waitForPreviewToSettle` would
-// spin to its timeout and misreport the CPE-1357 regression pin as a "stuck spinner" even though the app
-// correctly degraded to the metadata pane.
-const CONTENT_SELECTOR = [
-  ".preview-img",
-  ".mp-media",
-  ".preview-pdf",
-  ".preview-font",
-  ".preview-table-wrap",
-  ".preview-markdown",
-  ".code-view",
-  "pre.preview-text",
-  ".preview-editor",
-  '[data-testid="hexview"]',
-  ".data-browser",
-  "aside.details",
-].join(", ");
-
-// The exact English `pv.loading` string (PreviewPane.svelte / src/lib/i18n.ts) — the default locale in
-// this harness (see file-health.smoke.ts's identical note). Used only to tell the TRANSIENT loading
-// `.preview-note` apart from a TERMINAL one (e.g. "Can't preview this file").
-const LOADING_TEXT = "Loading preview…";
-
-/** Poll until the preview pane shows SOMETHING for the currently-selected file: either a definite
- *  content element ({@link CONTENT_SELECTOR}) or a terminal `.preview-note` (any note whose text isn't
- *  the transient loading string) — assertion (b), "rendered or gracefully degraded, never a stuck
- *  spinner forever". Throws (via `waitUntil`'s `timeoutMsg`) if neither ever appears within `timeoutMs`
- *  — the stuck-spinner failure mode this spec exists to catch. */
-async function waitForPreviewToSettle(relPath: string, timeoutMs = 20_000): Promise<void> {
-  await browser.waitUntil(
-    async () => {
-      if ((await $$(CONTENT_SELECTOR).length) > 0) return true;
-      const notes = $$(".preview-note");
-      for await (const note of notes) {
-        const text = await note.getText();
-        if (text && text !== LOADING_TEXT) return true;
-      }
-      return false;
-    },
-    {
-      timeout: timeoutMs,
-      timeoutMsg: `preview pane never settled for ${relPath} — still "${LOADING_TEXT}" (or nothing rendered) after ${timeoutMs}ms`,
-    },
-  );
-}
-
-/** Navigates the address bar directly to `absDir` (Ctrl+L -> type the absolute path -> Enter — the same
- *  "Type a path (Ctrl+L)" flow a user driving the address bar uses, NavToolbar.svelte), then waits for
- *  the breadcrumb to confirm the folder actually changed. Used instead of double-clicking through nested
- *  folders so every sample's own subdirectory (audio/, images/, documents/, …) is reachable in one step
- *  regardless of nesting depth.
- *
- *  CPE-1507: the original single-shot "Ctrl+L -> waitForExist -> `.setValue()`" sequence raced two ways
- *  on Linux (WebKitWebDriver) that a real CI run (job 93164774027) caught cold — both invisible on
- *  Windows/CDP, which is why this went unnoticed until the Linux leg finished a full run for the first
- *  time (CPE-1481):
- *   (a) the FIRST Ctrl+L of the walk sometimes never opened `.pathedit` at all (a clean 10s of empty
- *       `findElements` polls, no flicker) — WebKitWebDriver's Actions-based key delivery occasionally
- *       drops the very first keypress of a session/after a long idle. Fixed by retrying the Ctrl+L
- *       keypress a few times with a short poll each, instead of sending it once and waiting the full
- *       timeout.
- *   (b) once `.pathedit` DID mount, WebdriverIO's `setValue()` (native `elementClear` then
- *       `elementSendKeys`) raced NavToolbar.svelte's unconditional `on:blur={() => (editingPath =
- *       false)}`: the log shows `elementClear` succeed, then the very next `elementSendKeys` fail with
- *       "stale element — terminating request" — the input had already been unmounted between the two
- *       native WebDriver calls. Because every spec `it()` in this suite shares ONE app session, that
- *       first stale-element throw left the SAME desync behind for every later sample in the walk,
- *       cascading into ~30 identical ".pathedit not found" failures from one root cause. Fixed by
- *       setting the value directly via `browser.execute` — the one primitive this harness has already
- *       proven reliable against wry's webview (see mouse.ts's `pointOf()` comment) — which never
- *       triggers WebDriver's native clear/sendKeys pair and so never races that blur handler. */
-async function navigateTo(absDir: string): Promise<void> {
-  const PATHEDIT_SELECTOR = ".pathedit";
-  const CTRL_L_ATTEMPTS = 3;
-  let opened = false;
-  for (let attempt = 1; attempt <= CTRL_L_ATTEMPTS && !opened; attempt++) {
-    await browser.keys(["Control", "l"]);
-    try {
-      await $(PATHEDIT_SELECTOR).waitForExist({ timeout: 4_000 });
-      opened = true;
-    } catch {
-      // CPE-1507: Ctrl+L occasionally doesn't register on WebKitWebDriver's Actions-based key
-      // delivery — retry rather than fail on the first miss (unless this was the last attempt).
-      if (attempt === CTRL_L_ATTEMPTS) {
-        throw new Error(
-          `expected the address-bar path input (${PATHEDIT_SELECTOR}) to appear after Ctrl+L (${CTRL_L_ATTEMPTS} attempts)`,
-        );
-      }
-    }
-  }
-
-  // CPE-1507: set the value via `browser.execute` (bypasses the native elementClear/elementSendKeys
-  // pair that races NavToolbar's `on:blur` on WebKitWebDriver — see the header comment above). Svelte's
-  // `bind:value={draft}` just reads `el.value` off the bubbling `input` event, so a plain property
-  // assignment + dispatched event is exactly as faithful here as real keystrokes would be.
-  await browser.execute(
-    (sel, value) => {
-      const el = document.querySelector(sel) as HTMLInputElement | null;
-      if (!el) return;
-      el.focus();
-      el.value = value;
-      el.dispatchEvent(new Event("input", { bubbles: true }));
-    },
-    PATHEDIT_SELECTOR,
-    absDir,
-  );
-  await browser.keys(["Enter"]);
-
-  const expectedName = path.basename(absDir);
-  await browser.waitUntil(
-    async () => {
-      const crumb = await $('[aria-current="page"]');
-      if (!(await crumb.isExisting())) return false;
-      return (await crumb.getText()) === expectedName;
-    },
-    {
-      timeout: 15_000,
-      timeoutMsg: `expected the breadcrumb to show "${expectedName}" after navigating to ${absDir}`,
-    },
-  );
-}
-
-/** The FIRST `.row` whose rendered HTML contains `name` — the same getHTML-scan idiom every other spec
- *  in this suite uses (declutter.smoke.ts / file-health.smoke.ts) rather than an exact-text locator
- *  (unreliable against wry under classic WebDriver — see open-dir.smoke.ts's note). */
-async function findRowContaining(name: string): Promise<WebdriverIO.Element> {
-  let found: WebdriverIO.Element | undefined;
-  await browser.waitUntil(
-    async () => {
-      const rows = $$(".row");
-      for await (const row of rows) {
-        const html = await row.getHTML({ includeSelectorTag: false });
-        if (html.includes(name)) {
-          found = row;
-          return true;
-        }
-      }
-      return false;
-    },
-    { timeout: 15_000, timeoutMsg: `expected a .row containing "${name}"` },
-  );
-  return found!;
-}
-
-/** The crash guard (assertion a): the window/session must still be responding. If the renderer process
- *  died, this WebDriver call itself throws (session/window gone) rather than returning — that failure
- *  IS the CPE-1357 regression signal, not a bug in this helper. */
-async function assertAppStillAlive(context: string): Promise<void> {
-  const body = await $("body");
-  expect(await body.isExisting(), `app/window did not respond after ${context}`).to.equal(true);
-  const html = await body.getHTML({ includeSelectorTag: false });
-  expect(html.trim().length, `app/window rendered empty content after ${context}`).to.be.greaterThan(0);
-}
+// Navigation (`navigateTo`), row lookup (`findRowContaining`), settle-detection
+// (`waitForPreviewToSettle`, + the `CONTENT_SELECTOR`/`LOADING_TEXT` it's built from), and the crash
+// guard (`assertAppStillAlive`) all now live in `../lib/samplesNav.js` (CPE-1629), shared with
+// `specs/preview-pane.smoke.ts` — see that module's header comment for why (one implementation of the
+// CPE-1507 Linux/WebKitGTK workarounds, not two copies that can silently drift). Behaviour here is
+// UNCHANGED by the extraction: `PREVIEW_CONTENT_SELECTOR` is byte-identical to this file's old
+// `CONTENT_SELECTOR`, so this spec's settle-detection — and therefore its `known-failing.json` entry
+// (CPE-1507) — is provably the same as before.
 
 /** Navigates to `relPath`'s folder, selects the file, waits for its preview to settle (or gracefully
  *  degrade), then re-confirms the app is alive — the full per-file assertion this spec makes for every
@@ -299,7 +138,8 @@ describe("CPE-1358 — headless GUI smoke: every samples/ file opens without cra
 
   // CPE-1357 regression pin — deliberately LAST, see the file header comment for why. A longer
   // crash-detection pause than the default: `pdf_validity` should reject this file BEFORE the iframe
-  // ever mounts (falling back to `aside.details`, see CONTENT_SELECTOR's comment above), so nothing
+  // ever mounts (falling back to `aside.details`, see `PREVIEW_CONTENT_SELECTOR`'s comment in
+  // `../lib/samplesNav.js`), so nothing
   // should ever reach WebView2's PDF plugin at all — but this is the one file in the whole walk where
   // "nothing threw yet" is the least trustworthy signal, so give a regression in that validation path
   // extra room to manifest before this spec declares victory.
