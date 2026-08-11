@@ -2,13 +2,13 @@
 id: CPE-1604
 title: "Docs: split Tags / Smart folders / Saved searches into deep pages, and promote Agent Watch to its own page"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Docs
 epic: CPE-1569
 tags: [ready]
 created: 2026-08-10
-closed:
+closed: 2026-08-10
 ---
 
 ## Why
@@ -48,3 +48,19 @@ upward; 1591-1604 are taken) rather than documenting around it.
 Model: sonnet. Conflict surface: `src/docs/03-explorer.md`, three new pages, an Agent Watch page,
 `src/lib/sectionDocs.ts`. Do **not** touch `src/docs/explorer-archives.md`, `22-file-health.md`,
 `30-structured-previews.md`, or any component under `src/lib/components/` — other PRs are in flight there.
+
+## Result
+Shipped `src/docs/explorer-tags.md`, `explorer-smart-folders.md`, `explorer-saved-searches.md`, and
+`explorer-agent-watch.md`; `03-explorer.md` now points to all four instead of duplicating them.
+`sectionDocs.ts` gained an `"agent-watch"` `Section` wired into `App.svelte`'s `currentSection()` off
+`activeWatchCwd`, so F1/the toolbar "?" opens the new page while the Agent Watch strip is showing — not
+just a passive registry entry. Also fixed a stale claim in `16-checkpoints.md` (called the now-shipped
+Agent Watch Replay-tab checkpoint markers "a separate, deferred feature") and re-pointed
+`organizing-select-by.md`'s Saved Searches cross-link. Verifying against the real components (not the old
+prose) turned up two bugs, filed as CPE-1605 (smart-folder sidebar tooltip mislabels itself "this saved
+search" in all 12 locales) and CPE-1606 (Agent Watch's filesystem watcher stays armed for every running
+agent session regardless of `activeWatchCwd`, contradicting `AGENT-WATCH.md`'s "off means off" boundary —
+documented honestly in the new page rather than silently glossed over). `npm run check`: 0 errors.
+`npx vitest run`: 272 files / 3294 tests green, including `sectionDocs.test.ts` and
+`docs.coverage.test.ts` (which also lost the now-stale `SessionHistoryDialog` allowlist entry, since the
+new Agent Watch page documents that surface by name).

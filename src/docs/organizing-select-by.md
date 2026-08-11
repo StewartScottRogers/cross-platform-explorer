@@ -64,7 +64,8 @@ Enter-to-submit shortcut, so use the **Select** button for those.
   **Saved Search**: the first click reveals a name field inline (the criterion picker stays visible, not
   a second modal); a second click (or **Enter** in the name field) saves it. Running the command
   palette's own **"Save search…"** entry opens this dialog with that name field already revealed. See
-  [The Explorer](03-explorer)'s Saved Searches section for what a saved search does once created.
+  [Saved Searches](explorer-saved-searches) for what happens once it's created — where it lives in the
+  sidebar, how its live refresh works, and its read-only enforcement.
 
 ## Select by pattern…
 

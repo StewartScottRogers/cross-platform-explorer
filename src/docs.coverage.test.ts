@@ -48,7 +48,6 @@ export const KNOWN_GAPS_ALLOWLIST: string[] = [
   // content gap; kept allowlisted purely because the mechanical name-order check can't see it.
   "PatternSelectDialog",
   "RepairLinkDialog", // broken-symlink repair flow — no page yet
-  "SessionHistoryDialog", // Agent Watch session-history browser + export — no page yet
   "ShredConfirmDialog", // secure-delete (shred) confirmation — no page yet
   "SignCertDialog", // CA-signed certificate issuance — 28-cert-management.md covers create, not sign, by name
   "TransferConflictDialog", // copy/move conflict resolution (Replace/Skip/Keep both) — no page yet

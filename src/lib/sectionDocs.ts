@@ -35,7 +35,8 @@ export type Section =
   | "keyboard-shortcuts"
   | "navigation-mode"
   | "trash"
-  | "binary-inspector";
+  | "binary-inspector"
+  | "agent-watch";
 
 /** Section id → doc slug (a `src/docs/*.md` filename without `.md`). */
 const SECTION_DOC: Record<Section, string> = {
@@ -151,6 +152,11 @@ const SECTION_DOC: Record<Section, string> = {
   // panel the preview pane shows for a PE/ELF/Mach-O file), but it still earns its own doc page +
   // registry entry per [[maintain-in-app-docs-library]].
   "binary-inspector": "binary-inspector",
+  // CPE-1604 (epic CPE-1569, docs completeness slice 7): Agent Watch — promoted from a subsection of
+  // `03-explorer.md` to its own deep page. Unlike file-health/vaults/terminal above, this one DOES map to
+  // a real `currentSection()` branch (App.svelte checks `activeWatchCwd`) so F1/the toolbar "?" actually
+  // opens straight to it while the Agent Watch strip is showing — not just a passive registry entry.
+  "agent-watch": "explorer-agent-watch",
 };
 
 /** The default doc when a section has no page (or an unknown id is passed): the Overview. */
