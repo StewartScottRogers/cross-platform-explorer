@@ -8,13 +8,18 @@ import { evaluate, type KnownFailingFile, type SpecResult } from "./ratchet.js";
 
 // CPE-1594/CPE-1595: `network.smoke.ts` was triaged and found to be a stale test selector, not a
 // product regression — `$("=Network")` maps to WebDriver's "link text" strategy, which only matches
-// `<a>` elements, but the header is a plain `<span class="label fav-title">` (Sidebar.svelte). Fixed in
-// the same PR (see `specs/network.smoke.ts`), so the real `known-failing.json` — and this mirror of it
-// — carries 6 entries, not 7.
+// `<a>` elements, but the header is a plain `<span class="label fav-title">` (Sidebar.svelte). The
+// selector is fixed in the same PR (see `specs/network.smoke.ts`), but the fix is UNVERIFIED against a
+// live Linux run: the replacement uses the same `.fav-title` + `getText()` pattern that
+// `saved-search.smoke.ts` is known-failing for on this WebKitGTK/Xvfb stack (CPE-1507 recorded
+// `getElementText()` returning empty for 10s straight on all three sidebar headers). Because this gate
+// now BLOCKS, betting wrong reds every PR — so the spec stays listed at 7 entries until a real `main`
+// run shows it green, then its entry is deleted (the one-way ratchet will insist on it).
 const KNOWN_FAILING: KnownFailingFile = {
   specs: {
     "samples.smoke.ts": { reason: "preview pane never settles on WebKitGTK", ticket: "CPE-1507" },
     "saved-search.smoke.ts": { reason: "sidebar header never renders on Linux", ticket: "CPE-1507" },
+    "network.smoke.ts": { reason: "selector fixed but unverified on a live Linux run", ticket: "CPE-1595" },
     "archive-browse.smoke.ts": { reason: "element click intercepted", ticket: "CPE-1595" },
     "archive-password.smoke.ts": { reason: "element not interactable", ticket: "CPE-1595" },
     "shred-dialog.smoke.ts": { reason: "'.ctx button.row' still not clickable after 10s", ticket: "CPE-1595" },
@@ -65,7 +70,7 @@ const ALL_40_SPECS = [
   "vault-create.smoke.ts",
 ];
 
-/** The real, current `main` state: 34 pass, the 6 KNOWN_FAILING specs fail, all 40 report. */
+/** The real, current `main` state: 33 pass, the 7 KNOWN_FAILING specs fail, all 40 report. */
 function mainStateResults(): SpecResult[] {
   const knownFailingNames = new Set(Object.keys(KNOWN_FAILING.specs));
   return ALL_40_SPECS.map((spec) => ({
@@ -74,8 +79,8 @@ function mainStateResults(): SpecResult[] {
   }));
 }
 
-describe("evaluate — the known-6 baseline (current main state)", () => {
-  it("is green: 34 pass, 6 known-failing, all 40 report", () => {
+describe("evaluate — the known-failing baseline (current main state)", () => {
+  it("is green: 33 pass, 7 known-failing, all 40 report", () => {
     const result = evaluate({
       results: mainStateResults(),
       knownFailing: KNOWN_FAILING,
