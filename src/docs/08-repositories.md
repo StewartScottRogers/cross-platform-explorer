@@ -29,8 +29,8 @@ then "Cloned to target") or reports a failure in place.
 Check **Remember token for ⟨provider⟩** to save the token in your OS keychain so you don't retype it. The
 checkbox is the only thing that saves a token — browsing successfully does **not** quietly keep it, so if
 you leave the box unchecked the token lives only as long as the dialog does. Note the other direction too:
-because the box is re-applied every time you browse, browsing with it **unchecked** deletes any token you
-had previously saved for that provider.
+unticking the box deletes any token you had previously saved for that provider — immediately, and again on
+every successful browse while it stays unticked.
 
 ## Generic Git and self-hosted
 
