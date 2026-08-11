@@ -290,7 +290,7 @@ describe("BatchMediaDialog apply + streamed progress", () => {
     execCalls[0].resolve({ written: 1, skipped: [] });
     await settle();
 
-    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } });
+    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] }, checkpointFailures: [] });
   });
 
   it("holds the dialog open on skips, lists each skipped file + reason, and dispatches only on Done (CPE-1115)", async () => {
@@ -325,6 +325,7 @@ describe("BatchMediaDialog apply + streamed progress", () => {
     await fireEvent.click(screen.getByTestId("batch-media-done"));
     expect(onApply).toHaveBeenCalledWith({
       report: { written: 1, skipped: [["/repo/photo.jpg", "not a valid image"]] },
+      checkpointFailures: [], // non-destructive path here — no checkpoint was ever attempted
     });
   });
 
@@ -450,9 +451,30 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     expect(warning.textContent).toContain("pics"); // names the affected folder, not just a generic notice
     expect(screen.getByTestId("batch-media-done")).toBeTruthy();
 
-    // "Done" still hands the (unmodified) report to the parent once the user has acknowledged the warning.
+    // "Done" still hands the (unmodified) report to the parent once the user has acknowledged the warning —
+    // and carries the failed folder out with it, so the app-level notice can repeat the warning even if the
+    // user dismisses this panel on reflex (CPE-1590 review round 2).
     await fireEvent.click(screen.getByTestId("batch-media-done"));
-    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } });
+    expect(onApply).toHaveBeenCalledWith({
+      report: { written: 1, skipped: [] },
+      checkpointFailures: ["/repo/pics"],
+    });
+  });
+
+  it("carries the checkpoint failure out on the cancel path too — Escape must not discard it unread", async () => {
+    checkpointBehavior = "reject";
+    const { component } = await planOverwriteReady(["/repo/pics/a.jpg"]);
+    const onCancel = vi.fn();
+    component.$on("cancel", (e: CustomEvent) => onCancel(e.detail));
+
+    await fireEvent.click(applyButton());
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    execCalls[0].resolve({ written: 1, skipped: [] });
+    await settle();
+
+    // The warning is showing; the user hits Escape out of habit rather than reading it.
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledWith({ checkpointFailures: ["/repo/pics"] });
   });
 
   it("does NOT show the checkpoint warning, and closes normally, when the pre-write checkpoint succeeds", async () => {
@@ -468,7 +490,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
     expect(screen.queryByTestId("checkpoint-warning")).toBeNull();
     expect(screen.queryByTestId("batch-media-done")).toBeNull(); // not held open
-    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] } }); // closed immediately
+    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] }, checkpointFailures: [] }); // closed immediately
   });
 
   it("editing the op list after opening the confirm panel dismisses it (no stale confirm)", async () => {

@@ -35,7 +35,12 @@
   /** Full paths of the (already image-filtered) selection to operate on. */
   export let paths: string[] = [];
 
-  const dispatch = createEventDispatcher<{ apply: { report: BatchReport }; cancel: void }>();
+  // `checkpointFailures` rides on BOTH events (CPE-1590): the in-dialog warning is dismissable by Escape
+  // or a backdrop click, so the parent needs it on the cancel path too or a habitual keystroke discards it.
+  const dispatch = createEventDispatcher<{
+    apply: { report: BatchReport; checkpointFailures: string[] };
+    cancel: { checkpointFailures: string[] };
+  }>();
 
   // ---- ordered op list ----
   let ops: MediaOp[] = [];
@@ -309,7 +314,10 @@
         // while the user still believes the promised recovery net exists. "Done" finishes the flow.
         completed = report;
       } else {
-        dispatch("apply", { report });
+        // Nothing skipped and no checkpoint failure (the branch above already held the dialog open for
+        // either) — checkpointFailures is guaranteed empty here, but still passed explicitly so the
+        // parent always receives the same event shape regardless of which path dispatched it.
+        dispatch("apply", { report, checkpointFailures });
       }
     } catch (e) {
       detachChannel();
@@ -322,7 +330,10 @@
   function finish() {
     const report = completed;
     completed = null;
-    if (report) dispatch("apply", { report });
+    // CPE-1590: carry any checkpoint failures out with the report. The in-dialog warning only reaches a
+    // user who is looking at the screen when the run ends and doesn't reflexively dismiss it; the parent
+    // folds this into the app-level notice so the warning survives every dismissal path.
+    if (report) dispatch("apply", { report, checkpointFailures });
   }
 
   /** Back out of the (CPE-1590) overwrite confirm panel without touching anything — the dialog itself
@@ -334,7 +345,9 @@
   function cancel() {
     if (applying) return; // no mid-run cancel in v1 — let it finish rather than leaving a half-applied job
     detachChannel();
-    dispatch("cancel");
+    // CPE-1590: Escape and the backdrop click both land here, including while the checkpoint-failure
+    // warning is showing — so carry it out rather than letting a habitual keystroke discard it unread.
+    dispatch("cancel", { checkpointFailures });
   }
 </script>
 

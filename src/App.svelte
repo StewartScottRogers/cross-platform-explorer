@@ -2981,11 +2981,27 @@
   /** Apply a completed batch-media run (CPE-1093): the dialog itself streams the execute + shows its own
    *  progress (per BUSY-CURSOR.md), so by the time this fires the job has already finished — report the
    *  outcome, refresh the pane `beginBatchMedia` snapshot targeted (CPE-1384), and close. */
-  async function applyBatchMedia(report: BatchReport) {
+  /** CPE-1590: a folder whose checkpoint failed before an in-place overwrite has NO recovery net, so that
+   *  warning outranks the ordinary converted/skipped summary — it must reach the user even if they
+   *  dismissed the dialog's own warning panel on reflex (Escape / backdrop click both route here too). */
+  function noticeCheckpointFailures(dirs: string[]): boolean {
+    if (dirs.length === 0) return false;
+    const name = dirs[0].split(/[\\/]/).pop() || dirs[0];
+    const rest = dirs.length === 1 ? "" : ` (+${dirs.length - 1} more)`;
+    showNotice(
+      `No checkpoint was taken for "${name}"${rest} — the originals there were overwritten with no recovery net.`,
+      true,
+    );
+    return true;
+  }
+
+  async function applyBatchMedia(report: BatchReport, checkpointFailures: string[] = []) {
     const target = batchMediaFor;
     batchMediaFor = null;
     const failed = report.skipped.length;
-    if (failed === 0) {
+    if (noticeCheckpointFailures(checkpointFailures)) {
+      // the checkpoint warning stands alone — don't overwrite it with the routine summary
+    } else if (failed === 0) {
       showNotice(`Converted ${report.written} item${report.written === 1 ? "" : "s"}.`);
     } else {
       const [firstPath, firstReason] = report.skipped[0];
@@ -6866,8 +6882,11 @@
 {#if batchMediaFor}
   <BatchMediaDialog
     paths={batchMediaFor.entries.map((e) => e.path)}
-    on:apply={(e) => applyBatchMedia(e.detail.report)}
-    on:cancel={() => (batchMediaFor = null)}
+    on:apply={(e) => applyBatchMedia(e.detail.report, e.detail.checkpointFailures ?? [])}
+    on:cancel={(e) => {
+      batchMediaFor = null;
+      noticeCheckpointFailures(e.detail?.checkpointFailures ?? []);
+    }}
   />
 {/if}
 
