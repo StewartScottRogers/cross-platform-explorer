@@ -112,6 +112,76 @@ describe("sampleCoverage", () => {
     expect(Math.max(...result.shown)).toBeGreaterThan(0xac00 + 15_000);
   });
 
+  // --- CPE-1598: scale the reservation instead of a flat 50% -------------------------------------
+  // CPE-1593's flat `RESERVED_LOW_BLOCK_SHARE = 0.5` reserved a fixed 100-of-200 cells for ANY font that
+  // covers Basic Latin + Latin-1 at all, regardless of how much else the font covers. Nearly every
+  // real-world CJK UI font fully covers ASCII (needed for mixed-script text), so it paid the full tax even
+  // though its own script is what a user opens the font to see. Measured on real fonts (see the PR
+  // description for the full before/after table): on `malgun.ttf` (Malgun Gothic, Korean, 27,133
+  // codepoints of coverage) the flat share cost 34 of its 134 available distinct 256-blocks (134 → 100)
+  // for a reservation double what the alphabet/digit guarantee actually needs (100 cells vs. the 62 the
+  // alnum floor requires). The fix scales the reservation by the font's OWN Latin-share-of-coverage,
+  // floored at just enough cells to guarantee the alphabet/digit run, capped at the old flat share so a
+  // Latin-dominant font is never worse off than before.
+
+  it("a CJK-plus-ASCII font spends meaningfully more than half its grid on its own script", () => {
+    // Same shape as the Arial-style test above (full Basic Latin + Latin-1, PLUS a large non-Latin tail),
+    // but with the tail large enough (27,000+, Malgun-Gothic-scale) that Latin is a tiny sliver of the
+    // font's total coverage — the CJK-UI-font case this ticket exists to fix.
+    const latin = [...Array.from({ length: 94 }, (_, i) => 0x21 + i), ...Array.from({ length: 95 }, (_, i) => 0xa1 + i)];
+    const hangulLike = Array.from({ length: 27_000 }, (_, i) => 0xac00 + i);
+    const coverage = [...latin, ...hangulLike];
+
+    const result = sampleCoverage(coverage, GLYPH_GRID_CAP);
+    const nonLatinShown = result.shown.filter((cp) => cp >= 0xac00).length;
+    // The flat 50% share left a CJK font's grid at 99/200 (barely under half) non-Latin cells — this
+    // asserts a real majority, not just "more than before".
+    expect(nonLatinShown).toBeGreaterThan(GLYPH_GRID_CAP * 0.6);
+    // The alphabet/digit guarantee must still hold even at this scaled-down reservation.
+    const shown = new Set(result.shown);
+    for (let cp = 0x41; cp <= 0x5a; cp++) expect(shown.has(cp)).toBe(true); // A–Z
+    for (let cp = 0x61; cp <= 0x7a; cp++) expect(shown.has(cp)).toBe(true); // a–z
+    for (let cp = 0x30; cp <= 0x39; cp++) expect(shown.has(cp)).toBe(true); // 0–9
+  });
+
+  it("reserves fewer Latin cells as the font's non-Latin coverage grows, for the same Latin coverage", () => {
+    // Isolates the "scale by non-Latin coverage" behaviour directly: identical Latin coverage, only the
+    // size of the non-Latin tail changes. The reservation (and so the Latin cell count actually shown)
+    // should shrink monotonically as the tail grows, never staying flat at a fixed fraction.
+    const latin = [...Array.from({ length: 94 }, (_, i) => 0x21 + i), ...Array.from({ length: 95 }, (_, i) => 0xa1 + i)];
+    const latinCellsFor = (tailLength: number) => {
+      const tail = Array.from({ length: tailLength }, (_, i) => 0x4e00 + i); // CJK-ish
+      const result = sampleCoverage([...latin, ...tail], GLYPH_GRID_CAP);
+      return result.shown.filter((cp) => cp <= 0xff).length;
+    };
+    const small = latinCellsFor(300); // total coverage 489 — still small, Latin is a big share
+    const medium = latinCellsFor(5_000);
+    const large = latinCellsFor(27_000); // Malgun-Gothic scale
+    expect(small).toBeGreaterThanOrEqual(medium);
+    expect(medium).toBeGreaterThanOrEqual(large);
+    // The large-tail end lands at the alnum floor, not zero — the alphabet guarantee never disappears.
+    expect(large).toBeGreaterThanOrEqual(62);
+  });
+
+  it("a small, mostly-Latin font (e.g. Latin Extended additions) gets a bigger-than-floor reservation, and still fills the grid", () => {
+    // A font whose TOTAL coverage is only modestly bigger than the reserved low blocks themselves (a
+    // realistic shape for a European accented-Latin font with a handful of extra symbols) has a high
+    // Latin-share-of-coverage, so the proportional term — not just the alnum floor — should size the
+    // reservation. This is the "capped so a Latin-only-ish font still fills its grid" shape: unlike the
+    // Malgun-scale tests above (where the tail dwarfs the reserved pool and the floor dominates), here
+    // Latin genuinely IS most of what the font has, so it's entitled to more than the bare alnum minimum.
+    const latin = [...Array.from({ length: 94 }, (_, i) => 0x21 + i), ...Array.from({ length: 95 }, (_, i) => 0xa1 + i)];
+    const extra = Array.from({ length: 200 }, (_, i) => 0x0100 + i); // Latin Extended-A — a modest "everything else"
+    const result = sampleCoverage([...latin, ...extra], GLYPH_GRID_CAP);
+    const latinCells = result.shown.filter((cp) => cp <= 0xff).length;
+    // Comfortably above the 62-cell alnum floor (the proportional term is doing real work here) — well
+    // above what the Malgun-scale "large" case in the monotonic test above lands on.
+    expect(latinCells).toBeGreaterThan(90);
+    // The grid still fills completely to the cap — no cells left on the table.
+    expect(result.shown.length).toBe(GLYPH_GRID_CAP);
+    expect(result.truncated).toBe(true);
+  });
+
   // --- CPE-1593 UAT regression: control/whitespace filtering --------------------------------------
   // Coverage is sorted ascending, so cell 0 was ALWAYS an invisible codepoint before this fix: U+0020
   // space for arial, U+0000 NUL for malgun, U+000C form feed for seguisym.

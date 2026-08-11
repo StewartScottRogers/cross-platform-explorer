@@ -95,14 +95,61 @@ const RESERVED_LOW_BLOCKS: readonly { start: number; end: number }[] = [
   { start: 0xa1, end: 0xff }, // Latin-1 Supplement
 ];
 
-/** Share of the cap reserved for {@link RESERVED_LOW_BLOCKS}, capped by however much of those blocks the
- *  font actually covers — so a font that doesn't cover them (Malgun Gothic "barely touches ASCII") pays
- *  nothing; the reservation only activates for coverage the font actually has. At the default 200-cell
- *  cap this reserves up to 100 cells — comfortably more than the full 94-codepoint Basic-Latin-printable
- *  run, so a font covering ordinary ASCII always gets the complete alphabet + digits, not a diluted
- *  fragment of it (CPE-1593 UAT: pure even-stride sampling showed Arial only 5 of 200 cells in printable
- *  ASCII — `1, C, T, f, w` — losing the alphabet/digit run entirely). */
-const RESERVED_LOW_BLOCK_SHARE = 0.5;
+/** Within {@link RESERVED_LOW_BLOCKS}, the codepoints an "alphabet" reservation actually needs: digits,
+ *  then uppercase, then lowercase — exactly the `0–9`, `A–Z`, `a–z` run the CPE-1593 acceptance criterion
+ *  requires. Selected out of the low-block pool AHEAD OF plain punctuation and Latin-1 Supplement (see
+ *  {@link sampleCoverage}), so the reservation's mandatory floor is the minimum that still guarantees the
+ *  full alnum run — not however much of the low blocks happens to sort first by raw codepoint value. Final
+ *  render order is unaffected: {@link sampleCoverage} re-sorts `shown` ascending regardless of selection
+ *  order, so this only changes what gets INCLUDED under a tight budget, never the on-screen ordering. */
+function isReservedAlnum(cp: number): boolean {
+  return (cp >= 0x30 && cp <= 0x39) || (cp >= 0x41 && cp <= 0x5a) || (cp >= 0x61 && cp <= 0x7a);
+}
+
+/** Upper bound on the Latin reservation's share of the cap — the ceiling {@link sampleCoverage} scales
+ *  down FROM as a font's non-Latin coverage grows (CPE-1598), and, unscaled, the same 50% flat share
+ *  CPE-1593 originally shipped: never worse than that scheme for a genuinely Latin-dominant font (little
+ *  or no other coverage), and enough headroom that the reservation can still consume most of a small
+ *  extended-Latin font's budget when its own coverage is almost entirely inside {@link RESERVED_LOW_BLOCKS}. */
+const RESERVED_LOW_BLOCK_MAX_SHARE = 0.5;
+
+/**
+ * Scale the Latin reservation by how much of the font's own coverage is actually Latin, instead of a flat
+ * share (CPE-1598 — follow-up to CPE-1593's flat `RESERVED_LOW_BLOCK_SHARE = 0.5`). That flat share taxed
+ * every font covering Basic Latin + Latin-1 the same 100 cells regardless of context; nearly every
+ * real-world CJK UI font fully covers ASCII (needed for mixed-script text) and so paid the full tax even
+ * though its own script is what a user opens the font to see. Measured on Malgun Gothic (27,133 codepoints,
+ * cmap dominated by Hangul/Han): the flat share cost it 34 of its 134 available distinct 256-blocks (134 →
+ * 100) for a reservation double what showing the alphabet actually requires.
+ *
+ * Three-part shape (CPE-1598's stated fix, each part measured against `arial.ttf`/`malgun.ttf`/
+ * `seguisym.ttf`/`msyh.ttc` — see `font.test.ts` for the calibration test and PR description for the
+ * before/after table):
+ *
+ * - **Proportional**: `latinShare` — the reserved low blocks' share of the font's own TOTAL displayable
+ *   coverage — scaled onto the cap. A font whose Latin coverage is a small fraction of a much larger
+ *   repertoire (any real CJK font: 189 Latin codepoints out of tens of thousands) gets a tiny proportional
+ *   figure; a font whose coverage is mostly/entirely those same low blocks gets a large one.
+ * - **Floored**: never below however many of the {@link isReservedAlnum} codepoints the font actually
+ *   covers — the CPE-1593 acceptance criterion (full `A–Z`/`a–z`/`0–9`) must hold regardless of how the
+ *   proportional term comes out. This floor is usually what real fonts land on: measured against all four
+ *   test fonts above, `latinShare` never exceeds ~5.4% (Arial, the most Latin-heavy of the four) — the
+ *   reserved low blocks are capped at 189 codepoints by definition, so `latinShare` only climbs above the
+ *   floor for a font with a genuinely small total repertoire (see the "small extended-Latin font" case in
+ *   `font.test.ts`). For Malgun this floor is 62 cells versus the old flat 100 — recovering roughly half
+ *   the block-diversity CPE-1593's flat share cost it (134-ceiling measurement above), while still
+ *   guaranteeing the exact same alphabet/digit run.
+ * - **Capped**: never above {@link RESERVED_LOW_BLOCK_MAX_SHARE} of the cap — the same ceiling the old flat
+ *   share used, so a Latin-dominant font (little/no other coverage) still gets a reservation generous
+ *   enough to fill the grid, exactly as before.
+ */
+function reservedLowBlockBudget(reservedPool: number[], visibleTotal: number, cap: number): number {
+  const alnumCount = reservedPool.filter(isReservedAlnum).length;
+  const latinShare = reservedPool.length / visibleTotal;
+  const proportional = Math.ceil(cap * latinShare);
+  const maxBudget = Math.ceil(cap * RESERVED_LOW_BLOCK_MAX_SHARE);
+  return Math.min(reservedPool.length, Math.max(alnumCount, Math.min(proportional, maxBudget)));
+}
 
 /** Evenly sample at most `cap` codepoints across a SORTED coverage list, so a capped grid shows a
  *  representative spread of what the font covers (touching multiple Unicode blocks) rather than an
@@ -116,10 +163,12 @@ const RESERVED_LOW_BLOCK_SHARE = 0.5;
  *  - A share of the budget is reserved for {@link RESERVED_LOW_BLOCKS} (ordinary printable Latin) when the
  *    font's coverage includes them, so an ordinary Latin-script font (the common case — Arial is the font
  *    people preview most) still shows its alphabet up front instead of getting diluted by even-stride
- *    sampling across its full (often much larger) Unicode coverage. A font whose coverage barely touches
- *    those blocks (a CJK font like Malgun Gothic) is unaffected — the reservation is capped by what the
- *    font ACTUALLY covers there, so the rest of its budget still evenly spans its real (e.g. Hangul/Han)
- *    coverage exactly as before.
+ *    sampling across its full (often much larger) Unicode coverage. The SIZE of that share is scaled by
+ *    {@link reservedLowBlockBudget} rather than a flat fraction (CPE-1598): a font with no Latin coverage
+ *    at all pays nothing (as before), but a font that fully covers ASCII+Latin-1 only as a side effect of
+ *    a much bigger non-Latin repertoire — nearly every real-world CJK UI font, which needs ASCII for
+ *    mixed-script text — now pays only the minimum needed to guarantee the alphabet/digit run, not a flat
+ *    tax sized as if Latin were its main content. See that function's doc comment for the measured numbers.
  */
 export function sampleCoverage(codepoints: number[], cap: number = GLYPH_GRID_CAP): GlyphGrid {
   const visible = codepoints.filter(isDisplayableCodepoint);
@@ -129,8 +178,11 @@ export function sampleCoverage(codepoints: number[], cap: number = GLYPH_GRID_CA
 
   const isReservedLowBlock = (cp: number) => RESERVED_LOW_BLOCKS.some((r) => cp >= r.start && cp <= r.end);
   const reservedPool = visible.filter(isReservedLowBlock); // already ascending — `visible` is sorted
-  const reservedBudget = Math.min(reservedPool.length, Math.ceil(cap * RESERVED_LOW_BLOCK_SHARE));
-  const reservedShown = reservedPool.slice(0, reservedBudget);
+  const reservedBudget = reservedLowBlockBudget(reservedPool, visible.length, cap);
+  // Alnum codepoints (the CPE-1593 acceptance criterion) get first claim on the budget, ahead of plain
+  // punctuation/Latin-1 — see `isReservedAlnum`'s doc comment for why this doesn't affect render order.
+  const alnumFirst = [...reservedPool.filter(isReservedAlnum), ...reservedPool.filter((cp) => !isReservedAlnum(cp))];
+  const reservedShown = alnumFirst.slice(0, reservedBudget);
   const reservedShownSet = new Set(reservedShown);
 
   // The rest of the budget is spent evenly across everything NOT already shown — including any leftover
