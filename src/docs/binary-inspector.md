@@ -10,7 +10,7 @@ categoryOrder: 6
 Select an executable or library — a Windows `.exe`/`.dll`/`.sys`/`.efi`/`.ocx`/`.scr`/`.cpl`, a Linux/Unix
 `.so`, or a macOS `.dylib` — and the preview pane shows its structure in a tabbed, read-only inspector
 instead of a raw hex dump: format and architecture, its sections, what it imports and exports, its symbol
-table, and (for x86/x64 code) a disassembly listing.
+table, its .NET/CLR metadata when it's a managed assembly, and (for x86/x64 code) a disassembly listing.
 
 The inspector never executes, decompiles, edits, or writes to the file. It only reads and displays the
 structural information already stored in the file's own headers.
@@ -27,8 +27,9 @@ The first thing you see for any recognized binary:
 - **Sections / Imports / Exports / Symbols** — a quick count for each, so you know what to expect before
   clicking into a tab.
 
-If the file looks like a managed .NET assembly, a short badge here points you to the Disassembly tab's
-explanation (see *Managed .NET assemblies* below).
+If the file is a managed .NET assembly, a short badge here points you to the **.NET metadata** tab (for
+its assembly identity, referenced assemblies, and types) and to the Disassembly tab's explanation of why
+its code section isn't decoded as x86/x64 (see *Managed .NET assemblies* below).
 
 ## Sections tab
 
@@ -51,6 +52,29 @@ Entries from the format's own symbol table (ELF's `.symtab`, Mach-O's `LC_SYMTAB
 EXE/DLL carries no such table at all — only object files and PDBs do — so this tab is empty for almost
 every PE file you'll open, with a note explaining why rather than an unexplained blank grid.
 
+## .NET metadata tab
+
+Only shown for a **managed .NET/CLR assembly** — see *Managed .NET assemblies* below for how that's
+detected. Opening this tab reads the file's CLR metadata tables (the ECMA-335 `#~` stream) and shows:
+
+- **Assembly identity** — the assembly's name, version, culture (or "neutral" for the culture-neutral
+  default), public key (hex, when strong-named), and any recognized `AssemblyFlags` bits (for example
+  `PublicKey`, `Retargetable`) as a row of pills. A file with no assembly manifest at all (a module rather
+  than a standalone assembly) shows a short note here instead of these fields.
+- **Referenced assemblies** — every assembly this one references, with name, version, culture, and public
+  key token.
+- **Types** — every type this assembly defines, by namespace and name.
+- **Methods** — every method this assembly defines, by name.
+
+This is names and identity only — no method bodies, no IL disassembly, no decompilation (that's a
+separate, larger piece of work). A large assembly can carry thousands of referenced assemblies, types, or
+methods; each table is capped the same way the Sections/Imports/Exports/Symbols tables are (see *Big
+binaries* below).
+
+If the file's CLR header is present but its metadata root can't be located or parsed, the tab says so
+plainly instead of showing an empty-looking table — an unreadable result is never presented as if it were
+a clean "no assembly manifest" or "no types" result.
+
 ## Disassembly tab
 
 An x86/x64 disassembly of the binary's code section: address, raw bytes, and the decoded
@@ -69,35 +93,24 @@ its "code section" — it holds Common Intermediate Language (CIL) bytecode, whi
 the .NET runtime's JIT compiler. Decoding those bytes as if they were x86/x64 produces output that looks
 like a real disassembly listing but isn't: real bytes, meaningless instructions.
 
-The inspector doesn't yet read the file's actual CLR header (that's planned separately — see *Limits /
-notes* below), so it recognizes a likely-managed assembly two ways, and is honest about which one fired:
+The inspector detects this by reading the file's actual CLR header (the PE optional header's
+`IMAGE_COR20_HEADER` data directory) — a real structural read, not a guess from imports/exports or file
+extension. A PE either has this header or it doesn't; ELF and Mach-O files are never managed .NET
+assemblies. When it's present, the Overview tab's badge and the Disassembly tab both state plainly that
+this is a managed assembly — there's no hedged "possibly" wording, because the flag is authoritative.
 
-- **Confirmed** — the file imports `mscoree.dll` (the classic native stub older/32-bit CLR images use to
-  bootstrap the runtime) or exports the CLR loader entry points. The Disassembly tab states plainly that
-  this is a managed assembly.
-- **Possible** — the file has **no imports and no exports at all**. This is consistent with a modern
-  64-bit/AnyCPU assembly, which the OS loads straight off its CLR header with no native import table (this
-  is the shape a real `mscorlib.dll` has) — but it isn't proof by itself (some legitimate native binaries
-  have empty tables too), so the wording says "if this is a managed assembly" rather than stating it
-  outright.
-
-Either way, the Disassembly tab shows that explanation instead of a decode. A **"Show it anyway"** button
-is still there if you want to see the raw (possibly meaningless) decode — it stays clearly labelled the
+The Disassembly tab shows that explanation instead of a decode. A **"Show it anyway"** button is still
+there if you want to see the raw (meaningless) decode of the CIL bytes — it stays clearly labelled the
 whole time it's shown, so nothing is ever presented as fact that isn't.
-
-An empty import/export table isn't always ambiguous, though: for **`.efi`** (UEFI drivers and boot
-applications) and **`.sys`** (kernel drivers), it's the **normal, by-design** shape — UEFI code reaches
-firmware services through a pointer handed to it at entry, never through a PE import table. The inspector
-never applies the "Possible" caveat to these two extensions; instead the Overview tab shows a short,
-non-gating note explaining that the empty tables are ordinary for the format, and the Disassembly tab
-shows the real x86/x64 decode directly, with no extra click required.
 
 ## Big binaries
 
-A system library can easily carry over a thousand imports or exports. The Sections/Imports/Exports/
-Symbols tables show at most 1,000 rows each — comfortably above what most files need, but capped so an
-unusually large table can't make the pane unresponsive. When a table is capped, a note under it says so
-plainly and gives the real total (for example "Showing the first 1,000 of 1,693 exports").
+A system library can easily carry over a thousand imports or exports, and a large managed assembly can
+likewise carry thousands of referenced assemblies, types, or methods. Every table in the inspector —
+Sections/Imports/Exports/Symbols and the .NET metadata tab's referenced-assemblies/types/methods tables —
+shows at most 1,000 rows each, comfortably above what most files need but capped so an unusually large
+table can't make the pane unresponsive. When a table is capped, a note under it says so plainly and gives
+the real total (for example "Showing the first 1,000 of 1,693 exports").
 
 ## When a file can't be inspected
 
@@ -117,9 +130,8 @@ None of these ever show a raw error string or stack trace as the primary message
   flow graphs.
 - **x86/x64 disassembly only.** ARM/ARM64 and other architectures show their header information (format,
   architecture, sections, imports, exports, symbols) normally, but never a disassembly listing.
-- **.NET metadata comes later.** Today's managed-assembly detection is a best-effort heuristic (it looks
-  for the CLR loader import every managed PE carries) used only to caveat the Disassembly tab — the
-  inspector does not yet read .NET-specific metadata (assembly/type/method tables, IL disassembly, or
-  resources). A dedicated managed-image flag and a proper .NET metadata view are tracked separately.
+- **.NET metadata is names and identity only.** The .NET metadata tab shows assembly identity, referenced
+  assemblies, and type/method names — it does not disassemble IL, resolve method bodies, or list
+  resources/attributes. Full decompilation is tracked as separate, larger work.
 - **Extensionless binaries.** An ELF binary with no `.so` extension isn't recognized by this provider —
   detection here is by file extension, not by sniffing the file's magic bytes.

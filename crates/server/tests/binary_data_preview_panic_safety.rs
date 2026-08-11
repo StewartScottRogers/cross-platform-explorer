@@ -240,6 +240,16 @@ fn dotnet_metadata_read_never_panics() {
 
     let mut section_data = cli;
     section_data.extend_from_slice(&root);
+    // `parse_metadata_root`'s stream-name scan reads a bounded (`MAX_STREAM_NAME_SCAN`=64-byte) window
+    // starting at each stream header's name field, and treats a window clipped by EOF as unparseable
+    // (CPE-1615: an honest "couldn't parse" rather than silently accepting a truncated scan). This
+    // fixture's `#~` stream is deliberately tiny (`Valid`=0, no row data), so without trailing padding
+    // the "#~" stream header's own name-scan window would run past the file's actual end — spuriously
+    // failing to parse a metadata root that is otherwise completely well-formed. This padding is *not*
+    // part of the metadata root's own declared size (`root.len()`, baked into `MetaData.Size` above),
+    // just physically-present filler so the scan windows this reader performs stay in-file, matching
+    // this fixture's stated intent below: a genuine, valid, zero-table managed PE.
+    section_data.extend_from_slice(&[0u8; 128]);
 
     let opt_header_size: u16 = (28 + 68 + NUM_RVA_AND_SIZES as usize * 8) as u16;
     let mut opt = vec![0u8; 28]; // standard fields: irrelevant to this walk, all zero

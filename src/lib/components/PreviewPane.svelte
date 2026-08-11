@@ -1156,9 +1156,11 @@
       <pre class="preview-text" bind:this={textContentEl}>{info}</pre>
     {/if}
   {:else if provider.kind === "binary" && entry}
-    <!-- Binary Inspector (CPE-1597, epic CPE-1562 slice 4): self-contained like FontPreview/CertPreview
-         above — fetches its own data from `path`, no declared action-bar actions. -->
-    <BinaryPreview path={entry.path} size={entry.size} extension={entry.extension} />
+    <!-- Binary Inspector (CPE-1597, epic CPE-1562 slice 4; CPE-1615 slice 5): self-contained like
+         FontPreview/CertPreview above — fetches its own data from `path`, no declared action-bar actions.
+         No `extension` prop (CPE-1615 retired the frontend's extension-keyed managed-.NET heuristic in
+         favour of the backend's real `info.is_managed` flag). -->
+    <BinaryPreview path={entry.path} size={entry.size} />
   {:else if provider.kind === "hex" && entry}
     <HexView path={entry.path} size={entry.size} />
   {:else if provider.kind === "data-grid" && entry}

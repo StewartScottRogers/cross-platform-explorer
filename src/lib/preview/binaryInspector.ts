@@ -1,8 +1,9 @@
-// Binary Inspector preview provider (CPE-1597, epic CPE-1562 slice 4): pure, framework-free helpers
-// behind `BinaryPreview.svelte` — kept separate (mirrors `csv.ts`/`jsonTree.ts`/`outline.ts`) so the
-// capping/classification/managed-.NET-detection logic is unit-testable without mounting a component.
+// Binary Inspector preview provider (CPE-1597, epic CPE-1562 slice 4; CPE-1615 slice 5): pure,
+// framework-free helpers behind `BinaryPreview.svelte` — kept separate (mirrors
+// `csv.ts`/`jsonTree.ts`/`outline.ts`) so the capping/classification/.NET-metadata-formatting logic is
+// unit-testable without mounting a component.
 
-import type { BinaryExport, BinaryImport, BinaryInfo } from "../bindings.gen";
+import type { BinaryInfo } from "../bindings.gen";
 
 /** Render cap for a Sections/Imports/Exports/Symbols table (CPE-1597, "big binaries must not stall the
  *  pane"). The backend already bounds each list at `MAX_BINARY_LIST_ENTRIES` (4096, guards against a
@@ -57,98 +58,49 @@ export function classifyBinaryError(message: string): BinaryErrorKind {
 }
 
 /**
- * Confidence level for the frontend-side managed-.NET heuristic below — deliberately not a plain boolean,
- * so the component can word its caveat honestly instead of asserting a guess as fact. "confirmed" only
- * for the strong signal (see below); "possible" for a weaker signal that's real but ambiguous; "none"
- * otherwise.
+ * Known bits of ECMA-335 II.23.1.2 `AssemblyFlags`, decoded from `DotnetAssemblyIdentity.flags` for
+ * display (CPE-1615) — the backend exposes the raw column unparsed (see its own doc comment in
+ * `bindings.gen.ts`), so the frontend names the bits a user is likely to care about rather than showing a
+ * bare hex/decimal number. Deliberately not exhaustive (the processor-architecture sub-field and a couple
+ * of rarely-set compatibility bits are omitted) — an unrecognized bit contributes no pill, but the raw
+ * value is always rendered alongside the pills, so nothing a binary declares is ever invisible.
+ *
+ * Bit values are `CorAssemblyFlags` (ECMA-335 II.23.1.2 / `corhdr.h`). CPE-1615's first cut mislabeled
+ * these — 0x0200 is the WindowsRuntime content type, not a JIT bit, and the two JIT bits sat one slot too
+ * low — so a Debug build (0xC000) showed a single, wrongly-named pill. Corrected against `corhdr.h`.
  */
-export type ManagedConfidence = "confirmed" | "possible" | "none";
+const ASSEMBLY_FLAG_BITS: ReadonlyArray<readonly [number, string]> = [
+  [0x0001, "PublicKey"],
+  [0x0100, "Retargetable"],
+  [0x0200, "ContentType:WindowsRuntime"],
+  [0x4000, "DisableJITcompileOptimizer"],
+  [0x8000, "EnableJITcompileTracking"],
+];
 
-/**
- * Extensions where an EMPTY import/export table is the **normal, by-design** shape for a legitimate
- * native binary — not a hint of anything unusual, let alone managed .NET (CPE-1597, fixing a code-review
- * finding on the first version of this heuristic):
- *
- * - `.efi` — UEFI drivers/boot applications reach firmware services through the `EFI_SYSTEM_TABLE`
- *   pointer handed to them at entry, never through a PE import table. A zero-import, zero-export `.efi`
- *   is the norm, not an anomaly — flagging one as "possibly managed" was actively wrong, hid a perfectly
- *   real, valid x86/x64 disassembly behind an unnecessary extra click, and told the user an everyday
- *   shape was "unusual" when it's standard.
- * - `.sys` — Windows kernel drivers. They can likewise carry a near-empty (occasionally fully empty)
- *   import table depending on how they reach the kernel/HAL, but the stronger reason is categorical: the
- *   CLR does not run in kernel mode at all, so a kernel driver can never legitimately be a managed .NET
- *   assembly in the first place. "Possibly managed" is inapplicable to this format regardless of how
- *   common empty import tables happen to be among drivers.
- *
- * The zero-imports-AND-zero-exports signal below is SKIPPED entirely for these extensions (never
- * downgraded to a lesser warning — it simply isn't evidence for this format), so `.efi`/`.sys` never gate
- * their Disassembly tab behind the "possible" caveat's opt-in click. The "confirmed" signal (an actual
- * `mscoree.dll` import / CLR export) is unaffected and still applies to any extension — it's real evidence
- * regardless of format.
- */
-const EMPTY_TABLES_NORMAL_EXTS = new Set(["efi", "sys"]);
-
-/**
- * Best-effort, frontend-side detection of a managed .NET assembly (CPE-1597) — so the Disassembly tab
- * never presents CIL bytecode decoded as x86/x64 as if it were real machine code (confirmed nonsense on
- * `mscorlib.dll` during CPE-1585's UAT: 2,048 meaningless "instructions").
- *
- * TODO(CPE-1596): that ticket is adding a real `is_managed` flag to `BinaryInfo`, computed backend-side
- * from the actual CLR header (the IMAGE_COR20_HEADER pointed at by the PE optional header's 15th data
- * directory) — once it lands, prefer `info.is_managed` directly and retire this whole heuristic (the
- * `EMPTY_TABLES_NORMAL_EXTS` carve-out below goes away with it — a real CLR-header read never needs a
- * per-format exception list). Landing this ticket first (rather than blocking on that parallel branch)
- * means the caveat ships now, on data the backend already returns.
- *
- * Two signals, checked in order:
- *
- * 1. **"confirmed"** — the PE imports `mscoree.dll` (checked case-insensitively by owning library) or
- *    exports the CLR loader entry points `_CorExeMain`/`_CorDllMain`. This is the classic, well-known
- *    signal: an OLDER or 32-bit-targeted CLR-hosted image carries exactly this one native import so the
- *    plain PE/COFF loader can bootstrap the runtime before any managed code runs. Applies to ANY
- *    extension — an actual CLR import/export is real evidence no matter what the file is named.
- *
- * 2. **"possible"** — the PE has **zero imports and zero exports**, AND its extension isn't in
- *    {@link EMPTY_TABLES_NORMAL_EXTS} (where that shape is the norm, not a signal — see its doc comment).
- *    Verified against a real 64-bit `mscorlib.dll`
- *    (`C:\Windows\Microsoft.NET\Framework64\v4.0.30319\mscorlib.dll`) during this ticket's own manual
- *    testing: it reports `imports: 0, exports: 0` — signal 1 alone MISSES it, because a modern x64/AnyCPU
- *    pure-IL assembly is loaded straight off its CLR header, with no legacy import-table stub at all. An
- *    ordinary EXE/DLL, by contrast, almost always imports *something* (at minimum a handful of kernel32
- *    functions), so an import-free, export-free one is worth a hedged caveat there — but this signal is
- *    weak either way (a real IL assembly usually carries exactly one `mscoree.dll` import, which the
- *    "confirmed" tier already catches), so the UI must never claim this shape is itself unusual — only
- *    that it's consistent with a guess, not a finding.
- *
- * Neither signal reads the CLR header itself, so a packed/obfuscated .NET binary that strips its imports
- * AND happens to carry unrelated exports could still slip past both — an acceptable gap for a caveat, not
- * a security boundary, and exactly what the real `is_managed` flag (CPE-1596) will close for good.
- */
-export function managedDotNetConfidence(
-  info: Pick<BinaryInfo, "format" | "imports" | "exports">,
-  extension: string,
-): ManagedConfidence {
-  if (info.format !== "Pe") return "none";
-  const confirmed =
-    info.imports.some((i: BinaryImport) => (i.library ?? "").toLowerCase() === "mscoree.dll") ||
-    info.exports.some((e: BinaryExport) => e.name === "_CorExeMain" || e.name === "_CorDllMain");
-  if (confirmed) return "confirmed";
-  if (EMPTY_TABLES_NORMAL_EXTS.has(extension.toLowerCase())) return "none";
-  if (info.imports.length === 0 && info.exports.length === 0) return "possible";
-  return "none";
+/** Decode the recognized bits of an `AssemblyFlags` value into short display labels (CPE-1615), for
+ *  rendering as a reflowing pill row. Pure and total: an unrecognized/zero value yields `[]`, never throws. */
+export function decodeAssemblyFlags(flags: number): string[] {
+  return ASSEMBLY_FLAG_BITS.filter(([bit]) => (flags & bit) !== 0).map(([, label]) => label);
 }
 
-/**
- * Whether `extension` is a format where an empty import/export table is normal-by-design (CPE-1597) —
- * exported so the component can show a short, non-gating, purely informational note explaining WHY the
- * Imports/Exports tabs are empty for one of these files, without implying anything about managed .NET
- * (that heuristic already skips these extensions entirely — see {@link EMPTY_TABLES_NORMAL_EXTS}). Kept
- * separate from {@link managedDotNetConfidence} so the note can render even though that function
- * correctly returns "none" here (nothing to caveat, but a user staring at two empty tables still
- * deserves an explanation).
- */
-export function emptyImportExportIsNormalFor(extension: string): boolean {
-  return EMPTY_TABLES_NORMAL_EXTS.has(extension.toLowerCase());
+/** Human label for a nullable CLR culture string (CPE-1615) — `null`/empty means the neutral culture, per
+ *  `DotnetAssemblyIdentity.culture`'s and `DotnetAssemblyRef.culture`'s own doc comments. */
+export function cultureLabel(culture: string | null): string {
+  return culture && culture.length > 0 ? culture : "neutral";
+}
+
+/** Render a nullable hex-blob field (`public_key`/`public_key_token`) for display (CPE-1615) — an em dash
+ *  for `None` (no key/token present), matching {@link hexAddress}'s convention for "nothing here" rather
+ *  than an empty cell that could be mistaken for a loading gap. */
+export function hexOrDash(hex: string | null): string {
+  return hex && hex.length > 0 ? hex : "—";
+}
+
+/** Render the raw `AssemblyFlags` word as hex (CPE-1615) so a bit {@link decodeAssemblyFlags} doesn't
+ *  recognize is still visible — the inspector's job is ground truth, so nothing a binary declares should
+ *  be reachable only through a lookup table we happen to have filled in. */
+export function rawAssemblyFlags(flags: number): string {
+  return `0x${(flags >>> 0).toString(16).toUpperCase().padStart(4, "0")}`;
 }
 
 /** Human label for a `BinaryFormat` value. */
