@@ -145,12 +145,19 @@ batch media's writes are still never pushed onto the app's Ctrl+Z undo stack. Th
 net, not a gate**: if the checkpoint itself fails (e.g. the disk is full), the confirmed write still
 proceeds — you already explicitly agreed to it on the confirm panel.
 
-**A checkpoint that didn't fully cover a folder is never silent**, whether it failed outright or it
-succeeded but left a file out (e.g. one too large to capture). Either way, the dialog holds itself open
-afterward on a danger-styled warning naming exactly which folder(s) aren't fully covered — the same
+**A checkpoint problem is never silent — and the dialog is honest about which kind it is.** Either way, the
+dialog holds itself open afterward on a warning naming exactly which folder(s) are affected — the same
 "stay open until acknowledged" treatment the skipped-files panel uses — instead of closing normally while
-you still believe the promised recovery net exists. Click **Done** once you've read it. Your only
-guaranteed recovery for a folder in that warning is your own backup.
+you still believe the promised recovery net exists. Click **Done** once you've read it. There are two
+distinct warnings, worded deliberately differently because they mean very different things for recovery:
+
+- **"No checkpoint was taken"** — the checkpoint attempt failed outright (e.g. the disk was full). That
+  folder has **zero** recovery net; your only recovery for files there is your own backup.
+- **"The checkpoint didn't fully cover…"** — the checkpoint succeeded, but named file(s) inside it were
+  too large to capture (or hit the store's budget) and were left out. Everything else in that folder IS
+  covered by the checkpoint; only the specific file(s) named in the warning would need your own backup.
+
+If a run hits both kinds across different folders, you'll see both warnings.
 
 ## Failures and partial success
 

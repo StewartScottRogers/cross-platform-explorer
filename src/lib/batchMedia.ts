@@ -84,6 +84,18 @@ export function confirmOverwriteJob(job: BatchJob): BatchJob {
   return { ...job, confirmed_overwrite: true };
 }
 
+/**
+ * One folder whose pre-overwrite `checkpointCreate` SUCCEEDED but left `skippedCount` file(s) uncaptured
+ * (oversize/budget) — distinct from an outright checkpoint failure (CPE-1599 UAT follow-up: `App.svelte`'s
+ * `noticeCheckpointFailures` and `BatchMediaDialog.svelte`'s results panel both need this shape, so it
+ * lives here rather than being declared inside the `.svelte` component, which can't export a plain type
+ * from its instance script).
+ */
+export interface CheckpointPartial {
+  dir: string;
+  skippedCount: number;
+}
+
 /** The result of {@link partitionEligible}: which selected entries the batch engine can operate on,
  *  and how many were dropped. */
 export interface EligibilitySplit<T> {

@@ -300,7 +300,11 @@ describe("BatchMediaDialog apply + streamed progress", () => {
     execCalls[0].resolve({ written: 1, skipped: [] });
     await settle();
 
-    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] }, checkpointFailures: [] });
+    expect(onApply).toHaveBeenCalledWith({
+      report: { written: 1, skipped: [] },
+      checkpointFailures: [],
+      checkpointPartial: [],
+    });
   });
 
   it("holds the dialog open on skips, lists each skipped file + reason, and dispatches only on Done (CPE-1115)", async () => {
@@ -336,6 +340,7 @@ describe("BatchMediaDialog apply + streamed progress", () => {
     expect(onApply).toHaveBeenCalledWith({
       report: { written: 1, skipped: [["/repo/photo.jpg", "not a valid image"]] },
       checkpointFailures: [], // non-destructive path here — no checkpoint was ever attempted
+      checkpointPartial: [],
     });
   });
 
@@ -456,9 +461,12 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     await settle();
 
     expect(onApply).not.toHaveBeenCalled(); // held open, not auto-dispatched/closed
+    // CPE-1599 UAT follow-up: an outright checkpoint failure keeps the BLUNT pre-CPE-1599 wording — this
+    // folder has NO recovery net at all, and must never read like a minor/partial gap.
     const warning = screen.getByTestId("checkpoint-warning");
-    expect(warning.textContent).toContain("didn't fully cover");
+    expect(warning.textContent).toContain("No checkpoint was taken");
     expect(warning.textContent).toContain("pics"); // names the affected folder, not just a generic notice
+    expect(screen.queryByTestId("checkpoint-warning-partial")).toBeNull(); // NOT the softer partial panel
     expect(screen.getByTestId("batch-media-done")).toBeTruthy();
 
     // "Done" still hands the (unmodified) report to the parent once the user has acknowledged the warning —
@@ -468,6 +476,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     expect(onApply).toHaveBeenCalledWith({
       report: { written: 1, skipped: [] },
       checkpointFailures: ["/repo/pics"],
+      checkpointPartial: [],
     });
   });
 
@@ -484,10 +493,10 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
     // The warning is showing; the user hits Escape out of habit rather than reading it.
     await fireEvent.keyDown(window, { key: "Escape" });
-    expect(onCancel).toHaveBeenCalledWith({ checkpointFailures: ["/repo/pics"] });
+    expect(onCancel).toHaveBeenCalledWith({ checkpointFailures: ["/repo/pics"], checkpointPartial: [] });
   });
 
-  it("does NOT show the checkpoint warning, and closes normally, when the pre-write checkpoint succeeds", async () => {
+  it("does NOT show either checkpoint warning, and closes normally, when the pre-write checkpoint succeeds", async () => {
     const { component } = await planOverwriteReady(["/repo/a.jpg"]);
     const onApply = vi.fn();
     component.$on("apply", (e: CustomEvent) => onApply(e.detail));
@@ -499,8 +508,13 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
     await settle();
 
     expect(screen.queryByTestId("checkpoint-warning")).toBeNull();
+    expect(screen.queryByTestId("checkpoint-warning-partial")).toBeNull();
     expect(screen.queryByTestId("batch-media-done")).toBeNull(); // not held open
-    expect(onApply).toHaveBeenCalledWith({ report: { written: 1, skipped: [] }, checkpointFailures: [] }); // closed immediately
+    expect(onApply).toHaveBeenCalledWith({
+      report: { written: 1, skipped: [] },
+      checkpointFailures: [],
+      checkpointPartial: [],
+    }); // closed immediately
   });
 
   it("editing the op list after opening the confirm panel dismisses it (no stale confirm)", async () => {
@@ -565,7 +579,7 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
   // ---- CPE-1599: the pre-overwrite checkpoint's `skipped` field is inspected, not discarded -----------
 
-  it("surfaces a checkpoint that SUCCEEDED but left file(s) uncaptured, via the same warning path as an outright failure", async () => {
+  it("surfaces a checkpoint that SUCCEEDED but left file(s) uncaptured on its OWN, less-alarming panel — never the outright-failure one", async () => {
     checkpointBehavior = "skipped";
     const { component } = await planOverwriteReady(["/repo/pics/a.jpg"]);
     const onApply = vi.fn();
@@ -581,13 +595,35 @@ describe("BatchMediaDialog overwrite-in-place confirm (CPE-1590)", () => {
 
     // Held open exactly like a hard checkpoint failure, even though `checkpoint_create` never rejected.
     expect(onApply).not.toHaveBeenCalled();
-    const warning = screen.getByTestId("checkpoint-warning");
+    expect(screen.queryByTestId("checkpoint-warning")).toBeNull(); // NOT the outright-failure panel
+    const warning = screen.getByTestId("checkpoint-warning-partial");
+    expect(warning.textContent).toContain("didn't fully cover");
     expect(warning.textContent).toContain("pics");
+    expect(warning.textContent).toContain("1 file"); // names the actual uncaptured count
 
     await fireEvent.click(screen.getByTestId("batch-media-done"));
     expect(onApply).toHaveBeenCalledWith({
       report: { written: 1, skipped: [] },
-      checkpointFailures: ["/repo/pics"],
+      checkpointFailures: [],
+      checkpointPartial: [{ dir: "/repo/pics", skippedCount: 1 }],
+    });
+  });
+
+  it("carries a partial checkpoint out on the cancel path too — Escape must not discard it unread", async () => {
+    checkpointBehavior = "skipped";
+    const { component } = await planOverwriteReady(["/repo/pics/a.jpg"]);
+    const onCancel = vi.fn();
+    component.$on("cancel", (e: CustomEvent) => onCancel(e.detail));
+
+    await fireEvent.click(applyButton());
+    await fireEvent.click(screen.getByTestId("overwrite-confirm-go"));
+    execCalls[0].resolve({ written: 1, skipped: [] });
+    await settle();
+
+    await fireEvent.keyDown(window, { key: "Escape" });
+    expect(onCancel).toHaveBeenCalledWith({
+      checkpointFailures: [],
+      checkpointPartial: [{ dir: "/repo/pics", skippedCount: 1 }],
     });
   });
 });

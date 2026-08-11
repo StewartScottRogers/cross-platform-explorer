@@ -137,6 +137,7 @@
   import BatchRenameDialog from "./lib/components/BatchRenameDialog.svelte";
   import BatchMediaDialog from "./lib/components/BatchMediaDialog.svelte";
   import { partitionEligible, canBatchTransform } from "./lib/batchMedia";
+  import type { CheckpointPartial } from "./lib/batchMedia";
   import type { BatchReport } from "./lib/bindings.gen";
   import TagEditor from "./lib/components/TagEditor.svelte";
   import { initTags, tags, retagPath, renameTag, deleteTag, importTags, exportTags } from "./lib/tags";
@@ -2981,28 +2982,49 @@
   /** Apply a completed batch-media run (CPE-1093): the dialog itself streams the execute + shows its own
    *  progress (per BUSY-CURSOR.md), so by the time this fires the job has already finished — report the
    *  outcome, refresh the pane `beginBatchMedia` snapshot targeted (CPE-1384), and close. */
-  /** CPE-1590: a folder whose checkpoint failed before an in-place overwrite has NO recovery net, so that
-   *  warning outranks the ordinary converted/skipped summary — it must reach the user even if they
-   *  dismissed the dialog's own warning panel on reflex (Escape / backdrop click both route here too).
-   *  CPE-1599: also covers a checkpoint that succeeded but left some file(s) uncaptured (`skipped`) —
-   *  `BatchMediaDialog` folds that case into the same `checkpointFailures` list it always has, so this
-   *  one function and its wording ("may be incomplete", not "no checkpoint at all") cover both. */
-  function noticeCheckpointFailures(dirs: string[]): boolean {
-    if (dirs.length === 0) return false;
-    const name = dirs[0].split(/[\\/]/).pop() || dirs[0];
-    const rest = dirs.length === 1 ? "" : ` (+${dirs.length - 1} more)`;
-    showNotice(
-      `The pre-overwrite checkpoint for "${name}"${rest} didn't fully cover the originals there — recovery may be incomplete.`,
-      true,
-    );
+  /** CPE-1590: a folder whose checkpoint failed outright before an in-place overwrite has NO recovery net
+   *  at all, so that warning outranks the ordinary converted/skipped summary — it must reach the user even
+   *  if they dismissed the dialog's own warning panel on reflex (Escape / backdrop click both route here
+   *  too). CPE-1599 UAT follow-up: `partial` (a checkpoint that succeeded but left some file(s)
+   *  uncaptured) is a **materially better** situation than `failures` (no checkpoint at all) and must read
+   *  that way — collapsing them into one softened sentence let a folder with ZERO protection sound like a
+   *  minor gap, which is exactly what this warning exists to prevent. Since `showNotice` is a single
+   *  banner, an outright failure (worse) leads; a concurrent partial is appended, not dropped, so both
+   *  are still surfaced when a run hits both kinds in one go. */
+  function noticeCheckpointFailures(failures: string[], partial: CheckpointPartial[] = []): boolean {
+    if (failures.length === 0 && partial.length === 0) return false;
+    if (failures.length > 0) {
+      const name = failures[0].split(/[\\/]/).pop() || failures[0];
+      const rest = failures.length === 1 ? "" : ` (+${failures.length - 1} more)`;
+      const partialNote =
+        partial.length > 0
+          ? ` Also, ${partial.length} other folder${partial.length === 1 ? "" : "s"} has a checkpoint that didn't fully cover every file.`
+          : "";
+      showNotice(
+        `No checkpoint was taken for "${name}"${rest} before the overwrite — no recovery net for the originals there.${partialNote}`,
+        true,
+      );
+    } else {
+      const p = partial[0];
+      const name = p.dir.split(/[\\/]/).pop() || p.dir;
+      const rest = partial.length === 1 ? "" : ` (+${partial.length - 1} more)`;
+      showNotice(
+        `The pre-overwrite checkpoint for "${name}"${rest} didn't fully cover the originals there — recovery is incomplete for ${p.skippedCount} file${p.skippedCount === 1 ? "" : "s"} there.`,
+        true,
+      );
+    }
     return true;
   }
 
-  async function applyBatchMedia(report: BatchReport, checkpointFailures: string[] = []) {
+  async function applyBatchMedia(
+    report: BatchReport,
+    checkpointFailures: string[] = [],
+    checkpointPartial: CheckpointPartial[] = [],
+  ) {
     const target = batchMediaFor;
     batchMediaFor = null;
     const failed = report.skipped.length;
-    if (noticeCheckpointFailures(checkpointFailures)) {
+    if (noticeCheckpointFailures(checkpointFailures, checkpointPartial)) {
       // the checkpoint warning stands alone — don't overwrite it with the routine summary
     } else if (failed === 0) {
       showNotice(`Converted ${report.written} item${report.written === 1 ? "" : "s"}.`);
@@ -6885,10 +6907,11 @@
 {#if batchMediaFor}
   <BatchMediaDialog
     paths={batchMediaFor.entries.map((e) => e.path)}
-    on:apply={(e) => applyBatchMedia(e.detail.report, e.detail.checkpointFailures ?? [])}
+    on:apply={(e) =>
+      applyBatchMedia(e.detail.report, e.detail.checkpointFailures ?? [], e.detail.checkpointPartial ?? [])}
     on:cancel={(e) => {
       batchMediaFor = null;
-      noticeCheckpointFailures(e.detail?.checkpointFailures ?? []);
+      noticeCheckpointFailures(e.detail?.checkpointFailures ?? [], e.detail?.checkpointPartial ?? []);
     }}
   />
 {/if}
