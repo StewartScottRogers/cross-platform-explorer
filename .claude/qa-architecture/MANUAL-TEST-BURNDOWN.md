@@ -276,3 +276,18 @@ Also: drive Chrome directly from Bash, not PowerShell `Start-Process`, which man
 misleading error-page screenshots.
 
 Worth folding into `gui-smoke`'s README when CPE-1629 lands, so this is discoverable rather than rediscovered.
+
+## Critic hazard (2026-08-11) — NEVER kill Chrome by image name
+
+A Visual Critic cleaning up its headless Chrome instance ran `taskkill /IM chrome.exe /T`, which killed
+**every** Chrome process on the machine — including any browser window the user had open. The user is often
+away during a sprint, so this is exactly the "automation must not hijack the screen" line we don't cross.
+
+**Rule for critics and any agent launching a browser:**
+- Capture the PID of the process you launch and kill **only that PID** (`taskkill /PID <pid> /T`), or use a
+  dedicated `--user-data-dir` and a distinctive `--remote-debugging-port` so your instance is identifiable.
+- **Never** `taskkill /IM chrome.exe`, `/IM msedge.exe`, or any image-name kill of a user-facing application.
+- The same applies to `node`, `cargo`, and anything else the user might be running themselves.
+
+If a stray headless instance can't be identified, leave it — an orphaned background process is a far smaller
+cost than closing the user's browser session.
