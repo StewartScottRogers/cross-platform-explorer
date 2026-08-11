@@ -20,7 +20,7 @@
   import AboutDialog from "./lib/components/AboutDialog.svelte";
   import SettingsDialog from "./lib/components/SettingsDialog.svelte";
   import { startAiConsole, startAgentBoard, consoleUrlWith, platformActive, consentState, setConsent, CAPABILITY_INFO } from "./lib/sidecar";
-  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
+  import { initAgentSessions, agentSessions, watchTargetFor, watchTargets, markVisited, currentSessions, normalizePath, clearAgentSessions, ingestSessionState } from "./lib/agentSessions";
   import { startAgentWatch, stopAgentWatch, type FsActivity, type AgentSession } from "./lib/sidecar";
   import { initAgentActivity, fsActivity, recentActivities, agentTimeline, affectsListing, ingestActivity } from "./lib/agentActivity";
   import { initAgentDiffs } from "./lib/agentDiffs";
@@ -1430,16 +1430,18 @@
   let reconcileInFlight = false;
   let reconcilePending = false;
 
-  /** Reconcile the live filesystem watches against the running-session set (CPE-1099): start a watch
-   *  for each newly-arrived (or re-homed) session, stop the ones that ended, and keep exactly ONE
-   *  shared fs-activity + fs-diff (+ cost) listener pair alive while anything is armed — never one per
-   *  session. When the armed set returns to empty, every listener is removed (off means off). */
-  async function reconcileAgentWatch(sessions: AgentSession[]) {
+  /** Reconcile the live filesystem watches against the *visited* session set (CPE-1606, replacing the
+   *  CPE-1099 "watch every running session" behavior): start a watch for each newly-visited (or
+   *  re-homed) session, stop the ones that ended, and keep exactly ONE shared fs-activity + fs-diff
+   *  (+ cost) listener pair alive while anything is armed — never one per session. A running session the
+   *  explorer has never navigated into is never in `desired`, so it's never armed at all — that's the
+   *  "off means off" boundary. When the armed set returns to empty, every listener is removed. */
+  async function reconcileAgentWatch(sessions: AgentSession[], visited: ReadonlySet<string>) {
     if (reconcileInFlight) { reconcilePending = true; return; }
     reconcileInFlight = true;
     try {
       const desired = new Map<string, string>();
-      for (const s of watchTargets(sessions)) if (s.cwd) desired.set(s.sessionId, s.cwd);
+      for (const s of watchTargets(sessions, visited)) if (s.cwd) desired.set(s.sessionId, s.cwd);
 
       // Start the delta: a new session, or one whose cwd changed (re-arming drops the old watch).
       for (const [id, cwd] of desired) {
@@ -1476,14 +1478,32 @@
       }
     } finally {
       reconcileInFlight = false;
-      if (reconcilePending) { reconcilePending = false; reconcileAgentWatch(currentSessions()); }
+      if (reconcilePending) { reconcilePending = false; reconcileAgentWatch(currentSessions(), visitedSessionIds); }
     }
   }
 
-  // Watch every running session concurrently (CPE-1099 conflict radar); re-run on any session change.
-  $: reconcileAgentWatch($agentSessions);
+  /** Sessions whose project folder the explorer has actually navigated into at least once this run
+   *  (CPE-1606) — the gate for `reconcileAgentWatch`. Grown by `markVisited` (agentSessions.ts) as
+   *  `currentPath` moves; a session, once visited, is retained here (and stays watched) for the rest of
+   *  its life even after navigating away, so hopping between sibling agent projects doesn't thrash the
+   *  underlying `notify` watcher and Radar/Cost/History don't lose data for a project you looked at
+   *  earlier this run. A session never navigated into never appears here — never watched. */
+  let visitedSessionIds = new Set<string>();
+  /** Update the visited set for the current session/path pair, then reconcile watches against it. A
+   *  plain function (not a second `$:` block assigning `visitedSessionIds` from itself) so the
+   *  read-then-write stays unambiguous under Svelte's reactivity — see markVisited's doc for why the
+   *  set only grows, never shrinks, while a session is still running. */
+  function reconcileVisitedAndWatch(sessions: AgentSession[], current: string) {
+    const next = markVisited(sessions, current, visitedSessionIds);
+    if (next !== visitedSessionIds) visitedSessionIds = next;
+    reconcileAgentWatch(sessions, visitedSessionIds);
+  }
+  // Watch only the sessions the explorer has actually visited this run (CPE-1606); re-run on any
+  // session change or newly-visited project.
+  $: reconcileVisitedAndWatch($agentSessions, currentPath);
   // The on-screen drawer still describes just the project the explorer is inside (CPE-399); leaving
-  // every watched project closes the timeline (CPE-400) but does NOT stop watching the other sessions.
+  // every watched project closes the timeline (CPE-400) but does NOT stop watching a project visited
+  // earlier this run (retained — see markVisited/reconcileVisitedAndWatch above).
   $: activeWatchCwd = watchTargetFor($agentSessions, currentPath);
   $: if (!activeWatchCwd) showTimeline = false;
   $: watchedAgentName =

@@ -4,7 +4,7 @@ import {
   applySessionAnnouncement,
   type AgentSession,
 } from "./sidecar";
-import { watchTargetFor, watchTargets } from "./agentSessions";
+import { watchTargetFor, watchTargets, markVisited } from "./agentSessions";
 import { ingestSessionState, currentSessions } from "./agentSessions";
 
 const started = (id: string, cwd = "Z:/repo") =>
@@ -91,17 +91,82 @@ describe("watchTargetFor (CPE-399 — which project am I in)", () => {
   });
 });
 
-describe("watchTargets (CPE-1099 — watch every running session)", () => {
+describe("watchTargets (CPE-1606 — only visited sessions are armed, replacing CPE-1099's watch-everything)", () => {
   const sess = (id: string, cwd: string): AgentSession => ({ sessionId: id, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
 
-  it("watches all running sessions, not just the on-screen one", () => {
-    const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
-    // Both sessions are returned regardless of where the explorer is navigated — overlap is the
-    // radar's frontend fold, not a watch-selection concern.
-    expect(watchTargets(sessions)).toEqual(sessions);
+  it("is empty when no agent is running (off means off ⇒ nothing armed)", () => {
+    expect(watchTargets([], new Set())).toEqual([]);
   });
 
-  it("is empty when no agent is running (off means off ⇒ nothing armed)", () => {
-    expect(watchTargets([])).toEqual([]);
+  it("arms nothing when sessions are running but none has ever been visited", () => {
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
+    // A session the explorer never navigated into must not be armed, no matter how long it runs —
+    // this is the exact CPE-1606 repro: launch an agent, never open its folder, watcher stays idle.
+    expect(watchTargets(sessions, new Set())).toEqual([]);
+  });
+
+  it("arms only the visited session, leaving an unvisited sibling untouched", () => {
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/other/web")];
+    expect(watchTargets(sessions, new Set(["s1"]))).toEqual([sessions[0]]);
+  });
+});
+
+describe("markVisited (CPE-1606 — grows the visited-this-run set that gates watchTargets)", () => {
+  const sess = (id: string, cwd: string): AgentSession => ({ sessionId: id, agentId: "a", agentName: "A", provider: "p", model: "m", cwd });
+
+  it("adds the session whose project the explorer navigates into", () => {
+    const sessions = [sess("s1", "/work/api")];
+    const visited = markVisited(sessions, "/work/api/routes", new Set());
+    expect(visited).toEqual(new Set(["s1"]));
+  });
+
+  it("leaves the visited set untouched (same contents) when navigating somewhere unrelated to any agent", () => {
+    const sessions = [sess("s1", "/work/api")];
+    const visited = markVisited(sessions, "/elsewhere", new Set());
+    expect(visited).toEqual(new Set());
+  });
+
+  it("does NOT visit a sibling agent's project just because a different one is on screen", () => {
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/work/web")];
+    const visited = markVisited(sessions, "/work/api", new Set());
+    expect(visited).toEqual(new Set(["s1"])); // s2 stays unarmed until its own folder is opened
+  });
+
+  it("retains a visited session after navigating away from it — no watcher thrash on every nav", () => {
+    // Deliberate design choice (CPE-1606 Work Log): tearing the watch down the instant you step out of
+    // the folder would (a) re-arm/disarm a `notify` watcher on every single navigation when hopping
+    // between two sibling agent projects, and (b) prematurely flush that session's Cost/History row as
+    // if it had ended (reconcileAgentWatch flushes on removal), fragmenting one live session's metrics
+    // into two rows. So once a project is visited, it stays in the set — and stays watched — for the
+    // rest of that session's life, even after the explorer navigates elsewhere.
+    const sessions = [sess("s1", "/work/api")];
+    const afterVisit = markVisited(sessions, "/work/api", new Set());
+    const afterLeaving = markVisited(sessions, "/elsewhere", afterVisit);
+    expect(afterLeaving).toEqual(new Set(["s1"]));
+  });
+
+  it("accumulates both sibling projects when you visit each in turn — neither evicts the other", () => {
+    const sessions = [sess("s1", "/work/api"), sess("s2", "/work/web")];
+    const afterApi = markVisited(sessions, "/work/api", new Set());
+    const afterWeb = markVisited(sessions, "/work/web", afterApi);
+    expect(afterWeb).toEqual(new Set(["s1", "s2"]));
+  });
+
+  it("disarms once the session actually ends — leaving (the session's lifetime) genuinely disarms it", () => {
+    const running = [sess("s1", "/work/api")];
+    const visited = markVisited(running, "/work/api", new Set());
+    expect(visited).toEqual(new Set(["s1"]));
+    // The session ends: it drops out of the running-sessions list entirely (App.svelte's reconcile
+    // loop mirrors this via `$agentSessions`). The next markVisited call must prune it — a session
+    // that no longer exists can't stay "armed" forever.
+    const afterEnded = markVisited([], "/elsewhere", visited);
+    expect(afterEnded).toEqual(new Set());
+    expect(watchTargets([], afterEnded)).toEqual([]);
+  });
+
+  it("is a no-op (same Set instance) when nothing changed, so callers can skip redundant reconciles", () => {
+    const sessions = [sess("s1", "/work/api")];
+    const visited = new Set(["s1"]);
+    expect(markVisited(sessions, "/elsewhere", visited)).toBe(visited);
   });
 });
