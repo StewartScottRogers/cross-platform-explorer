@@ -30,7 +30,14 @@
 //! Deliberately **not** `read_file_text` with a raised cap: raising the shared `PREVIEW_MAX_BYTES` would
 //! push a multi-megabyte read into every other preview provider that reuses it. This is a separate,
 //! log-specific path.
+//!
+//! **UTF-16 is refused, not silently garbled (CPE-1637 review).** A `String::from_utf8` check alone
+//! cannot catch it: every UTF-16 ASCII byte (NUL bytes included) is individually valid single-byte
+//! UTF-8, so a UTF-16 log would otherwise "succeed" into NUL-interleaved garbage. [`align_window`] runs
+//! the crate's existing [`text_encoding::detect_encoding`] sniffer over the window first and returns a
+//! clean, encoding-naming error for `Utf16Le`/`Utf16Be` instead.
 
+use crate::text_encoding;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -69,19 +76,69 @@ pub fn read_window(path: &Path, max_bytes: u64, end: Option<u64>) -> Result<LogW
     let raw_start = end.saturating_sub(max_bytes);
 
     let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+
+    // Bounded 1-byte peek (CPE-1637 review): `raw_start` can land exactly on a genuine line boundary —
+    // not rare for uniform-length logs, and GUARANTEED whenever the tail line's own length is close to
+    // `max_bytes` (the one-pathologically-long-line case this module already special-cases below). If
+    // the byte immediately before `raw_start` is already `\n`, `raw_start` needs no trim at all; blindly
+    // trimming through the next `\n` regardless (the old behavior) discarded an entire legitimate line
+    // it never needed to drop — see `landing_exactly_on_a_line_boundary_does_not_discard_the_next_line`.
+    let already_aligned = if raw_start == 0 {
+        true
+    } else {
+        let mut prev = [0u8; 1];
+        file.seek(SeekFrom::Start(raw_start - 1)).map_err(|e| e.to_string())?;
+        file.read_exact(&mut prev).map_err(|e| e.to_string())?;
+        prev[0] == b'\n'
+    };
+
     file.seek(SeekFrom::Start(raw_start)).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; (end - raw_start) as usize];
     file.read_exact(&mut buf).map_err(|e| e.to_string())?;
 
-    align_window(&buf, raw_start, end, file_len)
+    align_window(&buf, raw_start, end, file_len, already_aligned)
 }
 
 /// Pure alignment/decode step, split out from [`read_window`] so it's unit-testable without touching a
 /// real file: given the raw bytes already read for `[raw_start, end)`, trims a partial leading line (or,
-/// failing that, a partial leading UTF-8 sequence) and decodes what remains.
-fn align_window(buf: &[u8], raw_start: u64, end: u64, file_len: u64) -> Result<LogWindow, String> {
-    let (skip, line_aligned) = if raw_start == 0 {
-        // True start of the file — nothing to trim.
+/// failing that, a partial leading UTF-8 sequence) and decodes what remains. `already_aligned` — see
+/// [`read_window`]'s 1-byte peek — must be `true` whenever `raw_start` is already known to sit right
+/// after a `\n` (or at true byte 0), so this never trims through a `\n` it didn't need to.
+fn align_window(
+    buf: &[u8],
+    raw_start: u64,
+    end: u64,
+    file_len: u64,
+    already_aligned: bool,
+) -> Result<LogWindow, String> {
+    // UTF-16 (with or without a BOM) is NOT caught by the `String::from_utf8` check below — every
+    // UTF-16LE/BE ASCII byte, NUL bytes included, is individually valid single-byte UTF-8, so a UTF-16
+    // log would otherwise "succeed" straight into NUL-interleaved garbage on screen (CPE-1637 review).
+    // The old whole-file `read_file_text` path happened to mask this by refusing such files outright on
+    // size before ever decoding them; this windowed path exposed it. Reuse the crate's existing sniffer
+    // — bounded (it only ever samples a small leading prefix of whatever slice it's given, so this is no
+    // extra I/O beyond the window already in hand) — and refuse cleanly, naming the encoding, rather than
+    // decode it wrong. Checked on the raw (pre-trim) window so the NUL-lane signature is intact.
+    match text_encoding::detect_encoding(buf) {
+        text_encoding::EncodingGuess::Utf16Le => {
+            return Err(
+                "This file looks like UTF-16 (little-endian) text, which the log preview doesn't decode \
+                 yet. Open it in a text editor instead."
+                    .to_string(),
+            );
+        }
+        text_encoding::EncodingGuess::Utf16Be => {
+            return Err(
+                "This file looks like UTF-16 (big-endian) text, which the log preview doesn't decode \
+                 yet. Open it in a text editor instead."
+                    .to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    let (skip, line_aligned) = if raw_start == 0 || already_aligned {
+        // True start of the file, or `raw_start` already sits right after a '\n' — nothing to trim.
         (0, true)
     } else {
         match buf.iter().position(|&b| b == b'\n') {
@@ -234,6 +291,29 @@ mod tests {
     }
 
     #[test]
+    fn landing_exactly_on_a_line_boundary_does_not_discard_the_next_line() {
+        // Regression (CPE-1637 review). `raw_start` can coincide with a genuine '\n' boundary — not
+        // rare for uniform-length logs, and GUARANTEED when the tail line's length is close to
+        // max_bytes (the one-long-line case this ticket exists for). The old alignment unconditionally
+        // trimmed through the first '\n' it found regardless of whether raw_start already sat on a
+        // boundary, discarding an entire legitimate line it never needed to drop.
+        //
+        // Exact reproduction from review: 15-byte file "AAAA\nBBBB\nCCCC\n", max_bytes=5, tail read.
+        // raw_start = 15 - 5 = 10, which is exactly one past the '\n' at offset 9 — already aligned.
+        let d = scratch("boundary");
+        let f = d.join("boundary.log");
+        fs::write(&f, b"AAAA\nBBBB\nCCCC\n").unwrap();
+        let w = read_window(&f, 5, None).unwrap();
+        assert_eq!(w.text, "CCCC\n", "must not discard the legitimate last line");
+        assert_eq!(w.window_start, 10);
+        assert_eq!(w.window_end, 15);
+        assert!(w.at_end);
+        assert!(!w.at_start);
+        assert!(w.line_aligned);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn missing_file_is_a_clean_error_not_a_panic() {
         let f = std::env::temp_dir().join("cpe-log-window-does-not-exist-12345.log");
         let r = read_window(&f, 1024, None);
@@ -246,9 +326,10 @@ mod tests {
     #[test]
     fn align_window_trims_a_partial_leading_line() {
         // Simulates a window whose raw start landed mid-line: "rtial\nfull line\n" — the "rtial" prefix
-        // (a fragment of the previous, unseen line) must be dropped.
+        // (a fragment of the previous, unseen line) must be dropped. `already_aligned=false` since this
+        // window is deliberately simulating a raw_start that did NOT land on a boundary.
         let buf = b"rtial\nfull line\n";
-        let w = align_window(buf, 100, 117, 500).unwrap();
+        let w = align_window(buf, 100, 117, 500, false).unwrap();
         assert_eq!(w.text, "full line\n");
         assert_eq!(w.window_start, 106); // 100 + len("rtial\n")
         assert!(w.line_aligned);
@@ -259,7 +340,7 @@ mod tests {
     #[test]
     fn align_window_at_true_start_trims_nothing() {
         let buf = b"first line\nsecond\n";
-        let w = align_window(buf, 0, buf.len() as u64, buf.len() as u64).unwrap();
+        let w = align_window(buf, 0, buf.len() as u64, buf.len() as u64, true).unwrap();
         assert_eq!(w.text, "first line\nsecond\n");
         assert!(w.at_start);
         assert!(w.at_end);
@@ -267,11 +348,25 @@ mod tests {
     }
 
     #[test]
+    fn align_window_already_aligned_trims_nothing_even_though_the_buffer_starts_with_a_full_line() {
+        // Regression (CPE-1637 review): raw_start sits right after a genuine '\n' (already_aligned=true)
+        // even though it isn't byte 0. The buffer's own first line ("keep me\n") must NOT be trimmed away
+        // just because a '\n' exists somewhere in it — the old code trimmed unconditionally whenever
+        // raw_start != 0, discarding this legitimate content.
+        let buf = b"keep me\nand this too\n";
+        let w = align_window(buf, 100, 100 + buf.len() as u64, 10_000, true).unwrap();
+        assert_eq!(w.text, "keep me\nand this too\n");
+        assert_eq!(w.window_start, 100);
+        assert!(w.line_aligned);
+        assert!(!w.at_start);
+    }
+
+    #[test]
     fn align_window_with_no_newline_falls_back_to_utf8_boundary_and_flags_unaligned() {
         // A window entirely inside one giant line: no '\n' anywhere. Falls back to keeping the whole
         // (already UTF-8-boundary-clean, since these are all ASCII) buffer and flags line_aligned=false.
         let buf = b"middleofaverylongsingleline";
-        let w = align_window(buf, 100, 100 + buf.len() as u64, 10_000).unwrap();
+        let w = align_window(buf, 100, 100 + buf.len() as u64, 10_000, false).unwrap();
         assert_eq!(w.text, "middleofaverylongsingleline");
         assert!(!w.line_aligned);
         assert!(!w.at_start);
@@ -286,8 +381,43 @@ mod tests {
         let mut buf = Vec::new();
         buf.push(0xA9); // stray continuation byte (second half of a split "é")
         buf.extend_from_slice("rest\nnext line\n".as_bytes());
-        let w = align_window(&buf, 50, 50 + buf.len() as u64, 1000).unwrap();
+        let w = align_window(&buf, 50, 50 + buf.len() as u64, 1000, false).unwrap();
         assert_eq!(w.text, "next line\n");
         assert!(w.line_aligned);
+    }
+
+    // --- UTF-16 refusal (CPE-1637 review) ---
+
+    #[test]
+    fn bom_less_utf16le_content_is_refused_cleanly_not_silently_garbled() {
+        // Regression: a real UTF-16LE log (e.g. MicrosoftEdgeUpdate.log) previously "succeeded" through
+        // `String::from_utf8` into NUL-interleaved garbage, because every UTF-16LE ASCII byte — NULs
+        // included — is individually valid single-byte UTF-8. Build a synthetic UTF-16LE fixture (no
+        // machine-specific path) matching that shape: plain ASCII log lines encoded as UTF-16LE, no BOM.
+        let d = scratch("utf16le");
+        let f = d.join("edge.log");
+        let text = "2026-08-11 00:00:00 INFO Starting update check\r\n2026-08-11 00:00:01 INFO Done\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let r = read_window(&f, 1024, None);
+        let err = r.expect_err("UTF-16LE content must be refused, not decoded as garbage");
+        assert!(err.contains("UTF-16"), "error should name the encoding: {err}");
+        assert!(!err.contains("too large"), "must be a distinct message from the old size-refusal");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16be_content_is_refused_cleanly() {
+        let d = scratch("utf16be");
+        let f = d.join("be.log");
+        let text = "hello log line one\r\nhello log line two\r\n";
+        let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        fs::write(&f, &utf16be).unwrap();
+
+        let r = read_window(&f, 1024, None);
+        let err = r.expect_err("UTF-16BE content must be refused, not decoded as garbage");
+        assert!(err.contains("UTF-16"), "error should name the encoding: {err}");
+        let _ = fs::remove_dir_all(&d);
     }
 }

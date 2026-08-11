@@ -218,3 +218,106 @@ across the three scenarios.
 - Did not attempt a genuinely multi-**gigabyte** file (none available on this machine) — the "bounded
   regardless of file size" claim rests on the seek+read code path having no size-dependent step (verified
   by reading the implementation) plus the 19.35 MB measurement, not a GB-scale empirical run.
+
+## Work Log (2026-08-11, cont'd) — review response, PR #835 CHANGES REQUESTED
+
+Independent reviewer confirmed the UAT pass and most of the implementation (`spawn_blocking`, both
+registration sites, byte-identical bindings regen, window-relative line counts with no whole-file scan,
+byte-for-byte-unchanged small files, no new deps, machine-independent synthetic-fixture tests, CPE-1636/1638
+untouched) — not re-litigated below. Two real bugs found; both fixed on the same branch, same PR.
+
+### Bug 1 (BLOCKER): `align_window` couldn't tell "landed mid-line" from "landed exactly on a boundary"
+
+`raw_start` can coincide with a genuine `\n` boundary — not rare for uniform-length logs, and
+**guaranteed** whenever the tail line's length is close to `max_bytes` (the one-long-line case this
+ticket itself calls out). The old code trimmed through the first `\n` it found *unconditionally*
+whenever `raw_start != 0`, discarding an entire legitimate line it never needed to drop.
+
+**Negative control** — added the regression test first, ran it against the pre-fix code (PR #835 HEAD):
+
+```
+fs::write(f, b"AAAA\nBBBB\nCCCC\n");  // 15 bytes
+read_window(&f, 5, None)
+
+thread '...' panicked: assertion `left == right` failed: must not discard the legitimate last line
+  left: ""
+  right: "CCCC\n"
+```
+
+Exactly the reviewer's reproduction — confirmed before touching the fix.
+
+**Fix**: `read_window` now does a bounded 1-byte peek (`file.seek(raw_start - 1)` + `read_exact(1
+byte)`) before reading the window itself. If that byte is already `\n`, `raw_start` is passed into
+`align_window` as `already_aligned: true` and the trim-through-the-next-`\n` step is skipped entirely —
+the window starts exactly at `raw_start` with no line discarded. Still strictly bounded work: one extra
+1-byte read, not a scan of anything. Re-ran the same test after the fix: passes, `text == "CCCC\n"`,
+`window_start == 10`, `line_aligned == true`.
+
+**New tests**: `landing_exactly_on_a_line_boundary_does_not_discard_the_next_line` (the exact
+reproduction, full `read_window` I/O path) and
+`align_window_already_aligned_trims_nothing_even_though_the_buffer_starts_with_a_full_line` (direct unit
+test of the pure alignment function with `already_aligned=true` and a buffer whose own first line
+contains a `\n`, proving that alone doesn't trigger a trim). All four pre-existing `align_window(...)`
+call sites updated for the new `already_aligned` parameter (each explicitly passes `true`/`false`
+matching what it's simulating).
+
+### Bug 2: UTF-16 logs decoded into NUL-interleaved garbage instead of being refused
+
+`String::from_utf8` cannot catch UTF-16: every UTF-16LE/BE ASCII byte — NUL bytes included — is
+individually valid single-byte UTF-8, so a UTF-16 log "succeeded" straight into garbage. Pre-existing
+flaw, but the old whole-file `read_file_text` path masked it by refusing anything over 256 KiB on size
+before ever attempting to decode it; this windowed path made it reachable (the reviewer's real
+`MicrosoftEdgeUpdate.log`, and independently the UAT, both hit it).
+
+**Negative control** — temporarily disabled the new encoding-check arms (`if false` guard) and ran the
+two new UTF-16 tests against that state:
+
+```
+thread '...bom_less_utf16be_content_is_refused_cleanly' panicked:
+  UTF-16BE content must be refused, not decoded as garbage:
+  LogWindow { text: "\0h\0e\0l\0l\0o\0 \0l\0o\0g\0 \0l\0i\0n\0e\0 \0o\0n\0e\0\r\0\n\0...", ... }
+
+thread '...bom_less_utf16le_content_is_refused_cleanly_not_silently_garbled' panicked:
+  LogWindow { text: "2\00\02\06\0-\00\08\0-\01\01\0 \00\00\0:\00\00\0:\00\00\0 \0I\0N\0F\0O\0...", ... }
+```
+
+Exactly the NUL-interleaved shape the reviewer described. Confirmed before restoring the fix.
+
+**Fix**: reused the crate's existing `text_encoding::detect_encoding` (already used by
+`inspect.rs`/Properties, already has the NUL-lane UTF-16 heuristic in its own doc comment) — called on
+the raw window buffer (bounded: it only samples a small leading prefix of whatever slice it's given, no
+extra I/O beyond the window already read) before line-alignment/UTF-8-decode runs. `Utf16Le`/`Utf16Be` →
+a clean, encoding-naming `Err` (e.g. *"This file looks like UTF-16 (little-endian) text, which the log
+preview doesn't decode yet. Open it in a text editor instead."*) instead of attempting to decode.
+Chose **refuse cleanly** over **decode it**, per the review's own framing that either is acceptable:
+windowed UTF-16 decoding would need byte-pair-aligned seeks and endianness-aware line splitting (the
+`\n`-byte alignment trick this module relies on doesn't hold for 2-byte code units), meaningfully more
+surface for a case with no real-world urgency once it fails cleanly instead of garbling. This error
+surfaces through the same `loadError` UI state `read_file_text` failures already use — already
+structurally distinct from the empty-file and partial-window states (non-negotiable #3), no frontend
+change needed.
+
+**New tests**: `bom_less_utf16le_content_is_refused_cleanly_not_silently_garbled` and
+`bom_less_utf16be_content_is_refused_cleanly` — both build a synthetic UTF-16-encoded fixture in-test
+(`"...".encode_utf16().flat_map(|u| u.to_le_bytes())`, no machine-specific path), assert the read errors
+and the message names "UTF-16" and is distinct from the old "too large" wording.
+
+### Not addressed here (per the coordinator's steer — tracked in CPE-1644 instead)
+- Unbounded `pages: LogWindow[]` cache growth in `LogPreview.svelte` as a user pages back.
+- `jumpToLatest()` never re-fetches, so "Back to latest" shows the open-time snapshot of a growing log.
+
+### Re-verification after both fixes
+
+- `crates/server`: **4 new tests** (2 boundary, 2 UTF-16) — log_window module now **15 tests**, all
+  passing. Full crate `cargo test --lib`: **1918 passed, 0 failed, 2 ignored** (up from the prior
+  1914/2 — the 4 new tests; the 2 ignores are pre-existing/unrelated). Full `cargo test` (all
+  integration suites): 0 `FAILED` occurrences.
+- `cargo clippy --all-targets -- -D warnings`: clean (exit 0) across all three `crates/server` feature
+  combinations tried (default, `--features index`, `--features pdf-thumb,video-thumb,waveform,dicom-thumb`).
+- `npm run check`: 0 errors, 0 warnings (no frontend files touched this round — `LogWindow`'s shape is
+  unchanged, so `bindings.gen.ts` needed no regeneration).
+- `npx vitest run`: re-run in full; results in the PR follow-up.
+- **Re-measured open time on the real 19.35 MB `dism.log`** (post-fix, release build, warm page cache):
+  **146 µs** — consistent with the reviewer's independently-measured 179.9 µs (my earlier 14.3 ms figure
+  in the first pass was a cold-cache disk-read artifact of a `cargo run --release` cold start, not a
+  property of the algorithm). Tail window still lands on the file's genuine last line.
