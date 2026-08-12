@@ -308,6 +308,319 @@ describe("detectLevel — CPE-1636 round 3: bracket exemption reopened the prose
   });
 });
 
+// CPE-1655/1656/1657: one coherent design pass over three tickets that pull in opposite directions —
+// CPE-1655 WIDENS detection (real errors with no level word were invisible to the Errors filter);
+// CPE-1657 TIGHTENS it (a loose digit-shape check let bracket-tagged prose slip through as a level);
+// CPE-1656 does both (a UTF-16 false positive in the Rust crate, plus Go/Ruby/Rust trace grouping gaps).
+// Every fixture below marked "real" is a literal transcript of genuine captured output (python -c, a live
+// node crash, a real RUST_BACKTRACE=1 panic compiled+run for this ticket, and real lines pulled from
+// C:\Windows\Logs\DISM\dism.log on the machine this was verified on) — not an invented approximation. Go
+// and Ruby fixtures are marked synthetic where noted: this environment has no local Go or Ruby toolchain,
+// so those use the ticket's own literal documented shape rather than a captured transcript.
+
+describe("detectLevel — CPE-1657: the timestamp gate rejects a coincidental digit run, not just any timestamp", () => {
+  it("rejects a partial-date digit run coincidentally sitting in front of a bracket (adversarial input #4 from the ticket)", () => {
+    // Pre-fix: TIMESTAMP_SHAPE_REGEX (`/\d{1,4}[:-]\d{2}/`) matched "2026-08" even though it has no day
+    // component — not a real date — which wrongly exempted the "[draft]" bracket and let this classify as
+    // "error". This is the WIDEN-vs-TIGHTEN pairing's tighten half: a regression guard against ever
+    // loosening the timestamp shape back to "any digit-separator-digit run".
+    expect(detectLevel("2026-08 [draft] ERROR budget")).toBeNull();
+  });
+
+  it("rejects an IP:port octet's coincidental colon-digit run (adversarial input #5 from the ticket)", () => {
+    // Pre-fix: "1:80" (the tail of "10.0.0.1:8080") satisfied the old regex — one digit, a colon, two
+    // digits — even though it's not a timestamp. The tightened regex requires two digits before the colon
+    // AND a valid minute (00-59) after it; "1:80"'s minute "80" fails immediately.
+    expect(detectLevel("10.0.0.1:8080 [proxy] ERROR rate")).toBeNull();
+  });
+
+  it("still rejects the three inputs that already held pre-fix, via the same fallback prose-word mechanism", () => {
+    // The ticket's own finding: these three held only because of an incidental prose word outside the
+    // bracket ("the", "Version", "See section"), not because the gate recognized the digits as bogus. They
+    // must stay null after the fix too — this is the non-regression half of the tighten.
+    expect(detectLevel("At 14:30 the [main] ERROR handling was disabled.")).toBeNull();
+    expect(detectLevel("Version 1.2-30 [beta] ERROR counts rose.")).toBeNull();
+    expect(detectLevel("See section 3-14 [note] WARNING signs.")).toBeNull();
+  });
+
+  it("still detects every positive control the ticket lists, including a level word directly inside the bracket", () => {
+    expect(detectLevel("17:04:22.123 [main] ERROR c.e.MyService - Failed to connect")).toBe("error");
+    expect(detectLevel("2026-08-11T09:14:05Z [1234] ERROR worker crashed")).toBe("error");
+    expect(detectLevel("[ERROR] msg")).toBe("error");
+  });
+
+  it("still stays null for the four original CPE-1636 round-3 prose cases", () => {
+    expect(detectLevel("[main] ERROR handling is disabled in this build.")).toBeNull();
+    expect(detectLevel("[TODO] ERROR handling needs review before ship.")).toBeNull();
+    expect(detectLevel("[1] WARNING signs were ignored by the team.")).toBeNull();
+    expect(detectLevel("[x] ERROR checking disabled for this test.")).toBeNull();
+  });
+
+  it("still detects the bracket-only-date shape ([2026-08-11] ERR ...) via the full-ISO-date alternative", () => {
+    expect(detectLevel("[2026-08-11] ERR disk write failed")).toBe("error");
+  });
+});
+
+describe("detectLevel — CPE-1655: the markdown ATX-heading false positive", () => {
+  it("does not flag a markdown heading as a level (found in this repo's own src/docs/*.md prose)", () => {
+    // Pre-fix: "## " contains no letters, so leadHasIsolatedLetterWord's letter-run loop never even sees
+    // it, and it sailed through as if it were a real logger prefix. 1 hit in 3,859 real doc lines.
+    expect(detectLevel("## Error handling")).toBeNull();
+  });
+
+  it("still flags nothing for the deeper heading levels either", () => {
+    expect(detectLevel("# ERROR")).toBeNull();
+    expect(detectLevel("### WARNING")).toBeNull();
+    expect(detectLevel("###### INFO")).toBeNull();
+  });
+});
+
+describe("detectLevel — CPE-1655: DISM's native status-line shape, real captured lines", () => {
+  // Real lines pulled from C:\Windows\Logs\DISM\dism.log (64,499 lines) on the verifying machine. All 816
+  // lines matching this shape in that real file used one of exactly these three hex codes, every one with
+  // the HRESULT failure bit set (top nibble 8-f) — never a 0x0... success code.
+  it("classifies the real dism.log error line as error", () => {
+    expect(
+      detectLevel(
+        "[31692.9108] [0x8007007b] FIOReadFileIntoBuffer:(1454): The filename, directory name, or volume label syntax is incorrect.",
+      ),
+    ).toBe("error");
+  });
+
+  it("classifies a real dism.log line with no trailing message text (just the status shape)", () => {
+    expect(detectLevel("[31692.9108] [0xc142011c] UnmarshallImageHandleFromDirectory:(641)")).toBe("error");
+    expect(detectLevel("[14116.31140] [0x80070002] SomeOtherFunc:(200)")).toBe("error");
+  });
+
+  it("does not flag an ordinary DISM info line sharing the [pid.tid] prefix but no hex-status shape", () => {
+    expect(
+      detectLevel(
+        "[31692.9108] Info                  DISM   API: PID=31692 TID=9108 Enter CCommandThread::ExecuteLoop",
+      ),
+    ).toBeNull();
+  });
+
+  it("does not flag a hex-looking bracket whose top nibble is NOT in the HRESULT-failure range", () => {
+    // 0x00000000-0x7FFFFFFF never appeared in the real file's matches (Win32 success/non-failure range);
+    // the shape stays deliberately narrow to that observed real-world signal.
+    expect(detectLevel("[100.200] [0x00000001] SomeFunc:(10): informational")).toBeNull();
+  });
+});
+
+describe("parseLog — CPE-1655: whole-file crash dumps with no level word anywhere are reachable via the Errors filter", () => {
+  it("a real python -c KeyError traceback (captured for this ticket) is fully reachable, all 13 lines", () => {
+    // Real output: `python C:\...\python_crash_test.py` raising KeyError('missing_key'), captured verbatim
+    // (path shortened here for readability; the shape — not the exact path — is what's under test).
+    const PYTHON_TRACEBACK = [
+      "Traceback (most recent call last):",
+      '  File "script.py", line 12, in <module>',
+      "    deep1()",
+      '  File "script.py", line 9, in deep1',
+      "    return deep2()",
+      "           ^^^^^^^",
+      '  File "script.py", line 6, in deep2',
+      "    return deep3()",
+      "           ^^^^^^^",
+      '  File "script.py", line 3, in deep3',
+      '    return d["missing_key"]',
+      "           ~^^^^^^^^^^^^^^~",
+      "KeyError: 'missing_key'",
+    ].join("\n");
+    const result = parseLog(PYTHON_TRACEBACK);
+    expect(result.lines[0].level).toBe("error");
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.length).toBe(result.lines.length); // the WHOLE file is reachable, not just the header
+    // The terminal exception-summary line is grouped (inherited), not double-badged with its own level —
+    // the CPE-1638 "wall of red" guard still holds for a continuation of an already-classified header.
+    expect(result.lines[result.lines.length - 1].level).toBeNull();
+    expect(result.lines[result.lines.length - 1].filterLevel).toBe("error");
+  });
+
+  it("a real node TypeError crash (captured for this ticket) with NO level word anywhere is reachable", () => {
+    const NODE_CRASH = [
+      "C:\\scratch\\node_crash_test.js:3",
+      "  return obj.foo;",
+      "             ^",
+      "",
+      "TypeError: Cannot read properties of undefined (reading 'foo')",
+      "    at deep3 (C:\\scratch\\node_crash_test.js:3:14)",
+      "    at deep2 (C:\\scratch\\node_crash_test.js:6:10)",
+      "    at deep1 (C:\\scratch\\node_crash_test.js:9:10)",
+      "    at Object.<anonymous> (C:\\scratch\\node_crash_test.js:12:1)",
+      "    at Module._compile (node:internal/modules/cjs/loader:1781:14)",
+      "",
+      "Node.js v22.22.3",
+    ].join("\n");
+    const result = parseLog(NODE_CRASH);
+    // The header (a ROOT bare-exception header, nothing classified above it) gets its own real level.
+    expect(result.lines[4].level).toBe("error");
+    expect(result.lines[4].text).toContain("TypeError");
+    for (let i = 5; i <= 9; i++) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBe("error");
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(true);
+    }
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.map((l) => l.text)).toEqual(NODE_CRASH.split("\n").slice(4, 10));
+    // The pre-crash source-excerpt lines and the trailing "Node.js v22.22.3" line are correctly NOT swept
+    // in — they precede/follow the finding, they aren't part of it.
+    expect(result.lines[0].filterLevel).toBeNull();
+    expect(result.lines[11].filterLevel).toBeNull();
+  });
+
+  it("a real RUST_BACKTRACE=1 panic (compiled and run for this ticket) is reachable, header through every frame", () => {
+    // Real output from a small Rust program panicking on an out-of-bounds Vec index, compiled with `rustc
+    // -g` and run with RUST_BACKTRACE=1 (paths shortened for readability; shape is what's under test).
+    const RUST_PANIC = [
+      "thread 'main' (27836) panicked at src\\main.rs:3:6:",
+      "index out of bounds: the len is 3 but the index is 10",
+      "stack backtrace:",
+      "   0: std::panicking::panic_handler",
+      "             at /rustc/abc123/library\\std\\src\\panicking.rs:689",
+      "   1: core::panicking::panic_fmt",
+      "             at /rustc/abc123/library\\core\\src\\panicking.rs:80",
+      "   2: core::panicking::panic_bounds_check",
+      "             at /rustc/abc123/library\\core\\src\\panicking.rs:271",
+      "   5: main::deep3",
+      "             at src\\main.rs:3",
+      "   6: main::deep2",
+      "             at src\\main.rs:5",
+      "note: Some details are omitted, run with `RUST_BACKTRACE=full` for a verbose backtrace.",
+    ].join("\n");
+    const result = parseLog(RUST_PANIC);
+    expect(result.lines[0].level).toBe("error"); // the panic header itself
+    expect(result.lines[2].level).toBe("error"); // "stack backtrace:" re-anchors after the free-text message
+    for (let i = 3; i <= 12; i++) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBe("error");
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(true);
+    }
+    // The one free-text message line between the panic header and "stack backtrace:" doesn't itself match
+    // any known shape — an accepted, documented, narrow gap (still under-grouping, never over-grouping).
+    expect(result.lines[1].filterLevel).toBeNull();
+    // The trailing "note:" line after the backtrace is correctly not swept in either.
+    expect(result.lines[13].filterLevel).toBeNull();
+  });
+
+  it("a Go panic (ticket's own documented shape — no local Go toolchain available to capture live output) is reachable", () => {
+    const GO_PANIC = [
+      "panic: runtime error: index out of range [3] with length 3",
+      "",
+      "goroutine 1 [running]:",
+      "main.main()",
+      "\t/app/main.go:10 +0x1b",
+    ].join("\n");
+    const result = parseLog(GO_PANIC);
+    expect(result.lines[0].level).toBe("error"); // "panic: ..." header
+    // The blank line breaks the chain (existing, tested behavior) — "goroutine ...:" re-anchors as its own
+    // header rather than relying on the chain to bridge the gap.
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[2].level).toBe("error"); // "goroutine 1 [running]:"
+    expect(result.lines[3].filterLevel).toBe("error"); // "main.main()"
+    expect(result.lines[3].isContinuation).toBe(true);
+    expect(result.lines[4].filterLevel).toBe("error"); // "\t/app/main.go:10 +0x1b"
+    expect(result.lines[4].isContinuation).toBe(true);
+  });
+});
+
+describe("parseLog — CPE-1656 B: Ruby backtrace frames group under an already-classified header", () => {
+  // The ticket's own literal frame shape (`\tfrom /path:N:in \`method'`). No local Ruby toolchain is
+  // available in this environment to capture a live crash, so this uses an explicit ERROR-leveled header
+  // (unlike the Python/Node/Rust cases above, which are fully real end-to-end) — the header classification
+  // itself isn't in question here, only whether the `from ...` frame shape groups once a header exists.
+  it("groups two Ruby-style 'from ...' frames under a preceding ERROR line", () => {
+    const text = [
+      "ERROR uncaught exception in worker",
+      "\tfrom /app/lib/worker.rb:6:in `deep2'",
+      "\tfrom /app/lib/worker.rb:9:in `deep1'",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+    expect(result.lines[2].filterLevel).toBe("error");
+    expect(result.lines[2].isContinuation).toBe(true);
+  });
+});
+
+describe("parseLog — CPE-1656 B: over-grouping guard still holds under the widened shapes", () => {
+  it("does not sweep an indented line that merely LOOKS path-like into an unrelated preceding error", () => {
+    // The widened CONTINUATION_SOURCE_LOCATION_REGEX/CONTINUATION_RUST_FRAME_INDEX_REGEX/GO_FRAME shapes
+    // must not resurrect the CPE-1638 F2 "bare indentation is enough" bug — an indented line only counts
+    // once it clears one of the real corroborating shapes.
+    const text = [
+      "ERROR Connection failed on worker-thread-1",
+      "  Now processing next item in queue for worker-thread-2",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("does not sweep a real source path followed by ordinary prose (PR #846 review, near-miss shape)", () => {
+    // The reviewer's demonstrated over-grouping: the first CONTINUATION_SOURCE_LOCATION_REGEX allowed
+    // ARBITRARY trailing text after `file.ext:NN`, so an indented sentence that merely opens with a real
+    // source location was swept into an unrelated preceding error. Only Go's own `+0xHEX` offset (or
+    // nothing at all) may follow now. This is the near-miss the widened shape left unpinned — bare
+    // indentation without any shape match was already covered, this one wasn't.
+    const text = [
+      "ERROR Connection failed on worker-thread-1",
+      "\tsrc/main.rs:42 was recently modified by CPE-1656",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("does not sweep a bare function call that lacks Go's package qualifier (PR #846 review, near-miss shape)", () => {
+    // Same class, other regex: CONTINUATION_GO_FRAME_REGEX matched ANY call-shaped line. A real Go frame
+    // is always package-qualified (`main.main()`), so an unqualified call is not a frame.
+    const text = ["ERROR Connection failed on worker-thread-1", "processRequest(ctx)"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("still groups the GENUINE Go frame shapes the tightening had to preserve", () => {
+    // The other half of the tightening: both real shapes must survive it, or the fix traded one bug for
+    // another. Package-qualified call + tab-indented `file.go:NN +0xHEX` location.
+    const text = [
+      "panic: runtime error: index out of range [3] with length 3",
+      "",
+      "goroutine 1 [running]:",
+      "main.main()",
+      "\t/app/main.go:10 +0x1b",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[3].filterLevel, "main.main()").toBe("error");
+    expect(result.lines[4].filterLevel, "/app/main.go:10 +0x1b").toBe("error");
+  });
+
+  it("still does not sweep several interleaved indented lines from unrelated threads (re-run of the CPE-1638 guard)", () => {
+    const text = [
+      "2026-08-11T09:00:00Z ERROR worker-1 failed to acquire lock",
+      "  worker-2: heartbeat ok, queue depth 4",
+      "  worker-3: heartbeat ok, queue depth 1",
+      "\tworker-4: starting batch 17",
+    ].join("\n");
+    const result = parseLog(text);
+    for (const i of [1, 2, 3]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBeNull();
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(false);
+    }
+  });
+});
+
+describe("parseLog — CPE-1655: real MSI verbose log's internal 'Error' table reference is not misclassified", () => {
+  // A real line from a genuine MSI verbose install log on the verifying machine: MSI's own internal
+  // SQL-style diagnostic chatter referencing the `Error` table by name — not an actual error condition.
+  // Already correctly rejected pre-fix (via the pre-existing "isolated word" lead-in rule — "MSI" itself is
+  // an isolated word); recorded here as a real-corpus non-regression guard for this ticket's pass.
+  it("does not flag MSI's own 'Note: ... 3: Error' internal diagnostic line", () => {
+    expect(detectLevel("MSI (c) (20:D4) [08:10:05:861]: Note: 1: 2205 2:  3: Error ")).toBeNull();
+    expect(
+      detectLevel("MSI (c) (20:00) [08:10:05:909]: Note: 1: 2228 2:  3: Error 4: SELECT `Message` FROM `Error` WHERE `Error` = 2898 "),
+    ).toBeNull();
+  });
+});
+
 describe("parseLog — ANSI-coloured input", () => {
   it("strips ANSI colour codes before rendering and still detects the level underneath", () => {
     // A real SGR colour sequence (ESC [ 31 m ... ESC [ 0 m) built from the actual escape byte — the

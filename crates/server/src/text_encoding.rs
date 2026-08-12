@@ -64,14 +64,47 @@ const BINARY_CONTROL_RATIO: f64 = 0.3;
 /// data that clears the *majority*-lane bar at all (the existing `nul * 2 >= lane` check, unchanged by
 /// this constant) pollutes both lanes roughly together rather than concentrating on one — the worst case
 /// found scanning real files (a Windows PE executable's zero-padded header) had a ~46% minority lane
-/// alongside its ~53% majority lane. 25% sits with wide margin above the realistic-text noise floor and
-/// well below that binary floor.
+/// alongside its ~53% majority lane.
+///
+/// **Limitation (CPE-1656, softened from an earlier "wide margin both ways" claim that oversold this
+/// single number's confidence):** this ratio alone cannot separate genuine UTF-16 ASCII text from a
+/// small-`u16` sequential/incrementing index table (font glyph/loca tables, resource or index
+/// directories) — measured at ~0.4% minority-lane NUL for a representative synthetic table, which sits
+/// *below* the ~1-2% real-text noise floor above, not near the 25% bar at all. No threshold on this ratio
+/// could reject that shape without also rejecting genuine near-pure-ASCII UTF-16 text (which can measure
+/// exactly as low). [`classify_nul_bytes`] therefore no longer relies on this ratio alone — it also
+/// requires the content lane to look like actual printable text ([`UTF16_CONTENT_LANE_PRINTABLE_RATIO`]),
+/// a signal an index table's roughly-uniform byte distribution fails but real text passes easily.
 const UTF16_MINORITY_NUL_RATIO: f64 = 0.25;
+
+/// Above this fraction of the UTF-16 NUL-lane heuristic's *content* lane (the minority-NUL lane — the one
+/// carrying the actual low/ASCII-range byte of each code unit) needing to look like ordinary printable
+/// text, for a NUL-lane match to be trusted as genuine UTF-16 (CPE-1656's second signal — see
+/// [`classify_nul_bytes`] and [`UTF16_MINORITY_NUL_RATIO`]'s doc comment for why the NUL ratio alone
+/// cannot make this call). A small-uint16 index/glyph table's content-lane byte cycles through
+/// essentially the full 0-255 range as its values increase, so at most ~37% of it (95 of 256 byte values)
+/// can even land in the printable-ASCII band by chance — measured ~35-39% on synthetic sequential and
+/// near-sequential index tables. Real UTF-16 log text (English prose, source paths, JSON-ish structured
+/// fields) measured >90% printable on every real UTF-16 log excerpt used to verify this (a real
+/// `MicrosoftEdgeUpdate.log` windowed read, plus the existing emoji/accented/CJK/RTL fixtures below). 60%
+/// sits with wide margin below that real-text floor and well above the index-table ceiling.
+const UTF16_CONTENT_LANE_PRINTABLE_RATIO: f64 = 0.60;
 
 /// True for a byte that reads as non-text control data: the C0 control range excluding tab/LF/CR
 /// (the three control characters that legitimately appear in text), plus DEL (`0x7F`).
 fn is_binary_control_byte(b: u8) -> bool {
     (b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r') || b == 0x7F
+}
+
+/// True for a byte that looks like ordinary printable text when read as a UTF-16 code unit's
+/// low/content byte in isolation: printable ASCII (`0x20`-`0x7E`) or common text whitespace
+/// (tab/LF/CR). Used by [`classify_nul_bytes`]'s content-lane plausibility check
+/// ([`UTF16_CONTENT_LANE_PRINTABLE_RATIO`], CPE-1656) — deliberately narrow (printable ASCII only, not
+/// the Latin-1 supplement `0xA0`-`0xFF`): widening it to include that range would let a byte-uniform
+/// index table's content lane score ~75% "printable" purely from covering the fuller range, defeating
+/// the whole point of the check (measured on a synthetic sequential-index fixture during this ticket).
+fn looks_like_printable_text_byte(b: u8) -> bool {
+    (0x20..=0x7E).contains(&b) || b == b'\t' || b == b'\n' || b == b'\r'
 }
 
 /// Heuristic binary check for bytes that are *not* valid UTF-8 (this is only ever consulted after
@@ -176,6 +209,16 @@ pub fn detect_encoding_at(bytes: &[u8], base_offset: u64) -> EncodingGuess {
 /// whole point is decoding UTF-16 instead of refusing it, and a window wrongly called `Binary` falls
 /// through to the plain UTF-8 path and fails outright rather than getting even an honest refusal. See
 /// [`UTF16_MINORITY_NUL_RATIO`]'s doc comment for the measurements behind the specific threshold.
+///
+/// **Second signal: content-lane printability (CPE-1656).** The NUL-lane ratio alone cannot separate
+/// genuine UTF-16 ASCII text from a small-`u16` sequential/incrementing index table (font glyph/loca
+/// tables, resource or index directories) — both produce the same "one lane ~0% NUL, the other ~100%"
+/// shape, because a small index value's high byte is usually zero too, same as ASCII. What differs is the
+/// CONTENT of the non-NUL ("content") lane: real text's bytes are overwhelmingly printable ASCII; an
+/// index table's content byte cycles through close to the full 0-255 range as its values increase, so at
+/// most ~37% of it can even land in the printable range by chance. Once the NUL-lane shape matches, this
+/// function ALSO requires the content lane to clear [`UTF16_CONTENT_LANE_PRINTABLE_RATIO`] before
+/// trusting the UTF-16 call — seeing constants for the measurements behind both thresholds.
 fn classify_nul_bytes(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
     if sniff_len < 2 {
@@ -184,19 +227,37 @@ fn classify_nul_bytes(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     let lane = (sniff_len / 2).max(1); // approx positions per byte-lane in the sniffed prefix
     let mut even_nul = 0usize;
     let mut odd_nul = 0usize;
+    let mut even_printable = 0usize;
+    let mut odd_printable = 0usize;
+    let mut even_count = 0usize;
+    let mut odd_count = 0usize;
     for (i, &b) in bytes[..sniff_len].iter().enumerate() {
-        if b == 0 {
-            if (base_offset + i as u64) % 2 == 0 {
+        if (base_offset + i as u64) % 2 == 0 {
+            even_count += 1;
+            if b == 0 {
                 even_nul += 1;
-            } else {
+            } else if looks_like_printable_text_byte(b) {
+                even_printable += 1;
+            }
+        } else {
+            odd_count += 1;
+            if b == 0 {
                 odd_nul += 1;
+            } else if looks_like_printable_text_byte(b) {
+                odd_printable += 1;
             }
         }
     }
     let minority_tolerance = (lane as f64 * UTF16_MINORITY_NUL_RATIO) as usize;
-    if odd_nul * 2 >= lane && even_nul <= minority_tolerance {
+    // For LE the content (minority-NUL) lane is EVEN (the low/ASCII byte of each code unit); for BE it's
+    // ODD. Guard the division: an empty lane (possible only for a 2-3 byte sniff) has no content to judge,
+    // so it can't clear the printability bar either.
+    let even_printable_ratio = if even_count > 0 { even_printable as f64 / even_count as f64 } else { 0.0 };
+    let odd_printable_ratio = if odd_count > 0 { odd_printable as f64 / odd_count as f64 } else { 0.0 };
+
+    if odd_nul * 2 >= lane && even_nul <= minority_tolerance && even_printable_ratio >= UTF16_CONTENT_LANE_PRINTABLE_RATIO {
         EncodingGuess::Utf16Le
-    } else if even_nul * 2 >= lane && odd_nul <= minority_tolerance {
+    } else if even_nul * 2 >= lane && odd_nul <= minority_tolerance && odd_printable_ratio >= UTF16_CONTENT_LANE_PRINTABLE_RATIO {
         EncodingGuess::Utf16Be
     } else {
         EncodingGuess::Binary
@@ -387,6 +448,60 @@ mod tests {
         let text = "user \u{62a}\u{645} \u{62a}\u{633}\u{62c}\u{64a}\u{644} logged in";
         let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
         assert_eq!(detect_encoding(&utf16be), EncodingGuess::Utf16Be);
+    }
+
+    // ---- CPE-1656 A: content-lane printability gate on top of the NUL-lane ratio ----
+    //
+    // This gate is monotonic: it only ever ADDS a requirement to the Utf16Le/Utf16Be branches, so any
+    // input that already classified as Binary before this change (every real binary format the CPE-1636
+    // followups reviewer measured — PE, ELF, SQLite, WAV, BMP, TIFF, ICO, protobuf, all confirmed staying
+    // Binary with wide NUL-ratio margin) is logically guaranteed to still classify as Binary now — there is
+    // no path for a stricter UTF-16 condition to turn a rejection into an acceptance. The PE-header and PNG
+    // fixtures already committed above (which exercise the *closest* real-world near-misses on the NUL-ratio
+    // side) are re-asserted unchanged; these two new tests cover the NEW signal specifically.
+
+    #[test]
+    fn small_uint16_sequential_index_table_is_not_misread_as_utf16le() {
+        // A synthetic small-u16 sequential index/glyph table — the shape of a font glyph/loca table or a
+        // resource/index directory (CPE-1656). No real file format measured during the CPE-1636 followups
+        // review triggered this; it's a synthetic-but-plausible shape the NUL-lane ratio ALONE (even
+        // widened to UTF16_MINORITY_NUL_RATIO) cannot tell apart from genuine UTF-16 ASCII text, because
+        // both produce the identical "one lane ~0% NUL, the other ~100%" pattern.
+        let bytes: Vec<u8> = (0u16..256).flat_map(|v| v.to_le_bytes()).collect();
+        // Fixture sanity: confirms this really does clear the pure NUL-lane bar the way the ticket
+        // describes (measured ~0.4% minority-lane NUL there; this construction lands at ~0.39%).
+        let content_lane_nul = bytes.iter().step_by(2).filter(|&&b| b == 0).count();
+        assert!(
+            (content_lane_nul as f64 / 256.0) < 0.01,
+            "fixture sanity: content lane should be under 1% NUL, matching the ticket's ~0.4% measurement"
+        );
+        // Pre-fix (NUL-ratio alone) this reported Utf16Le — the exact bug CPE-1656 describes. Post-fix,
+        // the content lane's printable ratio (~38%, see UTF16_CONTENT_LANE_PRINTABLE_RATIO's doc comment)
+        // fails the new gate, so it falls through to Binary — an honest "not text", not a silent garbage
+        // decode.
+        assert_eq!(detect_encoding(&bytes), EncodingGuess::Binary);
+    }
+
+    #[test]
+    fn real_edge_update_log_windowed_utf16_bytes_still_decode() {
+        // CPE-1656 regression guard, real input: a genuine 120-byte excerpt captured mid-file (absolute
+        // offset 2000, well past the file's own BOM) from a real `MicrosoftEdgeUpdate.log` on this
+        // machine — decodes as UTF-16LE text `crosoftEdgeUpdate.exe" /ua /installsource scheduler]\r\n
+        // [07/28`. Exercises the exact BOM-less windowed-read path (`detect_encoding_at` with a nonzero
+        // `base_offset`) that `log_window.rs` uses for a page that doesn't start at byte 0 — this is
+        // precisely the "genuine UTF-16 log" case the new content-lane printability gate must not
+        // regress, alongside the emoji/accented/CJK/RTL fixtures above.
+        let bytes: Vec<u8> = vec![
+            0x63, 0x00, 0x72, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x66, 0x00, 0x74, 0x00, 0x45, 0x00,
+            0x64, 0x00, 0x67, 0x00, 0x65, 0x00, 0x55, 0x00, 0x70, 0x00, 0x64, 0x00, 0x61, 0x00, 0x74, 0x00,
+            0x65, 0x00, 0x2e, 0x00, 0x65, 0x00, 0x78, 0x00, 0x65, 0x00, 0x22, 0x00, 0x20, 0x00, 0x2f, 0x00,
+            0x75, 0x00, 0x61, 0x00, 0x20, 0x00, 0x2f, 0x00, 0x69, 0x00, 0x6e, 0x00, 0x73, 0x00, 0x74, 0x00,
+            0x61, 0x00, 0x6c, 0x00, 0x6c, 0x00, 0x73, 0x00, 0x6f, 0x00, 0x75, 0x00, 0x72, 0x00, 0x63, 0x00,
+            0x65, 0x00, 0x20, 0x00, 0x73, 0x00, 0x63, 0x00, 0x68, 0x00, 0x65, 0x00, 0x64, 0x00, 0x75, 0x00,
+            0x6c, 0x00, 0x65, 0x00, 0x72, 0x00, 0x5d, 0x00, 0x0d, 0x00, 0x0a, 0x00, 0x5b, 0x00, 0x30, 0x00,
+            0x37, 0x00, 0x2f, 0x00, 0x32, 0x00, 0x38, 0x00,
+        ];
+        assert_eq!(detect_encoding_at(&bytes, 2000), EncodingGuess::Utf16Le);
     }
 
     #[test]

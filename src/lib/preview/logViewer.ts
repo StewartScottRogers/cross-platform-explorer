@@ -57,6 +57,22 @@
  * preceding one, so an indented line still has to clear the same shape bar once its own whitespace is
  * stripped. The chain breaks the instant a line doesn't look like a continuation, so unrelated lines are
  * never swept in; see that function's doc comment for the exact shapes recognized.
+ *
+ * **One coherent detection model (CPE-1655/1656/1657).** The level-word path above and the continuation
+ * grouping above it are the "narrow, structural signal only" foundation both a WIDEN and a TIGHTEN pass
+ * build on without contradicting it: CPE-1655 widens {@link detectLevel} with a handful of additional
+ * *structurally unambiguous, line-start-anchored* shapes for real error/crash output that carries no level
+ * word at all (Python's `Traceback (most recent call last):`, Rust's `thread '...' panicked at ...` and
+ * `stack backtrace:`, Go's `panic: ...` and `goroutine N [...]:`, DISM's `[pid.tid] [0xHEXCODE]
+ * Func:(line):` status shape) plus a markdown-ATX-heading lead-in rejection; CPE-1657 tightens
+ * {@link TIMESTAMP_SHAPE_REGEX} from "any digit-separator-digit run" to a genuine ISO-date-or-clock-time
+ * shape, closing an adversarial gap in the bracket-corroboration gate without touching anything the widen
+ * pass added; CPE-1656 widens {@link groupContinuations}'s recognized frame shapes (Go, Rust, Ruby) and
+ * grants Python's own source-excerpt/caret body lines a narrow bounded allowance. Every new "headerless"
+ * shape stays inside the SAME safety bar the rest of the module already enforces — anchored, structural,
+ * never a bare word match — so the widen and tighten halves of this pass never fight each other: one
+ * makes the level-position rule recognize more genuine structural markers, the other makes an existing
+ * corroboration check actually correspond to what it claims to check for.
  */
 import { stripAnsi } from "./notebook";
 
@@ -169,13 +185,28 @@ const BRACKET_TOKEN_REGEX = /\[[^[\]\s]+\]/g;
  *  and it only ever runs against the already-bounded `LEVEL_SCAN_CHARS` lead-in. */
 const ANY_BRACKET_PAIR_REGEX = /\[[^[\]]*\]/;
 
-/** A timestamp-shaped token: digits, a `:` or `-` separator, then exactly two more digits — the pattern a
- *  real clock time (`17:04`, `09:14:05`) or ISO date (`2026-08-11`) always takes. Deliberately tight
- *  (exactly two digits after the separator, and a real separator character, not just any punctuation) so
- *  it doesn't fire on a version number (`3.1`, dot not colon/dash) or a bare PID (`1234`, digits with no
- *  separator at all). Used by {@link leadHasIsolatedLetterWord}'s bracket-corroboration gate (round 3, PR
- *  #842) — see that function's doc comment. */
-const TIMESTAMP_SHAPE_REGEX = /\d{1,4}[:-]\d{2}/;
+/** A genuine timestamp/date shape — either a full ISO calendar date (`2026-08-11`, all three
+ *  four/two/two-digit groups) or a real clock time (`17:04`, `09:14:05`, hour 00-23, minute/second
+ *  00-59). Used by {@link leadHasIsolatedLetterWord}'s bracket-corroboration gate (round 3, PR #842) — see
+ *  that function's doc comment.
+ *
+ *  **CPE-1657 tightening.** The original version of this regex (`/\d{1,4}[:-]\d{2}/`) matched *any*
+ *  digit-separator-digit run, not a timestamp — a date fragment (`2026-08`, no day component) or an
+ *  IP:port octet (`.1:8080`) satisfied it exactly as well as a genuine clock time, letting two adversarial
+ *  inputs (`"2026-08 [draft] ERROR budget"`, `"10.0.0.1:8080 [proxy] ERROR rate"`) defeat the bracket gate
+ *  and misclassify as `error`. Both are rejected by the tightened shape: `2026-08` has no third
+ *  `-\d{2}` day group, so it fails the full-ISO-date alternative; `1:8080`/`.1:80` never has TWO digits
+ *  immediately before the `:` (only a single `1`, preceded by `.`, not another digit), and even where a
+ *  2-digit group does sit before a colon elsewhere in an IP (there isn't one here), a valid clock minute
+ *  requires its first digit to be 0-5 — `80` fails that outright. Every existing positive control
+ *  (`[2026-08-11 09:14:02] ...`, `2026-08-11T09:14:05Z ...`, `[2026-08-11] ERR ...`,
+ *  `17:04:22.123 [main] ERROR ...`) still matches: the ISO-date alternative catches the bracket-only-date
+ *  shape, the clock-time alternative catches everything with a real `HH:MM` pair (including right after an
+ *  ISO `T`, since this regex isn't `\b`-anchored — `\b` would fail between `T` and a digit, both word
+ *  characters). Single-digit hours (`9:14`, no leading zero) are deliberately NOT matched — no positive
+ *  control or real format sampled during this ticket used one, and requiring two hour digits is what
+ *  keeps a bare `1:8080` from reading as an hour "1". */
+const TIMESTAMP_SHAPE_REGEX = /\d{4}-\d{2}-\d{2}|(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?/;
 
 /** True when `lead` contains a run of letters that is NOT immediately preceded by a digit and NOT wholly
  *  inside a {@link BRACKET_TOKEN_REGEX} logger/thread-tag token — i.e. a standalone alphabetic word, as
@@ -231,6 +262,13 @@ function leadHasIsolatedLetterWord(lead: string): boolean {
  *  ("1. ERROR handling guide"), never how a real logger prefixes a level. */
 const LEAD_LIST_MARKER_REGEX = /^\d+\.\s*$/;
 
+/** A lead-in that is *only* a markdown ATX heading marker (`"# "`, `"## "`, up to 6 `#`s) — a documentation
+ *  heading shape (`"## Error handling"`), never how a real logger prefixes a level (CPE-1655). Contains no
+ *  letters, so {@link leadHasIsolatedLetterWord}'s letter-run loop never sees it and the line would
+ *  otherwise sail through unflagged — found in `src/docs/*.md`'s own real prose (1 hit in 3,859 lines) by
+ *  the CPE-1655 UAT. Same shape family as {@link LEAD_LIST_MARKER_REGEX}. */
+const LEAD_MARKDOWN_HEADING_REGEX = /^#{1,6}\s*$/;
+
 /** Quote characters that, sitting immediately before the match, mark it as a quoted/mentioned word
  *  (`"ERROR" is a reserved word...`) rather than a genuine level marker in position. */
 const QUOTE_CHARS = new Set(['"', "'", "`", "\u2018", "\u2019", "\u201C", "\u201D"]);
@@ -239,13 +277,92 @@ const QUOTE_CHARS = new Set(['"', "'", "`", "\u2018", "\u2019", "\u201C", "\u201
  *  glued straight onto the next character (rules out compounds like "error-like" or "errorish"). */
 const TRAILING_SEPARATOR_REGEX = /^[\s:\]|]$/;
 
+// --- CPE-1655: "headerless" error shapes — real error/crash output that carries NO level word anywhere
+// (a bare crash dump, a native status-code line) is otherwise entirely invisible to the Errors filter, per
+// the CPE-1655 UAT against real Python/Rust/Node crash output and a real `C:\Windows\Logs\DISM\dism.log`.
+// Each shape below is a narrow, structural, line-start-anchored ("^") literal or near-literal marker that
+// never appears in ordinary prose — anchoring at the true start of the line is itself part of the safety
+// margin here (unlike the level-word path's lead-in machinery, nothing can precede these to make them look
+// like a mid-sentence mention). Checked against a wider window than the level-word path
+// ({@link HEADERLESS_SCAN_CHARS} vs {@link LEVEL_SCAN_CHARS}) because DISM's own shape runs a bit longer
+// before its own structural marker (the closing `)`) appears. Verified against real captured output — see
+// each regex's doc comment — and against the CPE-1636 zero-false-positive `src/docs/*.md` prose corpus. ---
+
+/** How many characters from a line's start the headerless-error-shape regexes below ever inspect — wider
+ *  than {@link LEVEL_SCAN_CHARS} because DISM's real shape (`[pid.tid] [0xHEXCODE] FunctionName:(line):`)
+ *  runs to ~55 characters before its own closing `)` appears. Still a small fixed bound, so this stays
+ *  O(1) per line regardless of how long the rest of the line is. */
+const HEADERLESS_SCAN_CHARS = 96;
+
+/** DISM/CBS's own native status-line shape, with no level word at all: `[pid.tid] [0xHEXCODE]
+ *  FunctionName:(lineNumber)` — confirmed against a real 64,499-line `C:\Windows\Logs\DISM\dism.log` on
+ *  this machine (CPE-1655): every one of the 816 lines matching this shape carried one of exactly three
+ *  hex codes (`0x8007007b`, `0xc142011c`, `0x80070002`), and every one of those has its top hex nibble in
+ *  `8`-`f` — the Win32 `FAILED(hr)` convention (the HRESULT severity bit set) — never a `0x0...` success
+ *  code. Requiring that top nibble is both a genuine structural signal (this hex block is a status code,
+ *  not an arbitrary counter) and, per that same real-file measurement, never over-fires on the file's
+ *  other 63,683 lines. */
+const DISM_STATUS_LINE_REGEX = /^\[\d+\.\d+\] \[0x[89a-fA-F][0-9a-fA-F]{7}\] [A-Za-z_]\w*:\(\d+\)/;
+
+/** Python's own exact traceback-block opener, with no level word anywhere in the dump — confirmed against
+ *  a real `python` `KeyError` crash captured for this ticket (CPE-1655): `Traceback (most recent call
+ *  last):` is a fixed literal string CPython's own runtime emits, only ever for an actual uncaught
+ *  exception. Classifying this line as the finding's header lets {@link groupContinuations}'s existing
+ *  Python-frame handling sweep the `File "..."` frames (and their own CPE-1656-added source-excerpt/caret
+ *  body lines) and the terminal `XError: message`/`XException: message` summary line all into the same
+ *  error group. */
+const PYTHON_TRACEBACK_HEADER_REGEX = /^Traceback \(most recent call last\):\s*$/;
+
+/** Rust's own panic-header shape, with no level word anywhere: `thread '<name>' panicked at <location>:` —
+ *  optionally with a `(<pid>)` between the thread name and `panicked at`, the shape a real
+ *  `RUST_BACKTRACE=1` run emits (confirmed against a real captured Rust panic for this ticket, CPE-1655/
+ *  1656: `thread 'main' (27836) panicked at C:\...\main.rs:3:6:`). Rust-specific and structurally
+ *  unambiguous — no prose sentence starts with a quoted thread name followed by this exact phrase. */
+const RUST_PANIC_HEADER_REGEX = /^thread '[^']*'\s*(?:\(\d+\)\s*)?panicked at\b/;
+
+/** Rust's own `stack backtrace:` section label. Re-anchors the error chain right where the actual frame
+ *  list begins: real `RUST_BACKTRACE=1` output has a free-text message line (and sometimes a `note:` line)
+ *  between the panic header and the frame list that don't themselves look like any recognized continuation
+ *  shape, breaking the forward chain from {@link RUST_PANIC_HEADER_REGEX} before it ever reaches the
+ *  frames (confirmed on a real captured panic, CPE-1656) — this line restarts it so
+ *  {@link CONTINUATION_RUST_FRAME_INDEX_REGEX} and the existing `at ...` continuation shape can sweep the
+ *  frames that follow. */
+const RUST_STACK_BACKTRACE_HEADER_REGEX = /^stack backtrace:\s*$/;
+
+/** Go's own panic-header shape: `panic: <message>`, with no level word. Go's canonical/documented panic
+ *  output format (this repo has no local Go toolchain to capture a live run — CPE-1655/1656 note this gap
+ *  explicitly; the shape itself is standard and stable across Go versions). */
+const GO_PANIC_HEADER_REGEX = /^panic: /;
+
+/** Go's own goroutine-trace section header: `goroutine <N> [<status>]:`. Real Go panic output has a blank
+ *  line between the `panic: ...` header and this line, which already breaks the continuation chain (an
+ *  intentional, tested behavior — see {@link groupContinuations}'s "does not inherit a level across a
+ *  blank-line break" coverage) — so this line is classified as its OWN header rather than relying on the
+ *  chain to bridge the gap, re-anchoring right where `main.main()` and its indented source-location line
+ *  can group under it via {@link CONTINUATION_GO_FRAME_REGEX} / {@link CONTINUATION_SOURCE_LOCATION_REGEX}. */
+const GO_GOROUTINE_HEADER_REGEX = /^goroutine \d+ \[[^\]]*\]:\s*$/;
+
 /**
  * Detect a line's severity level from common leveled-log shapes (bracketed/plain timestamp prefix,
- * `LEVEL:` prefix, `[LEVEL]` prefix, or Android logcat's `L/Tag:`). Never throws — a plain regex
- * test/slice can't. Returns `null` for anything that doesn't match; see the module doc comment for why
- * this is deliberately conservative rather than a "match the word anywhere" scan.
+ * `LEVEL:` prefix, `[LEVEL]` prefix, or Android logcat's `L/Tag:`) — plus, since CPE-1655, a handful of
+ * structurally-unambiguous "headerless" error shapes that carry no level word at all (see the block
+ * above). Never throws — a plain regex test/slice can't. Returns `null` for anything that doesn't match;
+ * see the module doc comment for why this is deliberately conservative rather than a "match the word
+ * anywhere" scan.
  */
 export function detectLevel(line: string): LogLevel | null {
+  const headerlessPrefix = line.length > HEADERLESS_SCAN_CHARS ? line.slice(0, HEADERLESS_SCAN_CHARS) : line;
+  if (
+    DISM_STATUS_LINE_REGEX.test(headerlessPrefix) ||
+    PYTHON_TRACEBACK_HEADER_REGEX.test(headerlessPrefix) ||
+    RUST_PANIC_HEADER_REGEX.test(headerlessPrefix) ||
+    RUST_STACK_BACKTRACE_HEADER_REGEX.test(headerlessPrefix) ||
+    GO_PANIC_HEADER_REGEX.test(headerlessPrefix) ||
+    GO_GOROUTINE_HEADER_REGEX.test(headerlessPrefix)
+  ) {
+    return "error";
+  }
+
   const prefix = line.length > LEVEL_SCAN_CHARS ? line.slice(0, LEVEL_SCAN_CHARS) : line;
 
   const androidMatch = ANDROID_LEVEL_REGEX.exec(prefix);
@@ -263,6 +380,7 @@ export function detectLevel(line: string): LogLevel | null {
     const leadLooksLikePrefix =
       !leadHasIsolatedLetterWord(lead) &&
       !LEAD_LIST_MARKER_REGEX.test(lead) &&
+      !LEAD_MARKDOWN_HEADING_REGEX.test(lead) &&
       (lead.length === 0 || !QUOTE_CHARS.has(lead[lead.length - 1]));
     const trailLooksLikeSeparator = trailChar === "" || TRAILING_SEPARATOR_REGEX.test(trailChar);
 
@@ -303,8 +421,51 @@ const CONTINUATION_PYTHON_FRAME_REGEX = /^File "/;
 /** A bare exception-type header with no level word of its own (`"AbortError: Request aborted"`,
  *  `"NullPointerException: ..."`) — recognized ONLY as a continuation of an immediately preceding ERROR
  *  line (never a warn/info/etc.), and only when it ends in the conventional "Error"/"Exception" suffix,
- *  so an unrelated capitalized sentence ("Note: see docs") is never swept in. */
+ *  so an unrelated capitalized sentence ("Note: see docs") is never swept in. Also used, from CPE-1655
+ *  on, as a *root* header for a bare exception dump with nothing classified above it at all (a real Node
+ *  crash: `TypeError: Cannot read properties of undefined (reading 'foo')` with no level word anywhere in
+ *  the file) — see {@link groupContinuations}'s dedicated handling for why that's a distinct case from
+ *  this continuation-only one and doesn't reopen CPE-1638's "wall of red" concern. */
 const BARE_EXCEPTION_HEADER_REGEX = /^[A-Za-z][A-Za-z0-9]*(?:Error|Exception):\s/;
+
+/** Rust backtrace frame-number line: `0: symbol`, `12: symbol` — the shape cargo's own panic-handler
+ *  backtrace prints for each frame, always indented for column alignment (confirmed against a real
+ *  captured `RUST_BACKTRACE=1` panic, CPE-1656: `   0: std::panicking::panic_handler`). Recognized so a
+ *  frame-index line no longer breaks the continuation chain before the immediately-following indented
+ *  `at ...` location line is even reached — that line already matches {@link CONTINUATION_AT_FRAME_REGEX}
+ *  once its own turn comes; the fix is making sure the chain survives the line before it. Only ever
+ *  checked against an indented line's trimmed remainder. */
+const CONTINUATION_RUST_FRAME_INDEX_REGEX = /^\d+:\s/;
+
+/** A Go stack-trace frame's function-call line: a package-qualified call ending in `)` — `main.main()`,
+ *  `runtime.gopanic(...)` — Go's own documented panic-output shape, always unindented, immediately
+ *  followed by an indented file:line location line. Checked against the line unindented, same as
+ *  {@link CONTINUATION_AT_FRAME_REGEX}'s unindented case, since real Go frame lines carry no leading
+ *  whitespace of their own.
+ *
+ *  **Package qualifier required (PR #846 review).** The first version of this shape was
+ *  `/^[\w./*]+\([^)]*\)\s*$/`, which matches ANY bare function-call-shaped line — the reviewer
+ *  demonstrated `processRequest(ctx)` sitting under an unrelated `ERROR` being swept into that error's
+ *  group. Real Go frames are always package-qualified (`main.main()`, `runtime.gopanic(...)`), never a
+ *  bare call, so requiring the dot keeps every genuine frame and drops the near-miss. */
+const CONTINUATION_GO_FRAME_REGEX = /^[\w./*]+\.[\w*]+\([^)]*\)\s*$/;
+
+/** A Go or Rust bare source-location continuation: `path/to/file.ext:line` optionally followed by more
+ *  text (Go's own `+0xNN` offset suffix, or nothing) — Go's `/app/main.go:10 +0x1b` frame-location line,
+ *  which (unlike Java/Node/Rust) carries no `at ` prefix of its own. Only ever checked against an indented
+ *  line's trimmed remainder (Go/Rust always indent this line with a tab).
+ *
+ *  **Trailing text bounded to Go's own offset suffix (PR #846 review).** The first version ended
+ *  `(?:[\s+:].*)?$` — arbitrary trailing prose — so an indented `src/main.rs:42 was recently modified by
+ *  CPE-1656` under an unrelated `ERROR` was swept into that error's group. Only Go's `+0xHEX` offset (or
+ *  nothing) may follow, which still matches every genuine frame-location line. */
+const CONTINUATION_SOURCE_LOCATION_REGEX = /^\S+\.\w+:\d+(?:\s+\+0x[0-9a-fA-F]+)?\s*$/;
+
+/** A Ruby backtrace frame: `from /path/to/file.rb:10:in \`method'` — Ruby's own documented backtrace
+ *  format (this repo has no local Ruby toolchain to capture a live run — CPE-1656 notes this gap
+ *  explicitly; the shape itself is Ruby's stable, well-known convention). Only ever checked against an
+ *  indented line's trimmed remainder (Ruby always indents this line with a tab). */
+const CONTINUATION_RUBY_FROM_REGEX = /^from\s/;
 
 /** True when `text` looks like it continues a line already classified as `parentLevel` — see the module
  *  doc comment's CPE-1638 section for the shapes recognized and why each is included. Deliberately
@@ -324,6 +485,7 @@ function looksLikeContinuation(text: string, parentLevel: LogLevel): boolean {
   if (CONTINUATION_ELLIPSIS_REGEX.test(head)) return true; // "... 9 more"
   if (CONTINUATION_CAUSED_BY_REGEX.test(head)) return true; // "Caused by: ..."
   if (CONTINUATION_AT_FRAME_REGEX.test(head)) return true; // an unindented "at ..." frame
+  if (CONTINUATION_GO_FRAME_REGEX.test(head)) return true; // Go's unindented "pkg.Func()" frame (CPE-1656)
   if (parentLevel === "error" && BARE_EXCEPTION_HEADER_REGEX.test(head)) return true;
 
   const wsMatch = CONTINUATION_LEADING_WS_REGEX.exec(head);
@@ -333,7 +495,10 @@ function looksLikeContinuation(text: string, parentLevel: LogLevel): boolean {
       CONTINUATION_AT_FRAME_REGEX.test(trimmed) || // an indented "at ..." frame
       CONTINUATION_ELLIPSIS_REGEX.test(trimmed) || // an indented "... N more"
       CONTINUATION_CAUSED_BY_REGEX.test(trimmed) || // an indented "Caused by: ..."
-      CONTINUATION_PYTHON_FRAME_REGEX.test(trimmed) // a Python `File "...", line N, in ...` frame
+      CONTINUATION_PYTHON_FRAME_REGEX.test(trimmed) || // a Python `File "...", line N, in ...` frame
+      CONTINUATION_RUST_FRAME_INDEX_REGEX.test(trimmed) || // Rust's indented "0: symbol" frame (CPE-1656)
+      CONTINUATION_SOURCE_LOCATION_REGEX.test(trimmed) || // Go/Rust's indented bare "path:line" (CPE-1656)
+      CONTINUATION_RUBY_FROM_REGEX.test(trimmed) // Ruby's indented "from path:line:in `method'" (CPE-1656)
     ) {
       return true;
     }
@@ -341,31 +506,102 @@ function looksLikeContinuation(text: string, parentLevel: LogLevel): boolean {
   return false;
 }
 
+/** How many "body" lines (CPE-1656) a real Python 3.11+ traceback frame can carry directly under its own
+ *  `File "...", line N, in ...` line: the source-excerpt line CPython prints (`    deep1()`), and
+ *  sometimes a further indented caret/tilde annotation line under it (`           ^^^^^^^` or
+ *  `           ~^^^^^^^^^^^^^^^`) pinpointing the exact expression that failed — confirmed against a real
+ *  captured `python -c`-style `KeyError` traceback for this ticket. Both are arbitrary source text that
+ *  can't be shape-matched like a real stack frame, so {@link groupContinuations} grants a narrow, bounded
+ *  allowance of up to this many indented lines (content unchecked) immediately after a real
+ *  {@link CONTINUATION_PYTHON_FRAME_REGEX} match, closing the moment a non-indented line is seen or the
+ *  next real `File "..."` frame resets the allowance back to full. */
+const PYTHON_FRAME_BODY_LINES = 2;
+
 /**
  * Second, O(n) pass over already-detected lines: an unleveled line immediately following a classified
  * (or already-grouped) line, that {@link looksLikeContinuation} of it, inherits that line's level into
  * `filterLevel` and is flagged `isContinuation` — so an errors-only filter keeps the whole finding
  * (header + trace) together instead of just the bare header. The chain breaks — `filterLevel` resets to
  * `null` — the instant a line doesn't look like a continuation, so unrelated lines that merely follow an
- * error are never swept in. Mutates `lines` in place (each entry's `filterLevel`/`isContinuation`
- * were already initialized in {@link parseLog}'s map); never rescans line text beyond the bounded
+ * error are never swept in. Mutates `lines` in place, including — in the two cases documented below —
+ * `level` itself (every OTHER line's `level` was already finalized by {@link detectLevel} in
+ * {@link parseLog}'s map and is never touched here); never rescans line text beyond the bounded
  * {@link CONTINUATION_SCAN_CHARS} window per line, so this stays flat over lines already sliced to
  * {@link MAX_LINES}.
+ *
+ * **CPE-1656: Python frame body lines.** A real Python traceback interleaves each `File "..."` frame with
+ * 1-2 lines of arbitrary source text (see {@link PYTHON_FRAME_BODY_LINES}) that can't be shape-matched.
+ * Immediately after a real Python-frame match, up to that many indented lines are swept in unconditionally
+ * (content unchecked, indentation required) so the chain survives to the NEXT `File "..."` frame — and
+ * ultimately to the traceback's terminal `XError: message` summary line — instead of breaking on the very
+ * first source-excerpt line.
+ *
+ * **CPE-1655: a root bare-exception header.** {@link BARE_EXCEPTION_HEADER_REGEX} (`TypeError: ...`,
+ * `KeyError: ...`) is normally trusted ONLY as a continuation of an already-classified ERROR line — never
+ * given its own `level` — specifically so an exception header immediately following a real leveled error
+ * (CPE-1638's original AbortError/BUGSNAG case) doesn't paint a second redundant badge (the "wall of red"
+ * CPE-1638 exists to avoid). But a real Node crash dump (`TypeError: Cannot read properties of undefined
+ * (reading 'foo')` with no level word ANYWHERE in the file, confirmed against a real captured `node`
+ * crash) has NOTHING classified above it — there is no preceding badge to be redundant with, so this is
+ * the finding's own true root, not a continuation. Only in that specific circumstance (`carryLevel` is
+ * currently `null`) does this pass promote the line to its own real `level`/`filterLevel` and start a
+ * fresh chain from it, so the `at ...` frames beneath it group too.
  */
 function groupContinuations(lines: LogLine[]): void {
   let carryLevel: LogLevel | null = null;
+  let pythonFrameBodyRemaining = 0;
   for (const line of lines) {
     if (line.level) {
       carryLevel = line.level;
       line.filterLevel = line.level;
       line.isContinuation = false;
-    } else if (carryLevel && looksLikeContinuation(line.text, carryLevel)) {
-      line.filterLevel = carryLevel;
-      line.isContinuation = true;
+      pythonFrameBodyRemaining = 0;
+      continue;
+    }
+
+    if (carryLevel) {
+      const head =
+        line.text.length > CONTINUATION_SCAN_CHARS ? line.text.slice(0, CONTINUATION_SCAN_CHARS) : line.text;
+      const wsMatch = CONTINUATION_LEADING_WS_REGEX.exec(head);
+      const trimmed = wsMatch ? head.slice(wsMatch[0].length) : head;
+      const isPythonFrame = wsMatch !== null && CONTINUATION_PYTHON_FRAME_REGEX.test(trimmed);
+
+      if (isPythonFrame) {
+        line.filterLevel = carryLevel;
+        line.isContinuation = true;
+        pythonFrameBodyRemaining = PYTHON_FRAME_BODY_LINES;
+      } else if (pythonFrameBodyRemaining > 0 && wsMatch) {
+        line.filterLevel = carryLevel;
+        line.isContinuation = true;
+        pythonFrameBodyRemaining -= 1;
+      } else if (looksLikeContinuation(line.text, carryLevel)) {
+        line.filterLevel = carryLevel;
+        line.isContinuation = true;
+        pythonFrameBodyRemaining = 0;
+      } else {
+        carryLevel = null;
+        line.filterLevel = null;
+        line.isContinuation = false;
+        pythonFrameBodyRemaining = 0;
+      }
+      continue;
+    }
+
+    // carryLevel is null: nothing classified precedes this line. A root bare-exception header (CPE-1655)
+    // gets a real level of its own here — see this function's doc comment for why that's safe from
+    // CPE-1638's "wall of red" concern in this specific circumstance.
+    const head =
+      line.text.length > CONTINUATION_SCAN_CHARS ? line.text.slice(0, CONTINUATION_SCAN_CHARS) : line.text;
+    if (BARE_EXCEPTION_HEADER_REGEX.test(head)) {
+      line.level = "error";
+      line.filterLevel = "error";
+      line.isContinuation = false;
+      carryLevel = "error";
+      pythonFrameBodyRemaining = 0;
     } else {
-      carryLevel = null;
       line.filterLevel = null;
       line.isContinuation = false;
+      pythonFrameBodyRemaining = 0;
     }
   }
 }
@@ -387,19 +623,24 @@ export function parseLog(raw: string): ParsedLog {
   const linesCapped = totalLines > MAX_LINES;
   const toProcess = linesCapped ? rawLines.slice(0, MAX_LINES) : rawLines;
 
-  const counts = emptyCounts();
   const lines: LogLine[] = toProcess.map((raw, index) => {
     const clean = stripAnsi(raw);
     const level = detectLevel(clean);
-    if (level) counts[level]++;
     const { text, truncated } = capText(clean, MAX_LINE_CHARS);
     return { index, text, level, truncated, filterLevel: level, isContinuation: false };
   });
 
   // CPE-1638: group stack-trace continuation lines with their header so an errors-only filter keeps the
   // whole finding, not just the bare header. Overwrites the placeholder filterLevel/isContinuation set
-  // above for any line that turns out to be a continuation of the preceding one.
+  // above for any line that turns out to be a continuation of the preceding one — and, in the CPE-1655
+  // root-bare-exception-header case, `level` itself (see groupContinuations' doc comment), which is why
+  // `counts` is tallied AFTER this call runs, not inline in the map above.
   groupContinuations(lines);
+
+  const counts = emptyCounts();
+  for (const line of lines) {
+    if (line.level) counts[line.level]++;
+  }
 
   return { lines, totalLines, linesCapped, counts };
 }
