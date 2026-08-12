@@ -1,66 +1,55 @@
 # Sprint Checkpoint
 
-## RUN 2026-08-11 (CLI resume, BATCHED "up to 50") — 43/50 — CLEAN HAND-OFF
-**State:** `main` clean and pushed, **every PR merged, zero of ours open** (only the pre-existing Gource
-PR #738, which awaits the user). Worktrees pruned to 2 (one is locked by a dead agent process — harmless,
-prune on resume). Sub-agent budget ~133/200 → handing off for headroom. Lock released, wakeups cancelled.
-**Zero escaped defects across all 21 merges.**
+## RUN 2026-08-11 (CLI resume, BATCHED "up to 50") — **COMPLETE at 50/50** — clean end
+**State:** `main` clean and pushed, **every one of our PRs merged, none open** (only the pre-existing
+Gource PR #738, which awaits the user). Batched run reached its bound; `BATCH-COUNTER` deleted. Lock
+released, wakeups cancelled. **Zero escaped defects; 7 blockers caught pre-merge.**
 
-### FIRST ACTION ON RESUME
-Nothing is blocked or half-built. Pick up **CPE-1642** or **CPE-1647** first — both are High, both are
-security-shaped, and they overlap each other's design space (see below). Then work down the ready list.
+### FIRST ACTION ON A NEW RUN
+Nothing is blocked or half-built. The Backlog holds **19** tickets. Suggested order:
 
-### Merged this session (21)
-Agent Watch "off means off" (CPE-1606) · smart-folder notice, now correct + 12 locales (CPE-1614) · File
-Health honours unreadable archives (CPE-1603) · `shred_paths` confirm gate (CPE-1611) · co-located agent
-sessions both visible (CPE-1625) · docs depth pass (CPE-1619) · **same-file canonicalisation, the High
-data-loss fix (CPE-1613)** · .NET metadata tab (CPE-1615) · notebook viewer (CPE-1616) · 45 notices → 12
-languages (CPE-1627) · durable checkpoint-failure records (CPE-1600) · pause-vs-end metrics (CPE-1626) ·
-log viewer (CPE-1618) · preview-pane screenshot harness (CPE-1629) · **batch-media output containment, High
-(CPE-1623)** · onDestroy teardown (CPE-1633) · CPE-1635 (premise disproven — hardening + reusable harness
-shipped) · vault_create confirm gate (CPE-1630) · bounded log window (CPE-1637) · YAML/TOML viewer
-(CPE-1617) · syntax highlighting (CPE-1631).
-
-### READY QUEUE — ordered, nothing blocked (20 tickets)
-1. **CPE-1642 (High)** — Batch Media containment still pattern-matches *link shapes*; symlink **chains** and a
-   hard-link check that **fails open under file contention** both escape, demonstrated. The durable fix is to
-   resolve the output's true filesystem identity once (volume serial + file index / dev+ino) and compare
-   identities. **Design with CPE-1624** (TOCTOU per-write re-check + ADS colons), same files.
-2. **CPE-1647 (High)** — `vault_unlock` takes `session_dir` straight off the IPC boundary with **no
-   containment check**, so `lock` → `wipe_session_dir` can shred an arbitrary directory. Fix is containment
-   (mirror `create_vault`'s existing `resolves_inside`), **not** a confirm flag. **Design with CPE-1645.**
-3. **CPE-1645 (High)** — Locking a vault **silently destroys edits made while unlocked**; nothing ever
+1. **CPE-1645 (High)** — locking a vault **silently destroys edits made while unlocked**; nothing ever
    re-encrypts, despite `src/docs/20-vaults.md` promising "re-seal". Decide the product behaviour first.
-4. **CPE-1624** — batch-media per-write re-check (TOCTOU) + ADS: a colon **anywhere** in a rename template
-   writes a hidden NTFS stream onto a same-named file, reachable from the UI.
-5. **CPE-1632** — the contrast guard's blind spots (white-on-solid-danger 2.88:1; `--text-faint` 3.45:1).
-   The deliverable is **the guard**, not two colours — two failures have now been found by eye.
-6. **CPE-1634** — 62 templated `showNotice` calls still untranslated, + a raw literal hiding in a multi-line
-   ternary, + the regrowth guard is defeatable by embedding its own marker in the string.
-7. **CPE-1636 / 1638 / 1644** — log viewer follow-ups: prose false-positives; filtering hides a stack
-   trace's own frames; UTF-16 decode + endianness label + unbounded page cache + stale "Back to latest".
-8. **CPE-1641** — a crashed agent session is recorded but **never shown**; its duration is measured from
-   deck-close, so History overstates it.
-9. **CPE-1643 / 1646 / 1648 / 1639 / 1640 / 1620 / 1621 / 1622 / 1628(Deferred) / 1518(needs NAS)**.
+   **Design with CPE-1654** (refused-lock UX) and **CPE-1653** (link debris) — same files, and 1654's
+   message work will be redone if 1645 lands after it.
+2. **CPE-1651 (High)** — `delete_permanent` deletes whatever it is handed and trusts the UI to have
+   confirmed. This was **step 2 of a working exploit chain** in the PR #838 review. Mirror the
+   `shred_paths` (CPE-1611) / `vault_create` (CPE-1630) consent shape. Audit `move_exact` alongside it.
+3. **CPE-1624** — batch-media per-write re-check (TOCTOU) + a colon **anywhere** in a rename template
+   writing a hidden NTFS stream. **Design with CPE-1652** (reparse tags + the two-census cost cliff) —
+   same files, and CPE-1642 just rewrote them.
+4. **CPE-1634** — 62 templated `showNotice` calls still untranslated, + a raw literal in a multi-line
+   ternary, + the regrowth guard is defeatable by embedding its own marker.
+5. **CPE-1655 / 1656 / 1657** — the log-viewer detector, all three at once as ONE design pass (they pull
+   in opposite directions: 1655 widens detection, 1657 tightens it, 1656 does both).
+6. **CPE-1649** — high-contrast theme solid-fill buttons fail worse than normal dark (filed by the
+   CPE-1632 worker; the new guard will find them).
+7. **CPE-1639** (needs a real `tauri build` + tauri-driver run), **CPE-1646**, **CPE-1648**, **CPE-1650**,
+   **CPE-1640**, **CPE-1658**, **CPE-1628** (Deferred), **CPE-1518** (needs the QNAP NAS).
+
+### Merged this run (7 PRs / 11 tickets)
+CPE-1641 crashed sessions in History (#839) · CPE-1620+1622 repo-URL strip + native model picker (#837) ·
+**CPE-1647 vault session containment, High (#838)** · CPE-1632 contrast guard app-wide (#841) ·
+**CPE-1642 batch-media output identity, High (#840)** · CPE-1636/1638/1644 log viewer follow-ups (#842) ·
+**CPE-1621 close-all-consoles, High + CPE-1643 (#843)**.
 
 ### Owed to the USER (async, non-blocking)
-- **Visual/taste glance** on everything shipped: syntax highlighting in all four themes, YAML/TOML tree,
-  notebook viewer, log viewer + its filter chips, .NET metadata tab, checkpoint-failure rows.
-- **`main` has no branch protection**, so the GUI gate isn't enforced at the merge button. Repo setting.
-- A critic's cleanup **closed the user's Chrome session** (rule now recorded); a stray reviewer scratch file
-  was committed and removed.
+- **Visual/taste glance** on everything shipped. One concrete pick-list item: the two colour-blind-safe
+  agent swatches now read slightly **mustard / steel-blue** rather than vivid orange / sky-blue
+  (screenshots were sent; also at `.claude/sprint-metrics/visual-evidence/cpe-1632-{light,dark}.png`).
+- **`main` has no branch protection**, so the gauntlet isn't enforced at the merge button. Repo setting.
 - Gource PR #738 still open, pre-existing.
+- Older queue still standing: hands-on checks of AI search (v0.57.45), tray, archive-drag.
 
 ### Lessons (full version in history.md — read its tail at kickoff)
-- **Ask for a number, not an impression** — coverage %, files-that-parse, byte-level proof.
-- **Real inputs, never the committed fixture** — it was written by the same author as the code.
-- **A negative control or it didn't happen.**
-- **A test written by reading the code can only confirm the code** — derive expectations from a spec or
-  reference implementation. One test here encoded the bug as its expected value.
-- **"We don't know" must never look like "it's fine"** — hit four separate ways.
-- **Approve the code, don't approve the record** — a worker overstated a bug as "95% of the stylesheet dead";
-  triangulation showed one rule. Correct the record in place.
-- **Headless Chrome's `--window-size` lies** (clamps to ~500px, rescales the screenshot) — it produced a
-  *false defect report*. Use an iframe, verify the width from inside. **Never `taskkill /IM chrome.exe`.**
-
-### To RESUME: fresh session → "resume the sprint" → start at CPE-1642/1647, batch count continues at 43/50.
+- **Neutralise each guard separately.** Both big security tickets had a guard that no test was pinning;
+  one could be deleted outright with the suite green. Disabling guards one at a time found both.
+- **A fix can be worse than the bug it fixes.** CPE-1642 round 1 made long paths fail OPEN — base `main`
+  refused the case the "fix" allowed. When a fix swaps a mechanism, diff the new mechanism's *reach*
+  against the old one's.
+- **Test the guard, not just the code** — the contrast guard passed vacuously on `var(--token, #fff)`.
+- **Real inputs beat fixtures.** Every UTF-16 fixture was pure ASCII; one emoji broke detection entirely.
+- **Refuse "too noisy to measure"** — a proper control showed the batch-media fix is ~19% *faster*.
+- **Two independent legs converging is the strongest signal** — reviewer and UAT hit the CPE-1621
+  failure-path defect by completely different routes.
+- **A Foreman-applied fix is right when the reviewer prescribes an exact, small change** (0 agents).
