@@ -62,9 +62,14 @@ impl WebdavProvider {
         WebdavProvider { agent, base_url: config.base_url.clone(), auth_header }
     }
 
-    /// The absolute URL for a provider path (`/`-rooted).
+    /// The absolute URL for a provider path (`/`-rooted). Each segment is percent-encoded (CPE-1659
+    /// found this the hard way against a real Apache `mod_dav` server): `ureq`'s request URL is parsed
+    /// like any other URL, so a raw `#` in a path silently starts a fragment — everything after it is
+    /// dropped from what's actually sent on the wire — and other reserved bytes aren't safe to send raw
+    /// either. The in-process fake server this crate's own tests use reads the raw request-line text
+    /// with no URL parsing at all, so it never exercised this; a real server does.
     fn url_for(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+        format!("{}/{}", self.base_url.trim_end_matches('/'), percent_encode_path(path.trim_start_matches('/')))
     }
 
     fn request(&self, method: &str, path: &str) -> ureq::Request {
@@ -276,6 +281,23 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-encode a `/`-rooted path for an OUTGOING request URL, preserving `/` as the segment
+/// separator — the mirror image of [`percent_decode`] above (which reverses this on the way IN, for
+/// `<d:href>` values a server sends back). Every byte outside the URL-safe unreserved set
+/// (`ALPHA / DIGIT / "-" / "." / "_" / "~"`, plus `/` itself) is escaped, so a name containing `#`,
+/// `%`, a space, or non-ASCII/emoji bytes reaches the server as the SAME literal name instead of being
+/// misparsed as a URL fragment/reserved character by the HTTP client library.
+fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

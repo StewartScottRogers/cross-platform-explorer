@@ -401,23 +401,24 @@ jobs:
             echo "CPE_E2E_SFTP_KNOWN_HOSTS_STORE=$RUNNER_TEMP/sftp-known-hosts"
           } >> "$GITHUB_ENV"
 
-      # Images pinned by tag; `docker pull` prints the exact digest resolved for this run into the log
-      # below, which a follow-up hardening commit turns into a hard `image@sha256:...` pin per the
-      # ticket's "pin by tag AND digest" requirement (so a silent upstream retag can't change what
-      # "real server" means underneath this job without a deliberate, reviewed commit).
-      - name: Pull + record the exact digest of every real server image (CPE-1659)
+      # Images pinned by BOTH tag (human-readable) AND digest (immutable) — `name:tag@sha256:digest` —
+      # so a silent upstream retag can never change what "real server" means underneath this job without
+      # a deliberate, reviewed commit updating the digest here. Digests below are what a real
+      # `docker pull` on this job resolved (confirmed on a live CI run before being hardened into a pin);
+      # bumping the tag AND re-confirming the resolved digest is the deliberate way to move these
+      # forward.
+      - name: Pull every real server image by its pinned digest (CPE-1659)
         run: |
-          for img in atmoz/sftp:latest bytemark/webdav:latest fauria/vsftpd:latest; do
-            docker pull "$img"
-            echo "resolved digest for $img: $(docker inspect --format='{{index .RepoDigests 0}}' "$img")"
-          done
+          docker pull atmoz/sftp:latest@sha256:0960390462a4441dbb63698d7c185b76a41ffcee7b78ff4adf275f3e66f9c475
+          docker pull bytemark/webdav:latest@sha256:21eed0df1238d17766080425f9ef46da2c1130e3e3aa9eaf36794d2a72e7c616
+          docker pull fauria/vsftpd:latest@sha256:6d71d7c7f1b0ab2844ec7dc7999a30aef6d758b6d8179cf5967513f87c79c177
 
       - name: Start real SFTP server (OpenSSH sftp-server, atmoz/sftp)
         run: |
           docker run -d --name sftp-e2e \
             --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.11 \
             -v "$CPE_E2E_SFTP_FIXTURE_DIR:/home/tester/upload" \
-            atmoz/sftp:latest \
+            atmoz/sftp:latest@sha256:0960390462a4441dbb63698d7c185b76a41ffcee7b78ff4adf275f3e66f9c475 \
             "tester:testpass:1001:1001:upload"
           {
             echo "CPE_E2E_SFTP_HOST=172.28.0.11"
@@ -432,7 +433,7 @@ jobs:
             --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.12 \
             -v "$CPE_E2E_WEBDAV_FIXTURE_DIR:/var/lib/dav/data" \
             -e AUTH_TYPE=Basic -e USERNAME=tester -e PASSWORD=testpass \
-            bytemark/webdav:latest
+            bytemark/webdav:latest@sha256:21eed0df1238d17766080425f9ef46da2c1130e3e3aa9eaf36794d2a72e7c616
           {
             echo "CPE_E2E_WEBDAV_HOST=172.28.0.12"
             echo "CPE_E2E_WEBDAV_USER=tester"
@@ -440,14 +441,70 @@ jobs:
             echo "CPE_E2E_WEBDAV_ROOT=/"
           } >> "$GITHUB_ENV"
 
+      # fauria/vsftpd ships with NO `ssl_enable` directive at all (plain FTP only) — FTPS needs it
+      # explicitly turned on, plus a real certificate. A public CA fundamentally cannot issue one for a
+      # private, ephemeral Docker IP, so this generates a throwaway self-signed cert (with an IP SAN,
+      # since certificate verifiers ignore the CN) and a full replacement vsftpd.conf (the image's
+      # entrypoint only ever APPENDS its own PASV/logging directives to whatever's already at this path,
+      # so pre-seeding it via bind mount is safe). `CPE_E2E_FTPS_EXTRA_CA_PEM_FILE` is the CI/test-only
+      # trust-anchor env var `crates/ftp` reads (see `extra_test_root` in its source) — a no-op for every
+      # real app run, only ever set here.
+      - name: Generate a throwaway FTPS certificate + vsftpd.conf (CPE-1659)
+        shell: bash
+        run: |
+          set -euo pipefail
+          ssl_dir="$RUNNER_TEMP/vsftpd-ssl"
+          mkdir -p "$ssl_dir"
+          openssl req -x509 -newkey rsa:2048 -keyout "$ssl_dir/vsftpd.key" -out "$ssl_dir/vsftpd.pem" \
+            -days 2 -nodes -subj "/CN=172.28.0.13" -addext "subjectAltName=IP:172.28.0.13"
+          chmod 0755 "$ssl_dir"
+          chmod 0644 "$ssl_dir/vsftpd.key" "$ssl_dir/vsftpd.pem"
+          conf="$RUNNER_TEMP/vsftpd.conf"
+          : > "$conf"
+          echo 'background=NO' >> "$conf"
+          echo 'anonymous_enable=NO' >> "$conf"
+          echo 'local_enable=YES' >> "$conf"
+          echo 'guest_enable=YES' >> "$conf"
+          echo 'virtual_use_local_privs=YES' >> "$conf"
+          echo 'write_enable=YES' >> "$conf"
+          echo 'pam_service_name=vsftpd_virtual' >> "$conf"
+          echo 'user_sub_token=$USER' >> "$conf"
+          echo 'local_root=/home/vsftpd/$USER' >> "$conf"
+          echo 'chroot_local_user=YES' >> "$conf"
+          echo 'allow_writeable_chroot=YES' >> "$conf"
+          echo 'hide_ids=YES' >> "$conf"
+          echo 'xferlog_enable=YES' >> "$conf"
+          echo 'xferlog_file=/var/log/vsftpd/vsftpd.log' >> "$conf"
+          echo 'port_enable=YES' >> "$conf"
+          echo 'connect_from_port_20=YES' >> "$conf"
+          echo 'ftp_data_port=20' >> "$conf"
+          echo 'seccomp_sandbox=NO' >> "$conf"
+          echo 'ssl_enable=YES' >> "$conf"
+          echo 'rsa_cert_file=/etc/vsftpd/ssl/vsftpd.pem' >> "$conf"
+          echo 'rsa_private_key_file=/etc/vsftpd/ssl/vsftpd.key' >> "$conf"
+          echo 'allow_anon_ssl=NO' >> "$conf"
+          echo 'force_local_data_ssl=NO' >> "$conf"
+          echo 'force_local_logins_ssl=NO' >> "$conf"
+          echo 'require_ssl_reuse=NO' >> "$conf"
+          echo 'ssl_tlsv1=YES' >> "$conf"
+          echo 'ssl_sslv2=NO' >> "$conf"
+          echo 'ssl_sslv3=NO' >> "$conf"
+          {
+            echo "CPE_E2E_FTP_SSL_DIR=$ssl_dir"
+            echo "CPE_E2E_FTP_CONF=$conf"
+            echo "CPE_E2E_FTPS_EXTRA_CA_PEM_FILE=$ssl_dir/vsftpd.pem"
+          } >> "$GITHUB_ENV"
+
       - name: Start real FTP server (vsftpd, fauria/vsftpd)
         run: |
           docker run -d --name ftp-e2e \
             --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.13 \
             -v "$CPE_E2E_FTP_FIXTURE_DIR:/home/vsftpd/tester" \
-            -e FTP_USER=tester -e FTP_PASS=testpass \
+            -v "$CPE_E2E_FTP_CONF:/etc/vsftpd/vsftpd.conf" \
+            -v "$CPE_E2E_FTP_SSL_DIR:/etc/vsftpd/ssl" \
+            -e FTP_USER=tester -e FTP_PASS=testpass -e LOCAL_UMASK=022 \
             -e PASV_ADDRESS=172.28.0.13 -e PASV_MIN_PORT=21100 -e PASV_MAX_PORT=21110 \
-            fauria/vsftpd:latest
+            fauria/vsftpd:latest@sha256:6d71d7c7f1b0ab2844ec7dc7999a30aef6d758b6d8179cf5967513f87c79c177
           {
             echo "CPE_E2E_FTP_HOST=172.28.0.13"
             echo "CPE_E2E_FTP_USER=tester"
@@ -494,7 +551,7 @@ jobs:
           docker run -d --name sftp-e2e \
             --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.11 \
             -v "$CPE_E2E_SFTP_FIXTURE_DIR:/home/tester/upload" \
-            atmoz/sftp:latest \
+            atmoz/sftp:latest@sha256:0960390462a4441dbb63698d7c185b76a41ffcee7b78ff4adf275f3e66f9c475 \
             "tester:testpass:1001:1001:upload"
           for _ in $(seq 1 30); do
             (echo > "/dev/tcp/172.28.0.11/22") >/dev/null 2>&1 && break
