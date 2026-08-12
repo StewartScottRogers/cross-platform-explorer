@@ -93,14 +93,37 @@ function collectNakedLiterals(node: ts.Node, out: ts.Node[]): void {
   }
   if (ts.isCallExpression(node)) {
     // A literal handed to ANY call still becomes the message the user reads — `String("...")`, a local
-    // `formatErr(`...`)` helper, `[...].join(", ")`. So descend into the arguments, but skip a bare
-    // identifier / property or element access (`String(e)`, `err.message`): those carry a *runtime*
-    // value, not this expression's own literal text, and opening them is what would make
-    // `typeof e === "string"` false-positive. Nested calls recurse naturally.
+    // `formatErr(`...`)` helper. So descend into the arguments, but skip a bare identifier / property or
+    // element access (`String(e)`, `err.message`): those carry a *runtime* value, not this expression's
+    // own literal text, and opening them is what would make `typeof e === "string"` false-positive.
+    // Nested calls recurse naturally.
     for (const arg of node.arguments) {
       if (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg) || ts.isElementAccessExpression(arg)) continue;
       collectNakedLiterals(arg, out);
     }
+    // ...and for a METHOD call the literal can live in the receiver rather than the arguments —
+    // `["Hardcoded sentence."].join()` puts the whole message on the left of the dot, where no amount of
+    // argument-descent would ever see it (PR #845 re-review, demonstrated live). Open the receiver too,
+    // unless it's a bare identifier, which keeps `arr.join(", ")` and `e.toString()` unflagged.
+    if (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) {
+      const receiver = node.expression.expression;
+      if (!ts.isIdentifier(receiver)) collectNakedLiterals(receiver, out);
+    }
+    return;
+  }
+  if (ts.isArrayLiteralExpression(node)) {
+    // An array of literals is message text the moment anything joins it.
+    for (const element of node.elements) collectNakedLiterals(element, out);
+    return;
+  }
+  if (ts.isSpreadElement(node)) {
+    collectNakedLiterals(node.expression, out);
+    return;
+  }
+  if (ts.isTaggedTemplateExpression(node)) {
+    // `` msgTag`Hardcoded ${x}` `` is a tagged template, NOT a CallExpression — a separate node kind that
+    // would otherwise fall through to the opaque default with its text fully visible in the source.
+    collectNakedLiterals(node.template, out);
     return;
   }
   // Anything else — identifiers, property/element access, a comparison (`typeof e === "string"`) — is
@@ -271,6 +294,59 @@ describe("showNotice() i18n regrowth guard (CPE-1627/CPE-1634)", () => {
           showNotice(String(e), true);
           showNotice(String(err.message), true);
           showNotice(typeof e === "string" ? String(e) : $t("notice.failed"), true);
+        }
+      </script>
+    `;
+    expect(findOffenders(snippet)).toEqual([]);
+  });
+
+  it("flags a literal array joined into a message — the receiver side of a method call (PR #845 re-review)", () => {
+    // The re-review's live-demonstrated hole: descending into a call's ARGUMENTS is not enough, because
+    // `.join()` with no separator puts the entire message on the left of the dot. Deliberately written
+    // WITHOUT a separator argument — the `.join("")` form would go red for the wrong reason (its empty
+    // separator is itself a literal) and so would keep passing if someone later used a variable separator.
+    const snippet = `
+      <script lang="ts">
+        function f() {
+          showNotice(["Realistic hardcoded English sentence."].join());
+        }
+      </script>
+    `;
+    const offenders = findOffenders(snippet);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].text).toContain("Realistic hardcoded English sentence.");
+  });
+
+  it("flags a tagged template and a spread of literal messages (the remaining unopened node kinds)", () => {
+    const tagged = `
+      <script lang="ts">
+        function f(x: string) {
+          showNotice(msgTag\`Hardcoded tagged text \${x}\`);
+        }
+      </script>
+    `;
+    expect(findOffenders(tagged)).toHaveLength(1);
+
+    const spread = `
+      <script lang="ts">
+        function f() {
+          showNotice(pick(...["Hardcoded A", "Hardcoded B"]));
+        }
+      </script>
+    `;
+    expect(findOffenders(spread)).toHaveLength(1);
+  });
+
+  it("still does not flag a method call on a runtime receiver (arr.join(\", \"), e.toString())", () => {
+    // The receiver descent must not cost the non-flagging half: a bare identifier receiver carries a
+    // runtime value. (`arr.join(", ")` does flag its separator — that's the argument rule, and a real
+    // separator is not user-facing message text, so it gets the exemption comment like anything else.)
+    const snippet = `
+      <script lang="ts">
+        function f(arr: string[], e: unknown) {
+          showNotice(arr.join());
+          showNotice(e.toString());
+          showNotice(err.message.trim());
         }
       </script>
     `;
