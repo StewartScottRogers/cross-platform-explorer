@@ -257,8 +257,26 @@ pub struct Epic {
     pub tags: Vec<String>,
 }
 
+/// The epic `status:` a folder under `Ticketing/Epics/` means (CPE-1676) — the Epics queue has the
+/// same five status folders as `Tickets/`, and there too **the folder is the status**. The only
+/// difference from [`status_for_column`] is that a dormant epic brief is `Proposed`, not `Open`.
+/// Deliberately duplicated from `cpe_server::ticket_board` — the sidecar must not depend on the app
+/// or `cpe-server` (ADR 0001), so both boards carry their own copy and change in lockstep.
+fn epic_status_for_folder(folder: &str) -> Option<&'static str> {
+    match folder_for_column(folder)? {
+        "Backlog" => Some("Proposed"),
+        "Doing" => Some("In Progress"),
+        "Blocked" => Some("Blocked"),
+        "Deferred" => Some("Deferred"),
+        "Done" => Some("Done"),
+        _ => None,
+    }
+}
+
 /// Parse an epic from a ticket's markdown. `None` if it has no id **or** isn't `epic`-tagged.
-fn epic_from(md: &str) -> Option<Epic> {
+/// `folder_status`, when given, overrides the frontmatter — the caller passes it for a file read out
+/// of an `Epics/<Folder>/` status folder, where the folder is authoritative (CPE-1676).
+fn epic_from(md: &str, folder_status: Option<&str>) -> Option<Epic> {
     let fm = frontmatter(md);
     let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
     let tags: Vec<String> = fm.get("tags").map(|s| parse_tags(s)).unwrap_or_default();
@@ -268,30 +286,44 @@ fn epic_from(md: &str) -> Option<Epic> {
     Some(Epic {
         id,
         title: fm.get("title").map(|s| unquote(s)).unwrap_or_default(),
-        status: fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        status: match folder_status {
+            Some(s) => s.to_string(),
+            None => fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        },
         tags,
     })
 }
 
-/// Read the repo's epics: active/proposed epics from `Ticketing/Epics/` + closed epics from the
-/// top level of `Ticketing/Tickets/Done/` (each `epic`-tagged) — mirrors the in-process board's
-/// `board_epics_impl` (CPE-1129). Unreadable dirs/files and non-epic tickets are skipped. Id-sorted.
-pub fn read_epics(root: &Path) -> Vec<Epic> {
-    let mut epics = Vec::new();
-    for dir in [epics_dir(root), tickets_dir(root).join("Done")] {
-        let Ok(entries) = fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("md") {
-                continue;
-            }
-            if let Ok(md) = fs::read_to_string(&path) {
-                if let Some(epic) = epic_from(&md) {
-                    epics.push(epic);
-                }
+/// Read every `epic`-tagged `.md` directly inside `dir` (non-recursive), taking each epic's status
+/// from `folder_status` when the caller supplies one. Unreadable dirs/files, the folders' `wiki.md`
+/// explainers and non-epic tickets are skipped.
+fn collect_epics_in(dir: &Path, folder_status: Option<&str>, out: &mut Vec<Epic>) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        if let Ok(md) = fs::read_to_string(&path) {
+            if let Some(epic) = epic_from(&md, folder_status) {
+                out.push(epic);
             }
         }
     }
+}
+
+/// Read the repo's epics: the epics in the five status folders of `Ticketing/Epics/` + closed epics
+/// from the top level of `Ticketing/Tickets/Done/` (each `epic`-tagged) — mirrors the in-process
+/// board's `board_epics_impl` (CPE-1129, CPE-1676). Inside `Epics/` the folder supplies the status,
+/// so a stale `status:` line can't make the board disagree with the queue's layout; epics closed
+/// before CPE-1676 still sit in `Tickets/Done/` and keep using their frontmatter. Unreadable
+/// dirs/files and non-epic tickets are skipped. Id-sorted.
+pub fn read_epics(root: &Path) -> Vec<Epic> {
+    let mut epics = Vec::new();
+    for column in COLUMNS {
+        collect_epics_in(&epics_dir(root).join(column), epic_status_for_folder(column), &mut epics);
+    }
+    collect_epics_in(&tickets_dir(root).join("Done"), None, &mut epics);
     epics.sort_by(|a, b| a.id.cmp(&b.id));
     epics
 }
@@ -542,7 +574,7 @@ mod tests {
     fn read_epics_resolves_from_the_sibling_epics_dir_and_closed_done() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        write_epic(root, "Epics", "CPE-500", "In Progress");
+        write_epic(root, "Epics/Doing", "CPE-500", "In Progress");
         write_epic(root, "Tickets/Done", "CPE-501", "Done");
         // A non-epic ticket in Done must NOT be picked up as an epic.
         write_ticket(root, "Done", "CPE-9", "Done");
@@ -553,6 +585,35 @@ mod tests {
         assert_eq!(epics[0].status, "In Progress");
         assert_eq!(epics[1].status, "Done");
         assert!(epics.iter().all(|e| e.tags.contains(&"epic".to_string())));
+    }
+
+    /// CPE-1676: the Epics queue is five status folders and **the folder is the status** — the
+    /// standalone board must read epics at the new depth, prefer the folder over a stale `status:`
+    /// line, and ignore each folder's `wiki.md` explainer. Mirrors the in-process board's test.
+    #[test]
+    fn read_epics_takes_the_status_from_the_epics_status_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_epic(root, "Epics/Backlog", "CPE-1", "Proposed");
+        // Stale frontmatter: the folder wins.
+        write_epic(root, "Epics/Doing", "CPE-2", "Proposed");
+        write_epic(root, "Epics/Blocked", "CPE-3", "Blocked");
+        write_epic(root, "Epics/Deferred", "CPE-4", "Deferred");
+        write_epic(root, "Epics/Done", "CPE-5", "Done");
+        fs::write(root.join("Ticketing/Epics/Backlog/wiki.md"), "# Backlog\n").unwrap();
+
+        let epics = read_epics(root);
+        let got: Vec<(&str, &str)> = epics.iter().map(|e| (e.id.as_str(), e.status.as_str())).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("CPE-1", "Proposed"),
+                ("CPE-2", "In Progress"),
+                ("CPE-3", "Blocked"),
+                ("CPE-4", "Deferred"),
+                ("CPE-5", "Done"),
+            ]
+        );
     }
 
     #[test]

@@ -220,9 +220,32 @@ fn board_archived_impl(root: String) -> Vec<ticket_board::Card> {
     out
 }
 
-/// List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
-/// `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each `epic`-tagged.
-/// Read-only. Note the two live at different depths since CPE-1128 (Epics is a sibling of Tickets).
+/// Read every `CPE-*.md` directly inside `dir`, parsing each with `parse` and collecting the hits.
+/// Non-CPE files (the folders' `wiki.md` explainers) and unreadable entries are skipped.
+fn collect_epics_in(dir: &std::path::Path, parse: impl Fn(&str) -> Option<ticket_board::Epic>, out: &mut Vec<ticket_board::Epic>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if !name.starts_with("CPE-") || !name.ends_with(".md") {
+            continue;
+        }
+        if let Ok(md) = std::fs::read_to_string(&p) {
+            if let Some(epic) = parse(&md) {
+                out.push(epic);
+            }
+        }
+    }
+}
+
+/// List the repo's epics for the board's epic-organized view (CPE-530): the epics in the five status
+/// folders of `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each
+/// `epic`-tagged. Read-only.
+///
+/// Since CPE-1676 the Epics queue has the same five status folders as `Tickets/` and **the folder is
+/// the status**, so an epic read out of `Epics/<Folder>/` takes its status from that folder, not from
+/// its `status:` line. Epics closed before that migration still sit in `Tickets/Done/` (and its dated
+/// subfolders, which reach the board via `board_archived`) — those keep using their frontmatter.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
@@ -232,23 +255,13 @@ async fn board_epics(root: String) -> Vec<ticket_board::Epic> {
 
 fn board_epics_impl(root: String) -> Vec<ticket_board::Epic> {
     let base = std::path::Path::new(&root).join("Ticketing");
+    let epics_dir = base.join("Epics");
     let mut epics = Vec::new();
-    // Epics is a top-level sibling queue; closed epics live in the status-flow's Done (CPE-1128).
-    for dir in [base.join("Epics"), base.join("Tickets").join("Done")] {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if !name.starts_with("CPE-") || !name.ends_with(".md") {
-                continue;
-            }
-            if let Ok(md) = std::fs::read_to_string(&p) {
-                if let Some(epic) = ticket_board::epic_from(&md) {
-                    epics.push(epic);
-                }
-            }
-        }
+    for column in ticket_board::EPIC_COLUMNS {
+        collect_epics_in(&epics_dir.join(column), |md| ticket_board::epic_from_in(md, column), &mut epics);
     }
+    // Epics closed before CPE-1676 live in the status-flow's Done (CPE-1128); status from frontmatter.
+    collect_epics_in(&base.join("Tickets").join("Done"), ticket_board::epic_from, &mut epics);
     epics
 }
 
@@ -12887,11 +12900,13 @@ mod tests {
     fn find_ticket_file_locates_epics_sprints_and_archived() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
-        // The Ticketing/ container (CPE-1128): status folders under Tickets/, Epics/ & Sprints/ as siblings.
+        // The Ticketing/ container (CPE-1128): status folders under Tickets/, Epics/ & Sprints/ as
+        // siblings — and since CPE-1676 the Epics queue has its own status folders too, so the epic
+        // sits one level deeper than it used to. The recursive search must still reach it.
         let t = root.join("Ticketing");
         for (dir, name) in [
             ("Tickets/Backlog", "CPE-10_a.md"),
-            ("Epics", "CPE-616_epic-remote.md"),
+            ("Epics/Backlog", "CPE-616_epic-remote.md"),
             ("Sprints", "SPR-01_x.md"),
             ("Tickets/Done/2026/Q3/July/Week-30", "CPE-1_done.md"),
         ] {
@@ -12906,6 +12921,53 @@ mod tests {
         assert!(find_ticket_file(&rs, "CPE-999").is_none(), "missing id → None");
         // Prefix precision: `CPE-6` must not match `CPE-616`.
         assert!(find_ticket_file(&rs, "CPE-6").is_none(), "CPE-6 does not match CPE-616");
+    }
+
+    /// CPE-1676: the Epics queue is five status folders and the **folder** is the status. The board
+    /// must read epics at the new depth, take the status from the folder even when the file's own
+    /// `status:` disagrees, ignore the folders' `wiki.md` explainers, and still surface the epics
+    /// closed into `Tickets/Done/` before the migration.
+    #[test]
+    fn board_epics_reads_the_status_folders_and_trusts_the_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let epics = root.join("Ticketing").join("Epics");
+        let write = |dir: &std::path::Path, name: &str, body: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(name), body).unwrap();
+        };
+        let epic_md = |id: &str, status: &str| {
+            format!("---\nid: {id}\ntitle: \"EPIC: {id}\"\nstatus: {status}\ntags: [epic]\n---\nbody\n")
+        };
+        write(&epics.join("Backlog"), "CPE-1_epic-a.md", &epic_md("CPE-1", "Proposed"));
+        // Stale frontmatter: the folder wins, so this reports as In Progress, not Proposed.
+        write(&epics.join("Doing"), "CPE-2_epic-b.md", &epic_md("CPE-2", "Proposed"));
+        write(&epics.join("Blocked"), "CPE-3_epic-c.md", &epic_md("CPE-3", "Blocked"));
+        write(&epics.join("Deferred"), "CPE-4_epic-d.md", &epic_md("CPE-4", "Deferred"));
+        write(&epics.join("Done"), "CPE-5_epic-e.md", &epic_md("CPE-5", "Done"));
+        // Each folder's explainer is not an epic and must not appear.
+        write(&epics.join("Backlog"), "wiki.md", "# Backlog\n");
+        // A pre-CPE-1676 closed epic still parked in the status-flow's Done.
+        write(&root.join("Ticketing/Tickets/Done"), "CPE-6_epic-old.md", &epic_md("CPE-6", "Done"));
+        // A plain (non-epic) ticket in Done is not an epic.
+        write(&root.join("Ticketing/Tickets/Done"), "CPE-7_plain.md", "---\nid: CPE-7\ntags: [ready]\n---\n");
+
+        let mut got: Vec<(String, String)> = board_epics_impl(root.to_string_lossy().into_owned())
+            .into_iter()
+            .map(|e| (e.id, e.status))
+            .collect();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("CPE-1".to_string(), "Proposed".to_string()),
+                ("CPE-2".to_string(), "In Progress".to_string()),
+                ("CPE-3".to_string(), "Blocked".to_string()),
+                ("CPE-4".to_string(), "Deferred".to_string()),
+                ("CPE-5".to_string(), "Done".to_string()),
+                ("CPE-6".to_string(), "Done".to_string()),
+            ]
+        );
     }
 
     #[test]

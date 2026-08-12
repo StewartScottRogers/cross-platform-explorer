@@ -405,7 +405,8 @@ mod tests {
     fn serves_epics_and_sprints_json_from_the_sibling_ticketing_queues() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
-        seed_epic(&root, "Epics", "CPE-500", "In Progress");
+        // Since CPE-1676 the Epics queue has the Tickets queue's five status folders.
+        seed_epic(&root, "Epics/Doing", "CPE-500", "In Progress");
         seed_sprint(&root, "Sprints", "SPR-02", "Active");
         let server = serve(root.clone()).unwrap();
 

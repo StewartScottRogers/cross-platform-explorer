@@ -1,8 +1,15 @@
 # Ticketing Organize — Done Folder
 
-Scan the `Done/` folder and subdivide any directory that exceeds the file threshold
+Scan the `Ticketing/Tickets/Done/` folder and subdivide any directory that exceeds the file threshold
 by moving its tickets one level deeper. Safe to run at any time — already-compliant
 folders are untouched.
+
+**Scope: `Ticketing/Tickets/Done/` only.** The Epics queue gained the same five status folders in
+CPE-1676, but its `Ticketing/Epics/Done/` is deliberately **flat and stays flat** — there are ~70
+epics in total and few ever close, so dated buckets would add depth without buying anything, and
+every reader (both boards, the ticket MCP, the guard test) gets a simpler contract. This skill and
+`scripts/organize-done.mjs` must never nest `Epics/Done/`. Revisit only if it ever passes a few
+hundred files.
 
 ## How to run (CPE-865)
 

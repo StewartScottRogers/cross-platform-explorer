@@ -35,9 +35,14 @@ async boardCards(root: string) : Promise<Card[]> {
     return await TAURI_INVOKE("board_cards", { root });
 },
 /**
- * List the repo's epics for the board's epic-organized view (CPE-530): active/proposed epics from
- * `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each `epic`-tagged.
- * Read-only. Note the two live at different depths since CPE-1128 (Epics is a sibling of Tickets).
+ * List the repo's epics for the board's epic-organized view (CPE-530): the epics in the five status
+ * folders of `Ticketing/Epics/` + closed epics from `Ticketing/Tickets/Done/` (top level), each
+ * `epic`-tagged. Read-only.
+ * 
+ * Since CPE-1676 the Epics queue has the same five status folders as `Tickets/` and **the folder is
+ * the status**, so an epic read out of `Epics/<Folder>/` takes its status from that folder, not from
+ * its `status:` line. Epics closed before that migration still sit in `Tickets/Done/` (and its dated
+ * subfolders, which reach the board via `board_archived`) — those keep using their frontmatter.
  */
 async boardEpics(root: string) : Promise<Epic[]> {
     return await TAURI_INVOKE("board_epics", { root });

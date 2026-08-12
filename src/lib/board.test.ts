@@ -1,6 +1,6 @@
 // CPE-521: Agent Board model — column grouping, ordering, counts, and move validation.
 import { describe, it, expect } from "vitest";
-import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, epicBar, doneWithArchived, filterCards, epicColumn, groupEpicsByColumn, archivedEpics, filterEpics, type Card, type Epic } from "./board";
+import { groupByColumn, columnCounts, isValidMove, isColumn, ticketTask, groupByLane, laneFor, clampBoardSize, BOARD_MIN_W, BOARD_MIN_H, groupByEpic, todoDone, epicProgress, epicBar, doneWithArchived, filterCards, epicColumn, groupEpicsByColumn, archivedEpics, filterEpics, BOARD_COLUMNS, EPIC_COLUMNS, type Card, type Epic } from "./board";
 
 function card(id: string, column: string, extra: Partial<Card> = {}): Card {
   return { id, title: `t ${id}`, ticket_type: "Feature", priority: "Medium", tags: [], column, ...extra };
@@ -135,7 +135,7 @@ describe("board model (CPE-521)", () => {
 describe("epics-as-kanban (CPE-922)", () => {
   const ep = (id: string, status: string): Epic => ({ id, title: `Epic ${id}`, status, tags: ["epic"] });
 
-  it("maps epic status onto Backlog/Doing/Done columns", () => {
+  it("maps epic status onto the five status columns", () => {
     expect(epicColumn("Proposed")).toBe("Backlog");
     expect(epicColumn("")).toBe("Backlog");
     expect(epicColumn("whatever")).toBe("Backlog");
@@ -143,12 +143,25 @@ describe("epics-as-kanban (CPE-922)", () => {
     expect(epicColumn("active")).toBe("Doing");
     expect(epicColumn("Done")).toBe("Done");
     expect(epicColumn("CLOSED")).toBe("Done");
+    // CPE-1676: the Epics queue gained Blocked/ and Deferred/, so their statuses get real lanes
+    // instead of silently falling into Backlog.
+    expect(epicColumn("Blocked")).toBe("Blocked");
+    expect(epicColumn("deferred")).toBe("Deferred");
+  });
+
+  it("the Epics view has exactly the tickets board's five columns (CPE-1676)", () => {
+    expect([...EPIC_COLUMNS]).toEqual([...BOARD_COLUMNS]);
   });
 
   it("groups epics into columns, id-ordered", () => {
-    const g = groupEpicsByColumn([ep("CPE-100", "Proposed"), ep("CPE-9", "Proposed"), ep("CPE-3", "In Progress"), ep("CPE-2", "Done")]);
+    const g = groupEpicsByColumn([
+      ep("CPE-100", "Proposed"), ep("CPE-9", "Proposed"), ep("CPE-3", "In Progress"), ep("CPE-2", "Done"),
+      ep("CPE-4", "Blocked"), ep("CPE-5", "Deferred"),
+    ]);
     expect(g.Backlog.map((e) => e.id)).toEqual(["CPE-9", "CPE-100"]); // numeric order, not lexical
     expect(g.Doing.map((e) => e.id)).toEqual(["CPE-3"]);
+    expect(g.Blocked.map((e) => e.id)).toEqual(["CPE-4"]);
+    expect(g.Deferred.map((e) => e.id)).toEqual(["CPE-5"]);
     expect(g.Done.map((e) => e.id)).toEqual(["CPE-2"]);
   });
 

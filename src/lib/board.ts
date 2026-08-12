@@ -127,6 +127,8 @@ export type EpicBarState = "complete" | "partial" | "empty";
  *  - A **Doing** (In Progress) epic shows child completion as a visually distinct **partial** (hatched)
  *    style, so an open epic whose known children happen to be all-done never reads as a solid *complete*
  *    bar; with no decomposed children yet it's an empty track.
+ *  - A **Blocked** / **Deferred** epic (CPE-1676) reads like Doing: it was decomposed and then parked,
+ *    so its children's real progress is the honest thing to show — partial, or empty with no children.
  *  Pure — the `done`/`total` come from {@link epicProgress} over the full (archive-inclusive) card set. */
 export function epicBar(
   status: string,
@@ -148,22 +150,29 @@ export function epicBar(
 // --- Epics-as-kanban (CPE-922): lay epics out across ticket-style columns instead of a list+detail, so
 // the Epics view reads like the tickets board. Epics flow Proposed → In Progress → Done. -------------
 
-/** The Epics view's columns — the epic lifecycle mapped onto the tickets board's Backlog/Doing/Done. */
-export const EPIC_COLUMNS = ["Backlog", "Doing", "Done"] as const;
-export type EpicColumn = (typeof EPIC_COLUMNS)[number];
+/** The Epics view's columns. Since CPE-1676 the Epics queue has the **same five status folders** as
+ *  `Ticketing/Tickets/`, so the view shows the same five lanes as the tickets board — Blocked and
+ *  Deferred are normally empty, exactly as an unblocked board's are. */
+export const EPIC_COLUMNS = BOARD_COLUMNS;
+export type EpicColumn = Column;
 
-/** Map an epic's `status:` frontmatter to its board column. `In Progress`/`Active` → Doing,
- *  `Done`/`Closed` → Done; anything else (Proposed, blank, unknown) is not-yet-started → Backlog. */
+/** Map an epic's `status:` to its board column. The backend derives that status from the epic's
+ *  folder (CPE-1676), so this is a straight fold of the status vocabulary — plus the historical
+ *  aliases (`Active`, `Closed`) that older closed epics in `Tickets/Done/` still carry.
+ *  Anything unknown (Proposed, blank) is not-yet-started → Backlog. */
 export function epicColumn(status: string): EpicColumn {
   const s = status.trim().toLowerCase();
   if (s === "done" || s === "closed" || s === "complete") return "Done";
   if (s === "in progress" || s === "active" || s === "doing") return "Doing";
+  if (s === "blocked") return "Blocked";
+  if (s === "deferred") return "Deferred";
   return "Backlog";
 }
 
 /** Group epics into the Epics-view columns, each id-ordered (CPE-9 before CPE-100). */
 export function groupEpicsByColumn(epics: Epic[]): Record<EpicColumn, Epic[]> {
-  const out = { Backlog: [], Doing: [], Done: [] } as Record<EpicColumn, Epic[]>;
+  const out = {} as Record<EpicColumn, Epic[]>;
+  for (const c of EPIC_COLUMNS) out[c] = [];
   for (const e of epics) out[epicColumn(e.status)].push(e);
   for (const c of EPIC_COLUMNS) out[c].sort((a, b) => idNum(a.id) - idNum(b.id));
   return out;

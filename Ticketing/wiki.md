@@ -16,6 +16,11 @@ Ticketing/
   wiki.md        <- workflow rules (you are here)
   _template.md   <- copy to Tickets/Backlog/ to start a new ticket
   Epics/         <- umbrella trackers, decomposed just-in-time (SIBLING queue — see "Epics" below)
+    Backlog/       <- Proposed: dormant briefs, not yet decomposed
+    Doing/         <- In Progress: activated epics (several may be active at once)
+    Blocked/       <- epics gated EXTERNALLY (normally empty)
+    Deferred/      <- epics WE postponed by choice / on an internal prereq (normally empty)
+    Done/          <- closed epics — FLAT, never dated-nested
   Sprints/       <- time-boxed batches of tickets (SIBLING queue — see "Sprints" below)
   Tickets/       <- the status-flow queue (folder = status)
     Backlog/       <- open tickets waiting to be worked
@@ -26,6 +31,12 @@ Ticketing/
 ```
 
 The folder a ticket lives in IS its status. The `status:` frontmatter field mirrors it.
+
+`Tickets/` and `Epics/` deliberately have the **same five status folders** (CPE-1676) so both queues
+read the same way and the same mental model applies to each; only the status vocabulary differs
+(`Backlog/` means `Open` for a ticket and `Proposed` for an epic). Two guard tests in
+`src/lib/epicsQueueLayout.test.ts` hold the Epics queue to it: nothing loose in `Ticketing/Epics/`,
+and no `status:` that disagrees with its folder.
 
 ---
 
@@ -150,7 +161,8 @@ either as Won't Fix; they are postponed, not declined. See each folder's `wiki.m
 
 An **epic** is a headline goal too big for one unit of work (a Mega-Feature, or anything that will
 clearly spawn many child tickets). Epics are managed by the **`ticketing-epic`** skill and live in
-their own queue, **`Ticketing/Epics/`** — never in `Backlog/`.
+their own queue, **`Ticketing/Epics/`** — never in `Tickets/`. That queue has the **same five status
+folders** as `Tickets/`, and there too the folder IS the status.
 
 **The core rule: no research, planning, or sub-ticketing until an epic is *activated*.** A dormant
 epic is a one-page brief — goal, rough scope, open questions, maybe an epic-level Definition of Done —
@@ -161,18 +173,25 @@ Lifecycle:
 
 | Stage | Folder / status | What exists |
 |-------|-----------------|-------------|
-| **Proposed** | `Epics/`, `status: Proposed` | Just the brief. No children, no research. |
-| **Active** | `Epics/`, `status: In Progress` | Activated: decisions resolved, child tickets created in `Backlog/` (each with `epic: CPE-NNN`). |
-| **Done** | `Done/`, `status: Done` | All children Done + the epic's Definition of Done met. |
+| **Proposed** | `Epics/Backlog/`, `status: Proposed` | Just the brief. No children, no research. |
+| **Active** | `Epics/Doing/`, `status: In Progress` | Activated: decisions resolved, child tickets created in `Tickets/Backlog/` (each with `epic: CPE-NNN`). |
+| **Blocked** | `Epics/Blocked/`, `status: Blocked` | Gated by something EXTERNAL. Normally empty. |
+| **Deferred** | `Epics/Deferred/`, `status: Deferred` | Parked by OUR choice / an internal prereq. Normally empty. |
+| **Done** | `Epics/Done/`, `status: Done` | All children Done + the epic's Definition of Done met. |
 
 - `status: Proposed` is **epics-only** — it marks a dormant, not-yet-decomposed brief.
 - **`activate`** (in `ticketing-epic`) is the *only* place an epic is decomposed: research → resolve
-  `needs-decision` questions with the user → create `epic:`-linked children in `Backlog/` → set the
-  epic `In Progress`.
-- Epics are **never** put in `Doing/` and **never** built by `/ticketing-work` (it redirects to
+  `needs-decision` questions with the user → create `epic:`-linked children in `Tickets/Backlog/` →
+  `git mv` the epic `Epics/Backlog/ → Epics/Doing/` and set `status: In Progress` in the same edit.
+- `Epics/Doing/` is **not** one-at-a-time the way `Tickets/Doing/` is — several epics can be active.
+- `Epics/Done/` is **flat**: `/ticketing-organize` nests `Tickets/Done/` by date because it holds
+  thousands of tickets; there are ~70 epics in total, so it must never touch `Epics/Done/`.
+- Epics are **never** put in `Tickets/` and **never** built by `/ticketing-work` (it redirects to
   `ticketing-epic activate`). Only an epic's *children* are worked, as ordinary Backlog tickets.
 - Every child carries an `epic: CPE-NNN` frontmatter field so progress is countable and the epic
   closes exactly when its children (and DoD) do.
+- Epics closed **before** CPE-1676 were filed into `Tickets/Done/` and were left there; both boards
+  therefore read epics from `Epics/**` *and* from `Tickets/Done/`.
 
 ---
 

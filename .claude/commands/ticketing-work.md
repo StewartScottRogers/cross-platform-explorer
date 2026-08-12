@@ -3,11 +3,12 @@ pick up -> implement -> close.
 
 ## Picking Up
 
-0. **Epic guard.** If the target is an epic (found in `Ticketing/Epics/`, or its `tags:` include `epic`),
-   do NOT build it here — an epic is decomposed just-in-time, not worked directly. Redirect: run
-   `/ticketing-epic activate CPE-$ARGUMENTS` (if it is still `Proposed`) or point the user at its
-   child tickets in `Backlog/` (if already `In Progress`). Then stop this skill.
-1. Find the file. Check Ticketing/Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Deferred/, then Doing/, then Done/ recursively.
+0. **Epic guard.** If the target is an epic (found anywhere under `Ticketing/Epics/`, or its `tags:`
+   include `epic`), do NOT build it here — an epic is decomposed just-in-time, not worked directly.
+   Redirect: run `/ticketing-epic activate CPE-$ARGUMENTS` (if it is still in `Epics/Backlog/`, i.e.
+   `Proposed`) or point the user at its child tickets in `Tickets/Backlog/` (if it is already in
+   `Epics/Doing/`). Then stop this skill.
+1. Find the file. Check Ticketing/Tickets/Backlog/CPE-$ARGUMENTS_*.md first, then Blocked/, then Deferred/, then Doing/, then Done/ recursively. (`Ticketing/Epics/**` is the epic queue — step 0 covers it.)
 2. If found in Done/: ask the user whether to reopen before proceeding.
    If found in Blocked/: read the Work Log's blocked-on / unblock note first. Confirm the blocker has
    actually cleared before picking up; if it has not, tell the user what is still gating it and stop.
