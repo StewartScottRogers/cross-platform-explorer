@@ -18,8 +18,22 @@
   --pal-gray-150: #f0f0f0;
   --pal-gray-200: #ebebeb;
   --pal-gray-250: #e5e5e5;
-  --pal-gray-400: #b3b3b3;
-  --pal-gray-600: #8a8a8a;
+  /* CPE-1632: was #b3b3b3 — 2.10:1 on --surface (#fff) / 2.03:1 on --surface-alt (#fbfbfb), both
+     under WCAG 1.4.11's 3:1 non-text-UI floor. This is the toolbar/menu/input-chrome emphasis
+     border (address bar, search box, docs button, menus, command-bar separator — see app.css'
+     `--border-strong` doc comment below) and every one of those sits on --surface or --surface-alt,
+     never directly on --bg, so those are the pairings that actually render. Darkened until both
+     clear 3:1 — see src/app.css.light-contrast.test.ts. */
+  --pal-gray-400: #828282;
+  /* CPE-1632: was #8a8a8a — 3.45:1 on --surface (#fff) / 3.34:1 on --surface-alt (#fbfbfb) / 3.11:1
+     on --bg (#f3f3f3), all under WCAG AA's 4.5:1 normal-text floor. --text-faint carries real
+     information (the log viewer's TRACE badge + gutter line-numbers, "This file is empty."/
+     "Loading…" notes) at sizes too small to qualify as WCAG "large text" (>=18.66px bold), so it's
+     held to the 4.5:1 body-text bar, not the 3:1 non-text-UI bar --text-dim/--border-strong use.
+     Darkened until all three surfaces it renders on clear 4.5:1 — see
+     src/app.css.light-contrast.test.ts. This narrows the visual gap to --pal-gray-700 (--text-dim)
+     versus the old value; that's an intentional, necessary trade for correctness, not a mistake. */
+  --pal-gray-600: #6c6c6c;
   --pal-gray-700: #616161;
   --pal-gray-850: #3c3c3c;
   --pal-gray-900: #1b1b1b;
@@ -33,13 +47,21 @@
   --pal-red-700: #a82419;
   --pal-green-600: #3a9d4a;
 
-  /* Okabe-Ito colour-blind-safe set — backs the conflict-radar agent palette below. */
+  /* Okabe-Ito colour-blind-safe set — backs the conflict-radar agent palette below. Original values
+     against white designed for larger chart-style marks, not the thin swatch/dot/legend use this
+     app makes of them: `--pal-okabe-orange` (2.25:1) and `--pal-okabe-sky-blue` (2.31:1) both sat
+     under WCAG 1.4.11's 3:1 non-text-UI floor against --surface. CPE-1632 darkened those two,
+     preserving hue, until they clear 3:1 — see src/app.css.light-contrast.test.ts. The other four
+     already cleared 3:1 (vermillion 3.87, bluish-green 3.42, reddish-purple 3.06, blue 5.19) and
+     are unchanged. (Re-hued for WCAG contrast only, not re-verified against a colour-blind
+     simulator the way CPE-1631's `--hljs-*` re-hue was — if a future ticket touches this palette
+     again, that check is worth doing here too.) */
   --pal-okabe-blue: #0072b2;
   --pal-okabe-vermillion: #d55e00;
   --pal-okabe-bluish-green: #009e73;
   --pal-okabe-reddish-purple: #cc79a7;
-  --pal-okabe-orange: #e69f00;
-  --pal-okabe-sky-blue: #56b4e9;
+  --pal-okabe-orange: #b37a00;
+  --pal-okabe-sky-blue: #198dc8;
   --pal-purple-500: #6b4fbb;
 
   /* Log-preview WARN tone (CPE-1618) — 5.93:1 on white / 5.34:1 on --pal-gray-100, clears WCAG AA. */
@@ -132,6 +154,15 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  /* CPE-1632 (guard review round 2): foreground text/icon colour for something painted ON TOP of a
+     solid `--accent` fill (e.g. HomeView's "Add" button, MetadataStudioDialog's `.btn.primary`) —
+     the SAME literal-white role `.btn.primary` already gets via a plain `color: #fff`, just given a
+     real name instead of leaning on an undefined token + hard-coded `var(--x, #fff)` fallback (which
+     is exactly the pattern that let a background regress under white text with zero test noticing —
+     see src/app.css.solid-fill-contrast.test.ts). White clears WCAG's 3:1 UI floor against --accent
+     in every theme this token is defined for (light 5.68:1; dark/hc already covered by the existing
+     `.btn.primary`-pattern pairing that guard derives). */
+  --accent-fg: var(--pal-white);
   --selection: var(--pal-blue-100);     /* selected row fill */
   --selection-hover: var(--pal-blue-150);
 
@@ -201,6 +232,7 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  --accent-fg: var(--pal-white);
   --selection: var(--pal-blue-100);
   --selection-hover: var(--pal-blue-150);
 
@@ -248,27 +280,47 @@
   --pal-dark-gray-300: #9c9c9c; /* text-faint */
   --pal-dark-gray-200: #c5c5c5; /* text-dim */
   --pal-dark-gray-100: #f3f3f3; /* text */
+  --pal-dark-white: #ffffff; /* accent-fg — literal white text painted on solid-fill accent
+                                  buttons/pills (dark theme's own primitive, mirroring the light
+                                  layer's --pal-white, rather than reaching across layers) */
 
   --pal-dark-blue-900: #0f3550; /* selection */
   --pal-dark-blue-850: #123f5e; /* selection-hover */
-  --pal-dark-blue-400: #3ea6ff; /* accent — lighter than the light theme's #0067c0, which
-                                     under-contrasts on a dark surface */
-  --pal-dark-blue-300: #60cdff; /* accent-hover */
+  /* CPE-1632: --accent/--accent-hover back TWO on-screen roles at once — (a) foreground text/icon/
+     focus-ring accent (existing >=3:1-vs-bg/surface guard below) and (b) the solid-fill BACKGROUND
+     of every `.btn.primary`-style button app-wide (~75 files), which pairs it with literal white
+     (`color: #fff`) text. Nobody had ever measured role (b): the old #3ea6ff/#60cdff cleared role
+     (a) easily but rendered as white-on-#3ea6ff = 2.59:1 and white-on-#60cdff (the `:hover` state)
+     = 1.80:1 — both catastrophically under WCAG's 3:1 UI-component floor, i.e. dark-theme primary
+     buttons were nearly unreadable. Darkened both until EVERY role clears its bar with margin:
+     accent fgBg=3.70 fgSurf=3.21 whiteOn=4.41; accent-hover (brighter, preserving the light theme's
+     "hover brightens" direction) fgBg=4.72 fgSurf=4.10 whiteOn=3.45. See
+     src/app.css.solid-fill-contrast.test.ts, which derives this pairing from real component CSS
+     rather than a hand-picked list. */
+  --pal-dark-blue-400: #0078e0; /* accent */
+  --pal-dark-blue-300: #0092d6; /* accent-hover */
 
-  --pal-dark-red-400: #ff6659;  /* danger */
-  --pal-dark-red-300: #ff8a80;  /* danger-hover */
+  /* CPE-1632: --danger/--danger-hover have the same two-role tension as --accent above — (a)
+     foreground error text (existing >=4.5:1-vs-bg/surface guard below, error text is body-text
+     weight) and (b) the solid-fill destructive-button/badge background (ConfirmDialog/
+     ShredConfirmDialog/CheckpointDialog/BatchMediaDialog primary destructive buttons, AgentTimeline's
+     checkpoint-delete button, .agent-badge.removed/.tl-badge.removed pills, ExplorerPane's removed
+     agent chip, SidecarManager's "bad" status), all paired with literal white text. That pairing was
+     NEVER measured: the CPE-1616 revision briefly nudged this primitive from #ff6659 to #ff7b6f to
+     help the notebook-traceback tint, someone noticed white-on-#ff6659 was ALREADY only 2.88:1 (and
+     white-on-#ff7b6f a worse 2.53:1) — both well under WCAG's 3:1 UI-component floor — and CPE-1616
+     reverted to #ff6659 rather than fix the underlying failure, deferring it here as CPE-1632.
+     Darkened both roles into a value that clears every bar with margin: danger fgBg=5.29 fgSurf=4.60
+     whiteOn=3.08; danger-hover (darker, preserving the light theme's "hover darkens" direction)
+     fgBg=4.57 fgSurf=3.97 whiteOn=3.57. See src/app.css.solid-fill-contrast.test.ts. */
+  --pal-dark-red-400: #ff5a4d;  /* danger */
+  --pal-dark-red-300: #ff3a29;  /* danger-hover */
   --pal-dark-green-400: #6bcf7f; /* success */
-  /* CPE-1616 correction: an earlier revision of this ticket nudged the SHARED --pal-dark-red-400
-     (--danger) above from #ff6659 to #ff7b6f to lift the notebook traceback's contrast against its
-     own `color-mix(var(--danger) 8%, var(--surface))`-tinted background. --danger backs ~80 files
-     app-wide, including the white-text-on-solid-danger pattern (ConfirmDialog/ShredConfirmDialog/
-     CheckpointDialog/BatchMediaDialog primary destructive buttons, .agent-badge.removed/
-     .tl-badge.removed pills, Sidebar's .drive-bar-fill.full) — that surface was ALREADY under
-     WCAG's 3:1 non-text floor (2.88:1 white-on-#ff6659) and the nudge silently widened the gap
-     (2.53:1 white-on-#ff7b6f) while softening the app-wide destructive red into something more
-     pastel. Reverted --pal-dark-red-400 to its original #ff6659; that pre-existing white-on-danger
-     failure is tracked separately as CPE-1632 and is NOT fixed here. This primitive backs the
-     notebook traceback ONLY (--danger-on-tint below) — --danger itself no longer references it. */
+  /* Dedicated text-only tint for the notebook traceback's tinted background (CPE-1616) — kept
+     separate from --danger (--danger itself no longer references this primitive) because darkening
+     --danger for CPE-1632's solid-fill fix would have under-contrasted that specific
+     `color-mix(var(--danger) 8%, var(--surface))` tinted use. Not consumed anywhere else — see
+     --danger-on-tint below. */
   --pal-dark-red-450-notebook: #ff7b6f;
 
   /* Log-preview WARN tone (CPE-1618) — 8.24:1 on --pal-dark-gray-800 (--surface) / 9.48:1 on
@@ -342,6 +394,7 @@
 
   --accent: var(--pal-dark-blue-400);
   --accent-hover: var(--pal-dark-blue-300);
+  --accent-fg: var(--pal-dark-white);
   --selection: var(--pal-dark-blue-900);
   --selection-hover: var(--pal-dark-blue-850);
 
@@ -502,6 +555,7 @@
 
   --accent: var(--pal-hc-light-blue-900);
   --accent-hover: var(--pal-hc-light-blue-950);
+  --accent-fg: var(--pal-hc-light-white);
   --selection: var(--pal-hc-light-blue-100);
   --selection-hover: var(--pal-hc-light-blue-150);
 
@@ -559,6 +613,7 @@
 
   --accent: var(--pal-hc-dark-blue-300);
   --accent-hover: var(--pal-hc-dark-blue-200);
+  --accent-fg: var(--pal-hc-dark-white);
   --selection: var(--pal-hc-dark-blue-900);
   --selection-hover: var(--pal-hc-dark-blue-850);
 
