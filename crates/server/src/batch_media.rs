@@ -1385,7 +1385,7 @@ fn reparse_tag_of(handle: windows::Win32::Foundation::HANDLE) -> Option<u32> {
 /// slice comparisons and a length test — no syscall, no extra allocation beyond the `Vec<u16>` the raw
 /// encoding already required. The per-entry directory census therefore pays nothing for this.
 #[cfg(windows)]
-fn verbatim_wide(path: &std::path::Path) -> Vec<u16> {
+pub(crate) fn verbatim_wide(path: &std::path::Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetFullPathNameW;

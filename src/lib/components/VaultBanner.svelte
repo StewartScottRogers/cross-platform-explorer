@@ -5,13 +5,21 @@
    * Shown while the explorer is navigated INSIDE an unlocked vault's session directory (App.svelte derives
    * this from `vaultOfSessionPath` over the `vaults` store). It makes the mount state unmistakable — the
    * plaintext you're browsing lives in a temporary decrypted session dir — and offers the one-click Lock
-   * that re-seals it (App navigates out first, then wipes it). Theme variables only, clearly bordered.
+   * that re-seals it: since CPE-1645 that genuinely means "encrypt what's here back into the vault file,
+   * then wipe this copy" (App navigates out first). Theme variables only, clearly bordered.
    */
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
+  import { t } from "../i18n";
 
   /** Friendly vault name (blob base name minus `.cpevault`). */
   export let name: string;
+
+  /** A lock for this vault is already in flight (SEC-847 reviewer blocker A). Locking re-seals the whole
+   *  tree, so it is slow by design and this banner stays mounted throughout — without disabling the
+   *  button, a second click started a second lock, and the two interleaved: one sealed the tree the other
+   *  had already half-shredded, over the vault, with both reporting success. */
+  export let locking = false;
 
   const dispatch = createEventDispatcher<{ lock: void }>();
 </script>
@@ -19,9 +27,16 @@
 <div class="vault-banner" role="status" data-testid="vault-banner">
   <span class="vb-icon" aria-hidden="true"><Icon name="lock-open" size={15} /></span>
   <span class="vb-text"><strong data-testid="vault-banner-name">{name}</strong> — unlocked</span>
-  <button class="vb-lock" data-testid="vault-lock" on:click={() => dispatch("lock")}>
+  <button
+    class="vb-lock"
+    data-testid="vault-lock"
+    disabled={locking}
+    aria-busy={locking}
+    title={locking ? $t("vault.lockingTitle") : $t("vault.lockTitle")}
+    on:click={() => dispatch("lock")}
+  >
     <Icon name="lock" size={13} />
-    <span>Lock</span>
+    <span>{locking ? $t("vault.locking") : $t("vault.lock")}</span>
   </button>
 </div>
 
@@ -73,7 +88,14 @@
     color: var(--text);
     cursor: pointer;
   }
-  .vb-lock:hover {
+  /* Disabled while a lock is in flight (SEC-847 blocker A) — dimmed + not-allowed, theme tokens only, so
+     the state reads the same in light and dark. `:hover` below is scoped past this so a disabled button
+     does not light up under the pointer. */
+  .vb-lock:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .vb-lock:not(:disabled):hover {
     background: var(--surface);
   }
 </style>

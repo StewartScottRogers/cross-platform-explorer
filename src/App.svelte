@@ -110,6 +110,7 @@
     vaultOfSessionPath,
     vaultDisplayName,
     classifyUnlockError,
+    classifyLockError,
   } from "./lib/vaultStore";
   import ShortcutsDialog from "./lib/components/ShortcutsDialog.svelte";
   import ContentSearchDialog from "./lib/components/ContentSearchDialog.svelte";
@@ -2438,6 +2439,12 @@
   /** The blob path of the unlocked vault we're currently browsing inside, or `null` (drives the banner). */
   $: activeVaultBlob = vaultOfSessionPath($vaults, currentPath);
 
+  /** The vault whose lock is currently in flight, or `null`. Disables the banner's Lock button for the
+   *  whole (now deliberately slow — it re-seals) round trip, so a second click can't start a second lock
+   *  (SEC-847 reviewer blocker A). The backend refuses a concurrent lock too; this keeps the user from
+   *  meeting that refusal at all. */
+  let lockInFlightFor: string | null = null;
+
   /** Activation of a `.cpevault` row. If it's ALREADY unlocked, navigate straight back into its existing
    *  session dir — never re-unlock, which would allocate a fresh session dir and orphan the old plaintext
    *  on disk (review #1). Otherwise confirm it's really a vault via `vault_is` (magic header, not just the
@@ -2499,20 +2506,48 @@
   }
 
   /** Lock the vault we're browsing: navigate OUT of the session dir FIRST (it's about to be wiped), then
-   *  ask the backend to lock (shred + remove the session dir) and update the store. On a wipe FAILURE the
-   *  vault stays unlocked (retryable) — navigate BACK INTO the session dir so the banner + Lock button
-   *  reappear and the user can retry, rather than stranding the plaintext with no in-app affordance
-   *  (review #2). */
+   *  ask the backend to lock (re-seal the session dir back into the blob, then shred + remove it) and
+   *  update the store.
+   *
+   *  Failures are NOT all alike (CPE-1654), so `classifyLockError` decides both the copy and the
+   *  recovery. A RETRYABLE failure — the wipe hit a file still in use, or the edits couldn't be re-sealed
+   *  — leaves the vault unlocked, so navigate BACK INTO the session dir: the banner + Lock button
+   *  reappear and the user can retry (or copy their files out) rather than being stranded with the
+   *  plaintext and no in-app affordance (CPE-1249 review #2). A TAMPER refusal is the opposite: the
+   *  backend wiped nothing, dropped its mapping, and the vault's own file is sealed — so stay where we
+   *  navigated to (that path now resolves somewhere else entirely, which is the whole reason it was
+   *  refused) and let the banner clear, which `lockVault` has already done.
+   *
+   *  **One lock at a time (SEC-847 reviewer blocker A).** This is fired un-awaited from the banner's
+   *  button, and it `await`s `navigate(back)` before the backend call — so the banner (and its button)
+   *  stay mounted across a re-seal that is now slow by design. A second click used to start a second
+   *  lock: the two interleaved, and the later one sealed the half-shredded tree over the vault while
+   *  both reported success. The backend refuses the second call outright now, and `lockInFlightFor`
+   *  disables the button so the user never provokes it in the first place. */
   async function lockActiveVault(blobPath: string) {
+    if (lockInFlightFor) return; // already locking — the button is disabled, but the call is un-awaited
     const sessionDir = sessionDirFor($vaults, blobPath);
     const back = parentOfPath(blobPath) || HOME;
-    await navigate(back);
+    // The claim is taken INSIDE the try (SEC-847 round-3 nit): it used to be set before `await
+    // navigate(back)`, which sits outside it, so a rejected navigate latched the flag forever — and the
+    // banner binds `locking={lockInFlightFor !== null}`, not `=== blobPath`, so that disabled EVERY
+    // vault's Lock button for the rest of the session. Everything from here on is inside the `finally`
+    // that clears it.
     try {
+      lockInFlightFor = blobPath;
+      await navigate(back);
       await lockVault(blobPath);
       showNotice($t("notice.vaultLocked", { name: vaultDisplayName(blobPath) }));
-    } catch {
-      if (sessionDir) await navigate(sessionDir); // re-expose the banner's Lock button for a retry
-      showNotice($t("notice.vaultLockFailed", { name: vaultDisplayName(blobPath) }), true);
+    } catch (e) {
+      const failure = classifyLockError(e);
+      // Never follow a session path we've just decided not to trust.
+      if (failure.retryable && sessionDir) await navigate(sessionDir);
+      showNotice(
+        $t(failure.messageKey, { name: vaultDisplayName(blobPath), reason: failure.reason }),
+        true,
+      );
+    } finally {
+      lockInFlightFor = null;
     }
   }
 
@@ -6570,6 +6605,7 @@
            session dir; its Lock button re-seals the vault (navigate out + wipe). -->
       <VaultBanner
         name={vaultDisplayName(activeVaultBlob)}
+        locking={lockInFlightFor !== null}
         on:lock={() => { if (activeVaultBlob) lockActiveVault(activeVaultBlob); }}
       />
     {/if}

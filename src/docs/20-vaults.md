@@ -40,8 +40,36 @@ Double-click a `.cpevault` file and enter its passphrase to **unlock** it. While
 behaves like an ordinary folder — you can browse, open, and edit its contents. A banner across the top
 shows you are inside an unlocked vault and offers a **Lock** button.
 
-Click **Lock** (or lock it from its badge) to re-seal the vault. Locking removes the decrypted copy
-from disk and the badge returns to **locked**.
+Click **Lock** (or lock it from its badge) to re-seal the vault. Locking **encrypts everything in the
+unlocked folder back into the vault file** — anything you added, edited, renamed, or deleted while it
+was unlocked is kept — then removes the decrypted copy from disk. The badge returns to **locked**.
+
+### What locking guarantees about your changes
+
+- **Your edits are written back before anything is deleted.** Locking seals the current contents into a
+  new vault file and checks that the new file really opens, *and only then* removes the decrypted copy.
+  The working copy is never destroyed until its replacement has been proven readable.
+- **If locking fails, nothing is lost.** A failure at any point — no disk space, a file still open in
+  another program, a permissions problem — leaves the vault **unlocked**, the decrypted folder exactly as
+  it was, and the old vault file unchanged. The app says so and you can try again, or copy the files out
+  first.
+- **Locking is a snapshot of the whole folder.** A file you deleted while unlocked stays deleted after
+  locking; it is not merged back in. Taken to its limit, this means that if you delete *everything* in
+  an unlocked vault and then lock it, you get an empty vault — that is the same rule, not a bug.
+- **Big vaults take a moment to lock.** Locking re-encrypts the whole folder, so it takes about as long
+  as creating the vault did. The **Lock** button is disabled while that is happening; let it finish
+  rather than clicking again.
+- **A couple of things can't be stored in a vault.** Shortcuts/symlinks and files that are a second name
+  for a file elsewhere on your disk (hard links) aren't sealed in: shortcuts are skipped, and locking
+  **refuses** if it finds a hard-linked file, telling you which one. Copy the real file into the vault
+  instead. This is deliberate — a link points at something outside the vault, so storing it would either
+  drag an unrelated file in or leave you with a shortcut to nothing. If a hard link somehow turns up in
+  the folder *after* that check — while the vault is being sealed — the cleanup step removes the extra
+  name and leaves the real file alone, rather than erasing it.
+
+Note that changes are written back **when you lock**, not as you work. If the app is closed or crashes
+while a vault is unlocked, the decrypted folder is left behind and cleaned up on the next start — the
+changes in it will not have been sealed into the vault. Lock the vault when you have finished with it.
 
 ## Passphrase and keychain behavior
 
@@ -61,7 +89,9 @@ of the tradeoffs:
 - **Plaintext exists while unlocked.** To let you browse a vault like a normal folder, unlocking
   extracts its contents into a private temporary session folder on disk. That plaintext lives there
   until you lock the vault (locking securely wipes it). If the app crashes while a vault is unlocked,
-  that temporary copy can linger until the next unlock/lock cleans it up.
+  that temporary copy can linger until the next unlock/lock cleans it up. Because locking has to
+  re-encrypt your changes, the passphrase you typed is also held in memory for as long as the vault is
+  unlocked — it is still never written to a file or a log.
 - **A forgotten passphrase is unrecoverable.** There is no backdoor and no reset. If you lose the
   passphrase, the contents are gone for good. That is the whole point of encryption — but it means you
   must keep the passphrase somewhere safe.
