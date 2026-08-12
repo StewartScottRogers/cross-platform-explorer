@@ -59,7 +59,7 @@
   {/if}
 
   {#if notice}
-    <span class:error={noticeIsError}>{notice}</span>
+    <span class="notice" class:error={noticeIsError} title={notice}>{notice}</span>
   {/if}
 
   {#if git && git.is_repo}
@@ -98,6 +98,25 @@
 
 <style>
   .dim { color: var(--text-faint); }
+
+  /* The notice/toast text (CPE-1660): a plain <span> had no overflow strategy at all, so a notice
+     longer than the window could hold wrapped to a second line and the fixed 26px `.statusbar` grew
+     for the 5s it's shown. Option 1 from the ticket: truncate with an ellipsis instead of letting it
+     reflow the chrome, with the full text still reachable via the `title` tooltip on the span above —
+     keeps the bar's height a hard constant (this app's "predictable" tiebreaker) rather than option
+     2's bounded-but-still-variable two-line clamp. `min-width: 0` opts the flex item out of its
+     default min-content floor so it can actually shrink below its own text width instead of forcing
+     the row wider or crushing its neighbours (git status, free space) at narrow widths; `max-width`
+     additionally caps how much of the row a single notice may claim. Applies identically to the error
+     variant (`.error` below only recolours — no separate overflow rule needed for it). */
+  .notice {
+    max-width: 45%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+  }
   /* Git sync + free space sit at the far right, away from the item/selection counts. */
   .git { display: flex; align-items: center; gap: 6px; margin-left: auto; }
   .git-branch { opacity: 0.85; }

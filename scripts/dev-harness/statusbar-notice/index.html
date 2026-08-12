@@ -1,0 +1,38 @@
+<!doctype html>
+<!--
+  CPE-1660 notice-overflow verification harness — OUTER shell. Sizes an <iframe> (loading inner.html,
+  which mounts the real StatusBar.svelte) to an explicit CSS width so the achieved viewport can be
+  confirmed via `getBoundingClientRect`/`innerWidth` before trusting any measurement — the real Chrome
+  window stays large since headless Chrome's `--window-size` does not reliably set the CSS viewport
+  under `--headless=new` (it clamps to ~500px internally and rescales the screenshot). Mirrors
+  scripts/dev-harness/checkpoint-narrow's iframe pattern (CPE-1635) for the same reason: a genuinely
+  separate browsing context, not a sized wrapper div in the top-level page.
+
+  Usage: load `index.html?w=900&notice=long` (defaults: w=900, notice=short).
+  Dev-only; not part of the production build.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1660 harness — StatusBar notice overflow</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #888; font-family: monospace; }
+      #readout {
+        background: #000; color: #0f0; font-size: 12px; padding: 4px 6px; white-space: pre-wrap;
+      }
+      #frame-wrap {
+        display: inline-block;
+        border: 2px solid magenta;
+        overflow: visible;
+      }
+      iframe { display: block; border: none; }
+    </style>
+  </head>
+  <body>
+    <div id="readout">booting…</div>
+    <div id="frame-wrap">
+      <iframe id="stage-frame" title="StatusBar under test"></iframe>
+    </div>
+    <script type="module" src="./outer-main.ts"></script>
+  </body>
+</html>

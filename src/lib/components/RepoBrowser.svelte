@@ -34,9 +34,25 @@
    *  scheme or `user@host:` prefix because it was pasted for the wrong provider, or a host neither
    *  strip recognized. Covers `scheme://…` and the SCP-style `user@host:path` shorthand (CPE-1650) —
    *  without the latter, a foreign-host SSH URL just looks like `owner/repo.git` (it contains a `/`)
-   *  and would slip past this guard straight to `forge_browse` as a malformed repo id. */
+   *  and would slip past this guard straight to `forge_browse` as a malformed repo id. Kept as its own
+   *  helper (still exercised directly below) even though `browse()` no longer gates on it — see
+   *  `isRepoId` for why. */
   export function looksLikeUrl(r: string): boolean {
     return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) || /^[^@/\s]+@[^:@/\s]+:/i.test(r);
+  }
+
+  /** True if `r` is a well-formed `owner/name` repo id: exactly one `/` separating two non-empty
+   *  segments of repo-name characters (letters, digits, `.`, `_`, `-`) — no colon, no backslash, no
+   *  whitespace, no `@`. CPE-1663: the old guard (`!r.includes("/") || looksLikeUrl(r)`) was a growing
+   *  list of negative special cases — two exceptions deep (scheme:// and user@host:) — and still let a
+   *  Windows path (`C:/repos/thing`, one "/" inside a colon-bearing string) and an ordinary sentence
+   *  (`Fix: update src/main.rs docs`, a "/" inside colon+whitespace) through, since neither looks like
+   *  a recognized URL shape. A single POSITIVE predicate closes the whole class at once: anything
+   *  outside this character set is rejected, which also covers cases nobody special-cased yet — a
+   *  double-`@` SCP string (`git@github.com@evil.com:o/r`) and a bare `host:owner/repo` with no user
+   *  both contain a disallowed `@`/`:` and are rejected the same way as everything else. */
+  export function isRepoId(r: string): boolean {
+    return /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(r);
   }
 </script>
 
@@ -69,7 +85,7 @@
 
   async function browse(toPath = ""): Promise<void> {
     const r = stripRepoUrl(repo, provider);
-    if (!r.includes("/") || looksLikeUrl(r)) { error = "Enter a repository as owner/name."; return; }
+    if (!isRepoId(r)) { error = "Enter a repository as owner/name."; return; }
     repo = r;
     loading = true; error = "";
     try {
