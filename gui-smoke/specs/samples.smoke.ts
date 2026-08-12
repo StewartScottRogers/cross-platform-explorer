@@ -127,14 +127,6 @@ describe("CPE-1358 — headless GUI smoke: every samples/ file opens without cra
     it(`opens samples/${relPath}: no crash + preview renders or gracefully degrades`, async function () {
       await openAndVerify(samplesRootAbs, relPath);
 
-      // CPE-1677 DELIBERATE BREAK — TEMPORARY, reverted in the very next commit. This reproduces the
-      // exact experiment the CPE-1639 worker ran (break the font-preview case inside this
-      // already-known-failing spec file) to prove the case-granular ratchet now REDS the job where the
-      // old spec-file ratchet printed a byte-identical green verdict. Do not keep this.
-      if (relPath === "fonts/mini.ttf") {
-        throw new Error("CPE-1677 deliberate break: proving the case-granular ratchet reds the job");
-      }
-
       // A couple of representative frames for the Visual Critic gallery (CPE-1148) — not one per file
       // (25+ near-identical screenshots would be noise); the newly-added coverage fixtures + the fixed
       // PDF are the surfaces actually worth a human/Critic glance here.
