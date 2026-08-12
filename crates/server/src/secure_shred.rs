@@ -60,21 +60,49 @@ pub fn shred_file(path: &str, scheme: ShredScheme) -> Result<ShredReport, String
         .map_err(|e| format!("cannot stat {path}: {e}"))?
         .len();
 
-    let plan = secure_delete::plan_shred(path, size_bytes, scheme, false, false);
-
-    let mut rng = SplitMix64::new_from_env();
-    let mut passes_run: u32 = 0;
-    let mut bytes_written: u64 = 0;
-
-    for pattern in &plan.passes {
-        run_pass(path, *pattern, size_bytes, &mut rng)?;
-        passes_run += 1;
-        bytes_written += size_bytes;
-    }
+    let mut file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| format!("cannot open {path} for pass: {e}"))?;
+    let passes_run = shred_open_file(&mut file, size_bytes, scheme, path)?;
+    // Close before unlinking: Windows will not remove a file this process still holds open.
+    drop(file);
 
     std::fs::remove_file(path).map_err(|e| format!("cannot remove {path} after shredding: {e}"))?;
 
-    Ok(ShredReport { path: path.to_string(), passes_run, bytes_written, removed: true })
+    Ok(ShredReport {
+        path: path.to_string(),
+        passes_run,
+        bytes_written: size_bytes * u64::from(passes_run),
+        removed: true,
+    })
+}
+
+/// Run every overwrite pass **through a handle the caller already holds**, and return how many ran.
+/// Does not unlink — the caller owns the name.
+///
+/// Split out of [`shred_file`] for CPE-1672: the vault session shredder must decide *what object it is
+/// destroying* from an open handle (identity + hard-link count read from that same handle) and then write
+/// through **that** handle, because re-opening by path between the check and the write is precisely the
+/// window a junction swapped in at a parent directory exploits. Passing the handle in also means a
+/// multi-pass scheme resolves the path once instead of once per pass.
+///
+/// `label` is only used in error messages (and to plan the pass sequence, which takes the path purely to
+/// report it back) — it is never re-opened.
+pub fn shred_open_file(
+    file: &mut std::fs::File,
+    size_bytes: u64,
+    scheme: ShredScheme,
+    label: &str,
+) -> Result<u32, String> {
+    let plan = secure_delete::plan_shred(label, size_bytes, scheme, false, false);
+    let mut rng = SplitMix64::new_from_env();
+    let mut passes_run: u32 = 0;
+    for pattern in &plan.passes {
+        run_pass(file, *pattern, size_bytes, &mut rng, label)?;
+        passes_run += 1;
+    }
+    Ok(passes_run)
 }
 
 /// Per-path outcome of a [`shred_paths`] batch run — `OpResult`-shaped (`path`/`ok`/`error`) so the
@@ -158,13 +186,17 @@ pub fn shred_paths(paths: &[String], scheme: ShredScheme, confirmed: bool) -> Re
         .collect())
 }
 
-/// Run a single overwrite pass: open `path` for writing, seek to 0, overwrite exactly `size` bytes
-/// with `pattern`, then flush + `sync_all` so the pass is durable before the next one starts.
-fn run_pass(path: &str, pattern: PassPattern, size: u64, rng: &mut SplitMix64) -> Result<(), String> {
-    let mut file = OpenOptions::new()
-        .write(true)
-        .open(path)
-        .map_err(|e| format!("cannot open {path} for pass: {e}"))?;
+/// Run a single overwrite pass on an already-open handle: seek to 0, overwrite exactly `size` bytes
+/// with `pattern`, then flush + `sync_all` so the pass is durable before the next one starts. `label`
+/// names the file in error messages only — the handle is never re-derived from it (CPE-1672).
+fn run_pass(
+    file: &mut std::fs::File,
+    pattern: PassPattern,
+    size: u64,
+    rng: &mut SplitMix64,
+    label: &str,
+) -> Result<(), String> {
+    let path = label;
     file.seek(SeekFrom::Start(0)).map_err(|e| format!("cannot seek {path}: {e}"))?;
 
     let mut chunk = vec![0u8; CHUNK_BYTES.min(size.max(1) as usize)];
@@ -321,7 +353,9 @@ mod tests {
 
         // Use the internal pass runner directly so we can inspect bytes before the file is unlinked.
         let mut rng = SplitMix64::new_from_env();
-        run_pass(&path, PassPattern::Ones, 4096, &mut rng).unwrap();
+        let mut file = OpenOptions::new().write(true).open(&path).unwrap();
+        run_pass(&mut file, PassPattern::Ones, 4096, &mut rng, &path).unwrap();
+        drop(file);
 
         let mut buf = Vec::new();
         std::fs::File::open(&path).unwrap().read_to_end(&mut buf).unwrap();

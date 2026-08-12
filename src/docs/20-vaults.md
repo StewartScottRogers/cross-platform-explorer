@@ -66,6 +66,16 @@ was unlocked is kept — then removes the decrypted copy from disk. The badge re
   drag an unrelated file in or leave you with a shortcut to nothing. If a hard link somehow turns up in
   the folder *after* that check — while the vault is being sealed — the cleanup step removes the extra
   name and leaves the real file alone, rather than erasing it.
+- **If a shortcut appears where a real folder used to be, locking stops rather than carrying on.** The
+  cleanup that erases the unlocked copy checks, folder by folder and file by file, that each thing it is
+  about to erase is still the same thing it found a moment earlier — not merely that the name still
+  spells the same path. If something has been swapped underneath it, it stops with a message and erases
+  nothing further; your vault is already sealed at that point, so you can simply lock again.
+- **A `.cpevault` file that is itself a shortcut/symlink gets replaced by a real file.** If you keep a
+  vault on another drive and link it into a folder, then the first time that vault is created or locked
+  the link is replaced by the real vault file at that name. Nothing is lost — the file at the other end
+  is untouched and still opens — and the path you actually use holds your current contents. Creating and
+  locking behave the same way here, deliberately: neither writes *through* a link.
 
 Note that changes are written back **when you lock**, not as you work. If the app is closed or crashes
 while a vault is unlocked, the decrypted folder is left behind and cleaned up on the next start — the

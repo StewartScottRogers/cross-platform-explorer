@@ -66,6 +66,7 @@ use age::secrecy::{ExposeSecret, SecretString};
 /// takes `&SecretString` everywhere a passphrase is passed.
 pub use age::secrecy::SecretString as PassphraseSecret;
 
+use crate::batch_media::{handle_facts, open_existing_no_follow, FileIdentity};
 use crate::secure_delete::ShredScheme;
 use crate::secure_shred;
 use crate::vault_crypto::{self, VaultError, MAGIC};
@@ -215,13 +216,42 @@ fn create_vault_with_verifier(
     }
 
     let blob = vault_crypto::encrypt_tree(folder, passphrase)?;
-    std::fs::write(dest_blob_path, &blob)?;
 
+    // STAGE → FSYNC → VERIFY → RENAME (CPE-1669 + CPE-1670), the identical four steps
+    // [`reseal_session_with_hooks`] takes, through the identical helpers.
+    //
+    // This used to be a bare `std::fs::write` followed by a verify. Two problems, both closed here:
+    //
+    // - **Durability** (CPE-1669, from PR #847's review): the *destruction* was durable (the shredder
+    //   `sync_all`s every pass) and the *replacement* was not. `verify_recoverable` re-reads the file it
+    //   just wrote, which on every mainstream OS is served from the page cache — it proves the bytes
+    //   parse, not that they reached the disk. A power loss in that window could leave a `.cpevault`
+    //   whose directory entry points at unwritten data with the plaintext already shredded, having told
+    //   the user the copy was verified first. [`create_staging_exclusive`] `sync_all`s before returning,
+    //   so the fsync now provably precedes the verify — asserted, not reviewed, by
+    //   `create_vault_fsyncs_the_blob_before_it_is_verified_and_therefore_before_any_shred`.
+    // - **Symlinked destinations** (CPE-1670): `std::fs::write` is `O_CREAT|O_TRUNC`, which *follows* a
+    //   symlink and writes straight through a hard link — the opposite of what the re-seal's rename did,
+    //   so the two halves of the same feature disagreed about what a symlinked vault path means. They
+    //   now agree: neither writes through a link. See the note at the re-seal's rename for the decision.
+    let staging = create_staging_exclusive(dest_blob_path, &blob)?;
     if opts.shred_original {
         // INVARIANT: prove the persisted copy is recoverable BEFORE destroying anything. Verify the
         // bytes that actually landed on disk (not the in-memory `blob`), so a partial/failed write is
-        // caught too. On any error we return WITHOUT shredding — the original is untouched.
-        verify(dest_blob_path, passphrase)?;
+        // caught too. On any error we return WITHOUT shredding — the original is untouched, and now the
+        // destination is untouched as well rather than left holding an unverifiable blob.
+        if let Err(e) = verify(&staging, passphrase) {
+            let _ = std::fs::remove_file(&staging);
+            return Err(e);
+        }
+    }
+    if let Err(e) = std::fs::rename(&staging, dest_blob_path) {
+        let _ = std::fs::remove_file(&staging);
+        return Err(VaultError::Io(e));
+    }
+    sync_parent_dir(dest_blob_path);
+
+    if opts.shred_original {
         // `ShredEveryFile`: this folder is the user's own pick, not an app-owned session tree — see
         // [`AliasPolicy`]. Unchanged behaviour; the round-3 alias fix is scoped to the session wipe.
         shred_tree(folder, opts.shred_scheme, AliasPolicy::ShredEveryFile)?;
@@ -239,31 +269,48 @@ fn verify_recoverable(blob_path: &Path, passphrase: &SecretString) -> Result<(),
     vault_crypto::verify_blob(&blob, passphrase)
 }
 
-/// Does `dest` resolve to a location inside `folder` (including `folder` itself)? Used to guard the
-/// destructive shred path so the vault blob is never written where the shred will destroy it.
+/// Will a write to `dest` **land** inside `folder` (including `folder` itself)? Guards the destructive
+/// shred path so the vault blob is never written where the shred will destroy it.
 ///
-/// `folder` must exist (it's the tree being sealed). `dest` typically does **not** exist yet, so its
-/// parent is canonicalized and the file name re-appended rather than canonicalizing a missing path.
-/// Comparing canonicalized paths collapses `..`/symlinks/`.\` on both sides so the containment check
-/// can't be fooled by a non-normalized destination.
+/// **This asks where the write lands, not where the name resolves to** (SEC-861 blocking 1). Every
+/// parent component is canonicalized — the writer's `rename`/`open` resolves those too, so following
+/// them is correct — but the **final component is never followed**, because the writer no longer follows
+/// it either. `dest.parent()` is canonicalized and `dest.file_name()` re-appended, always: not just when
+/// `dest` does not exist yet.
+///
+/// It used to call `canonicalize(dest)` first and fall back to the parent form only for a missing path.
+/// That was right while `create_vault` wrote with `std::fs::write` (which follows a final symlink), and
+/// CPE-1670 silently invalidated it by switching to stage-beside + `rename` (which replaces the link).
+/// The guard then reasoned about the far end of a symlinked destination while the file landed at the
+/// near end — so a destination name *inside* `folder`, linked to somewhere *outside* it, read as "outside,
+/// safe", the vault was written inside the folder, and `shred_tree` destroyed the plaintext **and** the
+/// only encrypted copy while `create_vault` returned `Ok(())`. Pinned by
+/// `a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies`.
+///
+/// The guard and the writer must agree about links or the guard is measuring a different file from the
+/// one being written; that agreement is the invariant here, not the particular link policy. `folder`
+/// must exist (it's the tree being sealed). Any resolution failure propagates as `Err` — the callers
+/// treat that as a refusal, never as "probably fine".
 fn resolves_inside(folder: &Path, dest: &Path) -> Result<bool, VaultError> {
     let folder_canon = std::fs::canonicalize(folder)?;
-    let dest_canon = match std::fs::canonicalize(dest) {
-        Ok(p) => p,
-        Err(_) => {
-            let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
-            let parent_canon = match parent {
-                Some(p) => std::fs::canonicalize(p)?,
-                // A bare file name with no parent resolves against the current dir.
-                None => std::fs::canonicalize(".")?,
-            };
-            match dest.file_name() {
-                Some(name) => parent_canon.join(name),
-                None => parent_canon,
-            }
-        }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let parent_canon = match parent {
+        Some(p) => std::fs::canonicalize(p)?,
+        // A bare file name with no parent resolves against the current dir.
+        None => std::fs::canonicalize(".")?,
     };
-    Ok(dest_canon.starts_with(&folder_canon))
+    // `file_name()` is `None` for a path ending in `..` or a root/prefix. Fall back to `parent_canon` and
+    // be precise about what that is (SEC-861 nit 2): for `F/..` this yields `F`, which is NOT the
+    // directory `F/..` denotes — that is F's parent. It is deliberately the conservative approximation:
+    // it can only ever answer "inside" where the true landing might be outside, i.e. it over-refuses and
+    // never under-refuses, and the writer's `rename` onto a directory errors regardless. An earlier
+    // comment here claimed the fallback *was* the landing site, which is the category of claim this whole
+    // PR exists to stop making.
+    let dest_landing = match dest.file_name() {
+        Some(name) => parent_canon.join(name),
+        None => parent_canon,
+    };
+    Ok(dest_landing.starts_with(&folder_canon))
 }
 
 // ---------------------------------------------------------------------------
@@ -678,29 +725,76 @@ fn reseal_session_with_hooks(
         let _ = std::fs::remove_file(&staging);
         return Err(reseal_failed(e));
     }
-    // The replacing rename. NOTE (SEC-847 reviewer nit 7): if `blob_path` is itself a symlink, this
-    // replaces the *link* with the real file rather than writing through it — the opposite of
-    // `create_vault`'s `fs::write`. That is the safer of the two (a re-seal can never be redirected into
-    // writing a vault somewhere else), but it is a deliberate asymmetry, not an accident, and it means a
-    // deliberately-symlinked `.cpevault` stops being a link the first time it is locked. Filed as a
-    // follow-up rather than changed here, so the behaviour is not altered under a security fix.
+    // The replacing rename.
+    //
+    // **A symlinked `.cpevault` path is REPLACED, not written through** (SEC-847 reviewer nit 7, settled
+    // by CPE-1670). `rename` replaces the *link itself* with the real file. `create_vault` used to do the
+    // opposite — `std::fs::write` follows a symlink and updates its target — so the two halves of the
+    // same feature disagreed about what a symlinked vault path means; `create_vault` now stages and
+    // renames through this same code path, so both ends agree.
+    //
+    // Replacing is the direction chosen, deliberately, over resolving the link: it is the only one of the
+    // three options (replace / resolve / refuse) that neither lets a re-seal be redirected into writing a
+    // vault somewhere the user did not choose, nor wedges a legitimately-symlinked vault "unlocked" with
+    // its plaintext still on disk because locking refuses. The consequence, stated in the user docs and
+    // in VAULT-SECURITY.md §5: a deliberately-symlinked `.cpevault` stops being a link the first time it
+    // is created or locked, and the file at the far end keeps whatever it last held. Nothing is
+    // destroyed — both files exist and both are decryptable — and the path the user actually opens holds
+    // the current contents. *Reads* still follow a link (unlock reads the blob with `std::fs::read`);
+    // only writes replace it.
     if let Err(e) = std::fs::rename(&staging, blob_path) {
         let _ = std::fs::remove_file(&staging);
         return Err(reseal_failed(VaultError::Io(e)));
     }
-    // DURABILITY (SEC-847 reviewer blocker C): the file's own bytes were `sync_all`ed above, but on Unix
-    // the *directory entry* the rename created is itself only in the page cache until the directory is
-    // synced. Without this, a power loss in the window between here and the wipe could leave the vault's
-    // name pointing at nothing while the shredder has already destroyed the only other copy. Best-effort:
-    // a filesystem that will not let us open the directory (or Windows, where directories are not synced
-    // this way and `rename` is already ordered) is not a reason to fail a lock whose data is on disk.
+    sync_parent_dir(blob_path);
+    Ok(())
+}
+
+/// fsync the directory holding `path` after a rename created its entry (SEC-847 reviewer blocker C, and
+/// CPE-1669 for the create side).
+///
+/// The renamed file's own bytes are `sync_all`ed by [`write_new_exclusive`], but on Unix the *directory
+/// entry* the rename created is itself only in the page cache until the directory is synced. Without
+/// this, a power loss between the rename and the shred could leave the vault's name pointing at nothing
+/// while the shredder has already destroyed the only other copy.
+///
+/// Best-effort: a filesystem that will not let us open the directory is not a reason to fail an
+/// operation whose data is already on the disk.
+///
+/// **Windows is a no-op, and that leaves the window narrowed rather than closed** (SEC-861 finding 5).
+/// An earlier version justified the no-op with "`rename`'s ordering is already provided", which is not
+/// true: `MoveFileEx` without `MOVEFILE_WRITE_THROUGH` is not durable, so the directory entry the rename
+/// creates can still be lost to a power failure. What *is* closed on both platforms is the larger half —
+/// the blob's own bytes are `sync_all`ed before the verify, so the entry can never point at unwritten
+/// data. What remains on Windows is the entry itself: a power loss in that window can leave the vault
+/// name missing after the plaintext was shredded. Directories are not openable for `sync_all` the way
+/// Unix allows, so closing it would need `MOVEFILE_WRITE_THROUGH` via a direct `MoveFileExW` — a
+/// deliberate follow-up, not something to imply is already handled. **CPE-1669's window is closed on
+/// Unix and only narrowed on Windows.**
+fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
-    if let Some(parent) = blob_path.parent() {
+    if let Some(parent) = path.parent() {
         if let Ok(dir) = std::fs::File::open(parent) {
+            #[cfg(test)]
+            PARENT_DIR_SYNCS.with(|c| c.set(c.get() + 1));
             let _ = dir.sync_all();
         }
     }
-    Ok(())
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+// Count of parent-directory fsyncs (Unix only). **Test builds only**, for the same reason
+// VAULT_BLOB_SYNCS exists: so `sync_parent_dir`'s claim is asserted rather than merely reviewed.
+#[cfg(all(test, unix))]
+thread_local! {
+    static PARENT_DIR_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many parent-directory fsyncs this thread has performed. Test-only observation point.
+#[cfg(all(test, unix))]
+fn parent_dir_sync_count() -> usize {
+    PARENT_DIR_SYNCS.with(|c| c.get())
 }
 
 /// Create the staging file for a re-seal **exclusively**, returning its path and the open handle
@@ -760,16 +854,27 @@ fn write_new_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     sync_durably(&file)
 }
 
-/// Count of staging fsyncs this process has performed. **Test builds only** — it exists so the
-/// "durable before verify" ordering can be *asserted* instead of merely reviewed (SEC-847 round-3: the
-/// `sync_all` was removable with the whole 50-test vault suite still green). Compiled out of release.
+// Count of vault-blob fsyncs this process has performed. **Test builds only** — it exists so the
+// "durable before verify" ordering can be *asserted* instead of merely reviewed (SEC-847 round-3: the
+// `sync_all` was removable with the whole 50-test vault suite still green). Compiled out of release.
+//
+// Covers both writers, since CPE-1669 made `create_vault` stage through the same helper the re-seal
+// uses — so the same counter pins the same ordering claim on both paths.
+//
+// **Thread-local, not a process-wide atomic.** It was an `AtomicUsize`, which made both ordering tests
+// weaker than they read: the suite runs in parallel, so another test's fsync could satisfy
+// "the count went up" without this call site having synced anything at all — verified by neutralising
+// the create-side write and watching the create-side ordering test stay green. Per-thread, only the
+// writes this test itself provoked can be counted.
 #[cfg(test)]
-static STAGING_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    static VAULT_BLOB_SYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
-/// How many staging fsyncs have happened so far. Test-only observation point for [`sync_durably`].
+/// How many vault-blob fsyncs this thread has performed. Test-only observation point for [`sync_durably`].
 #[cfg(test)]
-fn staging_sync_count() -> usize {
-    STAGING_SYNCS.load(std::sync::atomic::Ordering::SeqCst)
+fn vault_blob_sync_count() -> usize {
+    VAULT_BLOB_SYNCS.with(|c| c.get())
 }
 
 /// `sync_all`, counted in test builds. Wrapping it is what makes the *ordering* — fsync happens before
@@ -777,7 +882,7 @@ fn staging_sync_count() -> usize {
 /// portable way to ask the OS after the fact whether a given write reached the platter.
 fn sync_durably(file: &std::fs::File) -> std::io::Result<()> {
     #[cfg(test)]
-    STAGING_SYNCS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    VAULT_BLOB_SYNCS.with(|c| c.set(c.get() + 1));
     file.sync_all()
 }
 
@@ -856,7 +961,7 @@ fn staging_nonce() -> String {
 ///
 /// Fails **closed**: a link count that cannot be read at all is refused, not assumed to be 1. Directories
 /// are walked, not counted (no OS here lets an ordinary user hard-link a directory), and symlinks are
-/// skipped without being followed, exactly as [`collect_files`] and the crypto core's walk do.
+/// skipped without being followed, exactly as [`shred_dir_pinned`] and the crypto core's walk do.
 ///
 /// Scoped to the session re-seal only: [`create_vault`] still seals a user-chosen folder as it always has,
 /// where hard links are the user's own arrangement of their own files and cross no trust boundary.
@@ -898,7 +1003,7 @@ fn ensure_no_aliased_files(dir: &Path) -> Result<(), VaultError> {
 
 /// How many directory entries name the same file. [`HardLinks::Unknown`] is a refusal, never a "probably
 /// fine" — see [`ensure_no_aliased_files`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HardLinks {
     /// Exactly one name — an ordinary file.
     One,
@@ -908,23 +1013,63 @@ enum HardLinks {
     Unknown(&'static str),
 }
 
-/// Unix link count: `st_nlink`, straight off `symlink_metadata` (no follow — the caller has already
-/// established this entry is not a symlink).
-#[cfg(unix)]
-fn hard_link_count(path: &Path) -> HardLinks {
-    use std::os::unix::fs::MetadataExt;
-    match std::fs::symlink_metadata(path) {
-        Ok(md) if md.nlink() > 1 => HardLinks::Many(md.nlink()),
-        Ok(_) => HardLinks::One,
-        Err(_) => HardLinks::Unknown("its metadata could not be read"),
+/// Everything one **no-follow** look at a path establishes: which object is there, how many names it has,
+/// and what kind it is. One probe rather than three, because the shredder needs all of it and each extra
+/// path resolution is another window (CPE-1672).
+#[derive(Debug, Clone, Copy)]
+struct EntryProbe {
+    /// The object's filesystem identity, or `None` when it could not be established — including a
+    /// *degenerate* identity (a zero volume/index, which some network redirectors return from a call that
+    /// otherwise succeeds; see [`FileIdentity::is_degenerate`]). `None` means "unproven", never "fine".
+    id: Option<FileIdentity>,
+    /// Hard-link count, with the same fail-closed [`HardLinks::Unknown`] arm the alias guards rely on.
+    links: HardLinks,
+    /// A directory (never followed through — this is the no-follow answer).
+    is_dir: bool,
+    /// A symlink, junction or other reparse point.
+    is_link: bool,
+}
+
+impl EntryProbe {
+    /// Nothing could be established. Every field fails closed.
+    fn unreadable(why: &'static str) -> Self {
+        Self { id: None, links: HardLinks::Unknown(why), is_dir: false, is_link: false }
     }
 }
 
-/// Windows link count: `nNumberOfLinks` from `GetFileInformationByHandle`.
-/// `std::os::windows::fs::MetadataExt::number_of_links()` is still behind the unstable
-/// `windows_by_handle` feature (rust-lang/rust#63010), so this makes the same call the std wrapper would,
-/// via the `windows` crate already vendored for [`crate::batch_media`]'s identity probe — whose two
-/// load-bearing details are reproduced here for the same reasons (CPE-1642 finding B):
+/// Gate a raw identity on [`FileIdentity::is_degenerate`] — an identity that identifies nothing is
+/// *unproven*, never a real one, exactly as [`crate::batch_media`] treats it.
+fn provable(id: FileIdentity) -> Option<FileIdentity> {
+    if id.is_degenerate() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// Unix: one `symlink_metadata` (no follow) answers all four questions — `st_dev`/`st_ino` for identity,
+/// `st_nlink` for the link count, and the file type.
+#[cfg(unix)]
+fn probe_no_follow(path: &Path) -> EntryProbe {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(md) => EntryProbe {
+            id: provable(FileIdentity { volume: md.dev(), index: u128::from(md.ino()) }),
+            links: if md.nlink() > 1 { HardLinks::Many(md.nlink()) } else { HardLinks::One },
+            is_dir: md.is_dir(),
+            is_link: md.file_type().is_symlink(),
+        },
+        Err(_) => EntryProbe::unreadable("its metadata could not be read"),
+    }
+}
+
+/// Windows: `GetFileInformationByHandle` on an attributes-only, no-follow open — `nNumberOfLinks` for the
+/// count, `dwVolumeSerialNumber` + `nFileIndex{High,Low}` for the identity, `dwFileAttributes` for the
+/// kind. `std::os::windows::fs::MetadataExt`'s `number_of_links()`/`file_index()`/`volume_serial_number()`
+/// are all still behind the unstable `windows_by_handle` feature (rust-lang/rust#63010), so this makes the
+/// same call the std wrappers would, via the `windows` crate already vendored for
+/// [`crate::batch_media`]'s identity probe — whose two load-bearing details are reproduced here for the
+/// same reasons (CPE-1642 finding B):
 ///
 /// - `FILE_READ_ATTRIBUTES`, not `GENERIC_READ`: Windows' share-mode conflict check ignores
 ///   attribute-read rights, so this still succeeds against a file another process holds exclusively. With
@@ -937,20 +1082,21 @@ fn hard_link_count(path: &Path) -> HardLinks {
 ///   deep vault, so the transformation is required for the feature to work at all.
 ///
 /// `FILE_FLAG_OPEN_REPARSE_POINT` keeps it from following a link, `FILE_FLAG_BACKUP_SEMANTICS` lets the
-/// same call work for any entry kind. Any failure is [`HardLinks::Unknown`] — refused, never assumed safe.
+/// same call work for a directory as well as a file. Any failure is [`EntryProbe::unreadable`] — refused,
+/// never assumed safe.
 #[cfg(windows)]
-fn hard_link_count(path: &Path) -> HardLinks {
+fn probe_no_follow(path: &Path) -> EntryProbe {
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
-        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
-        FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
     let wide = crate::batch_media::verbatim_wide(path);
     // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. This is an
-    // attributes-only open of an already-existing file (`OPEN_EXISTING`, full sharing) — no create, no
+    // attributes-only open of an already-existing object (`OPEN_EXISTING`, full sharing) — no create, no
     // write, no truncate, no data access — and the handle is closed on every path before returning.
     unsafe {
         let handle = match CreateFileW(
@@ -963,18 +1109,26 @@ fn hard_link_count(path: &Path) -> HardLinks {
             HANDLE::default(),
         ) {
             Ok(h) => h,
-            Err(_) => return HardLinks::Unknown("it could not be opened to read its link count"),
+            Err(_) => return EntryProbe::unreadable("it could not be opened to read its link count"),
         };
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
         let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
         let _ = CloseHandle(handle);
         if !ok {
-            return HardLinks::Unknown("the filesystem did not report its link count");
+            return EntryProbe::unreadable("the filesystem did not report its link count");
         }
-        match info.nNumberOfLinks {
-            0 => HardLinks::Unknown("the filesystem reported a link count of zero"),
-            1 => HardLinks::One,
-            n => HardLinks::Many(u64::from(n)),
+        EntryProbe {
+            id: provable(FileIdentity {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+            }),
+            links: match info.nNumberOfLinks {
+                0 => HardLinks::Unknown("the filesystem reported a link count of zero"),
+                1 => HardLinks::One,
+                n => HardLinks::Many(u64::from(n)),
+            },
+            is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+            is_link: info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
         }
     }
 }
@@ -982,8 +1136,14 @@ fn hard_link_count(path: &Path) -> HardLinks {
 /// Neither Unix nor Windows: refuse rather than guess (no such platform ships today; this keeps the
 /// guard fail-closed by construction rather than by omission).
 #[cfg(not(any(unix, windows)))]
-fn hard_link_count(_path: &Path) -> HardLinks {
-    HardLinks::Unknown("this platform cannot report a file's link count")
+fn probe_no_follow(_path: &Path) -> EntryProbe {
+    EntryProbe::unreadable("this platform cannot report a file's link count")
+}
+
+/// How many names point at `path`, probed without following a link. Kept as its own function because the
+/// alias guards ([`ensure_no_aliased_files`], [`sweep_stale_staging`]) ask only this one question.
+fn hard_link_count(path: &Path) -> HardLinks {
+    probe_no_follow(path).links
 }
 
 /// Wrap a re-seal failure with wording that (a) tells the user their work is safe and (b) is
@@ -1024,6 +1184,12 @@ fn staging_blob_path_with(blob_path: &Path, nonce: &str) -> PathBuf {
 /// that could get a link planted at the session path (on Windows a *junction* needs neither Developer
 /// Mode nor elevation) would redirect the shredder at whatever the link points to. The registry
 /// re-validates containment before calling here; the two guards fail closed independently.
+///
+/// This check is a **single pass, at the top** — that is deliberate and it is no longer load-bearing on
+/// its own. Since CPE-1672 the walk itself re-pins the root (and every directory under it) by filesystem
+/// identity immediately before it enumerates and again before it destroys anything, so a link swapped in
+/// after this check is caught by [`shred_tree`] rather than followed. This one stays because it is the
+/// cheapest, clearest refusal for the common case and because the two fail closed independently.
 pub fn wipe_session_dir(session_dir: &Path, scheme: ShredScheme) -> Result<(), VaultError> {
     // `symlink_metadata` does NOT follow the link, so this sees the link itself. A missing path is a
     // no-op success (the dir was already removed), matching the previous `exists()` behaviour.
@@ -1468,9 +1634,17 @@ enum AliasPolicy {
     /// Overwrite every regular file found, aliases included. Used by [`create_vault`]'s optional
     /// shred-original: that folder is the **user's own**, chosen in a file picker, so a hard link in it
     /// is their own arrangement of their own data and crosses no trust boundary. Unchanged behaviour.
+    ///
+    /// Since CPE-1672 this is also the module's "is this tree adversarial?" switch, because the identity
+    /// pinning the session wipe needs has one arm that has to differ: an identity that cannot be
+    /// established at all. See [`same_object_or_refuse`].
     ShredEveryFile,
-    /// Overwrite only files this module can prove have exactly one name; **unlink** anything else
+    /// Overwrite only files this module can prove have exactly one name; leave anything else alone
     /// instead of writing through it. Used by the session wipe — see [`wipe_disposition`].
+    ///
+    /// "Leave alone" means exactly that: no open and no write. The *name* still goes away, because
+    /// [`shred_tree`]'s single `remove_dir_all` at the end removes the tree — and unlinking one of an
+    /// inode's names destroys no data, which is the whole point.
     UnlinkAliasesInsteadOfOverwriting,
 }
 
@@ -1480,7 +1654,8 @@ enum AliasPolicy {
 enum WipeDisposition {
     /// Exactly one name: this file is the session's own, so overwrite it before unlinking.
     Shred,
-    /// More than one name — or a count that could not be read at all. **Unlink the name only.**
+    /// More than one name — or a count that could not be read at all. **Do not overwrite it**; the
+    /// tree removal at the end of [`shred_tree`] takes the name, which destroys no data.
     UnlinkOnly,
 }
 
@@ -1499,70 +1674,293 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
     }
 }
 
-/// Shred every file under `root` (each overwrite-then-unlinked via [`secure_shred::shred_file`]), then
-/// remove the now-fileless directory tree. Symlinks are skipped (never followed) — matching what the
-/// crypto core captured — but are removed with the tree.
+/// Overwrite every file under `root`, then remove the tree. Symlinks/junctions are skipped — never
+/// followed, at any depth — and removed with the tree.
 ///
-/// **The destructive step carries its own link check** (SEC-847 round-3 audit). The re-seal's
-/// [`ensure_no_aliased_files`] walk is a check-then-USE: it runs once, at the very top, and the "use" is
-/// this shredder several seconds later, after encrypt + an exclusive staging write + `sync_all` + a full
-/// verifying decrypt (a real scrypt KDF, ~1s **by design**) + the rename. The attacker did not even need
-/// to win a race, because the staging file appearing beside the `.cpevault` is a publicly observable
-/// starting gun proving the guard has already passed: poll for it, then
-/// `create_hard_link(victim, "<session>/loot.xlsx")` — a registered IPC command, unprivileged on NTFS —
-/// and this loop zero-filled the victim through the alias while `lock` returned `Ok(())` and the UI said
-/// "Locked".
+/// # What this destroys, and how it knows (CPE-1672)
 ///
-/// So under [`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`] the count is re-read **per file, just
-/// before that file is overwritten**, and a file with another name is **unlinked rather than
-/// overwritten**: a name that has another name is not ours to destroy, and unlinking one of an inode's
-/// names destroys nothing. That closes the hard-link variant this round was filed for, and gives the
-/// destructive step a guard of its own instead of relying on the caller's earlier walk — the discipline
-/// every other destructive step in this module already follows.
+/// **Objects, not names.** Every overwrite goes through a handle opened no-follow, whose filesystem
+/// identity is compared against the identity probed when the entry was enumerated; every descent into a
+/// subdirectory compares the same way. Nothing is ever overwritten because a *path* still spells the
+/// right thing — the two are different questions, and only the second one is safe to answer late.
 ///
-/// **It does NOT close the class, and this comment must not say that it does (SEC-847 round-3 re-audit).**
-/// An earlier draft claimed "no window at all" and "closes the integrity half completely". Both are false,
-/// and the auditor reproduced a victim file being securely overwritten and unlinked 3/3 through the public
-/// [`VaultRegistry::lock`] with `lock` returning `Ok(())`:
+/// That is the fix for a finding the security auditor reproduced 3/3 through the public
+/// [`VaultRegistry::lock`], with `lock` returning `Ok(())` and the UI saying "Locked" while a file
+/// outside the vault was securely overwritten and unlinked. The old shape was **collect-then-shred**:
+/// `collect_files` froze absolute paths, then the loop called `hard_link_count` and
+/// `secure_shred::shred_file`, each of which re-resolved the whole path from scratch. The per-file link
+/// check SEC-847 added had no-follow semantics on the **final component only** — every parent component
+/// was resolved by the OS — so the attacker skipped hard links entirely: plant an innocuous real
+/// subdirectory before locking (link count 1, not a reparse point, so every alias walk passes and it is
+/// sealed into the blob), wait for the first shredded file to vanish, then `remove_dir_all` it and drop a
+/// **junction** in its place pointing at `Documents`. The frozen path resolved through the junction, the
+/// victim's link count read `One`, and it was shredded.
 ///
-/// - This loop is **collect-then-shred**. [`collect_files`] walks the tree first and freezes absolute
-///   paths; the loop then calls [`hard_link_count`] and `shred_file`, each of which **re-resolves the
-///   whole path from scratch**. So there IS a window — two independent path resolutions plus
-///   `shred_file`'s own `metadata` and up to three opens.
-/// - The per-file check has no-follow semantics on the **final component only**. Every *parent* component
-///   is resolved by the OS. So the attacker skips the hard link entirely: plant an innocuous real
-///   subdirectory before locking (it passes both alias walks — link count 1, not a reparse point, and it
-///   gets sealed into the blob), wait for the first shredded file to vanish (the same starting-gun
-///   problem, one level up), then `remove_dir_all` that subdirectory and drop a **junction** in its place
-///   pointing at `Documents`. The frozen path now resolves through the junction, the link count of the
-///   victim reads `One`, and it is shredded.
-/// - `wipe_session_dir`'s own root-is-not-a-link check is likewise a single pass before `collect_files`.
+/// The walk now runs in five steps per directory, and the order is the guarantee:
 ///
-/// This structure is **pre-existing on `main`**, not introduced by CPE-1645, which is why that ticket
-/// landed with it open rather than growing a third time. It is filed with the full reproduction as
-/// **CPE-1672**. The proportionate fix is to stop collecting first — walk and shred inline, checking
-/// `symlink_metadata(dir).file_type().is_symlink()` immediately before descending — which removes both the
-/// frozen list and the observable starting gun. The complete fix is handle-based: open each file once
-/// no-follow, read `nNumberOfLinks` from *that* handle, and write through the same handle.
+/// 0. **Re-pin this directory** against the identity its parent recorded for it at enumeration, before
+///    reading anything. This is the first line of [`shred_dir_pinned`], and on the exploit's path it is
+///    the check that fires. It is also the near side of the residual gap described below.
+/// 1. **Enumerate and probe**, recording each entry's identity as it is seen. Nothing is destroyed in
+///    this pass, so every subdirectory's identity is captured *before* the first byte is overwritten
+///    anywhere in this directory — i.e. before the attacker's starting gun can possibly have fired.
+///    (Step 1 *records* identities; it re-checks nothing. Step 0 is the re-check.)
+/// 2. **Re-pin the directory itself again**, before anything is destroyed. A swap that lands during
+///    step 1 is refused with nothing written. This is the far side of the residual gap.
+/// 3. **Overwrite the files**, each through one no-follow handle that must carry the identity step 1
+///    recorded — so a parent swapped in after the gun fires makes the open land on a different object and
+///    is refused, rather than shredding whatever it found.
+/// 4. **Descend**, each subdirectory re-pinned against the identity from step 1 — which is step 0 of
+///    that child's own invocation.
+///
+/// **Nothing here unlinks by path.** The removal is left entirely to one `remove_dir_all(root)`, which
+/// std hardened against exactly this swap in 1.58.1 (CVE-2022-21658): it recurses through directory
+/// handles rather than re-resolving path strings, and deletes a reparse point instead of descending into
+/// it. That is also how an alias's *name* goes away — see [`AliasPolicy`].
+///
+/// # The residual, stated with its real size
+///
+/// This is not "no window", and this comment must not say that it is. Two remain.
+///
+/// **The gap.** Step 0's re-pin and the `read_dir` on the very next line are separated by a single
+/// syscall, and step 2 re-pins the same directory once the enumeration is done — so the two re-pins
+/// bracket the enumeration, and a swap must be **in and back out** between them to survive. Both halves
+/// of that must land, and the same is true one level down, so the real shape is a **four-phase
+/// alignment across two gaps**, not one lucky insertion.
+///
+/// **What is NOT hard about it, stated because two earlier drafts claimed otherwise (SEC-861 blocking 2,
+/// and PR #861 review):**
+///
+/// - **The attacker is not blind.** An earlier draft said the starting gun was gone "because nothing is
+///   unlinked mid-walk any more". Wrong: the gun merely changed form. Step 3 overwrites file *contents*
+///   in a directory the attacker can read, so polling content is a signal that fires at the same instant
+///   the old "file vanished" signal did — which this module's own regression test says out loud, since
+///   that is exactly how it arms. The auditor armed off it and it fired **400/400**.
+/// - **Restoring the same identity is free**, not the hard part. `rename` aside and back preserves the
+///   identity, one syscall per phase. The bracketing re-pins constrain *what* the attacker must put back,
+///   not how expensive it is to put back.
+/// - **An earlier draft also mislocated this gap**, placing its near side at step 1's per-entry probe —
+///   which puts step 2's re-pin, all of step 3's overwrites and the child's own step 0 inside it. That
+///   was wrong in the *unsafe* direction (it described a far wider window than exists) and is corrected
+///   above: the near side is step 0, on the line before the `read_dir`.
+///
+/// **What is actually hard about it is the timing, and that is measured, not asserted.** Armed with the
+/// content-change signal and this exact four-phase pattern, the auditor got **0 victims in 600 rounds**,
+/// with 91 of those rounds refused outright. The honest claim is therefore not "no signal" but "the
+/// signal does not buy enough": the window is a syscall wide, it must be hit twice in alignment, and it
+/// was not hit once in 600 attempts by someone trying to.
+///
+/// **The second residual:** `remove_dir_all` re-resolves `root` once, at the very end. By then every file
+/// has already been overwritten, so what is at stake is an unlink, not an overwrite, and std's own
+/// hardening (above) is what stands behind it.
+///
+/// Closing both entirely needs handle-relative traversal (`openat`/`NtCreateFile` with a root directory
+/// handle), which std does not expose and which is not worth a new dependency here; that is the remaining
+/// gap and its size, not a claim that there is none.
 fn shred_tree(root: &Path, scheme: ShredScheme, aliases: AliasPolicy) -> Result<(), VaultError> {
-    let mut files = Vec::new();
-    collect_files(root, &mut files)?;
-    for file in &files {
-        if aliases == AliasPolicy::UnlinkAliasesInsteadOfOverwriting
-            && wipe_disposition(&hard_link_count(file)) == WipeDisposition::UnlinkOnly
-        {
-            // Best-effort, exactly like the shred path's own error handling below is not: a name we
-            // cannot unlink is left in place and the following `remove_dir_all` reports it. Nothing is
-            // written to it either way, which is the property that matters.
-            let _ = std::fs::remove_file(file);
-            continue;
-        }
-        let p = file.to_string_lossy().to_string();
-        secure_shred::shred_file(&p, scheme)
-            .map_err(|e| VaultError::Format(format!("shred {p}: {e}")))?;
-    }
+    // No separate root-is-a-link check here: `shred_dir_pinned` re-probes `root` before it reads it, and
+    // that probe's link arm refuses. An extra check in front of it would be a guard no test could turn
+    // red on its own — which is how a guard quietly stops working (SEC-847 round-3 found exactly that
+    // shape). One check, pinned by `shred_tree_refuses_a_root_that_is_itself_a_link`.
+    let root_probe = probe_no_follow(root);
+    shred_dir_pinned(root, root_probe.id, scheme, aliases)?;
+    // The ONLY removal in this function, and the only place a path is resolved for a destructive
+    // purpose after the overwrites are done — see the doc comment on why std's hardened implementation
+    // is what the unlink safety rests on.
     std::fs::remove_dir_all(root)?;
     Ok(())
+}
+
+/// One directory of [`shred_tree`]'s walk, pinned to the identity `expected` that its parent recorded
+/// (or, for the root, that [`shred_tree`] probed immediately before). See [`shred_tree`] for the ordering
+/// argument; this is that order, expressed.
+fn shred_dir_pinned(
+    dir: &Path,
+    expected: Option<FileIdentity>,
+    scheme: ShredScheme,
+    aliases: AliasPolicy,
+) -> Result<(), VaultError> {
+    // Before we read it: is this still the directory our caller enumerated? On the exploit's path this
+    // is the check that fires — the junction was swapped in after the starting gun, so the identity here
+    // no longer matches the one captured before any file was touched.
+    same_object_or_refuse(dir, expected, aliases, "directory")?;
+
+    // STEP 1 — enumerate + probe. Purely observational: nothing below this point can be destroyed
+    // without step 2 agreeing first.
+    let mut files: Vec<(PathBuf, EntryProbe)> = Vec::new();
+    let mut subdirs: Vec<(PathBuf, Option<FileIdentity>)> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue; // never followed — the crypto core skips these too; `remove_dir_all` unlinks them
+        }
+        let path = entry.path();
+        let probe = probe_no_follow(&path);
+        if probe.is_link {
+            // A reparse point the directory entry did not report as a symlink (a Windows junction reads
+            // as a plain directory through some APIs). Same treatment: never followed.
+            continue;
+        }
+        if probe.is_dir {
+            subdirs.push((path, probe.id));
+        } else if ft.is_file() {
+            files.push((path, probe));
+        }
+    }
+
+    // STEP 2 — re-pin, before a single byte is destroyed.
+    same_object_or_refuse(dir, expected, aliases, "directory")?;
+
+    // STEP 3 — overwrite, each file pinned to the identity captured in step 1.
+    for (path, probe) in &files {
+        overwrite_pinned_file(path, probe, scheme, aliases)?;
+    }
+
+    // STEP 4 — descend, each subdirectory pinned to the identity captured in step 1, which was recorded
+    // BEFORE step 3 gave an observer anything to react to.
+    for (path, id) in &subdirs {
+        shred_dir_pinned(path, *id, scheme, aliases)?;
+    }
+    Ok(())
+}
+
+/// Is the object at `path` right now the same object `expected` names? Refuses when it provably is not,
+/// and — for the app-owned session tree — when that cannot be proven either way.
+///
+/// The `Unknown` arm is where the two [`AliasPolicy`] trust levels genuinely differ. A session directory
+/// lives in the app's own cache dir on a local volume, where an identity is always readable, so an
+/// unreadable one there is anomalous and refused (the lock stays retryable and nothing is destroyed).
+/// **Precisely: refused for a directory, and silently declined for a file** — `overwrite_pinned_file`
+/// leaves the name for `remove_dir_all` rather than writing through an object it cannot vouch for, which
+/// is the safer half of the same rule. The two cannot diverge in practice, since identity and link count
+/// come from the same syscall on both platforms (PR #861 review — the earlier wording read as a
+/// module-wide "refused" and was narrower than the module behaves).
+/// `create_vault`'s optional shred-original runs over a folder the **user** picked in a file picker,
+/// which may sit on a network redirector that reports a degenerate identity from a call that otherwise
+/// succeeds — refusing there would break a legitimate feature to defend against an attacker who, by that
+/// path's own threat model ([`AliasPolicy::ShredEveryFile`]), is not present.
+fn same_object_or_refuse(
+    path: &Path,
+    expected: Option<FileIdentity>,
+    aliases: AliasPolicy,
+    what: &str,
+) -> Result<(), VaultError> {
+    let now = probe_no_follow(path);
+    if now.is_link {
+        // Deliberately does NOT claim the link "was swapped in" — this same call guards the very first
+        // look at the wipe's root, where the link may have been there all along. It says only what is
+        // certainly true: there is a link here, and this module does not overwrite through one.
+        return Err(VaultError::Format(format!(
+            "refusing to wipe {}: a symbolic link or junction is at this {what}, not the real one a wipe \
+             walks — following it would overwrite whatever it points at",
+            path.display()
+        )));
+    }
+    match (expected, now.id) {
+        (Some(before), Some(after)) if before == after => Ok(()),
+        (Some(_), Some(_)) => Err(VaultError::Format(format!(
+            "refusing to wipe {}: this {what} is no longer the same object it was when the wipe \
+             enumerated it, so something replaced it while the wipe was running — nothing further will \
+             be overwritten",
+            path.display()
+        ))),
+        _ => match aliases {
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting => Err(VaultError::Format(format!(
+                "refusing to wipe {}: this {what} could not be shown to be the same object the wipe \
+                 enumerated, so there is no way to tell what an overwrite would land on",
+                path.display()
+            ))),
+            AliasPolicy::ShredEveryFile => Ok(()),
+        },
+    }
+}
+
+/// Overwrite one file **through a single no-follow handle**, or decline to overwrite it at all.
+///
+/// The order matters, and every step fails closed against destroying data:
+///
+/// 1. The link count probed at enumeration decides the [`wipe_disposition`]. An alias (or an unreadable
+///    count) is left alone entirely — no open, no write; `remove_dir_all` takes the *name* at the end,
+///    which destroys nothing, since a name that has another name is not ours to overwrite.
+/// 2. Open once, no-follow, for writing.
+/// 3. Ask that handle who it is. Wrong object, a reparse point, a directory — refuse the whole wipe.
+/// 4. Re-read the link count **from that same handle**. An alias that appeared between step 1 and the
+///    open is caught here with nothing written.
+/// 5. Only then write, and write through that handle for every pass.
+fn overwrite_pinned_file(
+    path: &Path,
+    probed: &EntryProbe,
+    scheme: ShredScheme,
+    aliases: AliasPolicy,
+) -> Result<(), VaultError> {
+    let unlink_only = aliases == AliasPolicy::UnlinkAliasesInsteadOfOverwriting;
+    if unlink_only && wipe_disposition(&probed.links) == WipeDisposition::UnlinkOnly {
+        return Ok(());
+    }
+
+    let mut file = open_existing_no_follow(path).map_err(|e| {
+        VaultError::Format(format!("shred {}: cannot open it for overwriting: {e}", path.display()))
+    })?;
+
+    let facts = match handle_facts(&file) {
+        Some(f) if !f.id.is_degenerate() => f,
+        // The handle exists but will not say what it is. Under the session tree's threat model that is
+        // exactly the shape of an attack; under `create_vault`'s it is an exotic volume, and the old
+        // behaviour (overwrite) is kept.
+        _ => {
+            if unlink_only {
+                return Ok(());
+            }
+            return shred_through(&mut file, path, scheme);
+        }
+    };
+    if facts.is_reparse_point || facts.is_dir {
+        return Err(VaultError::Format(format!(
+            "refusing to wipe {}: the handle opened at this name is a link or a directory, not the \
+             ordinary file the wipe enumerated",
+            path.display()
+        )));
+    }
+    // THE identity check, made against the object we are holding rather than against the name again.
+    match probed.id {
+        Some(before) if before == facts.id => {}
+        Some(_) => {
+            return Err(VaultError::Format(format!(
+                "refusing to wipe {}: the handle opened at this name is a different object from the one \
+                 the wipe enumerated, so something was swapped in behind this path while the wipe was \
+                 running — nothing further will be overwritten",
+                path.display()
+            )))
+        }
+        // Nothing was established at enumeration time, so there is nothing to compare against.
+        None if unlink_only => return Ok(()),
+        None => {}
+    }
+    // And the link count that actually decides, likewise read from the object rather than from a name —
+    // so an alias created between the enumeration probe and this open is caught with nothing written.
+    let links = match facts.links {
+        0 => HardLinks::Unknown("the filesystem reported a link count of zero"),
+        1 => HardLinks::One,
+        n => HardLinks::Many(n),
+    };
+    if unlink_only && wipe_disposition(&links) == WipeDisposition::UnlinkOnly {
+        return Ok(());
+    }
+    shred_through(&mut file, path, scheme)
+}
+
+/// Run every overwrite pass through `file`. The name is used only to size the file and to name it in an
+/// error — it is never re-opened (CPE-1672).
+fn shred_through(file: &mut std::fs::File, path: &Path, scheme: ShredScheme) -> Result<(), VaultError> {
+    let label = path.to_string_lossy().to_string();
+    let size = file
+        .metadata()
+        .map_err(|e| VaultError::Format(format!("shred {label}: cannot size it: {e}")))?
+        .len();
+    secure_shred::shred_open_file(file, size, scheme, &label)
+        .map(|_| ())
+        .map_err(|e| VaultError::Format(format!("shred {label}: {e}")))
 }
 
 /// Remove a symlink/junction **itself**, never its target (CPE-1653). A file symlink unlinks with
@@ -1574,24 +1972,6 @@ fn remove_link(link: &Path) {
     if std::fs::remove_file(link).is_err() {
         let _ = std::fs::remove_dir(link);
     }
-}
-
-/// Collect the regular-file paths under `dir` (recursive), skipping symlinks.
-fn collect_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), VaultError> {
-    for entry in std::fs::read_dir(dir)? {
-        let entry = entry?;
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            continue;
-        }
-        let p = entry.path();
-        if ft.is_dir() {
-            collect_files(&p, out)?;
-        } else if ft.is_file() {
-            out.push(p);
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -3864,13 +4244,25 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("top.txt"), b"edited while unlocked").unwrap();
 
-        // The whole process shares the counter and tests run in parallel, so compare a snapshot taken
-        // just before with the value observed inside our own verify — a monotonic counter can only have
-        // gone UP, and our own write is guaranteed to be one of the increments.
-        let before = staging_sync_count();
+        // The counter is THREAD-LOCAL (see `VAULT_BLOB_SYNCS`), so the value observed inside our own
+        // verify was produced by this test's own call site and nothing else. Do not "simplify" it back
+        // to a process-wide atomic: with a shared counter another test's fsync can satisfy "the count
+        // went up" while this call site synced nothing. Measured on a faithful reconstruction of `main`
+        // (PR #861 re-review): the ordering mutation — moving the fsync to AFTER the verify — was masked
+        // 4 times in 10. Not "always weaker" and not "genuinely falsifiable"; ~60% reliable, because a
+        // shared counter makes falsification depend on parallel interleaving.
+        //
+        // The before-snapshot is **load-bearing here**, unlike at the create-side copy of this comment:
+        // `sealed_vault` above calls `create_vault`, which since CPE-1669 fsyncs through the very same
+        // `write_new_exclusive` **on this thread**, so the counter is already non-zero when the re-seal
+        // starts (measured: `RESEAL-TEST before=1`, `CREATE-TEST before=0`). Delete the snapshot and the
+        // assertion degenerates to `at_verify > 0`, which the fixture's own create satisfies — the same
+        // masking the thread-local fixed cross-thread, reappearing same-thread. CPE-1669 is what created
+        // that coupling, so this sentence and the code it guards were written in the same change.
+        let before = vault_blob_sync_count();
         let at_verify = std::cell::Cell::new(usize::MAX);
         reseal_session_with_verifier(&blob_path, &session, &pass("pw"), |p, pw| {
-            at_verify.set(staging_sync_count());
+            at_verify.set(vault_blob_sync_count());
             verify_recoverable(p, pw)
         })
         .expect("the re-seal itself must succeed");
@@ -3881,6 +4273,729 @@ mod tests {
              may never have reached the disk, and the caller destroys the only other copy next \
              (syncs before={before}, at verify={})",
             at_verify.get()
+        );
+    }
+
+    // ---- CPE-1672: a link swapped in at a PARENT directory mid-wipe --------------------------------
+    //
+    // The security auditor's re-audit of PR #847 reproduced this 3/3 through the public
+    // `VaultRegistry::lock`, with `lock` returning `Ok(())` and the UI saying "Locked" while a file
+    // outside the vault was securely overwritten and unlinked. It is strictly worse than the hard-link
+    // variant CPE-1645 closed: there the victim's inode kept its other name, so nothing was lost; here
+    // the victim's ONLY name is overwritten and removed.
+    //
+    //   1. Before locking, plant an innocuous REAL subdirectory `<session>/zsub/` holding a real file
+    //      whose name matches one in the victim directory. Every guard finds it innocent — link count 1,
+    //      not a reparse point — and it is sealed into the blob.
+    //   2. Starting gun: poll the session dir. The first shredded file disappearing proves the wipe is
+    //      running (and, on the old collect-then-shred code, that the path list is already frozen).
+    //   3. `remove_dir_all(<session>/zsub)`, then plant a junction there pointing at the victim dir.
+    //   4. The wipe reaches `<session>/zsub/taxes.xlsx`, which now resolves THROUGH the junction.
+    //
+    // The un-named `bystander.txt` is what proves this is the shredder writing through the junctioned
+    // parent rather than `remove_dir_all` recursing into it: only the name the attacker chose is hit.
+
+    /// Bytes the victim must still have when this is over, read back OFF DISK.
+    const VICTIM_BYTES: &[u8] = b"VICTIM PLAINTEXT - the only copy";
+
+    /// Whether the timing exploit could actually be *staged* on this run — kept distinct from whether
+    /// the fix held, so a missed window can never be reported as a link failure or, worse, as a pass
+    /// (PR #861 audit, finding 4: the junction form hard-failed twice in seven Windows runs because the
+    /// watcher thread was descheduled past the overwrite phase and woke after `remove_dir_all(root)`,
+    /// and the assertion then blamed junction creation for a test that had detected nothing).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SwapOutcome {
+        /// The link was planted mid-wipe and every assertion in the harness ran.
+        Swapped,
+        /// The wipe finished before the watcher could act — nothing was proven either way.
+        WindowMissed,
+        /// The window was hit, but this OS/account refused to create the link.
+        LinkRefused,
+    }
+
+    impl SwapOutcome {
+        const SWAPPED: u8 = 0;
+        const WINDOW_MISSED: u8 = 1;
+        const LINK_REFUSED: u8 = 2;
+
+        fn from(raw: u8) -> Self {
+            match raw {
+                Self::SWAPPED => Self::Swapped,
+                Self::LINK_REFUSED => Self::LinkRefused,
+                _ => Self::WindowMissed,
+            }
+        }
+    }
+
+    /// Shared body of the CPE-1672 regression. Returns `false` (asserting nothing) when the swap could
+    /// not be staged on this run, so the caller skips LOUDLY instead of passing silently.
+    fn wipe_must_not_write_through_a_swapped_parent(
+        make_link: impl Fn(&Path, &Path) -> bool + Send + 'static,
+        kind: &str,
+    ) -> SwapOutcome {
+        use std::sync::atomic::{AtomicU8, Ordering};
+        use std::sync::Arc;
+
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        let session = root.join("16720000-1672-0000-1672-000000000000");
+
+        // The victim: the user's own Documents. `taxes.xlsx` shares its name with the decoy the attacker
+        // plants inside the session tree; `bystander.txt` does not, and must survive either way.
+        let victim_dir = dir.path().join("Documents");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("taxes.xlsx");
+        std::fs::write(&victim, VICTIM_BYTES).unwrap();
+        let bystander = victim_dir.join("bystander.txt");
+        std::fs::write(&bystander, b"a file the attacker never named").unwrap();
+
+        let reg = VaultRegistry::default();
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session)
+            .expect("the legitimate unlock must succeed — the exploit starts from a VALID session");
+
+        // (1) The innocuous real subdirectory, planted before the lock so it is sealed into the blob.
+        let zsub = session.join("zsub");
+        std::fs::create_dir_all(&zsub).unwrap();
+        std::fs::write(zsub.join("taxes.xlsx"), b"the attacker's decoy").unwrap();
+        // Padding that sorts after the starting gun (`top.txt`) and before `zsub`, so the wipe spends a
+        // measurable time shredding between the gun firing and the frozen path being reached. Without it
+        // the window is a couple of syscalls wide and the exploit is a coin flip rather than 3/3.
+        for i in 0..8 {
+            std::fs::write(session.join(format!("y_pad_{i}.bin")), vec![0xABu8; 512 * 1024]).unwrap();
+        }
+
+        // (2) + (3) The watcher: swap the moment the gun fires.
+        let session_c = session.clone();
+        let victim_dir_c = victim_dir.clone();
+        let outcome = Arc::new(AtomicU8::new(SwapOutcome::WINDOW_MISSED));
+        let outcome_c = outcome.clone();
+        let watcher = std::thread::spawn(move || {
+            let gun = session_c.join("top.txt");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+            while std::time::Instant::now() < deadline {
+                // The starting gun is the FIRST file's plaintext stopping being its plaintext. The
+                // original code unlinked each file as it shredded it, so "gone" was the signal; the fixed
+                // code only overwrites (the tree removal comes at the very end), so "gone" would never
+                // fire until it was far too late to prove anything. Watching the *content* fires at the
+                // same instant in both, which is what makes this one test meaningful against both.
+                if std::fs::read(&gun).map(|b| b != b"top secret").unwrap_or(true) {
+                    let zsub = session_c.join("zsub");
+                    // Distinguish "the wipe outran us" from "this OS refuses the link". Getting these
+                    // two confused is what made the Windows leg red intermittently while blaming
+                    // junction creation for a test that had detected nothing (PR #861 audit, finding 4).
+                    if std::fs::remove_dir_all(&zsub).is_err() {
+                        outcome_c.store(SwapOutcome::WINDOW_MISSED, Ordering::SeqCst);
+                    } else if make_link(&victim_dir_c, &zsub) {
+                        outcome_c.store(SwapOutcome::SWAPPED, Ordering::SeqCst);
+                    } else {
+                        outcome_c.store(SwapOutcome::LINK_REFUSED, Ordering::SeqCst);
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_micros(200));
+            }
+        });
+
+        // (4) The payload.
+        let result = reg.lock(&blob_path);
+        watcher.join().unwrap();
+        let outcome = SwapOutcome::from(outcome.load(Ordering::SeqCst));
+        if outcome != SwapOutcome::Swapped {
+            return outcome;
+        }
+
+        // The auditor's own probe line, printed on red AND green runs so the evidence is in the log
+        // either way — in particular that the bystander survives, which is what distinguishes "the
+        // shredder wrote through the junctioned parent" from "`remove_dir_all` recursed into it".
+        eprintln!(
+            "CPE-1672 PROBE ({kind}): swapped=true lock_ok={} victim_exists={} victim_dir_exists={} \
+             bystander_exists={}",
+            result.is_ok(),
+            victim.exists(),
+            victim_dir.is_dir(),
+            bystander.exists()
+        );
+
+        // THE headline, read back off disk rather than inferred from the returned Result.
+        assert_eq!(
+            std::fs::read(&victim).unwrap_or_default(),
+            VICTIM_BYTES,
+            "the wipe shredded a file OUTSIDE the vault by resolving a path through a {kind} swapped in \
+             at a PARENT directory mid-wipe (lock returned {result:?})"
+        );
+        assert_eq!(
+            std::fs::read(&bystander).unwrap_or_default(),
+            b"a file the attacker never named",
+            "a file the attacker never named was destroyed too — that would mean the whole victim \
+             directory was recursed into, not written through by name"
+        );
+        assert!(victim_dir.is_dir(), "the victim directory itself must survive");
+
+        // The *outcome* of the lock is deliberately NOT pinned here, and that is not a weakened
+        // assertion — it is the honest one. Where the swap lands inside the wipe decides it: land it
+        // before the walk descends and the identity pin refuses (`WipeFailed`); land it during the final
+        // `remove_dir_all` and std either reports an I/O error or unlinks the reparse point without
+        // following it and the lock legitimately succeeds — having destroyed nothing outside the vault,
+        // which is the only thing that was ever at stake. Pinning one of those made this test flaky
+        // under load for exactly that reason. The refusal's own wording is pinned deterministically, and
+        // without a thread, by `the_wipe_refuses_a_directory_that_is_not_the_object_it_was_told_to_wipe`.
+        if let Err(LockError { code, message }) = &result {
+            assert_eq!(
+                *code,
+                LockFailureCode::WipeFailed,
+                "a swap that lands mid-wipe can only fail the WIPE — the re-seal is long finished by \
+                 then, and the code the frontend recovers on must not be forgeable: {message}"
+            );
+            assert!(reg.is_unlocked(&blob_path), "a refused wipe must stay retryable");
+        }
+        SwapOutcome::Swapped
+    }
+
+    /// THE bug (CPE-1672), via a Windows **junction** — the sharp end, because a junction needs neither
+    /// Developer Mode nor elevation. On the unfixed code this shreds `Documents\taxes.xlsx` while `lock`
+    /// returns `Ok(())`.
+    #[cfg(windows)]
+    #[test]
+    fn the_wipe_refuses_a_junction_swapped_in_at_a_parent_directory_mid_wipe() {
+        match wipe_must_not_write_through_a_swapped_parent(try_junction_dir, "junction") {
+            SwapOutcome::Swapped => {}
+            // A junction needs no elevation on NTFS, so THIS really would mean a broken fixture.
+            SwapOutcome::LinkRefused => panic!(
+                "creating a directory junction must succeed on Windows/NTFS — it needs no elevation, so \
+                 a refusal here means the fixture is broken, not that the case is untestable"
+            ),
+            // Not a failure: the wipe simply finished before the watcher could plant anything, so this
+            // run detected nothing either way. Failing here would red the Windows leg intermittently
+            // while blaming junction creation for a missed window (PR #861 audit, finding 4).
+            SwapOutcome::WindowMissed => eprintln!(
+                "SKIPPED the_wipe_refuses_a_junction_swapped_in_at_a_parent_directory_mid_wipe: the \
+                 watcher thread was descheduled past the overwrite phase and the wipe finished first, so \
+                 the swap could not be staged. The junction form of the parent swap was NOT verified on \
+                 this run — the deterministic pins still were."
+            ),
+        }
+    }
+
+    /// The same swap built from a **symbolic link**, so the regression is also covered on the Linux and
+    /// macOS legs of the 3-OS backend matrix.
+    #[test]
+    fn the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe() {
+        match wipe_must_not_write_through_a_swapped_parent(try_symlink_dir, "symlink") {
+            SwapOutcome::Swapped => {}
+            SwapOutcome::LinkRefused => eprintln!(
+                "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: this \
+                 OS/account cannot create a directory symlink (on Windows this needs Developer Mode or \
+                 admin). The symlink form of the parent swap was NOT verified on this run."
+            ),
+            SwapOutcome::WindowMissed => eprintln!(
+                "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: the wipe \
+                 finished before the watcher could stage the swap. The symlink form of the parent swap \
+                 was NOT verified on this run — the deterministic pins still were."
+            ),
+        }
+    }
+
+    /// The identity pin, deterministically and with no thread: hand the walk the identity of a
+    /// *different* directory and it must refuse before overwriting a single byte. This is the arm the
+    /// timing test above exercises through a real junction; here it is pinned as the plain comparison it
+    /// is, so the guard cannot be removed on a machine where the swap could not be staged.
+    ///
+    /// Goes red if the `same_object_or_refuse` calls in `shred_dir_pinned` are removed.
+    #[test]
+    fn the_wipe_refuses_a_directory_that_is_not_the_object_it_was_told_to_wipe() {
+        let dir = worktree_tempdir();
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(session.join("nested")).unwrap();
+        std::fs::write(session.join("nested").join("mine.txt"), b"the vault's own file").unwrap();
+
+        // Some *other* real directory's identity, standing in for "what this path used to be".
+        let other = dir.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let wrong_id = probe_no_follow(&other).id.expect("a real local directory must have an identity");
+        assert_ne!(
+            wrong_id,
+            probe_no_follow(&session).id.unwrap(),
+            "the fixture is only meaningful if the two directories really are different objects"
+        );
+
+        let result = shred_dir_pinned(
+            &session,
+            Some(wrong_id),
+            SESSION_WIPE_SCHEME,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        );
+
+        match result {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains("refusing to wipe"),
+                "the refusal must say why, got: {msg}"
+            ),
+            other => panic!("wiping a directory that is not the pinned object must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(session.join("nested").join("mine.txt")).unwrap(),
+            b"the vault's own file",
+            "a refused wipe must not have overwritten anything"
+        );
+
+        // NEGATIVE CONTROL: the SAME call with the right identity must actually do the work, or the
+        // guard would just be "always refuse" and every lock would fail.
+        let right_id = probe_no_follow(&session).id.unwrap();
+        shred_dir_pinned(
+            &session,
+            Some(right_id),
+            SESSION_WIPE_SCHEME,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        )
+        .expect("the pinned wipe must succeed when the identity matches");
+        assert_ne!(
+            std::fs::read(session.join("nested").join("mine.txt")).unwrap(),
+            b"the vault's own file",
+            "the session's own file must really have been overwritten"
+        );
+    }
+
+    // The destructive step's two **handle-side** checks. Both are pinned by handing `overwrite_pinned_file`
+    // a probe that LIES — which is exactly what a probe taken one instant before a swap becomes. Neither
+    // is reachable through the directory-level pin, and they get a test each rather than sharing one, so
+    // that neutralising either turns a *distinct* test red.
+
+    /// The hard-link count that decides is re-read from the handle the overwrite will write through, not
+    /// taken from the probe. Here the probe claims one name while the object really has two — the shape
+    /// of an alias planted between the enumeration and the open.
+    #[test]
+    fn the_overwrite_re_reads_the_link_count_from_the_handle_it_will_write_through() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("taxes.xlsx");
+        std::fs::write(&victim, VICTIM_BYTES).unwrap();
+        let loot = dir.path().join("loot.xlsx");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPED the_overwrite_re_reads_the_link_count_from_the_handle_it_will_write_through: \
+                 this OS/volume refused a hard link."
+            );
+            return;
+        }
+
+        let mut lying = probe_no_follow(&loot);
+        assert!(
+            matches!(lying.links, HardLinks::Many(_)),
+            "the fixture must really be an alias, or this proves nothing"
+        );
+        lying.links = HardLinks::One; // ...as the probe would have read a moment before it was planted
+
+        overwrite_pinned_file(&loot, &lying, ShredScheme::Zero, AliasPolicy::UnlinkAliasesInsteadOfOverwriting)
+            .expect("an alias is declined, not an error — the tree removal takes the name");
+
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            VICTIM_BYTES,
+            "the wipe overwrote a file through an alias the probe it was handed did not know about"
+        );
+    }
+
+    /// An alias is declined from the **enumeration probe**, before a write handle is ever taken on it —
+    /// this module does not open a stranger's file for writing just to then decide it is not its own.
+    /// That is a separate decision from the handle-side re-read above (which exists for an alias that
+    /// appears *later*), so it gets its own test: pinned by making the object un-openable for writing,
+    /// which a correct decline never notices and an open-first version fails the whole wipe on.
+    #[test]
+    fn an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("taxes.xlsx");
+        std::fs::write(&victim, VICTIM_BYTES).unwrap();
+        let loot = dir.path().join("loot.xlsx");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPED an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it: this OS/volume \
+                 refused a hard link."
+            );
+            return;
+        }
+
+        let restore = |writable: bool| {
+            let mut perms = std::fs::metadata(&loot).unwrap().permissions();
+            perms.set_readonly(!writable);
+            let _ = std::fs::set_permissions(&loot, perms);
+        };
+        restore(false);
+        if open_existing_no_follow(&loot).is_ok() {
+            restore(true);
+            eprintln!(
+                "SKIPPED an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it: this account can \
+                 open a read-only file for writing (running as root?), so the \"declined before opening\" \
+                 ordering was NOT verified on this run."
+            );
+            return;
+        }
+
+        let probe = probe_no_follow(&loot);
+        assert!(matches!(probe.links, HardLinks::Many(_)), "the fixture must really be an alias");
+        let result = overwrite_pinned_file(
+            &loot,
+            &probe,
+            ShredScheme::Zero,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        );
+        restore(true); // before any assertion, so a failure still leaves a cleanable temp dir
+
+        result.expect("an alias must be declined from the probe, with no write handle ever taken on it");
+        assert_eq!(std::fs::read(&victim).unwrap(), VICTIM_BYTES, "and nothing may be written to it");
+    }
+
+    /// The object behind the name is checked against the one that was enumerated. `ShredEveryFile` so the
+    /// identity mismatch is the only thing that can refuse — this arm is not the alias policy's doing.
+    #[test]
+    fn the_overwrite_refuses_a_name_that_now_denotes_a_different_object() {
+        let dir = worktree_tempdir();
+        let ours = dir.path().join("mine.txt");
+        std::fs::write(&ours, b"the vault's own file").unwrap();
+        let other = dir.path().join("other.txt");
+        std::fs::write(&other, b"someone else's file").unwrap();
+
+        let mut lying = probe_no_follow(&ours);
+        lying.id = probe_no_follow(&other).id;
+        assert_ne!(lying.id, probe_no_follow(&ours).id, "the fixture must be two distinct objects");
+
+        let err = overwrite_pinned_file(&ours, &lying, ShredScheme::Zero, AliasPolicy::ShredEveryFile)
+            .expect_err("a name that now denotes a different object than the one enumerated is refused");
+        assert!(reason(err).contains("refusing to wipe"), "the refusal must say why");
+        assert_eq!(
+            std::fs::read(&ours).unwrap(),
+            b"the vault's own file",
+            "and it must be refused BEFORE the first byte is written"
+        );
+
+        // NEGATIVE CONTROL: an honest probe still lets the overwrite happen, or the guard would just be
+        // "always refuse" and no vault could ever be locked.
+        let honest = probe_no_follow(&ours);
+        overwrite_pinned_file(&ours, &honest, ShredScheme::Zero, AliasPolicy::ShredEveryFile)
+            .expect("an honest probe must let the overwrite proceed");
+        assert_ne!(
+            std::fs::read(&ours).unwrap(),
+            b"the vault's own file",
+            "the file the wipe really does own must really be overwritten"
+        );
+    }
+
+    /// The **link arm** of [`same_object_or_refuse`], isolated. It has to be pinned on its own because
+    /// the identity arm beside it independently catches every case where an identity is readable — each
+    /// of the two is sufficient for the junction swap, which is exactly why neither can be left resting
+    /// on the other's test. The case only this arm answers is a link at a path whose identity could not
+    /// be established, under the trust level that lets an unprovable identity through.
+    #[test]
+    fn a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("Documents");
+        precious_dir(&victim);
+        let link = dir.path().join("as-a-link");
+
+        #[cfg(windows)]
+        let made = try_junction_dir(&victim, &link);
+        #[cfg(not(windows))]
+        let made = try_symlink_dir(&victim, &link);
+        if !made {
+            eprintln!(
+                "SKIPPED a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against: this \
+                 OS/account cannot create a directory link."
+            );
+            return;
+        }
+
+        // `None` + `ShredEveryFile` is the one combination the identity arm waves through, so a refusal
+        // here can only have come from the link check.
+        let result = same_object_or_refuse(&link, None, AliasPolicy::ShredEveryFile, "directory");
+        match result {
+            Err(VaultError::Format(msg)) => {
+                assert!(msg.contains("refusing to wipe"), "the refusal must say why, got: {msg}")
+            }
+            other => panic!("a link must be refused with no identity to compare, got {other:?}"),
+        }
+        // NEGATIVE CONTROL: the same call against the real directory must pass, or this arm would just
+        // be "always refuse".
+        same_object_or_refuse(&victim, None, AliasPolicy::ShredEveryFile, "directory")
+            .expect("a real directory with an unprovable identity is allowed through at this trust level");
+    }
+
+    /// [`shred_tree`]'s own root check, independent of [`wipe_session_dir`]'s (which fires first on the
+    /// production path and so would mask this one). Two guards, each pinned, failing closed separately.
+    #[test]
+    fn shred_tree_refuses_a_root_that_is_itself_a_link() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("Documents");
+        precious_dir(&victim);
+        let link = dir.path().join("as-a-link");
+
+        #[cfg(windows)]
+        let made = try_junction_dir(&victim, &link);
+        #[cfg(not(windows))]
+        let made = try_symlink_dir(&victim, &link);
+        if !made {
+            eprintln!(
+                "SKIPPED shred_tree_refuses_a_root_that_is_itself_a_link: this OS/account cannot create \
+                 a directory link."
+            );
+            return;
+        }
+
+        let result = shred_tree(
+            &link,
+            SESSION_WIPE_SCHEME,
+            AliasPolicy::UnlinkAliasesInsteadOfOverwriting,
+        );
+        assert_precious_intact(&victim, "after shred_tree was pointed straight at a link");
+        match result {
+            Err(VaultError::Format(msg)) => {
+                assert!(msg.contains("refusing to wipe"), "the refusal must say why, got: {msg}")
+            }
+            other => panic!("shredding a linked root must be refused, got {other:?}"),
+        }
+    }
+
+    /// A link planted **inside** the session tree before the wipe starts is never followed and never
+    /// removed by recursing through it: the walk skips it, and the single `remove_dir_all` at the end
+    /// unlinks the reparse point itself. Pins the behaviour the shredder's removal now rests on (std's
+    /// `remove_dir_all` has been hardened against symlink swaps since 1.58.1, CVE-2022-21658).
+    #[test]
+    fn a_link_planted_inside_the_session_tree_is_never_followed_and_its_target_survives() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("Documents");
+        precious_dir(&victim);
+
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("mine.txt"), b"the vault's own file").unwrap();
+
+        let planted = session.join("shortcut");
+        #[cfg(windows)]
+        let made = try_junction_dir(&victim, &planted);
+        #[cfg(not(windows))]
+        let made = try_symlink_dir(&victim, &planted);
+        if !made {
+            eprintln!(
+                "SKIPPED a_link_planted_inside_the_session_tree_is_never_followed_and_its_target_survives: \
+                 this OS/account cannot create a directory link."
+            );
+            return;
+        }
+
+        wipe_session_dir(&session, SESSION_WIPE_SCHEME).expect("the wipe must still succeed");
+
+        assert!(!session.exists(), "the session tree must still be removed");
+        assert_precious_intact(&victim, "after a wipe of a tree containing a link into it");
+    }
+
+    // ---- CPE-1669 / CPE-1670: create_vault writes the blob the way the re-seal does -----------------
+
+    /// CPE-1669: the blob is `sync_all`ed **before** it is verified, and therefore before `shred_tree`
+    /// destroys the plaintext original. Same falsifiable shape as
+    /// [`the_staging_blob_is_fsynced_before_it_is_verified`] — [`sync_durably`] counts its calls in test
+    /// builds and the injected verifier reads the counter at the moment it runs, because there is no
+    /// portable way to ask the OS after the fact whether a write reached the platter. Removing the
+    /// `sync_all` makes the count stand still and this fails.
+    #[test]
+    fn create_vault_fsyncs_the_blob_before_it_is_verified_and_therefore_before_any_shred() {
+        let dir = worktree_tempdir();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+
+        // The counter is THREAD-LOCAL (see `VAULT_BLOB_SYNCS`), so the value observed inside our own
+        // verify was produced by this test's own call site and nothing else. Do not "simplify" it back
+        // to a process-wide atomic: that is exactly what made both ordering tests weaker than they read,
+        // because another test's fsync could satisfy "the count went up" while this call site synced
+        // nothing (PR #861 review — reconstructed and confirmed against `main`'s atomic version). The
+        // before-snapshot is kept as belt-and-braces, not because a shared counter needs it.
+        let before = vault_blob_sync_count();
+        let at_verify = std::cell::Cell::new(usize::MAX);
+        create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, true, |p, pw| {
+            at_verify.set(vault_blob_sync_count());
+            verify_recoverable(p, pw)
+        })
+        .expect("the create itself must succeed");
+
+        assert!(
+            at_verify.get() > before,
+            "the blob must be fsynced BEFORE it is verified — the verify read back a copy that may never \
+             have reached the disk, and the shred destroys the only other copy next (syncs before \
+             ={before}, at verify={})",
+            at_verify.get()
+        );
+        // ...and the ordering claim is only worth anything if the shred really did run afterwards.
+        assert!(!src.exists(), "the confirmed shred must still have destroyed the original");
+        assert!(is_vault(&blob_path));
+    }
+
+    /// CPE-1669, the Unix half: the destination's parent directory is fsynced after the rename, so the
+    /// new directory entry is durable too. Counted for the same reason the blob fsync is.
+    #[cfg(unix)]
+    #[test]
+    fn create_vault_fsyncs_the_destination_directory_after_the_rename() {
+        let dir = worktree_tempdir();
+        let src = dir.path().join("src");
+        sample_folder(&src);
+        let blob_path = dir.path().join("v.cpevault");
+
+        let before = parent_dir_sync_count();
+        create_vault(&src, &blob_path, &pass("pw"), &CreateOpts::default(), false).unwrap();
+
+        assert!(
+            parent_dir_sync_count() > before,
+            "the rename created a directory entry that is only in the page cache until the directory \
+             itself is synced"
+        );
+    }
+
+    /// **The containment guard must ask where the write LANDS, not where the name resolves to**
+    /// (SEC-861 blocking 1, found by the security audit of this PR).
+    ///
+    /// CPE-1670 changed `create_vault` from following a symlinked destination to replacing it — but
+    /// `resolves_inside`, the guard whose entire job is "never write the vault where the shred will
+    /// destroy it", still decided by canonicalizing `dest`, which **follows** a final-component symlink.
+    /// The guard reasoned about the far end while the file landed at the near end. So a destination name
+    /// *inside* the folder, symlinked to somewhere *outside* it, read as "outside, safe" — and the vault
+    /// was written inside the folder that `shred_tree` then destroyed, losing the plaintext AND the
+    /// encrypted copy, with `create_vault` returning `Ok(())`. Measured on the unfixed branch:
+    /// `folder_shredded=true blob_at_far_end_len=Some(11)` — the far end still held its 11-byte
+    /// placeholder, so there was no vault anywhere.
+    ///
+    /// This is the auditor's own case. It is the deterministic, non-racy half of the finding: no threads,
+    /// no timing, no elevation (an unprivileged file symlink on Linux/macOS).
+    #[test]
+    fn a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies() {
+        let dir = worktree_tempdir();
+
+        // The user's folder, about to be sealed and then securely deleted.
+        let folder = dir.path().join("MyStuff");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(folder.join("irreplaceable.txt"), b"the only copy of the user's data").unwrap();
+
+        // A real file OUTSIDE the folder, which the destination name links to.
+        let outside = dir.path().join("elsewhere.cpevault");
+        std::fs::write(&outside, b"placeholder").unwrap();
+
+        // The destination: a name INSIDE the folder that happens to be a symlink pointing OUT.
+        let dest = folder.join("backup.cpevault");
+        if !try_symlink_file(&outside, &dest) {
+            eprintln!(
+                "SKIPPED a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies: \
+                 this OS/account cannot create a file symlink (on Windows this needs Developer Mode or \
+                 admin). The sharp end of this finding is Linux/macOS, where it needs neither."
+            );
+            return;
+        }
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        let result = create_vault(&folder, &dest, &pass("pw"), &opts, true);
+
+        let landed_inside = folder.join("backup.cpevault");
+        let is_vault_at = |p: &Path| std::fs::read(p).map(|b| b.starts_with(MAGIC)).unwrap_or(false);
+        eprintln!(
+            "SEC-861 CONTAINMENT: create_vault -> {:?}; folder_shredded={} \
+             vault_at_link_name={} vault_at_far_end={}",
+            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string()),
+            !folder.exists(),
+            is_vault_at(&landed_inside),
+            is_vault_at(&outside),
+        );
+
+        // THE invariant, read back off disk: the user must never end up with neither copy.
+        let plaintext_survives = std::fs::read(folder.join("irreplaceable.txt"))
+            .map(|b| b == b"the only copy of the user's data")
+            .unwrap_or(false);
+        assert!(
+            plaintext_survives || is_vault_at(&landed_inside) || is_vault_at(&outside),
+            "BOTH copies are gone — the plaintext was shredded and no readable vault exists anywhere \
+             (create_vault returned {result:?})"
+        );
+        // And specifically: this must be REFUSED, not merely survived by luck. The destination lands
+        // inside the folder being shredded, which is exactly what the guard exists to stop.
+        match result {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains("refusing to shred"),
+                "the refusal must read like the other data-loss refusals, got: {msg}"
+            ),
+            other => panic!("a destination landing inside the shredded folder must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(folder.join("irreplaceable.txt")).unwrap(),
+            b"the only copy of the user's data",
+            "a refused call must leave every byte of the folder alone"
+        );
+    }
+
+    /// CPE-1670: a symlinked `.cpevault` path is **replaced**, not written through — and `create_vault`
+    /// and the lock-time re-seal now agree about that, which is the whole point of the ticket. Covers the
+    /// full lifecycle through the linked path (seal → unlock → edit → lock → unlock) and asserts the file
+    /// at the far end of the link is left holding exactly what it held, since nothing may be destroyed.
+    #[test]
+    fn a_symlinked_vault_path_is_replaced_by_both_create_and_lock_never_written_through() {
+        let dir = worktree_tempdir();
+
+        // The far end of the link: a real, openable vault somewhere else entirely.
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        let real_blob = sealed_vault(&elsewhere);
+        let real_before = std::fs::read(&real_blob).unwrap();
+
+        // The user's linked-in name for it.
+        let linked = dir.path().join("linked.cpevault");
+        if !try_symlink_file(&real_blob, &linked) {
+            eprintln!(
+                "SKIPPED a_symlinked_vault_path_is_replaced_by_both_create_and_lock_never_written_through: \
+                 this OS/account cannot create a file symlink (on Windows this needs Developer Mode or \
+                 admin)."
+            );
+            return;
+        }
+        assert!(is_vault(&linked), "reads follow the link — the linked name really opens the vault");
+
+        // (a) The LOCK half. Unlock through the link, edit, lock.
+        let root = sessions_root(dir.path());
+        let session = root.join("16700000-1670-0000-1670-000000000000");
+        let reg = VaultRegistry::default();
+        reg.unlock(SessionsRoot::new(&root), &linked, &pass("pw"), &session).unwrap();
+        std::fs::write(session.join("edited.txt"), b"written while unlocked").unwrap();
+        reg.lock(&linked).expect("locking a vault reached through a symlink must succeed");
+
+        // The link was REPLACED by the real file — the behaviour, stated and now pinned.
+        assert!(
+            !std::fs::symlink_metadata(&linked).unwrap().file_type().is_symlink(),
+            "the re-seal replaces a symlinked vault path rather than writing through it"
+        );
+        // Nothing was destroyed: the file at the far end still holds exactly what it held.
+        assert_eq!(
+            std::fs::read(&real_blob).unwrap(),
+            real_before,
+            "the link's target must be byte-for-byte untouched — a replaced link destroys nothing"
+        );
+        // And the path the user opens holds the current contents.
+        let session2 = root.join("16700000-1670-0000-1670-000000000001");
+        reg.unlock(SessionsRoot::new(&root), &linked, &pass("pw"), &session2).unwrap();
+        assert_eq!(
+            std::fs::read(session2.join("edited.txt")).unwrap(),
+            b"written while unlocked",
+            "the edit made while unlocked must be in the vault the linked path now names"
+        );
+        reg.lock(&linked).unwrap();
+
+        // (b) The CREATE half must agree — this is the asymmetry CPE-1670 was filed for. `create_vault`
+        // used to `std::fs::write` straight THROUGH the link and update its target.
+        let linked2 = dir.path().join("linked2.cpevault");
+        assert!(try_symlink_file(&real_blob, &linked2), "the same OS just made one of these");
+        let src = dir.path().join("fresh");
+        sample_folder(&src);
+        create_vault(&src, &linked2, &pass("pw2"), &CreateOpts::default(), false).unwrap();
+        assert!(
+            !std::fs::symlink_metadata(&linked2).unwrap().file_type().is_symlink(),
+            "create_vault must treat a symlinked destination exactly as the re-seal does — replace it"
+        );
+        assert_eq!(
+            std::fs::read(&real_blob).unwrap(),
+            real_before,
+            "and it must NOT have written through the link into its target"
         );
     }
 
