@@ -174,7 +174,7 @@ possibly `vault_crypto`, `src/docs/20-vaults.md`. Related to the pre-existing CP
   no `sync_all`, so `verify` was reading it back out of the page cache: that proves the bytes *parse*, not
   that they *reached the disk*, while the wipe then shredded the only other copy with `flush` + `sync_all`
   per pass. Now `sync_all` before verify, plus a parent-directory fsync after the rename on Unix.
-  `create_vault` has the identical gap — filed as **CPE-1667** rather than widened into this PR.
+  `create_vault` has the identical gap — filed as **CPE-1669** rather than widened into this PR.
 
   **HIGH 3 (MEDIUM in the audit, fixed here because it is a lie the user sees).** `classifyLockError`
   matched substrings, and the other lock failures interpolate **full file paths** — so a file named
@@ -189,7 +189,7 @@ possibly `vault_crypto`, `src/docs/20-vaults.md`. Related to the pre-existing CP
   actionable message; VAULT-SECURITY.md §5 now records that `vault_lock` can **empty** a vault (an emptied
   session dir re-seals an empty tree — inherent to always-re-seal-never-diff, so documented and pinned by a
   test rather than "fixed" with a heuristic); the symlinked-vault-path asymmetry is commented and filed as
-  **CPE-1668**; the three lock messages go through `$t` (7 new keys × 12 locales) after rebasing onto the
+  **CPE-1670**; the three lock messages go through `$t` (7 new keys × 12 locales) after rebasing onto the
   merged PR #845; and the docs no longer overstate what a lock keeps (symlinks are skipped, hard links are
   refused).
 
