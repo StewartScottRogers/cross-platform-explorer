@@ -69,6 +69,7 @@
   import {
     connectionLocation,
     secretAlwaysRequired,
+    secretLabel,
     formFromConnection,
     blankConnectionForm,
     mergeDiscovered,
@@ -7506,7 +7507,7 @@
     x={networkSecretPrompt.x}
     y={networkSecretPrompt.y}
     name={promptConn.name}
-    label={promptConn.auth.kind === "key" ? "Passphrase" : "Password"}
+    label={secretLabel(promptConn.auth)}
     on:submit={(e) => void submitNetworkSecret(promptConn, e.detail.secret, e.detail.remember)}
     on:close={() => (networkSecretPrompt = null)}
   />

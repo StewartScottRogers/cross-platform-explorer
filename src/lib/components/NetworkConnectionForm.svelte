@@ -1,8 +1,11 @@
 <script lang="ts">
   /** "+ Add a connection" / Edit inline form for the Network sidebar section (CPE-1513, epic CPE-1498) — an
-      inline/instant control ([[prefer-inline-instant-controls]]), not a modal: protocol dropdown (sftp/webdav
-      to start), host, optional user/port/path, and (for key auth) a key-file field with a native Browse
-      picker ([[path-inputs-need-picker]]). Mirrors SmartFolderMenu/NetworkSecretPrompt's popover shape — a
+      inline/instant control ([[prefer-inline-instant-controls]]), not a modal: protocol dropdown
+      (sftp/webdav/smb/ftp/s3), host, optional user/port/path, and (for key auth) a key-file field with a
+      native Browse picker ([[path-inputs-need-picker]]). Field labels follow the protocol — for `s3`
+      (CPE-1686, epic CPE-1503) the same inputs are the endpoint, region and bucket/prefix, and the auth
+      choice is an access key ID whose *secret* half is never typed here: it's collected by the existing
+      connect-time NetworkSecretPrompt and stored in the OS keychain (CPE-1510), exactly like a password. Mirrors SmartFolderMenu/NetworkSecretPrompt's popover shape — a
       clearly-bordered box anchored at the trigger's click point ([[dialogs-need-visible-border]]), not a
       full-screen dialog. Pure validation lives in `network.ts`'s `buildConnection` (unit-tested); this
       component only wires the fields to it and shows the returned error string inline. */
@@ -11,9 +14,13 @@
   import Icon from "./Icon.svelte";
   import {
     SUPPORTED_SCHEMES,
+    authKindsFor,
     blankConnectionForm,
     buildConnection,
+    coerceAuthKind,
+    schemeFieldHints,
     type ConnectionFormInput,
+    type FormAuthKind,
   } from "../network";
   import type { Connection } from "../types";
 
@@ -27,6 +34,24 @@
 
   let form: ConnectionFormInput = { ...initial };
   let error = "";
+
+  /** Field labels/placeholders follow the protocol (CPE-1686): for `s3` the same three inputs mean
+   *  endpoint / region / bucket-and-prefix. The mapping is pure and unit-tested in `network.ts`. */
+  $: hints = schemeFieldHints(form.scheme);
+  /** Only the auth kinds the chosen protocol can actually use (S3 signs with an access key; the SSH/HTTP
+   *  providers reject access keys), so the form can't save a profile that could only fail at connect. */
+  $: allowedAuthKinds = authKindsFor(form.scheme);
+  const AUTH_LABELS: Record<FormAuthKind, string> = {
+    password: "Password",
+    key: "Key file",
+    access_key: "Access key",
+  };
+
+  /** Switching protocol snaps the auth choice back to something that protocol supports. Done on `change`
+   *  rather than in a `$:` so the assignment can't feed back into its own reactive dependency. */
+  function onSchemeChange() {
+    form.authKind = coerceAuthKind(form.scheme, form.authKind);
+  }
 
   let el: HTMLDivElement;
   let left = x;
@@ -79,35 +104,46 @@
       </label>
       <label class="field">
         <span>Protocol</span>
-        <select bind:value={form.scheme}>
+        <select bind:value={form.scheme} on:change={onSchemeChange}>
           {#each SUPPORTED_SCHEMES as s (s)}
             <option value={s}>{s}</option>
           {/each}
         </select>
       </label>
       <label class="field">
-        <span>Host</span>
-        <input bind:value={form.host} spellcheck="false" autocomplete="off" placeholder="host.example.com" />
+        <span>{hints.hostLabel}</span>
+        <input bind:value={form.host} spellcheck="false" autocomplete="off" placeholder={hints.hostPlaceholder} />
       </label>
       <label class="field half">
-        <span>User</span>
-        <input bind:value={form.user} spellcheck="false" autocomplete="off" placeholder="(optional)" />
+        <span>{hints.userLabel}</span>
+        <input bind:value={form.user} spellcheck="false" autocomplete="off" placeholder={hints.userPlaceholder} />
       </label>
       <label class="field half">
         <span>Port</span>
         <input bind:value={form.port} spellcheck="false" autocomplete="off" placeholder="default" />
       </label>
       <label class="field">
-        <span>Remote path</span>
-        <input bind:value={form.path} spellcheck="false" autocomplete="off" placeholder="/ (server root)" />
+        <span>{hints.pathLabel}</span>
+        <input bind:value={form.path} spellcheck="false" autocomplete="off" placeholder={hints.pathPlaceholder} />
       </label>
       <div class="field">
         <span>Authentication</span>
         <div class="auth-choice">
-          <label><input type="radio" bind:group={form.authKind} value="password" /> Password</label>
-          <label><input type="radio" bind:group={form.authKind} value="key" /> Key file</label>
+          {#each allowedAuthKinds as kind (kind)}
+            <label><input type="radio" bind:group={form.authKind} value={kind} /> {AUTH_LABELS[kind]}</label>
+          {/each}
         </div>
       </div>
+      {#if form.authKind === "access_key"}
+        <label class="field">
+          <span>Access key ID</span>
+          <input bind:value={form.accessKeyId} spellcheck="false" autocomplete="off" placeholder="AKIA…" />
+        </label>
+        <div class="note">
+          The secret access key isn’t stored here — you’re asked for it when you first connect, and it goes
+          straight to your operating system’s keychain.
+        </div>
+      {/if}
       {#if form.authKind === "key"}
         <label class="field">
           <span>Private key path</span>
@@ -147,8 +183,10 @@
   }
   .field input:focus, .field select:focus { outline: none; border-color: var(--accent); }
   .field input:disabled { opacity: 0.6; }
-  .auth-choice { display: flex; gap: 12px; font-size: 12px; color: var(--text); }
-  .auth-choice label { display: flex; align-items: center; gap: 5px; }
+  /* Reflows onto more rows as auth kinds are added, rather than overflowing ([[tick-tacks-reflow]]). */
+  .auth-choice { display: flex; flex-wrap: wrap; gap: 6px 12px; font-size: 12px; color: var(--text); }
+  .auth-choice label { display: flex; align-items: center; gap: 5px; white-space: nowrap; flex: 0 0 auto; }
+  .note { font-size: 11px; line-height: 1.35; color: var(--text-dim); }
   .path-row { display: flex; gap: 6px; }
   .path-row input { flex: 1 1 auto; min-width: 0; }
   .error { margin-top: 8px; font-size: 12px; color: var(--danger); }
