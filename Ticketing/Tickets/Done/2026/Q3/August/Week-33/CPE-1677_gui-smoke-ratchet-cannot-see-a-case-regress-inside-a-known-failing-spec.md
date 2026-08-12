@@ -3,11 +3,11 @@ id: CPE-1677
 title: The GUI-smoke ratchet works at spec-file granularity, so a case regressing inside an already-known-failing spec is invisible
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
