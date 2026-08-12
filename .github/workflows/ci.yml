@@ -298,19 +298,32 @@ jobs:
         # first net-new Network protocol since SFTP/WebDAV. Sync (suppaftp + rustls/ring — pure Rust, no
         # C tooling), tested against an in-process hand-rolled FTP server, so it runs on all three OSes
         # with no Docker/real FTP daemon.
+        #
+        # BOTH feature modes, like `security`'s `jwt` and `server`'s `index`/`pdf-thumb` below. CPE-1673
+        # put `extra_test_root` (and its base64/PEM decoders) behind `e2e-extra-ca`, and the PR #860 review
+        # caught that gating them removed three tests from EVERY CI job: `net-e2e` only ever runs
+        # crates/vfs's `real_server_conformance` integration binary with that feature, which never touches
+        # cpe-ftp's own lib tests. They ran unconditionally before the gate. Feature-gating a test is only
+        # safe if some job turns the feature on.
         working-directory: crates/ftp
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
+          cargo clippy --all-targets --features e2e-extra-ca -- -D warnings
+          cargo test --features e2e-extra-ca
 
       - name: vfs — clippy + test
         # The scheme router (CPE-616/CPE-1502): open(connection, secret, …) -> boxed FileSystemProvider,
         # dispatching to cpe-sftp / cpe-webdav / cpe-ftp. Ties the connections model to the concrete
         # remote providers.
+        # Both feature modes for the same reason as `ftp` above — `e2e-extra-ca` propagates here, so the
+        # gated build must be compiled and linted somewhere outside the Docker rig.
         working-directory: crates/vfs
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
+          cargo clippy --all-targets --features e2e-extra-ca -- -D warnings
+          cargo test --features e2e-extra-ca
 
       - name: updater-verify — clippy + test
         # The headless updater-manifest + minisign signature guard (CPE-1058): parses tauri-action's
