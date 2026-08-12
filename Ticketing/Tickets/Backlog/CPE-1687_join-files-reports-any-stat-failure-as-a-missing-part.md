@@ -65,6 +65,12 @@ in the PR body.
 - [ ] A test covers both, driven through `join_files`, with the unreadable part constructed for real
       (`icacls /deny` on Windows, `chmod` on Unix) — and, per CPE-1678's lesson, **the test announces
       itself when it cannot construct that condition** rather than skipping in silence.
+- [ ] That announcement uses `writeln!(std::io::stderr(), ..)`, **not `eprintln!`**, and you have
+      confirmed it appears under plain `cargo test` with no `--nocapture`. This is not a style
+      preference. libtest captures stdout/stderr per test and replays it only for *failing* tests; a
+      skip is a pass, so an `eprintln!` is swallowed and the notice reaches nobody. CI runs plain
+      `cargo test`. CPE-1678 shipped this exact bug once — the fix was verified under `--nocapture`
+      and assumed to hold everywhere — so verify through the channel that will actually carry it.
 - [ ] Reverting the fix turns that test red; the actual output is pasted in the PR.
 - [ ] The PR body reports what the wider `map_err(|_| ..)` sweep covered and what it found, scope stated.
 
