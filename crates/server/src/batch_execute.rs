@@ -338,8 +338,14 @@ fn execute_one(
     job: &BatchJob,
     input_keys: &std::collections::HashSet<PathKey>,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    WINDOW_TRACE.with(|c| c.set(WindowTrace::default()));
+    #[cfg(test)]
+    trace_mark(|t| t.transform_start = Some(std::time::Instant::now()));
     let input_bytes = fs::read(&item.input).map_err(|e| format!("could not read input: {e}"))?;
     let output_bytes = batch_transform::apply_ops(&input_bytes, &job.ops)?;
+    #[cfg(test)]
+    trace_mark(|t| t.transform_end = Some(std::time::Instant::now()));
 
     if let Some(parent) = Path::new(&item.output).parent() {
         if !parent.as_os_str().is_empty() {
@@ -349,7 +355,7 @@ fn execute_one(
 
     let verified = crate::batch_media::open_output_verified(&item.input, &item.output)?;
     #[cfg(test)]
-    let verified_at = std::time::Instant::now();
+    trace_mark(|t| t.window_start = Some(std::time::Instant::now()));
 
     // Something was already at this name. `confirmed_overwrite` is the only thing that can authorise
     // replacing it — and `created` is an atomic fact from the open, not a stat that can go stale.
@@ -365,16 +371,82 @@ fn execute_one(
 
     let result = verified.write_all(&output_bytes, &item.output);
     #[cfg(test)]
-    VERIFY_TO_WRITE_NANOS.with(|c| c.set(verified_at.elapsed().as_nanos()));
+    trace_mark(|t| t.window_end = Some(std::time::Instant::now()));
     result
+}
+
+/// Four timestamps recorded from **inside a real [`execute_one`] run** (PR #856 review): the transform's
+/// start/end and the verify-to-write window's start/end. Ordering claims built from these (does the
+/// transform's interval lie entirely before the window's?) are exact and immune to both build profile and
+/// runner contention — unlike a ratio of measured durations, which cannot be made to work: under
+/// `--release` the window is roughly two orders of magnitude smaller than under `cargo test` (a debug
+/// build's image transform is far slower), and a shared CI runner can add two more orders of magnitude of
+/// noise on top of either. A fixed ratio bound that survives all of that does not exist — see the tests
+/// that read this trace for what a ratio bound got wrong in practice (a real CI failure on a saturated
+/// runner, 9.1× against a 10× gate, that turned out to be pure contention).
+///
+/// `Instant` is `Copy`, so a plain `Cell` (not `RefCell`) suffices — no borrow to hold across the
+/// read-modify-write. Thread-local for the same reason the other test counters in this module are: tests
+/// run on separate threads and must not see each other's runs.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct WindowTrace {
+    transform_start: Option<std::time::Instant>,
+    transform_end: Option<std::time::Instant>,
+    window_start: Option<std::time::Instant>,
+    window_end: Option<std::time::Instant>,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// How long the last [`execute_one`] spent between finishing verification and finishing the write —
-    /// the real exploitable window, which the security audit's SEC-7 probe measures against the transform
-    /// it used to contain. Thread-local for the same reason the other test counters are.
-    static VERIFY_TO_WRITE_NANOS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static WINDOW_TRACE: std::cell::Cell<WindowTrace> = std::cell::Cell::new(WindowTrace::default());
+}
+
+/// Read-modify-write one field of the current thread's [`WindowTrace`]. `Cell::get`/`set` (not `RefCell`)
+/// because `WindowTrace` is `Copy` — no borrow needs to live across the mutation.
+#[cfg(test)]
+fn trace_mark(set: impl FnOnce(&mut WindowTrace)) {
+    WINDOW_TRACE.with(|c| {
+        let mut t = c.get();
+        set(&mut t);
+        c.set(t);
+    });
+}
+
+/// The deterministic replacement for a ratio bound (PR #856 review, following CI red on a saturated
+/// runner: 9.1× against a 10× gate, pure contention — see [`WindowTrace`]'s doc for why no fixed ratio
+/// survives both build profile and runner load). Reads the trace left by the [`execute_one`] call the
+/// caller just made and asserts an **ordering** property instead of a duration comparison: the transform's
+/// whole interval must end at or before the window opens, i.e. it is provably not overlapping the window
+/// at all, regardless of how fast or slow either one ran. `Instant` is monotonic, so this is exact on every
+/// build profile and every runner, loaded or not — there is no bound to tune.
+///
+/// Prints both measured durations (still genuinely useful context) but gates on ordering alone.
+#[cfg(test)]
+fn assert_transform_precedes_window(context: &str) {
+    let t = WINDOW_TRACE.with(|c| c.get());
+    let transform_start =
+        t.transform_start.expect("transform_start was never recorded — this test verified NOTHING");
+    let transform_end =
+        t.transform_end.expect("transform_end was never recorded — this test verified NOTHING");
+    let window_start =
+        t.window_start.expect("window_start was never recorded — this test verified NOTHING");
+    let window_end = t.window_end.expect("window_end was never recorded — this test verified NOTHING");
+
+    println!(
+        "{context}: transform took {:?}; the verify->write window took {:?}",
+        transform_end.duration_since(transform_start),
+        window_end.duration_since(window_start)
+    );
+
+    assert!(
+        transform_end <= window_start,
+        "{context}: EXPLOIT WINDOW — the transform's interval ends {:?} AFTER the window opened, so the \
+         transform (or part of it) now runs INSIDE the verify->write window. This is an exact ordering \
+         check on monotonic `Instant`s, not a duration ratio, so it cannot flake on build profile or \
+         runner load — a failure here means the ordering itself regressed.",
+        transform_end.duration_since(window_start)
+    );
 }
 
 #[cfg(test)]
@@ -1794,11 +1866,13 @@ mod tests {
     /// written to fail on that build and is meaningless once the ordering is fixed.
     ///
     /// The regression form asserts the property the fix actually establishes: **the transform happens
-    /// before verification, so the window no longer contains it.** `VERIFY_TO_WRITE_NANOS` records the
-    /// real gap — from the handle being verified to the bytes being on disk — and it must be a small
-    /// fraction of the transform it used to contain. The bound is deliberately loose (10×, against a
-    /// measured ratio of ~4 orders of magnitude) so it cannot flake on a loaded CI runner while still
-    /// failing instantly if the transform ever moves back inside the window.
+    /// before verification, so the window no longer contains it.** This used to be a duration ratio
+    /// (`window * 10 < transform`); a ratio bound cannot survive both build profile and a shared CI
+    /// runner (PR #856 review — this bound went red at 9.1× on a saturated runner while the branch's own
+    /// logic was fine), so it is now the exact claim the property actually is: an **ordering** check on
+    /// [`WindowTrace`]'s monotonic timestamps via [`assert_transform_precedes_window`] — the transform's
+    /// whole interval must end at or before the window opens. That is immune to both concerns and cannot
+    /// flake for either reason; it can only fail if the ordering itself regresses.
     #[test]
     fn secaudit_the_transform_is_no_longer_inside_the_verify_to_write_window() {
         let d = scratch("secaudit-gap");
@@ -1808,28 +1882,11 @@ mod tests {
         job.confirmed_overwrite = true;
         let items = plan(&job, &[photo.to_string_lossy().to_string()]).unwrap();
 
-        // How long the work that USED to sit inside the window takes.
-        let t1 = std::time::Instant::now();
-        let input_bytes = fs::read(&items[0].input).unwrap();
-        let _out = crate::batch_transform::apply_ops(&input_bytes, &job.ops).unwrap();
-        let transform = t1.elapsed();
-
-        // The real window, recorded from inside `execute_one`.
-        VERIFY_TO_WRITE_NANOS.with(|c| c.set(0));
+        // The trace is recorded from inside `execute_one`, driven through the real `execute_plan`.
         let report = execute_plan(&items, &job).expect("the batch runs");
         assert_eq!(report.written, 1);
-        let window_ns = VERIFY_TO_WRITE_NANOS.with(|c| c.get());
-        assert!(window_ns > 0, "the window was never recorded — this test verified NOTHING");
 
-        println!(
-            "SEC-7 read+transform (outside the window, where it belongs) took {transform:?}; the \
-             verify->write window is {window_ns} ns"
-        );
-        assert!(
-            window_ns * 10 < transform.as_nanos(),
-            "EXPLOIT WINDOW: the verify->write window ({window_ns} ns) is not decisively smaller than \
-             the transform ({transform:?}) — the transform may have moved back inside it"
-        );
+        assert_transform_precedes_window("SEC-7");
 
         let _ = fs::remove_dir_all(&d);
     }
@@ -1848,9 +1905,18 @@ mod tests {
     /// **The trap this avoids (per the ticket: the auditor's worktree was destroyed mid-measurement).** If
     /// item 0's output is made to collide with a file that is NOT one of the batch's own inputs,
     /// `is_foreign_overwrite` correctly answers "foreign" and `execute_one` refuses before ever reaching
-    /// `write_all` — `VERIFY_TO_WRITE_NANOS` is left at its reset value of 0, and a test that doesn't check
-    /// for that would silently "pass" having measured nothing. `assert!(window_ns > 0)` below exists
-    /// specifically to catch that trap, exactly as SEC-7's own copy does.
+    /// `write_all` — `.unwrap_or_else(|e| panic!(...))` below turns that refusal into a hard test failure
+    /// rather than a silent "pass" having measured nothing, exactly as SEC-7's own copy guards the same
+    /// trap (see [`assert_transform_precedes_window`]'s own `.expect`s for the second line of defence).
+    ///
+    /// **Not a duration ratio, for the same reason SEC-7 no longer is one (PR #856 review).** This used to
+    /// assert `window * 10 < transform`; the reviewer restored the GENUINE pre-CPE-1667 pairwise scan and
+    /// that assertion still passed with a 24× margin under `cargo test` (a debug build's transform is slow
+    /// enough to hide even the O(n) cost it was meant to catch) — the exact defect this ticket exists to
+    /// fix, re-introduced in a new assertion. The deterministic canonicalize-count test below is what owns
+    /// the O(1) claim (it caught that same restoration at exactly 898 calls); this test's job is only the
+    /// ordering claim [`assert_transform_precedes_window`] checks, which a ratio was never suited to prove
+    /// or disprove in the first place.
     #[test]
     fn cpe_1667_the_not_created_branch_window_stays_narrow_across_a_chained_batch() {
         let d = scratch("cpe1667-not-created-window");
@@ -1884,51 +1950,20 @@ mod tests {
         // Precomputed once, outside the window — exactly like `execute_plan_walk` does (CPE-1667).
         let input_keys = input_path_keys(&items);
 
-        // How long the work that sits OUTSIDE the window (read + transform item 0) takes.
-        let t1 = std::time::Instant::now();
-        let input_bytes = fs::read(&items[0].input).unwrap();
-        let _out = crate::batch_transform::apply_ops(&input_bytes, &job.ops).unwrap();
-        let transform = t1.elapsed();
-
-        VERIFY_TO_WRITE_NANOS.with(|c| c.set(0));
+        // The trace is recorded from inside this real `execute_one` call.
         execute_one(&items[0], &job, &input_keys).unwrap_or_else(|e| {
             panic!(
                 "the batch's own last input must be a permitted write target for item 0's output, not a \
                  refused foreign overwrite: {e}"
             )
         });
-        let window_ns = VERIFY_TO_WRITE_NANOS.with(|c| c.get());
-        assert!(window_ns > 0, "the window was never recorded — this test verified NOTHING");
 
         // The overwrite genuinely happened — this is the "return false, item actually written" the ticket
-        // asked for, not a refusal that happened to also leave `window_ns` at 0.
+        // asked for, not a refusal that happened to also leave the trace unset.
         let written = fs::read(&last_input).unwrap();
         assert_ne!(written, last_input_orig, "item 0 must actually have been written, not skipped");
 
-        println!(
-            "CPE-1667 !created branch (n={n}, match at the far end): read+transform (outside the window) \
-             took {transform:?}; the verify->write window (now including an O(1) is_foreign_overwrite \
-             check) is {window_ns} ns"
-        );
-        // NOT an O(n) regression guard, and it must not claim to be (PR #856 review). The reviewer
-        // restored the GENUINE pre-CPE-1667 pairwise scan and this assertion still passed with a 24x
-        // margin under `cargo test` — 22.1 ms window against a 534 ms debug transform — because a debug
-        // build's transform is slow enough to hide even the O(n) cost. The deterministic
-        // canonicalize-count test below is what owns the O(1) claim; it caught that same restoration at
-        // exactly 898 calls. (The PR body originally blamed a HashSet-iteration-order artifact for the
-        // miss; that diagnosis was wrong, and the faithful control disproved it.)
-        //
-        // What this DOES guard, which nothing else on this branch did: that the !created arm's
-        // verify->write window is a small fraction of the transform end-to-end, driven through the real
-        // `execute_one`. Keep the bound at 10x — under `--release` the window is ~405,000 ns against a
-        // ~35.9 ms transform, so a 100x bound would fail release runs.
-        assert!(
-            window_ns * 10 < transform.as_nanos(),
-            "the !created branch's verify->write window ({window_ns} ns) is no longer a small fraction \
-             of the transform ({transform:?}) — something expensive moved inside the window. This does \
-             NOT prove the O(1) property; see cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_\
-             canonicalize_calls_regardless_of_batch_size for that."
-        );
+        assert_transform_precedes_window("CPE-1667 !created branch (n=300, match at the far end)");
 
         let _ = fs::remove_dir_all(&d);
     }
