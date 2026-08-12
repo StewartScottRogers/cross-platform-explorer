@@ -1,0 +1,13 @@
+# CPE-1659 slice 2: a minimal container image for the EXISTING `cpe-server-ref` reference Server
+# binary (see `src/bin/cpe-server-ref.rs`), so `tests/real_server_e2e.rs` can drive it from a real
+# Docker bridge-network address (a different network namespace, never 127.0.0.1) instead of only ever
+# being exercised over loopback in-process.
+#
+# Not a release/shipped artifact — CI-only, built in `.github/workflows/ci.yml`'s
+# `Network E2E (ubuntu-latest, real servers)` job from the SAME binary `cargo build --release` already
+# produced on the runner (no second Rust toolchain baked into the image; the base OS is pinned close to
+# the `ubuntu-latest` runner's own to avoid a glibc-version mismatch running a runner-built binary).
+FROM ubuntu:24.04
+COPY target/release/cpe-server-ref /usr/local/bin/cpe-server-ref
+EXPOSE 9876
+ENTRYPOINT ["/usr/local/bin/cpe-server-ref", "0.0.0.0:9876"]

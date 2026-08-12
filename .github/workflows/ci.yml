@@ -324,6 +324,209 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test
 
+  net-e2e:
+    # CPE-1659 (epic CPE-1498), retiring MANUAL-TEST-BURNDOWN rows #7 and #13: every remote provider
+    # this app ships (crates/sftp, crates/webdav, crates/ftp) is otherwise tested ONLY against an
+    # in-process fake server written by the same author as the client — the `sftp`/`webdav`/`ftp` steps
+    # above say so explicitly. This job is the interop layer above them: real third-party server images
+    # (OpenSSH `sftp-server` via atmoz/sftp, Apache mod_dav via bytemark/webdav, vsftpd via
+    # fauria/vsftpd — vsftpd/OpenSSH are literally what QNAP QTS runs) on a Docker bridge network,
+    # driven by `crates/vfs/tests/real_server_conformance.rs` through the real `cpe_vfs::open` routing
+    # seam. Slice 2 (`crates/net/tests/real_server_e2e.rs`) containerises the existing
+    # `cpe-server-ref` reference Server on the SAME bridge network and drives it from this job's own
+    # (non-127.0.0.1) address, retiring the "real non-loopback client<->server run" gap.
+    #
+    # Linux + Docker only (ubuntu-latest is the only leg in this repo's matrix with Docker) — this
+    # tests protocol INTEROP, not OS behaviour, so one OS is the right scope; deliberately a separate
+    # job from `crates` above so Docker is never added to the 3-OS matrix.
+    #
+    # BLOCKING — never `continue-on-error`. Making this job non-blocking (or deleting it) later is a
+    # burndown regression under the QA charter's rule 2; see .claude/qa-architecture/README.md.
+    name: Network E2E (ubuntu-latest, real servers)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            ./crates/vfs -> target
+            ./crates/net -> target
+
+      - name: Create the Docker bridge network (static subnet, CPE-1659)
+        # A fixed subnet lets every service get a STABLE, predictable IP via `--ip` — needed so the
+        # SFTP host-key TOFU steps below can recreate the sftp-e2e container (with a fresh host key)
+        # while its address stays the same, which is the whole point of that assertion. It also gives
+        # slice 2 (`cpe-server-ref`) a genuinely non-127.0.0.1, different-network-namespace address for
+        # free — the actual thing burndown row #7 asks for.
+        run: docker network create --subnet=172.28.0.0/24 "net-e2e-${{ github.run_id }}"
+
+      - name: Seed the hostile fixture tree (CPE-1659)
+        # Deliberately hostile, not tidy: nested dirs, a 0-byte file, a 5 MiB binary of random bytes, a
+        # name with a space, one with `#`/`%` (the classic WebDAV href-encoding bug), one with
+        # non-ASCII/emoji, and a file whose bytes mix CRLF and lone LF (the classic FTP ASCII-mode
+        # corruption trap). Each provider gets its OWN copy so mutating one scheme's copy during its
+        # test run can never leak into another scheme's `list` assertions.
+        shell: bash
+        run: |
+          set -euo pipefail
+          seed() {
+            local dir="$1"
+            mkdir -p "$dir/sub/dir"
+            : > "$dir/empty.bin"
+            head -c 5242880 /dev/urandom > "$dir/big.bin"
+            printf 'nested fixture file\n' > "$dir/sub/dir/nested.txt"
+            printf 'space file body\n' > "$dir/name with space.txt"
+            printf 'weird name body\n' > "$dir/weird#name%.txt"
+            printf 'emoji name body\n' > "$dir/emoji-😀-name.txt"
+            printf 'line1\r\nline2\nline3\r\n' > "$dir/mixed-eol.txt"
+            chmod -R 0777 "$dir"
+          }
+          seed "$RUNNER_TEMP/fixture-sftp"
+          seed "$RUNNER_TEMP/fixture-webdav"
+          seed "$RUNNER_TEMP/fixture-ftp"
+          mkdir -p "$RUNNER_TEMP/fixture-net"
+          printf 'alpha\n' > "$RUNNER_TEMP/fixture-net/alpha.txt"
+          printf 'beta\n' > "$RUNNER_TEMP/fixture-net/beta.txt"
+          chmod -R 0777 "$RUNNER_TEMP/fixture-net"
+          {
+            echo "CPE_E2E_SFTP_FIXTURE_DIR=$RUNNER_TEMP/fixture-sftp"
+            echo "CPE_E2E_WEBDAV_FIXTURE_DIR=$RUNNER_TEMP/fixture-webdav"
+            echo "CPE_E2E_FTP_FIXTURE_DIR=$RUNNER_TEMP/fixture-ftp"
+            echo "CPE_E2E_NET_FIXTURE_DIR=$RUNNER_TEMP/fixture-net"
+            echo "CPE_E2E_SFTP_KNOWN_HOSTS_STORE=$RUNNER_TEMP/sftp-known-hosts"
+          } >> "$GITHUB_ENV"
+
+      # Images pinned by tag; `docker pull` prints the exact digest resolved for this run into the log
+      # below, which a follow-up hardening commit turns into a hard `image@sha256:...` pin per the
+      # ticket's "pin by tag AND digest" requirement (so a silent upstream retag can't change what
+      # "real server" means underneath this job without a deliberate, reviewed commit).
+      - name: Pull + record the exact digest of every real server image (CPE-1659)
+        run: |
+          for img in atmoz/sftp:latest bytemark/webdav:latest fauria/vsftpd:latest; do
+            docker pull "$img"
+            echo "resolved digest for $img: $(docker inspect --format='{{index .RepoDigests 0}}' "$img")"
+          done
+
+      - name: Start real SFTP server (OpenSSH sftp-server, atmoz/sftp)
+        run: |
+          docker run -d --name sftp-e2e \
+            --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.11 \
+            -v "$CPE_E2E_SFTP_FIXTURE_DIR:/home/tester/upload" \
+            atmoz/sftp:latest \
+            "tester:testpass:1001:1001:upload"
+          {
+            echo "CPE_E2E_SFTP_HOST=172.28.0.11"
+            echo "CPE_E2E_SFTP_USER=tester"
+            echo "CPE_E2E_SFTP_PASS=testpass"
+            echo "CPE_E2E_SFTP_ROOT=/upload"
+          } >> "$GITHUB_ENV"
+
+      - name: Start real WebDAV server (Apache mod_dav, bytemark/webdav)
+        run: |
+          docker run -d --name webdav-e2e \
+            --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.12 \
+            -v "$CPE_E2E_WEBDAV_FIXTURE_DIR:/var/lib/dav/data" \
+            -e AUTH_TYPE=Basic -e USERNAME=tester -e PASSWORD=testpass \
+            bytemark/webdav:latest
+          {
+            echo "CPE_E2E_WEBDAV_HOST=172.28.0.12"
+            echo "CPE_E2E_WEBDAV_USER=tester"
+            echo "CPE_E2E_WEBDAV_PASS=testpass"
+            echo "CPE_E2E_WEBDAV_ROOT=/"
+          } >> "$GITHUB_ENV"
+
+      - name: Start real FTP server (vsftpd, fauria/vsftpd)
+        run: |
+          docker run -d --name ftp-e2e \
+            --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.13 \
+            -v "$CPE_E2E_FTP_FIXTURE_DIR:/home/vsftpd/tester" \
+            -e FTP_USER=tester -e FTP_PASS=testpass \
+            -e PASV_ADDRESS=172.28.0.13 -e PASV_MIN_PORT=21100 -e PASV_MAX_PORT=21110 \
+            fauria/vsftpd:latest
+          {
+            echo "CPE_E2E_FTP_HOST=172.28.0.13"
+            echo "CPE_E2E_FTP_USER=tester"
+            echo "CPE_E2E_FTP_PASS=testpass"
+            echo "CPE_E2E_FTP_ROOT=/"
+          } >> "$GITHUB_ENV"
+
+      - name: Wait for the real servers to accept connections
+        run: |
+          for hp in 172.28.0.11:22 172.28.0.12:80 172.28.0.13:21; do
+            host="${hp%%:*}"; port="${hp##*:}"
+            for _ in $(seq 1 30); do
+              (echo > "/dev/tcp/$host/$port") >/dev/null 2>&1 && { echo "$hp is up"; break; }
+              sleep 1
+            done
+          done
+
+      - name: Build the real cpe-server-ref binary (release, Slice 2 CPE-1659)
+        working-directory: crates/net
+        run: cargo build --release --bin cpe-server-ref
+
+      - name: Containerise + start the real cpe-server-ref (Slice 2 CPE-1659)
+        run: |
+          docker build -t cpe-server-ref-e2e -f crates/net/Dockerfile.e2e crates/net
+          docker run -d --name net-e2e \
+            --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.14 \
+            -v "$CPE_E2E_NET_FIXTURE_DIR:/data" \
+            cpe-server-ref-e2e
+          {
+            echo "CPE_E2E_NET_ADDR=172.28.0.14:9876"
+            echo "CPE_E2E_NET_CONTAINER_DIR=/data"
+          } >> "$GITHUB_ENV"
+
+      - name: "crates/vfs — SFTP host-key TOFU, part 1: first contact then trusts (real OpenSSH)"
+        working-directory: crates/vfs
+        run: cargo test --test real_server_conformance sftp_host_key_tofu_first_contact_then_trusts_against_real_sshd -- --ignored --nocapture
+
+      - name: Recreate the SFTP container with a FRESH host key (CPE-1659 TOFU negative case)
+        # Same static IP, no host-key volume mounted — atmoz/sftp generates brand-new ephemeral host
+        # keys on a fresh container, so the address the previous step trusted now presents a DIFFERENT
+        # key, exactly the "changed key" scenario CPE-1512 must refuse.
+        run: |
+          docker rm -f sftp-e2e
+          docker run -d --name sftp-e2e \
+            --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.11 \
+            -v "$CPE_E2E_SFTP_FIXTURE_DIR:/home/tester/upload" \
+            atmoz/sftp:latest \
+            "tester:testpass:1001:1001:upload"
+          for _ in $(seq 1 30); do
+            (echo > "/dev/tcp/172.28.0.11/22") >/dev/null 2>&1 && break
+            sleep 1
+          done
+
+      - name: "crates/vfs — SFTP host-key TOFU, part 2: a changed key is refused (real OpenSSH)"
+        working-directory: crates/vfs
+        run: cargo test --test real_server_conformance sftp_host_key_tofu_changed_key_is_refused_against_real_sshd -- --ignored --nocapture
+
+      - name: crates/vfs — full conformance suite (sftp / webdav / ftp / ftps) against real servers
+        working-directory: crates/vfs
+        run: cargo test --test real_server_conformance -- --ignored --nocapture --test-threads=1 --skip sftp_host_key_tofu
+
+      - name: "crates/net — Slice 2: real client<->server E2E over a non-loopback container IP"
+        working-directory: crates/net
+        run: cargo test --test real_server_e2e -- --ignored --nocapture
+
+      - name: Dump real-server container logs (debug aid on failure)
+        if: failure()
+        run: |
+          for c in sftp-e2e webdav-e2e ftp-e2e net-e2e; do
+            echo "=== $c ==="
+            docker logs "$c" 2>&1 | tail -n 200 || true
+          done
+
+      - name: Tear down containers + network (CPE-1659)
+        if: always()
+        run: |
+          docker rm -f sftp-e2e webdav-e2e ftp-e2e net-e2e >/dev/null 2>&1 || true
+          docker network rm "net-e2e-${{ github.run_id }}" >/dev/null 2>&1 || true
+
   sidecar:
     # The sidecar platform crates (sidecar/contract, sidecar/host) are standalone —
     # deliberately NOT part of the app's cargo workspace, so the `backend` job above
