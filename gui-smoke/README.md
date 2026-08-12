@@ -194,10 +194,14 @@ stays visible and drainable instead of becoming a quiet permanent hole. The bar 
 annoyance: the entry's `reason` must cite the real runs where the same case both passed and failed on
 unchanged code. A case that fails *every* run is a plain entry, not an intermittent one.
 
-The three `samples/audio/*` cases are the current (and only) users of it — CPE-1677's first live run
-found them flipping across six real runs (`31593963928`, `31598207125`, `31602466829`, `31617196015`,
-`31621443412`, `31622660088` attempts 1 and 2), which the old whole-file exemption had hidden completely.
-They are owed a real fix to the audio preview's settle path.
+The four **media** cases (`samples/audio/track.{flac,mp3,ogg}` + `samples/video/clip.mp4` — exactly the
+samples whose settle-detection depends on `.mp-media`, MediaPreview's `<audio>`/`<video>`) are the
+current and only users of it. CPE-1677's first live runs found a different one or two of them failing
+almost every run on unchanged code across eight real runs (`31593963928`, `31598207125`, `31602466829`,
+`31617196015`, `31621443412`, `31622660088` attempts 1+2, `31630437256`) — including one run **on `main`**
+where the old whole-file ratchet still printed `OK`. The boundary is the `.mp-media` family, not a
+case-by-case guess. Unverified hypothesis for the follow-up ticket: GStreamer/WebKitGTK media init under
+Xvfb occasionally exceeds the 20s settle window.
 
 **Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
 is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
