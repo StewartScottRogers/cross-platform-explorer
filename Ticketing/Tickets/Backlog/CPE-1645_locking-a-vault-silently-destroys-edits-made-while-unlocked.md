@@ -124,6 +124,75 @@ possibly `vault_crypto`, `src/docs/20-vaults.md`. Related to the pre-existing CP
   "What locking guarantees about your changes" section (and the memory-held passphrase in *Honest
   limits*), and the `lock` / `vault_lock` doc comments were rewritten.
 
+- 2026-08-12 — **Security audit + independent review of PR #847: two HIGH findings and three blockers,
+  all introduced by the re-seal itself, all now closed.** Both HIGHs came with working exploits; those
+  tests are kept as permanent regressions rather than thrown away.
+
+  **HIGH 1 — the staging file was a plant-once-and-wait file-destruction primitive.** The staging path was
+  deterministic *by design* (`<blob>.cpe-reseal-tmp`, documented as such) and was opened with
+  `std::fs::write` — `CREATE_ALWAYS`/`O_CREAT|O_TRUNC`, which follows a symlink and writes **through** a
+  hard link. `create_hard_link(victim, <that name>)` is a registered IPC command, unelevated on NTFS, so
+  the attacker set the trap once and waited for the **user** to click Lock: the victim's inode was
+  truncated and filled with vault ciphertext (verified: the spreadsheet's bytes afterwards began
+  `CPEVLT1\x01` + `age-encryption.org/v1`), verify read back that same inode and passed, and the UI said
+  "Locked". Closed with `create_new(true)` (`O_EXCL` refuses a regular file, a hard link **and** a symlink
+  in one flag, with no check-then-open window) plus a per-attempt nonce so the name cannot be predicted.
+  Stale staging debris is swept at the start of the next re-seal, but only after `symlink_metadata` proves
+  a regular non-symlink file (Unix: `nlink == 1`) — this module never deletes what it cannot prove it made.
+
+  **HIGH 2 — a hard link is not a reparse point.** Every link guard here, and the crypto core's
+  skip-every-link walk, reason about links visible in a *directory entry*; a hard link is just another
+  name for an inode and looks like an ordinary file. So `create_hard_link(victim, "<session>/loot.xlsx")`
+  inside a legitimately-unlocked session meant locking (a) sealed the victim's plaintext into a vault whose
+  passphrase the attacker chose — verified by reading it back out — and (b) let the wipe's shredder
+  overwrite the victim's real file through the alias. `ensure_no_aliased_files` now **refuses** (never
+  silently skips — skipping would drop a file the user can see, the same quiet loss this ticket exists to
+  end) any session-tree file whose link count is not exactly 1, and fails **closed** when the count cannot
+  be read: `st_nlink` on Unix, `GetFileInformationByHandle` on Windows (the std accessor is still unstable),
+  reusing `batch_media`'s already-audited probe details rather than a second hand-rolled Win32 call. The
+  re-seal also gained its own independent link refusal, matching `wipe_session_dir`'s belt-and-braces — it
+  had been the only destructive step in the module relying solely on its caller's check.
+
+  **Blocker A — two concurrent locks silently destroyed the whole vault.** The mutex was held only to clone
+  the mapping and again to drop it, so a second `lock` re-sealed the tree the first was already shredding
+  and wrote *that* over the vault; both returned `Ok` and the vault read back as zero bytes. Reachable from
+  the UI, not just automation: the Lock button fires un-awaited and stays mounted across a re-seal that is
+  slow by design, so a double-click on a large vault did it. The registry now claims an in-flight slot in
+  the **same** mutex acquisition that reads the session, releases it by RAII on every exit (including a
+  panic), and refuses the second caller with `AlreadyLocking` having done nothing; the button is disabled
+  for the duration as well.
+
+  **Blocker B — nothing pinned the cross-language error contract.** The reviewer changed the Rust marker
+  string and all 62 Rust and 13 TS tests stayed green while, in production, every tamper refusal silently
+  reclassified as transient — leaving the banner up and navigating the user into the tampered path, the
+  exact exploit CPE-1654 closed. Folded into HIGH 3's fix as the reviewer suggested: the contract is now the
+  serialised `LockFailureCode`, and a Rust guard test reads `src/lib/vaultStore.ts` and fails if any code
+  stops appearing there (neutralisation-verified: flipping `rename_all` to camelCase turns it red with a
+  message naming the fix).
+
+  **Blocker C — the destruction was durable but the replacement was not.** The staging blob went down with
+  no `sync_all`, so `verify` was reading it back out of the page cache: that proves the bytes *parse*, not
+  that they *reached the disk*, while the wipe then shredded the only other copy with `flush` + `sync_all`
+  per pass. Now `sync_all` before verify, plus a parent-directory fsync after the rename on Unix.
+  `create_vault` has the identical gap — filed as **CPE-1667** rather than widened into this PR.
+
+  **HIGH 3 (MEDIUM in the audit, fixed here because it is a lie the user sees).** `classifyLockError`
+  matched substrings, and the other lock failures interpolate **full file paths** — so a file named
+  `why my landlord can no longer be trusted.txt`, held open by another program, turned an ordinary wipe
+  failure into a "tamper refusal": the store was cleared, the banner vanished, and the user was told the
+  vault was sealed and nothing deleted, while the entire decrypted tree sat on disk. No attacker needed.
+  `vault_lock` now returns a structured `LockError { code, message }` whose code is decided by **which step
+  failed**; the frontend switches on that and falls back to the safest reading (retryable, still unlocked)
+  for anything unrecognised.
+
+  Also taken: the vault-inside-session refusal routes through `reseal_failed` so the user sees the
+  actionable message; VAULT-SECURITY.md §5 now records that `vault_lock` can **empty** a vault (an emptied
+  session dir re-seals an empty tree — inherent to always-re-seal-never-diff, so documented and pinned by a
+  test rather than "fixed" with a heuristic); the symlinked-vault-path asymmetry is commented and filed as
+  **CPE-1668**; the three lock messages go through `$t` (7 new keys × 12 locales) after rebasing onto the
+  merged PR #845; and the docs no longer overstate what a lock keeps (symlinks are skipped, hard links are
+  refused).
+
   **Red→green.** `locking_re_seals_edits_made_while_unlocked_into_the_blob` performs the reporter's exact
   five-step sequence and fails on the unfixed code with *"a file CREATED while the vault was unlocked was
   DESTROYED by locking"*; `locking_re_seals_deletions_made_while_unlocked` fails likewise. Both pass after

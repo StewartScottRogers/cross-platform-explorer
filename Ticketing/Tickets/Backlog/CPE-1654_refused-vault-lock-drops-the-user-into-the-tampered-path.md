@@ -93,3 +93,24 @@ and should be left alone.
   shapes landing on different messages and different recovery. A control test asserts a re-seal failure
   keeps the vault unlocked. Deleting the tamper branch from `classifyLockError`, or the store-clearing in
   `lockVault`, turns them red again (verified separately).
+- 2026-08-12 — **Reworked under the PR #847 security audit (finding 3) + review (blocker B): the classifier
+  no longer reads the backend's prose at all.** Substring matching could not stand — `shred_tree` and
+  `collect_dir` interpolate **full file paths** into their errors, so a file *inside the vault* named
+  `why my landlord can no longer be trusted.txt`, merely held open by another program, was classified as a
+  tamper refusal: the store was cleared, the banner vanished, and the user was told the vault was sealed and
+  nothing had been deleted — while the whole decrypted tree was still on disk. Every clause false, no
+  attacker required. Separately, the reviewer showed the wording contract was unpinned in both directions:
+  changing the Rust constant left all 62 Rust and 13 TS tests green while every real tamper refusal
+  silently became "transient".
+
+  Both are closed by the same change, as the Foreman suggested: `vault_lock` returns a structured
+  `LockError { code, message }` (`untrusted_session` / `reseal_failed` / `wipe_failed` / `already_locking`),
+  the code is decided by **which step of the backend failed**, and `classifyLockError` switches on it.
+  Nothing a file can be named can forge a code. The four code strings are pinned across the language
+  boundary by a Rust guard test that reads `src/lib/vaultStore.ts`, and the TS union type is imported from
+  the generated bindings so the type cannot drift either. An unrecognised or missing code falls back to the
+  **safest** reading — retryable, vault still unlocked, no claim about what was destroyed.
+
+  The messages now go through `$t` (rebased onto the merged PR #845): `notice.vaultLockTampered`,
+  `notice.vaultLockResealFailed`, `notice.vaultLockInProgress` + the existing `notice.vaultLockFailed`, in
+  all 12 complete locales, with the banner's own labels translated too.
