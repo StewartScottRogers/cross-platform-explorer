@@ -90,6 +90,17 @@ pub enum AddressingStyle {
 ///
 /// `Debug` is derived and safe — the secret redaction lives in [`Credentials`], so it cannot be lost by
 /// someone adding a field here later.
+///
+/// # Endpoint, region and bucket are three separate inputs
+/// They have to be. The epic's original brief said the saved connection's `host` *was* the bucket, which
+/// leaves nowhere to put a custom endpoint or a region — and a custom endpoint is the entire reason
+/// MinIO, Backblaze B2, Wasabi and GCS come free. The settled connection-profile convention (ruled at
+/// CPE-1686, wired up in CPE-1685) reads `s3://region@endpoint-host:port/bucket[/prefix]`, which maps
+/// onto this struct directly: `host`+`port` → [`endpoint`](Self::endpoint) (default port 443),
+/// `user` → [`region`](Self::region) (default `us-east-1`), first path segment →
+/// [`bucket`](Self::bucket). Any remaining path segments are a key prefix, which is a *provider*
+/// concern (CPE-1683/1684) rather than an addressing one, so there is deliberately no `prefix` field
+/// here — this type answers only "what URL does `(bucket, key)` become".
 #[derive(Debug, Clone)]
 pub struct S3Config {
     /// Service endpoint as an absolute URL: `https://s3.us-east-1.amazonaws.com`,
