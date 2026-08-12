@@ -89,7 +89,9 @@ re-scoping it. **Right-click** an Agents leaf, or the Agent Deck toolbar button 
 
 - **Open ⟨agent · provider · model⟩** — jump to that session's tab (leaf only).
 - **Close ⟨agent · provider · model⟩** — end just that one session; the rest keep running (leaf only).
-- **Close all consoles** — see *Limits / notes* below for exactly what this does and doesn't stop.
+- **Close all consoles** — after a confirm ("Every running agent will be terminated…"), genuinely
+  terminates **every** running agent, wherever its session lives, and clears the sidebar's Agents list —
+  matching the Agent Deck window's **own** "Close all" button exactly (see *Limits / notes* below).
 
 ## "Work on this" — a scoped launch from the explorer
 
@@ -149,15 +151,15 @@ You want an agent to add tests to one module while you keep browsing the rest of
 
 ## Limits / notes
 
-- **"Close all consoles" (sidebar / toolbar) stops the console's connection and clears the sidebar's
-  Agents list — it does not necessarily stop every running agent process.** Sessions run in a separate,
-  host-owned process that's designed to survive the console UI closing (that's exactly what makes
-  reattach-on-reopen work); "Close all consoles" here doesn't reach into that process the way the Agent
-  Deck window's **own** "Close all" button (inside the console, which explicitly warns "Any running
-  agents will be terminated") does. Tracked as **CPE-1621**. Until it's resolved, treat "Close all
-  consoles" from outside the Agent Deck window as clearing the UI, not as a guaranteed stop — close
-  sessions from inside the Agent Deck window (or quit the app) if you need to be certain nothing is still
-  running.
+- **"Close all consoles" (sidebar / toolbar) terminates every running agent, then clears the sidebar's
+  Agents list.** Sessions run in a separate, host-owned process that's designed to survive the console UI
+  closing (that's exactly what makes reattach-on-reopen work); "Close all consoles" reaches into that
+  process the same way the Agent Deck window's **own** "Close all" button (inside the console, which
+  explicitly warns "Any running agents will be terminated") does — both routes end at the same
+  termination, so either one leaves nothing still running (**CPE-1621**). A confirm dialog stands between
+  the click and the termination for exactly this reason: this is a batched, irreversible stop of
+  everything at once. Ending a **single** session (the leaf's own "Close ⟨agent⟩" item) is unconfirmed
+  and unaffected by any of this — it always just ends that one session, as before.
 - **A setup, a key label, and a tab name are three different things that can't be renamed in place** —
   each can only be deleted/removed and recreated under a new name.
 - **Swarms share the Agent Deck's trust model.** A swarm agent only gets the working folder and

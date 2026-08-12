@@ -2903,6 +2903,27 @@ async sidecarCloseSession(sessionId: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Close **every** running AI Console session at once (CPE-1621) — the main-window/sidebar "Close all
+ * consoles" path's real fan-out teardown. Routes to the console's own `POST /api/close-all` over its
+ * loopback UI server, the SAME endpoint the in-console "Close all" button already uses
+ * (`sidecar/ai-console/src/launcher.html`) — `ConsoleState::close_all` there kills each session's
+ * `SessionIo` regardless of whether it's a `LocalIo` or a `DaemonIo` (the production case once a
+ * session daemon is running), so this genuinely reaches the host-owned session-daemon process's own
+ * PTYs, not just the console UI's local bookkeeping. Must be called BEFORE `sidecar_stop` drops the
+ * connection/URL (CPE-464) — once that happens there is nothing left to reach. A no-op if the console
+ * isn't running (no URL yet). Deliberately does NOT touch `AiConsoleState.daemon`: the session daemon
+ * process itself is left running (empty), matching its documented "outlives a UI-sidecar restart"
+ * design (see `AiConsoleState::daemon`'s doc comment) — this only ends every session inside it.
+ */
+async sidecarCloseAllSessions() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_close_all_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
  * from starting until re-enabled. Independent per sidecar — never touches others.
  */

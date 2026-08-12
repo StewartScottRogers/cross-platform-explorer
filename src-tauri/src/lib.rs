@@ -8138,6 +8138,32 @@ fn sidecar_close_session(session_id: String, state: tauri::State<AiConsoleState>
     Ok(())
 }
 
+/// Close **every** running AI Console session at once (CPE-1621) — the main-window/sidebar "Close all
+/// consoles" path's real fan-out teardown. Routes to the console's own `POST /api/close-all` over its
+/// loopback UI server, the SAME endpoint the in-console "Close all" button already uses
+/// (`sidecar/ai-console/src/launcher.html`) — `ConsoleState::close_all` there kills each session's
+/// `SessionIo` regardless of whether it's a `LocalIo` or a `DaemonIo` (the production case once a
+/// session daemon is running), so this genuinely reaches the host-owned session-daemon process's own
+/// PTYs, not just the console UI's local bookkeeping. Must be called BEFORE `sidecar_stop` drops the
+/// connection/URL (CPE-464) — once that happens there is nothing left to reach. A no-op if the console
+/// isn't running (no URL yet). Deliberately does NOT touch `AiConsoleState.daemon`: the session daemon
+/// process itself is left running (empty), matching its documented "outlives a UI-sidecar restart"
+/// design (see `AiConsoleState::daemon`'s doc comment) — this only ends every session inside it.
+#[cfg(feature = "sidecar-platform")]
+#[tauri::command]
+#[cfg_attr(feature = "specta-bindings", specta::specta)]
+fn sidecar_close_all_sessions(state: tauri::State<AiConsoleState>) -> Result<(), String> {
+    let url = { state.url.lock().map_err(|_| "state lock poisoned")?.clone() };
+    let Some(base) = url else { return Ok(()) }; // console not running → nothing to close
+    let target = format!("{}/api/close-all", base.trim_end_matches('/'));
+    ureq::post(&target)
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .map_err(|e| format!("close all sessions failed: {e}"))?;
+    state.log(sidecar_host::observability::LogLevel::Info, "closed all sessions by user");
+    Ok(())
+}
+
 /// Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
 /// from starting until re-enabled. Independent per sidecar — never touches others.
 #[cfg(feature = "sidecar-platform")]
@@ -11430,6 +11456,8 @@ pub fn run() {
             #[cfg(feature = "sidecar-platform")]
             sidecar_close_session,
             #[cfg(feature = "sidecar-platform")]
+            sidecar_close_all_sessions,
+            #[cfg(feature = "sidecar-platform")]
             sidecar_set_enabled,
             #[cfg(feature = "sidecar-platform")]
             sidecar_start_ai_console,
@@ -12273,6 +12301,7 @@ pub fn export_bindings(out: &std::path::Path) -> Result<(), String> {
         sidecar_stop,
         sidecar_repair,
         sidecar_close_session,
+        sidecar_close_all_sessions,
         sidecar_set_enabled,
         sidecar_start_ai_console,
         sidecar_start_agent_board,

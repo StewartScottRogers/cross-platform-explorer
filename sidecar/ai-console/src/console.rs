@@ -2719,6 +2719,91 @@ mod tests {
         assert!(post(&st, "/api/close-all")["closed"].as_array().unwrap().is_empty());
     }
 
+    /// CPE-1621 regression: `/api/close-all` must reach a session that lives in the SEPARATE
+    /// session-daemon process, not just `ConsoleState`'s own local `sessions` map. Wires this
+    /// `ConsoleState` to a real `DaemonEngine` talking to a real (in-process-hosted, but otherwise
+    /// identical to production) session daemon over its actual loopback socket protocol
+    /// (`session_server`/`session_client`) — the same wiring `sidecar_start_ai_console` uses in
+    /// `src-tauri/src/lib.rs`. Before this ticket's fix, the main-window/sidebar "Close all consoles"
+    /// path (`src/App.svelte`'s `closeAllConsoles`) never reached this endpoint at all — it only
+    /// dropped the host's connection to the console UI (`sidecar_stop`), which is why the daemon's own
+    /// sessions — and their real OS child processes — survived. Proving `/api/close-all` empties the
+    /// DAEMON's own session table (queried via a second, independent client connection, not through
+    /// `ConsoleState` at all) is the process-level assertion the ticket calls for: `SessionDaemon::kill`
+    /// (`session_daemon.rs`) synchronously calls `Child::kill()` + `Child::wait()`, so an empty daemon
+    /// `list()` here means the real subprocess is already killed and reaped, not just forgotten about.
+    #[test]
+    fn close_all_reaches_a_session_daemon_backed_session_not_just_local_bookkeeping() {
+        // A real session daemon, hosted on its own thread in this test process — identical code path
+        // (`session_server::serve` over a real `TcpListener`) to the actual out-of-process daemon.
+        let listener = crate::session_server::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let daemon = std::sync::Arc::new(crate::session_daemon::SessionDaemon::new());
+        let daemon_for_server = std::sync::Arc::clone(&daemon);
+        thread::spawn(move || crate::session_server::serve(listener, daemon_for_server));
+
+        // `DaemonEngine` is the production engine once a session daemon is running (CPE-309 S4) —
+        // `SessionDaemonHandle::external` mirrors the host handing over an ALREADY-spawned daemon's
+        // port, exactly like `AiConsoleState::ensure_session_daemon` does in `src-tauri/src/lib.rs`.
+        let handle = crate::session_supervisor::SessionDaemonHandle::external(addr.port());
+        let engine = std::sync::Arc::new(crate::session_engine::DaemonEngine::new(handle));
+
+        let dir = tempfile::tempdir().unwrap();
+        let agents = dir.path().join("agents");
+        std::fs::create_dir_all(&agents).unwrap();
+        let (cmd, args) = if cfg!(windows) {
+            ("cmd", r#"["/c","ping","-n","30","127.0.0.1"]"#)
+        } else {
+            ("sh", r#"["-c","sleep 30"]"#)
+        };
+        let manifest = format!(
+            r#"{{"schema_version":1,"id":"sleeper","name":"Sleeper",
+               "run":{{"windows":{{"command":"{cmd}","args":{args}}},
+                       "macos":{{"command":"{cmd}","args":{args}}},
+                       "linux":{{"command":"{cmd}","args":{args}}}}},
+               "providers":["native"],
+               "provider_recipes":{{"native":{{"env":{{}},"args":[]}}}}}}"#
+        );
+        std::fs::write(agents.join("sleeper.json"), manifest).unwrap();
+        let st = ConsoleState::new(
+            AgentRegistry::load_from_dirs(&[agents]),
+            dir.path().to_string_lossy().into_owned(),
+        )
+        .with_engine(engine);
+
+        let r = route(
+            &st,
+            &Request {
+                method: "POST".into(),
+                path: "/api/launch".into(),
+                body: r#"{"agent":"sleeper","provider":"native"}"#.into(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.status, 200, "launch failed: {}", String::from_utf8_lossy(&r.body));
+
+        // The session really is daemon-held: a SECOND, independent client — bypassing `ConsoleState`
+        // entirely — sees it too.
+        let observer = crate::session_client::SessionClient::connect(&addr.to_string()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while observer.list().unwrap_or_default().is_empty() && std::time::Instant::now() < deadline {
+            thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(observer.list().unwrap(), vec!["s1".to_string()], "session never reached the daemon");
+
+        // `POST /api/close-all` — the exact route `sidecar_close_all_sessions` (src-tauri/src/lib.rs,
+        // CPE-1621) now calls before `sidecar_stop` drops the console connection.
+        let r = route(&st, &Request { method: "POST".into(), path: "/api/close-all".into(), ..Default::default() });
+        assert_eq!(r.status, 200);
+        let closed: Value = serde_json::from_slice(&r.body).unwrap();
+        assert_eq!(closed["closed"].as_array().unwrap().len(), 1);
+
+        // The DAEMON's own table is empty too — not merely `ConsoleState.sessions` locally. This is the
+        // process-level proof: `SessionDaemon::close_all` already reaped the real child by the time this
+        // observes it (kill() is synchronous).
+        assert!(observer.list().unwrap().is_empty(), "the session-daemon-held session survived close-all");
+    }
+
     // Real end-to-end WebSocket test: launch an echo "agent", connect a WS client, and
     // confirm the PTY output streams through (CPE-334). Spawns a subprocess + binds a real
     // port + is timing-sensitive, so it's a manual diagnostic (like ai_console_flow) rather
