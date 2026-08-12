@@ -50,10 +50,7 @@ use std::io::{Cursor, Read as _};
 use std::sync::{Arc, Mutex};
 
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
-use suppaftp::{
-    list::ListParser, rustls, types::FileType, types::FormatControl, FtpError, RustlsConnector,
-    RustlsFtpStream,
-};
+use suppaftp::{list::ListParser, rustls, types::FileType, FtpError, RustlsConnector, RustlsFtpStream};
 
 /// How to authenticate to the FTP server.
 #[derive(Debug, Clone)]
@@ -158,20 +155,14 @@ impl FtpProvider {
         stream.login(user, pass).map_err(|e| format!("ftp: login: {e}"))?;
         // Explicit `TYPE I` (CPE-1659): `suppaftp` never sets a transfer type on its own — `retr_as_stream`
         // and `put_file` just issue RETR/STOR over whatever type the server currently has, and RFC 959's
-        // default representation type at connection is ASCII, not binary. A hand-rolled in-process test
-        // server that ignores TYPE entirely can never catch a missing call here (nothing ever gets
-        // translated), but a real ASCII-mode-conformant daemon like vsftpd will silently rewrite every
-        // bare LF to CRLF and drop the RFC's own transparency exception on the way through, corrupting
-        // any binary payload the byte-exact 5 MiB read test would have caught immediately.
-        // CPE-1659 NEGATIVE CONTROL (temporary, reverted in the very next commit): deliberately force
-        // ASCII mode instead of Binary, to prove the real-server rig can fail. The in-process fake FTP
-        // server ignores TYPE entirely (see its `"CWD" | "TYPE" | "OPTS" => 200 OK` handler) so this is
-        // invisible to `cargo test -p cpe-ftp`; only a real ASCII-mode-conformant daemon corrupts the
-        // wire, which is exactly the class of bug this rig exists to catch that a same-author fake
-        // server never can.
-        stream
-            .transfer_type(FileType::Ascii(FormatControl::Default))
-            .map_err(|e| format!("ftp: TYPE A: {e}"))?;
+        // default representation type at connection is ASCII, not binary. Kept explicit on principle (an
+        // RFC-conformant ASCII-mode daemon could otherwise silently rewrite line endings through a binary
+        // payload) even though CPE-1659's own negative-control experiment (forcing ASCII deliberately,
+        // then reverting it here) found this particular vsftpd build/config does NOT actually translate
+        // on the wire — a real, confirmed finding, not a guess: see the Work Log. The in-process fake FTP
+        // server ignores TYPE entirely regardless (`"CWD" | "TYPE" | "OPTS" => 200 OK`), so neither mode
+        // is visible to `cargo test -p cpe-ftp` either way.
+        stream.transfer_type(FileType::Binary).map_err(|e| format!("ftp: TYPE I: {e}"))?;
         Ok(FtpProvider { session: Mutex::new(stream) })
     }
 }
