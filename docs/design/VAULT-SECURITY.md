@@ -214,14 +214,28 @@ as a normal location; locking **re-seals that session directory back into the bl
     answer" shape PR #848 adopted for the Batch Media write path after the identical class of finding, and
     it reuses that module's `FileIdentity`/`handle_facts` primitives rather than a second copy.
 
-    **The residual, with its real size — this is not "no window".** Between a directory's re-pin and the
-    `read_dir` that follows it sits a single syscall. To exploit it an attacker must swap a directory
-    **in and back out** inside that gap, restoring an object with the *same* identity (the re-pins bracket
-    the enumeration on both sides), while getting no observable signal about when the gap is — the
-    starting gun is gone, because nothing is unlinked mid-walk any more. The old exploit needed neither
-    precision nor a signal. Closing the remainder entirely needs handle-relative traversal
-    (`openat`/`NtCreateFile` with a root directory handle), which std does not expose and which is not
-    worth a new dependency here.
+    **The residual, with its real size — this is not "no window", and the attacker is not blind.**
+    Between a directory's re-pin at the **top of `shred_dir_pinned`** — against the identity its parent
+    recorded at enumeration — and the `read_dir` on the next line sits a single syscall; the re-pin after
+    the enumeration brackets the far side. So a swap must be **in and back out** between the two, and the
+    same must hold one level down: a **four-phase alignment across two gaps**, both of which must land.
+
+    Three claims an earlier draft made here were wrong and are withdrawn (SEC-861 blocking 2, PR #861
+    review). **(a)** "No observable signal — the starting gun is gone, because nothing is unlinked
+    mid-walk." False: the gun changed *form* rather than disappearing. The overwrite step changes file
+    **contents** in a directory the attacker can read, which fires at the same instant the old "file
+    vanished" signal did — the regression test in this repo arms off exactly that, so the doc contradicted
+    the code shipping beside it. The auditor armed off it too: **400/400**. **(b)** "Restoring an object
+    with the same identity" was presented as the hard part; it is free — `rename` aside and back preserves
+    the identity, one syscall per phase. **(c)** The gap was mislocated at the per-entry probe inside the
+    parent's enumeration, which is *wider* than the truth (it would enclose the post-enumeration re-pin
+    and every overwrite) — wrong in the unsafe direction.
+
+    What is actually hard is the timing, and it is **measured, not asserted**: armed with the
+    content-change signal and this exact four-phase pattern, the auditor achieved **0 victims in 600
+    rounds**, 91 of them refused outright. The honest claim is not "no signal" but "the signal does not
+    buy enough". Closing the remainder entirely needs handle-relative traversal (`openat`/`NtCreateFile`
+    with a root directory handle), which std does not expose and which is not worth a new dependency here.
 
     Every one of these guards was neutralised individually and each turned a **distinct** test red:
     the identity arm → `the_wipe_refuses_a_directory_that_is_not_the_object_it_was_told_to_wipe`; the link
@@ -263,11 +277,38 @@ as a normal location; locking **re-seals that session directory back into the bl
     exclusively beside the destination → `sync_all` → verify the bytes that landed → rename → fsync the
     parent on Unix), so the fsync provably precedes the verify and therefore any shred. Pinned by
     `create_vault_fsyncs_the_blob_before_it_is_verified_and_therefore_before_any_shred` and, on Unix,
-    `create_vault_fsyncs_the_destination_directory_after_the_rename`. Both counters are now
+    `create_vault_fsyncs_the_destination_directory_after_the_rename`.
+
+    **Closed on Unix, only narrowed on Windows** (SEC-861 finding 5). The larger half is closed on both:
+    the blob's bytes are `sync_all`ed before the verify, so the vault's name can never point at unwritten
+    *data*. The remaining half is the directory **entry** the rename creates. On Unix that is fsynced. On
+    Windows `sync_parent_dir` is a no-op, and the justification it used to carry — "`rename`'s ordering is
+    already provided" — is false: `MoveFileEx` without `MOVEFILE_WRITE_THROUGH` is not durable, so a power
+    loss in that window can leave the vault name missing after the plaintext was shredded. Closing it
+    needs `MOVEFILE_WRITE_THROUGH` via a direct `MoveFileExW`; that is a follow-up, and the shipped state
+    is stated here rather than implied to be handled. Both counters are now
     **thread-local** rather than a process-wide atomic: as an `AtomicUsize` another test running in
-    parallel could satisfy "the count went up" without this call site having synced at all — which was
-    caught by neutralising the create-side write and watching its ordering test stay green, so the older
-    `the_staging_blob_is_fsynced_before_it_is_verified` was quietly weaker than it read too.
+    parallel could satisfy "the count went up" without this call site having synced at all — caught by
+    neutralising the create-side write and watching its ordering test stay green, where the thread-local
+    version fails.
+
+    **What this does *not* mean, corrected (SEC-861 blocking 3).** An earlier draft extrapolated that
+    #847's `the_staging_blob_is_fsynced_before_it_is_verified` had therefore been "quietly weaker than it
+    read". That is wrong, and the audit falsified it: on `main` the re-seal was the **only** increment
+    source in the process, so removing `sync_durably` from `write_new_exclusive` removed every increment
+    and the test **failed**. It was genuinely falsifiable against the mutation it exists to catch. What
+    was weak was the assertion *form* — a shared monotonic counter compared with `>` — and that form only
+    became exploitable when CPE-1669 added a **second** increment source in this very PR. The bug was
+    introduced by the fix, not uncovered by it.
+
+    That coupling has a second edge, same cause: `sealed_vault` (the re-seal test's own fixture) calls
+    `create_vault`, which now fsyncs **on the same thread**, so the re-seal test's before-snapshot is
+    *load-bearing* rather than defensive — measured as `RESEAL-TEST before=1` against `CREATE-TEST
+    before=0`. Demonstrated: give the re-seal a writer that forgets to sync while `create_vault` keeps
+    syncing, and the test catches it; delete the snapshot and the identical mutation passes, masked by
+    the fixture's own create. The thread-local fixed the cross-thread masking; the snapshot is what stops
+    the same masking reappearing same-thread. Both call sites carry a comment saying which of the two
+    they are, because they differ.
   - **A symlinked `.cpevault` path is replaced, not written through — and both ends now agree
     (CPE-1670).** The lock-time re-seal finishes with `rename`, which replaces the *link itself*;
     `create_vault` used `std::fs::write`, which **follows** a symlink and updates its target. The two

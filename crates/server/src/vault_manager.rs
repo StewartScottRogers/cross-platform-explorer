@@ -269,31 +269,43 @@ fn verify_recoverable(blob_path: &Path, passphrase: &SecretString) -> Result<(),
     vault_crypto::verify_blob(&blob, passphrase)
 }
 
-/// Does `dest` resolve to a location inside `folder` (including `folder` itself)? Used to guard the
-/// destructive shred path so the vault blob is never written where the shred will destroy it.
+/// Will a write to `dest` **land** inside `folder` (including `folder` itself)? Guards the destructive
+/// shred path so the vault blob is never written where the shred will destroy it.
 ///
-/// `folder` must exist (it's the tree being sealed). `dest` typically does **not** exist yet, so its
-/// parent is canonicalized and the file name re-appended rather than canonicalizing a missing path.
-/// Comparing canonicalized paths collapses `..`/symlinks/`.\` on both sides so the containment check
-/// can't be fooled by a non-normalized destination.
+/// **This asks where the write lands, not where the name resolves to** (SEC-861 blocking 1). Every
+/// parent component is canonicalized — the writer's `rename`/`open` resolves those too, so following
+/// them is correct — but the **final component is never followed**, because the writer no longer follows
+/// it either. `dest.parent()` is canonicalized and `dest.file_name()` re-appended, always: not just when
+/// `dest` does not exist yet.
+///
+/// It used to call `canonicalize(dest)` first and fall back to the parent form only for a missing path.
+/// That was right while `create_vault` wrote with `std::fs::write` (which follows a final symlink), and
+/// CPE-1670 silently invalidated it by switching to stage-beside + `rename` (which replaces the link).
+/// The guard then reasoned about the far end of a symlinked destination while the file landed at the
+/// near end — so a destination name *inside* `folder`, linked to somewhere *outside* it, read as "outside,
+/// safe", the vault was written inside the folder, and `shred_tree` destroyed the plaintext **and** the
+/// only encrypted copy while `create_vault` returned `Ok(())`. Pinned by
+/// `a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies`.
+///
+/// The guard and the writer must agree about links or the guard is measuring a different file from the
+/// one being written; that agreement is the invariant here, not the particular link policy. `folder`
+/// must exist (it's the tree being sealed). Any resolution failure propagates as `Err` — the callers
+/// treat that as a refusal, never as "probably fine".
 fn resolves_inside(folder: &Path, dest: &Path) -> Result<bool, VaultError> {
     let folder_canon = std::fs::canonicalize(folder)?;
-    let dest_canon = match std::fs::canonicalize(dest) {
-        Ok(p) => p,
-        Err(_) => {
-            let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
-            let parent_canon = match parent {
-                Some(p) => std::fs::canonicalize(p)?,
-                // A bare file name with no parent resolves against the current dir.
-                None => std::fs::canonicalize(".")?,
-            };
-            match dest.file_name() {
-                Some(name) => parent_canon.join(name),
-                None => parent_canon,
-            }
-        }
+    let parent = dest.parent().filter(|p| !p.as_os_str().is_empty());
+    let parent_canon = match parent {
+        Some(p) => std::fs::canonicalize(p)?,
+        // A bare file name with no parent resolves against the current dir.
+        None => std::fs::canonicalize(".")?,
     };
-    Ok(dest_canon.starts_with(&folder_canon))
+    // `file_name()` is `None` for a path ending in `..` or a root/prefix — nothing is created at such a
+    // name, so the directory it denotes is the landing site.
+    let dest_landing = match dest.file_name() {
+        Some(name) => parent_canon.join(name),
+        None => parent_canon,
+    };
+    Ok(dest_landing.starts_with(&folder_canon))
 }
 
 // ---------------------------------------------------------------------------
@@ -742,8 +754,18 @@ fn reseal_session_with_hooks(
 /// while the shredder has already destroyed the only other copy.
 ///
 /// Best-effort: a filesystem that will not let us open the directory is not a reason to fail an
-/// operation whose data is already on the disk. Windows is a no-op — directories are not synced this way
-/// there, and `rename`'s ordering is already provided.
+/// operation whose data is already on the disk.
+///
+/// **Windows is a no-op, and that leaves the window narrowed rather than closed** (SEC-861 finding 5).
+/// An earlier version justified the no-op with "`rename`'s ordering is already provided", which is not
+/// true: `MoveFileEx` without `MOVEFILE_WRITE_THROUGH` is not durable, so the directory entry the rename
+/// creates can still be lost to a power failure. What *is* closed on both platforms is the larger half —
+/// the blob's own bytes are `sync_all`ed before the verify, so the entry can never point at unwritten
+/// data. What remains on Windows is the entry itself: a power loss in that window can leave the vault
+/// name missing after the plaintext was shredded. Directories are not openable for `sync_all` the way
+/// Unix allows, so closing it would need `MOVEFILE_WRITE_THROUGH` via a direct `MoveFileExW` — a
+/// deliberate follow-up, not something to imply is already handled. **CPE-1669's window is closed on
+/// Unix and only narrowed on Windows.**
 fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     if let Some(parent) = path.parent() {
@@ -1669,18 +1691,22 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 /// **junction** in its place pointing at `Documents`. The frozen path resolved through the junction, the
 /// victim's link count read `One`, and it was shredded.
 ///
-/// The walk now runs in four steps per directory, and the order is the guarantee:
+/// The walk now runs in five steps per directory, and the order is the guarantee:
 ///
-/// 1. **Enumerate and probe**, pinning each entry as it is seen (the *entry pin* — the near side of the
-///    residual gap described below). Nothing is destroyed in this pass, so every subdirectory's identity
-///    is captured *before* the first byte is overwritten anywhere in this directory — i.e. before the
-///    attacker's starting gun can possibly have fired.
-/// 2. **Re-pin the directory itself**, before anything is destroyed. A swap that lands during step 1 is
-///    refused with nothing written.
+/// 0. **Re-pin this directory** against the identity its parent recorded for it at enumeration, before
+///    reading anything. This is the first line of [`shred_dir_pinned`], and on the exploit's path it is
+///    the check that fires. It is also the near side of the residual gap described below.
+/// 1. **Enumerate and probe**, recording each entry's identity as it is seen. Nothing is destroyed in
+///    this pass, so every subdirectory's identity is captured *before* the first byte is overwritten
+///    anywhere in this directory — i.e. before the attacker's starting gun can possibly have fired.
+///    (Step 1 *records* identities; it re-checks nothing. Step 0 is the re-check.)
+/// 2. **Re-pin the directory itself again**, before anything is destroyed. A swap that lands during
+///    step 1 is refused with nothing written. This is the far side of the residual gap.
 /// 3. **Overwrite the files**, each through one no-follow handle that must carry the identity step 1
 ///    recorded — so a parent swapped in after the gun fires makes the open land on a different object and
 ///    is refused, rather than shredding whatever it found.
-/// 4. **Descend**, each subdirectory re-pinned against the identity from step 1.
+/// 4. **Descend**, each subdirectory re-pinned against the identity from step 1 — which is step 0 of
+///    that child's own invocation.
 ///
 /// **Nothing here unlinks by path.** The removal is left entirely to one `remove_dir_all(root)`, which
 /// std hardened against exactly this swap in 1.58.1 (CVE-2022-21658): it recurses through directory
@@ -1689,20 +1715,39 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 ///
 /// # The residual, stated with its real size
 ///
-/// This is not "no window", and this comment must not say that it is. Two remain:
+/// This is not "no window", and this comment must not say that it is. Two remain.
 ///
-/// - Between a directory's **entry pin** — taken in step 1 as it is enumerated in its parent — and the
-///   `read_dir` that step 4's descent then performs on it, sits a single syscall. (Step 2's re-pin of the
-///   directory *itself* is not the near side of this gap: all of step 3's overwrites and the child's own
-///   entry pin sit between it and the next level's `read_dir`. The precise location was muddled in an
-///   earlier draft — PR #861 review.) To exploit it an attacker must swap a directory
-///   **in and back out** inside that gap — restoring an object with the *same* identity, since the
-///   re-pins bracket the enumeration on both sides — while getting no observable signal about when the
-///   gap is. The old exploit needed neither precision nor a signal, because the starting gun told it the
-///   path list was already frozen; this one has to hit a blind sub-microsecond double swap.
-/// - `remove_dir_all` re-resolves `root` once, at the very end. By then every file has already been
-///   overwritten, so what is at stake is an unlink, not an overwrite, and std's own hardening (above) is
-///   what stands behind it.
+/// **The gap.** Step 0's re-pin and the `read_dir` on the very next line are separated by a single
+/// syscall, and step 2 re-pins the same directory once the enumeration is done — so the two re-pins
+/// bracket the enumeration, and a swap must be **in and back out** between them to survive. Both halves
+/// of that must land, and the same is true one level down, so the real shape is a **four-phase
+/// alignment across two gaps**, not one lucky insertion.
+///
+/// **What is NOT hard about it, stated because two earlier drafts claimed otherwise (SEC-861 blocking 2,
+/// and PR #861 review):**
+///
+/// - **The attacker is not blind.** An earlier draft said the starting gun was gone "because nothing is
+///   unlinked mid-walk any more". Wrong: the gun merely changed form. Step 3 overwrites file *contents*
+///   in a directory the attacker can read, so polling content is a signal that fires at the same instant
+///   the old "file vanished" signal did — which this module's own regression test says out loud, since
+///   that is exactly how it arms. The auditor armed off it and it fired **400/400**.
+/// - **Restoring the same identity is free**, not the hard part. `rename` aside and back preserves the
+///   identity, one syscall per phase. The bracketing re-pins constrain *what* the attacker must put back,
+///   not how expensive it is to put back.
+/// - **An earlier draft also mislocated this gap**, placing its near side at step 1's per-entry probe —
+///   which puts step 2's re-pin, all of step 3's overwrites and the child's own step 0 inside it. That
+///   was wrong in the *unsafe* direction (it described a far wider window than exists) and is corrected
+///   above: the near side is step 0, on the line before the `read_dir`.
+///
+/// **What is actually hard about it is the timing, and that is measured, not asserted.** Armed with the
+/// content-change signal and this exact four-phase pattern, the auditor got **0 victims in 600 rounds**,
+/// with 91 of those rounds refused outright. The honest claim is therefore not "no signal" but "the
+/// signal does not buy enough": the window is a syscall wide, it must be hit twice in alignment, and it
+/// was not hit once in 600 attempts by someone trying to.
+///
+/// **The second residual:** `remove_dir_all` re-resolves `root` once, at the very end. By then every file
+/// has already been overwritten, so what is at stake is an unlink, not an overwrite, and std's own
+/// hardening (above) is what stands behind it.
 ///
 /// Closing both entirely needs handle-relative traversal (`openat`/`NtCreateFile` with a root directory
 /// handle), which std does not expose and which is not worth a new dependency here; that is the remaining
@@ -4199,7 +4244,13 @@ mod tests {
         // to a process-wide atomic: that is exactly what made both ordering tests weaker than they read,
         // because another test's fsync could satisfy "the count went up" while this call site synced
         // nothing (PR #861 review — reconstructed and confirmed against `main`'s atomic version). The
-        // before-snapshot is kept as belt-and-braces, not because a shared counter needs it.
+        // The before-snapshot is **load-bearing here**, unlike at the create-side copy of this comment:
+        // `sealed_vault` above calls `create_vault`, which since CPE-1669 fsyncs through the very same
+        // `write_new_exclusive` **on this thread**, so the counter is already non-zero when the re-seal
+        // starts (measured: `RESEAL-TEST before=1`, `CREATE-TEST before=0`). Delete the snapshot and the
+        // assertion degenerates to `at_verify > 0`, which the fixture's own create satisfies — the same
+        // masking the thread-local fixed cross-thread, reappearing same-thread. CPE-1669 is what created
+        // that coupling, so this sentence and the code it guards were written in the same change.
         let before = vault_blob_sync_count();
         let at_verify = std::cell::Cell::new(usize::MAX);
         reseal_session_with_verifier(&blob_path, &session, &pass("pw"), |p, pw| {
@@ -4239,13 +4290,42 @@ mod tests {
     /// Bytes the victim must still have when this is over, read back OFF DISK.
     const VICTIM_BYTES: &[u8] = b"VICTIM PLAINTEXT - the only copy";
 
+    /// Whether the timing exploit could actually be *staged* on this run — kept distinct from whether
+    /// the fix held, so a missed window can never be reported as a link failure or, worse, as a pass
+    /// (PR #861 audit, finding 4: the junction form hard-failed twice in seven Windows runs because the
+    /// watcher thread was descheduled past the overwrite phase and woke after `remove_dir_all(root)`,
+    /// and the assertion then blamed junction creation for a test that had detected nothing).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum SwapOutcome {
+        /// The link was planted mid-wipe and every assertion in the harness ran.
+        Swapped,
+        /// The wipe finished before the watcher could act — nothing was proven either way.
+        WindowMissed,
+        /// The window was hit, but this OS/account refused to create the link.
+        LinkRefused,
+    }
+
+    impl SwapOutcome {
+        const SWAPPED: u8 = 0;
+        const WINDOW_MISSED: u8 = 1;
+        const LINK_REFUSED: u8 = 2;
+
+        fn from(raw: u8) -> Self {
+            match raw {
+                Self::SWAPPED => Self::Swapped,
+                Self::LINK_REFUSED => Self::LinkRefused,
+                _ => Self::WindowMissed,
+            }
+        }
+    }
+
     /// Shared body of the CPE-1672 regression. Returns `false` (asserting nothing) when the swap could
     /// not be staged on this run, so the caller skips LOUDLY instead of passing silently.
     fn wipe_must_not_write_through_a_swapped_parent(
         make_link: impl Fn(&Path, &Path) -> bool + Send + 'static,
         kind: &str,
-    ) -> bool {
-        use std::sync::atomic::{AtomicBool, Ordering};
+    ) -> SwapOutcome {
+        use std::sync::atomic::{AtomicU8, Ordering};
         use std::sync::Arc;
 
         let dir = worktree_tempdir();
@@ -4280,8 +4360,8 @@ mod tests {
         // (2) + (3) The watcher: swap the moment the gun fires.
         let session_c = session.clone();
         let victim_dir_c = victim_dir.clone();
-        let swapped = Arc::new(AtomicBool::new(false));
-        let swapped_c = swapped.clone();
+        let outcome = Arc::new(AtomicU8::new(SwapOutcome::WINDOW_MISSED));
+        let outcome_c = outcome.clone();
         let watcher = std::thread::spawn(move || {
             let gun = session_c.join("top.txt");
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
@@ -4293,8 +4373,15 @@ mod tests {
                 // same instant in both, which is what makes this one test meaningful against both.
                 if std::fs::read(&gun).map(|b| b != b"top secret").unwrap_or(true) {
                     let zsub = session_c.join("zsub");
-                    if std::fs::remove_dir_all(&zsub).is_ok() && make_link(&victim_dir_c, &zsub) {
-                        swapped_c.store(true, Ordering::SeqCst);
+                    // Distinguish "the wipe outran us" from "this OS refuses the link". Getting these
+                    // two confused is what made the Windows leg red intermittently while blaming
+                    // junction creation for a test that had detected nothing (PR #861 audit, finding 4).
+                    if std::fs::remove_dir_all(&zsub).is_err() {
+                        outcome_c.store(SwapOutcome::WINDOW_MISSED, Ordering::SeqCst);
+                    } else if make_link(&victim_dir_c, &zsub) {
+                        outcome_c.store(SwapOutcome::SWAPPED, Ordering::SeqCst);
+                    } else {
+                        outcome_c.store(SwapOutcome::LINK_REFUSED, Ordering::SeqCst);
                     }
                     return;
                 }
@@ -4305,8 +4392,9 @@ mod tests {
         // (4) The payload.
         let result = reg.lock(&blob_path);
         watcher.join().unwrap();
-        if !swapped.load(Ordering::SeqCst) {
-            return false;
+        let outcome = SwapOutcome::from(outcome.load(Ordering::SeqCst));
+        if outcome != SwapOutcome::Swapped {
+            return outcome;
         }
 
         // The auditor's own probe line, printed on red AND green runs so the evidence is in the log
@@ -4353,7 +4441,7 @@ mod tests {
             );
             assert!(reg.is_unlocked(&blob_path), "a refused wipe must stay retryable");
         }
-        true
+        SwapOutcome::Swapped
     }
 
     /// THE bug (CPE-1672), via a Windows **junction** — the sharp end, because a junction needs neither
@@ -4362,23 +4450,41 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_wipe_refuses_a_junction_swapped_in_at_a_parent_directory_mid_wipe() {
-        assert!(
-            wipe_must_not_write_through_a_swapped_parent(try_junction_dir, "junction"),
-            "creating a directory junction must succeed on Windows/NTFS — it needs no elevation, so a \
-             failure here means the fixture is broken, not that the case is untestable"
-        );
+        match wipe_must_not_write_through_a_swapped_parent(try_junction_dir, "junction") {
+            SwapOutcome::Swapped => {}
+            // A junction needs no elevation on NTFS, so THIS really would mean a broken fixture.
+            SwapOutcome::LinkRefused => panic!(
+                "creating a directory junction must succeed on Windows/NTFS — it needs no elevation, so \
+                 a refusal here means the fixture is broken, not that the case is untestable"
+            ),
+            // Not a failure: the wipe simply finished before the watcher could plant anything, so this
+            // run detected nothing either way. Failing here would red the Windows leg intermittently
+            // while blaming junction creation for a missed window (PR #861 audit, finding 4).
+            SwapOutcome::WindowMissed => eprintln!(
+                "SKIPPED the_wipe_refuses_a_junction_swapped_in_at_a_parent_directory_mid_wipe: the \
+                 watcher thread was descheduled past the overwrite phase and the wipe finished first, so \
+                 the swap could not be staged. The junction form of the parent swap was NOT verified on \
+                 this run — the deterministic pins still were."
+            ),
+        }
     }
 
     /// The same swap built from a **symbolic link**, so the regression is also covered on the Linux and
     /// macOS legs of the 3-OS backend matrix.
     #[test]
     fn the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe() {
-        if !wipe_must_not_write_through_a_swapped_parent(try_symlink_dir, "symlink") {
-            eprintln!(
-                "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: the swap \
-                 could not be staged on this run (this OS/account cannot create a directory symlink, or \
-                 the wipe outran the watcher). The symlink form of the parent swap was NOT verified here."
-            );
+        match wipe_must_not_write_through_a_swapped_parent(try_symlink_dir, "symlink") {
+            SwapOutcome::Swapped => {}
+            SwapOutcome::LinkRefused => eprintln!(
+                "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: this \
+                 OS/account cannot create a directory symlink (on Windows this needs Developer Mode or \
+                 admin). The symlink form of the parent swap was NOT verified on this run."
+            ),
+            SwapOutcome::WindowMissed => eprintln!(
+                "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: the wipe \
+                 finished before the watcher could stage the swap. The symlink form of the parent swap \
+                 was NOT verified on this run — the deterministic pins still were."
+            ),
         }
     }
 
@@ -4731,6 +4837,84 @@ mod tests {
             parent_dir_sync_count() > before,
             "the rename created a directory entry that is only in the page cache until the directory \
              itself is synced"
+        );
+    }
+
+    /// **The containment guard must ask where the write LANDS, not where the name resolves to**
+    /// (SEC-861 blocking 1, found by the security audit of this PR).
+    ///
+    /// CPE-1670 changed `create_vault` from following a symlinked destination to replacing it — but
+    /// `resolves_inside`, the guard whose entire job is "never write the vault where the shred will
+    /// destroy it", still decided by canonicalizing `dest`, which **follows** a final-component symlink.
+    /// The guard reasoned about the far end while the file landed at the near end. So a destination name
+    /// *inside* the folder, symlinked to somewhere *outside* it, read as "outside, safe" — and the vault
+    /// was written inside the folder that `shred_tree` then destroyed, losing the plaintext AND the
+    /// encrypted copy, with `create_vault` returning `Ok(())`. Measured on the unfixed branch:
+    /// `folder_shredded=true blob_at_far_end_len=Some(11)` — the far end still held its 11-byte
+    /// placeholder, so there was no vault anywhere.
+    ///
+    /// This is the auditor's own case. It is the deterministic, non-racy half of the finding: no threads,
+    /// no timing, no elevation (an unprivileged file symlink on Linux/macOS).
+    #[test]
+    fn a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies() {
+        let dir = worktree_tempdir();
+
+        // The user's folder, about to be sealed and then securely deleted.
+        let folder = dir.path().join("MyStuff");
+        std::fs::create_dir_all(folder.join("sub")).unwrap();
+        std::fs::write(folder.join("irreplaceable.txt"), b"the only copy of the user's data").unwrap();
+
+        // A real file OUTSIDE the folder, which the destination name links to.
+        let outside = dir.path().join("elsewhere.cpevault");
+        std::fs::write(&outside, b"placeholder").unwrap();
+
+        // The destination: a name INSIDE the folder that happens to be a symlink pointing OUT.
+        let dest = folder.join("backup.cpevault");
+        if !try_symlink_file(&outside, &dest) {
+            eprintln!(
+                "SKIPPED a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies: \
+                 this OS/account cannot create a file symlink (on Windows this needs Developer Mode or \
+                 admin). The sharp end of this finding is Linux/macOS, where it needs neither."
+            );
+            return;
+        }
+
+        let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
+        let result = create_vault(&folder, &dest, &pass("pw"), &opts, true);
+
+        let landed_inside = folder.join("backup.cpevault");
+        let is_vault_at = |p: &Path| std::fs::read(p).map(|b| b.starts_with(MAGIC)).unwrap_or(false);
+        eprintln!(
+            "SEC-861 CONTAINMENT: create_vault -> {:?}; folder_shredded={} \
+             vault_at_link_name={} vault_at_far_end={}",
+            result.as_ref().map(|_| "Ok").map_err(|e| e.to_string()),
+            !folder.exists(),
+            is_vault_at(&landed_inside),
+            is_vault_at(&outside),
+        );
+
+        // THE invariant, read back off disk: the user must never end up with neither copy.
+        let plaintext_survives = std::fs::read(folder.join("irreplaceable.txt"))
+            .map(|b| b == b"the only copy of the user's data")
+            .unwrap_or(false);
+        assert!(
+            plaintext_survives || is_vault_at(&landed_inside) || is_vault_at(&outside),
+            "BOTH copies are gone — the plaintext was shredded and no readable vault exists anywhere \
+             (create_vault returned {result:?})"
+        );
+        // And specifically: this must be REFUSED, not merely survived by luck. The destination lands
+        // inside the folder being shredded, which is exactly what the guard exists to stop.
+        match result {
+            Err(VaultError::Format(msg)) => assert!(
+                msg.contains("refusing to shred"),
+                "the refusal must read like the other data-loss refusals, got: {msg}"
+            ),
+            other => panic!("a destination landing inside the shredded folder must be refused, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read(folder.join("irreplaceable.txt")).unwrap(),
+            b"the only copy of the user's data",
+            "a refused call must leave every byte of the folder alone"
         );
     }
 
