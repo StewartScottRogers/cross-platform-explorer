@@ -96,7 +96,22 @@ impl Dispatcher {
                 path: String,
             }
             let a: P = params(p)?;
-            result(crate::listing::list_dir(&a.path).map_err(domain)?)
+            let entries = crate::listing::list_dir(&a.path).map_err(|e| {
+                // CPE-1659: a missing path is a structured `NotFound` over the wire, not the generic
+                // `Internal` every other domain error gets — the real-server rig's Slice 2 E2E test
+                // (`crates/net/tests/real_server_e2e.rs`) asserts exactly this ("a missing remote path
+                // must be a clean error ... not a panic, not a silent success") and caught this gap for
+                // real: `domain()`'s blanket Err(String) -> Internal mapping is right for most handlers,
+                // but wrong for the single failure a caller most needs to branch on. `Path::exists()`
+                // (rather than matching the io::Error's Display text) keeps this portable — the OS wording
+                // for "no such file" differs across platforms, but non-existence doesn't.
+                if !std::path::Path::new(&a.path).exists() {
+                    ContractError::new(ErrorCode::NotFound, e, false)
+                } else {
+                    domain(e)
+                }
+            })?;
+            result(entries)
         });
 
         // Path-arg: hash a file.
@@ -187,6 +202,21 @@ mod tests {
         match resp.result {
             Err(e) => assert_eq!(e.code, ErrorCode::BadRequest),
             Ok(_) => panic!("bad params must be BadRequest"),
+        }
+    }
+
+    #[test]
+    fn list_dir_of_a_missing_path_is_not_found() {
+        // CPE-1659: a missing path is the ONE domain error a caller most needs to branch on
+        // structurally, so it must not be flattened into the generic `Internal` every other domain
+        // error gets (see `domain_error_maps_to_internal` below) — proven in-process here, and the same
+        // shape the real-server Docker rig's Slice 2 E2E test asserts over an actual wire socket.
+        let ctx = HeadlessCtx::new(scratch("base"));
+        let resp = Dispatcher::with_builtins()
+            .dispatch(&ctx, req("list_dir", json!({ "path": "/definitely/not/a/real/path/xyz" })));
+        match resp.result {
+            Err(e) => assert_eq!(e.code, ErrorCode::NotFound, "got {:?}: {}", e.code, e.message),
+            Ok(_) => panic!("listing a missing path must error"),
         }
     }
 
