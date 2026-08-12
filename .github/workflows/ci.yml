@@ -455,8 +455,21 @@ jobs:
           set -euo pipefail
           ssl_dir="$RUNNER_TEMP/vsftpd-ssl"
           mkdir -p "$ssl_dir"
+          # CPE-1659: `openssl req -x509` without an explicit basicConstraints extension inherits the
+          # default OpenSSL config's `v3_ca` section, which sets `CA:TRUE` — fine for a real root CA, but
+          # this same certificate is ALSO the leaf vsftpd presents on the wire, and rustls/webpki's path
+          # validation refuses to accept a CA:TRUE certificate as a TLS end-entity leaf
+          # ("invalid peer certificate: CaUsedAsEndEntity", confirmed on this rig's first run to get past
+          # the cipher-suite mismatch). Explicit `CA:FALSE` plus a serverAuth EKU marks it as what it
+          # actually is here: a self-signed end-entity cert that happens to also be its own trust anchor
+          # (added separately via CPE_E2E_FTPS_EXTRA_CA_PEM_FILE) — trust anchors are exempt from the
+          # basicConstraints check, only the presented leaf is not.
           openssl req -x509 -newkey rsa:2048 -keyout "$ssl_dir/vsftpd.key" -out "$ssl_dir/vsftpd.pem" \
-            -days 2 -nodes -subj "/CN=172.28.0.13" -addext "subjectAltName=IP:172.28.0.13"
+            -days 2 -nodes -subj "/CN=172.28.0.13" \
+            -addext "subjectAltName=IP:172.28.0.13" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "keyUsage=critical,digitalSignature,keyEncipherment" \
+            -addext "extendedKeyUsage=serverAuth"
           chmod 0755 "$ssl_dir"
           chmod 0644 "$ssl_dir/vsftpd.key" "$ssl_dir/vsftpd.pem"
           conf="$RUNNER_TEMP/vsftpd.conf"
