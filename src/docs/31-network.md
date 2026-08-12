@@ -99,8 +99,9 @@ reports an unsupported protocol.
 - **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
   the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
   is why **Access key** is the only authentication S3 offers.
-- Listing very large buckets will be paged as you browse, so a prefix with hundreds of thousands of
-  objects fills in progressively rather than all at once.
+- **A prefix with an enormous number of objects will be capped.** Listing follows the store's
+  continuation tokens to completion before showing you anything, so a prefix holding hundreds of
+  thousands of objects has a limit rather than an unbounded wait.
 
 ## The row menu
 

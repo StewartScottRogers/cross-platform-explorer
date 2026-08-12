@@ -23,9 +23,16 @@ export type ConnState = "connected" | "disconnected" | "error";
  *  on the default port omits it from its location string on both sides.
  *
  *  `s3: 443` (CPE-1686): S3 and every S3-compatible endpoint speaks HTTPS, so 443 is the default a blank
- *  Port field means. Rust's `default_port` still falls through to `0` for `"s3"` until **CPE-1685** adds the
- *  arm — that ticket must set it to **443** to keep this hand-mirror honest. `network.test.ts` asserts the
- *  literal on this side, so a change on either side has a test to break. */
+ *  Port field means.
+ *
+ *  **The s3 entry is currently mirrored on ONE side only — read this before trusting it.** Rust's
+ *  `default_port` falls through to `0` for `"s3"`, so the two sides disagree *today*, silently, with the
+ *  whole suite green. `network.test.ts` pins this literal, which catches a change here; nothing pins the
+ *  Rust side, so a change there is invisible. **CPE-1685 must set it to 443 and add a Rust test**, which is
+ *  an acceptance criterion on that ticket, not a hope. Until then the drift is latent rather than live:
+ *  `find_connection` treats an absent port as a wildcard and this side omits the port at 443, so the
+ *  comparison short-circuits before the mismatch matters. Precedent for the finished shape:
+ *  `filetypes.test.ts`, which pins the TS list and names the Rust test pinning the same list. */
 export const DEFAULT_PORTS: Record<string, number> = {
   sftp: 22,
   ssh: 22,

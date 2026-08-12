@@ -15,8 +15,24 @@ closed:
 ## What
 
 `S3Provider` implementing the `list` half of `cpe_server::provider::FileSystemProvider`, so an
-`s3://bucket/prefix` location produces `ProviderEntry` rows that the existing listing machinery can render
+`s3://region@endpoint/bucket/prefix` location produces `ProviderEntry` rows that the existing listing machinery can render
 without knowing it is looking at an object store.
+
+## Before you scope this: "B2/GCS/Wasabi come free" is overstated (added 2026-08-12)
+
+The epic's headline claim is that every S3-compatible store works for free once addressing is right.
+The CPE-1681 worker, having just built the signer, flagged that this is **necessary but not
+sufficient**, and that **this ticket is where it bites** rather than theirs:
+
+- **Backblaze B2 and Wasabi** are genuinely drop-in.
+- **Google Cloud Storage's S3 shim (the XML API)** has its own SigV4 quirks and **does not support
+  ListObjectsV2 the same way** — which is precisely the call this ticket is built on.
+
+Do not discover this at the end. Decide up front whether GCS is in scope: either verify it against the
+XML API's actual listing behaviour, or state plainly that GCS is out of scope for the first version and
+correct the epic's claim to match. An unverified "it comes free" is the confident-wrong-answer failure
+this crew keeps closing — see the Evidence Rules in `Ticketing/wiki.md`, particularly the one about
+stating the scope of a claim.
 
 ## Why the delimiter, and not a client-side key split
 

@@ -28,8 +28,12 @@ new commands and no new frontend plumbing.
 ## Scope
 
 - An `s3` arm in `cpe_vfs::open` building an `S3Config` from the `Connection` and handing back a boxed
-  `S3Provider`. `conn.host` is the bucket (`location.rs` already parses `s3://bucket/key` that way — check
-  it, do not re-derive it), `conn.path` the prefix.
+  `S3Provider`. ~~`conn.host` is the bucket (`location.rs` already parses `s3://bucket/key` that way —
+  check it, do not re-derive it), `conn.path` the prefix.~~ **⚠ SUPERSEDED by CPE-1686 — do not build
+  this.** `host` is the **endpoint**, `user` the **region**, and the **bucket is the first segment of
+  `path`**. "Host is the bucket" leaves no field for the endpoint or the region, making custom endpoints
+  (MinIO/B2/Wasabi/GCS) inexpressible. Full convention and the reasoning: **"Handed over from CPE-1686"**
+  below — read that section before writing any of this ticket.
 - `AuthMethod::AccessKey { id, secret_ref }` → the access key id and, from the keychain, the secret. Note
   that `secret_ref` is currently **declared and used nowhere** — this is its first consumer, so decide
   deliberately how it relates to the existing `secret_for(access, &conn.name)` lookup rather than
@@ -59,6 +63,15 @@ new commands and no new frontend plumbing.
 - [ ] `default_port("s3")` returns a sensible value and the connection's derived location string matches
       what `src/lib/network.ts`'s `DEFAULT_PORTS` will produce (CPE-1686 keeps the two in sync — that
       mirroring is deliberate and already documented in `network.ts`).
+- [ ] `default_port("s3")` returns **443**, pinned by a Rust test — the TS side asserts the same literal
+      (`network.test.ts`), but nothing pins the Rust side today, so the two are currently in *silent*
+      disagreement (`0` vs `443`) with the whole suite green. That is exactly the drift the mirror exists
+      to stop, and only a test on this side closes it.
+- [ ] The transitional paragraph in `src/docs/31-network.md` ("saving works now; the provider ships
+      alongside it") is **deleted**, and the "Honest limits" list plus the `## Limits` section are flipped
+      from future tense to present. See the handover note below for why both halves must happen together.
+      *(This is an AC, not a footnote, because the prose version of it sat below the checklist and a worker
+      who works the checkboxes would have shipped a lie.)*
 - [ ] `cargo test` green across `crates/s3`, `crates/vfs`, `crates/server`; `cargo clippy --all-targets
       -D warnings` clean in both feature modes; any `Cargo.lock` delta committed, **including
       `src-tauri/Cargo.lock`** if the app pulls the new crate.
