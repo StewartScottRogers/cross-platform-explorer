@@ -16,6 +16,7 @@
   import { get } from "svelte/store";
   import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
   import { commands } from "../bindings.gen";
+  import { unwrap } from "../invoke";
   import { t, translate, locale } from "../i18n";
 
   /** Full path of the broken symlink being repaired. */
@@ -67,7 +68,10 @@
       if (!recheck.broken) {
         throw new Error("This link is no longer broken — refresh the folder and try again.");
       }
-      const delRes = await commands.deletePermanent([linkPath]);
+      // `confirmed: true` (CPE-1651) is set only here, on the far side of the `phase === "confirming"`
+      // step the user has to press through — `accept()` merely arms the dialog; this function is what
+      // the confirm button runs. The backend refuses the call outright without it.
+      const delRes = unwrap(await commands.deletePermanent([linkPath], true));
       const delFailed = delRes.find((r) => !r.ok);
       if (delFailed) {
         throw new Error(delFailed.error);

@@ -158,7 +158,23 @@ export async function undoFire(fire: WatchFire): Promise<void> {
   }
   for (const p of plan.deletes) {
     guard.guard(p, now);
-    await commands.deletePermanent([p]);
+    // `confirmed: true` (CPE-1651): the user pressed Undo on this specific fire, and `plan.deletes` is
+    // only ever the set of COPIES that fire itself created (recorded on the fire record at the moment
+    // the rule ran) — never a pre-existing file the user put there. That is a genuine, targeted user
+    // action on app-created artefacts, not a blanket constant threaded through to satisfy the compiler:
+    // nothing else in this module may set it, and the source file is moved back rather than deleted.
+    // Don't discard the result: a batch-level refusal (the CPE-1651 gate) or a per-path failure would
+    // otherwise vanish silently and leave the user believing Undo removed a copy it did not. Matches how
+    // this module already reports a failed watch action (PR #844 review).
+    const res = await commands.deletePermanent([p], true);
+    if (res.status === "error") {
+      // A batch-level error means the CPE-1651 consent gate refused the call outright.
+      console.warn(`folderWatch undo: delete refused for ${p}: ${res.error}`);
+    } else {
+      for (const r of res.data) {
+        if (!r.ok) console.warn(`folderWatch undo: could not delete ${r.path}: ${r.error}`);
+      }
+    }
   }
 }
 

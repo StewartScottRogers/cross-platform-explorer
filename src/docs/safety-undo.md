@@ -27,6 +27,20 @@ Undo only exists for operations that are safe to reverse automatically:
 If you need to reverse a copy or a permanent delete, Undo is the wrong tool — see [Checkpoints &
 Rollback](16-checkpoints) for a way to protect a folder *before* a risky operation instead.
 
+### The permanent-delete confirmation is enforced end-to-end (CPE-1651)
+
+Because a permanent delete can't be undone, the confirmation isn't just a dialog: the backend **refuses
+to delete anything** unless it is explicitly told that confirmation happened. Exactly three things in the
+app can say so, and each of them is you making a decision: the "Delete permanently?" dialog's button, the
+Repair Link dialog's replace confirmation, and pressing **Undo** on a folder-watch rule (which removes
+only the copies that rule just made). The same rule already
+covers [secure delete / shred](20-vaults), creating a vault with "securely delete the original"
+checked, [emptying the Trash](38-trash), and [batch-media overwrites](explorer-batch-media) — every
+operation that destroys bytes with no way back asks the same question, and none of them will act on an
+answer they weren't given. You won't notice this in normal use; it exists so nothing else that can
+reach the app's internals — a script, an automation, a browser console — can quietly skip the question
+you would have been asked.
+
 ## How to open it
 
 - **Keyboard: Ctrl+Z**, from anywhere in the file list. The chord can be rebound in **Settings →

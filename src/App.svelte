@@ -4450,7 +4450,11 @@
       title: "Delete permanently?",
       message: `${what} will be permanently deleted. This cannot be undone and does not go to the Recycle Bin.`,
       label: "Delete permanently",
-      onYes: () => doDelete(true, target),
+      // The `true` for `confirmed` (CPE-1651) is set HERE and nowhere else: this closure only runs when
+      // the user actually pressed "Delete permanently" on the dialog above. It is deliberately a
+      // separate argument from `permanent` — reusing the intent flag as the consent flag is the exact
+      // bug CPE-1646 was filed against.
+      onYes: () => doDelete(true, target, true),
     };
   }
 
@@ -4458,14 +4462,19 @@
    *  non-permanent no-modal path) via `snapshotConfirmTarget` — deliberately a parameter, NOT
    *  re-derived from live `activePane`/selection state here, so a pane switch that happens while a
    *  confirm dialog was open can never retarget an already-confirmed delete onto a different pane's
-   *  files (CPE-1370 review). */
-  async function doDelete(permanent: boolean, target: ConfirmTarget) {
+   *  files (CPE-1370 review).
+   *
+   *  `confirmed` (CPE-1651) is the user's CONSENT, tracked separately from `permanent` (the caller's
+   *  INTENT) and defaulting to `false`: the backend now refuses an unconsented `delete_permanent`
+   *  outright, so a future call site that forgets the confirm dialog fails loudly instead of quietly
+   *  destroying files. Only `askDelete`'s confirm-dialog `onYes` may pass `true`. */
+  async function doDelete(permanent: boolean, target: ConfirmTarget, confirmed = false) {
     confirm = null;
     const { inPaneB, paths } = target;
     if (paths.length === 0) return;
     try {
       const results = permanent
-        ? await commands.deletePermanent(paths)
+        ? unwrap(await commands.deletePermanent(paths, confirmed))
         : await commands.deleteToTrash(paths);
       reportResults(results, permanent ? "deletePermanent" : "moveToBin");
 

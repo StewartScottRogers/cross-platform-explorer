@@ -52,12 +52,16 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 let deletePermanentCalls: string[][] = [];
+/** The `confirmed` flag each `delete_permanent` call carried (CPE-1651) — the backend refuses the call
+ *  without it, so this records whether the UI actually supplied the user's consent. */
+let deletePermanentConsent: unknown[] = [];
 
 beforeEach(() => {
   localStorage.clear();
   resetSettings();
   Element.prototype.scrollIntoView = vi.fn();
   deletePermanentCalls = [];
+  deletePermanentConsent = [];
   invoke.mockReset();
   invoke.mockImplementation(async (cmd: string, args: Record<string, unknown> = {}) => {
     const listingFor = (path: unknown) => (path === PATH_B ? entriesB : entriesA);
@@ -77,6 +81,7 @@ beforeEach(() => {
       case "delete_permanent": {
         const paths = args.paths as string[];
         deletePermanentCalls.push(paths);
+        deletePermanentConsent.push(args.confirmed);
         return paths.map((p) => ({ path: p, ok: true, error: "" }));
       }
       case "delete_to_trash": {
@@ -159,6 +164,26 @@ describe("App — confirm-delete targets a frozen snapshot, not whatever pane is
     await fireEvent.click(within(dialog).getByText("Delete permanently"));
     await waitFor(() => expect(deletePermanentCalls.length).toBe(1));
     expect(deletePermanentCalls[0]).toEqual([`${PATH_A}\\alpha.txt`]); // still pane A
+  });
+
+  // CPE-1651: the backend now REFUSES `delete_permanent` unless the call carries explicit consent, so
+  // the explorer's own delete path has to supply it — and only from the confirm dialog's Yes handler.
+  it("supplies backend consent (confirmed: true) only from the confirm dialog's Yes, never before it", async () => {
+    await bootDualPane();
+
+    await fireEvent.click(screen.getByText("alpha.txt"));
+    await fireEvent.keyDown(window, { key: "Delete", shiftKey: true });
+    const dialog = await screen.findByRole("dialog");
+
+    // Opening the dialog must not have called the destructive command at all.
+    expect(deletePermanentCalls.length).toBe(0);
+
+    await fireEvent.click(within(dialog).getByText("Delete permanently"));
+    await waitFor(() => expect(deletePermanentCalls.length).toBe(1));
+
+    // Consent is `true` — and it is a real boolean, not `undefined` sliding through as falsy, which is
+    // what the pre-CPE-1651 call shape (no flag at all) would have produced.
+    expect(deletePermanentConsent).toEqual([true]);
   });
 });
 
