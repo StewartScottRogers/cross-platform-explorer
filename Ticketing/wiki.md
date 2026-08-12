@@ -244,6 +244,52 @@ YYYY-MM-DD — Short description of discovery, decision, or action.
 
 ---
 
+## Evidence Rules
+
+Two rules about *proof*, not about code. They apply to every ticket, and to the PR body and review
+that close it. Both exist because the crew has broken them and paid for it.
+
+### 1. Guard neutralisation — a test that cannot fail is not evidence
+
+Every new guard must be **broken on its own** and shown to make a **distinct** test go red, then
+restored and shown green. Break one guard at a time: a change that reds five tests at once has proved
+nothing about which guard is load-bearing. Paste the **actual** red output — the real panic message,
+not a description of it — into the PR body. "The test passes" says nothing until you have seen it fail
+for the right reason.
+
+### 2. Verify through the channel that will carry the message
+
+Prove a thing works **the way it will actually be used**, not the way that shows it most easily. A
+check run under conditions the real caller never sets has confirmed nothing about the real caller.
+
+The rule came out of CPE-1678 (PR #865), where the same failure appeared three times inside a PR whose
+own subject was that failure:
+
+- A sweep searched `read_to_string`/`fs::read` and concluded **"this is the only instance"**. The claim
+  was wider than the search — the sibling bug was an `fs::metadata` collapse, which that search could
+  not find (CPE-1687).
+- A skip-notice was verified with `cargo test -- --nocapture` and a comment written asserting the CI log
+  would show it. CI runs plain `cargo test`; libtest captures output for *passing* tests, and a skip is a
+  pass. The notice reached nobody.
+- The follow-up ticket's acceptance criteria then carried the intent ("the test must announce itself")
+  forward **without the mechanism**, which would have handed the next person the same trap.
+
+None of those was carelessness. Each was a true observation generalised one step past its evidence,
+which is what makes the failure worth a rule instead of a shrug. In practice:
+
+- **State the scope of a negative result.** "I found none" is only ever "I found none *within X*" —
+  write the X down. A bare "there are no others" is a claim you have not tested.
+- **Run the real invocation.** If CI runs `cargo test`, verify under `cargo test`. Flags, env vars and
+  local config that make a signal visible can be the only reason it is visible.
+- **A ticket must specify the mechanism, not just the goal**, wherever the obvious implementation of the
+  goal is the bug. Otherwise the AC propagates the trap.
+
+Related: the recurring product rule these keep proving — *a confident wrong answer is worse than an
+honest "I don't know"* (CPE-1673, CPE-1678, CPE-1680, CPE-1687). These two rules are that same idea
+applied to our own evidence rather than to the app's error messages.
+
+---
+
 ## When to Auto-File a Ticket
 
 `/ticketing-new` intercepts **units of project work** transparently: a feature, a bug/defect fix
