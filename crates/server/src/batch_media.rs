@@ -2218,10 +2218,88 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
+    /// **The belt-and-braces length guard in `classify_open_failure` must be pinned by a test of its
+    /// own.** Layer 1 (`verbatim_wide`) normally keeps the probe from ever seeing a truncation error, so
+    /// every filesystem-level test reaches this function through a path where the guard is inert — delete
+    /// the guard and the whole suite still passes. That is not acceptable here: an independent review
+    /// demonstrated that with layer 1 disabled, this guard is the only thing standing between a
+    /// past-`MAX_PATH` symlink alias and the victim's bytes (it degrades the verdict to `Unverifiable`,
+    /// which every caller refuses on). This ticket exists because prior rounds each eroded a guard no test
+    /// was holding, so pin it directly: the function is pure, so no filesystem is needed.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_classify_open_failure_length_guard_is_pinned() {
+        const ERROR_FILE_NOT_FOUND: u32 = 2;
+        const ERROR_PATH_NOT_FOUND: u32 = 3;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_INVALID_NAME: u32 = 123;
+        const ERROR_BAD_PATHNAME: u32 = 161;
+        const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+        /// One wide char past the unprefixed limit, i.e. a length only a verbatim path can address.
+        const LONG: usize = 300;
+        /// Comfortably inside the unprefixed limit.
+        const SHORT: usize = 100;
+
+        // The four codes that mean "this path was too long to even parse" must NOT be read as `Absent`
+        // once the path is at or past the limit — reading them as `Absent` is precisely the fail-open the
+        // reviewer exploited (probe says "nothing there", `std::fs` writes anyway).
+        for code in [
+            ERROR_PATH_NOT_FOUND,
+            ERROR_INVALID_NAME,
+            ERROR_BAD_PATHNAME,
+            ERROR_FILENAME_EXCED_RANGE,
+        ] {
+            assert!(
+                matches!(classify_open_failure(code, LONG), Probe::Unreadable),
+                "os error {code} on a past-MAX_PATH path must fail CLOSED as Unreadable, never Absent"
+            );
+        }
+
+        // Same codes below the limit keep their ordinary meaning: there, `ERROR_PATH_NOT_FOUND` really
+        // does mean a missing parent, so treating it as `Absent` is correct and costs nothing.
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, SHORT), Probe::Absent),
+            "a short path's ERROR_PATH_NOT_FOUND genuinely means 'nothing there'"
+        );
+
+        // The deliberate exclusion: `ERROR_FILE_NOT_FOUND` stays `Absent` at ANY length. This is the
+        // ordinary "the output doesn't exist yet" case — the guard must not make every deep-folder batch
+        // unverifiable. The exclusion is safe because with layer 1 in place the path is never truncated,
+        // so a `2` really does mean the leaf is absent.
+        for len in [SHORT, LONG] {
+            assert!(
+                matches!(classify_open_failure(ERROR_FILE_NOT_FOUND, len), Probe::Absent),
+                "ERROR_FILE_NOT_FOUND must stay Absent at length {len} — this is the common legitimate path"
+            );
+        }
+
+        // The boundary itself, from both sides, so a future off-by-one in the comparison is caught.
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 259), Probe::Absent),
+            "259 wide chars is still addressable unprefixed"
+        );
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 260), Probe::Unreadable),
+            "260 wide chars (NUL included) is the limit — at it, truncation is possible"
+        );
+
+        // An unrelated failure is unreadable regardless of length: something is there, we just could not
+        // identify it. Never `Absent`.
+        for len in [SHORT, LONG] {
+            assert!(
+                matches!(classify_open_failure(ERROR_ACCESS_DENIED, len), Probe::Unreadable),
+                "a permissions failure is Unreadable, not Absent"
+            );
+        }
+    }
+
     /// **An over-`MAX_PATH` output that is an ordinary, absent file must still be ALLOWED.** Without this,
     /// the test above could pass by refusing every long path, and every legitimate deep-folder batch would
-    /// break. Also pins the belt-and-braces length guard in `classify_open_failure` to the codes that
-    /// actually mean truncation: a plain `ERROR_FILE_NOT_FOUND` at any length is still `Absent`.
+    /// break.
+    ///
+    /// Note this reaches `classify_open_failure` only through layer 1 (`verbatim_wide`), so it exercises
+    /// the `ERROR_FILE_NOT_FOUND`-stays-`Absent` half and *not* the length guard itself — the guard is
+    /// pinned directly by `cpe_1642_classify_open_failure_length_guard_is_pinned` below.
     #[cfg(windows)]
     #[test]
     fn cpe_1642_ordinary_absent_output_past_max_path_is_still_allowed() {

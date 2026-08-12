@@ -308,3 +308,39 @@ must — they are false-refusal and non-vacuity guards, not the red case. Source
   write follows it).
 - **F4** — the census perf cliff (`plan()` and `execute_plan_walk` build separate `ParentCache`s, so up
   to two full censuses).
+
+### Reviewer round 3 — Foreman-applied fix (2026-08-11)
+
+The round-2 re-review returned **SEC PASS** with one blocking item, and it was a good one. The reviewer
+neutralised each defence layer separately:
+
+- Layer 1 (`verbatim_wide` returning the raw path): suite went **RED** — the guard is load-bearing and
+  covered.
+- Layer 2 (the `classify_open_failure` length guard): suite stayed **fully GREEN**. Deleting the guard
+  outright broke nothing.
+
+That mattered because the same reviewer had just demonstrated layer 2 is what saves the victim's bytes
+when layer 1 fails (it degrades the verdict to `Unverifiable`, which every caller refuses on). An
+unpinned guard in a ticket whose entire history is "each round eroded a guard no test was holding" is
+the exact failure mode to close.
+
+Applied directly by the Foreman rather than spending another worker round-trip, since the fix was
+exactly prescribed:
+
+- Added `cpe_1642_classify_open_failure_length_guard_is_pinned` — a pure table test (no filesystem):
+  the four truncation codes past `MAX_PATH` must be `Unreadable`; the same codes below it keep their
+  ordinary meaning; `ERROR_FILE_NOT_FOUND` stays `Absent` at any length (the deliberate exclusion that
+  keeps legitimate deep-folder batches working); the 259/260 boundary is pinned from both sides; an
+  unrelated failure (`ERROR_ACCESS_DENIED`) is `Unreadable` regardless of length.
+- Corrected the coverage claim on `cpe_1642_ordinary_absent_output_past_max_path_is_still_allowed`, which
+  said it pinned the length guard. It does not — it reaches `classify_open_failure` through layer 1, where
+  the guard is inert. The doc now says so and points at the new test.
+
+Verified red-then-green: with `wide_len >= MAX_PATH` short-circuited to `false`, the new test fails with
+*"os error 3 on a past-MAX_PATH path must fail CLOSED as Unreadable, never Absent"*; restored, it passes.
+`cargo test --lib batch_media` 54 passed / 0 failed; `cargo clippy --all-targets -- -D warnings` clean.
+
+Reviewer's other observations, deliberately not actioned here: the intentional short-UNC divergence from
+`std` (harmless — analysed as bit-bucket-only), and `scan_dir_link_census` reporting `Escapes` for an
+entry that vanished mid-scan where `incomplete = true` would be more honest. The latter is a
+message-accuracy nit of the same family as CPE-1652 and belongs with it.
