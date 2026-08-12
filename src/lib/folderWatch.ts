@@ -147,10 +147,31 @@ export async function handleFolderBatch(
   }
 }
 
-/** Reverse a fire (CPE-794): move the file back to its original path and delete any copies it made. */
-export async function undoFire(fire: WatchFire): Promise<void> {
+/** What actually happened when {@link undoFire} tried to delete a fire's recorded copies (CPE-1671):
+ *  the console-only `console.warn` paths it used to report are folded into these counts so a caller
+ *  (App.svelte's `undoWatchFire`) can tell a fully-successful undo from a partial one instead of only
+ *  ever seeing a plain "Undid" toast. `removed` is the only outcome that actually deleted a copy; the
+ *  other three all leave the on-disk copy exactly where it was, for the three distinct reasons noted. */
+export interface UndoFireResult {
+  /** Copies actually deleted. */
+  removed: number;
+  /** Skipped (CPE-1666): the recorded path no longer resolves to a plain file — most likely something
+   *  replaced it with a directory between fire time and this Undo — so deleting it was refused rather
+   *  than risking a recursive `remove_dir_all` on something this fire never created. */
+  skippedNotFile: number;
+  /** Refused outright by the backend consent gate (CPE-1651): a batch-level `Err` from `deletePermanent`. */
+  refused: number;
+  /** Attempted but failed for this one path (`OpResult.ok === false` — e.g. permission denied). */
+  failed: number;
+}
+
+/** Reverse a fire (CPE-794): move the file back to its original path and delete any copies it made.
+ *  Returns what actually happened to those copies (CPE-1671) so the caller can report a partial undo
+ *  instead of always claiming full success. */
+export async function undoFire(fire: WatchFire): Promise<UndoFireResult> {
   const plan = undoPlan(fire);
   const now = Date.now();
+  const result: UndoFireResult = { removed: 0, skippedNotFile: 0, refused: 0, failed: 0 };
   if (plan.moveBack) {
     guard.guard(plan.moveBack.from, now);
     guard.guard(plan.moveBack.to, now);
@@ -178,6 +199,7 @@ export async function undoFire(fire: WatchFire): Promise<void> {
       console.warn(
         `folderWatch undo: skipped deleting ${p} — it is now a directory, not the file this fire copied; leaving it in place`,
       );
+      result.skippedNotFile++;
       continue;
     }
     guard.guard(p, now);
@@ -194,12 +216,19 @@ export async function undoFire(fire: WatchFire): Promise<void> {
     if (res.status === "error") {
       // A batch-level error means the CPE-1651 consent gate refused the call outright.
       console.warn(`folderWatch undo: delete refused for ${p}: ${res.error}`);
+      result.refused++;
     } else {
       for (const r of res.data) {
-        if (!r.ok) console.warn(`folderWatch undo: could not delete ${r.path}: ${r.error}`);
+        if (r.ok) {
+          result.removed++;
+        } else {
+          console.warn(`folderWatch undo: could not delete ${r.path}: ${r.error}`);
+          result.failed++;
+        }
       }
     }
   }
+  return result;
 }
 
 /** Start (or restart) watching `paths`, running `rulesFn()`'s rules on each landed file. Returns the

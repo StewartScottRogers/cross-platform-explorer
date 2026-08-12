@@ -234,9 +234,13 @@ describe("undoFire (CPE-1666) — re-stats a recorded delete before acting", () 
       fs.writeFileSync(path.join(copyPath, "nested", "also-keep-me.txt"), "more important data");
 
       const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-      await undoFire(fire({ copies: [copyPath] }));
+      // CPE-1671: the skip is now ALSO reported in the return value, not just the console.warn CPE-1666
+      // originally relied on — this is what lets App.svelte's undoWatchFire tell a partial undo apart
+      // from a full one instead of always showing the same "Undid" toast.
+      const result = await undoFire(fire({ copies: [copyPath] }));
       expect(warn).toHaveBeenCalled();
       warn.mockRestore();
+      expect(result).toEqual({ removed: 0, skippedNotFile: 1, refused: 0, failed: 0 });
 
       // The assertion CPE-1666 requires: list the directory back OFF DISK — not a return value — and
       // confirm the swapped-in tree is completely intact.
@@ -257,10 +261,13 @@ describe("undoFire (CPE-1666) — re-stats a recorded delete before acting", () 
     fs.mkdirSync(path.dirname(copyPath), { recursive: true });
     fs.writeFileSync(copyPath, "app-made copy");
 
-    await undoFire(fire({ copies: [copyPath] }));
+    const result = await undoFire(fire({ copies: [copyPath] }));
 
     expect(fs.existsSync(copyPath)).toBe(false);
     expect(fs.readdirSync(path.dirname(copyPath))).toEqual([]);
+    // CPE-1671: a fully successful undo reports the removed count and nothing skipped — this is the
+    // "common path stays clean" shape App.svelte's undoWatchFire relies on to keep today's plain toast.
+    expect(result).toEqual({ removed: 1, skippedNotFile: 0, refused: 0, failed: 0 });
   });
 
   it("a normal undo still moves the source back when the fire relocated it", async () => {
@@ -269,12 +276,59 @@ describe("undoFire (CPE-1666) — re-stats a recorded delete before acting", () 
     fs.mkdirSync(path.dirname(finalPath), { recursive: true });
     fs.writeFileSync(finalPath, "the moved file");
 
-    await undoFire(fire({ source: path.join(root, "dl", "invoice.pdf"), finalPath, copies: [] }));
+    const result = await undoFire(fire({ source: path.join(root, "dl", "invoice.pdf"), finalPath, copies: [] }));
 
     // moveExact itself is mocked (no real backend to move it for real in this unit test) — what's under
     // test here is that undoFire still calls it for the move leg, unaffected by the CPE-1666 re-stat
     // gate, which only applies to `plan.deletes`.
     const bindings = await import("./bindings.gen");
     expect(bindings.commands.moveExact).toHaveBeenCalledWith([[finalPath, path.join(root, "dl", "invoice.pdf")]]);
+    // No copies on this fire at all — the move-only leg isn't counted as a delete outcome either way.
+    expect(result).toEqual({ removed: 0, skippedNotFile: 0, refused: 0, failed: 0 });
+  });
+
+  // CPE-1671: the other two outcomes the ticket names — a batch-level refusal from the CPE-1651 consent
+  // gate, and a per-path `OpResult.ok === false` — used to be warn-only too. Both must show up in the
+  // return value exactly like the CPE-1666 directory-skip case above.
+  it("reports a batch-level refusal (CPE-1651 consent gate) rather than only warning", async () => {
+    const root = makeTmp();
+    const copyPath = path.join(root, "backup", "invoice.pdf");
+    fs.mkdirSync(path.dirname(copyPath), { recursive: true });
+    fs.writeFileSync(copyPath, "app-made copy");
+
+    const bindings = await import("./bindings.gen");
+    vi.mocked(bindings.commands.deletePermanent).mockResolvedValueOnce({
+      status: "error",
+      error: "consent required",
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await undoFire(fire({ copies: [copyPath] }));
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+
+    expect(result).toEqual({ removed: 0, skippedNotFile: 0, refused: 1, failed: 0 });
+    // The refused call never reached the real filesystem delete — the file is still there.
+    expect(fs.existsSync(copyPath)).toBe(true);
+  });
+
+  it("reports a per-path OpResult failure rather than only warning", async () => {
+    const root = makeTmp();
+    const copyPath = path.join(root, "backup", "invoice.pdf");
+    fs.mkdirSync(path.dirname(copyPath), { recursive: true });
+    fs.writeFileSync(copyPath, "app-made copy");
+
+    const bindings = await import("./bindings.gen");
+    vi.mocked(bindings.commands.deletePermanent).mockResolvedValueOnce({
+      status: "ok",
+      data: [{ path: copyPath, ok: false, error: "permission denied" }],
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const result = await undoFire(fire({ copies: [copyPath] }));
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+
+    expect(result).toEqual({ removed: 0, skippedNotFile: 0, refused: 0, failed: 1 });
   });
 });
