@@ -41,6 +41,29 @@ answer they weren't given. You won't notice this in normal use; it exists so not
 reach the app's internals — a script, an automation, a browser console — can quietly skip the question
 you would have been asked.
 
+### Three more operations now work the same way (CPE-1662, CPE-1664, CPE-1665)
+
+The same enforcement was extended to the other three places where the app destroys something, or starts
+something, that no Undo can walk back:
+
+| Operation | What it can destroy | Who is allowed to answer for you |
+|---|---|---|
+| **Copy/move with "Replace"** | Whatever already sits at the destination — recursively, for a folder. Not sent to the Recycle Bin. | Only the **Replace** button in the copy-conflict dialog ("Some items already exist"). |
+| **Running a backup job** | A *mirror* job deletes files under the destination that are no longer in the source. | Only the Backup jobs dashboard's **Run** / **Restore** buttons, or a job you ticked **auto-run on connect** for. |
+| **[User commands](organizing-user-commands)** | Anything — the command line runs as a real external process on your machine. | Only the **Run** button in the confirm dialog, after it has shown you the exact command line. |
+
+Two details are worth knowing, because they are deliberate:
+
+- **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
+  destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
+  to click past it, which is worse than no prompt at all.
+- **What this is, honestly.** It is the app's own discipline written into the backend rather than
+  promised in the interface: a call that skips the dialog is refused, and an old script written against
+  the previous version is refused outright because it doesn't carry the answer at all. It is *not* a
+  security boundary against something that has already taken over the app — that would need a different
+  mechanism, and the app doesn't claim to have one here. What it reliably prevents is any part of the
+  app — now or in a future version — quietly performing one of these operations without asking you.
+
 ## How to open it
 
 - **Keyboard: Ctrl+Z**, from anywhere in the file list. The chord can be rebound in **Settings →

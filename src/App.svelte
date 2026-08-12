@@ -605,6 +605,10 @@
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: job.source, destRoot: job.dest,
         copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
+        // CPE-1664: consent for an *unattended* run is the per-job auto-run opt-in the user ticked —
+        // read from the job rather than hard-coded `true`, so a job that never opted in is refused by
+        // the backend even if something else calls this helper.
+        confirmed: !!job.autoRun,
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;
@@ -3564,10 +3568,11 @@
 
   /** Start a copy of `sources` into the current folder — or pane B's (`inPaneB`, CPE-1380) — with the
    *  chosen conflict policy (CPE-624). Tags the resulting transfer id in `pasteCopyPaneB` when it targets
-   *  pane B so the shared `transfer://done` listener refreshes the right pane once it finishes. */
-  async function startCopyWithPolicy(sources: string[], policy: ConflictPolicy, inPaneB = false) {
+   *  pane B so the shared `transfer://done` listener refreshes the right pane once it finishes.
+   *  `confirmed` (CPE-1662) is the overwrite consent, defaulting to *not given* — see `startTransfer`. */
+  async function startCopyWithPolicy(sources: string[], policy: ConflictPolicy, inPaneB = false, confirmed = false) {
     try {
-      const id = await startTransfer(sources, inPaneB ? paneBPath : currentPath, "copy", policy);
+      const id = await startTransfer(sources, inPaneB ? paneBPath : currentPath, "copy", policy, confirmed);
       if (inPaneB) pasteCopyPaneB.add(id);
     } catch (e) {
       showNotice(String(e), true);
@@ -3575,11 +3580,14 @@
   }
 
   /** The conflict dialog's choice: run the pending copy with that policy (CPE-624), at the pane
-   *  `doPaste` originally captured it for (CPE-1380). */
+   *  `doPaste` originally captured it for (CPE-1380). This handler — the user having clicked a button in
+   *  `TransferConflictDialog` — is one of only two places allowed to pass `confirmed: true` (CPE-1662); the
+   *  flag is passed separately from `policy` rather than derived from it, so that consent means "we
+   *  asked", not merely "overwrite was selected". */
   function resolveCopyConflict(policy: ConflictPolicy) {
     const p = pendingCopy;
     pendingCopy = null;
-    if (p) startCopyWithPolicy(p.sources, policy, p.inPaneB);
+    if (p) startCopyWithPolicy(p.sources, policy, p.inPaneB, true);
   }
 
   /** `inPaneB` (CPE-1380): Ctrl+V/context-menu-paste must target whichever pane is actually meant — the
@@ -3753,20 +3761,24 @@
     await startDropStackCopy(sources, "keepboth");
   }
 
-  async function startDropStackCopy(sources: string[], policy: ConflictPolicy) {
+  /** `confirmed` (CPE-1662): the overwrite consent, defaulting to *not given* — see `startTransfer`. */
+  async function startDropStackCopy(sources: string[], policy: ConflictPolicy, confirmed = false) {
     try {
-      const id = await startTransfer(sources, currentPath, "copy", policy);
+      const id = await startTransfer(sources, currentPath, "copy", policy, confirmed);
       dropStackTransferOps.set(id, sources);
     } catch (e) {
       showNotice(String(e), true);
     }
   }
 
-  /** The conflict dialog's choice for a pending Drop-Stack copy (CPE-624/CPE-1533). */
+  /** The conflict dialog's choice for a pending Drop-Stack copy (CPE-624/CPE-1533). The second (and
+   *  last) place allowed to pass CPE-1662's `confirmed: true` — the user clicked a
+   *  `TransferConflictDialog` button; see `resolveCopyConflict` for why the flag is separate from
+   *  `policy`. */
   function resolveDropStackCopyConflict(policy: ConflictPolicy) {
     const p = pendingDropStackCopy;
     pendingDropStackCopy = null;
-    if (p) startDropStackCopy(p.sources, policy);
+    if (p) startDropStackCopy(p.sources, policy, true);
   }
 
   /** Fetch a text file's contents for the preview pane (size-capped backend). */

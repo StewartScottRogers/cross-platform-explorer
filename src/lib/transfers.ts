@@ -102,9 +102,24 @@ export function dismissTransfer(id: number): void {
 export type TransferKind = "copy" | "move";
 export type ConflictPolicy = "overwrite" | "skip" | "keepboth";
 
-/** Start a copy/move; resolves to the new transfer's id. Progress arrives via the events above. */
-export function startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy): Promise<number> {
-  return commands.startTransfer(sources, dest, kind, policy);
+/**
+ * Start a copy/move; resolves to the new transfer's id. Progress arrives via the events above.
+ *
+ * `confirmed` (CPE-1662) is the backend's consent gate for the **overwrite** policy only — the one
+ * policy whose collision handling deletes whatever already sits at the destination path (recursively,
+ * for a folder). It is a **separate argument from `policy`** on purpose (the CPE-1646 lesson): the
+ * policy is what the user chose, the flag is that they were actually asked. It therefore defaults to
+ * `false`, so a caller that passes `"overwrite"` without routing through the conflict dialog is
+ * rejected by the backend rather than quietly clobbering the destination. Skip/keep-both ignore it.
+ */
+export function startTransfer(
+  sources: string[],
+  dest: string,
+  kind: TransferKind,
+  policy: ConflictPolicy,
+  confirmed = false,
+): Promise<number> {
+  return commands.startTransfer(sources, dest, kind, policy, confirmed).then(unwrap);
 }
 
 /** Ask a running transfer to stop at the next chunk boundary. Also cancels a queued archive

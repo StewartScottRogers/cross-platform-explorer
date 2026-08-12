@@ -1088,12 +1088,16 @@ async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
  * `shred_paths` (CPE-1611) and `create_vault` (CPE-1630), and consistency is worth more than a token
  * the caller still supplies.
  * 
- * **Siblings found by the PR #844 review and audit, still ungated — do not read this comment as
- * "permanent deletion now requires consent" app-wide:** `start_transfer`'s `ConflictPolicy::Overwrite`
- * reaches `fs::remove_dir_all` on a caller-named path (CPE-1662); `apply_backup_plan` does the same on a
- * caller-chosen `dest_root`, with a verified one-message wipe (CPE-1664); and `run_command` still
- * carries the exact "the frontend MUST confirm" promise this ticket was filed against, on a command that
- * spawns a shell (CPE-1665). Gating this one narrows the step-2 primitive; it does not eliminate it.
+ * **Siblings from the PR #844 review and audit, now gated the same way:** `start_transfer`'s
+ * `ConflictPolicy::Overwrite` (CPE-1662), `apply_backup_plan` + its streaming twin (CPE-1664, which also
+ * fixed `safe_join` to reject a plan entry naming the root — the correctness half, which holds whatever
+ * the caller sets), and `run_command`, whose "the frontend MUST confirm" comment this ticket was filed
+ * against (CPE-1665). **Still do not read this as "destruction now requires consent" app-wide:** the
+ * auditor also flagged `checkpoint_revert` (`crates/server/src/revert_engine.rs`), which mass-`remove_
+ * file`s every file under a caller-chosen root absent from the named manifest — bounded by requiring a
+ * pre-existing checkpoint for that exact root, and semantically a restore, so it was rated lower and is
+ * **not** gated. And every one of these gates is the same UI discipline described above, not an
+ * authorization boundary.
  */
 async deletePermanent(paths: string[], confirmed: boolean) : Promise<Result<OpResult[], string>> {
     try {
@@ -1226,9 +1230,20 @@ async runWatchActions(path: string, actions: WatchAction[]) : Promise<OpResult[]
 /**
  * Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
  * `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
+ * 
+ * **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no ledger note, no
+ * thread spawned, so there is no partial state and no phantom entry in the operations panel — unless
+ * `confirmed` is `true`. See [`require_overwrite_consent`] for why only that policy is gated, why the
+ * flag is a separate argument from `policy`, and exactly what it does and does not defend. The check is
+ * repeated inside [`run_transfer`] so the engine can't be driven past it by a future caller.
  */
-async startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy) : Promise<number> {
-    return await TAURI_INVOKE("start_transfer", { sources, dest, kind, policy });
+async startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy, confirmed: boolean) : Promise<Result<number, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("start_transfer", { sources, dest, kind, policy, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * Signal a running transfer to stop at the next chunk boundary (CPE-620). Also cancels an archive
@@ -1541,17 +1556,34 @@ async hashFile(path: string) : Promise<Result<string, string>> {
 },
 /**
  * Execute a backup plan (CPE-797). Model lives in `cpe_server::backup` (CPE-821); thin dispatcher.
+ * 
+ * **CPE-1664:** a mirror plan's `delete_paths` are removed outright under `dest_root` — no Recycle Bin
+ * copy, no undo — from a root the caller chooses freely, so the engine refuses the whole plan unless
+ * `confirmed` is `true`. `BackupDashboard.svelte`'s Run/Restore buttons (and `App.svelte`'s
+ * drive-connect scheduler, for a job the user ticked auto-run for) are the only call sites allowed to
+ * set it. See `cpe_server::backup::apply_backup_plan_walk` for exactly what the flag does and does not
+ * defend — it is UI discipline enforced in Rust, not an authorization boundary.
  */
-async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean) : Promise<OpResult[]> {
-    return await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, verify });
+async applyBackupPlan(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean) : Promise<Result<OpResult[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * Streamed backup run (CPE-798 live progress): sends each file's `OpResult` over `on_result` in small
  * batches as it completes. Returns the total number of results emitted.
+ * 
+ * `confirmed` is the CPE-1664 consent gate; the engine
+ * (`cpe_server::backup::apply_backup_plan_walk`) owns it, so this dispatcher does nothing special to
+ * enforce it — same treatment CPE-1611 gave `shred_paths`. An unconfirmed call is `Err` with nothing
+ * deleted and **no** batch ever pushed down the channel.
  */
-async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
+async applyBackupPlanStream(sourceRoot: string, destRoot: string, copy: string[], update: string[], deletePaths: string[], verify: boolean, confirmed: boolean, onResult: TAURI_CHANNEL<OpResult[]>) : Promise<Result<number, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, verify, onResult }) };
+    return { status: "ok", data: await TAURI_INVOKE("apply_backup_plan_stream", { sourceRoot, destRoot, copy, update, deletePaths, verify, confirmed, onResult }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -2828,12 +2860,26 @@ async openTerminal(path: string) : Promise<Result<null, string>> {
 }
 },
 /**
- * Run a resolved user command line through the platform shell and capture its output (CPE-783). The
- * frontend confirms the command with the user first — see the module comment. Async per the commands rule.
+ * Run a resolved user command line through the platform shell and capture its output (CPE-783). Async
+ * per the commands rule.
+ * 
+ * **Refuses up front** ([`Err`], no process spawned, the shell never reached) when `confirmed` is
+ * `false` — CPE-1665, the same shape CPE-1611 gave `shred_paths`, CPE-1630 gave `create_vault`, and
+ * CPE-1651 gave `delete_permanent`/`empty_trash`. `RunCommandConfirm.svelte`'s "Run" button — which
+ * shows the exact resolved command line(s) first — is the one and only call site allowed to set it.
+ * 
+ * **Be precise about what this defends — it is UI discipline enforced in Rust, NOT an authorization
+ * boundary.** The flag rides on the same IPC message as `command`, so any caller that can forge the
+ * call can also set the flag; nothing here makes shell execution safe to expose. What it genuinely
+ * stops: a frontend call site that reaches this command without going through the confirm dialog; a
+ * replayed pre-CPE-1665 payload (serde gives `confirmed` no default, so the old two-argument shape now
+ * fails to deserialize outright); and a mechanical enumerator working from `bindings.gen.ts` that
+ * doesn't know the field exists. A real boundary would have to be something the caller cannot mint — a
+ * backend-issued one-shot consent token, or dropping the command from the IPC surface entirely.
  */
-async runCommand(command: string, cwd: string | null) : Promise<Result<CommandOutput, string>> {
+async runCommand(command: string, cwd: string | null, confirmed: boolean) : Promise<Result<CommandOutput, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("run_command", { command, cwd }) };
+    return { status: "ok", data: await TAURI_INVOKE("run_command", { command, cwd, confirmed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };

@@ -2173,12 +2173,16 @@ fn empty_trash_impl(ids: Option<Vec<String>>, confirmed: bool) -> Result<(), Str
 /// `shred_paths` (CPE-1611) and `create_vault` (CPE-1630), and consistency is worth more than a token
 /// the caller still supplies.
 ///
-/// **Siblings found by the PR #844 review and audit, still ungated — do not read this comment as
-/// "permanent deletion now requires consent" app-wide:** `start_transfer`'s `ConflictPolicy::Overwrite`
-/// reaches `fs::remove_dir_all` on a caller-named path (CPE-1662); `apply_backup_plan` does the same on a
-/// caller-chosen `dest_root`, with a verified one-message wipe (CPE-1664); and `run_command` still
-/// carries the exact "the frontend MUST confirm" promise this ticket was filed against, on a command that
-/// spawns a shell (CPE-1665). Gating this one narrows the step-2 primitive; it does not eliminate it.
+/// **Siblings from the PR #844 review and audit, now gated the same way:** `start_transfer`'s
+/// `ConflictPolicy::Overwrite` (CPE-1662), `apply_backup_plan` + its streaming twin (CPE-1664, which also
+/// fixed `safe_join` to reject a plan entry naming the root — the correctness half, which holds whatever
+/// the caller sets), and `run_command`, whose "the frontend MUST confirm" comment this ticket was filed
+/// against (CPE-1665). **Still do not read this as "destruction now requires consent" app-wide:** the
+/// auditor also flagged `checkpoint_revert` (`crates/server/src/revert_engine.rs`), which mass-`remove_
+/// file`s every file under a caller-chosen root absent from the named manifest — bounded by requiring a
+/// pre-existing checkpoint for that exact root, and semantically a restore, so it was rated lower and is
+/// **not** gated. And every one of these gates is the same UI discipline described above, not an
+/// authorization boundary.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn delete_permanent(
@@ -2641,8 +2645,43 @@ fn measure_one(p: &Path, bytes: &mut u64, files: &mut u64) {
     }
 }
 
+/// The CPE-1662 consent gate for a transfer, checked before anything is measured, inspected or touched.
+///
+/// **Only `ConflictPolicy::Overwrite` is gated**, deliberately. That is the one policy whose collision
+/// handling calls `fs::remove_dir_all` / `remove_file` on `dest/<name>` — a caller-named path — inside
+/// `resolve_conflict`; `Skip` no-ops on a collision and `Keepboth` writes beside it, so neither destroys
+/// anything and neither has anything to ask about. Making every copy/move prompt would train the user to
+/// click through the prompt, which is worse than no gate at all.
+///
+/// `confirmed` is a **separate argument from `policy`** (the CPE-1646 lesson): the policy is what the
+/// user chose to do, the flag is that they were actually asked. Deriving one from the other would make
+/// the gate self-satisfying and worth nothing. `App.svelte`'s `resolveCopyConflict` /
+/// `resolveDropStackCopyConflict` — the two handlers for `TransferConflictDialog`'s buttons — are the
+/// only call sites that pass `true`.
+///
+/// **Be precise about what this defends — it is UI discipline enforced in Rust, NOT an authorization
+/// boundary.** The flag arrives on the same IPC message as `sources`/`dest`/`policy`, so a caller able
+/// to forge the call can set it too. What it genuinely stops: a call site that reaches an overwriting
+/// transfer without the conflict dialog; a replayed pre-CPE-1662 payload (serde gives `confirmed` no
+/// default, so the old argument shape now fails to deserialize outright); and a mechanical enumerator
+/// working from `bindings.gen.ts` that doesn't know the field exists.
+fn require_overwrite_consent(policy: ConflictPolicy, confirmed: bool) -> Result<(), String> {
+    if policy == ConflictPolicy::Overwrite && !confirmed {
+        return Err(
+            "refusing to transfer: `confirmed` was not set on this start_transfer call with the \
+             overwrite policy — overwriting removes whatever already sits at each destination path \
+             (recursively, for a folder) with no Recycle Bin copy and no undo, so it must be re-invoked \
+             with an explicit confirmation (only the copy-conflict dialog's Overwrite choice should \
+             ever set it). Skip and keep-both need no confirmation and are unaffected."
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Resolve a collision at `base_target` per `policy`. `Some(path)` is where to write; `None` means
-/// skip this source (policy `Skip` with an existing target). `Overwrite` removes the existing entry.
+/// skip this source (policy `Skip` with an existing target). `Overwrite` removes the existing entry —
+/// which is why every route to here passes `require_overwrite_consent` first (CPE-1662).
 fn resolve_conflict(base_target: &Path, policy: ConflictPolicy) -> Option<PathBuf> {
     if !base_target.exists() {
         return Some(base_target.to_path_buf());
@@ -2761,16 +2800,36 @@ fn copy_tree_streamed(
 /// Run a whole transfer batch. Pure + headless: `cancel` is polled between chunks and `emit` receives
 /// progress snapshots. Returns the final report. A `Move` uses a same-volume rename fast path and
 /// only deletes a source after its copy fully succeeds (never on partial failure).
+///
+/// `confirmed` is the CPE-1662 consent gate — see [`require_overwrite_consent`]. The engine carries it
+/// as well as the command so the gate is exercised by the code that actually reaches `remove_dir_all`,
+/// rather than sitting outside the function under test (the reasoning `delete_permanent_impl` records);
+/// a refused batch measures nothing, copies nothing and deletes nothing.
+// One over clippy's threshold since CPE-1662 added `confirmed`; same treatment as `copy_tree_streamed`
+// below. Bundling the arguments into a struct would only move the same list somewhere less readable.
+#[allow(clippy::too_many_arguments)]
 fn run_transfer(
     id: u64,
     sources: &[PathBuf],
     dest_dir: &Path,
     kind: TransferKind,
     policy: ConflictPolicy,
+    confirmed: bool,
     cancel: &std::sync::atomic::AtomicBool,
     mut emit: impl FnMut(&TransferProgress),
 ) -> TransferReport {
     use std::sync::atomic::Ordering;
+    // CONFIRM GATE (CPE-1662): first, before the sources are even measured — an unconsented overwriting
+    // transfer must be wholly inert, not "inert but it walked and stat'd your destination first".
+    if let Err(e) = require_overwrite_consent(policy, confirmed) {
+        return TransferReport {
+            id,
+            op: TransferOp::from(kind),
+            failed: 1,
+            errors: vec![e],
+            ..Default::default()
+        };
+    }
     let measured: Vec<(u64, u64)> = sources
         .iter()
         .map(|s| {
@@ -2872,6 +2931,12 @@ fn transfer_registry(
 
 /// Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
 /// `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
+///
+/// **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no ledger note, no
+/// thread spawned, so there is no partial state and no phantom entry in the operations panel — unless
+/// `confirmed` is `true`. See [`require_overwrite_consent`] for why only that policy is gated, why the
+/// flag is a separate argument from `policy`, and exactly what it does and does not defend. The check is
+/// repeated inside [`run_transfer`] so the engine can't be driven past it by a future caller.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 fn start_transfer(
@@ -2880,8 +2945,12 @@ fn start_transfer(
     dest: String,
     kind: TransferKind,
     policy: ConflictPolicy,
-) -> u64 {
+    confirmed: bool,
+) -> Result<u64, String> {
     use std::sync::atomic::Ordering;
+    // Before the id, the registry entry, the app-op note and the thread — a refused transfer must leave
+    // nothing behind at all (mirroring `delete_permanent`'s "note only once we're actually about to").
+    require_overwrite_consent(policy, confirmed)?;
     let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     transfer_registry().lock().unwrap().insert(id, cancel.clone());
@@ -2904,13 +2973,13 @@ fn start_transfer(
     let dest_dir = PathBuf::from(dest);
     let ctx = server_ctx::TauriCtx::new(&app);
     std::thread::spawn(move || {
-        let report = run_transfer(id, &srcs, &dest_dir, kind, policy, &cancel, |p| {
+        let report = run_transfer(id, &srcs, &dest_dir, kind, policy, confirmed, &cancel, |p| {
             let _ = ctx.emit_json("transfer://progress", serde_json::to_value(p).unwrap_or_default());
         });
         let _ = ctx.emit_json("transfer://done", serde_json::to_value(&report).unwrap_or_default());
         transfer_registry().lock().unwrap().remove(&id);
     });
-    id
+    Ok(id)
 }
 
 /// Signal a running transfer to stop at the next chunk boundary (CPE-620). Also cancels an archive
@@ -3385,6 +3454,14 @@ async fn hash_file(path: String) -> Result<String, String> {
 
 /// Streamed backup run (CPE-798 live progress): sends each file's `OpResult` over `on_result` in small
 /// batches as it completes. Returns the total number of results emitted.
+///
+/// `confirmed` is the CPE-1664 consent gate; the engine
+/// (`cpe_server::backup::apply_backup_plan_walk`) owns it, so this dispatcher does nothing special to
+/// enforce it — same treatment CPE-1611 gave `shred_paths`. An unconfirmed call is `Err` with nothing
+/// deleted and **no** batch ever pushed down the channel.
+// Over clippy's threshold since CPE-1664 added `confirmed`; the argument list is the IPC payload shape
+// the frontend sends, so it can't be collapsed without changing the command's public signature.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn apply_backup_plan_stream(
@@ -3394,28 +3471,45 @@ async fn apply_backup_plan_stream(
     update: Vec<String>,
     delete_paths: Vec<String>,
     verify: bool,
+    confirmed: bool,
     on_result: tauri::ipc::Channel<Vec<OpResult>>,
 ) -> Result<usize, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let mut batch: Vec<OpResult> = Vec::new();
         let mut total = 0usize;
-        cpe_server::backup::apply_backup_plan_walk(&source_root, &dest_root, &copy, &update, &delete_paths, verify, |r| {
-            total += 1;
-            batch.push(r);
-            if batch.len() >= 16 {
-                let _ = on_result.send(std::mem::take(&mut batch));
-            }
-        });
+        cpe_server::backup::apply_backup_plan_walk(
+            &source_root,
+            &dest_root,
+            &copy,
+            &update,
+            &delete_paths,
+            verify,
+            confirmed,
+            |r| {
+                total += 1;
+                batch.push(r);
+                if batch.len() >= 16 {
+                    let _ = on_result.send(std::mem::take(&mut batch));
+                }
+            },
+        )?;
         if !batch.is_empty() {
             let _ = on_result.send(batch);
         }
-        total
+        Ok(total)
     })
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?
 }
 
 /// Execute a backup plan (CPE-797). Model lives in `cpe_server::backup` (CPE-821); thin dispatcher.
+///
+/// **CPE-1664:** a mirror plan's `delete_paths` are removed outright under `dest_root` — no Recycle Bin
+/// copy, no undo — from a root the caller chooses freely, so the engine refuses the whole plan unless
+/// `confirmed` is `true`. `BackupDashboard.svelte`'s Run/Restore buttons (and `App.svelte`'s
+/// drive-connect scheduler, for a job the user ticked auto-run for) are the only call sites allowed to
+/// set it. See `cpe_server::backup::apply_backup_plan_walk` for exactly what the flag does and does not
+/// defend — it is UI discipline enforced in Rust, not an authorization boundary.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn apply_backup_plan(
@@ -3425,12 +3519,21 @@ async fn apply_backup_plan(
     update: Vec<String>,
     delete_paths: Vec<String>,
     verify: bool,
-) -> Vec<OpResult> {
+    confirmed: bool,
+) -> Result<Vec<OpResult>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        cpe_server::backup::apply_backup_plan(&source_root, &dest_root, &copy, &update, &delete_paths, verify)
+        cpe_server::backup::apply_backup_plan(
+            &source_root,
+            &dest_root,
+            &copy,
+            &update,
+            &delete_paths,
+            verify,
+            confirmed,
+        )
     })
     .await
-    .unwrap_or_default()
+    .map_err(|e| e.to_string())?
 }
 
 /// Recursively checksum every file under `path` into a baseline manifest — the on-demand baseline for
@@ -7500,10 +7603,14 @@ fn remote_list_dir_stream_impl(
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
 // Runs a user's resolved command line (built by userCommands.resolveCommand / cmdTemplate, CPE-781) and
 // returns its captured output + exit code. Executed through the platform shell (`cmd /C` on Windows,
-// `sh -c` elsewhere) so a normal command string with pipes/quotes works as the user expects. This is an
-// external-process launch, so the frontend MUST confirm the resolved command with the user BEFORE calling
-// (the ticket's hard requirement) — this backend is the thin, gated executor, never invoked implicitly.
-// Output is capped per stream so a chatty command can't balloon memory.
+// `sh -c` elsewhere) so a normal command string with pipes/quotes works as the user expects. Output is
+// capped per stream so a chatty command can't balloon memory.
+//
+// CPE-1665: this comment used to say "the frontend MUST confirm the resolved command with the user
+// BEFORE calling" — the backend delegating a safety decision to the UI, which is precisely the pattern
+// CPE-1651 was filed against, on the most powerful primitive in the process (arbitrary code execution,
+// strictly more than deletion). The requirement now lives in Rust as `run_command`'s `confirmed` flag;
+// see that command's doc comment for what the flag genuinely defends and what it does not.
 
 /// Captured result of a user command run.
 #[derive(serde::Serialize)]
@@ -7530,17 +7637,45 @@ fn capped_string(mut bytes: Vec<u8>, cap: usize) -> (String, bool) {
     (String::from_utf8_lossy(&bytes).into_owned(), truncated)
 }
 
-/// Run a resolved user command line through the platform shell and capture its output (CPE-783). The
-/// frontend confirms the command with the user first — see the module comment. Async per the commands rule.
+/// Run a resolved user command line through the platform shell and capture its output (CPE-783). Async
+/// per the commands rule.
+///
+/// **Refuses up front** ([`Err`], no process spawned, the shell never reached) when `confirmed` is
+/// `false` — CPE-1665, the same shape CPE-1611 gave `shred_paths`, CPE-1630 gave `create_vault`, and
+/// CPE-1651 gave `delete_permanent`/`empty_trash`. `RunCommandConfirm.svelte`'s "Run" button — which
+/// shows the exact resolved command line(s) first — is the one and only call site allowed to set it.
+///
+/// **Be precise about what this defends — it is UI discipline enforced in Rust, NOT an authorization
+/// boundary.** The flag rides on the same IPC message as `command`, so any caller that can forge the
+/// call can also set the flag; nothing here makes shell execution safe to expose. What it genuinely
+/// stops: a frontend call site that reaches this command without going through the confirm dialog; a
+/// replayed pre-CPE-1665 payload (serde gives `confirmed` no default, so the old two-argument shape now
+/// fails to deserialize outright); and a mechanical enumerator working from `bindings.gen.ts` that
+/// doesn't know the field exists. A real boundary would have to be something the caller cannot mint — a
+/// backend-issued one-shot consent token, or dropping the command from the IPC surface entirely.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn run_command(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
-    tauri::async_runtime::spawn_blocking(move || run_command_impl(command, cwd))
+async fn run_command(command: String, cwd: Option<String>, confirmed: bool) -> Result<CommandOutput, String> {
+    tauri::async_runtime::spawn_blocking(move || run_command_impl(command, cwd, confirmed))
         .await
         .map_err(|e| e.to_string())?
 }
 
-fn run_command_impl(command: String, cwd: Option<String>) -> Result<CommandOutput, String> {
+/// See [`run_command`]. Takes `confirmed` itself, rather than being called only once the command has
+/// checked it, so the CPE-1665 gate sits inside the code under test — the same entry point a forged IPC
+/// call reaches (the reasoning `delete_permanent_impl` records).
+fn run_command_impl(command: String, cwd: Option<String>, confirmed: bool) -> Result<CommandOutput, String> {
+    // CONFIRM GATE (CPE-1665): checked first, before the command string is even inspected for
+    // emptiness, and long before a shell is built. Refuses cleanly — no process is created.
+    if !confirmed {
+        return Err(
+            "refusing to run: `confirmed` was not set on this run_command call — this launches an \
+             external process through the platform shell, so it must be re-invoked with an explicit \
+             confirmation (only RunCommandConfirm's \"Run\" button, which shows the resolved command \
+             line first, should ever set it)"
+                .to_string(),
+        );
+    }
     if command.trim().is_empty() {
         return Err("Command is empty".to_string());
     }
@@ -14604,7 +14739,7 @@ overlay / overlay rw,relatime 0 0
     #[test]
     fn run_command_captures_stdout_and_zero_exit() {
         // `echo hello` works under both cmd /C and sh -c; output has a trailing newline (\r\n or \n).
-        let out = run_command_impl("echo hello".to_string(), None).unwrap();
+        let out = run_command_impl("echo hello".to_string(), None, true).unwrap();
         assert!(out.stdout.contains("hello"), "stdout was {:?}", out.stdout);
         assert_eq!(out.code, Some(0));
         assert!(!out.truncated);
@@ -14613,13 +14748,48 @@ overlay / overlay rw,relatime 0 0
     #[test]
     fn run_command_reports_a_nonzero_exit_code() {
         // `exit 3` sets the shell's exit status on both platforms.
-        let out = run_command_impl("exit 3".to_string(), None).unwrap();
+        let out = run_command_impl("exit 3".to_string(), None, true).unwrap();
         assert_eq!(out.code, Some(3));
     }
 
     #[test]
     fn run_command_rejects_an_empty_command() {
-        assert!(run_command_impl("   ".to_string(), None).is_err());
+        assert!(run_command_impl("   ".to_string(), None, true).is_err());
+    }
+
+    /// CPE-1665: the gate must stop the *process*, not just the return value — asserting `Err` came back
+    /// is exactly what let this class of bug survive three tickets. So the command line under test is one
+    /// whose only observable effect is a file: if any child process ran, `pwned.txt` exists. Redirection
+    /// (`>`) behaves the same under `cmd /C` and `sh -c`, so this holds on all three CI legs.
+    ///
+    /// The second half runs the identical line **with** consent and asserts the file DOES appear —
+    /// without it, the first half could pass because the command was harmless all along.
+    #[test]
+    fn run_command_spawns_no_process_at_all_when_not_confirmed() {
+        let d = scratch("run_cmd_gate");
+        let dir = d.to_string_lossy().to_string();
+        let sentinel = d.join("pwned.txt");
+        let line = "echo pwned > pwned.txt".to_string();
+
+        let outcome = run_command_impl(line.clone(), Some(dir.clone()), false);
+        // Disk first, deliberately: "no process was created" is the claim, so the sentinel check is the
+        // assertion that must trip on an ungated build — not a return-value check tripping ahead of it.
+        assert!(
+            !sentinel.exists(),
+            "no child process may be created for an unconfirmed run_command — the shell wrote {}",
+            sentinel.display()
+        );
+        // `CommandOutput` isn't `Debug`, so unwrap the refusal by hand rather than via `expect_err`.
+        let err = match outcome {
+            Err(e) => e,
+            Ok(_) => panic!("an unconfirmed run_command must be refused, not executed"),
+        };
+        assert!(err.contains("`confirmed` was not set"), "the refusal must name the flag: {err}");
+
+        // Same line, consented: it really does spawn a shell, so the assertion above has teeth.
+        run_command_impl(line, Some(dir), true).expect("a confirmed run_command must be allowed to run");
+        assert!(sentinel.exists(), "the consented command must actually run");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -14759,6 +14929,7 @@ overlay / overlay rw,relatime 0 0
             &d.join("dst"),
             TransferKind::Copy,
             ConflictPolicy::Keepboth,
+            false, // keep-both destroys nothing, so it needs no CPE-1662 consent
             &cancel,
             |p| last_done = p.done_bytes,
         );
@@ -14782,18 +14953,18 @@ overlay / overlay rw,relatime 0 0
         let src = || vec![d.join("a.txt")];
 
         // Skip: the existing file is untouched.
-        let r = run_transfer(1, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Skip, &cancel, |_| {});
+        let r = run_transfer(1, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Skip, false, &cancel, |_| {});
         assert_eq!(r.skipped, 1);
         assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"OLD");
 
         // Keep both: a non-colliding copy is created; the original stays.
-        let r = run_transfer(2, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        let r = run_transfer(2, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, false, &cancel, |_| {});
         assert_eq!(r.transferred, 1);
         assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"OLD");
         assert!(d.join("dst/a - Copy.txt").exists(), "keep-both should auto-number");
 
         // Overwrite: the existing file is replaced.
-        let r = run_transfer(3, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        let r = run_transfer(3, &src(), &d.join("dst"), TransferKind::Copy, ConflictPolicy::Overwrite, true, &cancel, |_| {});
         assert_eq!(r.transferred, 1);
         assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"NEW");
         let _ = fs::remove_dir_all(&d);
@@ -14812,7 +14983,7 @@ overlay / overlay rw,relatime 0 0
         let cancel = std::sync::atomic::AtomicBool::new(false);
 
         // File pasted into its own folder with the destructive Overwrite policy — must skip, not delete.
-        let r = run_transfer(1, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        let r = run_transfer(1, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, true, &cancel, |_| {});
         assert_eq!(r.skipped, 1, "copy onto itself must be skipped");
         assert_eq!(r.transferred, 0);
         assert_eq!(r.failed, 0);
@@ -14821,19 +14992,125 @@ overlay / overlay rw,relatime 0 0
 
         // Folder pasted into its own parent with Overwrite — the whole tree must survive (remove_dir_all
         // would otherwise have nuked it).
-        let r = run_transfer(2, &[d.join("sub")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, &cancel, |_| {});
+        let r = run_transfer(2, &[d.join("sub")], &d, TransferKind::Copy, ConflictPolicy::Overwrite, true, &cancel, |_| {});
         assert_eq!(r.skipped, 1);
         assert!(d.join("sub/inner.txt").exists(), "the source folder tree must survive");
         assert_eq!(fs::read(d.join("sub/inner.txt")).unwrap(), b"KEEPDIR");
 
         // The guard is scoped to Overwrite: copy→paste-in-the-same-folder with KEEPBOTH must still produce
         // the in-place duplicate (it falls through to unique_target), not be swallowed by the self-guard.
-        let r = run_transfer(3, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        let r = run_transfer(3, &[d.join("a.txt")], &d, TransferKind::Copy, ConflictPolicy::Keepboth, false, &cancel, |_| {});
         assert_eq!(r.transferred, 1, "keep-both in-place duplicate must still copy");
         assert_eq!(r.skipped, 0);
         assert!(d.join("a - Copy.txt").exists(), "in-place duplicate should be created");
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"KEEP", "the original must remain untouched");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1662: `ConflictPolicy::Overwrite` is the one transfer policy that reaches
+    /// `fs::remove_dir_all(dest/<name>)` on a caller-named path. Without consent the whole batch must be
+    /// refused — and the proof is the **victim tree read back off disk**, nested file included, because
+    /// asserting the returned report is what let this class of bug survive twice.
+    #[test]
+    fn run_transfer_refuses_an_unconfirmed_overwrite_without_deleting_the_victim() {
+        let d = scratch("xfer_gate");
+        // The source: a folder named `Documents`, the shape of the filed exploit.
+        fs::create_dir_all(d.join("src/Documents")).unwrap();
+        fs::write(d.join("src/Documents/new.txt"), b"incoming").unwrap();
+        // The victim: an existing `dst/Documents` tree with a nested file inside it.
+        fs::create_dir_all(d.join("dst/Documents/nested")).unwrap();
+        fs::write(d.join("dst/Documents/taxes.docx"), b"irreplaceable").unwrap();
+        fs::write(d.join("dst/Documents/nested/deep.txt"), b"also irreplaceable").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let mut emitted = 0usize;
+        let r = run_transfer(
+            1,
+            &[d.join("src/Documents")],
+            &d.join("dst"),
+            TransferKind::Copy,
+            ConflictPolicy::Overwrite,
+            false, // confirmed
+            &cancel,
+            |_| emitted += 1,
+        );
+        // OFF-DISK verification FIRST, deliberately: this is the assertion that must carry the claim, so
+        // it is the one that trips on an ungated build rather than a return-value check tripping earlier.
+        // List the victim directory and read the nested file back.
+        let victim = d.join("dst/Documents");
+        let names: Vec<String> = fs::read_dir(&victim)
+            .expect("the victim directory must still be listable after a refused overwrite")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().any(|n| n == "taxes.docx"), "taxes.docx must survive: {names:?}");
+        assert!(names.iter().any(|n| n == "nested"), "nested/ must survive: {names:?}");
+        assert_eq!(
+            fs::read(victim.join("nested/deep.txt")).unwrap(),
+            b"also irreplaceable",
+            "the nested file must survive — this is the remove_dir_all arm the gate covers"
+        );
+        assert!(!victim.join("new.txt").exists(), "nothing may be copied in either");
+
+        // …and only then the reported shape of the refusal.
+        assert_eq!(r.failed, 1, "the refusal must be reported, not silently swallowed");
+        assert_eq!(r.transferred, 0);
+        assert!(
+            r.errors.iter().any(|e| e.contains("`confirmed` was not set")),
+            "the refusal must name what was missing: {:?}",
+            r.errors
+        );
+        assert_eq!(emitted, 0, "a refused batch must not even emit a progress snapshot");
+
+        // Consented, the identical call really does overwrite — so the assertions above have teeth.
+        let r = run_transfer(
+            2,
+            &[d.join("src/Documents")],
+            &d.join("dst"),
+            TransferKind::Copy,
+            ConflictPolicy::Overwrite,
+            true, // confirmed
+            &cancel,
+            |_| {},
+        );
+        assert_eq!(r.transferred, 1, "a consented overwrite must run: {:?}", r.errors);
+        assert!(victim.join("new.txt").exists(), "the consented copy must land");
+        assert!(!victim.join("taxes.docx").exists(), "and it really is destructive");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The gate is scoped to the destructive policy: an unconfirmed `Skip`/`Keepboth` transfer is
+    /// completely unaffected, so routine copies never learn to click through a prompt (CPE-1662 scope 2).
+    #[test]
+    fn run_transfer_does_not_gate_the_non_destructive_policies() {
+        let d = scratch("xfer_gate_scope");
+        fs::write(d.join("a.txt"), b"NEW").unwrap();
+        fs::create_dir_all(d.join("dst")).unwrap();
+        fs::write(d.join("dst/a.txt"), b"OLD").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let r = run_transfer(1, &[d.join("a.txt")], &d.join("dst"), TransferKind::Copy, ConflictPolicy::Skip, false, &cancel, |_| {});
+        assert_eq!(r.skipped, 1);
+        assert_eq!(r.failed, 0, "an unconfirmed skip must not be refused: {:?}", r.errors);
+
+        let r = run_transfer(2, &[d.join("a.txt")], &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, false, &cancel, |_| {});
+        assert_eq!(r.transferred, 1);
+        assert_eq!(r.failed, 0, "an unconfirmed keep-both must not be refused: {:?}", r.errors);
+        assert_eq!(fs::read(d.join("dst/a.txt")).unwrap(), b"OLD", "and it still destroys nothing");
+        assert!(d.join("dst/a - Copy.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The command-level half of the CPE-1662 gate: `start_transfer` refuses before issuing an id or
+    /// spawning its thread, so a refused call leaves no phantom entry in the operations panel. Exercised
+    /// through the shared helper both layers call — `start_transfer` itself needs an `AppHandle`.
+    #[test]
+    fn overwrite_consent_is_required_of_the_command_and_only_for_overwrite() {
+        assert!(require_overwrite_consent(ConflictPolicy::Overwrite, false).is_err());
+        assert!(require_overwrite_consent(ConflictPolicy::Overwrite, true).is_ok());
+        for (p, name) in [(ConflictPolicy::Skip, "skip"), (ConflictPolicy::Keepboth, "keep-both")] {
+            assert!(require_overwrite_consent(p, false).is_ok(), "{name} must never require consent");
+        }
     }
 
     #[test]
@@ -14842,7 +15119,7 @@ overlay / overlay rw,relatime 0 0
         fs::write(d.join("m.txt"), b"data").unwrap();
         fs::create_dir_all(d.join("dst")).unwrap();
         let cancel = std::sync::atomic::AtomicBool::new(false);
-        let r = run_transfer(1, &[d.join("m.txt")], &d.join("dst"), TransferKind::Move, ConflictPolicy::Keepboth, &cancel, |_| {});
+        let r = run_transfer(1, &[d.join("m.txt")], &d.join("dst"), TransferKind::Move, ConflictPolicy::Keepboth, false, &cancel, |_| {});
         assert_eq!(r.transferred, 1);
         assert!(!d.join("m.txt").exists(), "move should remove the source");
         assert_eq!(fs::read(d.join("dst/m.txt")).unwrap(), b"data");
@@ -14855,7 +15132,7 @@ overlay / overlay rw,relatime 0 0
         fs::write(d.join("a.txt"), b"x").unwrap();
         fs::create_dir_all(d.join("dst")).unwrap();
         let cancel = std::sync::atomic::AtomicBool::new(true); // pre-cancelled
-        let r = run_transfer(1, &[d.join("a.txt")], &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, &cancel, |_| {});
+        let r = run_transfer(1, &[d.join("a.txt")], &d.join("dst"), TransferKind::Copy, ConflictPolicy::Keepboth, false, &cancel, |_| {});
         assert!(r.cancelled);
         assert_eq!(r.transferred, 0);
         assert!(!d.join("dst/a.txt").exists());

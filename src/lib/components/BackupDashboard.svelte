@@ -95,6 +95,10 @@
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: srcRoot, destRoot: dstRoot,
         copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
+        // CPE-1664: the backend refuses the plan outright without this. `apply` is only reachable from
+        // the Run / Restore buttons below, so the flag rides on a real click — a mirror plan deletes
+        // files under the destination root with no Recycle Bin copy and no undo.
+        confirmed: true,
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;

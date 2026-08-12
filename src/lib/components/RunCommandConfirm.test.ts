@@ -61,8 +61,10 @@ describe("RunCommandConfirm (CPE-1390)", () => {
     await fireEvent.click(screen.getByText("Run"));
 
     await waitFor(() => expect(screen.getByText("built ok")).toBeTruthy());
-    expect(runCommandMock).toHaveBeenNthCalledWith(1, "npm run build", "/repo");
-    expect(runCommandMock).toHaveBeenNthCalledWith(2, "npm test", "/repo");
+    // The trailing `true` is CPE-1665's consent flag — the backend refuses to spawn without it, and
+    // this dialog's Run button is the one and only call site allowed to send it.
+    expect(runCommandMock).toHaveBeenNthCalledWith(1, "npm run build", "/repo", true);
+    expect(runCommandMock).toHaveBeenNthCalledWith(2, "npm test", "/repo", true);
     expect(runCommandMock).toHaveBeenCalledTimes(2);
 
     expect(screen.getByText("exit 0")).toBeTruthy();
@@ -75,7 +77,21 @@ describe("RunCommandConfirm (CPE-1390)", () => {
     render(RunCommandConfirm, { title: "T", commands: ["echo hi"] }); // cwd defaults to ""
     await fireEvent.click(screen.getByText("Run"));
 
-    await waitFor(() => expect(runCommandMock).toHaveBeenCalledWith("echo hi", null));
+    await waitFor(() => expect(runCommandMock).toHaveBeenCalledWith("echo hi", null, true));
+  });
+
+  it("only sends the CPE-1665 consent flag after the Run click — never on render", async () => {
+    // This file's mock accumulates across cases (each test queues its own `…Once` result), so compare
+    // against the count at entry rather than an absolute one.
+    const before = runCommandMock.mock.calls.length;
+    runCommandMock.mockResolvedValueOnce(ok());
+    render(RunCommandConfirm, { title: "T", commands: ["rm -rf /"] });
+    // Merely showing the dialog must not reach the backend at all.
+    expect(runCommandMock.mock.calls.length).toBe(before);
+
+    await fireEvent.click(screen.getByText("Run"));
+    await waitFor(() => expect(runCommandMock.mock.calls.length).toBe(before + 1));
+    expect(runCommandMock.mock.calls[before][2]).toBe(true);
   });
 
   it("marks a non-zero exit as failed() (err styling) but a zero exit as not failed", async () => {
