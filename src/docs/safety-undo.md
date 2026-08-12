@@ -30,8 +30,10 @@ Rollback](16-checkpoints) for a way to protect a folder *before* a risky operati
 ### The permanent-delete confirmation is enforced end-to-end (CPE-1651)
 
 Because a permanent delete can't be undone, the confirmation isn't just a dialog: the backend **refuses
-to delete anything** unless it is explicitly told that confirmation happened, and the "Delete
-permanently?" dialog's own button is the only thing in the app that says so. The same rule already
+to delete anything** unless it is explicitly told that confirmation happened. Exactly three things in the
+app can say so, and each of them is you making a decision: the "Delete permanently?" dialog's button, the
+Repair Link dialog's replace confirmation, and pressing **Undo** on a folder-watch rule (which removes
+only the copies that rule just made). The same rule already
 covers [secure delete / shred](20-vaults), creating a vault with "securely delete the original"
 checked, [emptying the Trash](38-trash), and [batch-media overwrites](explorer-batch-media) — every
 operation that destroys bytes with no way back asks the same question, and none of them will act on an

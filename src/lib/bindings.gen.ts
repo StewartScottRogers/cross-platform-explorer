@@ -1073,9 +1073,16 @@ async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
  * the independent review of PR #838 used exactly this command as **step 2 of a working exploit chain**
  * (delete a vault's live session dir, plant a junction at the same path, let the locker's shredder walk
  * it). CPE-1647 closed the vault end of that chain by re-checking containment immediately before the
- * wipe; this closes the primitive that made step 2 free. `App.svelte`'s "Delete permanently?" confirm
- * and `RepairLinkDialog.svelte`'s replace-confirm — the only places in the codebase allowed to set
- * `confirmed: true` — are now the only things that can make the backend actually delete a file.
+ * wipe; this closes **this command's** contribution to step 2. Three call sites, and only these three,
+ * are allowed to set `confirmed: true`: `App.svelte`'s "Delete permanently?" confirm,
+ * `RepairLinkDialog.svelte`'s replace-confirm, and `folderWatch.ts`'s `undoFire` (the user pressed Undo,
+ * and `plan.deletes` only ever holds copies that fire itself created at freshly-uniqued paths).
+ * 
+ * **Still open, deliberately not claimed closed here (CPE-1662):** `start_transfer`'s
+ * `ConflictPolicy::Overwrite` reaches `fs::remove_dir_all` on a caller-named path with no consent gate
+ * of its own, so the step-2 primitive is *narrowed* by this ticket, not eliminated. Found by the PR #844
+ * review. Do not restate this comment as "the primitive is gone" until that one is gated too — a doc
+ * comment asserting an invariant the code does not hold is exactly the failure this ticket exists to fix.
  */
 async deletePermanent(paths: string[], confirmed: boolean) : Promise<Result<OpResult[], string>> {
     try {

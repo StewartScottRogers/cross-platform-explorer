@@ -2158,9 +2158,16 @@ fn empty_trash_impl(ids: Option<Vec<String>>, confirmed: bool) -> Result<(), Str
 /// the independent review of PR #838 used exactly this command as **step 2 of a working exploit chain**
 /// (delete a vault's live session dir, plant a junction at the same path, let the locker's shredder walk
 /// it). CPE-1647 closed the vault end of that chain by re-checking containment immediately before the
-/// wipe; this closes the primitive that made step 2 free. `App.svelte`'s "Delete permanently?" confirm
-/// and `RepairLinkDialog.svelte`'s replace-confirm — the only places in the codebase allowed to set
-/// `confirmed: true` — are now the only things that can make the backend actually delete a file.
+/// wipe; this closes **this command's** contribution to step 2. Three call sites, and only these three,
+/// are allowed to set `confirmed: true`: `App.svelte`'s "Delete permanently?" confirm,
+/// `RepairLinkDialog.svelte`'s replace-confirm, and `folderWatch.ts`'s `undoFire` (the user pressed Undo,
+/// and `plan.deletes` only ever holds copies that fire itself created at freshly-uniqued paths).
+///
+/// **Still open, deliberately not claimed closed here (CPE-1662):** `start_transfer`'s
+/// `ConflictPolicy::Overwrite` reaches `fs::remove_dir_all` on a caller-named path with no consent gate
+/// of its own, so the step-2 primitive is *narrowed* by this ticket, not eliminated. Found by the PR #844
+/// review. Do not restate this comment as "the primitive is gone" until that one is gated too — a doc
+/// comment asserting an invariant the code does not hold is exactly the failure this ticket exists to fix.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn delete_permanent(
@@ -2191,8 +2198,8 @@ fn delete_permanent_impl(paths: Vec<String>, confirmed: bool) -> Result<Vec<OpRe
         return Err(
             "refusing to delete: `confirmed` was not set on this delete_permanent call — this is a \
              permanent operation with no Recycle Bin copy and no undo, so it must be re-invoked with \
-             an explicit confirmation (only the \"Delete permanently?\" confirm dialog, or \
-             RepairLinkDialog's replace-confirm, should ever set it)"
+             an explicit confirmation (only the \"Delete permanently?\" confirm dialog, \
+             RepairLinkDialog's replace-confirm, or folderWatch's Undo should ever set it)"
                 .to_string(),
         );
     }
