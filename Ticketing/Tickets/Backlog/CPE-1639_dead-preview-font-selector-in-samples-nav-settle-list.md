@@ -89,3 +89,9 @@ updating the CPE-1507 known-failing entry if the fonts case's behavior changes. 
 batch — left as a follow-up. The selector fix itself and the systematic audit are done and verified by
 the new unit test. Batched with CPE-1620 and CPE-1622 into PR #837 (branch
 `cpe-1620-1622-1639-small-fixes`).
+
+- 2026-08-11 — The code fix (corrected gui-smoke settle selector) shipped in PR #837. Ticket stays open:
+  its remaining acceptance bullet needs a real `tauri build` + tauri-driver run to confirm the
+  `fonts/mini.ttf` case settles on the corrected selector under load. Reviewer + UAT both confirmed the
+  selector now matches real markup (`FontPreview.svelte` `[data-testid="font-preview"]`) and that no other
+  gui-smoke consumer regressed.
