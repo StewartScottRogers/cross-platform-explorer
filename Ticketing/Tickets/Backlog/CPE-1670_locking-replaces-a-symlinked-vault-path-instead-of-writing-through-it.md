@@ -1,5 +1,5 @@
 ---
-id: CPE-1668
+id: CPE-1670
 title: "Locking replaces a symlinked .cpevault path instead of writing through it, unlike create_vault"
 type: bug
 priority: Low

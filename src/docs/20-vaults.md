@@ -63,7 +63,9 @@ was unlocked is kept — then removes the decrypted copy from disk. The badge re
   for a file elsewhere on your disk (hard links) aren't sealed in: shortcuts are skipped, and locking
   **refuses** if it finds a hard-linked file, telling you which one. Copy the real file into the vault
   instead. This is deliberate — a link points at something outside the vault, so storing it would either
-  drag an unrelated file in or leave you with a shortcut to nothing.
+  drag an unrelated file in or leave you with a shortcut to nothing. If a hard link somehow turns up in
+  the folder *after* that check — while the vault is being sealed — the cleanup step removes the extra
+  name and leaves the real file alone, rather than erasing it.
 
 Note that changes are written back **when you lock**, not as you work. If the app is closed or crashes
 while a vault is unlocked, the decrypted folder is left behind and cleaned up on the next start — the
