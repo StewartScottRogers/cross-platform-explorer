@@ -385,9 +385,31 @@ fn execute_one(
 /// that read this trace for what a ratio bound got wrong in practice (a real CI failure on a saturated
 /// runner, 9.1× against a 10× gate, that turned out to be pure contention).
 ///
+/// **What this does NOT cover, stated plainly because the alternative is a guard whose reputation exceeds
+/// its reach (PR #856 re-review).** The ordering assertion pins exactly one property: *the instrumented
+/// transform* does not overlap the window. It does **not** bound the window's size. The reviewer
+/// demonstrated the gap by adding a whole second transform inside the window — both tests stayed green
+/// while printing a **444 ms verify→write window**, which is the same shape and very nearly the same
+/// magnitude as the ~528 ms window the CPE-1624 audit actually exploited.
+///
+/// That coverage was traded away deliberately, because both walls have now been measured and no fixed
+/// ratio fits between them: a 10× gate failed on a saturated CI runner at 9.1× (pure contention), and a
+/// 100× gate fails under `--release`, where the window is ~405,000 ns against a ~35.9 ms transform. The
+/// ratio also never caught the regression this ticket was filed for — the reviewer restored the genuine
+/// O(n) scan and the ratio passed with a 24× margin. The `canonicalize`-count seam cannot cover the
+/// residual either: a second `apply_ops` plus an `fs::read` make zero canonicalize calls.
+///
+/// **So: new work introduced between `window_start` and `write_all` is a CODE-REVIEW obligation with no
+/// automated net.** If you are adding anything there, that is the check — there is no test that will stop
+/// you.
+///
 /// `Instant` is `Copy`, so a plain `Cell` (not `RefCell`) suffices — no borrow to hold across the
 /// read-modify-write. Thread-local for the same reason the other test counters in this module are: tests
-/// run on separate threads and must not see each other's runs.
+/// run on separate threads and must not see each other's runs. The trace is reset at the top of every
+/// [`execute_one`], so in a multi-item batch [`assert_transform_precedes_window`] necessarily inspects
+/// only the **last** item — harmless for today's callers (SEC-7 plans exactly one input; the CPE-1667
+/// test calls `execute_one` directly), but an ordering regression affecting only item 0 of an n-item
+/// batch would go unseen by a future reuse.
 #[cfg(test)]
 #[derive(Debug, Clone, Copy, Default)]
 struct WindowTrace {
@@ -421,6 +443,17 @@ fn trace_mark(set: impl FnOnce(&mut WindowTrace)) {
 /// at all, regardless of how fast or slow either one ran. `Instant` is monotonic, so this is exact on every
 /// build profile and every runner, loaded or not — there is no bound to tune.
 ///
+/// **Read [`WindowTrace`]'s doc for what this deliberately does not cover** — it pins the ordering of the
+/// instrumented transform, not the window's size, and a reviewer demonstrated a 444 ms window passing
+/// green. Do not cite this assertion as evidence that the window is bounded.
+///
+/// Red→green evidence for this assertion is the **faithful** mutation, not a synthetic one: moving
+/// `fs::read` + `apply_ops` bodily to after `open_output_verified`, with the trace marks travelling with
+/// the code exactly as a real regression would move them, turns both tests red deterministically
+/// (`the transform's interval ends 480.4241ms AFTER the window opened`). Moving `window_start` instead
+/// mutates the *instrumentation* and only proves this function works — that was the original proof and it
+/// was the weaker one.
+///
 /// Prints both measured durations (still genuinely useful context) but gates on ordering alone.
 #[cfg(test)]
 fn assert_transform_precedes_window(context: &str) {
@@ -441,10 +474,11 @@ fn assert_transform_precedes_window(context: &str) {
 
     assert!(
         transform_end <= window_start,
-        "{context}: EXPLOIT WINDOW — the transform's interval ends {:?} AFTER the window opened, so the \
-         transform (or part of it) now runs INSIDE the verify->write window. This is an exact ordering \
-         check on monotonic `Instant`s, not a duration ratio, so it cannot flake on build profile or \
-         runner load — a failure here means the ordering itself regressed.",
+        "{context}: THE INSTRUMENTED TRANSFORM MOVED INTO THE WINDOW — its interval ends {:?} AFTER the \
+         window opened. This is an exact ordering check on monotonic `Instant`s, not a duration ratio, so \
+         it cannot flake on build profile or runner load; a failure here means the ordering itself \
+         regressed. NOTE it pins only THIS transform's ordering — it does not bound the window's size, \
+         and other work added inside the window passes it silently (see `WindowTrace`'s doc).",
         transform_end.duration_since(window_start)
     );
 }
