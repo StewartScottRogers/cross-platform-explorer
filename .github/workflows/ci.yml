@@ -486,6 +486,15 @@ jobs:
           echo 'force_local_data_ssl=NO' >> "$conf"
           echo 'force_local_logins_ssl=NO' >> "$conf"
           echo 'require_ssl_reuse=NO' >> "$conf"
+          # CPE-1659: vsftpd's OWN default `ssl_ciphers` is the legacy `DES-CBC3-SHA` (confirmed against
+          # the vsftpd.conf(5) man page) — some distro builds extend it slightly, but never with a modern
+          # AEAD suite. `cpe-ftp`'s rustls-ring client only ever offers ECDHE+AES-GCM/ChaCha20 (TLS 1.2)
+          # and TLS 1.3 suites, so against the real vsftpd default the two sides share zero overlap and
+          # the handshake fails with a bare "HandshakeFailure" alert (confirmed on this rig's first run
+          # to get this far: FTP/SFTP/WebDAV all passed, only FTPS failed on this). `HIGH` is OpenSSL's
+          # own cipher-string alias for its strong-cipher set, which includes the ECDHE-RSA-AES*-GCM
+          # suites rustls needs.
+          echo 'ssl_ciphers=HIGH' >> "$conf"
           # CPE-1659: deliberately NOT setting ssl_tlsv1/ssl_sslv2/ssl_sslv3 here — an earlier guess (never
           # confirmed against a real error) blamed legacy-TLS config rejection for vsftpd's fast exit.
           # Leaving these three directives out lets vsftpd negotiate its own modern default TLS range;
