@@ -1387,3 +1387,47 @@ sonnet for everything; three-leg gauntlet (Reviewer + UAT + Visual/Security as t
 applies exactly-prescribed fixes directly (~8 times, 0 agents); `SendMessage` to resume a worker with context
 beats a fresh dispatch; a worker that reports "awaiting a background notification" is **stalled** — restart it
 and tell it to run synchronously; hold dispatch when the merge queue backs up.
+
+## 2026-08-11 (CLI resume, BATCHED "up to 50") — batches 44→50, run COMPLETE at 50/50
+
+**Shipped (6 PRs, 11 tickets):** CPE-1641 crashed-session visibility (#839) · CPE-1620+1622 small
+frontend fixes (#837) · CPE-1647 vault session containment + lock-time re-validation (#838) ·
+CPE-1632 contrast guard extended app-wide (#841) · CPE-1642 batch-media output identity + long-path
+fail-open (#840) · CPE-1636/1638/1644 log viewer follow-ups (#842) · CPE-1621/1643 close-all-consoles
++ onDestroy leaks (#843).
+
+**Escaped defects: 0. Blockers caught pre-merge: 7.** Four of six PRs needed a second pass; one needed
+three. Every blocker was found by the *independent* leg, never by the author.
+
+**What actually caught things — worth repeating:**
+- **Neutralise each guard separately.** On CPE-1647 the reviewer disabled the lock-time re-check and the
+  symlink refusal one at a time; both went red independently, and that experiment revealed one of them was
+  the sole protection on a second code path nobody had mentioned. On CPE-1642 the same technique found a
+  guard that could be **deleted with the suite staying green** — an unpinned last line of defence.
+- **A fix can be worse than the bug.** CPE-1642 round 1 introduced a MAX_PATH fail-open: the probe used a
+  Win32 call that silently stops working past 260 chars while the writer (`std::fs`) does not. Base `main`
+  refused the case; the "fix" allowed it. **When a fix replaces a mechanism, diff the new mechanism's reach
+  against the old one's.**
+- **Test the guard, not just the code.** CPE-1632's contrast guard passed vacuously on
+  `color: var(--token, #fff)` — the reviewer proved it by injecting a deliberately-broken pair and watching
+  the guard stay green and emit no assertion at all.
+- **Real inputs beat fixtures, again.** Every UTF-16 fixture in #842 was pure ASCII; one emoji in a real log
+  broke detection entirely. The UAT used genuine Windows logs (Edge update, MSI, CBS, DISM) and live
+  `node`/`python`/`cargo` crashes.
+- **Refuse "too noisy to measure".** A reviewer re-ran the CPE-1642 perf test against base and found the
+  fix is ~19% *faster* — the worker had written it off as unmeasurable noise.
+- **Two independent legs converging is the signal.** On CPE-1621 the reviewer and the UAT found the same
+  failure-path defect by different routes (code reading vs an executable UI repro).
+
+**Tuned defaults observed:** security-containment-rust → **opus** for both worker and reviewer (every one of
+those tickets needed 2-3 rounds; sonnet review would have missed the MAX_PATH and TOCTOU classes).
+frontend/theme/log-viewer classes → **sonnet** throughout, no escapes. Median agent 1779s; 30 agent-runs
+for 11 tickets (~2.7/ticket) — the conditional-legs gating held.
+
+**Foreman-applied fixes (0 agents):** the CPE-1642 guard-pinning test, red-then-green verified. Worth doing
+when a reviewer prescribes an exact, small change.
+
+**9 follow-up tickets filed from review findings:** CPE-1650 (SSH repo URLs), 1651 (delete_permanent has no
+backend gate — the exploit chain's step 2), 1652 (reparse tags + census cost), 1653 (link debris), 1654
+(refused-lock UX + docs), 1655 (errors with no level word), 1656 (u16-table binaries + Go/Ruby/Rust traces),
+1657 (timestamp-shaped digits defeat the bracket gate), 1658 (idle conhost survives close-all).
