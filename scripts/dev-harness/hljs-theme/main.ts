@@ -2,7 +2,8 @@
 // src/lib/theme.ts does in the real app, then runs the REAL highlight.ts against two representative
 // samples (a TypeScript file for the plain code preview, a Python snippet for a notebook code cell)
 // and injects the output into the real component markup, so a screenshot shows exactly what a user
-// would see.
+// would see. CPE-1661 widened accepted `?theme=` values to all four the app ships (see VALID_THEMES
+// below) so this harness can also screenshot hc-light/hc-dark, not just light/dark.
 import {
   ensureLanguageForName,
   highlightForFile,
@@ -10,9 +11,43 @@ import {
   highlightCode,
 } from "../../../src/lib/preview/highlight";
 
+// CPE-1661: widened from light|dark to all four `data-theme` values this app actually ships
+// (CPE-1543's hc-light/hc-dark), so this harness can screenshot the high-contrast themes too — the
+// keyword/title CVD collision this ticket fixes exists in light AND hc-light.
+const VALID_THEMES = ["light", "dark", "hc-light", "hc-dark"] as const;
+type HarnessTheme = (typeof VALID_THEMES)[number];
 const params = new URLSearchParams(location.search);
-const theme = params.get("theme") === "dark" ? "dark" : "light";
+const requestedTheme = params.get("theme");
+const theme: HarnessTheme = (VALID_THEMES as readonly string[]).includes(requestedTheme ?? "")
+  ? (requestedTheme as HarnessTheme)
+  : "light";
 document.documentElement.dataset.theme = theme;
+
+// CPE-1661: a Rust sample using the EXACT tokens the ticket names — `fn`/`let`/`struct` (keyword)
+// vs `Manifest`/`Path`/`Result`/`String` (title, via highlight.js's rust grammar treating capitalised
+// type names as `hljs-title`-bucketed tokens) — so the screenshot evidence matches the ticket's own
+// worked example, not just a proxy language.
+const RUST_SAMPLE = `use std::path::Path;
+
+/// Loads and validates a package manifest from disk.
+struct Manifest {
+    name: String,
+    version: String,
+}
+
+fn load_manifest(path: &Path) -> Result<Manifest, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let name = raw.lines().next().unwrap_or_default().to_string();
+    let version = String::from("0.1.0");
+    Ok(Manifest { name, version })
+}
+`;
+
+async function renderRust() {
+  const el = document.getElementById("rust-sample")!;
+  await ensureLanguage("rust");
+  el.innerHTML = highlightCode(RUST_SAMPLE, "rust");
+}
 
 // TypeScript sample exercising: keyword/selector-tag (import, interface, const, class, constructor,
 // private, readonly, async, for, let, try, return, await, catch, throw, new, export), title (class
@@ -112,5 +147,5 @@ async function renderSvelte() {
   el.innerHTML = highlightForFile(SVELTE_SAMPLE, "sample.svelte");
 }
 
-await Promise.all([renderCodePreview(), renderNotebookCell(), renderJson(), renderSvelte()]);
+await Promise.all([renderRust(), renderCodePreview(), renderNotebookCell(), renderJson(), renderSvelte()]);
 (window as unknown as { __hljsHarnessReady?: boolean }).__hljsHarnessReady = true;

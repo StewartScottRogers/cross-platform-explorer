@@ -1,0 +1,120 @@
+<!doctype html>
+<!--
+  CPE-1661 CVD (colour-vision-deficiency) screenshot capture page. NOT part of the production build
+  — dev-only, alongside index.html/main.ts (CPE-1631). Loads index.html three times in fixed-size
+  iframes (normal vision / protanopia / deuteranopia), applying the SAME Machado, Oliveira & Fialho
+  (2009) dichromacy matrices documented in .claude/qa-architecture/CVD-SIMULATION-METHOD.md as an SVG
+  `feColorMatrix` filter with `color-interpolation-filters="sRGB"` (that doc's own documented
+  scripted/headless method — no linearRGB round-trip), applied via CSS `filter: url(#id)` on the
+  iframe element itself (an iframe participates in normal CSS compositing, so a `filter` rasterizes
+  and recolours its rendered content exactly like any other element).
+
+  Headless-Chrome viewport gotcha (see CVD-SIMULATION-METHOD.md / the CPE-1661 ticket): under
+  `--headless=new`, `--window-size` does NOT reliably set the CSS layout viewport — it can clamp to
+  ~500px and rescale the output image, silently laying out (and therefore CVD-simulating) content at
+  the wrong width. Iframes sidestep this: an iframe's nested browsing-context viewport is set by its
+  OWN rendered box size (the `width`/`height` attributes below), not by the outer top-level window's
+  viewport metrics, so it's unaffected by that bug. The `#verify` banner at the top of the page prints
+  each iframe's measured `contentWindow.innerWidth`/`innerHeight` (read from INSIDE the iframe, not
+  guessed from the outer layout) once every iframe has loaded, baking the proof directly into the
+  screenshot instead of requiring a separate JS-evaluation step.
+
+  Usage: with `npm run harness:hljs-theme` running (port 4320), open
+  http://localhost:4320/scripts/dev-harness/hljs-theme/cvd-capture.html?theme=light (theme =
+  "light"|"dark"|"hc-light"|"hc-dark", default "light").
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1661 CVD capture — hljs theme</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #fff; font-family: "Segoe UI", sans-serif; }
+      #verify {
+        padding: 8px 12px; font: 12px/1.4 "Segoe UI", sans-serif; color: #111; background: #fffbcc;
+        border-bottom: 1px solid #ccc; white-space: pre;
+      }
+      #title-bar { padding: 8px 12px; font: 700 16px/1.3 "Segoe UI", sans-serif; color: #111; }
+      .row { display: flex; align-items: flex-start; gap: 12px; padding: 0 12px 16px; }
+      .col { display: flex; flex-direction: column; gap: 4px; }
+      .col h3 { margin: 0; font: 600 13px "Segoe UI", sans-serif; color: #111; }
+      iframe { border: 1px solid #999; display: block; }
+      /* protanopia/deuteranopia filters defined in the inline <svg> below and referenced here. */
+      .cvd-protanopia { filter: url(#cvd-protanopia); }
+      .cvd-deuteranopia { filter: url(#cvd-deuteranopia); }
+    </style>
+  </head>
+  <body>
+    <!-- Machado, Oliveira & Fialho (2009) full-severity dichromacy matrices, verbatim from
+         .claude/qa-architecture/CVD-SIMULATION-METHOD.md, expressed as feColorMatrix's 4x5 form
+         (3x3 colour block + 0 alpha-mixing column + 0 offset column; alpha row left as identity so
+         transparency is untouched, matching the doc's "alpha untouched" note).
+         color-interpolation-filters="sRGB" is REQUIRED — it's what makes the matrix apply directly
+         to gamma-encoded sRGB channel values instead of Chrome's default linearRGB, matching the
+         documented method exactly (and matching Chrome DevTools' own CVD emulation panel). -->
+    <svg width="0" height="0" style="position:absolute">
+      <filter id="cvd-protanopia" color-interpolation-filters="sRGB">
+        <feColorMatrix type="matrix" values="
+          0.152286  1.052583 -0.204868 0 0
+          0.114503  0.786281  0.099216 0 0
+         -0.003882 -0.048116  1.051998 0 0
+          0         0         0        1 0
+        "/>
+      </filter>
+      <filter id="cvd-deuteranopia" color-interpolation-filters="sRGB">
+        <feColorMatrix type="matrix" values="
+          0.367322  0.860646 -0.227968 0 0
+          0.280085  0.672501  0.047413 0 0
+         -0.011820  0.042940  0.968881 0 0
+          0         0         0        1 0
+        "/>
+      </filter>
+    </svg>
+    <div id="title-bar"></div>
+    <div id="verify">verifying iframe viewport widths…</div>
+    <div class="row">
+      <div class="col">
+        <h3>Normal vision</h3>
+        <iframe id="f-normal" width="620" height="900"></iframe>
+      </div>
+      <div class="col">
+        <h3>Protanopia (simulated)</h3>
+        <iframe id="f-prot" class="cvd-protanopia" width="620" height="900"></iframe>
+      </div>
+      <div class="col">
+        <h3>Deuteranopia (simulated)</h3>
+        <iframe id="f-deut" class="cvd-deuteranopia" width="620" height="900"></iframe>
+      </div>
+    </div>
+    <script type="module">
+      const VALID_THEMES = ["light", "dark", "hc-light", "hc-dark"];
+      const params = new URLSearchParams(location.search);
+      const requested = params.get("theme");
+      const theme = VALID_THEMES.includes(requested) ? requested : "light";
+      document.getElementById("title-bar").textContent =
+        `CPE-1661 — hljs keyword/title CVD check — theme: ${theme}`;
+
+      const frames = ["f-normal", "f-prot", "f-deut"].map((id) => document.getElementById(id));
+      for (const f of frames) f.src = `./index.html?theme=${theme}`;
+
+      let loaded = 0;
+      const report = [];
+      function onFrameLoad(f) {
+        loaded++;
+        try {
+          const w = f.contentWindow.innerWidth;
+          const h = f.contentWindow.innerHeight;
+          report.push(`${f.id}: contentWindow ${w}x${h} (expected 620 wide)`);
+        } catch (e) {
+          report.push(`${f.id}: could not read contentWindow (${e})`);
+        }
+        if (loaded === frames.length) {
+          document.getElementById("verify").textContent =
+            "Iframe viewport verification (read from INSIDE each iframe, not the outer page):\n" +
+            report.join("\n");
+          document.title = "CPE-1661 CVD capture — ready";
+        }
+      }
+      for (const f of frames) f.addEventListener("load", () => onFrameLoad(f));
+    </script>
+  </body>
+</html>
