@@ -63,6 +63,28 @@ new commands and no new frontend plumbing.
       -D warnings` clean in both feature modes; any `Cargo.lock` delta committed, **including
       `src-tauri/Cargo.lock`** if the app pulls the new crate.
 
+## Handed over from CPE-1686 (frontend landed first, 2026-08-12) — read before deciding
+
+CPE-1686 shipped the savable `s3` scheme and had to settle the endpoint/region shape to do it. Its answers,
+now live in `src/lib/network.ts` (see `schemeFieldHints`'s doc comment) and asserted by `network.test.ts`:
+
+- **`host` = the endpoint host** (`s3.us-east-1.amazonaws.com`, `minio.lan`), **`port` = the endpoint port**,
+  **`user` = the region** (blank ⇒ `us-east-1`), **`path` = `/bucket[/prefix]`** with the bucket as the first
+  segment. This *contradicts this ticket's parenthetical* "`conn.host` is the bucket": that reading leaves a
+  custom endpoint inexpressible, which would break the epic's "B2/GCS/Wasabi/MinIO come free" claim, since
+  those endpoints cannot be derived from a region. `location.rs` still parses the result unchanged —
+  `s3://us-east-1@minio.lan:9000/my-bucket/prefix` splits the same way it always did. No new `Connection`
+  field was needed, and none was added.
+- **`secret_ref` = the connection's `name`** — the same key `secret_for(access, &conn.name)` already uses. It
+  is a label naming the keychain entry, never the secret. That is what the form now writes.
+- **`default_port("s3")` must be `443`** — `network.ts`'s `DEFAULT_PORTS.s3` is 443 and `network.test.ts`
+  asserts that literal, so anything else here reintroduces exactly the silent drift the mirror exists to stop.
+- The frontend already refuses to connect an `AccessKey` connection with no stored secret
+  (`secretAlwaysRequired`), prompting for "Secret access key" first — the backend guard this ticket adds is
+  the second line of defence, not the only one.
+- `src/docs/31-network.md` carries a transitional paragraph ("saving works now; the provider ships alongside
+  it"). **Delete that paragraph as part of this ticket** — once `s3` routes, it becomes a lie.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1683** and **CPE-1684** (there
