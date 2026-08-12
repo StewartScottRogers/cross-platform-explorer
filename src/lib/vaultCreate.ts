@@ -67,3 +67,25 @@ export function canCreate(state: {
 export function shouldShowShredWarning(shredOriginal: boolean): boolean {
   return shredOriginal;
 }
+
+/**
+ * Whether "Create vault" may actually be submitted (CPE-1646). Layers a SECOND, independent gate on
+ * top of {@link canCreate}: when "securely delete the original" is intended (`shredOriginal`), the
+ * dialog also requires a genuinely separate acknowledgement (`shredConfirmed`) — never derived from
+ * `shredOriginal` itself. This is the fix for the bug CPE-1646 raised: the dialog used to pass the same
+ * `shredOriginal` value as both the intent AND the consent argument to `vault_create`, re-creating the
+ * "one flag doing double duty" collapse CPE-1599 exists to prevent. With this gate, ticking the shred
+ * checkbox alone can never satisfy the create-enabled condition — only the SEPARATE acknowledgement
+ * control (rendered inside the warning panel) can — so intent and consent can't drift into each other
+ * through a future refactor, restored draft, or deep-link default.
+ */
+export function canSubmitCreate(state: {
+  passphrase: string;
+  confirm: string;
+  dest: string;
+  busy: boolean;
+  shredOriginal: boolean;
+  shredConfirmed: boolean;
+}): boolean {
+  return canCreate(state) && (!state.shredOriginal || state.shredConfirmed);
+}

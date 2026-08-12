@@ -6,6 +6,7 @@ import {
   siblingVaultDest,
   checkPassphrases,
   canCreate,
+  canSubmitCreate,
   shouldShowShredWarning,
 } from "./vaultCreate";
 
@@ -83,5 +84,34 @@ describe("shouldShowShredWarning — shred checkbox gates the destructive warnin
   it("shows the warning only when 'securely delete the original' is on", () => {
     expect(shouldShowShredWarning(true)).toBe(true);
     expect(shouldShowShredWarning(false)).toBe(false);
+  });
+});
+
+// CPE-1646: `canSubmitCreate` layers the shred-consent gate on top of `canCreate`. The whole point is
+// that `shredOriginal` (intent) and `shredConfirmed` (consent) are two INDEPENDENT inputs — flipping one
+// must never be equivalent to flipping the other.
+describe("canSubmitCreate — the shred-consent gate is independent of shred intent", () => {
+  const okBase = { passphrase: "pw", confirm: "pw", dest: "/x/v.cpevault", busy: false };
+
+  it("is true with shred off, regardless of shredConfirmed (no extra friction for the common case)", () => {
+    expect(canSubmitCreate({ ...okBase, shredOriginal: false, shredConfirmed: false })).toBe(true);
+    expect(canSubmitCreate({ ...okBase, shredOriginal: false, shredConfirmed: true })).toBe(true);
+  });
+
+  it("is false with shred on but NOT confirmed — intent alone is not enough", () => {
+    expect(canSubmitCreate({ ...okBase, shredOriginal: true, shredConfirmed: false })).toBe(false);
+  });
+
+  it("is true only once BOTH shred is intended AND separately confirmed", () => {
+    expect(canSubmitCreate({ ...okBase, shredOriginal: true, shredConfirmed: true })).toBe(true);
+  });
+
+  it("still respects the base canCreate gate (busy / mismatch / blank dest) even when confirmed", () => {
+    expect(canSubmitCreate({ ...okBase, busy: true, shredOriginal: true, shredConfirmed: true })).toBe(
+      false,
+    );
+    expect(
+      canSubmitCreate({ ...okBase, confirm: "nope", shredOriginal: true, shredConfirmed: true }),
+    ).toBe(false);
   });
 });

@@ -354,8 +354,11 @@ describe("App — Create encrypted vault… is pane-aware + snapshot-safe (CPE-1
     await fireEvent.click(menu.getByText("Create encrypted vault…"));
     const dialog = await screen.findByRole("dialog");
 
-    // Opt into the destructive "shred the original" path.
+    // Opt into the destructive "shred the original" path, and separately acknowledge it (CPE-1646: the
+    // shred checkbox is intent, the "I understand…" checkbox is the distinct consent act — the dialog
+    // won't submit on intent alone).
     await fireEvent.click(within(dialog).getByTestId("vault-shred"));
+    await fireEvent.click(within(dialog).getByTestId("vault-shred-confirm"));
 
     // The active pane changes WHILE the passphrase dialog is still open.
     await fireEvent.click(paneAWrap);
