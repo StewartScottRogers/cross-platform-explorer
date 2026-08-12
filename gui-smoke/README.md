@@ -148,32 +148,75 @@ No spec or `wdio.conf.ts` capability changes are needed per OS — `APP_BINARY`/
 already resolve per-`process.platform`, and `tauri-driver` itself picks `WebKitWebDriver` vs
 `msedgedriver.exe` off `PATH`.
 
-### The ratchet (CPE-1594) — how the Linux leg's verdict is computed
+### The ratchet (CPE-1594, case-granular since CPE-1677) — how the Linux leg's verdict is computed
 
-The Linux leg does **not** require every spec to pass. It requires **no new failures** beyond a
-committed, named list:
+The Linux leg does **not** require every test to pass. It requires **no new failures** beyond a
+committed, named list — and the unit of exemption is **one test case**, not a whole spec file:
 
-- **`gui-smoke/known-failing.json`** — the specs currently allowed to fail, each with a `reason` and
-  an owning `ticket`. Anything failing that ISN'T in this file reds the job.
+- **`gui-smoke/known-failing.json`** — a `cases` array. Each entry is one `it()` that is allowed to
+  fail today: `{ "spec": "<spec file basename>", "test": "<it() title, verbatim>", "reason": ...,
+  "ticket": ... }`. Anything failing that ISN'T listed reds the job — **including a case inside a spec
+  file that already has other entries here.**
 - **`gui-smoke/lib/ratchet.ts`** (pure, unit-tested in `ratchet.test.ts`) + **`gui-smoke/scripts/run-ratchet.ts`**
   (the `npm run ratchet` I/O wrapper the CI step actually runs) compare the suite's real JSON results
-  (`wdio.conf.ts`'s `json` reporter, written to `gui-smoke/.results/`) against that file and decide:
-  1. **`NEW GUI REGRESSION`** — a spec failed that isn't listed. Fix it, or (if intentionally deferring
-     it) add an entry to `known-failing.json` with a reason + ticket.
-  2. **`RATCHET: <spec> now passes`** — a spec listed as known-failing PASSED this run. **Delete its
-     entry from `known-failing.json` in the same PR.** The ratchet is one-way: once a spec is fixed, it
-     can never quietly re-enter the failing column — leaving a passing spec listed would hide a real
-     future regression on it.
-  3. **`SUITE DID NOT COMPLETE`** — fewer specs reported a result than `specs/*.smoke.ts` globs to (a
-     timeout, crash, or hang). This is the specific guard against the exact failure mode CPE-1594 was
+  (`wdio.conf.ts`'s `json` reporter, written to `gui-smoke/.results/`, read down to
+  `suites[].tests[].name` + `.state`) against that file and decide:
+  1. **`NEW GUI REGRESSION`** — a case failed that isn't listed. Fix it, or (if intentionally deferring
+     it) add an entry for **that case** with a reason + ticket. Never exempt the whole file.
+  2. **`RATCHET: <case> now passes`** — a case listed as known-failing PASSED this run. **Delete its
+     entry from `known-failing.json` in the same PR.** The ratchet is one-way: once a case is fixed, it
+     can never quietly re-enter the failing column — leaving a passing case listed would hide a real
+     future regression on it, and the QA burndown depends on this list draining.
+  3. **`STALE EXEMPTION`** — a listed `test` title matched **no case** in the run. Titles are strings
+     and they drift; if a rename silently dropped the exemption it would drop the case's coverage with
+     it. Update the entry's `test`, or delete the entry if the case is genuinely gone (and check that
+     losing its coverage was intended).
+  4. **`SUITE DID NOT COMPLETE`** — fewer spec FILES reported a result than `specs/*.smoke.ts` globs to
+     (a timeout, crash, or hang). This is the specific guard against the exact failure mode CPE-1594 was
      filed over: 796 straight `cancelled` runs where a dead leg's timeout-kill made the whole workflow
-     unreadable. A truncated run is always RED, never green.
+     unreadable. A truncated run is always RED, never green. (Kept at spec granularity: there is no
+     committed expected-case count, and clause 3 already catches a truncation that swallows a listed
+     case.)
+  5. **`DUPLICATE EXEMPTION`** — the same `spec` + `test` is listed twice. List hygiene: with a
+     duplicate present, "delete its entry" in clauses 2/3 would leave the case exempt anyway.
 
-**Retiring a `known-failing.json` entry** (once its spec is actually fixed): reproduce locally
+  A `skipped`/`pending` case is neither: it can't red the job and can't retire an exemption, but it does
+  prove the title still exists. A **failing hook** becomes a synthetic case named `<hook> "<title>"`,
+  which is unlisted by construction and therefore red — a `before` hook that throws usually means its
+  suite's cases never reported at all, and "absent" must never read as green.
+
+**`"intermittent": true` — the one escape hatch, and how not to abuse it.** Case granularity turns a
+genuinely flaky case into a coin-flip gate: clause 1 reds the runs where it fails, clause 2 reds the runs
+where it passes, and the job is red either way regardless of the change under test. An entry marked
+`"intermittent": true` is exempt in **both** directions. It must still exist (clause 3 still applies),
+and `npm run ratchet` prints every intermittent entry **with its observed status on every run**, so it
+stays visible and drainable instead of becoming a quiet permanent hole. The bar is evidence, not
+annoyance: the entry's `reason` must cite the real runs where the same case both passed and failed on
+unchanged code. A case that fails *every* run is a plain entry, not an intermittent one.
+
+The four **media** cases (`samples/audio/track.{flac,mp3,ogg}` + `samples/video/clip.mp4` — exactly the
+samples whose settle-detection depends on `.mp-media`, MediaPreview's `<audio>`/`<video>`) are the
+current and only users of it. CPE-1677's first live runs found a different one or two of them failing
+almost every run on unchanged code across eight real runs (`31593963928`, `31598207125`, `31602466829`,
+`31617196015`, `31621443412`, `31622660088` attempts 1+2, `31630437256`) — including one run **on `main`**
+where the old whole-file ratchet still printed `OK`. The boundary is the `.mp-media` family, not a
+case-by-case guess. Unverified hypothesis for the follow-up ticket: GStreamer/WebKitGTK media init under
+Xvfb occasionally exceeds the 20s settle window.
+
+**Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
+is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
+nothing: the CPE-1639 worker deliberately broke the font-preview case inside that file, ran the real
+job, and the baseline run and the broken run printed the **byte-identical** verdict — `38 passed, 3
+failed, 3 known-failing listed — OK` — and both passed. Only the raw per-test log showed the flip. Hence
+also: `npm run ratchet` now always prints the per-case failing set, green or red, so a verdict can never
+again be identical across a clean and a broken run.
+
+**Retiring a `known-failing.json` entry** (once its case actually passes): reproduce locally
 (`cd gui-smoke && xvfb-run --auto-servernum npm test` on Linux, or just `npm test` if your desktop
-already runs the Linux driver stack), confirm the spec passes, delete its entry from
-`known-failing.json`, and open the PR. `npm run ratchet` will fail loudly (case 2 above) if you forget
-and leave a passing spec listed.
+already runs the Linux driver stack), confirm the case passes, delete **that case's** entry from
+`known-failing.json`, and open the PR. `npm run ratchet` will fail loudly (clause 2 above) if you forget
+and leave a passing case listed. If you RENAME a listed case, update its `test` in the same commit —
+clause 3 will red the job otherwise.
 
 **Testing the ratchet locally without a real `tauri-driver` run** — `npm run ratchet` reads its inputs
 from disk and every path is overridable via env var, so it can be pointed at a saved/synthetic report:
