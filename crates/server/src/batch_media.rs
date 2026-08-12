@@ -15,7 +15,7 @@
 //! computed output would leave the input's own directory (`validate()` also rejects the template up
 //! front, so this is the engine's own backstop, not just the one UI's field-level check) — see `plan()`'s
 //! own doc for the containment check (shared with `validate()`'s field-level echo AND
-//! `batch_execute::execute_plan_walk`'s pre-write re-check, via [`output_escapes_input_dir`]) and the
+//! `batch_execute::execute_plan_walk`'s pre-write re-check, via [`classify_output_containment`]) and the
 //! broadened real-filesystem collision guard that closes the rest of the gap. `validate()` sanitises
 //! **both** `Rename.template` and `Convert.to_ext` — an earlier cut of this fix checked only the former,
 //! which `plan()`'s own backstop still caught (never exploitable) but left no early field-level warning
@@ -31,7 +31,7 @@
 //! exist there?", never "does this stay inside the input's folder?" — so a **new** file at an arbitrary
 //! location sailed straight through, `confirmed_overwrite` or not. `execute_plan_walk` now re-derives
 //! containment itself, per item, before any byte is read or written, using the identical
-//! [`output_escapes_input_dir`] check `plan()` uses — see that module's doc for the refusal. The engine is
+//! [`classify_output_containment`] check `plan()` uses — see that module's doc for the refusal. The engine is
 //! now the actual enforcement point end-to-end, not just this one module's own two entry points.
 //!
 //! **`..` is a traversal risk only as a whole path segment, not any occurrence (UAT follow-up).** The
@@ -59,7 +59,7 @@
 //! **extensionless input** plus a template that's literally `".."` produced an `output` whose FINAL path
 //! component is a bare dot-segment, which `split` hands back as an ordinary "stem" — `out_dir == dir`
 //! skips the check entirely even though the output denotes a directory, not a file. Both are now guarded
-//! explicitly in [`output_escapes_input_dir`] itself (not just `validate()`'s template-level `:` rejection
+//! explicitly in [`classify_output_containment`] itself (not just `validate()`'s template-level `:` rejection
 //! above, which only covers the one production call path) — see that fn's doc for the exact conditions.
 //!
 //! **Link-as-final-component defeats the directory-identity comparison itself (reviewer, PR #828 attempt
@@ -76,10 +76,26 @@
 //! `is_foreign_overwrite` sees "nothing there" and `confirmed_overwrite` never even needs to be set. Both
 //! shapes are reachable off the IPC bypass AND (a rename template producing the stem `link`) an ordinary
 //! UI-driven batch, since `plan()`'s own non-destructive collision check uses the same `Path::is_file()`
-//! blind spot. [`output_escapes_input_dir`] now resolves the final component before trusting `out_dir ==
-//! dir` — see [`link_alias_escapes`] for exactly what each link shape does and does not close, in
-//! particular why a hard link's OTHER name is fundamentally unobservable without a disproportionate
-//! full-volume walk, and why that fails closed instead of guessing.
+//! blind spot. The containment check therefore resolves the final component before trusting `out_dir ==
+//! dir` at all.
+//!
+//! **Resolve the output's IDENTITY; stop pattern-matching link shapes (CPE-1642).** Three rounds of audit
+//! on the fix above each closed the shape that had been demonstrated and left the next one open: raw text
+//! → one-hop links → chains → contended reads. Two escapes survived: (A) a same-directory symlink
+//! **chain**, because the check read exactly ONE hop and compared only that target's *directory* — so
+//! `linkA → linkB → outside/victim` passed, and the outside victim's bytes really did change; and (B) the
+//! Windows hard-link count **failed open**, defaulting to "1 link" whenever its `GENERIC_READ` open
+//! failed, so an ordinary unprivileged process holding the file with `share_mode(0)` (or an AV scanner,
+//! or another thread of the same batch) turned a fail-closed rule into a fail-open one. The space of link
+//! shapes is not bounded by our imagination, so the check no longer enumerates it: it resolves the
+//! output's **true filesystem identity** — `(volume serial, file index)` on Windows,
+//! `(dev, ino)` on Unix — and compares identities. Chains are walked to their real end, hard links are
+//! settled by a census of the one folder the user selected, and **every failure to establish identity is
+//! a refusal**, never a pass. See [`classify_output_containment`] and [`resolve_output_containment`].
+//! That also let the one deliberate false positive go: a multiply-linked file whose every name is inside
+//! the selected folder reaches nothing outside it, and is now correctly allowed. Refusals distinguish
+//! "provably left the folder" from "couldn't be verified" ([`Containment`]) — telling a user their file
+//! escaped when it demonstrably didn't is its own defect.
 //!
 //! **Same-file detection (CPE-1613).** "Does output overwrite input?" must NOT be decided by raw string
 //! equality: `plan()` itself lower-cases a `Convert` target's extension, so `IMG_1.JPG` + Convert→jpg
@@ -215,11 +231,11 @@ pub struct PlannedItem {
 ///
 /// **`:` (reviewer finding, PR #828 attempt 2).** A template like `"C:foo"` contains none of the three
 /// original characters this fn checked — only `/`, `\`, `..` were rejected — so it passed straight
-/// through both here and [`output_escapes_input_dir`]'s directory-identity comparison for a
+/// through both here and [`classify_output_containment`]'s directory-identity comparison for a
 /// **bare-filename input** (no directory component at all, so both `dir` and the computed `out_dir` are
 /// textually empty and compare equal): a classic Windows drive-relative reference, which resolves against
 /// drive `C:`'s *current directory* at write time — not the folder the user picked. Rejecting `:` outright
-/// closes it at this field-level layer; [`output_escapes_input_dir`] carries a second, independent guard
+/// closes it at this field-level layer; [`classify_output_containment`] carries a second, independent guard
 /// for the same case (see its doc) so a caller that skips this check entirely (bypassing `validate()`)
 /// is still caught.
 ///
@@ -396,7 +412,7 @@ thread_local! {
     static CANONICALIZE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 /// `pub(crate)` (not just this module's own tests): [`crate::batch_execute::execute_plan_walk`] re-derives
-/// the identical containment check `plan()` uses, via the shared [`output_escapes_input_dir`] — its own
+/// the identical containment check `plan()` uses, via the shared [`classify_output_containment`] — its own
 /// perf regression guard (PR #828 attempt 3's "ALSO" follow-up: `plan()` had a guard, the execute-side copy
 /// of the exact same check did not) needs this same counter, from a test in a different file.
 #[cfg(test)]
@@ -427,11 +443,58 @@ enum PathKey {
     Lexical(String),
 }
 
-/// Shared type for [`path_key`]'s per-call memoized parent-canonicalize cache — pulled out to a named
-/// alias so [`output_escapes_input_dir`] (used by both this module's `plan()` and, as of the IPC-bypass
-/// fix, [`crate::batch_execute::execute_plan_walk`]) can be threaded a cache across an entire batch
-/// without either caller having to spell out the `HashMap<String, Option<PathBuf>>` type by hand.
-pub(crate) type ParentCache = std::collections::HashMap<String, Option<std::path::PathBuf>>;
+/// Per-batch memo shared by every containment decision — threaded through [`classify_output_containment`]
+/// (used by both this module's `plan()` and, as of the IPC-bypass fix,
+/// [`crate::batch_execute::execute_plan_walk`]) so an entire batch pays each *directory-level* filesystem
+/// question exactly once. Three memos, all keyed by directory path string:
+///
+/// - `parents` — [`path_key`]'s canonicalized-parent memo (CPE-1613; the original meaning of this type,
+///   which used to be a bare `HashMap` type alias).
+/// - `dir_ids` — a directory's [`FileIdentity`] (CPE-1642), resolved through links.
+/// - `dir_scans` — a directory's identity→name-count census ([`DirLinkScan`]), built lazily and only when
+///   an output turns out to be multiply-linked.
+///
+/// **Deliberately holds no memo for an individual output path's own probe.** Every call re-probes the
+/// `output` it is asked about, so calling the containment check again immediately before a write (the
+/// per-write re-check CPE-1624 adds) genuinely re-resolves that file's identity rather than replaying a
+/// plan-time answer — the cache narrows the TOCTOU window instead of widening it. Only facts about
+/// *directories* (which the batch neither creates nor moves) are reused.
+#[derive(Debug, Default)]
+pub(crate) struct ParentCache {
+    parents: std::collections::HashMap<String, Option<std::path::PathBuf>>,
+    dir_ids: std::collections::HashMap<String, Option<FileIdentity>>,
+    dir_scans: std::collections::HashMap<String, Option<DirLinkScan>>,
+}
+
+impl ParentCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    /// A directory's [`FileIdentity`], memoized. `""` (a bare-filename input's "directory") means the
+    /// process's current directory, spelled `"."` — the same place the OS would resolve such a path
+    /// against. `None` means the identity could not be established, which every caller must treat as a
+    /// containment FAILURE, never as a pass.
+    fn dir_identity(&mut self, dir: &str) -> Option<FileIdentity> {
+        let key = if dir.is_empty() { "." } else { dir };
+        if let Some(hit) = self.dir_ids.get(key) {
+            return *hit;
+        }
+        let id = identity_following_links(std::path::Path::new(key));
+        self.dir_ids.insert(key.to_string(), id);
+        id
+    }
+
+    /// A directory's identity→name-count census ([`DirLinkScan`]), memoized. Built at most once per
+    /// directory per batch, and only reached when an output is actually multiply-linked.
+    fn dir_scan(&mut self, dir: &str) -> Option<&DirLinkScan> {
+        let key = if dir.is_empty() { "." } else { dir };
+        self.dir_scans
+            .entry(key.to_string())
+            .or_insert_with(|| scan_dir_link_census(std::path::Path::new(key)))
+            .as_ref()
+    }
+}
 
 /// Map `path` to its [`PathKey`] — the one shared "is this the same file?" identity (CPE-1613) backing
 /// both `plan()`'s non-destructive guarantee/collision set and [`same_file`] (and, transitively,
@@ -468,6 +531,7 @@ fn path_key(path: &str, parent_cache: &mut ParentCache) -> PathKey {
 
     if let Some((dir, name)) = parent_and_name(path) {
         let canon_dir = parent_cache
+            .parents
             .entry(dir.to_string())
             .or_insert_with(|| canonicalize_path(dir).ok())
             .clone();
@@ -490,7 +554,7 @@ pub fn same_file(a: &str, b: &str) -> bool {
     if a == b {
         return true;
     }
-    let mut cache = std::collections::HashMap::new();
+    let mut cache = ParentCache::new();
     path_key(a, &mut cache) == path_key(b, &mut cache)
 }
 
@@ -535,149 +599,600 @@ pub fn same_file(a: &str, b: &str) -> bool {
 ///   dir` was still a bare TEXT comparison — it never asked what `output`'s final component actually IS
 ///   on disk. A symlink, junction, or hard link whose *name* sits inside the input's own directory can
 ///   still alias data physically outside it, and the fast path waved that straight through with zero
-///   resolution. See [`link_alias_escapes`] for the fix and exactly what it can and cannot prove.
+///   resolution.
+/// - **Findings A & B of CPE-1642 — pattern-matching link *shapes* can't be finished.** The fix for C
+///   read exactly ONE symlink hop and defaulted a failed hard-link-count read to "not linked", so a
+///   two-hop symlink chain and a merely-contended file both escaped. Both are gone: this now resolves
+///   the output's real filesystem IDENTITY once — see [`resolve_output_containment`] — and every failure
+///   to establish that identity is a refusal, never a pass.
+///
+/// Boolean form, kept for the tests that assert the yes/no answer directly. **Production callers use
+/// [`classify_output_containment`]** — collapsing "provably escapes" and "couldn't be verified" into one
+/// `true` is what produced a refusal message that stated something untrue (CPE-1642).
+#[cfg(test)]
 pub(crate) fn output_escapes_input_dir(input: &str, output: &str, parent_cache: &mut ParentCache) -> bool {
+    classify_output_containment(input, output, parent_cache) != Containment::Inside
+}
+
+/// **The one shared containment check every production caller uses** — the three-valued form of the
+/// question above (CPE-1642), so a caller rendering a refusal can say what is *actually* true. Reporting "would land outside its own
+/// input's folder" for an output this check merely could not verify is itself a defect: nothing left the
+/// folder, the check just couldn't prove it hadn't.
+///
+/// Order of decisions, cheapest and most structural first:
+/// 1. Findings A/B above (a dot-segment final component; a drive-relative output for a bare-filename
+///    input) — pure text, no filesystem.
+/// 2. Directory identity: does `output`'s directory resolve to `input`'s own? Textually-identical
+///    directories (the overwhelmingly common case) skip [`path_key`] entirely; anything else pays the
+///    O(1)-amortized resolution.
+/// 3. **Output identity** ([`resolve_output_containment`]): what the final component actually IS on disk,
+///    resolved through the whole link chain to a real (volume, file-index)/(dev, ino) identity.
+///
+/// **CPE-1624 seam:** this is a pure function of `(input, output, cache)` with no plan-time state — step 3
+/// re-probes `output` on every call (see [`ParentCache`]) — so calling it again immediately before each
+/// write is a genuine re-resolution, not a replay of the planning answer.
+pub(crate) fn classify_output_containment(
+    input: &str,
+    output: &str,
+    parent_cache: &mut ParentCache,
+) -> Containment {
     let out_final = output.rsplit(['/', '\\']).next().unwrap_or(output);
     if out_final == "." || out_final == ".." {
-        return true;
+        return Containment::Escapes;
     }
 
     let (dir, _, _) = split(input);
     let (out_dir, out_stem, _) = split(output);
     if dir.is_empty() && out_stem.contains(':') {
-        return true;
+        return Containment::Escapes;
     }
-    if out_dir == dir {
-        // The directory TEXT matches — the common case, and historically an immediate `false` here. But
-        // `output` may already exist on disk as a link whose real identity isn't where its name suggests
-        // (Finding C above); resolve that before trusting the string match. `None` means `output` doesn't
-        // exist yet, or is an ordinary single-linked file — the overwhelming common case, costing exactly
-        // one extra `symlink_metadata` stat and falling through to the prior `false` unchanged.
-        return link_alias_escapes(output, &dir, parent_cache).unwrap_or(false);
+    // `out_dir == dir` is the cheap fast path (identical TEXT ⇒ identical place); only a genuinely
+    // different directory string pays for `path_key`'s resolution, which still folds trailing separators,
+    // `.`/`..` segments, junctions and case differences into one answer.
+    if out_dir != dir && path_key(&out_dir, parent_cache) != path_key(&dir, parent_cache) {
+        return Containment::Escapes;
     }
-    path_key(&out_dir, parent_cache) != path_key(&dir, parent_cache)
+
+    // The output's *directory* is the input's own. That is necessary but NOT sufficient: the final
+    // component itself can be a link (or one of several hard-linked names) whose real data lives
+    // elsewhere. Resolve its identity.
+    resolve_output_containment(output, &dir, parent_cache)
 }
 
-/// Resolves whether `output` — already known to sit in the same TEXTUAL directory as the input (the
-/// `out_dir == dir` fast path in [`output_escapes_input_dir`]) — is actually a link whose real data lives
-/// outside `input_dir`. Returns `None` when there is nothing link-shaped to resolve (`output` doesn't
-/// exist yet, or is an ordinary file with a single name), so the caller's prior `false` stands unchanged —
-/// **no new false positives** on a plain output file that merely already exists in the selected folder.
-///
-/// **Symlinks and junctions:** read the link's own stored target ([`std::fs::read_link`]) rather than
-/// `canonicalize`, specifically because `canonicalize` requires the WHOLE chain to exist and therefore
-/// fails outright on a **dangling** symlink (target not created yet) — exactly the shape the audit
-/// demonstrated needs zero batch-job flags to exploit (`Path::is_file()` on a dangling symlink is `false`,
-/// so nothing downstream ever treats it as "already occupied"). A relative target is resolved against
-/// `output`'s own parent directory (the same rule the OS itself uses); the resolved location's directory
-/// is then compared via [`path_key`] against `input_dir`, identically to every other containment decision
-/// in this module. An unreadable link (the `is_symlink()` bit is set but `read_link` itself fails — a
-/// permission error or a TOCTOU race) is **not** treated as "nothing to resolve": failing open on an
-/// unreadable link would be worse than the false positive of refusing it, so this returns `Some(true)`.
-///
-/// **Hard links — deliberately NOT fully resolved.** A hard link has no "target" to read: every name for
-/// the same underlying data is equally real, and there is no directory-entry field that names a file's
-/// OTHER links. The only way to enumerate them is to walk every directory on the volume comparing
-/// (volume-serial, file-index) identity per entry — disproportionate to pay per planned item, and not
-/// attempted here. Instead: if a real file already sits at `output` and its **link count** (the one cheap
-/// signal `std::fs::Metadata` DOES expose, via the platform `MetadataExt` trait — `number_of_links()` on
-/// Windows, `nlink()` on Unix) is more than 1, some other name for this same data exists somewhere this
-/// fn cannot see. It might be inside `input_dir`, or it might not — there is no way to tell without the
-/// walk this deliberately doesn't do — so this fails closed and refuses rather than guessing "probably
-/// fine". **This is the one gap left open by design**, not an oversight: a batch job that plans to write
-/// through an existing multiply-linked file inside the selected folder is refused even when every one of
-/// its other names is also harmlessly inside that same folder, because this fn has no cheap way to know
-/// that. See the module doc's "Link-as-final-component" paragraph for the full reasoning.
-fn link_alias_escapes(output: &str, input_dir: &str, parent_cache: &mut ParentCache) -> Option<bool> {
-    let meta = std::fs::symlink_metadata(output).ok()?;
-    let file_type = meta.file_type();
+/// The verdict on one planned output (CPE-1642). Three-valued on purpose: "I could not establish this
+/// output's identity" is a distinct fact from "this output provably leaves the folder", and conflating
+/// them produced a refusal message that told the user something untrue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Containment {
+    /// Proven to land inside the input's own folder.
+    Inside,
+    /// Proven to land somewhere else.
+    Escapes,
+    /// Could not be established — **treated exactly like `Escapes` by every caller** (fail closed); the
+    /// payload is the true reason, for an accurate refusal message.
+    Unverifiable(&'static str),
+}
 
-    if file_type.is_symlink() {
-        return Some(match std::fs::read_link(output) {
-            Ok(target) => {
-                let resolved = if target.is_absolute() {
-                    target
-                } else {
-                    std::path::Path::new(output)
-                        .parent()
-                        .map(|p| p.join(&target))
-                        .unwrap_or(target)
-                };
-                let resolved_str = resolved.to_string_lossy().into_owned();
-                let (resolved_dir, _, _) = split(&resolved_str);
-                path_key(&resolved_dir, parent_cache) != path_key(input_dir, parent_cache)
+/// A file's **true filesystem identity** (CPE-1642): the pair every OS uses to answer "are these two
+/// names the same object?" — `(volume serial number, 64-bit file index)` on Windows via
+/// `GetFileInformationByHandle`, `(dev, ino)` on Unix. Comparing identities is what makes symlink chains,
+/// junctions, hard links and any future link shape collapse into ONE question, instead of a growing
+/// catalogue of path-string patterns to pattern-match (the approach CPE-1623 exhausted).
+///
+/// `index` is `u128` so both platforms' widest form fits without truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct FileIdentity {
+    volume: u64,
+    index: u128,
+}
+
+impl FileIdentity {
+    /// **An identity that identifies nothing (CPE-1642, reviewer finding F2).** `GetFileInformationByHandle`
+    /// is documented as not supplying a usable file index on several network redirectors — it *succeeds* and
+    /// hands back a zero index. Every object on such a volume would then carry the SAME identity, so the two
+    /// places that compare identities — the landing directory versus the selected directory in
+    /// [`resolve_output_containment`], and the census lookup in [`real_target_containment`] — would judge
+    /// every unrelated directory "the same place" and wave a symlink out of the folder straight through.
+    /// That is a fail-open the ticket's own rule forbids, and it is invisible from the call site because the
+    /// API reported success. Zero is not a legal value on either platform (`ino`/`st_dev` 0 denotes no file
+    /// / no device on Unix; a zero file index or volume serial is Windows' "not supported here"), so a zero
+    /// in either half means **identity unknown**, and every caller must refuse rather than compare it.
+    fn is_degenerate(self) -> bool {
+        self.volume == 0 || self.index == 0
+    }
+}
+
+/// Gate a freshly-probed [`FileFacts`] on [`FileIdentity::is_degenerate`]: an identity that identifies
+/// nothing is *unreadable*, never a real one. Pure, so the volume this defends against (which CI has no
+/// access to) can be reproduced in a unit test by injecting the degenerate value directly.
+fn facts_or_unreadable(facts: FileFacts) -> Probe {
+    if facts.id.is_degenerate() {
+        Probe::Unreadable
+    } else {
+        Probe::Real(facts)
+    }
+}
+
+/// The [`identity_following_links`] counterpart of [`facts_or_unreadable`] — `None` (which
+/// [`ParentCache::dir_identity`]'s callers already treat as a containment FAILURE) for a degenerate
+/// identity.
+fn identity_or_none(id: FileIdentity) -> Option<FileIdentity> {
+    if id.is_degenerate() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
+/// What one identity probe of an existing path yields: who it is, how many names it has, and whether it
+/// is a directory.
+#[derive(Debug, Clone, Copy)]
+struct FileFacts {
+    id: FileIdentity,
+    /// Hard-link count — how many names in the whole filesystem refer to this same data.
+    links: u64,
+    is_dir: bool,
+}
+
+/// The outcome of probing a path **without following links** — the first question
+/// [`resolve_output_containment`] asks about an output.
+enum Probe {
+    /// Nothing exists at this path (so there is no identity to alias).
+    Absent,
+    /// A symlink or junction; its chain has to be walked before anything can be said.
+    Link,
+    /// A real file or directory, with its identity established.
+    Real(FileFacts),
+    /// Something is there but its identity could NOT be established. **Never treat as `Absent`** — this
+    /// is exactly CPE-1642 finding B (a contended open used to fall back to "assume unlinked").
+    Unreadable,
+}
+
+/// An identity→name-count census of ONE directory (CPE-1642), used to decide whether a multiply-linked
+/// output's other names are all accounted for inside the folder the user selected.
+#[derive(Debug, Default)]
+struct DirLinkScan {
+    counts: std::collections::HashMap<FileIdentity, u64>,
+    /// At least one entry's identity could not be read, so `counts` may undercount — a shortfall must
+    /// then be reported as *unverifiable*, not as a proven escape.
+    incomplete: bool,
+}
+
+const WHY_PROBE_FAILED: &str = "the planned output exists but its filesystem identity could not be read \
+                               (it may be locked by another process)";
+const WHY_CHAIN_FAILED: &str = "the planned output is a link whose chain could not be followed to a real \
+                               location (unreadable, cyclic, or too many hops)";
+const WHY_DIR_IDENTITY_FAILED: &str = "the folder a linked output resolves into could not be identified";
+const WHY_CENSUS_FAILED: &str = "the selected folder could not be enumerated to account for the output's \
+                                 other hard links";
+
+/// **The identity half of the containment check (CPE-1642).** `output` is already known to sit in the
+/// input's own directory *by path*; this asks what it actually IS on disk and where the bytes a write
+/// would land on actually live. Replaces the previous shape-matching (`link_alias_escapes` +
+/// `hard_link_count`), which read exactly one symlink hop and defaulted an unreadable hard-link count to
+/// "not linked".
+///
+/// 1. **Probe the final component without following links.** Absent ⇒ nothing to alias, `Inside` (the
+///    overwhelmingly common case: one stat/attribute open, no canonicalize). Unreadable ⇒ `Unverifiable`
+///    — *this is finding B*: a merely contended file must never be waved through.
+/// 2. **A link ⇒ walk the WHOLE chain** ([`follow_link_chain`]), not one hop, resolving each relative
+///    target against its own link's parent exactly as the OS does, and refusing on an unreadable link,
+///    a cycle, or an absurd chain length. `read_link` (not `canonicalize`) so a **dangling** target — the
+///    shape that needs no batch-job flag to exploit, since `Path::is_file()` is `false` for it — still
+///    resolves. The chain's terminal path is where a write truly lands, so its *parent directory's*
+///    identity, not its spelling, is compared against the selected folder's.
+/// 3. **A real file ⇒ ask how many names it has.** One name ⇒ `Inside`. More than one ⇒ the other names
+///    are the question, and they are answerable *cheaply and exactly for the case that matters*: census
+///    the selected folder once ([`DirLinkScan`]) and count how many of its entries share this identity.
+///    All of them accounted for inside ⇒ `Inside` — the "all names harmlessly inside the folder" case
+///    CPE-1623 had to refuse as a known false positive is now correctly allowed. Fewer ⇒ a name provably
+///    exists outside the folder ⇒ `Escapes`. Census unavailable/incomplete ⇒ `Unverifiable`.
+///
+/// Every arm that cannot prove containment returns [`Containment::Unverifiable`], and every caller
+/// refuses on it. There is no path through this function that answers `Inside` by default.
+fn resolve_output_containment(output: &str, input_dir: &str, cache: &mut ParentCache) -> Containment {
+    match probe_no_follow(std::path::Path::new(output)) {
+        Probe::Absent => Containment::Inside,
+        Probe::Unreadable => Containment::Unverifiable(WHY_PROBE_FAILED),
+        Probe::Real(facts) => real_target_containment(facts, input_dir, cache),
+        Probe::Link => {
+            let terminal = match follow_link_chain(output) {
+                Ok(t) => t,
+                Err(why) => return Containment::Unverifiable(why),
+            };
+            let Some(parent) = terminal.parent() else {
+                return Containment::Unverifiable(WHY_DIR_IDENTITY_FAILED);
+            };
+            let landing = cache.dir_identity(&parent.to_string_lossy());
+            let selected = cache.dir_identity(input_dir);
+            match (landing, selected) {
+                (Some(a), Some(b)) if a == b => {}
+                (Some(_), Some(_)) => return Containment::Escapes,
+                _ => return Containment::Unverifiable(WHY_DIR_IDENTITY_FAILED),
             }
-            Err(_) => true,
-        });
+            // The chain lands in the selected folder itself — but its terminal may still be one of
+            // several hard-linked names, so it gets the same identity treatment as a direct output.
+            match probe_no_follow(&terminal) {
+                Probe::Absent => Containment::Inside, // dangling, but dangling *inside* the folder
+                Probe::Real(facts) => real_target_containment(facts, input_dir, cache),
+                Probe::Link => Containment::Unverifiable(WHY_CHAIN_FAILED),
+                Probe::Unreadable => Containment::Unverifiable(WHY_PROBE_FAILED),
+            }
+        }
     }
-
-    if file_type.is_file() && hard_link_count(output, &meta) > 1 {
-        return Some(true);
-    }
-
-    None
 }
 
-/// Platform-specific hard link count for [`link_alias_escapes`]'s fail-closed check — bare
-/// [`std::fs::Metadata`] doesn't expose this everywhere. Defaults to `1` (never treated as
-/// multiply-linked) on any platform/error where the count can't be read, matching this module's existing
-/// "resolve where possible, never invent a signal we can't back up" posture elsewhere (e.g. [`fold_case`]);
-/// that default is fine here specifically because it just falls through to the ORIGINAL, already-audited
-/// `out_dir == dir → false` behaviour, not a bypass of a check that used to run.
+/// Step 3 of [`resolve_output_containment`]: a real (non-link) target whose directory is already known to
+/// be the selected folder. The only remaining way for a write here to touch data outside the folder is a
+/// hard link — a second name for the same identity living somewhere else.
+fn real_target_containment(facts: FileFacts, input_dir: &str, cache: &mut ParentCache) -> Containment {
+    if facts.is_dir || facts.links <= 1 {
+        return Containment::Inside;
+    }
+    let Some(scan) = cache.dir_scan(input_dir) else {
+        return Containment::Unverifiable(WHY_CENSUS_FAILED);
+    };
+    let inside = scan.counts.get(&facts.id).copied().unwrap_or(0);
+    if inside >= facts.links {
+        // Every one of this file's names is a name in the selected folder — nothing can be reached
+        // outside it, so this is genuinely safe (CPE-1623 had to refuse this case for want of a cheap
+        // way to prove it).
+        Containment::Inside
+    } else if scan.incomplete {
+        Containment::Unverifiable(WHY_CENSUS_FAILED)
+    } else {
+        // The file has more names than this folder holds: at least one of them is somewhere else.
+        Containment::Escapes
+    }
+}
+
+/// Walk a symlink/junction chain from `start` to the real path it ultimately names (CPE-1642 finding A —
+/// the previous code read exactly ONE hop, so `linkA → linkB → outside/victim` passed containment because
+/// `linkB` was textually in the right folder). A relative target resolves against its own link's parent,
+/// the same rule the OS applies. Stops at the first non-link, **including a path that doesn't exist** —
+/// that is the dangling case, and where it *would* be created is exactly what containment must judge.
 ///
-/// **Unix:** `MetadataExt::nlink()` reads straight off the already-fetched [`std::fs::Metadata`] — no
-/// extra syscall.
+/// Fails closed (`Err`) on an unreadable link, a chain that revisits its own previous hop, or one longer
+/// than [`MAX_LINK_HOPS`] (which also bounds any cycle a plain equality check misses).
+fn follow_link_chain(start: &str) -> Result<std::path::PathBuf, &'static str> {
+    const MAX_LINK_HOPS: usize = 40;
+    let mut current = std::path::PathBuf::from(start);
+    for _ in 0..MAX_LINK_HOPS {
+        match probe_no_follow(&current) {
+            Probe::Link => {}
+            Probe::Absent | Probe::Real(_) => return Ok(current),
+            Probe::Unreadable => return Err(WHY_PROBE_FAILED),
+        }
+        let target = std::fs::read_link(&current).map_err(|_| WHY_CHAIN_FAILED)?;
+        let next = if target.is_absolute() {
+            target
+        } else {
+            current.parent().map(|p| p.join(&target)).unwrap_or(target)
+        };
+        if next == current {
+            return Err(WHY_CHAIN_FAILED);
+        }
+        current = next;
+    }
+    Err(WHY_CHAIN_FAILED)
+}
+
+/// Census one directory's entries by [`FileIdentity`] — how many NAMES in this folder refer to each
+/// distinct file. Bounded to the single selected directory (never a volume walk), non-recursive, and
+/// reached only when an output is actually multiply-linked, so its cost is proportional to the one folder
+/// the user picked and is memoized per batch by [`ParentCache::dir_scan`].
 ///
-/// **Windows:** `std::os::windows::fs::MetadataExt::number_of_links()` would be the equivalent one-liner,
-/// but it (and `file_index()`/`volume_serial_number()`, which would be needed for full hard-link identity
-/// resolution) are still gated behind the unstable `windows_by_handle` feature (rust-lang/rust#63010) on
-/// stable Rust. Falls back to the raw Win32 call the std wrapper would eventually make anyway
-/// (`CreateFileW` + `GetFileInformationByHandle`'s `nNumberOfLinks`) via the `windows` crate already
-/// vendored for [`crate::high_contrast`] — one extra open+query, but only when `output` already exists as
-/// an ordinary file (the branch this is called from), never per-item for the common "nothing there yet" case.
+/// Symlink entries are skipped deliberately: a symlink *pointing at* the file is not another hard link to
+/// it, and counting one would inflate the census and could mask a real out-of-folder name.
+fn scan_dir_link_census(dir: &std::path::Path) -> Option<DirLinkScan> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut scan = DirLinkScan::default();
+    for entry in entries {
+        let Ok(entry) = entry else {
+            scan.incomplete = true;
+            continue;
+        };
+        match entry.file_type() {
+            Ok(t) if t.is_symlink() => continue,
+            Ok(_) => {}
+            Err(_) => {
+                scan.incomplete = true;
+                continue;
+            }
+        }
+        match probe_no_follow(&entry.path()) {
+            Probe::Real(facts) => *scan.counts.entry(facts.id).or_insert(0) += 1,
+            Probe::Absent => {} // vanished mid-scan; it holds no name now
+            Probe::Link | Probe::Unreadable => scan.incomplete = true,
+        }
+    }
+    Some(scan)
+}
+
+/// Probe a path's identity **without following links** — Unix reads it straight off the one
+/// `symlink_metadata` call this module already made before CPE-1642 (`dev`/`ino`/`nlink` are all on
+/// `MetadataExt`, no extra syscall).
 #[cfg(unix)]
-fn hard_link_count(_output: &str, meta: &std::fs::Metadata) -> u64 {
+fn probe_no_follow(path: &std::path::Path) -> Probe {
     use std::os::unix::fs::MetadataExt;
-    meta.nlink()
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => Probe::Link,
+        Ok(meta) => facts_or_unreadable(FileFacts {
+            id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
+            links: meta.nlink(),
+            is_dir: meta.is_dir(),
+        }),
+        // ENOTDIR (a path component isn't a directory) means nothing can exist at this path either.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) => Probe::Absent,
+        Err(_) => Probe::Unreadable,
+    }
 }
+
+/// Windows identity probe. `std::os::windows::fs::MetadataExt`'s `volume_serial_number()`/`file_index()`/
+/// `number_of_links()` are still gated behind the unstable `windows_by_handle` feature
+/// (rust-lang/rust#63010) on stable Rust, so this makes the same `CreateFileW` +
+/// `GetFileInformationByHandle` call the std wrapper would, via the `windows` crate already vendored for
+/// [`crate::high_contrast`] — one open per probe, the same cost as the `symlink_metadata` it replaces.
+///
+/// **Two details are load-bearing, both CPE-1642 finding B:**
+/// - `FILE_READ_ATTRIBUTES` (not `GENERIC_READ`) as the desired access. Windows' share-mode conflict check
+///   ignores the attribute-read rights, so this open still succeeds against a file another process holds
+///   with `share_mode(0)` — the exact contention that made the old `GENERIC_READ` open fail and silently
+///   report "1 link".
+/// - A failed open is classified by its real error: only "there is nothing here" (`NotFound` and the
+///   malformed-path codes, which can never name an existing file) becomes [`Probe::Absent`]. Every other
+///   failure — sharing violation, access denied, anything unclassified — is [`Probe::Unreadable`], which
+///   the caller refuses on.
+///
+/// `FILE_FLAG_BACKUP_SEMANTICS` lets the same call open directories (needed to identify a folder);
+/// `FILE_FLAG_OPEN_REPARSE_POINT` keeps it from following a link, so the probe describes the name itself.
+/// A reparse point that std does not consider a symlink (a cloud placeholder, a dedup stub) is reported as
+/// the real file it is, not as a link — those are ordinary files to every reader, and calling them links
+/// would strand ordinary batches in OneDrive-backed folders.
+///
+/// **The path handed to `CreateFileW` goes through [`verbatim_wide`] first (CPE-1642, reviewer finding
+/// REV-G/REV-G2).** Without it the probe and the writer address different sets of files: every write in
+/// this crate goes through `std::fs`, which applies the same `\\?\` transformation and therefore reaches
+/// past `MAX_PATH`, while a raw `CreateFileW` is capped at it. That mismatch made an over-`MAX_PATH` output
+/// fail to open with `ERROR_PATH_NOT_FOUND`, classify as [`Probe::Absent`], and fail OPEN.
 #[cfg(windows)]
-fn hard_link_count(output: &str, _meta: &std::fs::Metadata) -> u64 {
-    use std::os::windows::ffi::OsStrExt;
+fn probe_no_follow(path: &std::path::Path) -> Probe {
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, HANDLE};
+    use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_NORMAL,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> =
-        std::path::Path::new(output).as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. Read-only open
-    // of an already-existing file (`GENERIC_READ` + `OPEN_EXISTING`, full sharing so this never contends
-    // with the batch's own later read/write of the same path) — no create/write/truncate side effect. The
-    // handle is closed on every path before returning.
+    let wide = verbatim_wide(path);
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. Attributes-only
+    // open of an already-existing file (`OPEN_EXISTING`, full sharing) — no create/write/truncate side
+    // effect, and no data access. The handle is closed on every path before returning.
     unsafe {
-        let Ok(handle) = CreateFileW(
+        let handle = match CreateFileW(
             PCWSTR(wide.as_ptr()),
-            GENERIC_READ.0,
+            FILE_READ_ATTRIBUTES.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             None,
             OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
             HANDLE::default(),
-        ) else {
-            return 1; // couldn't open (permission/race) — nothing more we can prove, matches the fallback
+        ) {
+            Ok(h) => h,
+            Err(_) => return classify_open_failure(GetLastError().0, wide.len()),
         };
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-        let links =
-            if GetFileInformationByHandle(handle, &mut info).is_ok() { info.nNumberOfLinks as u64 } else { 1 };
+        let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
         let _ = CloseHandle(handle);
-        links
+        if !ok {
+            return Probe::Unreadable;
+        }
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+            && std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(true)
+        {
+            return Probe::Link;
+        }
+        facts_or_unreadable(FileFacts {
+            id: FileIdentity {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+            },
+            links: u64::from(info.nNumberOfLinks),
+            is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+        })
     }
 }
+
+/// **`std`'s `maybe_verbatim`, reimplemented (CPE-1642, reviewer finding REV-G).** Every write in this crate
+/// goes through `std::fs`, which runs each path through this same transformation before calling into Win32
+/// — so it reaches paths longer than `MAX_PATH`. The identity probe calls Win32 directly, and without the
+/// same transformation it is capped at `MAX_PATH` while the writer is not: the probe would report "nothing
+/// is here" for a file the writer could happily overwrite. The probe must address exactly the set of files
+/// the writer does, or the safety check is checking a different filesystem.
+///
+/// The `\\?\` prefix **disables all path normalisation** in the kernel, so it may only be applied to a path
+/// that is already fully-qualified, `.`/`..`-free and back-slash-separated. `GetFullPathNameW` produces
+/// exactly that; the prefix is then chosen by shape, mirroring `std`'s table:
+/// `C:\…` ⇒ `\\?\C:\…`, `\\.\…` ⇒ `\\?\…`, `\\server\share` ⇒ `\\?\UNC\server\share`, and an
+/// already-verbatim (`\\?\`) or NT (`\??\`) path is returned untouched.
+///
+/// **Cost:** a path already verbatim, or shorter than the legacy limit and not UNC, is returned after two
+/// slice comparisons and a length test — no syscall, no extra allocation beyond the `Vec<u16>` the raw
+/// encoding already required. The per-entry directory census therefore pays nothing for this.
+#[cfg(windows)]
+fn verbatim_wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetFullPathNameW;
+
+    const SEP: u16 = b'\\' as u16;
+    const ALT_SEP: u16 = b'/' as u16;
+    const QUERY: u16 = b'?' as u16;
+    const COLON: u16 = b':' as u16;
+    const DOT: u16 = b'.' as u16;
+    /// `\\?\`
+    const VERBATIM: &[u16] = &[SEP, SEP, QUERY, SEP];
+    /// `\??\`
+    const NT: &[u16] = &[SEP, QUERY, QUERY, SEP];
+    /// `\\?\UNC\`
+    const UNC: &[u16] = &[SEP, SEP, QUERY, SEP, b'U' as u16, b'N' as u16, b'C' as u16, SEP];
+    /// `CreateDirectoryW`'s 248, the tighter of the two Windows limits — the same number `std` uses, so the
+    /// probe switches to the verbatim form no later than the writer does.
+    const LEGACY_MAX_PATH: usize = 248;
+
+    let raw: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    if raw.starts_with(VERBATIM) || raw.starts_with(NT) || raw.len() <= 1 {
+        return raw;
+    }
+    if raw.len() < LEGACY_MAX_PATH && !matches!(raw.as_slice(), [SEP | ALT_SEP, SEP | ALT_SEP, ..]) {
+        return raw;
+    }
+
+    // Fully qualify first — the verbatim prefix would otherwise freeze a relative path, a `/`, or a `..`
+    // segment into a name the filesystem cannot resolve.
+    let mut buf = vec![0u16; raw.len().max(LEGACY_MAX_PATH) + 64];
+    loop {
+        // SAFETY: `raw` is NUL-terminated and outlives the call; `buf` is a live, correctly-sized slice.
+        let n = unsafe { GetFullPathNameW(PCWSTR(raw.as_ptr()), Some(&mut buf), None) } as usize;
+        if n == 0 {
+            // Couldn't qualify it; hand back the raw form. `classify_open_failure`'s length guard then
+            // refuses to read a MAX_PATH truncation failure as "nothing is there".
+            return raw;
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            break;
+        }
+        buf = vec![0u16; n + 1];
+    }
+
+    let (prefix, body): (&[u16], &[u16]) = match buf.as_slice() {
+        // `C:\…` — a drive-rooted path.
+        [_, COLON, SEP, ..] => (VERBATIM, &buf[..]),
+        // `\\.\…` — a device path; `\\?\` is the same namespace without normalisation.
+        [SEP, SEP, DOT, SEP, ..] => (VERBATIM, &buf[4..]),
+        // Already verbatim / NT — leave alone.
+        [SEP, SEP, QUERY, SEP, ..] | [SEP, QUERY, QUERY, SEP, ..] => (&[], &buf[..]),
+        // `\\server\share\…` — the UNC spelling drops the leading `\\`.
+        [SEP, SEP, ..] => (UNC, &buf[2..]),
+        // Anything else (a rooted-but-driveless path, say) gains nothing from the prefix.
+        _ => (&[], &buf[..]),
+    };
+    let mut out = Vec::with_capacity(prefix.len() + body.len() + 1);
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(body);
+    out.push(0);
+    out
+}
+
+/// Split a failed Windows open into "nothing is there" versus "something is there and I couldn't read
+/// it". Only codes that mean the path names nothing at all may become [`Probe::Absent`]; `std`'s own error
+/// classification covers the not-found family, and the malformed-path codes are listed explicitly because
+/// a name the filesystem rejects outright can never denote an existing file either.
+///
+/// **Belt and braces for the `MAX_PATH` mismatch (CPE-1642, reviewer finding REV-G).** [`verbatim_wide`]
+/// is what keeps the probe and the writer addressing the same files; this is the second line of defence for
+/// when it cannot (a `GetFullPathNameW` that fails, a shape its table leaves unprefixed). At or past
+/// `MAX_PATH`, a "path not found"/"invalid name" is exactly what a *truncation* looks like, and the one
+/// thing it must never be read as is "nothing is there" — so at that length those codes are
+/// [`Probe::Unreadable`], which both callers refuse on. `ERROR_FILE_NOT_FOUND` (the ordinary "this output
+/// doesn't exist yet" answer, and the overwhelmingly common one) is deliberately NOT in that set, so the
+/// common path costs nothing.
+#[cfg(windows)]
+fn classify_open_failure(code: u32, wide_len: usize) -> Probe {
+    const ERROR_INVALID_NAME: u32 = 123;
+    const ERROR_BAD_PATHNAME: u32 = 161;
+    const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+    const ERROR_DIRECTORY: u32 = 267;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    /// Windows' unprefixed path limit, NUL included.
+    const MAX_PATH: usize = 260;
+
+    if wide_len >= MAX_PATH
+        && matches!(
+            code,
+            ERROR_PATH_NOT_FOUND | ERROR_INVALID_NAME | ERROR_BAD_PATHNAME | ERROR_FILENAME_EXCED_RANGE
+        )
+    {
+        return Probe::Unreadable;
+    }
+
+    let kind = std::io::Error::from_raw_os_error(code as i32).kind();
+    if kind == std::io::ErrorKind::NotFound
+        || matches!(code, ERROR_INVALID_NAME | ERROR_BAD_PATHNAME | ERROR_DIRECTORY)
+    {
+        Probe::Absent
+    } else {
+        Probe::Unreadable
+    }
+}
+
+/// Fail-closed stub for any platform that is neither Windows nor Unix: with no way to establish identity,
+/// an existing output can never be proven contained. Nothing this crate ships targets such a platform
+/// (CI is Windows + macOS + Linux); this exists so the module cannot silently compile into a
+/// pattern-matching-only build.
 #[cfg(not(any(windows, unix)))]
-fn hard_link_count(_output: &str, _meta: &std::fs::Metadata) -> u64 {
-    1
+fn probe_no_follow(path: &std::path::Path) -> Probe {
+    match std::fs::symlink_metadata(path) {
+        Ok(_) => Probe::Unreadable,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Probe::Absent,
+        Err(_) => Probe::Unreadable,
+    }
+}
+
+/// A path's identity **with** links followed — used for directories (the folder a resolved chain lands
+/// in, and the selected folder itself), where the target's identity is the whole point.
+#[cfg(unix)]
+fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(path).ok()?;
+    identity_or_none(FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) })
+}
+
+/// Windows counterpart. Uses [`verbatim_wide`] for the same reason [`probe_no_follow`] does — the selected
+/// folder and a resolved chain's landing folder can both sit past `MAX_PATH`, and a directory this could not
+/// open would be reported as "identity unknown", which refuses the whole batch (CPE-1642 REV-G).
+#[cfg(windows)]
+fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide = verbatim_wide(path);
+    // SAFETY: as `probe_no_follow` — attributes-only `OPEN_EXISTING` open of a NUL-terminated path kept
+    // alive for the call, handle closed on every path. No `FILE_FLAG_OPEN_REPARSE_POINT` here: this one
+    // deliberately follows links to identify the real directory.
+    unsafe {
+        let handle = CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            HANDLE::default(),
+        )
+        .ok()?;
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return None;
+        }
+        identity_or_none(FileIdentity {
+            volume: u64::from(info.dwVolumeSerialNumber),
+            index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+        })
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn identity_following_links(_path: &std::path::Path) -> Option<FileIdentity> {
+    None
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
@@ -713,8 +1228,7 @@ fn hard_link_count(_output: &str, _meta: &std::fs::Metadata) -> u64 {
 /// name is free" case costs one cheap syscall, not a regression to the per-item cost this module's own
 /// CPE-1613 fix eliminated.
 pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, String> {
-    let mut parent_cache: std::collections::HashMap<String, Option<std::path::PathBuf>> =
-        std::collections::HashMap::new();
+    let mut parent_cache = ParentCache::new();
     // Computed once per input (not re-derived per collision check below) and reused by index — avoids
     // redundant `canonicalize` syscalls for the same input path.
     let input_keys: Vec<PathKey> = inputs.iter().map(|p| path_key(p, &mut parent_cache)).collect();
@@ -781,16 +1295,29 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
 
             // CPE-1623: constrain the computed output to the input's own directory — plan() has never
             // taken a separate "target dir" parameter; each item's implicit target is always the folder
-            // its own input already lives in. [`output_escapes_input_dir`] is the one shared definition
+            // its own input already lives in. `classify_output_containment` is the one shared definition
             // of this check — also used by `batch_execute::execute_plan_walk`'s independent pre-write
             // re-check, so there is exactly one place that decides "did this leave the folder?", not two
             // definitions that could drift apart.
-            if output_escapes_input_dir(input, &output, &mut parent_cache) {
-                return Err(format!(
-                    "computed output for \"{input}\" would land at \"{output}\", outside its own folder \
-                     — a Convert extension or Rename template can only change a file's name/extension, \
-                     never its folder"
-                ));
+            // CPE-1642: three-valued, so the refusal says what is actually TRUE. "Would land outside its
+            // own folder" is a lie about an output the check merely could not verify — nothing left the
+            // folder in that case; identity resolution failed, and refusing was the safe response.
+            match classify_output_containment(input, &output, &mut parent_cache) {
+                Containment::Inside => {}
+                Containment::Escapes => {
+                    return Err(format!(
+                        "computed output for \"{input}\" would land at \"{output}\", outside its own \
+                         folder — a Convert extension or Rename template can only change a file's \
+                         name/extension, never its folder"
+                    ));
+                }
+                Containment::Unverifiable(why) => {
+                    return Err(format!(
+                        "refusing \"{input}\": couldn't verify that the computed output \"{output}\" \
+                         stays inside its own folder — {why}. Nothing was written; this is a refusal to \
+                         guess, not a detected escape"
+                    ));
+                }
             }
 
             if job.non_destructive {
@@ -1373,6 +1900,532 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ---- CPE-1642: resolve the output's IDENTITY, don't pattern-match link shapes --------------------
+    //
+    // The CPE-1623 fix above read exactly ONE symlink hop and defaulted an unreadable hard-link count to
+    // "not linked". These tests reproduce the two escapes that left open (findings A and B in the ticket),
+    // plus the negative controls that must still be allowed — including the one CPE-1623 had to refuse as
+    // a known false positive.
+
+    /// Create a symlink or skip the test with a VISIBLE reason (Windows needs Developer Mode/elevation).
+    /// Returns `false` when the caller should return early — never silently passes.
+    fn try_symlink(target: &std::path::Path, link: &std::path::Path, test: &str) -> bool {
+        match crate::links::create_symlink(&target.to_string_lossy(), &link.to_string_lossy()) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!(
+                    "SKIPPING {test}: could not create a symlink in this environment ({e}) — Windows \
+                     needs Developer Mode or elevation. This test did NOT verify anything."
+                );
+                false
+            }
+        }
+    }
+
+    /// **CPE-1642 finding A — the ticket's exact PoC.** `linkA → linkB` (relative, same directory) and
+    /// `linkB → outside/important.jpg`. The old check read ONE hop, saw that `linkB` was textually in the
+    /// selected folder, and returned "contained" — the outside victim's bytes then changed for real.
+    /// **Negative control:** identical to the pre-fix demonstration, which returned `false` here.
+    #[test]
+    fn cpe_1642_two_hop_symlink_chain_escapes() {
+        let dir = scratch("cpe1642-symlink-chain");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link_b = selected.join("linkB.jpg");
+        let link_a = selected.join("linkA.jpg");
+        if !try_symlink(&victim, &link_b, "cpe_1642_two_hop_symlink_chain_escapes") {
+            return;
+        }
+        // Relative target, so hop 1 resolves to a name that is TEXTUALLY inside the selected folder —
+        // exactly what fooled the one-hop check.
+        if !try_symlink(std::path::Path::new("linkB.jpg"), &link_a, "cpe_1642_two_hop_symlink_chain_escapes")
+        {
+            return;
+        }
+        assert_eq!(
+            std::fs::read_link(&link_a).unwrap(),
+            std::path::PathBuf::from("linkB.jpg"),
+            "sanity: hop 1's stored target must be a bare relative name inside the selected folder"
+        );
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link_a.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert!(
+            output_escapes_input_dir(&input, &output, &mut cache),
+            "a symlink CHAIN whose far end lands outside the selected folder must be refused — reading \
+             only the first hop is what let this through"
+        );
+    }
+
+    /// **Negative control for the chain fix:** the same two-hop shape, but the chain lands back on a real
+    /// file INSIDE the selected folder. Must still be allowed — otherwise the chain test above could pass
+    /// vacuously by refusing every symlink.
+    #[test]
+    fn cpe_1642_symlink_chain_landing_back_inside_the_folder_is_allowed() {
+        let dir = scratch("cpe1642-chain-inside");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let real = selected.join("real.jpg");
+        std::fs::write(&real, b"data").unwrap();
+        let link_b = selected.join("linkB.jpg");
+        let link_a = selected.join("linkA.jpg");
+        let test = "cpe_1642_symlink_chain_landing_back_inside_the_folder_is_allowed";
+        if !try_symlink(std::path::Path::new("real.jpg"), &link_b, test) {
+            return;
+        }
+        if !try_symlink(std::path::Path::new("linkB.jpg"), &link_a, test) {
+            return;
+        }
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link_a.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Inside,
+            "a chain that resolves back inside the selected folder must NOT be refused"
+        );
+    }
+
+    /// A symlink CYCLE must terminate and fail closed — and be reported as *unverifiable*, not as a proven
+    /// escape (nothing left the folder; the chain simply has no real end).
+    #[test]
+    fn cpe_1642_symlink_cycle_is_refused_as_unverifiable_and_terminates() {
+        let dir = scratch("cpe1642-cycle");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let link_a = selected.join("linkA.jpg");
+        let link_b = selected.join("linkB.jpg");
+        let test = "cpe_1642_symlink_cycle_is_refused_as_unverifiable_and_terminates";
+        // linkA -> linkB (dangling for the moment), then linkB -> linkA closes the loop.
+        if !try_symlink(std::path::Path::new("linkB.jpg"), &link_a, test) {
+            return;
+        }
+        if !try_symlink(std::path::Path::new("linkA.jpg"), &link_b, test) {
+            return;
+        }
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link_a.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        match classify_output_containment(&input, &output, &mut cache) {
+            Containment::Unverifiable(_) => {}
+            other => panic!("a symlink cycle must be refused as unverifiable, got {other:?}"),
+        }
+    }
+
+    /// **CPE-1642 finding B — the hard-link check used to FAIL OPEN under contention.** With
+    /// `selected/link.jpg` hard-linked to a file outside the folder (correctly refused when uncontended),
+    /// an ordinary unprivileged process holding an exclusive handle (`share_mode(0)`) made the old
+    /// `GENERIC_READ` open fail, which defaulted the link count to 1 and returned "contained".
+    /// **Negative control:** this exact sequence returned `false` before the fix. Windows-only because
+    /// `share_mode` is the Windows mechanism for making an open fail; the read is `nlink` off one stat on
+    /// Unix, which has no equivalent failure mode.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_hard_link_alias_is_still_refused_while_the_file_is_held_exclusively() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = scratch("cpe1642-contended-hardlink");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("link.jpg");
+        crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        // An ordinary process (this one) holding the file with NO sharing — an AV scanner, another app,
+        // or a second thread of the same batch would do exactly this.
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&link)
+            .expect("holding an exclusive handle needs no privilege");
+        assert!(
+            std::fs::OpenOptions::new().read(true).open(&link).is_err(),
+            "sanity: with share_mode(0) held, an ordinary GENERIC_READ open of this path must fail — \
+             that failure is what used to be misread as \"only one link\""
+        );
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        let verdict = classify_output_containment(&input, &output, &mut cache);
+        // `assert_eq!(…, Escapes)`, not `assert_ne!(…, Inside)` (reviewer finding F5): the weaker form
+        // would pass even if the identity probe were entirely broken and answered `Unverifiable` for
+        // everything, which is exactly the mechanism this test exists to prove. Reaching `Escapes` requires
+        // the `FILE_READ_ATTRIBUTES` open to have SUCCEEDED against the `share_mode(0)` holder, read a real
+        // link count of 2, and censused the folder to find only one of those names inside it.
+        assert_eq!(
+            verdict,
+            Containment::Escapes,
+            "a hard link to a file outside the selected folder must be a PROVEN escape even while the file \
+             is held exclusively — a contended read must never be treated as \"not linked\", and must not \
+             degrade to merely \"unverifiable\" either"
+        );
+        drop(hold);
+    }
+
+    /// **The positive control for the test above (reviewer finding F5).** Same exclusive `share_mode(0)`
+    /// holder, but both hard-linked names live INSIDE the selected folder. It must still come back
+    /// `Inside` — proving the contended case above reaches `Escapes` because the probe genuinely read the
+    /// file's identity through the contention, not because contention refuses everything.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_contended_hard_links_wholly_inside_the_folder_are_still_allowed() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = scratch("cpe1642-contended-inside");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let first = selected.join("a.jpg");
+        std::fs::write(&first, b"data").unwrap();
+        let second = selected.join("b.jpg");
+        crate::links::create_hard_link(&first.to_string_lossy(), &second.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&first)
+            .expect("holding an exclusive handle needs no privilege");
+        assert!(
+            std::fs::OpenOptions::new().read(true).open(&first).is_err(),
+            "sanity: the exclusive hold must actually block an ordinary GENERIC_READ open"
+        );
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = first.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Inside,
+            "contention alone must not refuse a file whose every name is inside the selected folder — \
+             otherwise the contended-escape test above passes vacuously"
+        );
+        drop(hold);
+    }
+
+    /// **The false positive CPE-1623 documented as a deliberate gap, now fixed.** Two hard-linked names
+    /// that BOTH live inside the selected folder alias nothing outside it, so writing through one is
+    /// contained. Resolving identity makes this provable with a census of the one folder the user picked
+    /// (never a volume walk). Doubles as the negative control for the contended test above: a check that
+    /// refused every multiply-linked file would pass that one vacuously.
+    #[test]
+    fn cpe_1642_hard_links_wholly_inside_the_selected_folder_are_allowed() {
+        let dir = scratch("cpe1642-hardlinks-inside");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let first = selected.join("a.jpg");
+        std::fs::write(&first, b"data").unwrap();
+        let second = selected.join("b.jpg");
+        crate::links::create_hard_link(&first.to_string_lossy(), &second.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = first.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Inside,
+            "a multiply-linked file whose every name is inside the selected folder reaches nothing \
+             outside it, so it must not be refused"
+        );
+    }
+
+    /// One name inside the folder, one outside — the census finds fewer names than the file has, which
+    /// PROVES a name exists elsewhere. Distinct from the "couldn't verify" verdict, and the distinction is
+    /// what the refusal message depends on being true.
+    #[test]
+    fn cpe_1642_hard_link_with_a_name_outside_the_folder_is_a_proven_escape() {
+        let dir = scratch("cpe1642-hardlink-outside");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("link.jpg");
+        crate::links::create_hard_link(&victim.to_string_lossy(), &link.to_string_lossy()).unwrap();
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Escapes,
+            "a hard link with a name outside the selected folder is a PROVEN escape, not merely unverified"
+        );
+    }
+
+    // ---- CPE-1642 round 2 (reviewer findings REV-G / F1, F2): the probe must address the SAME set of -----
+    // ---- files the writer does, and an identity that identifies nothing is not an identity -------------
+
+    /// **REV-G — over-`MAX_PATH` output, at the containment-check level.** The end-to-end, byte-proven
+    /// version of this lives in `batch_execute` (`cpe_1642_over_max_path_symlink_alias_…`); this is the
+    /// fast unit-level guard on the same mechanism. Before the fix `CreateFileW` on the raw path failed
+    /// with `ERROR_PATH_NOT_FOUND`, which became `Probe::Absent` and therefore `Containment::Inside` — a
+    /// fail-open, and strictly worse than the code CPE-1642 replaced. Windows-only: `MAX_PATH` is a Windows
+    /// limit and `symlink_metadata` on Unix has no equivalent truncation.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_symlink_alias_past_max_path_is_a_proven_escape() {
+        let dir = scratch("cpe1642-longpath-unit");
+        let mut deep = dir.path().to_path_buf();
+        while deep.to_string_lossy().chars().count() < 300 {
+            deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
+        }
+        let selected = deep.join("selected");
+        let outside = deep.join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(
+            selected.to_string_lossy().chars().count() > 260,
+            "sanity: the selected folder must sit past MAX_PATH or this test proves nothing"
+        );
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        // A RELATIVE target, resolved against the link's own parent exactly as the OS does — which also
+        // means the probe has to cope with a `..` segment inside an over-MAX_PATH path.
+        let link = selected.join("linkA.jpg");
+        let target = std::path::Path::new("..").join("outside").join("important.jpg");
+        if !try_symlink(&target, &link, "cpe_1642_symlink_alias_past_max_path_is_a_proven_escape") {
+            return;
+        }
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Escapes,
+            "a symlink out of an over-MAX_PATH folder must be a PROVEN escape — the identity probe has to \
+             reach every path `std::fs` (and therefore the writer) reaches"
+        );
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **The belt-and-braces length guard in `classify_open_failure` must be pinned by a test of its
+    /// own.** Layer 1 (`verbatim_wide`) normally keeps the probe from ever seeing a truncation error, so
+    /// every filesystem-level test reaches this function through a path where the guard is inert — delete
+    /// the guard and the whole suite still passes. That is not acceptable here: an independent review
+    /// demonstrated that with layer 1 disabled, this guard is the only thing standing between a
+    /// past-`MAX_PATH` symlink alias and the victim's bytes (it degrades the verdict to `Unverifiable`,
+    /// which every caller refuses on). This ticket exists because prior rounds each eroded a guard no test
+    /// was holding, so pin it directly: the function is pure, so no filesystem is needed.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_classify_open_failure_length_guard_is_pinned() {
+        const ERROR_FILE_NOT_FOUND: u32 = 2;
+        const ERROR_PATH_NOT_FOUND: u32 = 3;
+        const ERROR_ACCESS_DENIED: u32 = 5;
+        const ERROR_INVALID_NAME: u32 = 123;
+        const ERROR_BAD_PATHNAME: u32 = 161;
+        const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
+        /// One wide char past the unprefixed limit, i.e. a length only a verbatim path can address.
+        const LONG: usize = 300;
+        /// Comfortably inside the unprefixed limit.
+        const SHORT: usize = 100;
+
+        // The four codes that mean "this path was too long to even parse" must NOT be read as `Absent`
+        // once the path is at or past the limit — reading them as `Absent` is precisely the fail-open the
+        // reviewer exploited (probe says "nothing there", `std::fs` writes anyway).
+        for code in [
+            ERROR_PATH_NOT_FOUND,
+            ERROR_INVALID_NAME,
+            ERROR_BAD_PATHNAME,
+            ERROR_FILENAME_EXCED_RANGE,
+        ] {
+            assert!(
+                matches!(classify_open_failure(code, LONG), Probe::Unreadable),
+                "os error {code} on a past-MAX_PATH path must fail CLOSED as Unreadable, never Absent"
+            );
+        }
+
+        // Same codes below the limit keep their ordinary meaning: there, `ERROR_PATH_NOT_FOUND` really
+        // does mean a missing parent, so treating it as `Absent` is correct and costs nothing.
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, SHORT), Probe::Absent),
+            "a short path's ERROR_PATH_NOT_FOUND genuinely means 'nothing there'"
+        );
+
+        // The deliberate exclusion: `ERROR_FILE_NOT_FOUND` stays `Absent` at ANY length. This is the
+        // ordinary "the output doesn't exist yet" case — the guard must not make every deep-folder batch
+        // unverifiable. The exclusion is safe because with layer 1 in place the path is never truncated,
+        // so a `2` really does mean the leaf is absent.
+        for len in [SHORT, LONG] {
+            assert!(
+                matches!(classify_open_failure(ERROR_FILE_NOT_FOUND, len), Probe::Absent),
+                "ERROR_FILE_NOT_FOUND must stay Absent at length {len} — this is the common legitimate path"
+            );
+        }
+
+        // The boundary itself, from both sides, so a future off-by-one in the comparison is caught.
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 259), Probe::Absent),
+            "259 wide chars is still addressable unprefixed"
+        );
+        assert!(
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 260), Probe::Unreadable),
+            "260 wide chars (NUL included) is the limit — at it, truncation is possible"
+        );
+
+        // An unrelated failure is unreadable regardless of length: something is there, we just could not
+        // identify it. Never `Absent`.
+        for len in [SHORT, LONG] {
+            assert!(
+                matches!(classify_open_failure(ERROR_ACCESS_DENIED, len), Probe::Unreadable),
+                "a permissions failure is Unreadable, not Absent"
+            );
+        }
+    }
+
+    /// **An over-`MAX_PATH` output that is an ordinary, absent file must still be ALLOWED.** Without this,
+    /// the test above could pass by refusing every long path, and every legitimate deep-folder batch would
+    /// break.
+    ///
+    /// Note this reaches `classify_open_failure` only through layer 1 (`verbatim_wide`), so it exercises
+    /// the `ERROR_FILE_NOT_FOUND`-stays-`Absent` half and *not* the length guard itself — the guard is
+    /// pinned directly by `cpe_1642_classify_open_failure_length_guard_is_pinned` below.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_ordinary_absent_output_past_max_path_is_still_allowed() {
+        let dir = scratch("cpe1642-longpath-ok");
+        let mut deep = dir.path().to_path_buf();
+        while deep.to_string_lossy().chars().count() < 300 {
+            deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let input = deep.join("photo.jpg");
+        std::fs::write(&input, b"x").unwrap();
+        let output = deep.join("photo-800.jpg"); // does not exist yet — the overwhelmingly common case
+
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(
+                &input.to_string_lossy(),
+                &output.to_string_lossy(),
+                &mut cache
+            ),
+            Containment::Inside,
+            "an ordinary not-yet-existing output in a deep folder must not be refused"
+        );
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **A path handed in already in `\\?\` verbatim form.** `std::fs` returns such paths untouched, so the
+    /// probe must too — re-prefixing would produce `\\?\\\?\C:\…`, which names nothing, and (with the
+    /// length guard) would refuse every deep batch. `canonicalize` is the ordinary way one of these reaches
+    /// the engine. The symlink still has to be caught: the verbatim spelling must change nothing about the
+    /// verdict. There was no `\\?\` coverage in this module at all before.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_verbatim_prefixed_paths_are_probed_not_re_prefixed() {
+        let dir = scratch("cpe1642-verbatim");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("linkA.jpg");
+        if !try_symlink(&victim, &link, "cpe_1642_verbatim_prefixed_paths_are_probed_not_re_prefixed") {
+            return;
+        }
+
+        // `canonicalize` hands back the `\\?\`-prefixed spelling on Windows.
+        let canon_selected = std::fs::canonicalize(&selected).unwrap();
+        assert!(
+            canon_selected.to_string_lossy().starts_with("\\\\?\\"),
+            "sanity: this test needs a verbatim path, got {}",
+            canon_selected.display()
+        );
+        let input = canon_selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = canon_selected.join("linkA.jpg").to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Escapes,
+            "a symlink out of the folder must be caught just the same when the paths arrive in \\\\?\\ form"
+        );
+
+        // Positive control: an ordinary absent output in verbatim form must still be allowed, so the
+        // assertion above can't be passing because verbatim paths are simply never openable.
+        let plain = canon_selected.join("photo-800.jpg").to_string_lossy().to_string();
+        assert_eq!(
+            classify_output_containment(&input, &plain, &mut cache),
+            Containment::Inside,
+            "an ordinary not-yet-existing output must not be refused just for arriving in \\\\?\\ form"
+        );
+    }
+
+    /// **F2 — a degenerate identity is not an identity.** `GetFileInformationByHandle` *succeeds* on
+    /// several network redirectors while supplying no usable file index: it returns zero. Every object on
+    /// such a volume would then compare EQUAL, so the landing-directory-versus-selected-directory test
+    /// would pass for any directory anywhere and a symlink out of the folder would be judged contained —
+    /// a fail-open invisible from the call site, because the API said "OK".
+    ///
+    /// Injected rather than reproduced: no such volume is available to CI (or to the reviewer), and the
+    /// guard is a property of the values, not of the syscall.
+    #[test]
+    fn cpe_1642_degenerate_identity_is_never_accepted_as_a_real_one() {
+        let real = FileIdentity { volume: 0x9ABC_DEF0, index: 42 };
+        let no_index = FileIdentity { volume: 0x9ABC_DEF0, index: 0 };
+        let other_no_index = FileIdentity { volume: 0x9ABC_DEF0, index: 7_000 - 7_000 };
+        let no_volume = FileIdentity { volume: 0, index: 42 };
+
+        // The trap itself: without the guard, two *unrelated* objects on an index-less volume are equal.
+        assert_eq!(
+            no_index, other_no_index,
+            "sanity: on a volume with no file index every object carries the same identity — that is \
+             exactly why a zero index must never be compared"
+        );
+
+        assert!(!real.is_degenerate(), "an ordinary identity must keep working");
+        assert!(no_index.is_degenerate(), "a zero file index identifies nothing");
+        assert!(no_volume.is_degenerate(), "a zero volume serial identifies nothing");
+
+        let facts = |id| FileFacts { id, links: 1, is_dir: true };
+        assert!(
+            matches!(facts_or_unreadable(facts(real)), Probe::Real(_)),
+            "a real identity must probe as Real"
+        );
+        for bad in [no_index, no_volume] {
+            assert!(
+                matches!(facts_or_unreadable(facts(bad)), Probe::Unreadable),
+                "a degenerate identity must probe as Unreadable (which every caller refuses on), not Real"
+            );
+            assert_eq!(
+                identity_or_none(bad),
+                None,
+                "a degenerate directory identity must be None — `dir_identity`'s callers treat None as a \
+                 containment failure, so nothing can compare equal to it"
+            );
+        }
+        assert_eq!(identity_or_none(real), Some(real));
+    }
+
+    /// The degeneracy guard has to leave the ordinary case alone: a real directory on a real volume must
+    /// still yield an identity, or every batch on this machine would be refused.
+    #[test]
+    fn cpe_1642_a_real_directory_still_has_a_readable_identity() {
+        let dir = scratch("cpe1642-real-identity");
+        let id = identity_following_links(dir.path())
+            .expect("an ordinary local directory must still resolve to a usable identity");
+        assert!(!id.is_degenerate(), "a real local directory must not look degenerate: {id:?}");
     }
 
     /// Manual-only timing measurement (CPE-1623 follow-up to the CPE-1613 perf fix): `#[ignore]`d so it

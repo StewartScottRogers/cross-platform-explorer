@@ -191,11 +191,12 @@ junction = "1"
 # One-shot OS high-contrast read (CPE-1546, epic CPE-1496): `SystemParametersInfoW(SPI_GETHIGHCONTRAST)`
 # reads `HCF_HIGHCONTRASTON` from `HIGHCONTRASTW`. Same `windows` 0.56 the app adapter already pulls in
 # (src-tauri/Cargo.toml) — feature-unified to a single crate in the shipped tree, no second `windows`.
-# `Win32_Storage_FileSystem` (CPE-1623 follow-up, PR #828 attempt 3) adds `CreateFileW` +
-# `GetFileInformationByHandle` for `batch_media::hard_link_count` — `std::os::windows::fs::MetadataExt`'s
-# `number_of_links()`/`file_index()`/`volume_serial_number()` are still gated behind the unstable
-# `windows_by_handle` feature (rust-lang/rust#63010) on stable Rust, so the same already-vendored `windows`
-# crate is the only way to read a file's hard-link count without a new dependency.
+# `Win32_Storage_FileSystem` (CPE-1623 follow-up, PR #828 attempt 3; extended by CPE-1642) adds
+# `CreateFileW` + `GetFileInformationByHandle` for `batch_media`'s output-identity resolution —
+# `std::os::windows::fs::MetadataExt`'s `number_of_links()`/`file_index()`/`volume_serial_number()` are
+# still gated behind the unstable `windows_by_handle` feature (rust-lang/rust#63010) on stable Rust, so the
+# same already-vendored `windows` crate is the only way to read a file's identity (volume serial + file
+# index) and hard-link count without a new dependency.
 windows = { version = "0.56", features = [
     "Win32_Foundation",
     "Win32_Security",
