@@ -95,12 +95,30 @@ artifact once sealed.
 - **The session dir is contained, not caller-chosen (CPE-1647, closed).** `vault_unlock`'s `session_dir` is
   untrusted IPC input, and locking *securely shreds* whatever it names — so an unvalidated one was a
   "shred any directory" primitive (`vault_unlock(blob, pass, "…/Documents")` then `vault_lock(blob)`).
-  `unlock_to_session` now refuses any path that does not resolve **strictly inside**
+  `unlock_to_session` refuses any path that does not resolve **strictly inside**
   `appCacheDir()/vault-sessions` (`ensure_session_dir_contained`, the same guard shape `create_vault`'s
   `resolves_inside` uses). Both sides are canonicalized before a component-wise comparison, so `..`,
   symlinks/junctions and the `vault-sessions` / `vault-sessions-evil` prefix trap are all caught; the root
   itself is refused (wiping it would destroy every live session); and every resolution failure fails
-  **closed**. A refused unlock records no mapping, so a later `lock` has nothing to act on.
+  **closed**. A refused unlock records no mapping, so a later `lock` has nothing to act on. The guard is
+  **pure** — it reads the filesystem and never creates anything, so a refusal leaves no directory behind.
+
+  **What is guaranteed, precisely.** Checking only at unlock would contain the caller's path *string*, not
+  the *directory that gets shredded* — the two are separated in time, and `deletePermanent`/`moveExact`
+  plus `createJunction` (all registered commands, and a Windows junction needs neither Developer Mode nor
+  elevation) can swap a link in at the validated path afterwards, with the attacker choosing when `lock`
+  runs. So containment is enforced **twice**, and the guarantee is:
+    1. **At unlock** — `session_dir` must resolve strictly inside the app's `vault-sessions` root, checked
+       before the blob is read and before anything is decrypted.
+    2. **At lock, immediately before the wipe** — the root is stored alongside the session dir in the
+       registry and the *same* check is re-run against the path as it resolves *now*. A swapped-in
+       link canonicalizes to its target, which then fails `starts_with(root)`. A failed re-check shreds
+       nothing, drops the mapping (so the vault is not left wedged "unlocked" pointing at a path we have
+       decided not to trust), and returns a clear error rather than reporting a successful lock.
+    3. **Independently, at the wipe itself** — `wipe_session_dir` refuses outright when
+       `symlink_metadata` reports the session path is a symlink or junction. A genuine session dir is a
+       real directory this module extracted into and is never a link, while `exists()` and `read_dir()`
+       both silently follow reparse points. Belt-and-braces: (2) and (3) fail closed independently.
 - **Secure-delete of the original is best-effort.** The optional "securely delete the original after
   sealing" overwrites then removes, but on SSDs, copy-on-write, wear-levelled, or journalled filesystems
   the OS may retain remnants — the UI states this honestly. It only runs **after** the vault is verified
@@ -138,6 +156,16 @@ An **independent** reviewer (not the implementer) adversarially reviewed each sl
   by tests that read the victim's bytes back **off disk** after both the refused unlock and the follow-up
   lock, cover the `..`/symlink/prefix-sibling/root-itself/unresolvable-root variants, and keep a negative
   control showing a legitimate fresh session still unlocks and is still wiped.
+- **Session containment, review #1 (CPE-1647):** the first fix checked containment at **unlock only**, so
+  what it actually contained was the path *string* at unlock time, not the directory at wipe time. An
+  independent review demonstrated the gap end-to-end with no elevation and no race: unlock legitimately
+  into `<vault-sessions>/<uuid>`, `deletePermanent` that directory, `createJunction` a junction at the
+  same path pointing at the user's Documents, then `vault_lock` — every file under Documents was securely
+  shredded. Closed by (a) storing the session root with the session and **re-running the containment check
+  in `lock`, immediately before the wipe**, and (b) `wipe_session_dir` refusing a session path that is
+  itself a symlink/junction. Both changes fail closed independently. Regression tests rebuild the exploit
+  from real filesystem objects (junction on Windows, symlink elsewhere) and assert the victim's bytes are
+  still readable off disk; with either guard removed they fail with "it was DESTROYED".
 - Verify-before-shred is enforced with an injectable verifier and a falsifiable test proving the original
   survives a failed verify.
 

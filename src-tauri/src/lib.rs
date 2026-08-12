@@ -7036,7 +7036,9 @@ async fn vault_create(
 /// any path that does not resolve strictly inside this app's own `vault-sessions` root (resolved here via
 /// `vault_sessions_root`, the same dir the startup sweep and the frontend's `defaultAllocSessionDir` use).
 /// Without that check a devtools/automation caller holding a vault + its passphrase could point the unlock
-/// at any directory on the machine and then have `vault_lock` securely shred it.
+/// at any directory on the machine and then have `vault_lock` securely shred it. The root is recorded with
+/// the session and the same check is re-run inside `vault_lock`, immediately before the wipe — validating
+/// only here would contain the path *string*, not the directory that actually gets shredded.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn vault_unlock(
@@ -7051,7 +7053,12 @@ async fn vault_unlock(
     let pass = cpe_server::vault_manager::PassphraseSecret::from(passphrase);
     tauri::async_runtime::spawn_blocking(move || {
         registry
-            .unlock(Path::new(&blob_path), &pass, Path::new(&session_dir), &sessions_root)
+            .unlock(
+                cpe_server::vault_manager::SessionsRoot::new(&sessions_root),
+                Path::new(&blob_path),
+                &pass,
+                Path::new(&session_dir),
+            )
             .map_err(|e| e.to_string())
     })
     .await
@@ -7060,6 +7067,12 @@ async fn vault_unlock(
 
 /// Lock the vault at `blob_path`: drop its unlocked state and securely wipe (shred + remove) its session
 /// directory so no plaintext lingers. Async + `spawn_blocking`: shreds + removes files (CPE-760/761).
+///
+/// The engine re-checks containment here, immediately before shredding (CPE-1647): the session dir was
+/// validated at unlock, but other registered commands (`deletePermanent`/`moveExact` + `createJunction`)
+/// can replace it with a link afterwards, so the *path* being contained at unlock is not the same claim as
+/// the *directory* being contained at wipe. A failed re-check wipes nothing, forgets the session, and
+/// surfaces the refusal here rather than reporting a successful lock.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn vault_lock(
