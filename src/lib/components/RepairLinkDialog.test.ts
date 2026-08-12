@@ -73,7 +73,14 @@ describe("RepairLinkDialog (CPE-1209)", () => {
 
     await fireEvent.click(screen.getByTestId("repair-confirm-yes"));
 
-    await waitFor(() => expect(invoke).toHaveBeenCalledWith("delete_permanent", { paths: ["/repo/broken-link.txt"] }));
+    // `confirmed: true` (CPE-1651) is part of the contract now: the backend refuses an unconsented
+    // `delete_permanent` outright, so the dialog must pass consent — and only from behind this confirm.
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("delete_permanent", {
+        paths: ["/repo/broken-link.txt"],
+        confirmed: true,
+      }),
+    );
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("create_symlink", {
       target: "/repo/found/marker.txt",
       linkPath: "/repo/broken-link.txt",

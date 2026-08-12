@@ -2067,12 +2067,19 @@ fn restore_trash_items_impl(ids: Vec<String>) -> Vec<OpResult> {
 }
 
 /// Empty the Trash: purge everything (`ids: None`) or just the given items (`ids: Some`). Purging is
-/// permanent — the UI must confirm before calling this with `None`.
+/// permanent — a purged item is gone from the Recycle Bin with nothing left to restore.
+///
+/// **Refuses up front** ([`Err`], nothing purged, the OS trash never even listed) when `confirmed` is
+/// `false` (CPE-1651's sibling audit, same shape as `delete_permanent`/`shred_paths`/`vault_create`).
+/// The gate covers BOTH scopes deliberately: purging a named subset (`ids: Some`) destroys those items
+/// exactly as irrecoverably as purging the lot, so "the UI must confirm before calling this with `None`"
+/// — what this doc comment used to say, and delegate to the frontend — was both an ungated promise and
+/// too narrow a one. `TrashView.svelte`'s Empty-confirm dialog is the only place allowed to set it.
 #[cfg(any(target_os = "windows", target_os = "linux"))]
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn empty_trash(ids: Option<Vec<String>>) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || empty_trash_impl(ids))
+async fn empty_trash(ids: Option<Vec<String>>, confirmed: bool) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || empty_trash_impl(ids, confirmed))
         .await.map_err(|e| e.to_string())?
 }
 
@@ -2092,32 +2099,105 @@ fn select_trash_targets(all: Vec<trash::TrashItem>, ids: Option<&[String]>) -> V
     }
 }
 
+/// The consent gate + purge sequencing for [`empty_trash`], with the two OS calls injected (CPE-1651).
+///
+/// Injected for the same reason `select_trash_targets` was split out in the first place: a test that
+/// exercised the real `list`/`purge_all` would permanently destroy whatever the developer or CI runner
+/// actually has in their Recycle Bin. With them as parameters, a test can prove the refusal reaches
+/// **neither** — not just that it returned `Err` — which is the whole claim being made. Generic over the
+/// item type so that test never has to hand-build a `trash::TrashItem`.
+///
+/// `list` runs *after* the gate on purpose: an unconfirmed call must be inert, not "inert but it went
+/// and enumerated your Recycle Bin first".
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn empty_trash_impl(ids: Option<Vec<String>>) -> Result<(), String> {
-    use trash::os_limited::{list, purge_all};
+fn empty_trash_gated<T>(
+    confirmed: bool,
+    list: impl FnOnce() -> Result<Vec<T>, String>,
+    select: impl FnOnce(Vec<T>) -> Vec<T>,
+    purge: impl FnOnce(Vec<T>) -> Result<(), String>,
+) -> Result<(), String> {
+    // CONFIRM GATE (CPE-1651), mirroring `delete_permanent_impl`'s.
+    if !confirmed {
+        return Err(
+            "refusing to purge: `confirmed` was not set on this empty_trash call — purging is \
+             permanent and leaves nothing to restore, so it must be re-invoked with an explicit \
+             confirmation (only TrashView's Empty-confirm dialog should ever set it)"
+                .to_string(),
+        );
+    }
 
-    let all = list().map_err(|e| e.to_string())?;
-    let targets = select_trash_targets(all, ids.as_deref());
+    let targets = select(list()?);
     if targets.is_empty() {
         return Ok(());
     }
-    purge_all(targets).map_err(|e| e.to_string())
+    purge(targets)
 }
 
-/// Permanently delete entries. Irreversible — the UI must confirm explicitly
-/// before ever calling this.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn empty_trash_impl(ids: Option<Vec<String>>, confirmed: bool) -> Result<(), String> {
+    use trash::os_limited::{list, purge_all};
+
+    empty_trash_gated(
+        confirmed,
+        || list().map_err(|e| e.to_string()),
+        |all| select_trash_targets(all, ids.as_deref()),
+        |targets| purge_all(targets).map_err(|e| e.to_string()),
+    )
+}
+
+/// Permanently delete entries. Irreversible — there is no Recycle Bin copy and no undo.
+///
+/// **Refuses the whole batch up front** ([`Err`], nothing touched) when `confirmed` is `false`
+/// (CPE-1651, the same shape CPE-1611 gave `secure_shred::shred_paths` and CPE-1630 gave
+/// `vault_manager::create_vault`). Every call to this command is unconditionally destructive — unlike
+/// `delete_to_trash`, which leaves a recoverable copy — so there is no "safe" plan to distinguish and
+/// the flag itself is the entire gate.
+///
+/// Before this ticket the doc comment here said "the UI must confirm", i.e. the backend delegated the
+/// safety decision to the frontend. That is not a gate: the IPC surface is reachable without the UI, and
+/// the independent review of PR #838 used exactly this command as **step 2 of a working exploit chain**
+/// (delete a vault's live session dir, plant a junction at the same path, let the locker's shredder walk
+/// it). CPE-1647 closed the vault end of that chain by re-checking containment immediately before the
+/// wipe; this closes the primitive that made step 2 free. `App.svelte`'s "Delete permanently?" confirm
+/// and `RepairLinkDialog.svelte`'s replace-confirm — the only places in the codebase allowed to set
+/// `confirmed: true` — are now the only things that can make the backend actually delete a file.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn delete_permanent(app: tauri::AppHandle, paths: Vec<String>) -> Vec<OpResult> {
+async fn delete_permanent(
+    app: tauri::AppHandle,
+    paths: Vec<String>,
+    confirmed: bool,
+) -> Result<Vec<OpResult>, String> {
     // Same as its sibling `delete_to_trash` — a permanent delete is the user's doing too, not the
-    // owning agent session (CPE-1102, fast-follow on CPE-1101).
-    note_app_op(&app, || paths.clone());
-    tauri::async_runtime::spawn_blocking(move || delete_permanent_impl(paths))
-        .await.unwrap()
+    // owning agent session (CPE-1102, fast-follow on CPE-1101). Only worth noting once we're actually
+    // about to delete, mirroring `shred_paths` (CPE-1611): a refused call mutates nothing, so it must
+    // not leave a phantom entry in the app-op ledger that mis-attributes an unrelated watcher event.
+    if confirmed {
+        note_app_op(&app, || paths.clone());
+    }
+    tauri::async_runtime::spawn_blocking(move || delete_permanent_impl(paths, confirmed))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
-    paths
+/// See [`delete_permanent`]. Split out (and taking `confirmed` itself, rather than being called only
+/// once the command has checked it) so the CPE-1651 consent gate is exercised by the same entry point a
+/// forged IPC call reaches — a test that checked the flag in the command and the deletion here could
+/// pass while the gate sat outside the code under test.
+fn delete_permanent_impl(paths: Vec<String>, confirmed: bool) -> Result<Vec<OpResult>, String> {
+    // CONFIRM GATE (CPE-1651): checked first, before a single path is even inspected. Refuses cleanly —
+    // never a panic, never a partial delete, never a silently-skipped one.
+    if !confirmed {
+        return Err(
+            "refusing to delete: `confirmed` was not set on this delete_permanent call — this is a \
+             permanent operation with no Recycle Bin copy and no undo, so it must be re-invoked with \
+             an explicit confirmation (only the \"Delete permanently?\" confirm dialog, or \
+             RepairLinkDialog's replace-confirm, should ever set it)"
+                .to_string(),
+        );
+    }
+
+    Ok(paths
         .iter()
         .map(|p| {
             let path = Path::new(p);
@@ -2134,7 +2214,7 @@ fn delete_permanent_impl(paths: Vec<String>) -> Vec<OpResult> {
                 Err(e) => OpResult::err(path, e),
             }
         })
-        .collect()
+        .collect())
 }
 
 /// Securely delete (shred) entries: overwrite each file's bytes pass-by-pass per `scheme`, then remove
@@ -2946,6 +3026,27 @@ async fn start_archive_extract(
 ///
 /// Refuses to overwrite: if `to` already exists, the undo fails loudly rather
 /// than clobbering whatever now occupies that name.
+///
+/// **CPE-1651 audit — deliberately NO `confirmed` flag, unlike its `delete_permanent`/`shred_paths`/
+/// `vault_create` siblings.** The PR #838 reviewer noted this command "works equally well" as the
+/// exploit chain's step 2, so it was audited alongside `delete_permanent`. The conclusion is that a
+/// consent flag is the wrong instrument here, for three reasons:
+///
+/// 1. **It destroys nothing.** A move is a rename, fully reversible, and the `dst.exists()` refusal
+///    below means it can never clobber whatever occupies the destination — pinned by
+///    `move_exact_refuses_to_overwrite`, which reads the victim file's bytes back. The three gated
+///    commands all annihilate bytes with no recovery path; this one relocates them.
+/// 2. **Every caller is a non-destructive, already-reversible flow** — undo/redo, batch-rename apply,
+///    `macro_run`'s move step, `FileHealthDialog`'s rename-to-correct-extension fix-it, and
+///    `folderWatch`'s undo move-back. None shows (or should show) an irreversible-action confirm, so
+///    threading a flag through them could only ever be a hard-coded `true`: a compiler-satisfying
+///    constant, which is exactly the anti-pattern the ticket forbids and which would make the flag
+///    read as consent while carrying none.
+/// 3. **Consent cannot fix what the reviewer actually demonstrated.** Step 2's primitive is *vacating a
+///    path* so a link can be planted at it — and a fully consented, entirely legitimate move vacates
+///    its source just as effectively. The defence has to live at the point of destruction, not at the
+///    move, which is what CPE-1647 landed: `vault_lock` re-resolves containment immediately before the
+///    wipe, so a session dir that was moved/deleted and replaced by a junction is refused there.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<OpResult> {
@@ -13066,6 +13167,91 @@ mod tests {
 
     // list_dir + stream_dir_entries walker tests moved with the code to `cpe_server::listing` (CPE-815).
 
+    // ---- CPE-1651: backend consent gate on the permanent-destruction primitives --------------------
+    // `delete_permanent` used to delete whatever it was handed and say, in its doc comment, that "the UI
+    // must confirm" — delegating the safety decision to a frontend the IPC surface can bypass entirely.
+    // The PR #838 review used it as step 2 of a working exploit chain. These tests pin the gate the same
+    // way CPE-1611 pinned `shred_paths` and CPE-1630 pinned `vault_create`: refusal proven by reading the
+    // files' BYTES back off disk, not by trusting the `Err`.
+
+    /// The core defence-in-depth guarantee: `confirmed: false` refuses the WHOLE batch — `Err`, with a
+    /// specific reason, and **nothing deleted**, verified by reading each file's contents back.
+    #[test]
+    fn delete_permanent_refuses_the_whole_batch_when_not_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let b = dir.path().join("b.txt");
+        let sub = dir.path().join("sub");
+        let nested = sub.join("nested.txt");
+        fs::write(&a, b"alpha").unwrap();
+        fs::write(&b, b"bravo").unwrap();
+        fs::create_dir(&sub).unwrap();
+        fs::write(&nested, b"nested").unwrap();
+
+        let paths = vec![
+            a.to_string_lossy().to_string(),
+            b.to_string_lossy().to_string(),
+            sub.to_string_lossy().to_string(),
+        ];
+        let err = delete_permanent_impl(paths, false)
+            .expect_err("an unconfirmed delete_permanent call must be refused, not executed");
+
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+        assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+
+        // Nothing was deleted — bytes, not merely `exists()`. The directory arm (`remove_dir_all`, the
+        // arm the exploit chain used) is covered too.
+        assert_eq!(fs::read(&a).unwrap(), b"alpha", "a.txt must be byte-for-byte untouched");
+        assert_eq!(fs::read(&b).unwrap(), b"bravo", "b.txt must be byte-for-byte untouched");
+        assert_eq!(fs::read(&nested).unwrap(), b"nested", "the directory arm must not have recursed");
+    }
+
+    /// The flip side: the identical call proceeds and actually deletes once `confirmed` is `true`,
+    /// proving the flag is load-bearing rather than decorative — and that the legitimate UI path
+    /// (`App.svelte`'s "Delete permanently?" confirm) still works end to end.
+    #[test]
+    fn delete_permanent_proceeds_once_confirmed_is_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.txt");
+        let sub = dir.path().join("sub");
+        fs::write(&a, b"alpha").unwrap();
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("nested.txt"), b"nested").unwrap();
+
+        let results = delete_permanent_impl(
+            vec![a.to_string_lossy().to_string(), sub.to_string_lossy().to_string()],
+            true,
+        )
+        .expect("a confirmed delete_permanent call must be allowed to run");
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|r| r.ok), "both deletes should report ok: {results:?}");
+        assert!(!a.exists(), "a confirmed delete must actually remove the file");
+        assert!(!sub.exists(), "a confirmed delete must actually remove the directory tree");
+    }
+
+    /// Per-path failures are still reported per-path (skip-and-report), NOT promoted to the batch-level
+    /// `Err` the refusal now uses — so the frontend can keep telling "the whole call was refused" apart
+    /// from "one of these paths failed", and one bad path never loses the others' results.
+    #[test]
+    fn a_confirmed_delete_permanent_still_reports_per_path_failures_without_failing_the_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real.txt");
+        fs::write(&real, b"real").unwrap();
+        let missing = dir.path().join("not-there.txt");
+
+        let results = delete_permanent_impl(
+            vec![missing.to_string_lossy().to_string(), real.to_string_lossy().to_string()],
+            true,
+        )
+        .expect("a per-path failure must not fail the whole batch");
+
+        assert_eq!(results.len(), 2);
+        assert!(!results[0].ok, "the missing path should report a per-path error");
+        assert!(results[1].ok, "the healthy path must still be deleted despite its neighbour failing");
+        assert!(!real.exists());
+    }
+
     // ---- Trash listing / restore / empty (CPE-1558, epic CPE-1486 slice 1) --------------------------
     // `trash::os_limited::{list, restore_all, purge_all}` only round-trips on a real desktop session —
     // a headless CI runner can lack a working Recycle Bin (CPE-1268) — so every test below that touches
@@ -13094,6 +13280,57 @@ mod tests {
         let just_b = select_trash_targets(all, Some(&["b".to_string()]));
         assert_eq!(just_b.len(), 1);
         assert_eq!(just_b[0].id.to_string_lossy(), "b");
+    }
+
+    // CPE-1651 (sibling audit of `delete_permanent`): `empty_trash` carried the same ungated promise —
+    // "the UI must confirm before calling this with `None`". These exercise `empty_trash_gated` with the
+    // two OS calls injected, so the refusal is proven to reach NEITHER `list` nor `purge_all` without
+    // ever putting the developer's or CI runner's real Recycle Bin at risk.
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn empty_trash_refuses_without_reaching_the_os_when_not_confirmed() {
+        for ids in [None, Some(vec!["b".to_string()])] {
+            let mut listed = false;
+            let mut purged: Option<Vec<String>> = None;
+            let err = empty_trash_gated(
+                false,
+                || {
+                    listed = true;
+                    Ok(vec!["a".to_string(), "b".to_string()])
+                },
+                |all| match &ids {
+                    None => all,
+                    Some(want) => all.into_iter().filter(|i| want.contains(i)).collect(),
+                },
+                |targets| {
+                    purged = Some(targets);
+                    Ok(())
+                },
+            )
+            .expect_err("an unconfirmed empty_trash call must be refused, not executed");
+
+            assert!(err.to_lowercase().contains("confirm"), "refusal reason: {err}");
+            assert!(purged.is_none(), "a refused purge must never reach purge_all (ids: {ids:?})");
+            assert!(!listed, "a refused purge must not even enumerate the trash (ids: {ids:?})");
+        }
+    }
+
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    #[test]
+    fn empty_trash_purges_the_selected_targets_once_confirmed_is_true() {
+        let mut purged: Option<Vec<String>> = None;
+        empty_trash_gated(
+            true,
+            || Ok(vec!["a".to_string(), "b".to_string()]),
+            |all| all.into_iter().filter(|i| i == "b").collect(),
+            |targets| {
+                purged = Some(targets);
+                Ok(())
+            },
+        )
+        .expect("a confirmed empty_trash call must be allowed to run");
+        assert_eq!(purged, Some(vec!["b".to_string()]), "the confirmed purge must reach purge_all");
     }
 
     // CPE-1559 review fix on CPE-1558: `trash_item_to_entry` must DEGRADE (keep the entry with
@@ -13258,7 +13495,7 @@ mod tests {
         // Deliberately never call `empty_trash_impl(None)` here — on this real machine that would purge
         // EVERYTHING sitting in the actual Recycle Bin, not just this test's probes. The "purge everything"
         // branch is covered instead by the OS-call-free `select_trash_targets_filters_by_id_or_selects_everything`.
-        empty_trash_impl(Some(vec![purge_id.clone()])).expect("selective empty_trash should succeed");
+        empty_trash_impl(Some(vec![purge_id.clone()]), true).expect("selective empty_trash should succeed");
 
         let after = list_trash_impl().unwrap();
         assert!(after.iter().any(|e| e.id == keep_id), "an item NOT named in `ids` must survive a selective purge");

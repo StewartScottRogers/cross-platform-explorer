@@ -57,3 +57,28 @@ CPE-1647 closes the vault half of that chain. This ticket closes the primitive t
 ## Work Log
 
 - 2026-08-11 — Filed by the Foreman from the PR #838 review finding.
+- 2026-08-11 — Implemented on `cpe-1651-delete-permanent-consent`.
+  - `delete_permanent` now takes `confirmed: bool` and returns `Result<Vec<OpResult>, String>`,
+    refusing the whole batch up front when it's not set — the same shape/refusal style as
+    `secure_shred::shred_paths` (CPE-1611) and `vault_manager::create_vault` (CPE-1630). The
+    app-op ledger note (`note_app_op`) also moved behind the gate, mirroring `shred_paths`, so a
+    refused call leaves no phantom ledger entry. Per-path failures still report per-path, so the
+    batch-level `Err` means exactly one thing: "refused".
+  - **Sibling audit — `move_exact`: no consent flag, deliberately.** It destroys nothing (a rename,
+    and `dst.exists()` already refuses to clobber — pinned by the pre-existing
+    `move_exact_refuses_to_overwrite`, which reads the victim's bytes back); every caller
+    (undo/redo, batch rename, `macro_run`'s move step, FileHealthDialog's fix-it, folderWatch's
+    move-back) is an already-reversible flow with no irreversible-action confirm, so a flag there
+    could only be a hard-coded `true` — the blanket constant AC #3 forbids; and consent cannot fix
+    what the reviewer demonstrated anyway, since a fully legitimate consented move vacates its
+    source exactly as well. The defence for that primitive belongs at the point of destruction and
+    already landed in CPE-1647 (`vault_lock` re-resolves containment immediately before the wipe).
+    Reasoning recorded in `move_exact`'s own doc comment so it isn't re-litigated.
+  - **Sibling audit — `empty_trash`: same hole, fixed here.** Its doc comment carried the identical
+    ungated promise ("the UI must confirm before calling this with `None`") and purging is
+    irreversible. It now takes `confirmed: bool` too, covering **both** scopes — purging a named
+    subset destroys those items just as irrecoverably as purging the lot. `empty_trash_gated` takes
+    its two OS calls injected so a test can prove a refused purge reaches neither `list` nor
+    `purge_all` without risking a real Recycle Bin.
+  - Frontend consent is threaded as a *separate* argument from the caller's intent (`doDelete`'s
+    `confirmed` vs `permanent`) precisely to avoid CPE-1646's one-variable-for-both bug.

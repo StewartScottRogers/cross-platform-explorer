@@ -110,13 +110,15 @@
     confirmEmpty = null;
     if (!scope) return;
     try {
+      // `confirmed: true` (CPE-1651) is set only in this function — the one the Empty-confirm dialog's
+      // accept button runs. `requestEmpty` merely opens that dialog; it never purges.
       if (scope === "all") {
-        unwrap(await commands.emptyTrash(null));
+        unwrap(await commands.emptyTrash(null, true));
         entries = [];
         selected = new Set();
       } else {
         const ids = [...selected];
-        unwrap(await commands.emptyTrash(ids));
+        unwrap(await commands.emptyTrash(ids, true));
         entries = entries.filter((e) => !selected.has(e.id));
         selected = new Set();
       }

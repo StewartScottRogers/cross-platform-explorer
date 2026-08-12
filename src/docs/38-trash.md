@@ -37,6 +37,12 @@ without affecting the rest of your selection.
 Both are **permanent and cannot be undone**, so either one opens a confirmation dialog before
 anything is deleted.
 
+That confirmation is enforced by the backend too, not only by the dialog (CPE-1651): the purge refuses
+to run at all unless it is explicitly told you confirmed, and this dialog is the only thing in the app
+that says so. The rule covers **both** buttons — purging a few checked items destroys those items just
+as irrecoverably as emptying the lot. See [Undo](safety-undo) for the same guarantee across every other
+operation that can't be reversed.
+
 ## Platform support
 
 Browsing the Trash from within the app is available on **Windows and Linux**. On **macOS**, the

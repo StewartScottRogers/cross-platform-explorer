@@ -1060,11 +1060,30 @@ async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("delete_to_trash", { paths });
 },
 /**
- * Permanently delete entries. Irreversible — the UI must confirm explicitly
- * before ever calling this.
+ * Permanently delete entries. Irreversible — there is no Recycle Bin copy and no undo.
+ * 
+ * **Refuses the whole batch up front** ([`Err`], nothing touched) when `confirmed` is `false`
+ * (CPE-1651, the same shape CPE-1611 gave `secure_shred::shred_paths` and CPE-1630 gave
+ * `vault_manager::create_vault`). Every call to this command is unconditionally destructive — unlike
+ * `delete_to_trash`, which leaves a recoverable copy — so there is no "safe" plan to distinguish and
+ * the flag itself is the entire gate.
+ * 
+ * Before this ticket the doc comment here said "the UI must confirm", i.e. the backend delegated the
+ * safety decision to the frontend. That is not a gate: the IPC surface is reachable without the UI, and
+ * the independent review of PR #838 used exactly this command as **step 2 of a working exploit chain**
+ * (delete a vault's live session dir, plant a junction at the same path, let the locker's shredder walk
+ * it). CPE-1647 closed the vault end of that chain by re-checking containment immediately before the
+ * wipe; this closes the primitive that made step 2 free. `App.svelte`'s "Delete permanently?" confirm
+ * and `RepairLinkDialog.svelte`'s replace-confirm — the only places in the codebase allowed to set
+ * `confirmed: true` — are now the only things that can make the backend actually delete a file.
  */
-async deletePermanent(paths: string[]) : Promise<OpResult[]> {
-    return await TAURI_INVOKE("delete_permanent", { paths });
+async deletePermanent(paths: string[], confirmed: boolean) : Promise<Result<OpResult[], string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_permanent", { paths, confirmed }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 },
 /**
  * Can this platform restore items from the OS trash?
@@ -1121,11 +1140,18 @@ async restoreTrashItems(ids: string[]) : Promise<OpResult[]> {
 },
 /**
  * Empty the Trash: purge everything (`ids: None`) or just the given items (`ids: Some`). Purging is
- * permanent — the UI must confirm before calling this with `None`.
+ * permanent — a purged item is gone from the Recycle Bin with nothing left to restore.
+ * 
+ * **Refuses up front** ([`Err`], nothing purged, the OS trash never even listed) when `confirmed` is
+ * `false` (CPE-1651's sibling audit, same shape as `delete_permanent`/`shred_paths`/`vault_create`).
+ * The gate covers BOTH scopes deliberately: purging a named subset (`ids: Some`) destroys those items
+ * exactly as irrecoverably as purging the lot, so "the UI must confirm before calling this with `None`"
+ * — what this doc comment used to say, and delegate to the frontend — was both an ungated promise and
+ * too narrow a one. `TrashView.svelte`'s Empty-confirm dialog is the only place allowed to set it.
  */
-async emptyTrash(ids: string[] | null) : Promise<Result<null, string>> {
+async emptyTrash(ids: string[] | null, confirmed: boolean) : Promise<Result<null, string>> {
     try {
-    return { status: "ok", data: await TAURI_INVOKE("empty_trash", { ids }) };
+    return { status: "ok", data: await TAURI_INVOKE("empty_trash", { ids, confirmed }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1201,6 +1227,27 @@ async cancelTransfer(id: number) : Promise<void> {
  * 
  * Refuses to overwrite: if `to` already exists, the undo fails loudly rather
  * than clobbering whatever now occupies that name.
+ * 
+ * **CPE-1651 audit — deliberately NO `confirmed` flag, unlike its `delete_permanent`/`shred_paths`/
+ * `vault_create` siblings.** The PR #838 reviewer noted this command "works equally well" as the
+ * exploit chain's step 2, so it was audited alongside `delete_permanent`. The conclusion is that a
+ * consent flag is the wrong instrument here, for three reasons:
+ * 
+ * 1. **It destroys nothing.** A move is a rename, fully reversible, and the `dst.exists()` refusal
+ * below means it can never clobber whatever occupies the destination — pinned by
+ * `move_exact_refuses_to_overwrite`, which reads the victim file's bytes back. The three gated
+ * commands all annihilate bytes with no recovery path; this one relocates them.
+ * 2. **Every caller is a non-destructive, already-reversible flow** — undo/redo, batch-rename apply,
+ * `macro_run`'s move step, `FileHealthDialog`'s rename-to-correct-extension fix-it, and
+ * `folderWatch`'s undo move-back. None shows (or should show) an irreversible-action confirm, so
+ * threading a flag through them could only ever be a hard-coded `true`: a compiler-satisfying
+ * constant, which is exactly the anti-pattern the ticket forbids and which would make the flag
+ * read as consent while carrying none.
+ * 3. **Consent cannot fix what the reviewer actually demonstrated.** Step 2's primitive is *vacating a
+ * path* so a link can be planted at it — and a fully consented, entirely legitimate move vacates
+ * its source just as effectively. The defence has to live at the point of destruction, not at the
+ * move, which is what CPE-1647 landed: `vault_lock` re-resolves containment immediately before the
+ * wipe, so a session dir that was moved/deleted and replaced by a junction is refused there.
  */
 async moveExact(pairs: ([string, string])[]) : Promise<OpResult[]> {
     return await TAURI_INVOKE("move_exact", { pairs });

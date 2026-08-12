@@ -158,7 +158,12 @@ export async function undoFire(fire: WatchFire): Promise<void> {
   }
   for (const p of plan.deletes) {
     guard.guard(p, now);
-    await commands.deletePermanent([p]);
+    // `confirmed: true` (CPE-1651): the user pressed Undo on this specific fire, and `plan.deletes` is
+    // only ever the set of COPIES that fire itself created (recorded on the fire record at the moment
+    // the rule ran) — never a pre-existing file the user put there. That is a genuine, targeted user
+    // action on app-created artefacts, not a blanket constant threaded through to satisfy the compiler:
+    // nothing else in this module may set it, and the source file is moved back rather than deleted.
+    await commands.deletePermanent([p], true);
   }
 }
 

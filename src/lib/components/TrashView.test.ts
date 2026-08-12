@@ -239,7 +239,9 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     await fireEvent.click(within(dialog).getByText("Empty Trash"));
     await settle();
 
-    expect(invoke).toHaveBeenCalledWith("empty_trash", { ids: null });
+    // `confirmed: true` (CPE-1651) — the backend refuses an unconsented purge, and this dialog is the
+    // only thing allowed to set it.
+    expect(invoke).toHaveBeenCalledWith("empty_trash", { ids: null, confirmed: true });
     expect(screen.getByText("Trash is empty")).toBeTruthy();
   });
 
@@ -270,7 +272,7 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     await fireEvent.click(within(dialog).getByText("Empty Trash"));
     await settle();
 
-    expect(invoke).toHaveBeenCalledWith("empty_trash", { ids: ["a"] });
+    expect(invoke).toHaveBeenCalledWith("empty_trash", { ids: ["a"], confirmed: true });
     expect(screen.queryByText("a.txt")).toBeNull();
     expect(screen.getByText("b.txt")).toBeTruthy();
   });
