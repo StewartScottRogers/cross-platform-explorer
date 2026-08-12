@@ -1595,7 +1595,14 @@ fn identity_following_links(_path: &std::path::Path) -> Option<FileIdentity> {
 /// between step 3's link-count read and step 4's write, versus the 528 ms the audit exploited. Closing it
 /// entirely would need filesystem locking the platforms do not offer for this case, so it is stated here
 /// rather than papered over — and, per CPE-1667, stated with numbers actually measured on both of the two
-/// paths through this window, not a single figure asserted for both:
+/// paths through this window, not a single figure asserted for both.
+///
+/// **All figures below are `--release` measurements.** Under `cargo test` — what CI runs, and what a
+/// reader re-running these tests will see — the same two tests print **491.8 ms transform / 207,700 ns
+/// window** and **534.4 ms / 566,400 ns**, because a debug build's image transform is roughly 12x slower.
+/// The conclusions hold in both profiles (both windows are hundreds of microseconds; neither branch is
+/// decisively the wider one), but do not be surprised when the printed numbers do not match these
+/// (PR #856 review). The `canonicalize` **counts** are profile-independent and are the durable figures.
 ///
 /// - **`created == true`** (the output did not exist — no foreign-overwrite question to ask): a handful
 ///   of syscalls, genuinely microseconds. Measured here: **224,400 ns** for a single 2000×2000-pixel item

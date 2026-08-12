@@ -108,7 +108,22 @@ pub struct BatchReport {
 /// verify-to-write window ([`crate::batch_media::VerifiedOutput`]'s doc), so a bigger batch meant a wider
 /// window on every one of its own items — the opposite of what a security-critical window wants. Building
 /// the set once, up front (outside any window: nothing has been opened or written yet), turns each
-/// in-window check into a single `HashSet` lookup — `O(1)` regardless of batch size. See
+/// in-window check into a single `HashSet` lookup — `O(1)` regardless of batch size.
+///
+/// **Where these keys are CONSUMED, and why a stale memo is acceptable here — read this before reusing
+/// the pattern (PR #856 review).** This file's whole history is memo-staleness findings, and
+/// [`crate::batch_media::ParentCache`]'s own doc codifies the opposing rule: *the write-time authority
+/// builds its own cache, per item, and never receives one*. This set breaks that rule deliberately, so the
+/// reasoning is recorded rather than left in a reviewer's head. Item 300 consults keys computed ~n
+/// transforms earlier — but the set only ever answers "was this name one of the batch's **own inputs**",
+/// which is a question about the *batch*, not about what is on disk right now; the in-place arm is still
+/// computed fresh at write time; and `open_output_verified` re-checks links, reparse tags, containment and
+/// link count on a fresh cache **before** this is consulted. The only reach an attacker gains over the old
+/// code is that having transiently aliased a batch input onto an in-folder victim, they may now revert the
+/// alias instead of having to leave it in place. A future change that makes this set answer anything about
+/// current on-disk state must move it back inside the per-item authority.
+///
+/// See
 /// `cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_canonicalize_calls_regardless_of_batch_size`
 /// (deterministic) and `cpe_1667_the_not_created_branch_window_stays_narrow_across_a_chained_batch`
 /// (wall-clock) for the measurement.
@@ -1895,11 +1910,24 @@ mod tests {
              took {transform:?}; the verify->write window (now including an O(1) is_foreign_overwrite \
              check) is {window_ns} ns"
         );
+        // NOT an O(n) regression guard, and it must not claim to be (PR #856 review). The reviewer
+        // restored the GENUINE pre-CPE-1667 pairwise scan and this assertion still passed with a 24x
+        // margin under `cargo test` — 22.1 ms window against a 534 ms debug transform — because a debug
+        // build's transform is slow enough to hide even the O(n) cost. The deterministic
+        // canonicalize-count test below is what owns the O(1) claim; it caught that same restoration at
+        // exactly 898 calls. (The PR body originally blamed a HashSet-iteration-order artifact for the
+        // miss; that diagnosis was wrong, and the faithful control disproved it.)
+        //
+        // What this DOES guard, which nothing else on this branch did: that the !created arm's
+        // verify->write window is a small fraction of the transform end-to-end, driven through the real
+        // `execute_one`. Keep the bound at 10x — under `--release` the window is ~405,000 ns against a
+        // ~35.9 ms transform, so a 100x bound would fail release runs.
         assert!(
             window_ns * 10 < transform.as_nanos(),
-            "EXPLOIT WINDOW: the !created branch's verify->write window ({window_ns} ns) is not \
-             decisively smaller than the transform ({transform:?}) — is_foreign_overwrite may have \
-             regressed to its old O(n) pairwise scan"
+            "the !created branch's verify->write window ({window_ns} ns) is no longer a small fraction \
+             of the transform ({transform:?}) — something expensive moved inside the window. This does \
+             NOT prove the O(1) property; see cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_\
+             canonicalize_calls_regardless_of_batch_size for that."
         );
 
         let _ = fs::remove_dir_all(&d);
