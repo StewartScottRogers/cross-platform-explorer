@@ -132,6 +132,47 @@ fn input_path_keys(items: &[PlannedItem]) -> std::collections::HashSet<PathKey> 
     items.iter().map(|it| path_key(&it.input, &mut cache)).collect()
 }
 
+/// Lazily builds, and memoizes, [`input_path_keys`] on first use (CPE-1674).
+///
+/// **Why this exists.** CPE-1667 got the `n`-canonicalize-call cost of building this set out of the
+/// per-item verify-to-write window, but the PR #856 re-review found it still ran the build
+/// **unconditionally**, before the batch's first item is even touched — including when
+/// `job.confirmed_overwrite` is `true`, where nothing ever consults it (both call sites below are gated on
+/// `!job.confirmed_overwrite`, directly or via [`is_foreign_overwrite`]'s `!created` guard in
+/// [`execute_one`]). On a large batch over a network share that delays **time to first written file**,
+/// cutting against this repo's streaming-liveness convention (`docs/design/STREAMING.md`) for no reason —
+/// the confirmed-overwrite path was going to write item 0 immediately regardless.
+///
+/// Wrapping the memo in a [`std::cell::OnceCell`] fixes that without touching `input_path_keys` or
+/// [`is_foreign_overwrite`]'s own signature (both are still exercised directly, unchanged, by
+/// `cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_canonicalize_calls_regardless_of_batch_size`):
+/// a caller that never calls [`LazyInputKeys::get`] never pays for the build at all, and a caller that does
+/// pays for it exactly once no matter how many times it asks. For `confirmed_overwrite = true`, `.get()` is
+/// never called anywhere in this module, so the build genuinely never runs — not "runs cheaply", zero calls
+/// (measured in `cpe_1674_a_confirmed_overwrite_batch_never_builds_the_input_key_set`). For
+/// `confirmed_overwrite = false`, the up-front all-or-nothing refusal scan (below, in
+/// [`execute_plan_walk`]) still has to see every item before the loop starts — that part of the shape is
+/// unchanged from CPE-1667 and is not what this ticket is about — so `.get()` there builds it once, still
+/// before any byte is written, and every later call (including the one inside [`execute_one`]'s window)
+/// reuses the same cached set.
+struct LazyInputKeys<'a> {
+    items: &'a [PlannedItem],
+    cell: std::cell::OnceCell<std::collections::HashSet<PathKey>>,
+}
+
+impl<'a> LazyInputKeys<'a> {
+    fn new(items: &'a [PlannedItem]) -> Self {
+        Self { items, cell: std::cell::OnceCell::new() }
+    }
+
+    /// Build (once) and return the batch's input key set. Only ever call this from a branch that can run
+    /// while `job.confirmed_overwrite` is `false` — see this struct's doc for why calling it unconditionally
+    /// would undo the whole point of CPE-1674.
+    fn get(&self) -> &std::collections::HashSet<PathKey> {
+        self.cell.get_or_init(|| input_path_keys(self.items))
+    }
+}
+
 /// True when `item`'s planned write would replace bytes belonging to a file that was never submitted as
 /// one of the batch's own inputs — the original CPE-1613 in-place case (`item.output` is [`same_file`] as
 /// `item.input`), OR (CPE-1623) `item.output` resolves onto some OTHER real, pre-existing file that isn't
@@ -267,13 +308,14 @@ pub fn execute_plan_walk(
         ));
     }
 
-    // Built once for the whole batch (CPE-1667) — every `is_foreign_overwrite` call below, including the
-    // one inside `execute_one`'s per-item verify-to-write window, probes this same `HashSet` in O(1)
-    // instead of re-scanning `items` pairwise. See `input_path_keys`'s doc.
-    let input_keys = input_path_keys(items);
+    // Built lazily, at most once for the whole batch (CPE-1667's O(1)-per-check shape, made lazy by
+    // CPE-1674) — every `is_foreign_overwrite` call below, including the one inside `execute_one`'s
+    // per-item verify-to-write window, probes this same `HashSet` in O(1) instead of re-scanning `items`
+    // pairwise, and a `confirmed_overwrite` batch never builds it at all. See `LazyInputKeys`'s doc.
+    let input_keys = LazyInputKeys::new(items);
 
     if !job.confirmed_overwrite {
-        let count = items.iter().filter(|it| is_foreign_overwrite(it, &input_keys)).count();
+        let count = items.iter().filter(|it| is_foreign_overwrite(it, input_keys.get())).count();
         if count > 0 {
             return Err(format!(
                 "refusing to run: this plan would overwrite {count} file{} not explicitly part of this \
@@ -330,13 +372,15 @@ pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> Result<BatchReport
 ///
 /// Steps 2-4 are a handful of syscalls; the previously exploitable window was the entire transform.
 ///
-/// `input_keys` is the batch's precomputed [`input_path_keys`] set (CPE-1667), not the raw `items` slice
-/// — step 3's `is_foreign_overwrite` call sits inside the verify-to-write window, so it must cost O(1),
-/// not an O(n) scan over the batch.
+/// `input_keys` is the batch's lazily-built [`LazyInputKeys`] memo (CPE-1667, made lazy by CPE-1674), not
+/// the raw `items` slice — step 3's `is_foreign_overwrite` call sits inside the verify-to-write window, so
+/// it must cost O(1), not an O(n) scan over the batch, once the set has been built. `input_keys.get()` is
+/// only reached below when `!job.confirmed_overwrite` is also true (short-circuit `&&`), so a
+/// `confirmed_overwrite` batch never builds the set from here either.
 fn execute_one(
     item: &PlannedItem,
     job: &BatchJob,
-    input_keys: &std::collections::HashSet<PathKey>,
+    input_keys: &LazyInputKeys,
 ) -> Result<(), String> {
     #[cfg(test)]
     WINDOW_TRACE.with(|c| c.set(WindowTrace::default()));
@@ -359,7 +403,11 @@ fn execute_one(
 
     // Something was already at this name. `confirmed_overwrite` is the only thing that can authorise
     // replacing it — and `created` is an atomic fact from the open, not a stat that can go stale.
-    if !verified.created() && !job.confirmed_overwrite && is_foreign_overwrite(item, input_keys) {
+    //
+    // `&&` short-circuits left to right, so `input_keys.get()` (CPE-1674) is only ever evaluated once both
+    // `!verified.created()` and `!job.confirmed_overwrite` are true — a `confirmed_overwrite` batch never
+    // reaches it, from here or from `execute_plan_walk`'s up-front scan, so it never builds the set.
+    if !verified.created() && !job.confirmed_overwrite && is_foreign_overwrite(item, input_keys.get()) {
         verified.abandon(&item.output);
         return Err(format!(
             "refusing at write time: \"{}\" would overwrite a file this batch never selected — it \
@@ -1981,8 +2029,8 @@ mod tests {
         assert_eq!(items.len(), n);
 
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 1000 }]);
-        // Precomputed once, outside the window — exactly like `execute_plan_walk` does (CPE-1667).
-        let input_keys = input_path_keys(&items);
+        // Lazily built, memoized on first use — exactly like `execute_plan_walk` does (CPE-1667/CPE-1674).
+        let input_keys = LazyInputKeys::new(&items);
 
         // The trace is recorded from inside this real `execute_one` call.
         execute_one(&items[0], &job, &input_keys).unwrap_or_else(|e| {
@@ -2053,6 +2101,60 @@ mod tests {
             "EXPECTED O(1): is_foreign_overwrite made {calls} canonicalize call(s) against a {n}-item \
              batch whose matching input sits at the far end — a bound this small is unreachable for an \
              O(n) pairwise scan that has to walk the whole batch to find it"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1674 — the PR #856 re-review, second round.** `input_path_keys` used to be built
+    /// unconditionally, before `execute_plan_walk`'s loop even starts — including when
+    /// `job.confirmed_overwrite` is `true`, where nothing ever consults it (the up-front refusal scan is
+    /// skipped entirely, and `execute_one`'s in-window check short-circuits on `!job.confirmed_overwrite`
+    /// before ever reaching it). That delayed the first file being written on a large batch for zero
+    /// reason. [`LazyInputKeys`] fixes it by making the build a `OnceCell`, populated only by a caller that
+    /// actually needs an answer.
+    ///
+    /// Deterministic, like its CPE-1667 sibling above: every one of these `n` items has a fresh,
+    /// never-before-existing, SAME-DIRECTORY output, so `classify_output_containment`'s fast path (textually
+    /// identical directories) and `open_output_verified`'s own re-check never touch `path_key` either —
+    /// the only path to a `canonicalize_path` call anywhere in this run is `input_path_keys` itself. A
+    /// confirmed-overwrite batch must make **zero**.
+    ///
+    /// Proved red without the fix by reverting `execute_plan_walk` to call `input_path_keys(items)`
+    /// unconditionally (CPE-1667's original shape): this test then measured `calls = 300` (one
+    /// `canonicalize_path` per item's input) against the `== 0` assertion below.
+    #[test]
+    fn cpe_1674_a_confirmed_overwrite_batch_never_builds_the_input_key_set() {
+        let d = scratch("cpe1674-lazy-input-keys");
+        let n = 300usize;
+
+        let mut items: Vec<PlannedItem> = Vec::with_capacity(n);
+        for i in 0..n {
+            let input = d.join(format!("photo{i:04}.png"));
+            fs::write(&input, png_bytes(4, 4)).unwrap();
+            let output = d.join(format!("photo{i:04}-out.png")); // same dir; never exists beforehand
+            items.push(PlannedItem {
+                input: input.to_string_lossy().to_string(),
+                output: output.to_string_lossy().to_string(),
+                summary: "item under test — fresh, same-directory output".into(),
+            });
+        }
+        assert_eq!(items.len(), n);
+
+        let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 1000 }]);
+        job.confirmed_overwrite = true;
+
+        crate::batch_media::reset_canonicalize_call_count();
+        let report = execute_plan(&items, &job).expect("a confirmed batch runs");
+        let calls = crate::batch_media::canonicalize_call_count();
+
+        assert_eq!(report.written, n, "every item must actually have been written, not skipped");
+        println!("CPE-1674 canonicalize calls for a confirmed-overwrite {n}-item batch: {calls}");
+        assert_eq!(
+            calls, 0,
+            "EXPECTED ZERO: a confirmed_overwrite batch must never build `input_path_keys` — {calls} \
+             canonicalize call(s) were made against a {n}-item batch whose keys are never consulted; \
+             non-zero here is exactly the eager, unconditional pre-loop build this ticket removes"
         );
 
         let _ = fs::remove_dir_all(&d);
