@@ -244,7 +244,14 @@ describe("isRepoId (CPE-1663)", () => {
     "tauri-apps/tauri",
     "owner-name/repo.name_v2",
     "a/b",
-  ])("accepts a well-formed owner/name — %s", (r) => {
+    // GitLab nested groups (PR #852 UAT). The first version of isRepoId required EXACTLY one slash and
+    // silently broke these — common in real organisations, previously reachable, and supported all the
+    // way through the backend: is_safe_repo_slug accepts `segs.len() >= 2`, and browse_path builds
+    // GitLab's project id with `repo.replace('/', "%2F")`, which replaces every slash precisely so an
+    // arbitrary depth works. A client guard stricter than its own server is a regression.
+    "group/subgroup/project",
+    "group/sub/deeper/project",
+  ])("accepts a well-formed repo id — %s", (r) => {
     expect(isRepoId(r)).toBe(true);
   });
 
@@ -259,7 +266,11 @@ describe("isRepoId (CPE-1663)", () => {
     ["a trailing slash / empty second segment", "owner/"],
     ["a leading slash / empty first segment", "/name"],
     ["whitespace inside a segment", "owner/na me"],
-    ["more than one slash", "owner/name/extra"],
+    // These three mirror is_safe_repo_slug's own rules, so the client and the server now agree on what a
+    // repository id is instead of each holding a separate opinion.
+    ["an empty middle segment", "group//project"],
+    ["a `..` segment", "owner/../secrets"],
+    ["a segment starting with a dash (reads as a flag)", "owner/-rf"],
   ])("rejects %s — %s", (_label, r) => {
     expect(isRepoId(r)).toBe(false);
   });
@@ -290,6 +301,21 @@ describe("RepoBrowser — non-URL junk rejected without hitting forge_browse (CP
     await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
     await waitFor(() =>
       expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "owner/name")).toBe(true),
+    );
+    expect(await screen.findByText("src")).toBeTruthy();
+  });
+
+  it("browses a GitLab nested-group project through the real component (PR #852 UAT regression)", async () => {
+    // The end-to-end half of the nested-group fix: the UAT found this rejected in the UI with
+    // "Enter a repository as owner/name." and forge_browse never called, even though GitLab supports
+    // nested namespaces and the backend encodes every slash for exactly this case.
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "gitlab", repo: "group/subgroup/project" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await waitFor(() =>
+      expect(
+        calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "group/subgroup/project"),
+      ).toBe(true),
     );
     expect(await screen.findByText("src")).toBeTruthy();
   });

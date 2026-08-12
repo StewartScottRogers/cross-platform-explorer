@@ -41,18 +41,34 @@
     return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) || /^[^@/\s]+@[^:@/\s]+:/i.test(r);
   }
 
-  /** True if `r` is a well-formed `owner/name` repo id: exactly one `/` separating two non-empty
-   *  segments of repo-name characters (letters, digits, `.`, `_`, `-`) — no colon, no backslash, no
-   *  whitespace, no `@`. CPE-1663: the old guard (`!r.includes("/") || looksLikeUrl(r)`) was a growing
-   *  list of negative special cases — two exceptions deep (scheme:// and user@host:) — and still let a
-   *  Windows path (`C:/repos/thing`, one "/" inside a colon-bearing string) and an ordinary sentence
+  /** True if `r` is a well-formed repo id: **two or more** non-empty `/`-separated segments of
+   *  repo-name characters (letters, digits, `.`, `_`, `-`) — no colon, no backslash, no whitespace,
+   *  no `@` — with no segment that is `..` or starts with `-`.
+   *
+   *  CPE-1663: the old guard (`!r.includes("/") || looksLikeUrl(r)`) was a growing list of negative
+   *  special cases — two exceptions deep (scheme:// and user@host:) — and still let a Windows path
+   *  (`C:/repos/thing`, one "/" inside a colon-bearing string) and an ordinary sentence
    *  (`Fix: update src/main.rs docs`, a "/" inside colon+whitespace) through, since neither looks like
-   *  a recognized URL shape. A single POSITIVE predicate closes the whole class at once: anything
-   *  outside this character set is rejected, which also covers cases nobody special-cased yet — a
-   *  double-`@` SCP string (`git@github.com@evil.com:o/r`) and a bare `host:owner/repo` with no user
-   *  both contain a disallowed `@`/`:` and are rejected the same way as everything else. */
+   *  a recognized URL shape. A single POSITIVE predicate closes the whole class at once, including
+   *  cases nobody special-cased yet — a double-`@` SCP string (`git@github.com@evil.com:o/r`) and a
+   *  bare `host:owner/repo` with no user both carry a disallowed `@`/`:`.
+   *
+   *  **Two or more segments, not exactly two (PR #852 UAT).** The first version of this predicate
+   *  required exactly one `/`, which silently broke **GitLab nested groups** (`group/subgroup/project`)
+   *  — common in real organisations, previously reachable, and supported end-to-end on the backend:
+   *  `is_safe_repo_slug` (`src-tauri/src/lib.rs`) accepts `segs.len() >= 2`, and `browse_path`
+   *  (`src-tauri/src/forge_egress.rs`) builds GitLab's project id with `repo.replace('/', "%2F")`,
+   *  which replaces *every* slash precisely so an arbitrary number of segments works. A client guard
+   *  stricter than the server it guards is a regression, not extra safety.
+   *
+   *  The `..` and leading-`-` rules mirror `is_safe_repo_slug` exactly, so the two ends of the call
+   *  now agree on what a repository id is rather than each holding its own opinion. */
   export function isRepoId(r: string): boolean {
-    return /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(r);
+    const segs = r.split("/");
+    return (
+      segs.length >= 2 &&
+      segs.every((s) => /^[A-Za-z0-9._-]+$/.test(s) && s !== ".." && !s.startsWith("-"))
+    );
   }
 </script>
 
