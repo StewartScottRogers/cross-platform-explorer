@@ -10,21 +10,33 @@
 
   /** Strip the selected provider's own host prefix (and a trailing `.git`) from a pasted URL. Leaves
    *  the input untouched if it doesn't match that provider's host (e.g. a foreign-host URL, or one
-   *  already in `owner/name` form). Exported for the test file. */
+   *  already in `owner/name` form). Handles the three shapes a repo URL can arrive in: `https://`,
+   *  `ssh://[user@]host[:port]/…` and the SCP-style short form `[user@]host:owner/repo` (CPE-1650 —
+   *  the SSH forms have no `://` before the host in the SCP case, so they need their own strip, not
+   *  just a generalization of the `https?://` one). Exported for the test file. */
   export function stripRepoUrl(input: string, forProvider: string): string {
     const host = PROVIDER_HOSTS[forProvider];
     let r = input.trim();
     if (host) {
       const escaped = host.replace(/\./g, "\\.");
       r = r.replace(new RegExp(`^https?://${escaped}/`, "i"), "");
+      // ssh://[user@]host[:port]/owner/repo(.git)? — the host must be followed directly by an
+      // optional :port then `/`, so a lookalike host (e.g. "github.com.evil.com") can't match.
+      r = r.replace(new RegExp(`^ssh://[^@/]+@${escaped}(?::\\d+)?/`, "i"), "");
+      // SCP-style shorthand: [user@]host:owner/repo(.git)? — same anchoring, host directly
+      // followed by the `:` that separates it from the path (no `://` in this form at all).
+      r = r.replace(new RegExp(`^[^@/\\s]+@${escaped}:`, "i"), "");
     }
     return r.replace(/\.git$/, "");
   }
 
-  /** True if `r` still looks like a URL rather than a bare `owner/name` — e.g. it kept its scheme
-   *  because it was pasted for the wrong provider, or a host neither strip recognized. */
+  /** True if `r` still looks like a URL/SSH-ref rather than a bare `owner/name` — e.g. it kept its
+   *  scheme or `user@host:` prefix because it was pasted for the wrong provider, or a host neither
+   *  strip recognized. Covers `scheme://…` and the SCP-style `user@host:path` shorthand (CPE-1650) —
+   *  without the latter, a foreign-host SSH URL just looks like `owner/repo.git` (it contains a `/`)
+   *  and would slip past this guard straight to `forge_browse` as a malformed repo id. */
   export function looksLikeUrl(r: string): boolean {
-    return /^[a-z][a-z0-9+.-]*:\/\//i.test(r);
+    return /^[a-z][a-z0-9+.-]*:\/\//i.test(r) || /^[^@/\s]+@[^:@/\s]+:/i.test(r);
   }
 </script>
 

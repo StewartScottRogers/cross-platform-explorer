@@ -875,6 +875,13 @@ impl ConsoleState {
     /// "Close all" and process shutdown. Kills each agent PTY (reclaiming the child process + its
     /// PTY) and empties the set, so nothing is left running. Idempotent: with nothing open it returns
     /// an empty list. Returns the closed ids, sorted.
+    ///
+    /// CPE-1658: on a `DaemonEngine`, `s.io.kill()` reaches into the *session daemon process* and kills
+    /// that session's own PTY tree — including its own `conhost.exe --headless` (the ConPTY host for
+    /// that one session), which dies promptly. It does not, and should not, touch the daemon process's
+    /// *own* console host: on Windows that's a single `conhost.exe` tied to the daemon's own lifetime
+    /// (see `AiConsoleState::ensure_session_daemon` in `src-tauri/src/lib.rs`, which owns/reaps the
+    /// daemon process), not to any individual session — process-level evidence there.
     pub fn close_all(&self) -> Vec<String> {
         let drained: Vec<(String, Arc<Session>)> = self.sessions.lock().unwrap().drain().collect();
         let mut ids: Vec<String> = Vec::with_capacity(drained.len());
