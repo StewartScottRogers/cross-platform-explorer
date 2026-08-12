@@ -91,7 +91,10 @@ function mockBackend() {
       case "agent_watch_stop_all": return null;
       case "metrics_record": return null;
       case "sidecar_stop": return null;
-      case "sidecar_close_all_sessions": return null;
+      // "closed" (not the bare null this used to return) — CPE-1621 F1: closeAllConsoles() now only
+      // clears the Agents leaves on a genuine close, so this test's leaf-clear-triggered flush must
+      // simulate the console having actually reached and closed the session, not a no-URL no-op.
+      case "sidecar_close_all_sessions": return "closed";
       case "sidecar_registry_ids": return [];
       default: return null;
     }

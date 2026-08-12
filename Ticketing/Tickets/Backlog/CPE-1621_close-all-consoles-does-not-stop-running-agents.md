@@ -180,3 +180,81 @@ for `sidecar/ai-console`, clean; `cargo build --features sidecar-platform` clean
 **Left out / not done**: did not touch `HostSessionDaemon`'s lifecycle or add any host-side daemon RPC
 client (deliberately unnecessary, see design decision 1). Did not change `sidecar_close_session`'s
 behavior, signature, or confirmation. Did not add a backend `confirmed` gate (see design decision 3).
+
+2026-08-11 — Review round 2 (F1/F2/F3): the reviewer correctly rejected design decision #2 above. It read
+"same swallow-and-continue shape used elsewhere" as riskless, but this PR is exactly what makes it risky:
+before CPE-1621, `sidecarStop` was a purely local, effectively-infallible `Mutex` drop, so swallowing a
+failure cost nothing. After CPE-1621, `sidecarCloseAllSessions` is a genuine network call, and its no-op
+or failure is now the ONLY thing standing between "every agent is really dead" and "the UI merely says
+so" — and the no-op case is reachable in production: `sidecar_close_all_sessions` returned a bare
+`Ok(())` whenever `state.url == None` (after `sidecar_repair` nulls it, or a console that crashed/exited
+without an explicit stop), and the Agents leaves are a client-side store (`agentSessions.ts`) that
+persists independently of the live connection — the entire point of the CPE-461 reattach design — so
+"leaves showing running sessions with no live URL" is a normal state, not a corner case. `closeAllConsoles`
+cleared every leaf unconditionally regardless, so the UI claimed a kill it never performed.
+
+**Fix (F1)**: `sidecar_close_all_sessions` (`src-tauri/src/lib.rs:8141-8192`) now returns
+`Result<CloseAllOutcome, String>` instead of `Result<(), String>` — a new `#[derive(specta::Type)]` enum
+(`Closed` | `Nothing`, `serde(rename_all = "lowercase")`) so the wire distinguishes "genuinely reached
+`/api/close-all` and it succeeded" from "no console was running, nothing was reachable". A POST
+failure/timeout is unchanged — still `Err`. `closeAllConsoles()` (`src/App.svelte:1309-1361`) now computes
+`closedGenuinely = outcome === "closed" || currentSessions().length === 0` — the `"nothing"` no-op counts
+as success ONLY when the frontend independently knows there was nothing to lose (an empty Agents-leaf
+list); with any leaf present, both `"nothing"` and an outright `Err` are treated identically: the leaves
+are left untouched and `showNotice($t("notice.closeAllConsolesUnreachable"), true)` tells the user, instead
+of the previous `console.debug` nobody sees. `flushAllSessionsForcibly()`/`clearAgentSessions()` now only
+run on the genuine-success path. `sidecarStop("ai-console")` still runs unconditionally afterward either
+way — untouched — since it only tears down the local console UI process, a separate concern from whether
+the sessions inside it were actually reached. Regenerated `src/lib/bindings.gen.ts` (`cargo run --bin
+export_bindings --features "specta-bindings sidecar-platform"`); the drift-guard test
+(`typed_bindings_are_committed_and_routed_through_busy_cursor`) passes against the regenerated file.
+Notice text translated into all 12 catalogued locales (`src/lib/i18n.ts`, key
+`notice.closeAllConsolesUnreachable`) — the CPE-481 coverage gate holds every `COMPLETE_LOCALES` entry to
+100%, so a partial translation would fail `i18n.test.ts`.
+
+**Fix (F2)**: added `App.closeAllConsoles.test.ts` — `sidecar_close_all_sessions is invoked BEFORE
+sidecar_stop`, asserting the call-index ordering directly on `invoke.mock.calls` rather than relying on
+source-line order (which a future edit could silently swap and still compile/type-check/pass every other
+test).
+
+**Fix (F3)**: same new test file adds the three untested outcomes the review named: (a) `"nothing"` with a
+live leaf present → leaf NOT cleared, notice shown; (b) the POST rejecting/timing out → leaf NOT cleared,
+notice shown; (c) genuine `"closed"` success → leaf DOES clear (must-not-regress the original happy path).
+A fifth test covers the genuinely-benign case: `"nothing"` with NO leaves at all → no notice, nothing to
+clear, so the fix doesn't turn a truly-idle "Close all" into spurious noise.
+
+**Red-then-green (F1)**: `git stash push -m "..." -- src/App.svelte` to revert ONLY the F1 fix (leaving the
+new test file + backend enum + i18n key in place), then `npx vitest run src/App.closeAllConsoles.test.ts`:
+```
+ × F3(a) no-URL no-op ("nothing") with a live leaf: leaves are NOT cleared and the user is told
+ × F3(b) the POST fails/times out: leaves are NOT cleared and the user is told
+ Test Files  1 failed (1)
+      Tests  2 failed | 3 passed (5)
+```
+`git stash pop` to restore the fix, re-ran the same command:
+```
+ ✓ src/App.closeAllConsoles.test.ts (5 tests) 904ms
+ Test Files  1 passed (1)
+      Tests  5 passed (5)
+```
+
+**Existing test updated**: `App.agentWatchPauseMetrics.test.ts`'s `mockBackend()` now returns `"closed"`
+(not a bare `null`) for `sidecar_close_all_sessions`, matching the new `CloseAllOutcome` wire type — that
+file's "CPE-1626 loss path 1" test exercises the real close-all flow and needs the genuine-success outcome
+to reach its flush/clear assertions.
+
+**Optional item left out**: `ConsoleState::close_all` (`sidecar/ai-console/src/console.rs:878-888`)
+discards `s.io.kill()`'s `Result` and calls `announce_ended(&id)` unconditionally, so a failed kill is
+still announced as ended. Confirmed pre-existing (predates this ticket), shared with the in-console "Close
+all" button, out of this ticket's stated scope, and touching it would mean auditing every caller of
+`announce_ended` for a behavior change under limited remaining budget — leaving it as-is; should be filed
+as its own ticket if it matters.
+
+**Verification**: `npm run check` — 0 errors/0 warnings. Full `npx vitest run` — 290 files, 3666 tests, all
+green (was 289/3661; +1 file/+5 tests from `App.closeAllConsoles.test.ts`). `cargo clippy --all-targets --
+-D warnings` for `src-tauri`, both default and `--features sidecar-platform` — clean. `cargo clippy
+--all-targets -- -D warnings` for `sidecar/ai-console` — clean. `cargo test --lib` for `sidecar/ai-console`
+— 382 passed, 0 failed, 2 ignored (pre-existing, unrelated) — matches the required baseline exactly.
+`cargo test --lib --features "specta-bindings sidecar-platform"` for `src-tauri`,
+`typed_bindings_are_committed_and_routed_through_busy_cursor` — passes (bindings genuinely regenerated and
+committed, not drifted).

@@ -1306,33 +1306,54 @@
       onYes: closeAllConsoles,
     };
   }
-  /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves.
-   *  CPE-1621: first reach `/api/close-all` on the console's OWN loopback UI server — the same endpoint
-   *  the in-console "Close all" button already uses — so every session's PTY is actually killed,
-   *  including one held by the separate, host-owned session daemon (`state.daemon` in
-   *  `src-tauri/src/lib.rs`), which `sidecar_stop` below never touches by design (it survives a UI
-   *  sidecar restart on purpose). This MUST run before `sidecarStop`: that call drops the host's
-   *  connection/URL to the console (CPE-464), and once it's gone there is nothing left to reach —
-   *  ordering it after would silently no-op and leave every agent running, which was exactly this
-   *  ticket's bug. The console process is then reaped, so no per-session `ended` arrives — clear the
-   *  leaves here (CPE-457).
-   *  CPE-1626: flush every session's metrics row FIRST, forcibly for anything still running (no
-   *  `ended` will ever come now the process is gone) — otherwise `clearAgentSessions()` below empties
-   *  `$agentSessions`, and the reactive full-stop reconcile wipes the whole accumulator store with a
-   *  still-running session's activity never persisted anywhere. A forced row is honestly marked
-   *  `endedCleanly: false` rather than fabricated as a clean end (see `flushAllSessionsForcibly`). */
+  /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves — but ONLY when the
+   *  close genuinely happened (CPE-1621 F1 review fix). CPE-1621's original cut ran the leaf-clear
+   *  unconditionally, so the UI could claim a kill it never performed: `sidecarCloseAllSessions()`
+   *  no-ops (`Ok(CloseAllOutcome::Nothing)`) whenever `state.url` is `None` — after `sidecar_repair`, or
+   *  whenever the console sidecar crashed/exited without an explicit stop — and the Agents leaves are a
+   *  client-side store that persists independently of the live connection (the whole point of the
+   *  CPE-461 reattach design), so leaves showing daemon-backed sessions with no live URL is a normal
+   *  state, not a corner case. Treat that no-op as success ONLY if there were no leaves to lose in the
+   *  first place; otherwise — same as an outright POST failure/timeout — leave the leaves in place and
+   *  tell the user, rather than silently wiping evidence of agents that are, for all we know, still
+   *  running.
+   *  First reach `/api/close-all` on the console's OWN loopback UI server — the same endpoint the
+   *  in-console "Close all" button already uses — so every session's PTY is actually killed, including
+   *  one held by the separate, host-owned session daemon (`state.daemon` in `src-tauri/src/lib.rs`),
+   *  which `sidecarStop` below never touches by design (it survives a UI sidecar restart on purpose).
+   *  This MUST run before `sidecarStop`: that call drops the host's connection/URL to the console
+   *  (CPE-464), and once it's gone there is nothing left to reach — ordering it after would silently
+   *  no-op and leave every agent running, which was exactly this ticket's bug (F2: order pinned by
+   *  `App.closeAllConsoles.test.ts`). `sidecarStop` still runs regardless of the close outcome —
+   *  it only tears down the local console UI process, a separate concern from whether the sessions
+   *  inside it were reached.
+   *  CPE-1626: on the genuine-success path, flush every session's metrics row FIRST, forcibly for
+   *  anything still running (no `ended` will ever come now the process is gone) — otherwise
+   *  `clearAgentSessions()` below empties `$agentSessions`, and the reactive full-stop reconcile wipes
+   *  the whole accumulator store with a still-running session's activity never persisted anywhere. A
+   *  forced row is honestly marked `endedCleanly: false` rather than fabricated as a clean end (see
+   *  `flushAllSessionsForcibly`). */
   async function closeAllConsoles() {
     agentMenu = null;
     confirm = null;
+    let closedGenuinely: boolean;
     try {
-      unwrap(await commands.sidecarCloseAllSessions());
+      const outcome = unwrap(await commands.sidecarCloseAllSessions());
+      // "nothing" only counts as success if there was truly nothing to close — otherwise it means we
+      // couldn't REACH the sessions the leaves still show, not that they don't exist (F1).
+      closedGenuinely = outcome === "closed" || currentSessions().length === 0;
     } catch (e) {
       console.debug("close all sessions failed:", e);
+      closedGenuinely = false;
     }
     try {
       unwrap(await commands.sidecarStop("ai-console"));
     } catch (e) {
       console.debug("close consoles failed:", e);
+    }
+    if (!closedGenuinely) {
+      showNotice($t("notice.closeAllConsolesUnreachable"), true);
+      return;
     }
     await flushAllSessionsForcibly();
     clearAgentSessions();
