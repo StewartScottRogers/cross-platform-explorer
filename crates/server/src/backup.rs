@@ -59,23 +59,26 @@ fn safe_join(root: &Path, rel: &str, entry: PlanEntry) -> Result<PathBuf, String
     Ok(root.join(candidate))
 }
 
-/// Which half of a backup plan an entry came from — the two halves get **different** treatment of a
-/// [`win32_name_is_unstable`] name, and the asymmetry is the point (PR #855 round-3 review).
+/// Which half of a backup plan an entry came from — both halves now get the SAME, Windows-only
+/// treatment of a [`win32_name_is_unstable`] name (CPE-1675; previously asymmetric, PR #855 round-3
+/// review).
 ///
 /// `foo ` and `notes.` are legal, creatable, everyday filenames on Linux and macOS, where `root/notes.`
 /// is a real distinct path and nothing is aliased. The first version of this change refused them on
 /// every platform and for both halves, so **a Linux backup of a file named `notes.` was silently never
 /// copied** — breaking a basic operation on two platforms to defend against a hazard that exists only
-/// on the third. What each half does now:
+/// on the third. Round 3 fixed [`PlanEntry::Write`] but kept [`PlanEntry::Delete`] refusing everywhere,
+/// on the reasoning that a refused delete destroys nothing and is a reported no-op — true, but the
+/// consequence was that **a POSIX mirror-backup job whose destination held a stale `notes.` refused that
+/// delete on every run, forever**, so the job could never report clean (CPE-1675).
 ///
 /// - [`PlanEntry::Write`] (the `copy` + `update` lists) — refuse only on Windows. Elsewhere the name
 ///   addresses exactly what it spells, so refusing it loses the user's file for no safety gain. The
 ///   failure mode of being wrong here is a file that never gets backed up, which is bad.
-/// - [`PlanEntry::Delete`] (the mirror-delete list) — refuse **everywhere**. A refused delete is a
-///   reported no-op: the stale file simply stays, which is the safe direction, and keeping the rule
-///   uniform means all three CI legs exercise the same shape on the destructive path. The cost is that
-///   a POSIX mirror job will report rather than remove a stale entry named `notes.`; renaming it clears
-///   that.
+/// - [`PlanEntry::Delete`] (the mirror-delete list) — refuse only on Windows too, now. On POSIX the name
+///   addresses exactly what it spells, so refusing the delete buys no safety and costs convergence.
+///   [`cpe_server::fsutil::contained_under`] — asserted on the *resolved* delete path, platform-
+///   independently — is what makes the delete safe there; it already permits it.
 ///
 /// Neither setting is what carries the safety — [`cpe_server::fsutil::contained_under`] does, on the
 /// resolved path, platform-independently.
@@ -89,9 +92,11 @@ enum PlanEntry {
 
 impl PlanEntry {
     fn refuses_unstable_names(self) -> bool {
+        // CPE-1675: both variants behave identically now — one combined arm (rather than two arms with
+        // the same body) so a future third variant must be visited explicitly, and so clippy's
+        // same-arms lint has nothing to flag.
         match self {
-            PlanEntry::Write => cfg!(windows),
-            PlanEntry::Delete => true,
+            PlanEntry::Write | PlanEntry::Delete => cfg!(windows),
         }
     }
 }
@@ -400,19 +405,19 @@ mod tests {
                 assert!(!e.is_empty(), "the rejection must carry a reason for {rel:?}/{entry:?}");
             }
         }
-        // The Win32-normalised spellings: refused on the DELETE half everywhere (a refused delete is a
-        // reported no-op), and on the WRITE half only where they are actually dangerous. See `PlanEntry`.
+        // The Win32-normalised spellings: refused on Windows, allowed elsewhere, for BOTH halves now
+        // (CPE-1675 — the delete half used to refuse these everywhere; see `PlanEntry`'s doc for why that
+        // bought no safety on POSIX and cost a mirror job its ability to ever report clean).
         for rel in WIN32_ROOT_SPELLINGS.iter().copied().chain(ALIASING_SPELLINGS) {
-            assert!(
-                safe_join(root, rel, PlanEntry::Delete).is_err(),
-                "{rel:?} must be refused as a DELETE entry on every platform"
-            );
-            assert_eq!(
-                safe_join(root, rel, PlanEntry::Write).is_err(),
-                cfg!(windows),
-                "{rel:?} as a WRITE entry must be refused on Windows and allowed elsewhere — refusing \
-                 it on POSIX silently drops a legitimate file from the backup"
-            );
+            for entry in [PlanEntry::Write, PlanEntry::Delete] {
+                assert_eq!(
+                    safe_join(root, rel, entry).is_err(),
+                    cfg!(windows),
+                    "{rel:?} as a {entry:?} entry must be refused on Windows and allowed elsewhere — \
+                     refusing it on POSIX either silently drops a legitimate file from the backup (WRITE) \
+                     or refuses to ever remove a legitimate stale one (DELETE)"
+                );
+            }
         }
         // Ordinary entries — what `planBackup` actually emits — still join untouched, both halves.
         for entry in [PlanEntry::Write, PlanEntry::Delete] {

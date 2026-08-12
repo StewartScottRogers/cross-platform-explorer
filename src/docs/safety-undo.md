@@ -63,9 +63,8 @@ Three details are worth knowing, because they are deliberate:
   a NAS or Samba share, a WSL-created folder, or an extracted archive. The app refuses the item and
   carries on with the rest of the batch; nothing is lost, and you can rename it and retry.
   - **On macOS and Linux these are ordinary names and are handled normally** — `notes.` is a real,
-    distinct file there and nothing is ambiguous, so it is copied and moved like any other. The one
-    exception is a mirror backup's *delete* step, which still declines such a name and reports it
-    rather than removing it; renaming the file clears that.
+    distinct file there and nothing is ambiguous, so it is copied, moved, and mirror-deleted like any
+    other file.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
