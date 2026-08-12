@@ -51,7 +51,7 @@ const diff = (path: string, before: string, after: string, actor?: string): FsDi
 });
 
 describe("foldSessionStarted / foldSessionEnded / foldSessionAnnouncement", () => {
-  it("creates a fresh accumulator on started, stamped with identity + startedAt", () => {
+  it("creates a fresh accumulator on started, stamped with identity + startedAt + lastActivityAt", () => {
     const s = foldSessionStarted({}, session("s1"), 1000);
     expect(s.s1).toEqual({
       ...emptySessionAccumulator("s1"),
@@ -61,6 +61,7 @@ describe("foldSessionStarted / foldSessionEnded / foldSessionAnnouncement", () =
       model: "sonnet",
       cwd: "/work",
       startedAt: 1000,
+      lastActivityAt: 1000, // CPE-1641: start itself counts as the first observed activity
     });
   });
 
@@ -135,6 +136,20 @@ describe("foldDiffsForMetrics", () => {
     const prev: Record<string, SessionAccumulator> = {};
     const next = foldDiffsForMetrics(prev, [diff("/a", "x", "y", "user")]);
     expect(next).toBe(prev);
+  });
+
+  it("CPE-1641: stamps lastActivityAt with the fold time on every diff, advancing it forward", () => {
+    let s = foldSessionStarted({}, session("s1"), 1000);
+    expect(s.s1.lastActivityAt).toBe(1000); // stamped by started
+    s = foldDiffsForMetrics(s, [diff("/a.txt", "", "x", "s1")], 2000);
+    expect(s.s1.lastActivityAt).toBe(2000);
+    s = foldDiffsForMetrics(s, [diff("/b.txt", "", "y", "s1")], 3000);
+    expect(s.s1.lastActivityAt).toBe(3000);
+  });
+
+  it("CPE-1641: a lazily-created (raced) accumulator's lastActivityAt is the fold time too", () => {
+    const s = foldDiffsForMetrics({}, [diff("/a.txt", "", "x", "s-race")], 7000);
+    expect(s["s-race"].lastActivityAt).toBe(7000);
   });
 });
 
@@ -565,8 +580,8 @@ describe("flushAllSessionsForcibly (CPE-1626 loss path 1 — persist before a fu
 
   it("forcibly flushes a still-running session, honestly marked endedCleanly: false", async () => {
     ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
-    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")]);
-    ingestDiffsForMetrics([diff("/b.txt", "", "world", "s1")]);
+    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")], 1500);
+    ingestDiffsForMetrics([diff("/b.txt", "", "world", "s1")], 2000);
     // s1 never receives an `ended` announcement — simulates the console process being reaped.
 
     await flushAllSessionsForcibly(5000);
@@ -575,8 +590,45 @@ describe("flushAllSessionsForcibly (CPE-1626 loss path 1 — persist before a fu
     const rec = metricsRecord.mock.calls[0][0];
     expect(rec.sessionId).toBe("s1");
     expect(rec.editCount).toBe(2); // both edits present — nothing wiped
-    expect(rec.endedAt).toBe(5000); // stamped at flush time, since there's no real end to read
     expect(rec.endedCleanly).toBe(false); // honestly marked forced, never a fabricated clean end
+  });
+
+  // CPE-1641: the bug this ticket fixes. Before the fix, a forced flush stamped `endedAt` at FLUSH time
+  // (whenever the Agent Deck happened to be closed) rather than when the session actually died, so
+  // History's "Total time" silently overstated how long a crashed session ran — sometimes by hours. This
+  // is the regression test: deck-close is FAR later than the last real activity, so a regression back to
+  // "endedAt = flush time" fails loudly (rec.endedAt/wallClockMs would jump to the deck-close values).
+  it("CPE-1641: a forced flush uses the LAST OBSERVED ACTIVITY as the effective end, never flush time", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    ingestDiffsForMetrics([diff("/a.txt", "", "hello", "s1")], 2000);
+    ingestDiffsForMetrics([diff("/b.txt", "", "world", "s1")], 3000); // s1's real, last-observed activity
+    // The agent process dies right around here (3000) with no `ended` ever sent. The user doesn't close
+    // the Agent Deck — the event that actually triggers the forced flush — until 2 hours later.
+    const deckCloseTime = 3000 + 2 * 60 * 60 * 1000;
+
+    await flushAllSessionsForcibly(deckCloseTime);
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.startedAt).toBe(1000);
+    // The fix: effective end is the last observed diff (3000), NOT the flush/deck-close time.
+    expect(rec.endedAt).toBe(3000);
+    expect(rec.wallClockMs).toBe(2000); // 3000 - 1000 — NOT ~2 hours, which the old flush-time bug gave.
+    expect(rec.endedCleanly).toBe(false);
+  });
+
+  it("CPE-1641: falls back to startedAt (a zero-duration lower bound) when no diff activity was ever observed", async () => {
+    ingestSessionAnnouncement({ event: "started", session: session("s1") }, 1000);
+    // Worth-persisting via reported cost alone — no fs-diff ever folded, so lastActivityAt stays at
+    // whatever `started` stamped it to (1000): there is no later "real" activity signal to prefer.
+    ingestCost({ sessionId: "s1", inputTokens: 10, outputTokens: 5, costUsd: 0.1 });
+
+    await flushAllSessionsForcibly(999_999); // deck closed long after — must not leak into endedAt
+
+    expect(metricsRecord).toHaveBeenCalledTimes(1);
+    const rec = metricsRecord.mock.calls[0][0];
+    expect(rec.endedAt).toBe(1000); // falls back to startedAt, never the flush time
+    expect(rec.wallClockMs).toBe(0); // an honest lower bound, not a fabricated guess
   });
 
   it("flushes a genuinely-ended session exactly as flushSession would (endedCleanly: true)", async () => {

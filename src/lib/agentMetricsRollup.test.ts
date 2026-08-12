@@ -1,5 +1,13 @@
 import { describe, it, expect } from "vitest";
-import { rollup, overTime, emptyTotals, type MetricsTotals } from "./agentMetricsRollup";
+import {
+  rollup,
+  overTime,
+  emptyTotals,
+  isSessionEndedCleanly,
+  sessionRows,
+  uncleanSessionCount,
+  type MetricsTotals,
+} from "./agentMetricsRollup";
 import type { SessionMetricsRecord } from "./bindings.gen";
 
 /** A full, well-formed record with sensible defaults, overridable per test. */
@@ -166,6 +174,64 @@ describe("rollup — ratios are 0-safe (division-by-zero guards)", () => {
     expect(r.totals.costUsd).toBe(0);
     expect(r.totals.churnBytes).toBe(0);
     expect(r.totals.filesTouched).toBe(0);
+  });
+});
+
+describe("isSessionEndedCleanly (CPE-1641)", () => {
+  it("is true for an explicit endedCleanly: true", () => {
+    expect(isSessionEndedCleanly(rec({ endedCleanly: true }))).toBe(true);
+  });
+
+  it("is false only for an explicit endedCleanly: false (a forced/crashed flush)", () => {
+    expect(isSessionEndedCleanly(rec({ endedCleanly: false }))).toBe(false);
+  });
+
+  it("defaults an ABSENT field to clean — never misreads a pre-CPE-1626 row as crashed", () => {
+    const { endedCleanly: _drop, ...withoutField } = rec();
+    expect(isSessionEndedCleanly(withoutField as SessionMetricsRecord)).toBe(true);
+  });
+});
+
+describe("sessionRows (CPE-1641)", () => {
+  it("sorts newest-first by startedAt", () => {
+    const records = [
+      rec({ sessionId: "old", startedAt: 1_000 }),
+      rec({ sessionId: "newest", startedAt: 3_000 }),
+      rec({ sessionId: "mid", startedAt: 2_000 }),
+    ];
+    expect(sessionRows(records).map((r) => r.sessionId)).toEqual(["newest", "mid", "old"]);
+  });
+
+  it("does not mutate the input array", () => {
+    const records = [rec({ sessionId: "a", startedAt: 1 }), rec({ sessionId: "b", startedAt: 2 })];
+    const original = [...records];
+    sessionRows(records);
+    expect(records).toEqual(original);
+  });
+
+  it("empty input yields an empty array", () => {
+    expect(sessionRows([])).toEqual([]);
+  });
+});
+
+describe("uncleanSessionCount (CPE-1641)", () => {
+  it("counts only endedCleanly: false rows", () => {
+    const records = [
+      rec({ sessionId: "a", endedCleanly: true }),
+      rec({ sessionId: "b", endedCleanly: false }),
+      rec({ sessionId: "c", endedCleanly: false }),
+    ];
+    expect(uncleanSessionCount(records)).toBe(2);
+  });
+
+  it("is 0 when every row ended cleanly (including pre-CPE-1626 rows missing the field)", () => {
+    const { endedCleanly: _drop, ...withoutField } = rec();
+    const records = [rec({ endedCleanly: true }), withoutField as SessionMetricsRecord];
+    expect(uncleanSessionCount(records)).toBe(0);
+  });
+
+  it("empty input yields 0", () => {
+    expect(uncleanSessionCount([])).toBe(0);
   });
 });
 

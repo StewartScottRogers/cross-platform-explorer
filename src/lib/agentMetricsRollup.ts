@@ -190,6 +190,39 @@ export function rollup(records: SessionMetricsRecord[]): MetricsRollup {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Per-session rows + the "ended unexpectedly" distinction (CPE-1641).
+//
+// Before this, `endedCleanly` was recorded on every `SessionMetricsRecord` (CPE-1626) but never read
+// by any `.svelte` file: the History tab only ever showed the aggregates above, which fold a crashed
+// row's tallies in exactly like a clean one — two records identical except for `endedCleanly` roll up
+// to byte-identical totals. These helpers back a per-session list (the only place a single row's clean/
+// unclean status has anywhere to attach) and a fleet-wide caveat count for the aggregates.
+// ---------------------------------------------------------------------------------------------
+
+/** Whether `r` came from a genuine `ended` announcement. Mirrors the backend's own default: a record
+ *  with no `endedCleanly` at all (a pre-CPE-1626 row, or a wire payload that dropped an `undefined`
+ *  field) reads as clean, exactly like `metrics_journal.rs`'s `#[serde(default = "default_ended_cleanly")]`
+ *  — only an explicit `false` counts as "ended unexpectedly". Never invert this to `!r.endedCleanly`,
+ *  which would misread every old row as crashed. */
+export function isSessionEndedCleanly(r: Pick<SessionMetricsRecord, "endedCleanly">): boolean {
+  return r.endedCleanly !== false;
+}
+
+/** `records`, newest-first by `startedAt` — the row order the History tab's per-session list uses.
+ *  Pure (returns a new array; never mutates `records`). */
+export function sessionRows(records: SessionMetricsRecord[]): SessionMetricsRecord[] {
+  return [...records].sort((a, b) => b.startedAt - a.startedAt);
+}
+
+/** How many of `records` did NOT end cleanly (CPE-1641) — a crashed/reaped session forced-flushed
+ *  without a genuine `ended` announcement, whose duration is a best-effort estimate rather than a
+ *  measured one. Used to caveat an aggregate (e.g. "Total time") that folds an unclean row's duration
+ *  in alongside clean ones, so the number never reads as more precisely measured than it is. */
+export function uncleanSessionCount(records: SessionMetricsRecord[]): number {
+  return records.filter((r) => !isSessionEndedCleanly(r)).length;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Over-time bucketing (for the History tab's sparkline/bar view).
 // ---------------------------------------------------------------------------------------------
 
