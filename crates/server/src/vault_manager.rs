@@ -1671,8 +1671,9 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 ///
 /// The walk now runs in four steps per directory, and the order is the guarantee:
 ///
-/// 1. **Enumerate and probe.** Nothing is destroyed in this pass, so every subdirectory's identity is
-///    captured *before* the first byte is overwritten anywhere in this directory — i.e. before the
+/// 1. **Enumerate and probe**, pinning each entry as it is seen (the *entry pin* — the near side of the
+///    residual gap described below). Nothing is destroyed in this pass, so every subdirectory's identity
+///    is captured *before* the first byte is overwritten anywhere in this directory — i.e. before the
 ///    attacker's starting gun can possibly have fired.
 /// 2. **Re-pin the directory itself**, before anything is destroyed. A swap that lands during step 1 is
 ///    refused with nothing written.
@@ -1690,8 +1691,11 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 ///
 /// This is not "no window", and this comment must not say that it is. Two remain:
 ///
-/// - Between step 2's re-pin and `read_dir` in step 1 of the *next* level, and again between step 4's
-///   re-pin and that `read_dir`, sits a single syscall. To exploit it an attacker must swap a directory
+/// - Between a directory's **entry pin** — taken in step 1 as it is enumerated in its parent — and the
+///   `read_dir` that step 4's descent then performs on it, sits a single syscall. (Step 2's re-pin of the
+///   directory *itself* is not the near side of this gap: all of step 3's overwrites and the child's own
+///   entry pin sit between it and the next level's `read_dir`. The precise location was muddled in an
+///   earlier draft — PR #861 review.) To exploit it an attacker must swap a directory
 ///   **in and back out** inside that gap — restoring an object with the *same* identity, since the
 ///   re-pins bracket the enumeration on both sides — while getting no observable signal about when the
 ///   gap is. The old exploit needed neither precision nor a signal, because the starting gun told it the
@@ -1777,6 +1781,11 @@ fn shred_dir_pinned(
 /// The `Unknown` arm is where the two [`AliasPolicy`] trust levels genuinely differ. A session directory
 /// lives in the app's own cache dir on a local volume, where an identity is always readable, so an
 /// unreadable one there is anomalous and refused (the lock stays retryable and nothing is destroyed).
+/// **Precisely: refused for a directory, and silently declined for a file** — `overwrite_pinned_file`
+/// leaves the name for `remove_dir_all` rather than writing through an object it cannot vouch for, which
+/// is the safer half of the same rule. The two cannot diverge in practice, since identity and link count
+/// come from the same syscall on both platforms (PR #861 review — the earlier wording read as a
+/// module-wide "refused" and was narrower than the module behaves).
 /// `create_vault`'s optional shred-original runs over a folder the **user** picked in a file picker,
 /// which may sit on a network redirector that reports a degenerate identity from a call that otherwise
 /// succeeds — refusing there would break a legitimate feature to defend against an attacker who, by that
@@ -4185,9 +4194,12 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
         std::fs::write(session.join("top.txt"), b"edited while unlocked").unwrap();
 
-        // The whole process shares the counter and tests run in parallel, so compare a snapshot taken
-        // just before with the value observed inside our own verify — a monotonic counter can only have
-        // gone UP, and our own write is guaranteed to be one of the increments.
+        // The counter is THREAD-LOCAL (see `VAULT_BLOB_SYNCS`), so the value observed inside our own
+        // verify was produced by this test's own call site and nothing else. Do not "simplify" it back
+        // to a process-wide atomic: that is exactly what made both ordering tests weaker than they read,
+        // because another test's fsync could satisfy "the count went up" while this call site synced
+        // nothing (PR #861 review — reconstructed and confirmed against `main`'s atomic version). The
+        // before-snapshot is kept as belt-and-braces, not because a shared counter needs it.
         let before = vault_blob_sync_count();
         let at_verify = std::cell::Cell::new(usize::MAX);
         reseal_session_with_verifier(&blob_path, &session, &pass("pw"), |p, pw| {
@@ -4676,9 +4688,12 @@ mod tests {
         let blob_path = dir.path().join("v.cpevault");
         let opts = CreateOpts { shred_original: true, shred_scheme: ShredScheme::Zero };
 
-        // The whole process shares the counter and tests run in parallel, so compare a snapshot taken
-        // just before with the value observed inside our own verify — a monotonic counter can only have
-        // gone UP, and our own write is guaranteed to be one of the increments.
+        // The counter is THREAD-LOCAL (see `VAULT_BLOB_SYNCS`), so the value observed inside our own
+        // verify was produced by this test's own call site and nothing else. Do not "simplify" it back
+        // to a process-wide atomic: that is exactly what made both ordering tests weaker than they read,
+        // because another test's fsync could satisfy "the count went up" while this call site synced
+        // nothing (PR #861 review — reconstructed and confirmed against `main`'s atomic version). The
+        // before-snapshot is kept as belt-and-braces, not because a shared counter needs it.
         let before = vault_blob_sync_count();
         let at_verify = std::cell::Cell::new(usize::MAX);
         create_vault_with_verifier(&src, &blob_path, &pass("pw"), &opts, true, |p, pw| {

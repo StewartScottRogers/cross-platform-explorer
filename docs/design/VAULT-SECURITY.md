@@ -232,10 +232,14 @@ as a normal location; locking **re-seals that session directory back into the bl
     `an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it`. Neutralising the identity arm **and**
     the link arm together — each is independently sufficient — reproduces the original exploit in
     `the_wipe_refuses_a_{junction,symlink}_swapped_in_at_a_parent_directory_mid_wipe`, which rebuild the
-    auditor's reproduction from real filesystem objects and read the victim's bytes back off disk. Two
-    guards that no test could tell apart were **removed** rather than kept as reassurance: a duplicate
-    root-is-a-link check in `shred_tree`, and a "was a real one when the wipe started" phrase that was not
-    true for the wipe's own root.
+    auditor's reproduction from real filesystem objects and read the victim's bytes back off disk. One
+    **guard** that no test could tell apart was **removed** rather than kept as reassurance — a duplicate
+    root-is-a-link check in `shred_tree`, which consumed the same probe it would have compared and was
+    therefore information-free (the root is still refused twice independently, by `wipe_session_dir`'s
+    `symlink_metadata` check and by `shred_dir_pinned`'s entry probe, whose reparse-point attribute also
+    catches junctions `is_symlink()` may not). Alongside it, a **message phrase** — "was a real one when
+    the wipe started" — was dropped for being untrue of the wipe's own root. Calling both of those
+    "guards" was loose in a paragraph whose point is precision about what is load-bearing (PR #861 review).
   - **One lock at a time, per vault** (SEC-847 reviewer blocker A). The re-seal and the wipe are slow and
     hold no mutex, so two concurrent `lock` calls for the same vault interleaved: the second re-sealed the
     tree the first was already shredding and wrote *that* over the vault, **both returning `Ok`** over a
