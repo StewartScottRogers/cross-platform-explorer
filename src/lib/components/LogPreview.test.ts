@@ -229,6 +229,66 @@ describe("LogPreview (CPE-1618)", () => {
   });
 });
 
+// CPE-1638: filtering to Errors used to hide a finding's stack trace — reproduced on a real log
+// (`electron-2026-07-24.log`) by the independent UAT of CPE-1618, which found filtering to Errors left
+// only 1 of 22 lines visible (the bare header). End-to-end coverage through the real component, on top of
+// the pure-logic coverage in logViewer.test.ts.
+describe("LogPreview stack-trace continuation grouping (CPE-1638)", () => {
+  const TRACE_LOG = [
+    "2026-07-24T13:03:50.615Z error [BUGSNAG] Uncaught exception in main process",
+    "AbortError: Request aborted",
+    "    at RequestAborter.abort (electron/lib/net.js:120:11)",
+    "    at ClientRequest.emit (node:events:513:28)",
+    "Server accepted a new connection from 10.0.0.5", // unrelated — must not survive the errors-only filter
+  ].join("\n");
+
+  it("filtering to Errors-only keeps the header and its whole trace, not just the bare header", async () => {
+    readLogWindowMock.mockResolvedValueOnce(ok(wholeFile(TRACE_LOG)));
+
+    const { container } = render(LogPreview, { path: "/x/electron.log" });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(5));
+
+    // Turn off every chip except Error (mirrors the existing "filter chips actually hide" test's recipe).
+    for (const level of ["warn", "info", "debug", "trace"]) {
+      const chip = container.querySelector(`[data-testid="log-filter-chip-${level}"]`);
+      if (chip) await fireEvent.click(chip);
+    }
+    await fireEvent.click(container.querySelector('[data-testid="log-filter-chip-unleveled"]')!);
+
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(4));
+    const shownText = container.querySelector('[data-testid="log-body"]')!.textContent!;
+    expect(shownText).toContain("Uncaught exception in main process");
+    expect(shownText).toContain("AbortError: Request aborted");
+    expect(shownText).toContain("RequestAborter.abort");
+    expect(shownText).toContain("ClientRequest.emit");
+    // The unrelated trailing line must NOT have been swept in.
+    expect(shownText).not.toContain("Server accepted a new connection");
+    expect(container.querySelector('[data-testid="log-visible-count"]')!.textContent).toMatch(/4 of 5/);
+  });
+
+  it("renders continuation lines as visually subordinate (flagged, not given their own level badge)", async () => {
+    readLogWindowMock.mockResolvedValueOnce(ok(wholeFile(TRACE_LOG)));
+
+    const { container } = render(LogPreview, { path: "/x/electron.log" });
+    await waitFor(() => expect(container.querySelectorAll('[data-testid="log-row"]').length).toBe(5));
+
+    const rows = Array.from(container.querySelectorAll('[data-testid="log-row"]'));
+    // Header: its own level, not flagged as a continuation.
+    expect(rows[0].getAttribute("data-level")).toBe("error");
+    expect(rows[0].getAttribute("data-continuation")).toBe("false");
+    // The bare exception line + both stack frames: grouped (group-level "error") but no own level/badge —
+    // exactly what keeps a multi-frame trace from painting as several separate "Error" rows.
+    for (const row of [rows[1], rows[2], rows[3]]) {
+      expect(row.getAttribute("data-level")).toBe("none");
+      expect(row.getAttribute("data-continuation")).toBe("true");
+      expect(row.getAttribute("data-group-level")).toBe("error");
+    }
+    // The unrelated line: neither leveled nor grouped.
+    expect(rows[4].getAttribute("data-continuation")).toBe("false");
+    expect(rows[4].getAttribute("data-group-level")).toBe("none");
+  });
+});
+
 // CPE-1637: bounded windowed reads for multi-megabyte real logs (CBS.log, dism.log, …) that the old
 // all-or-nothing `read_file_text` refused outright above its 256 KiB cap. These tests exercise the
 // tail-window note, the "Load earlier" / "Back to latest" paging controls, and that paging never
@@ -308,7 +368,13 @@ describe("LogPreview windowed/partial reads (CPE-1637)", () => {
     expect(container.querySelector('[data-testid="log-jump-latest"]')).toBeTruthy();
   });
 
-  it("'Back to latest' returns to the cached tail page without issuing another backend read", async () => {
+  // CPE-1644 Part B: `jumpToLatest` used to be a pure cache-pointer move back to `pages[0]` — the window
+  // fetched when the file was opened — and NEVER re-fetched (confirmed by the UAT: the backend call count
+  // stayed at 2 after a page-back plus a jump-to-latest). On a log actively being appended to while the
+  // preview is open, "Back to latest" therefore showed the open-time snapshot, not the current tail. This
+  // test fails against that old behavior on two counts: it expects a THIRD backend call, and it expects
+  // NEW content (appended since open) that the old cache-only jump could never show.
+  it("'Back to latest' re-fetches the tail so it reflects lines appended to the file since it was opened", async () => {
     const tailText = "line A\nline B\n";
     const tail = tailWindow(tailText, 5_000_000);
     readLogWindowMock.mockResolvedValueOnce(ok(tail));
@@ -331,11 +397,28 @@ describe("LogPreview windowed/partial reads (CPE-1637)", () => {
     await waitFor(() => expect(container.textContent).toContain("older line"));
     expect(readLogWindowMock).toHaveBeenCalledTimes(2);
 
+    // The file grew (and its content changed) while the preview stayed open on the older page.
+    const grownTailText = "line A\nline B\nline C (appended after open)\n";
+    const grownTail = tailWindow(grownTailText, 5_000_100);
+    readLogWindowMock.mockResolvedValueOnce(ok(grownTail));
+
     await fireEvent.click(container.querySelector('[data-testid="log-jump-latest"]')!);
-    await waitFor(() => expect(container.textContent).toContain("line A"));
+    await waitFor(() => expect(container.textContent).toContain("line C (appended after open)"));
     expect(container.textContent).not.toContain("older line");
-    // Still only the two backend calls from before — the tail page was cached, not re-fetched.
-    expect(readLogWindowMock).toHaveBeenCalledTimes(2);
+    // A genuine THIRD backend call — the old code never issued this (stayed at 2 forever).
+    expect(readLogWindowMock).toHaveBeenCalledTimes(3);
+    expect(readLogWindowMock).toHaveBeenLastCalledWith("/x/dism.log", expect.any(Number), null);
+    // The growth is called out explicitly, not just silently shown.
+    expect(container.querySelector('[data-testid="log-window-note"]')!.textContent).toMatch(/grown/i);
+  });
+
+  it("does not claim the file has grown on an ordinary tail load with no prior open-time size to compare against", async () => {
+    const tail = tailWindow("line A\nline B\n", 5_000_000);
+    readLogWindowMock.mockResolvedValueOnce(ok(tail));
+
+    const { container } = render(LogPreview, { path: "/x/dism.log" });
+    await waitFor(() => expect(container.querySelector('[data-testid="log-window-note"]')).toBeTruthy());
+    expect(container.querySelector('[data-testid="log-window-note"]')!.textContent).not.toMatch(/grown/i);
   });
 
   it("reaching the true start of the file disables 'Load earlier' and drops the 'not the end' wording", async () => {

@@ -57,3 +57,32 @@ not reintroduce per-line rescanning.
 **Conflict surface:** `src/lib/preview/logViewer.ts` and `src/lib/components/LogPreview.svelte`, plus tests.
 Overlaps CPE-1637 (large-log support) and CPE-1636 (detection false positives) — all three touch the same
 two files, so sequence them rather than running them in parallel.
+
+## Work Log
+2026-08-11 (sprint, Worker) — Implemented: `LogLine` gained `filterLevel` (the level a filter should key
+on — a line's own `level`, or the inherited level of the classified line it continues) and `isContinuation`
+(true when grouped, so it renders subordinate rather than getting its own badge/full-strength border).
+`parseLog` runs a second `groupContinuations()` pass (O(n), one bounded `CONTINUATION_SCAN_CHARS`-window
+(64 chars) check per line — never rescans full line text) over the already-detected lines: an unleveled
+line immediately following a classified line inherits its level when it looks like a continuation
+(leading whitespace, `at `, `Caused by:`, a trailing `...`, or — only right after an error — a bare
+`XError:`/`XException:` header). The chain breaks the instant a line doesn't match, so unrelated trailing
+lines are never swept in. `filterLines` now keys on `filterLevel` instead of `level`. `LogPreview.svelte`
+renders continuation rows with `data-continuation`/`data-group-level` attributes and a faint indented
+border in the group's colour (35% mix) rather than the header's full-strength one — the Visual Critic's
+"wall of red" risk on a 10-frame trace is avoided since `level` (and thus the badge) stays `null` on every
+continuation line.
+
+Verified against the ticket's real excerpt (`electron-2026-07-24.log` shape, reproduced as
+`REAL_EXCERPT_LINES` in `logViewer.test.ts`): filtering to Errors-only now shows the header AND all 5
+continuation lines (6 of 7 total), not just the bare header; the one deliberately unrelated trailing line
+("Server accepted a new connection...") is correctly excluded — the explicit boundary test the ticket
+asked for. Independent verification pass (composed separately from the ticket's own fixture, in the shape
+of a real Node.js unhandled-rejection dump with 4 `at ...` frames) confirmed the same behavior end-to-end:
+all 4 frames + the `TypeError` header survive an errors-only filter, the following unrelated `info` line
+does not. "Showing N of M" counts stay accurate (asserted directly in the test). No regression to
+CPE-1636's detection-accuracy corpus (JSON/logfmt/syslog/URL/`ERRORLEVEL=1`/prose all still unclassified —
+same test file, same describe blocks, all still passing).
+
+Verification: `npm run check` clean; `npx vitest run` — all 287 files / 3660 tests pass. JS/TS-only change,
+no Rust touched.

@@ -97,3 +97,48 @@ fix. Bound it (a sliding window of pages, or evict the far end).
 possibly `read_file_text_impl` in `src-tauri/src/lib.rs` if the encoding fix is shared. Overlaps CPE-1636
 (detection false positives) and CPE-1638 (filtering hides stack traces) — all three touch `LogPreview`, so
 sequence them.
+
+## Work Log
+2026-08-11 (sprint, Worker) — Implemented all four remaining items (A′, A″, B, B′):
+
+- **A′ (decode UTF-16, not refuse it):** new `text_encoding::detect_encoding_at(bytes, base_offset)` —
+  offset-aware sibling of `detect_encoding` (BOM only honored at true offset 0; NUL-lane parity computed
+  from `base_offset + i`, not slice-relative `i`). `log_window::align_window` now routes a detected
+  `Utf16Le`/`Utf16Be` window through new `decode_utf16_window()`, a code-unit-pair-aligned parallel to the
+  byte-aligned UTF-8 path: strips a leading BOM (only when `raw_start == 0`), snaps to a 2-byte code-unit
+  boundary via `raw_start`'s own parity, searches for the `0x000A` code unit to land on a clean line
+  boundary (never trusts the UTF-8 path's 1-byte `already_aligned` peek, which means nothing for a 2-byte
+  code unit), and decodes with `std::char::decode_utf16` (unpaired surrogates → U+FFFD, never a hard
+  failure — matches the crate's "malformed input degrades gracefully" convention). No new dependency.
+- **A″ (offset-aware sniffing):** `detect_encoding_at`'s `base_offset` parameter is exactly this fix — a
+  window starting at an odd absolute file offset no longer flips LE/BE.
+- **B (re-fetch on "Back to latest"):** `jumpToLatest()` in `LogPreview.svelte` now issues a real
+  `loadLogWindow(path, null)` call instead of moving the pointer back to cached `pages[0]`, resets the page
+  cache to just the fresh tail, and a new `fileGrew` reactive flag (comparing the refetched `file_len`
+  against the file's size at open-time, tracked in `openedFileLen`) surfaces "The file has grown since this
+  preview was opened" in the window note when true.
+- **B′ (bounded page cache):** new `MAX_CACHED_LOG_PAGES = 20` and pure `pushLogPage()` helper in
+  `logViewer.ts` — evicts the oldest/shallowest cached page once the cap is exceeded; `LogPreview.svelte`'s
+  `loadOlder()` now calls it instead of the old unbounded `pages = [...pages, w]`. Cache is provably bounded
+  at exactly 20 pages regardless of how many times "Load earlier" is clicked (`pushLogPage` test pushes 500
+  pages and asserts `pages.length <= MAX_CACHED_LOG_PAGES` throughout, plus an exact-eviction-order test).
+
+**Byte-level verification (independent of the committed test fixtures):** generated real UTF-16LE/BE files
+with and without a BOM using .NET's own `[System.Text.Encoding]::Unicode`/`BigEndianUnicode` encoder (not
+this crate's code) in a scratch directory, confirmed the raw bytes by hex dump (e.g. `edge_le_nobom.log`
+first 16 bytes `5B-00-30-00-38-00-31-00-30-00-2F-00-31-00-32-00` — genuine interleaved-NUL UTF-16LE of
+`[0810/12…`), then ran a temporary integration test calling the real `cpe_server::log_window::read_window`
+against all four files: all four decoded byte-exact back to the original 3-line mixed INFO/WARNING/ERROR
+text, confirmed `at_start && at_end` on the whole-file window. Temp verification files (Rust test +
+generated fixtures) deleted before commit — the permanent coverage is the ticket-committed
+`crates/server/src/log_window.rs` test suite (19 `log_window` tests including
+`utf16le_tail_window_of_a_larger_file_decodes_correctly_even_when_the_window_lands_on_an_odd_byte_offset`
+and `utf16_windowed_paging_never_reintroduces_a_split_code_unit_across_several_backward_pages`, both
+exercising real windowed/paged reads over a larger synthetic file, plus `text_encoding`'s 26 tests
+including the two offset-parity-flip regression tests), all passing.
+
+Verification: `npm run check` clean; `npx vitest run` 287/287 files, 3660/3660 tests; `cargo clippy
+--all-targets -- -D warnings` clean in all three of `crates/server`'s CI feature-mode combos (default,
+`--features index`, `--features pdf-thumb,video-thumb,waveform,dicom-thumb`); `cargo test` in
+`crates/server` — 19/19 `log_window` tests, 26/26 `text_encoding` tests, full crate suite green (no os
+error 225 hit this run).

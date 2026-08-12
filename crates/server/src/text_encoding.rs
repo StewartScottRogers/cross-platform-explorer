@@ -98,24 +98,41 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// UTF-16 file dominated by non-ASCII (few NUL high-bytes) may fall through to `Binary`. UTF-32 is not
 /// distinguished (a `FF FE 00 00` BOM reads as UTF-16LE).
 pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
+    detect_encoding_at(bytes, 0)
+}
+
+/// Same as [`detect_encoding`], but for a slice that is not itself the true start of the file —
+/// `base_offset` is the slice's absolute byte offset within that file (CPE-1644 A″).
+///
+/// The BOM-less NUL-lane heuristic ([`classify_nul_bytes`]) has to know which byte-lane (even/odd)
+/// carries the NUL bytes to tell UTF-16LE from UTF-16BE apart, and that lane is a property of the
+/// **absolute** file offset, not the slice's own index 0 — a window starting at an odd absolute byte
+/// splits every UTF-16 code unit in it, flipping which lane looks NUL-heavy. `detect_encoding` (offset
+/// 0) is unaffected by this; only a windowed reader (`log_window.rs`) sniffing a slice that starts
+/// mid-file needs this variant.
+pub fn detect_encoding_at(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     if bytes.is_empty() {
         return EncodingGuess::Empty;
     }
-    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
-        return EncodingGuess::Utf8Bom;
-    }
-    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        return EncodingGuess::Utf16Le;
-    }
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        return EncodingGuess::Utf16Be;
+    // A BOM is only ever meaningful at the true start of the file — a `FF FE` two bytes into a UTF-16
+    // stream is just two ordinary code units, not a byte-order mark.
+    if base_offset == 0 {
+        if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+            return EncodingGuess::Utf8Bom;
+        }
+        if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            return EncodingGuess::Utf16Le;
+        }
+        if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+            return EncodingGuess::Utf16Be;
+        }
     }
     // A NUL byte means this isn't plain UTF-8/Latin-1 *text* (neither ever contains NUL); classify it as
     // BOM-less UTF-16 or binary BEFORE the UTF-8 check — a NUL is itself valid UTF-8, so a BOM-less
     // UTF-16 ASCII file like `h\0i\0` would otherwise round-trip through `from_utf8` and be mis-reported
     // as plain text (CPE-1003 QA finding).
     if bytes.contains(&0) {
-        return classify_nul_bytes(bytes);
+        return classify_nul_bytes(bytes, base_offset);
     }
     if std::str::from_utf8(bytes).is_ok() {
         return EncodingGuess::Utf8;
@@ -126,11 +143,14 @@ pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
     EncodingGuess::Latin1
 }
 
-/// Classify NUL-containing, BOM-less input (called only from [`detect_encoding`]). BOM-less UTF-16 of
-/// ASCII-range text fills one whole byte-lane with NULs — odd offsets for little-endian, even for
-/// big-endian — so a lane that is at least half NUL while the other lane is clear is reported as UTF-16;
-/// anything else (NULs on both lanes, or just a stray NUL) is [`Binary`](EncodingGuess::Binary).
-fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
+/// Classify NUL-containing, BOM-less input (called only from [`detect_encoding_at`]). BOM-less UTF-16 of
+/// ASCII-range text fills one whole byte-lane with NULs — the lane at an *odd absolute file offset* for
+/// little-endian, *even absolute file offset* for big-endian — so a lane that is at least half NUL while
+/// the other lane is clear is reported as UTF-16; anything else (NULs on both lanes, or just a stray NUL)
+/// is [`Binary`](EncodingGuess::Binary). `base_offset` is `bytes`'s own absolute offset in the file
+/// (CPE-1644 A″) — parity is computed as `(base_offset + i) % 2`, not `i % 2`, so a window that starts
+/// mid-file at an odd byte doesn't flip LE/BE relative to a window starting at byte 0 of the same stream.
+fn classify_nul_bytes(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
     if sniff_len < 2 {
         return EncodingGuess::Binary;
@@ -140,7 +160,7 @@ fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
     let mut odd_nul = 0usize;
     for (i, &b) in bytes[..sniff_len].iter().enumerate() {
         if b == 0 {
-            if i % 2 == 0 {
+            if (base_offset + i as u64) % 2 == 0 {
                 even_nul += 1;
             } else {
                 odd_nul += 1;
@@ -327,6 +347,59 @@ mod tests {
         // CPE-1014: a single [0x00] byte should be classified as Binary, not UTF-16.
         // A 1-byte file can never be valid UTF-16 (which requires at least 2 bytes).
         assert_eq!(detect_encoding(&[0x00]), EncodingGuess::Binary);
+    }
+
+    // ---- detect_encoding_at (CPE-1644 A″: offset-aware NUL-lane parity) ----
+
+    #[test]
+    fn detect_encoding_at_offset_zero_matches_plain_detect_encoding() {
+        let utf16le: Vec<u8> = "hello".bytes().flat_map(|b| [b, 0]).collect();
+        assert_eq!(detect_encoding_at(&utf16le, 0), detect_encoding(&utf16le));
+        assert_eq!(detect_encoding_at(&utf16le, 0), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn detect_encoding_at_an_odd_absolute_offset_reports_the_correct_endianness_where_offset_naive_detection_would_flip_it() {
+        // Regression (CPE-1644 A″): a UTF-16LE stream's NUL bytes sit on ODD absolute file offsets (the
+        // high byte of each ASCII code unit). A window that starts at an EVEN absolute offset sees that
+        // same lane pattern in its own slice-relative indices (0-based), so plain `detect_encoding` (which
+        // implicitly assumes the slice IS byte 0) gets it right by luck. But a window starting at an ODD
+        // absolute offset is itself missing the first byte of the first code unit, so the NULs that were on
+        // odd absolute offsets now land on EVEN slice-relative indices — offset-naive detection reports the
+        // opposite endianness (Utf16Be) even though the underlying stream is genuinely Utf16Le.
+        let full_stream: Vec<u8> = "hello world".bytes().flat_map(|b| [b, 0]).collect(); // UTF-16LE, no BOM
+        let odd_offset = 5u64; // itself odd — cuts a code unit in half, same as a real mid-file window would
+        let window = &full_stream[odd_offset as usize..];
+
+        // Offset-naive detection (what the pre-fix `align_window` effectively did by calling
+        // `detect_encoding` on a mid-file slice) misreads this window as big-endian.
+        assert_eq!(detect_encoding(window), EncodingGuess::Utf16Be, "sanity: this is the bug being fixed");
+
+        // Offset-aware detection, told the window's true absolute offset, reports the correct endianness.
+        assert_eq!(detect_encoding_at(window, odd_offset), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn detect_encoding_at_an_even_absolute_offset_also_reports_correct_endianness_for_utf16be() {
+        let full_stream: Vec<u8> = "hello world".bytes().flat_map(|b| [0, b]).collect(); // UTF-16BE, no BOM
+        let odd_offset = 5u64;
+        let window = &full_stream[odd_offset as usize..];
+
+        assert_eq!(detect_encoding(window), EncodingGuess::Utf16Le, "sanity: this is the bug being fixed");
+        assert_eq!(detect_encoding_at(window, odd_offset), EncodingGuess::Utf16Be);
+    }
+
+    #[test]
+    fn detect_encoding_at_ignores_a_bom_like_byte_pair_that_is_not_at_the_true_file_start() {
+        // A `FF FE` byte pair mid-file is not a byte-order mark — only `base_offset == 0` may treat it as
+        // one. Use content that, if BOM-sniffed, would misreport; the NUL-lane heuristic underneath should
+        // instead do the classifying (or fall through if the bytes don't look like a clean UTF-16 lane).
+        let bytes = [0xFF, 0xFE, 0x00, 0x01, 0x02];
+        // At true offset 0 this IS a BOM.
+        assert_eq!(detect_encoding_at(&bytes, 0), EncodingGuess::Utf16Le);
+        // At a non-zero absolute offset, the same two leading bytes are just data, not a BOM — the result
+        // must come from the NUL-lane/binary fallback path instead, not the BOM shortcut.
+        assert_ne!(detect_encoding_at(&bytes, 10), EncodingGuess::Utf16Le);
     }
 
     #[test]
