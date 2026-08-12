@@ -1093,8 +1093,8 @@ async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
  * fixed `safe_join` to reject a plan entry naming the root — the correctness half, which holds whatever
  * the caller sets), and `run_command`, whose "the frontend MUST confirm" comment this ticket was filed
  * against (CPE-1665). **Still do not read this as "destruction now requires consent" app-wide:** the
- * auditor also flagged `checkpoint_revert` (`crates/server/src/revert_engine.rs`), which mass-`remove_
- * file`s every file under a caller-chosen root absent from the named manifest — bounded by requiring a
+ * auditor also flagged `checkpoint_revert` (`crates/server/src/revert_engine.rs`), which removes every
+ * file under a caller-chosen root that is absent from the named manifest — bounded by requiring a
  * pre-existing checkpoint for that exact root, and semantically a restore, so it was rated lower and is
  * **not** gated. And every one of these gates is the same UI discipline described above, not an
  * authorization boundary.
