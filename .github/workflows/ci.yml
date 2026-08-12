@@ -486,11 +486,20 @@ jobs:
           echo 'force_local_data_ssl=NO' >> "$conf"
           echo 'force_local_logins_ssl=NO' >> "$conf"
           echo 'require_ssl_reuse=NO' >> "$conf"
-          # CPE-1659: deliberately NOT setting ssl_tlsv1/ssl_sslv2/ssl_sslv3 here. The first live run of
-          # this rig set `ssl_tlsv1=YES` (explicit legacy TLSv1.0) and vsftpd exited 147ms after start
-          # (exitCode=2) every time — consistent with a modern OpenSSL build refusing to enable TLSv1.0 at
-          # config load. Leaving these three directives out lets vsftpd negotiate with its own modern
-          # default TLS range; `ssl_enable=YES` above is what actually turns FTPS on.
+          # CPE-1659: deliberately NOT setting ssl_tlsv1/ssl_sslv2/ssl_sslv3 here — an earlier guess (never
+          # confirmed against a real error) blamed legacy-TLS config rejection for vsftpd's fast exit.
+          # Leaving these three directives out lets vsftpd negotiate its own modern default TLS range;
+          # `ssl_enable=YES` above is what actually turns FTPS on.
+          #
+          # CPE-1659 CONFIRMED root cause (via the foreground diagnostic replay below): vsftpd refuses to
+          # load a config file it doesn't own — "500 OOPS: config file not owned by correct user, or not a
+          # file". vsftpd.conf is generated here by the unprivileged `runner` user, then bind-mounted into
+          # the container where vsftpd runs as root (uid 0); bind mounts don't remap ownership, so the
+          # file stayed owned by the runner's uid and the root-owned check failed on every single run —
+          # this was the real, reproducible cause of the "never accepted a TCP connection" failures, not
+          # the TLS version. `sudo chown root:root` here is what actually fixes it.
+          sudo chown root:root "$conf"
+          sudo chown -R root:root "$ssl_dir"
           {
             echo "CPE_E2E_FTP_SSL_DIR=$ssl_dir"
             echo "CPE_E2E_FTP_CONF=$conf"
