@@ -131,17 +131,27 @@ the blocking `Network E2E (ubuntu-latest, real servers)` job.
   `crates/vfs` conformance test-binary pre-build now run concurrently (independent standalone crates, no
   shared files); (b) the 4-test conformance suite now runs as 3 concurrent groups by scheme — sftp / webdav
   / (ftp+ftps, kept serial relative to each other since they share one container + fixture directory).
-  **Measured wall-clock: baseline 14m01s (PR #849's own run, `11:48:37`→`12:02:38`) → this PR's run
-  7m27s (`15:00:49`→`15:08:12`)** — under the 10-minute target. Per-step data from this run: the parallel
-  build step now takes 35s (was ~4m each for the release build alone in two independent baseline samples);
-  sftp and webdav conformance now finish in under a second each, running alongside the ftp+ftps group,
-  which is now the dominant remaining cost at ~300s (unavoidable while it must stay serialised with itself).
-  Left uninvestigated: *why* the FTP+FTPS pair alone takes ~5 minutes — that was already true in the
-  pre-existing serial run (hidden inside its 5m01s total) and is a distinct question from parallelising the
-  test infrastructure, which is what this item asked for. Worth a follow-up ticket if further speedup is
-  wanted. Some of the overall improvement is also plausibly attributable to warmer `swatinem/rust-cache`
-  state on this run vs. the two cold/lukewarm baseline samples checked before starting — flagged for
-  honesty, not something this ticket's changes can fully disentangle without more repeated runs.
+  **Two measured samples, same code, back-to-back on this PR — the number is NOT stable run-to-run**:
+  baseline (PR #849's own run) 14m01s (`11:48:37`→`12:02:38`); this PR's first CI run 7m27s
+  (`15:00:49`→`15:08:12`, run 31609956961); this PR's second CI run (triggered by this Work Log commit,
+  identical Rust/YAML) **13m30s** (`15:59:03`→`16:12:33`, run 31614879942) — essentially back to baseline.
+  Root cause of the swing, found by comparing per-step timings: the parallel build step (release binary +
+  vfs test-binary pre-build) took 35s on the first run but **5m52s** on the second — `swatinem/rust-cache`
+  restore is inconsistent for that release-profile build (matches what the PR #849 baseline itself already
+  showed: two independent runs ~90 min apart both cold at ~4m, no warming between them either), so the
+  parallelisation's benefit is real but not reliable while the cache behaviour underneath it is this
+  volatile. The scheme-parallelised conformance suite, by contrast, measured identically both times
+  (5m01s) — because FTP+FTPS (serialised with each other; they share one container+fixture) was ALREADY
+  the critical path in the old single-threaded run too, so splitting sftp/webdav out (confirmed: both now
+  finish in <1s, running alongside the ftp+ftps group) doesn't move the total when ftp+ftps alone costs
+  ~300s regardless. Honest bottom line: this item's changes are structurally correct (proven by the
+  sub-second sftp/webdav times and by the release build no longer blocking serially before the vfs
+  pre-build starts) but the measured **wall-clock improvement is not consistently under 10 minutes** —
+  one of two samples was, one wasn't. Left uninvestigated, and worth a follow-up ticket: (1) why
+  `swatinem/rust-cache` doesn't reliably warm the `crates/net` release build across runs on this repo, and
+  (2) why the FTP+FTPS pair alone costs ~300s when SFTP/WebDAV cost <1s for the equivalent assertions —
+  that's a distinct, likely more valuable investigation than the test-infra parallelisation this item asked
+  for, but out of this ticket's scope.
 
 PR: https://github.com/StewartScottRogers/cross-platform-explorer/pull/860 (open, not merged — left for the
 Foreman). CI run: https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/31609956961
