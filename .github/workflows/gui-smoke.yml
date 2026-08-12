@@ -183,9 +183,11 @@ jobs:
     # `gui-smoke/known-failing.json`'s entry for it — so the baseline stays 7, not 6), so "flaky" was
     # never the right diagnosis; the fix is a ratchet, not more slack. The suite's own exit code below is
     # deliberately swallowed (`|| true`) — the "Ratchet — no new GUI regressions" step owns the verdict:
-    # it reds the job on any spec failing that ISN'T in `gui-smoke/known-failing.json`, on a
-    # known-failing spec starting to PASS (the ratchet is one-way — see `gui-smoke/lib/ratchet.ts`), or
-    # on the run not completing at all (fewer specs reporting than `specs/*.smoke.ts` globs to — the
+    # since CPE-1677 it works at TEST-CASE granularity, so it reds the job on any CASE failing that ISN'T
+    # in `gui-smoke/known-failing.json` (including a case inside a spec file that already has entries
+    # there — the hole CPE-1677 closed), on a known-failing case starting to PASS (the ratchet is one-way
+    # — see `gui-smoke/lib/ratchet.ts`), on a listed case title matching no test at all (titles drift), or
+    # on the run not completing at all (fewer spec files reporting than `specs/*.smoke.ts` globs to — the
     # exact "timeout kills the job and the whole run reads as cancelled" failure mode this ticket exists
     # to fix). WebKitGTK-under-Xvfb's own class of headless-CI flakiness (GPU-less compositing crashes,
     # cold-start jitter) is still possible — that shows up as an `incomplete` ratchet failure, which is
@@ -280,9 +282,12 @@ jobs:
       # before the ratchet ever executed: no ratchet output anywhere in that log). Reads the JSON results
       # `wdio.conf.ts`'s `json` reporter just wrote to `gui-smoke/.results/` and compares against
       # `gui-smoke/known-failing.json`. Exits non-zero (redding this job, and — unlike every other step
-      # here — WITHOUT `continue-on-error` — this is a hard gate) on a new regression, a stale
-      # known-failing entry, or an incomplete run. See `gui-smoke/lib/ratchet.ts` for the exact rules and
-      # `gui-smoke/README.md` for how to retire an entry once its spec is fixed.
+      # here — WITHOUT `continue-on-error` — this is a hard gate) on a new failing CASE, a listed case
+      # that now passes, a listed case title that matches no test, or an incomplete run (CPE-1677). Its
+      # log also prints every failing case by name, so a verdict can never again be byte-identical across
+      # a clean run and a run with a broken case inside an already-listed spec file. See
+      # `gui-smoke/lib/ratchet.ts` for the exact rules and `gui-smoke/README.md` for how to retire an
+      # entry once its case is fixed.
       - name: Ratchet — no new GUI regressions
         working-directory: gui-smoke
         run: npm run ratchet
