@@ -136,9 +136,11 @@ impl FtpProvider {
             // every CI OS and every user machine.
             let mut root_store =
                 rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            // CI/test-only (CPE-1659): trust one extra self-signed root IF (and only if) the harness set
+            // CI/test-only (CPE-1659, hardened by CPE-1673 with the `e2e-extra-ca` feature gate below):
+            // trust one extra self-signed root IF (and only if) the harness set
             // `CPE_E2E_FTPS_EXTRA_CA_PEM_FILE` — see `extra_test_root`'s doc comment. A no-op for every
-            // real app run.
+            // real app run — and on a normal (non-`e2e-extra-ca`) build, the whole hook is compiled out
+            // (the `not(feature)` stub below does nothing), not merely inert.
             extra_test_root(&mut root_store);
             let tls_config =
                 rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
@@ -167,22 +169,26 @@ impl FtpProvider {
     }
 }
 
-/// CI/test-only escape hatch (CPE-1659): the env var naming a PEM file with ONE extra certificate to
-/// trust for FTPS, read by [`extra_test_root`]. Used ONLY by the real-server E2E rig
-/// (`crates/vfs/tests/real_server_conformance.rs`) to validate against a throwaway container
-/// certificate that no public CA could ever sign for a private, ephemeral Docker IP — a real public CA
-/// (Let's Encrypt et al.) fundamentally cannot issue for an address like that, so this is the only way
-/// to prove the FTPS handshake genuinely works against vsftpd's real certificate through the SAME
-/// `cpe_vfs::open` seam the app itself uses, rather than bypassing it with a second, test-only connect
-/// path. Unset (the overwhelming common case, including every real app run) this is inert — the
-/// production trust store is exactly `webpki_roots::TLS_SERVER_ROOTS`, unchanged. Never surfaced in the
-/// `Connection` model or any UI; this is not a general "trust a custom CA" feature.
+/// CI/test-only escape hatch (CPE-1659, gated behind the `e2e-extra-ca` Cargo feature since CPE-1673):
+/// the env var naming a PEM file with ONE extra certificate to trust for FTPS, read by
+/// [`extra_test_root`]. Used ONLY by the real-server E2E rig (`crates/vfs/tests/real_server_conformance.rs`)
+/// to validate against a throwaway container certificate that no public CA could ever sign for a
+/// private, ephemeral Docker IP — a real public CA (Let's Encrypt et al.) fundamentally cannot issue for
+/// an address like that, so this is the only way to prove the FTPS handshake genuinely works against
+/// vsftpd's real certificate through the SAME `cpe_vfs::open` seam the app itself uses, rather than
+/// bypassing it with a second, test-only connect path. On a normal build (feature off — every real app
+/// run, including the shipped binary) this whole hook doesn't exist in the compiled code at all, not
+/// merely an unset env var: the production trust store is unconditionally
+/// `webpki_roots::TLS_SERVER_ROOTS`. Never surfaced in the `Connection` model or any UI; this is not a
+/// general "trust a custom CA" feature.
+#[cfg(feature = "e2e-extra-ca")]
 const EXTRA_TEST_CA_ENV: &str = "CPE_E2E_FTPS_EXTRA_CA_PEM_FILE";
 
 /// Add the certificate named by [`EXTRA_TEST_CA_ENV`] (if the env var is set and the file parses) to
 /// `store`. Any failure (var unset, file missing, bad PEM) is silently ignored — this must never turn
 /// into its own confusing error; the *real* signal is whichever TLS/handshake error the caller already
 /// surfaces when the certificate genuinely isn't trusted.
+#[cfg(feature = "e2e-extra-ca")]
 fn extra_test_root(store: &mut rustls::RootCertStore) {
     let Ok(path) = std::env::var(EXTRA_TEST_CA_ENV) else { return };
     let Ok(pem) = std::fs::read_to_string(&path) else { return };
@@ -191,9 +197,16 @@ fn extra_test_root(store: &mut rustls::RootCertStore) {
     }
 }
 
+/// No-op stub for a normal (non-`e2e-extra-ca`) build: the real hook above doesn't exist in this binary
+/// at all, so the call site can stay unconditional (`&mut store` — hence still `mut` — without an
+/// `unused_mut` warning either way).
+#[cfg(not(feature = "e2e-extra-ca"))]
+fn extra_test_root(_store: &mut rustls::RootCertStore) {}
+
 /// Minimal single-certificate PEM -> DER decode: strip the `-----BEGIN/END CERTIFICATE-----` marker
 /// lines and base64-decode the rest. Hand-rolled (no new dependency) since this is a narrow CI/test-only
 /// need (see [`extra_test_root`]), not a general PEM-bundle parser.
+#[cfg(feature = "e2e-extra-ca")]
 fn decode_pem_certificate(pem: &str) -> Option<Vec<u8>> {
     let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
     base64_decode_standard(&body)
@@ -201,6 +214,7 @@ fn decode_pem_certificate(pem: &str) -> Option<Vec<u8>> {
 
 /// Minimal standard-alphabet base64 decoder (RFC 4648, `=`-padded), hand-rolled to avoid a new
 /// dependency for the one CI/test-only PEM decode above — not used anywhere else in this crate.
+#[cfg(feature = "e2e-extra-ca")]
 fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
     const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let clean: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
@@ -692,10 +706,12 @@ mod tests {
         assert!(err.contains("TLS upgrade"), "expected a TLS-upgrade-flavoured error, got: {err}");
     }
 
-    // CPE-1659: self-tests for the hand-rolled base64/PEM decoder `extra_test_root` uses to load the
-    // real-server E2E rig's throwaway FTPS trust anchor. Pure logic, no network — proves the decoder
-    // itself is correct independent of whether the env var is ever set in a given run.
+    // CPE-1659 (feature-gated behind `e2e-extra-ca` since CPE-1673): self-tests for the hand-rolled
+    // base64/PEM decoder `extra_test_root` uses to load the real-server E2E rig's throwaway FTPS trust
+    // anchor. Pure logic, no network — proves the decoder itself is correct independent of whether the
+    // env var is ever set in a given run.
     #[test]
+    #[cfg(feature = "e2e-extra-ca")]
     fn base64_decode_standard_matches_known_vectors() {
         assert_eq!(base64_decode_standard("").unwrap_or_default(), Vec::<u8>::new());
         assert_eq!(base64_decode_standard("aGVsbG8=").unwrap(), b"hello");
@@ -710,12 +726,14 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "e2e-extra-ca")]
     fn decode_pem_certificate_strips_markers_and_decodes_the_body() {
         let pem = "-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n";
         assert_eq!(decode_pem_certificate(pem).unwrap(), b"hello");
     }
 
     #[test]
+    #[cfg(feature = "e2e-extra-ca")]
     fn extra_test_root_is_a_no_op_when_the_env_var_is_unset() {
         // Guard against test-order env-var leakage from any other test in this binary.
         std::env::remove_var(EXTRA_TEST_CA_ENV);

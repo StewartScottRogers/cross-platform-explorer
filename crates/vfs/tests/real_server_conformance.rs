@@ -152,6 +152,15 @@ fn conformance(provider: &mut dyn FileSystemProvider, root: &str, host_dir: &Pat
 }
 
 /// Assertion 1: `list("/")` returns the seeded set with correct `is_dir` and sizes.
+///
+/// Deliberately checks **presence**, not set-equality: this asserts every entry in
+/// [`fixture::TOP_LEVEL`] is present with the right `is_dir`/size, but does not fail if the listing
+/// contains extra entries beyond that set. That's on purpose (CPE-1673 review) — FTP and FTPS share the
+/// SAME fixture directory on disk (`CPE_E2E_FTP_FIXTURE_DIR`, mounted into both the plain and TLS
+/// vsftpd containers), so whichever of the two scheme's conformance runs happens to execute second in
+/// this job sees BOTH schemes' writes/renames left over from the first, not just its own seeded set. A
+/// set-equality assertion here would make one of FTP/FTPS's runs order-dependently flaky; presence is
+/// the correct check for a fixture root that's intentionally shared across schemes.
 fn assert_list_matches_seeded_set(provider: &dyn FileSystemProvider, root: &str, host_dir: &Path) {
     let entries = provider.list(root).expect("list the fixture root");
     for (name, is_dir) in fixture::TOP_LEVEL {

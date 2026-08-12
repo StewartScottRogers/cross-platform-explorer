@@ -157,7 +157,18 @@ impl FileSystemProvider for WebdavProvider {
         // run URLs.
         if (300..400).contains(&resp.status()) && !path.ends_with('/') {
             let with_slash = format!("{}/", path.trim_end_matches('/'));
-            self.request("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
+            let retry = self.request("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
+            // CPE-1673 follow-up: the retry is subject to the exact same `.call()`-only-errors-on->=400
+            // behaviour as the first attempt above, so a server that ALSO redirects the trailing-slash
+            // form would otherwise fall through to `Ok(())` here having deleted nothing — the identical
+            // failure mode the retry exists to close, one hop further along. Never trust a second 3xx as
+            // success; surface it as an error instead of silently no-op'ing.
+            if (300..400).contains(&retry.status()) {
+                return Err(format!(
+                    "{path}: DELETE retried against {with_slash} also returned HTTP {} (not deleted)",
+                    retry.status()
+                ));
+            }
         }
         Ok(())
     }
@@ -528,6 +539,69 @@ mod tests {
         let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         assert!(provider.read("/nope.txt").unwrap_err().contains("404"));
         assert!(provider.stat("/nope").is_err());
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1673 item 1: `percent_encode_path` had zero in-process coverage — it was pinned only by the
+    // Linux-Docker-only real-server rig (the fake server above reads the raw request-line text with no
+    // URL parsing at all, so it can never exercise this). This is a pure function, so a five-line unit
+    // test runs on all three OS legs for free and guards the exact regression already shipped once: a
+    // raw `#` silently starting a URL fragment and truncating everything after it.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn percent_encode_path_escapes_reserved_and_non_ascii_bytes_but_preserves_slashes() {
+        // The `#` truncation bug this fix closed (CPE-1659): a literal `#` must never reach the URL
+        // parser unescaped.
+        assert_eq!(percent_encode_path("weird#name.txt"), "weird%23name.txt");
+        // `%` itself must be escaped, or a name containing a literal percent would be misread as the
+        // start of an escape sequence.
+        assert_eq!(percent_encode_path("100%done.txt"), "100%25done.txt");
+        assert_eq!(percent_encode_path("has space.txt"), "has%20space.txt");
+        // Non-ASCII (e.g. "café") — each UTF-8 byte outside the unreserved set is escaped individually.
+        assert_eq!(percent_encode_path("caf\u{e9}.txt"), "caf%C3%A9.txt");
+        // Emoji — a 4-byte UTF-8 sequence, escaped byte-by-byte.
+        assert_eq!(percent_encode_path("\u{1F600}.txt"), "%F0%9F%98%80.txt");
+        // `/` stays the segment separator, and the unreserved set passes through unescaped.
+        assert_eq!(percent_encode_path("sub/dir-name_1.2~3"), "sub/dir-name_1.2~3");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1673 item 2: the collection-DELETE retry (RFC 4918 trailing-slash convention) must not trust
+    // a *second* 3xx as success — `ureq::Request::call()` only turns a >=400 status into an `Err`, so a
+    // server that redirects the trailing-slash form too would otherwise silently fall through to
+    // `Ok(())` having deleted nothing, exactly the failure mode the retry exists to close.
+    // -----------------------------------------------------------------------------------------
+
+    /// A dedicated fake server that redirects EVERY DELETE (with or without a trailing slash) with a
+    /// 301 — simulating a server where the RFC 4918 trailing-slash retry also gets redirected, so the
+    /// directory is never actually deleted on either attempt.
+    fn spawn_always_redirecting_delete_server() -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                if req.method().to_string().eq_ignore_ascii_case("DELETE") {
+                    let loc =
+                        tiny_http::Header::from_bytes(&b"Location"[..], &b"http://example.invalid/dir/"[..])
+                            .unwrap();
+                    let _ = req.respond(tiny_http::Response::empty(301).with_header(loc));
+                } else {
+                    let _ = req.respond(tiny_http::Response::empty(404));
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn delete_retry_that_also_redirects_is_reported_as_an_error_not_ok() {
+        let base = spawn_always_redirecting_delete_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+        let err = provider
+            .delete("/dir")
+            .expect_err("a retry that ALSO comes back 3xx must not silently report Ok(()) — nothing was deleted");
+        assert!(err.contains("dir"), "error should reference the path being deleted; got: {err}");
     }
 
     // -----------------------------------------------------------------------------------------
