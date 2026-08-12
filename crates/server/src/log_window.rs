@@ -31,11 +31,16 @@
 //! push a multi-megabyte read into every other preview provider that reuses it. This is a separate,
 //! log-specific path.
 //!
-//! **UTF-16 is refused, not silently garbled (CPE-1637 review).** A `String::from_utf8` check alone
-//! cannot catch it: every UTF-16 ASCII byte (NUL bytes included) is individually valid single-byte
-//! UTF-8, so a UTF-16 log would otherwise "succeed" into NUL-interleaved garbage. [`align_window`] runs
-//! the crate's existing [`text_encoding::detect_encoding`] sniffer over the window first and returns a
-//! clean, encoding-naming error for `Utf16Le`/`Utf16Be` instead.
+//! **UTF-16 is decoded, not silently garbled (CPE-1637 review; decoding landed in CPE-1644 A′).** A
+//! `String::from_utf8` check alone cannot catch it: every UTF-16 ASCII byte (NUL bytes included) is
+//! individually valid single-byte UTF-8, so a UTF-16 log would otherwise "succeed" into NUL-interleaved
+//! garbage. [`align_window`] runs the crate's existing [`text_encoding::detect_encoding_at`] sniffer over
+//! the window first (offset-aware — see [`text_encoding::detect_encoding_at`]'s docs on why the sniff
+//! needs the window's absolute file offset, not just its own bytes, to tell LE from BE correctly) and
+//! routes `Utf16Le`/`Utf16Be` windows to [`decode_utf16_window`] — a parallel, code-unit-pair-aligned
+//! version of the byte-aligned UTF-8 path below it, using only `std::char::decode_utf16` (no new
+//! dependency). UTF-16 was refused outright for one CPE-1637 review cycle before this landed; that
+//! interim answer is gone now that the byte-pair-aligned seeking it needed is implemented.
 
 use crate::text_encoding;
 use serde::{Deserialize, Serialize};
@@ -114,25 +119,20 @@ fn align_window(
     // UTF-16 (with or without a BOM) is NOT caught by the `String::from_utf8` check below — every
     // UTF-16LE/BE ASCII byte, NUL bytes included, is individually valid single-byte UTF-8, so a UTF-16
     // log would otherwise "succeed" straight into NUL-interleaved garbage on screen (CPE-1637 review).
-    // The old whole-file `read_file_text` path happened to mask this by refusing such files outright on
-    // size before ever decoding them; this windowed path exposed it. Reuse the crate's existing sniffer
-    // — bounded (it only ever samples a small leading prefix of whatever slice it's given, so this is no
-    // extra I/O beyond the window already in hand) — and refuse cleanly, naming the encoding, rather than
-    // decode it wrong. Checked on the raw (pre-trim) window so the NUL-lane signature is intact.
-    match text_encoding::detect_encoding(buf) {
+    // Sniff first — bounded (it only ever samples a small leading prefix of whatever slice it's given, so
+    // this is no extra I/O beyond the window already in hand), and offset-aware (`raw_start` is this
+    // window's true absolute file offset, needed to tell LE from BE correctly — see
+    // `text_encoding::detect_encoding_at`'s docs, CPE-1644 A″) — and route a UTF-16 window through its own
+    // code-unit-aligned decode path (CPE-1644 A′) rather than the byte-aligned UTF-8 path below, whose
+    // line-alignment relies on `0x0A` never being a UTF-8 continuation byte — a guarantee that doesn't
+    // extend to UTF-16's 2-byte, endianness-dependent code units. Checked on the raw (pre-trim) window so
+    // the NUL-lane signature is intact.
+    match text_encoding::detect_encoding_at(buf, raw_start) {
         text_encoding::EncodingGuess::Utf16Le => {
-            return Err(
-                "This file looks like UTF-16 (little-endian) text, which the log preview doesn't decode \
-                 yet. Open it in a text editor instead."
-                    .to_string(),
-            );
+            return decode_utf16_window(buf, raw_start, end, file_len, Utf16Endianness::Le);
         }
         text_encoding::EncodingGuess::Utf16Be => {
-            return Err(
-                "This file looks like UTF-16 (big-endian) text, which the log preview doesn't decode \
-                 yet. Open it in a text editor instead."
-                    .to_string(),
-            );
+            return decode_utf16_window(buf, raw_start, end, file_len, Utf16Endianness::Be);
         }
         _ => {}
     }
@@ -162,6 +162,103 @@ fn align_window(
         window_end: end,
         file_len,
         at_start: window_start == 0,
+        at_end: end == file_len,
+        line_aligned,
+    })
+}
+
+/// Which byte order a UTF-16 window is being decoded as — see [`decode_utf16_window`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Utf16Endianness {
+    Le,
+    Be,
+}
+
+/// Decode a UTF-16 window (CPE-1644 A′) — a code-unit-pair-aligned parallel to [`align_window`]'s UTF-8
+/// path, since a UTF-16 `\n` is the 2-byte code unit `0x0A 0x00` (LE) / `0x00 0x0A` (BE), not the single
+/// always-boundary-safe `0x0A` byte the UTF-8 path relies on. Uses only `std::char::decode_utf16` — no
+/// new dependency.
+///
+/// **Alignment model:** a UTF-16 stream's code-unit boundaries fall on absolute byte offsets of the same
+/// *parity* as the stream's own start — and a leading 2-byte BOM never changes that parity, since 2 is
+/// even. So `raw_start` only ever needs its own parity fixed up (trim one leading byte if `raw_start` is
+/// odd) — never a peek at byte 0 to learn whether a BOM is present.
+///
+/// **Simplification vs. the UTF-8 path:** unlike [`align_window`], this never trusts a precomputed
+/// "already on a boundary" signal (the 1-byte peek in [`read_window`] only checks for a single `\n` byte,
+/// which doesn't mean anything for a 2-byte UTF-16 code unit) — it always searches for the code-unit
+/// `\n` when `raw_start != 0`. That can occasionally trim one line that didn't strictly need trimming
+/// (the exact-boundary edge case [`landing_exactly_on_a_line_boundary_does_not_discard_the_next_line`]
+/// fixed for the UTF-8 path), which is an accepted, documented trade-off for this new path rather than a
+/// regression of that fix (which remains intact for UTF-8/most real logs).
+///
+/// **Never fails on malformed input:** an unpaired surrogate decodes to U+FFFD (`REPLACEMENT_CHARACTER`)
+/// rather than erroring, matching this crate's "a hostile/malformed file degrades gracefully, never a
+/// hard failure" convention elsewhere (`parseLog`'s frontend counterpart never throws either).
+fn decode_utf16_window(
+    buf: &[u8],
+    raw_start: u64,
+    end: u64,
+    file_len: u64,
+    endianness: Utf16Endianness,
+) -> Result<LogWindow, String> {
+    // A BOM only ever appears in the window that starts at true byte 0 — strip it before pairing so it
+    // isn't decoded as a literal (harmless but ugly) U+FEFF character in the rendered text.
+    let bom_skip = if raw_start == 0 && buf.len() >= 2 {
+        match (endianness, buf[0], buf[1]) {
+            (Utf16Endianness::Le, 0xFF, 0xFE) => 2,
+            (Utf16Endianness::Be, 0xFE, 0xFF) => 2,
+            _ => 0,
+        }
+    } else {
+        0
+    };
+
+    // Snap to a code-unit boundary: an odd number of bytes remaining before pairing means `raw_start`
+    // landed mid-code-unit. That single stray byte is an unrecoverable fragment of the previous window's
+    // last (unseen) code unit — the same "loss of the fragment is expected" trade-off `align_window`'s
+    // UTF-8 path documents for a split multibyte character.
+    let parity_skip = if raw_start == 0 { 0 } else { (raw_start % 2) as usize };
+    let body_start = (bom_skip + parity_skip).min(buf.len());
+    let body = &buf[body_start..];
+
+    let code_units: Vec<u16> = body
+        .chunks_exact(2)
+        .map(|pair| match endianness {
+            Utf16Endianness::Le => u16::from_le_bytes([pair[0], pair[1]]),
+            Utf16Endianness::Be => u16::from_be_bytes([pair[0], pair[1]]),
+        })
+        .collect();
+
+    // Line-boundary alignment in code-unit space — see the doc comment above on why this always searches
+    // rather than trusting `already_aligned` the way the UTF-8 path does.
+    let (skip_units, line_aligned) = if raw_start == 0 {
+        (0, true)
+    } else {
+        match code_units.iter().position(|&u| u == 0x000A) {
+            Some(i) => (i + 1, true),
+            // No newline code unit anywhere in this window (one pathologically long line): keep
+            // everything and flag the start as not a clean line boundary, mirroring the UTF-8 path.
+            None => (0, false),
+        }
+    };
+
+    let text: String = char::decode_utf16(code_units[skip_units..].iter().copied())
+        .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
+        .collect();
+
+    let window_start = raw_start + body_start as u64 + (skip_units as u64 * 2);
+    Ok(LogWindow {
+        text,
+        window_start,
+        window_end: end,
+        file_len,
+        // `raw_start == 0`, not `window_start == 0`: a BOM'd file's very first window trims 2 bytes of
+        // BOM off `window_start` even though `raw_start` (and this read) genuinely started at true byte
+        // 0 — there is nothing further back to page to, so "Load earlier" must still be disabled. (The
+        // UTF-8 path's `window_start == 0` check is equivalent to this for it, since its skip is always 0
+        // whenever `raw_start == 0`; the BOM-trim here is what breaks that equivalence for UTF-16.)
+        at_start: raw_start == 0,
         at_end: end == file_len,
         line_aligned,
     })
@@ -284,9 +381,14 @@ mod tests {
     fn invalid_utf8_is_reported_not_panicked() {
         let d = scratch("badutf8");
         let f = d.join("bad.log");
-        fs::write(&f, [0xFF, 0xFE, 0x00, 0x01]).unwrap();
+        // Bare UTF-8 continuation bytes: invalid as a UTF-8 lead, no NUL byte (so it never takes the
+        // UTF-16 path either) — this exercises the plain "not valid UTF-8" refusal, distinct from
+        // `[0xFF, 0xFE, ...]`, which is now a genuine (if tiny) valid UTF-16LE-with-BOM file since
+        // CPE-1644 A′ added real UTF-16 decoding.
+        fs::write(&f, [0x80, 0x81, 0x82, 0x83]).unwrap();
         let r = read_window(&f, 1024, None);
-        assert!(r.is_err());
+        let err = r.expect_err("bare continuation bytes are not valid UTF-8 or a UTF-16 lane");
+        assert!(err.contains("UTF-8"), "expected the plain UTF-8 refusal, got: {err}");
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -386,38 +488,227 @@ mod tests {
         assert!(w.line_aligned);
     }
 
-    // --- UTF-16 refusal (CPE-1637 review) ---
+    // --- UTF-16 decoding (CPE-1644 A′) ---
+    //
+    // Every fixture's EXPECTED text is the plain original `text` string — never something derived by
+    // calling this crate's own decoder — encoded to raw UTF-16 bytes via Rust's own `encode_utf16` (a
+    // trusted, independent reference encoder), matching the ticket's "assert on bytes, don't read your
+    // own decoder" instruction.
 
     #[test]
-    fn bom_less_utf16le_content_is_refused_cleanly_not_silently_garbled() {
+    fn bom_less_utf16le_content_decodes_correctly_not_silently_garbled() {
         // Regression: a real UTF-16LE log (e.g. MicrosoftEdgeUpdate.log) previously "succeeded" through
         // `String::from_utf8` into NUL-interleaved garbage, because every UTF-16LE ASCII byte — NULs
-        // included — is individually valid single-byte UTF-8. Build a synthetic UTF-16LE fixture (no
-        // machine-specific path) matching that shape: plain ASCII log lines encoded as UTF-16LE, no BOM.
+        // included — is individually valid single-byte UTF-8. For one CPE-1637 review cycle this was
+        // instead refused outright (an honest but incomplete interim answer); CPE-1644 A′ now decodes it.
         let d = scratch("utf16le");
         let f = d.join("edge.log");
         let text = "2026-08-11 00:00:00 INFO Starting update check\r\n2026-08-11 00:00:01 INFO Done\r\n";
         let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
         fs::write(&f, &utf16le).unwrap();
 
-        let r = read_window(&f, 1024, None);
-        let err = r.expect_err("UTF-16LE content must be refused, not decoded as garbage");
-        assert!(err.contains("UTF-16"), "error should name the encoding: {err}");
-        assert!(!err.contains("too large"), "must be a distinct message from the old size-refusal");
+        let w = read_window(&f, 1024, None).expect("UTF-16LE content must decode, not be refused or garbled");
+        assert_eq!(w.text, text);
+        assert!(w.at_start);
+        assert!(w.at_end);
+        assert!(w.line_aligned);
         let _ = fs::remove_dir_all(&d);
     }
 
     #[test]
-    fn bom_less_utf16be_content_is_refused_cleanly() {
+    fn bom_less_utf16be_content_decodes_correctly() {
         let d = scratch("utf16be");
         let f = d.join("be.log");
         let text = "hello log line one\r\nhello log line two\r\n";
         let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
         fs::write(&f, &utf16be).unwrap();
 
-        let r = read_window(&f, 1024, None);
-        let err = r.expect_err("UTF-16BE content must be refused, not decoded as garbage");
-        assert!(err.contains("UTF-16"), "error should name the encoding: {err}");
+        let w = read_window(&f, 1024, None).expect("UTF-16BE content must decode, not be refused or garbled");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16le_with_a_bom_decodes_correctly_and_the_bom_itself_is_not_rendered() {
+        let d = scratch("utf16le-bom");
+        let f = d.join("bommed.log");
+        let text = "line one\r\nline two\r\n";
+        let mut utf16le_bom: Vec<u8> = vec![0xFF, 0xFE]; // UTF-16LE BOM
+        utf16le_bom.extend(text.encode_utf16().flat_map(|u| u.to_le_bytes()));
+        fs::write(&f, &utf16le_bom).unwrap();
+
+        let w = read_window(&f, 1024, None).expect("BOM'd UTF-16LE must decode cleanly");
+        assert_eq!(w.text, text, "the BOM itself must not appear as a literal U+FEFF in the rendered text");
+        assert!(w.at_start);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16be_with_a_bom_decodes_correctly_and_the_bom_itself_is_not_rendered() {
+        let d = scratch("utf16be-bom");
+        let f = d.join("bommed.log");
+        let text = "line one\r\nline two\r\n";
+        let mut utf16be_bom: Vec<u8> = vec![0xFE, 0xFF]; // UTF-16BE BOM
+        utf16be_bom.extend(text.encode_utf16().flat_map(|u| u.to_be_bytes()));
+        fs::write(&f, &utf16be_bom).unwrap();
+
+        let w = read_window(&f, 1024, None).expect("BOM'd UTF-16BE must decode cleanly");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16le_with_an_emoji_decodes_not_refused() {
+        // Regression (reviewer's PR #842 repro, F3): `classify_nul_bytes` used to require the minority
+        // NUL lane to be EXACTLY zero, so any UTF-16 content that wasn't pure ASCII flipped the whole
+        // window to `Binary` and fell through to the byte-aligned UTF-8 path, which then failed outright
+        // — a regression from the honest "looks like UTF-16" refusal this ticket exists to replace. A
+        // realistic mixed-ASCII log line with one emoji (its low surrogate's low byte, 0x00, lands on the
+        // "wrong" lane) must still decode.
+        let d = scratch("utf16le-emoji");
+        let f = d.join("emoji.log");
+        let text = "2026-08-11 00:00:00 INFO user reacted with \u{1F600} to the message\r\nnext line\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with an emoji must decode, not be refused");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16le_with_accented_latin_decodes() {
+        let d = scratch("utf16le-accented");
+        let f = d.join("accented.log");
+        let text = "2026-08-11 00:00:00 INFO utilisateur a r\u{e9}agi avec \u{e9}motion \u{e0} la commande caf\u{e9}\r\nligne suivante\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with accented Latin must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16le_with_cjk_names_mixed_into_mostly_ascii_decodes() {
+        let d = scratch("utf16le-cjk");
+        let f = d.join("cjk.log");
+        let text = "2026-08-11 00:00:00 INFO \u{7528}\u{6237}\u{540d} \u{5f20}\u{4f1f} logged in successfully\r\nnext line\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with CJK names must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16be_no_bom_with_rtl_content_decodes() {
+        // A BOM-less BE fixture (F4 coverage gap: every prior UTF-16 fixture had a BOM or was LE) mixed
+        // with RTL (Arabic) text.
+        let d = scratch("utf16be-rtl");
+        let f = d.join("rtl.log");
+        let text = "2026-08-11 00:00:00 INFO \u{62a}\u{645} \u{62a}\u{633}\u{62c}\u{64a}\u{644} \u{627}\u{644}\u{62f}\u{62e}\u{648}\u{644}\r\nnext line\r\n";
+        let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        fs::write(&f, &utf16be).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("BOM-less UTF-16BE content with RTL text must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16le_surrogate_pair_bisected_by_the_window_boundary_degrades_to_replacement_character_not_a_panic() {
+        // F4: commit the reviewer's ad-hoc probe as a permanent test. A window boundary that lands
+        // between the two code units of a surrogate pair (a non-BMP character split across a page) loses
+        // that one character to U+FFFD — a documented, accepted trade-off (see `decode_utf16_window`'s doc
+        // comment) — but must never panic and must decode everything else cleanly.
+        //
+        // Deliberately ONE long line with no newline at all: if a `\n` code unit followed the bisection
+        // point, line-boundary alignment would simply discard the orphaned fragment (the same "loss of a
+        // partial leading line is expected" behavior `align_window`'s UTF-8 path already documents) and
+        // the replacement character would never make it into the rendered text. The no-newline fallback
+        // path is what actually keeps (and thus decodes) the orphaned low surrogate — see
+        // `decode_utf16_window`'s "no newline code unit anywhere in this window" branch.
+        let d = scratch("utf16le-bisected");
+        let f = d.join("bisected.log");
+        // "aaaa" (8 bytes) + emoji (4 bytes: 2 code units at byte offsets 8..12) + "bbbb" (8 bytes), no
+        // newline anywhere. A max_bytes chosen so raw_start lands at byte 10 (mid-emoji) bisects it.
+        let text = "aaaa\u{1F600}bbbb";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+        let file_len = utf16le.len() as u64;
+        let max_bytes = file_len - 10; // raw_start = file_len - max_bytes = 10, mid-emoji
+
+        let w = read_window(&f, max_bytes, None).expect("a bisected surrogate pair must not panic or error");
+        assert!(!w.line_aligned, "no newline anywhere in this window — must be flagged unaligned");
+        // The emoji's second code unit (the low surrogate, now orphaned at the window's start) decodes to
+        // U+FFFD; the rest of the content after it is intact.
+        assert_eq!(w.text, "\u{FFFD}bbbb", "expected a replacement character for the orphaned low surrogate");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16le_tail_window_of_a_larger_file_decodes_correctly_even_when_the_window_lands_on_an_odd_byte_offset() {
+        // The real "byte-pair-aligned seeks" concern the ticket calls out: a window into a UTF-16 file
+        // whose start doesn't happen to land on an even absolute offset must still decode cleanly (no
+        // split code units, no replacement characters, no garbage) — this is what A″'s offset-aware
+        // sniffing and A′'s parity-skip logic exist to guarantee together.
+        let d = scratch("utf16le-tail");
+        let f = d.join("big.log");
+        let mut text = String::new();
+        for i in 0..2000 {
+            text.push_str(&format!("2026-08-11T00:00:{:02}Z [INFO] line number {i} of the synthetic log\r\n", i % 60));
+        }
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+        let file_len = utf16le.len() as u64;
+
+        // Choose max_bytes so `file_len - max_bytes` (the raw window start before alignment) is ODD —
+        // forcing the parity-skip path this test exists to exercise.
+        let mut max_bytes = 20_000u64;
+        if (file_len - max_bytes) % 2 == 0 {
+            max_bytes += 1;
+        }
+        assert_eq!((file_len - max_bytes) % 2, 1, "test setup: need an odd raw window start");
+
+        let w = read_window(&f, max_bytes, None).unwrap();
+        assert!(w.at_end);
+        assert!(!w.at_start);
+        assert!(w.line_aligned);
+        // No replacement characters — a split/misaligned code unit would decode to one.
+        assert!(!w.text.contains('\u{FFFD}'), "must not contain replacement characters: {:?}", &w.text[..80.min(w.text.len())]);
+        // The tail's last line is intact and readable.
+        assert!(w.text.contains("line number 1999 of the synthetic log"));
+        // The window starts cleanly at a real line boundary — not a fragment of a line.
+        assert!(
+            w.text.starts_with("2026-08-11T00:00:"),
+            "window should start at a clean line boundary, got: {:?}",
+            &w.text[..40.min(w.text.len())]
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16_windowed_paging_never_reintroduces_a_split_code_unit_across_several_backward_pages() {
+        let d = scratch("utf16le-paging");
+        let f = d.join("paging.log");
+        let mut text = String::new();
+        for i in 0..500 {
+            text.push_str(&format!("line {i:04}\r\n"));
+        }
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let mut end = None;
+        for _ in 0..5 {
+            let w = read_window(&f, 777, end).unwrap(); // an odd, deliberately awkward page size
+            assert!(!w.text.contains('\u{FFFD}'), "page must not contain replacement characters");
+            if w.at_start {
+                break;
+            }
+            end = Some(w.window_start);
+        }
         let _ = fs::remove_dir_all(&d);
     }
 }

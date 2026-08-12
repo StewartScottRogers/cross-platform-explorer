@@ -53,6 +53,21 @@ const BINARY_SNIFF_LEN: usize = 512;
 /// [`EncodingGuess::Binary`] rather than an 8-bit legacy text encoding.
 const BINARY_CONTROL_RATIO: f64 = 0.3;
 
+/// Above this fraction of the BOM-less UTF-16 NUL-lane heuristic's *minority* lane being NUL, the input
+/// stops looking like a clean UTF-16 lane pattern — see [`classify_nul_bytes`]'s doc comment for why a
+/// strict "exactly zero" requirement here (the pre-CPE-1636-followups behavior) misfires on any UTF-16
+/// content that isn't pure ASCII, and for the measurements behind this specific number: real mixed-ASCII
+/// UTF-16 log text (English log lines with an occasional emoji/accented name/CJK username) puts at most
+/// ~1-2% of the minority lane's positions at NUL — an emoji's low surrogate is the only realistic case
+/// that pollutes the "wrong" lane at all, since accented Latin-1 and BMP CJK/RTL characters all land with
+/// a zero *high* byte, i.e. on the SAME lane as ASCII, contributing no minority-lane noise. Real binary
+/// data that clears the *majority*-lane bar at all (the existing `nul * 2 >= lane` check, unchanged by
+/// this constant) pollutes both lanes roughly together rather than concentrating on one — the worst case
+/// found scanning real files (a Windows PE executable's zero-padded header) had a ~46% minority lane
+/// alongside its ~53% majority lane. 25% sits with wide margin above the realistic-text noise floor and
+/// well below that binary floor.
+const UTF16_MINORITY_NUL_RATIO: f64 = 0.25;
+
 /// True for a byte that reads as non-text control data: the C0 control range excluding tab/LF/CR
 /// (the three control characters that legitimately appear in text), plus DEL (`0x7F`).
 fn is_binary_control_byte(b: u8) -> bool {
@@ -98,24 +113,41 @@ fn looks_binary(bytes: &[u8]) -> bool {
 /// UTF-16 file dominated by non-ASCII (few NUL high-bytes) may fall through to `Binary`. UTF-32 is not
 /// distinguished (a `FF FE 00 00` BOM reads as UTF-16LE).
 pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
+    detect_encoding_at(bytes, 0)
+}
+
+/// Same as [`detect_encoding`], but for a slice that is not itself the true start of the file —
+/// `base_offset` is the slice's absolute byte offset within that file (CPE-1644 A″).
+///
+/// The BOM-less NUL-lane heuristic ([`classify_nul_bytes`]) has to know which byte-lane (even/odd)
+/// carries the NUL bytes to tell UTF-16LE from UTF-16BE apart, and that lane is a property of the
+/// **absolute** file offset, not the slice's own index 0 — a window starting at an odd absolute byte
+/// splits every UTF-16 code unit in it, flipping which lane looks NUL-heavy. `detect_encoding` (offset
+/// 0) is unaffected by this; only a windowed reader (`log_window.rs`) sniffing a slice that starts
+/// mid-file needs this variant.
+pub fn detect_encoding_at(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     if bytes.is_empty() {
         return EncodingGuess::Empty;
     }
-    if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
-        return EncodingGuess::Utf8Bom;
-    }
-    if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
-        return EncodingGuess::Utf16Le;
-    }
-    if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
-        return EncodingGuess::Utf16Be;
+    // A BOM is only ever meaningful at the true start of the file — a `FF FE` two bytes into a UTF-16
+    // stream is just two ordinary code units, not a byte-order mark.
+    if base_offset == 0 {
+        if bytes.len() >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF {
+            return EncodingGuess::Utf8Bom;
+        }
+        if bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0xFE {
+            return EncodingGuess::Utf16Le;
+        }
+        if bytes.len() >= 2 && bytes[0] == 0xFE && bytes[1] == 0xFF {
+            return EncodingGuess::Utf16Be;
+        }
     }
     // A NUL byte means this isn't plain UTF-8/Latin-1 *text* (neither ever contains NUL); classify it as
     // BOM-less UTF-16 or binary BEFORE the UTF-8 check — a NUL is itself valid UTF-8, so a BOM-less
     // UTF-16 ASCII file like `h\0i\0` would otherwise round-trip through `from_utf8` and be mis-reported
     // as plain text (CPE-1003 QA finding).
     if bytes.contains(&0) {
-        return classify_nul_bytes(bytes);
+        return classify_nul_bytes(bytes, base_offset);
     }
     if std::str::from_utf8(bytes).is_ok() {
         return EncodingGuess::Utf8;
@@ -126,11 +158,25 @@ pub fn detect_encoding(bytes: &[u8]) -> EncodingGuess {
     EncodingGuess::Latin1
 }
 
-/// Classify NUL-containing, BOM-less input (called only from [`detect_encoding`]). BOM-less UTF-16 of
-/// ASCII-range text fills one whole byte-lane with NULs — odd offsets for little-endian, even for
-/// big-endian — so a lane that is at least half NUL while the other lane is clear is reported as UTF-16;
-/// anything else (NULs on both lanes, or just a stray NUL) is [`Binary`](EncodingGuess::Binary).
-fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
+/// Classify NUL-containing, BOM-less input (called only from [`detect_encoding_at`]). BOM-less UTF-16 of
+/// ASCII-range text fills one whole byte-lane with NULs — the lane at an *odd absolute file offset* for
+/// little-endian, *even absolute file offset* for big-endian — so a lane that is at least half NUL while
+/// the OTHER ("minority") lane stays under [`UTF16_MINORITY_NUL_RATIO`] is reported as UTF-16; anything
+/// else (NULs spread across both lanes, or just a stray NUL) is [`Binary`](EncodingGuess::Binary).
+/// `base_offset` is `bytes`'s own absolute offset in the file (CPE-1644 A″) — parity is computed as
+/// `(base_offset + i) % 2`, not `i % 2`, so a window that starts mid-file at an odd byte doesn't flip
+/// LE/BE relative to a window starting at byte 0 of the same stream.
+///
+/// **Why the minority lane tolerates a nonzero ratio, not just exactly zero (F3, CPE-1636 followups):**
+/// real UTF-16 log content that isn't pure ASCII puts an occasional NUL on the "wrong" lane — most
+/// visibly, a non-BMP character's low surrogate can have a zero low byte (e.g. U+1F600 😀 → LE code units
+/// `3D D8` `00 DE`; that `00` sits on the lane that's otherwise all-non-NUL ASCII bytes). A strict
+/// exactly-zero requirement flipped the *entire window* to [`Binary`](EncodingGuess::Binary) the moment
+/// one such character appeared, which is worse than the state this heuristic exists to detect: CPE-1644's
+/// whole point is decoding UTF-16 instead of refusing it, and a window wrongly called `Binary` falls
+/// through to the plain UTF-8 path and fails outright rather than getting even an honest refusal. See
+/// [`UTF16_MINORITY_NUL_RATIO`]'s doc comment for the measurements behind the specific threshold.
+fn classify_nul_bytes(bytes: &[u8], base_offset: u64) -> EncodingGuess {
     let sniff_len = bytes.len().min(BINARY_SNIFF_LEN);
     if sniff_len < 2 {
         return EncodingGuess::Binary;
@@ -140,16 +186,17 @@ fn classify_nul_bytes(bytes: &[u8]) -> EncodingGuess {
     let mut odd_nul = 0usize;
     for (i, &b) in bytes[..sniff_len].iter().enumerate() {
         if b == 0 {
-            if i % 2 == 0 {
+            if (base_offset + i as u64) % 2 == 0 {
                 even_nul += 1;
             } else {
                 odd_nul += 1;
             }
         }
     }
-    if odd_nul * 2 >= lane && even_nul == 0 {
+    let minority_tolerance = (lane as f64 * UTF16_MINORITY_NUL_RATIO) as usize;
+    if odd_nul * 2 >= lane && even_nul <= minority_tolerance {
         EncodingGuess::Utf16Le
-    } else if even_nul * 2 >= lane && odd_nul == 0 {
+    } else if even_nul * 2 >= lane && odd_nul <= minority_tolerance {
         EncodingGuess::Utf16Be
     } else {
         EncodingGuess::Binary
@@ -298,6 +345,100 @@ mod tests {
         assert_eq!(detect_encoding(b"hello\0world"), EncodingGuess::Binary);
     }
 
+    // ---- F3/F4 (CPE-1636 followups PR #842 review): realistic non-ASCII BOM-less UTF-16 byte fixtures,
+    // plus real-binary-file regression coverage for the widened minority-lane tolerance. Every UTF-16
+    // fixture in the original PR was pure ASCII, which never exercised `UTF16_MINORITY_NUL_RATIO` at all
+    // — these assert on bytes produced independently via `.encode_utf16()`, not on this module's own
+    // decoder, matching this crate's "assert on bytes, don't read your own encoder" convention.
+
+    #[test]
+    fn bom_less_utf16le_non_bmp_surrogate_pair_mixed_with_ascii_is_detected_as_utf16_not_binary() {
+        // Regression (F3): an emoji's low surrogate has a zero LOW byte (U+1F600 😀 → LE code units
+        // `3D D8` `00 DE`), which lands a NUL on the lane that's otherwise all non-NUL ASCII — the exact
+        // pollution the old exactly-zero minority check couldn't tolerate.
+        let text = "user reacted with \u{1F600} to the message";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(detect_encoding(&utf16le), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn bom_less_utf16le_accented_latin_mixed_with_ascii_is_detected_as_utf16() {
+        // Accented Latin-1-range characters (é, à, …) have a zero HIGH byte in LE, i.e. they land on the
+        // SAME lane as ASCII's NULs — this already worked before F3, committed here as permanent coverage
+        // since the PR's fixtures never included one.
+        let text = "utilisateur a r\u{e9}agi avec \u{e9}motion \u{e0} la commande caf\u{e9}";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(detect_encoding(&utf16le), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn bom_less_utf16le_cjk_mixed_with_ascii_is_detected_as_utf16() {
+        // CJK BMP characters have both bytes non-zero — they contribute to neither lane's NUL count, so a
+        // CJK username embedded in an otherwise-ASCII line doesn't dilute the ASCII lane's dominance.
+        let text = "user \u{7528}\u{6237}\u{540d} \u{5f20}\u{4f1f} logged in";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        assert_eq!(detect_encoding(&utf16le), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn bom_less_utf16be_rtl_mixed_with_ascii_is_detected_as_utf16() {
+        // F4 coverage gap: every UTF-16 fixture in the original PR was little-endian. A BOM-less
+        // big-endian file mixed with RTL (Arabic) content.
+        let text = "user \u{62a}\u{645} \u{62a}\u{633}\u{62c}\u{64a}\u{644} logged in";
+        let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        assert_eq!(detect_encoding(&utf16be), EncodingGuess::Utf16Be);
+    }
+
+    #[test]
+    fn real_png_bytes_stay_binary_under_the_widened_minority_tolerance() {
+        // F3 verification (binary direction): the widened minority-lane tolerance must not turn real
+        // binary data into a false-positive UTF-16 report. A real PNG signature + IHDR chunk (from this
+        // repo's own `src-tauri/icons/32x32.png`) followed by a deterministic pseudo-random tail standing
+        // in for compressed image data — PNG's majority-lane NUL ratio never approaches the 50% bar this
+        // heuristic requires in the first place (measured ~3-5% on real icon files), so this is nowhere
+        // close to the tolerance boundary; committed as a concrete regression fixture rather than relying
+        // on manual measurement alone.
+        let mut bytes: Vec<u8> = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, b'I', b'H', b'D', b'R', // IHDR chunk header
+            0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x20, // 32x32 dimensions
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x73, 0x7A, 0x7A, // bit depth/color type/CRC-ish bytes
+        ];
+        // Deterministic xorshift PRNG (no new dependency) standing in for compressed pixel data.
+        let mut state: u32 = 0x2026_0811;
+        for _ in 0..480 {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            bytes.push((state & 0xFF) as u8);
+        }
+        assert_eq!(detect_encoding(&bytes), EncodingGuess::Binary);
+    }
+
+    #[test]
+    fn pe_header_shaped_bytes_with_zero_padding_on_both_lanes_stay_binary() {
+        // F3 verification (binary direction, the closest real near-miss found by measurement): a Windows
+        // PE executable's DOS/PE header is unusually NUL-heavy (zero-padded reserved fields) — measured on
+        // a real `notepad.exe`, its first 512 bytes were ~46% NUL on the minority lane and ~53% on the
+        // majority lane. That's the realistic worst case for "binary data that clears the majority-lane
+        // bar at all" and it sits far above `UTF16_MINORITY_NUL_RATIO` (25%) on the minority side, because
+        // real zero-padding pollutes both lanes together rather than concentrating on one — unlike genuine
+        // UTF-16 ASCII text, which drives one lane to ~0 and the other to ~100%. Constructed here as an
+        // alternating pattern (byte, 0x00, byte, 0x00, 0x00, 0x00, …) that lands NULs on both lanes at a
+        // similar, well-above-25%-minority rate without depending on a real .exe being present on disk.
+        let mut bytes: Vec<u8> = vec![b'M', b'Z']; // DOS header magic
+        for i in 0..255u32 {
+            if i % 2 == 0 {
+                bytes.push(0x00);
+                bytes.push((i % 200 + 1) as u8); // non-zero, keeps this lane from being ALL NUL
+            } else {
+                bytes.push((i % 200 + 1) as u8);
+                bytes.push(0x00);
+            }
+        }
+        assert_eq!(detect_encoding(&bytes), EncodingGuess::Binary);
+    }
+
     #[test]
     fn mostly_control_bytes_without_nul_is_binary() {
         // No NUL byte, but well over 30% control bytes (excluding tab/lf/cr) plus an invalid UTF-8
@@ -327,6 +468,59 @@ mod tests {
         // CPE-1014: a single [0x00] byte should be classified as Binary, not UTF-16.
         // A 1-byte file can never be valid UTF-16 (which requires at least 2 bytes).
         assert_eq!(detect_encoding(&[0x00]), EncodingGuess::Binary);
+    }
+
+    // ---- detect_encoding_at (CPE-1644 A″: offset-aware NUL-lane parity) ----
+
+    #[test]
+    fn detect_encoding_at_offset_zero_matches_plain_detect_encoding() {
+        let utf16le: Vec<u8> = "hello".bytes().flat_map(|b| [b, 0]).collect();
+        assert_eq!(detect_encoding_at(&utf16le, 0), detect_encoding(&utf16le));
+        assert_eq!(detect_encoding_at(&utf16le, 0), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn detect_encoding_at_an_odd_absolute_offset_reports_the_correct_endianness_where_offset_naive_detection_would_flip_it() {
+        // Regression (CPE-1644 A″): a UTF-16LE stream's NUL bytes sit on ODD absolute file offsets (the
+        // high byte of each ASCII code unit). A window that starts at an EVEN absolute offset sees that
+        // same lane pattern in its own slice-relative indices (0-based), so plain `detect_encoding` (which
+        // implicitly assumes the slice IS byte 0) gets it right by luck. But a window starting at an ODD
+        // absolute offset is itself missing the first byte of the first code unit, so the NULs that were on
+        // odd absolute offsets now land on EVEN slice-relative indices — offset-naive detection reports the
+        // opposite endianness (Utf16Be) even though the underlying stream is genuinely Utf16Le.
+        let full_stream: Vec<u8> = "hello world".bytes().flat_map(|b| [b, 0]).collect(); // UTF-16LE, no BOM
+        let odd_offset = 5u64; // itself odd — cuts a code unit in half, same as a real mid-file window would
+        let window = &full_stream[odd_offset as usize..];
+
+        // Offset-naive detection (what the pre-fix `align_window` effectively did by calling
+        // `detect_encoding` on a mid-file slice) misreads this window as big-endian.
+        assert_eq!(detect_encoding(window), EncodingGuess::Utf16Be, "sanity: this is the bug being fixed");
+
+        // Offset-aware detection, told the window's true absolute offset, reports the correct endianness.
+        assert_eq!(detect_encoding_at(window, odd_offset), EncodingGuess::Utf16Le);
+    }
+
+    #[test]
+    fn detect_encoding_at_an_even_absolute_offset_also_reports_correct_endianness_for_utf16be() {
+        let full_stream: Vec<u8> = "hello world".bytes().flat_map(|b| [0, b]).collect(); // UTF-16BE, no BOM
+        let odd_offset = 5u64;
+        let window = &full_stream[odd_offset as usize..];
+
+        assert_eq!(detect_encoding(window), EncodingGuess::Utf16Le, "sanity: this is the bug being fixed");
+        assert_eq!(detect_encoding_at(window, odd_offset), EncodingGuess::Utf16Be);
+    }
+
+    #[test]
+    fn detect_encoding_at_ignores_a_bom_like_byte_pair_that_is_not_at_the_true_file_start() {
+        // A `FF FE` byte pair mid-file is not a byte-order mark — only `base_offset == 0` may treat it as
+        // one. Use content that, if BOM-sniffed, would misreport; the NUL-lane heuristic underneath should
+        // instead do the classifying (or fall through if the bytes don't look like a clean UTF-16 lane).
+        let bytes = [0xFF, 0xFE, 0x00, 0x01, 0x02];
+        // At true offset 0 this IS a BOM.
+        assert_eq!(detect_encoding_at(&bytes, 0), EncodingGuess::Utf16Le);
+        // At a non-zero absolute offset, the same two leading bytes are just data, not a BOM — the result
+        // must come from the NUL-lane/binary fallback path instead, not the BOM shortcut.
+        assert_ne!(detect_encoding_at(&bytes, 10), EncodingGuess::Utf16Le);
     }
 
     #[test]

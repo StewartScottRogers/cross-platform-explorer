@@ -3,9 +3,11 @@ import {
   detectLevel,
   parseLog,
   filterLines,
+  pushLogPage,
   ALL_LEVELS,
   MAX_LINES,
   MAX_LINE_CHARS,
+  MAX_CACHED_LOG_PAGES,
   type LogLevel,
   type LogLine,
 } from "./logViewer";
@@ -64,8 +66,19 @@ describe("detectLevel — recognized shapes", () => {
     expect(detectLevel("V/Layout: measure pass 3")).toBe("trace");
   });
 
-  it("detects a level after a pid-bracket prefix", () => {
-    expect(detectLevel("[1234] ERROR worker crashed")).toBe("error");
+  it(
+    "no longer detects a BARE pid-bracket prefix with nothing else before it (round 3, PR #842): " +
+      "structurally identical to a citation marker (\"[1] WARNING...\") once you strip the digits out, " +
+      "and no real log format emits a PID bracket with nothing else ahead of it (RFC3164 syslog's own " +
+      "PID-bracket shape always has a timestamp+hostname lead first — see the documented gap below). See " +
+      "leadHasIsolatedLetterWord's timestamp-corroboration gate and CPE-1636's Work Log.",
+    () => {
+      expect(detectLevel("[1234] ERROR worker crashed")).toBeNull();
+    },
+  );
+
+  it("still detects a pid-bracket prefix once a real timestamp corroborates it", () => {
+    expect(detectLevel("2026-08-11T09:14:05Z [1234] ERROR worker crashed")).toBe("error");
   });
 });
 
@@ -97,6 +110,201 @@ describe("detectLevel — must NOT misclassify", () => {
   it("never throws on pathological input", () => {
     expect(() => detectLevel("x".repeat(1_000_000))).not.toThrow();
     expect(() => detectLevel(" ERROR-weird-bytes-".repeat(1000))).not.toThrow();
+  });
+});
+
+// CPE-1636: the lead-in "no lowercase before the word" heuristic alone let a level word preceded by a
+// quote mark, a digit-dot list marker, or all-caps prose pass through as a real level — reproduced by the
+// independent Reviewer of CPE-1618 (PR #829) against four real prose lines. Each of these is a negative
+// control that FAILS against the pre-fix code (the old check only looked for lowercase in the lead-in,
+// and none of these four lead-ins contain a lowercase letter).
+describe("detectLevel — CPE-1636 prose false positives (reviewer-reproduced)", () => {
+  it("does not flag a quoted mention of a level word", () => {
+    expect(detectLevel('"ERROR" is a reserved word in this DSL, see docs.')).toBeNull();
+  });
+
+  it("does not flag a quoted level-shaped phrase even though what follows the quote looks like a real separator", () => {
+    expect(
+      detectLevel('"ERROR: connection refused" appears in the logs when the DB is down.'),
+    ).toBeNull();
+  });
+
+  it("does not flag a level word after a numbered-list marker", () => {
+    expect(detectLevel("1. ERROR handling guide")).toBeNull();
+  });
+
+  it("does not flag a level word inside an ALL-CAPS prose sentence", () => {
+    expect(detectLevel("SEE ERROR HANDLING DOCS FOR MORE INFO")).toBeNull();
+  });
+});
+
+// CPE-1636 — a fifth false positive, found independently during this ticket's real-prose verification
+// pass (not from the original reviewer's four): a lead-in of just a single capitalized word (most often
+// the English indefinite article "A", starting a sentence) contains no lowercase letter AND no run of 2+
+// uppercase letters, so it slipped past both of the original fix's lead-in checks. Genuinely real prose —
+// "A warning icon appears next to any file that couldn't be scanned." is the kind of sentence that shows
+// up in this app's own UI copy and docs. Fixed by generalizing the lead-in check to "no isolated letter
+// word" (a letter run not glued onto a digit), which subsumes both of the narrower original checks.
+describe("detectLevel — CPE-1636 fifth false positive: a lone capitalized lead-in word", () => {
+  it("does not flag a level word after a single capitalized word starting a sentence", () => {
+    expect(
+      detectLevel("A warning icon appears next to any file that couldn't be scanned."),
+    ).toBeNull();
+  });
+
+  it("does not flag a level word after other single-letter sentence starters", () => {
+    expect(detectLevel("I saw an ERROR dialog pop up during the demo.")).toBeNull();
+  });
+
+  it("still detects a genuine ISO-timestamp lead-in, where the letters DO touch a digit", () => {
+    // Regression guard for the fix's own mechanism: T and Z here are letters in the lead-in, but each is
+    // glued directly onto a digit (no separating space) — that's what must keep this line detected.
+    expect(detectLevel("2026-08-11T09:14:05Z ERROR Payment gateway timeout")).toBe("error");
+  });
+});
+
+// CPE-1636 acceptance criterion: "Every correctly-unclassified case listed under 'what is already
+// correct' still behaves the same" — these were already null before the fix (via the pre-existing
+// lowercase-in-lead-in rule) and must stay null after it; not regression reproductions of the bug, just
+// non-regression coverage for formats the fix must not disturb.
+describe("detectLevel — CPE-1636 already-correct shapes must not regress", () => {
+  it("does not flag JSON-per-line's level field", () => {
+    expect(detectLevel('{"level":"error","msg":"payment failed"}')).toBeNull();
+  });
+
+  it("does not flag logfmt's level field", () => {
+    expect(detectLevel("time=2026-08-11T09:14:05Z level=error msg=timeout")).toBeNull();
+  });
+
+  it("does not flag a syslog line with a lowercase hostname before the level word", () => {
+    expect(detectLevel("Aug 11 09:14:05 web-server-01 app[1234]: error occurred during checkout")).toBeNull();
+  });
+
+  it("does not flag a URL path fragment mentioning error, embedded in an ordinary sentence", () => {
+    expect(detectLevel("Routing GET /error-report to the reporting handler")).toBeNull();
+  });
+
+  it("does not flag ERRORLEVEL=1 (no word boundary after ERROR)", () => {
+    expect(detectLevel("ERRORLEVEL=1")).toBeNull();
+  });
+
+  it("does not flag a lowercase android-style prefix", () => {
+    expect(detectLevel("e/notactuallyalevel: just a path-looking string")).toBeNull();
+  });
+
+  it("does not flag mid-sentence prose mentioning a level word", () => {
+    expect(detectLevel("The checkout flow logs an error when the card is declined.")).toBeNull();
+  });
+
+  it("does not flag a stack-trace continuation line (no level word of its own)", () => {
+    expect(detectLevel("    at Object.<anonymous> (/app/index.js:42:11)")).toBeNull();
+  });
+});
+
+// CPE-1636 acceptance criterion: genuine level lines across supported formats must still be detected —
+// tightening detection is exactly how a fix like this loses real errors, so this is the other half of the
+// negative control (positive cases must still pass).
+describe("detectLevel — CPE-1636 genuine levels must still be detected after tightening", () => {
+  it("still detects every previously-recognized shape", () => {
+    expect(detectLevel("[2026-08-11 09:14:05] ERROR Failed to connect")).toBe("error");
+    expect(detectLevel("2026-08-11T09:14:05Z ERROR Payment gateway timeout")).toBe("error");
+    expect(detectLevel("ERROR: Unhandled exception in request handler")).toBe("error");
+    expect(detectLevel("[ERROR] crash in worker thread")).toBe("error");
+    // NOT "[1234] ERROR worker crashed" — round 3 (PR #842) intentionally stopped trusting a bare
+    // pid-bracket with nothing before it; see the dedicated describe block above for the rationale.
+    expect(detectLevel("[2026-08-11] ERR disk write failed")).toBe("error");
+    expect(detectLevel("WARNING: certificate expires soon")).toBe("warn");
+    expect(detectLevel("E/NetworkClient: Failed to reach api.example.com")).toBe("error");
+  });
+
+  it("still detects a level immediately followed by a pipe separator", () => {
+    expect(detectLevel("ERROR| worker crashed")).toBe("error");
+  });
+});
+
+// F1 (PR #842 review): two mainstream real-world log formats the original detector never recognized —
+// confirmed by the reviewer as a PRE-EXISTING gap (not a regression of CPE-1636/1638's own changes).
+describe("detectLevel — F1: previously-undetected mainstream formats", () => {
+  it("detects the Logback manual's own documented '%d [%thread] %level' pattern (bracketed thread name)", () => {
+    // Fixed: a bracket-wrapped token with no internal whitespace ("[main]") is a logger/thread-name tag,
+    // not an isolated prose word — see BRACKET_TOKEN_REGEX / leadHasIsolatedLetterWord.
+    expect(detectLevel("17:04:22.123 [main] ERROR c.e.MyService - Failed to connect")).toBe("error");
+  });
+
+  it("detects the Logback pattern with a more realistic multi-word-shaped thread-pool tag", () => {
+    expect(
+      detectLevel("17:04:22.123 [http-nio-8080-exec-1] WARN c.e.MyService - Slow response"),
+    ).toBe("warn");
+  });
+
+  it("still does not flag a bracketed prose remark that contains whitespace (not a bare tag token)", () => {
+    // The exemption requires the WHOLE bracket span to contain no whitespace — a parenthetical aside like
+    // "[see the docs]" never qualifies, so this must stay unclassified same as before the fix.
+    expect(detectLevel("[see the docs] WARNING word only, not a real level marker here")).not.toBe(
+      "warn",
+    );
+  });
+
+  it(
+    "documents a gap deliberately left open: RFC3164 syslog/journald with a month-name prefix AND a bare " +
+      "hostname token (not bracket-wrapped, doesn't touch a digit) is indistinguishable from an isolated " +
+      "prose word without materially raising the risk of flagging real prose — per the ticket's explicit " +
+      "'leave the gap rather than guess' guidance. Left unclassified; not a regression, since this shape " +
+      "was never detected before either.",
+    () => {
+      expect(
+        detectLevel("Aug 11 17:04:22 myhost myapp[1234]: ERROR Failed to connect to database"),
+      ).toBeNull();
+    },
+  );
+});
+
+// Round 3 (PR #842 review, attempt 3/3): F1's bracket exemption above reopened CPE-1636's own prose
+// false-positive bug. When the bracket token is the ONLY letter content in a lead-in — or contains no
+// letters at all — exempting it (or simply never reaching the letter-run loop) left the line looking like
+// a clean logger prefix, even though every one of these openers is ordinary prose/markdown: a `[TODO]` or
+// `[FIXME]` tag, a markdown checkbox (`[x]`/`[ ]`), or a citation marker (`[1]`, `[2]`). Fixed by requiring
+// a genuine timestamp-shaped token elsewhere in the lead-in before ANY bracket is trusted — see
+// leadHasIsolatedLetterWord's gate. These four are the exact reviewer-reproduced cases plus the
+// markdown-checkbox/citation-marker variants the reviewer asked for explicitly.
+describe("detectLevel — CPE-1636 round 3: bracket exemption reopened the prose false-positive class", () => {
+  it("does not flag a bracketed logger-tag-shaped word opening a sentence", () => {
+    expect(detectLevel("[main] ERROR handling is disabled in this build.")).toBeNull();
+  });
+
+  it("does not flag a TODO tag opening a sentence", () => {
+    expect(detectLevel("[TODO] ERROR handling needs review before ship.")).toBeNull();
+  });
+
+  it("does not flag a bracketed citation-marker-shaped number opening a sentence", () => {
+    expect(detectLevel("[1] WARNING signs were ignored by the team.")).toBeNull();
+  });
+
+  it("does not flag a checked markdown checkbox opening a sentence", () => {
+    expect(detectLevel("[x] ERROR checking disabled for this test.")).toBeNull();
+  });
+
+  it("does not flag an unchecked markdown checkbox opening a sentence", () => {
+    expect(detectLevel("[ ] ERROR checking disabled for this test (unchecked box).")).toBeNull();
+  });
+
+  it("does not flag a second citation-marker-shaped number opening a sentence", () => {
+    expect(detectLevel("[2] ERROR handling notes go here (citation).")).toBeNull();
+  });
+
+  it("does not flag a FIXME tag opening a sentence", () => {
+    expect(detectLevel("[FIXME] WARNING message needs a real implementation.")).toBeNull();
+  });
+
+  it("still detects [LEVEL] at line start — the level word INSIDE the bracket is a different code path " +
+    "(no complete bracket pair ever appears in the lead-in, since the level word itself is what's between " +
+    "the brackets) and must not be collateral damage from the round-3 gate", () => {
+    expect(detectLevel("[ERROR] msg")).toBe("error");
+    expect(detectLevel("[WARN] disk space low")).toBe("warn");
+  });
+
+  it("still detects the real Logback pattern once a genuine timestamp corroborates the bracket", () => {
+    expect(detectLevel("17:04:22.123 [main] ERROR c.e.MyService - Failed to connect")).toBe("error");
   });
 });
 
@@ -214,12 +422,177 @@ describe("parseLog — caps bound WORK, not just output", () => {
   });
 });
 
+// CPE-1638: filtering to Errors used to hide a finding's stack trace, because the trace's continuation
+// lines carry no level word of their own (`filterLines` keyed on `level`, which is null for every
+// continuation line). Reproduced on a real log (`electron-2026-07-24.log`) by the independent UAT of
+// CPE-1618: filtering to Errors left 1 of 22 lines visible — the bare header, with no trace at all.
+describe("parseLog — CPE-1638 stack-trace continuations inherit their header's level", () => {
+  // A trimmed-down reproduction of the real excerpt from the ticket: an error header, an unindented bare
+  // exception-type line (no level word), several indented "at ..." frames, a trailing "... N more" elision
+  // line, and then one clearly UNRELATED line that must NOT be swept into the group.
+  const REAL_EXCERPT_LINES = [
+    "2026-07-24T13:03:50.615Z error [BUGSNAG] Uncaught exception in main process", // 0: header, level=error
+    "AbortError: Request aborted", // 1: bare exception line, no level word
+    "    at RequestAborter.abort (electron/lib/net.js:120:11)", // 2: indented frame
+    "    at ClientRequest.emit (node:events:513:28)", // 3: indented frame
+    "    at TLSSocket.socketErrorListener (node:_http_client:495:9)", // 4: indented frame
+    "    ... 9 more lines omitted", // 5: elision line
+    "Server accepted a new connection from 10.0.0.5", // 6: UNRELATED — must not be swept in
+  ];
+  const REAL_EXCERPT = REAL_EXCERPT_LINES.join("\n");
+
+  it("gives the header its own level, and none of the continuation lines a level of their own (no false 'wall of red')", () => {
+    const result = parseLog(REAL_EXCERPT);
+    expect(result.lines[0].level).toBe("error");
+    for (const i of [1, 2, 3, 4, 5]) expect(result.lines[i].level).toBeNull();
+  });
+
+  it("inherits the header's level into filterLevel for every real continuation line, flagged isContinuation", () => {
+    const result = parseLog(REAL_EXCERPT);
+    for (const i of [1, 2, 3, 4, 5]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBe("error");
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(true);
+    }
+  });
+
+  it("does NOT sweep the unrelated trailing line into the group — the boundary the ticket explicitly asks to test", () => {
+    const result = parseLog(REAL_EXCERPT);
+    expect(result.lines[6].filterLevel).toBeNull();
+    expect(result.lines[6].isContinuation).toBe(false);
+  });
+
+  it("filtering to Errors-only keeps the header AND its whole trace, not just the bare header — fails against the pre-fix filterLines (which keyed on `level`, null for every continuation line)", () => {
+    const result = parseLog(REAL_EXCERPT);
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.map((l) => l.index)).toEqual([0, 1, 2, 3, 4, 5]);
+    expect(shown.map((l) => l.text)).toEqual(REAL_EXCERPT_LINES.slice(0, 6));
+    // The unrelated line must still be excluded — grouping isn't a license to keep everything after an error.
+    expect(shown.some((l) => l.text.includes("Server accepted"))).toBe(false);
+  });
+
+  it("filter counts ('Showing N of M') stay accurate with grouping applied", () => {
+    const result = parseLog(REAL_EXCERPT);
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.length).toBe(6);
+    expect(result.lines.length).toBe(7);
+  });
+
+  it("does not inherit a level across a blank-line break in the chain", () => {
+    const text = ["ERROR something broke", "", "Unrelated line after a blank"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull(); // blank line: no leading whitespace char to match
+    expect(result.lines[2].filterLevel).toBeNull(); // chain already broken by the blank line
+  });
+
+  it("does not treat a plain capitalized sentence after an error as a continuation (only Error/Exception-suffixed bare headers qualify)", () => {
+    const text = ["ERROR something broke", "Note: see the runbook for next steps"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("only inherits the bare-exception-header shape right after an ERROR, not after warn/info/etc.", () => {
+    const text = ["WARN disk space low", "SomeException: not really related"].join("\n");
+    const result = parseLog(text);
+    // The bare-exception-header heuristic is gated to error parents only (per the ticket's steer to be
+    // conservative); it still isn't swept in as a continuation of a WARN.
+    expect(result.lines[1].filterLevel).toBeNull();
+  });
+
+  it("chains a 'Caused by:' line and its own indented frames onto the original error", () => {
+    const text = [
+      "ERROR outer failure",
+      "Caused by: java.lang.NullPointerException",
+      "    at com.example.Service.call(Service.java:10)",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[2].filterLevel).toBe("error");
+  });
+
+  // --- F2 (PR #842 review): bare leading whitespace alone is not a corroborating signal. An indented
+  // line only counts as a continuation once its own leading whitespace is stripped away AND what's left
+  // looks like an actual stack-frame/continuation shape — never indentation by itself, which is far too
+  // common in ordinary interleaved multi-thread/multi-process log output to mean anything on its own. ---
+
+  it("does NOT sweep an indented but otherwise unrelated line into a preceding error's group (reviewer's live reproduction)", () => {
+    // Exact reproduction from the reviewer: two lines of interleaved multi-thread output where the second
+    // line is merely indented (e.g. a nested/sub-status log convention) — not a stack frame, not a
+    // continuation of the first line's message, just incidentally indented.
+    const text = [
+      "ERROR Connection failed on worker-thread-1",
+      "  Now processing next item in queue for worker-thread-2",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("does not sweep in several interleaved indented lines from unrelated threads, even mid-chain", () => {
+    const text = [
+      "2026-08-11T09:00:00Z ERROR worker-1 failed to acquire lock",
+      "  worker-2: heartbeat ok, queue depth 4",
+      "  worker-3: heartbeat ok, queue depth 1",
+      "\tworker-4: starting batch 17",
+    ].join("\n");
+    const result = parseLog(text);
+    for (const i of [1, 2, 3]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBeNull();
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(false);
+    }
+  });
+
+  it("still groups a genuine indented stack frame — the corroborating 'at ...' shape survives stripping the indentation", () => {
+    const text = ["ERROR outer failure", "    at com.example.Service.call(Service.java:10)"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it('still groups an indented Python-style File "..." traceback frame', () => {
+    const text = ["ERROR unhandled exception", '  File "app.py", line 10, in <module>'].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it("still groups an indented trailing elision line ('... N more')", () => {
+    const text = ["ERROR outer failure", "    ... 9 more lines omitted"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it("a real Node.js-style unhandled-rejection trace still shows fully under an errors-only filter", () => {
+    // A realistic Node.js stack trace shape: header + several indented "at ..." frames, no level word on
+    // any of the frame lines.
+    const NODE_TRACE_LINES = [
+      "2026-08-11T09:14:05.201Z ERROR Unhandled promise rejection",
+      "TypeError: Cannot read properties of undefined (reading 'foo')",
+      "    at Object.<anonymous> (/app/index.js:42:11)",
+      "    at Module._compile (node:internal/modules/cjs/loader:1105:14)",
+      "    at Module._extensions..js (node:internal/modules/cjs/loader:1159:10)",
+      "    at Module.load (node:internal/modules/cjs/loader:981:32)",
+      "Listening on port 3000", // unrelated — must not be swept in
+    ];
+    const result = parseLog(NODE_TRACE_LINES.join("\n"));
+    for (const i of [1, 2, 3, 4, 5]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBe("error");
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(true);
+    }
+    expect(result.lines[6].filterLevel).toBeNull();
+
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.map((l) => l.text)).toEqual(NODE_TRACE_LINES.slice(0, 6));
+  });
+});
+
 describe("filterLines", () => {
   const lines: LogLine[] = [
-    { index: 0, text: "info line", level: "info", truncated: false },
-    { index: 1, text: "warn line", level: "warn", truncated: false },
-    { index: 2, text: "error line", level: "error", truncated: false },
-    { index: 3, text: "plain line", level: null, truncated: false },
+    { index: 0, text: "info line", level: "info", truncated: false, filterLevel: "info", isContinuation: false },
+    { index: 1, text: "warn line", level: "warn", truncated: false, filterLevel: "warn", isContinuation: false },
+    { index: 2, text: "error line", level: "error", truncated: false, filterLevel: "error", isContinuation: false },
+    { index: 3, text: "plain line", level: null, truncated: false, filterLevel: null, isContinuation: false },
   ];
 
   it("shows everything when all levels + unleveled are active", () => {
@@ -250,5 +623,41 @@ describe("filterLines", () => {
   it("returns an empty array when nothing is active", () => {
     const shown = filterLines(lines, { levels: new Set<LogLevel>(), showUnleveled: false });
     expect(shown).toHaveLength(0);
+  });
+});
+
+// CPE-1644 B′: `LogPreview`'s `pages` cache grew without bound as a user paged backward through a huge
+// file ("... a slower, opt-in version of the exact problem CPE-1637's windowed reads exist to fix").
+// `pushLogPage` didn't exist before this fix — the unbounded growth lived inline in the component as
+// `pages = [...pages, w]` with no cap — so this whole suite is a negative control: it fails to even
+// import/compile against the pre-fix module.
+describe("pushLogPage — bounded page cache (CPE-1644 B′)", () => {
+  it("caps the cache at MAX_CACHED_LOG_PAGES, evicting the oldest/shallowest pages first", () => {
+    let pages: number[] = [];
+    for (let i = 0; i < MAX_CACHED_LOG_PAGES + 5; i++) pages = pushLogPage(pages, i);
+    expect(pages).toHaveLength(MAX_CACHED_LOG_PAGES);
+    // The 5 oldest pushes (0..4) were evicted; the most-recently-fetched pages survive, in order.
+    expect(pages[0]).toBe(5);
+    expect(pages[pages.length - 1]).toBe(MAX_CACHED_LOG_PAGES + 4);
+  });
+
+  it("never exceeds the cap no matter how many pages are pushed (exhaustively paging a huge file)", () => {
+    let pages: number[] = [];
+    for (let i = 0; i < 500; i++) pages = pushLogPage(pages, i);
+    expect(pages.length).toBeLessThanOrEqual(MAX_CACHED_LOG_PAGES);
+    expect(pages[pages.length - 1]).toBe(499); // always keeps the just-fetched page
+  });
+
+  it("does not evict anything while under the cap", () => {
+    let pages: string[] = [];
+    for (const p of ["a", "b", "c"]) pages = pushLogPage(pages, p);
+    expect(pages).toEqual(["a", "b", "c"]);
+  });
+
+  it("does not mutate the array passed in (pure)", () => {
+    const original = [1, 2, 3];
+    const next = pushLogPage(original, 4);
+    expect(original).toEqual([1, 2, 3]);
+    expect(next).toEqual([1, 2, 3, 4]);
   });
 });
