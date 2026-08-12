@@ -141,6 +141,40 @@ describe("stripRepoUrl / looksLikeUrl (CPE-1620)", () => {
   });
 });
 
+// CPE-1650 — an SCP-style SSH URL (`git@github.com:owner/repo.git`) has no `://`, so the CPE-1620
+// host strip (which only matched `https?://`) never fired, and `looksLikeUrl` (which only matched
+// `scheme://`) didn't flag it either — it slipped through as a fake `owner/name` and reached
+// `forge_browse` with a malformed repo id. Covers the SCP-style short form, the `ssh://` long form,
+// a URL with an explicit port, and a non-`git` user, per the independent review of PR #837.
+describe("stripRepoUrl / looksLikeUrl — SSH repo URLs (CPE-1650)", () => {
+  it.each([
+    ["SCP-style short form", "git@github.com:owner/name.git"],
+    ["ssh:// long form", "ssh://git@github.com/owner/name.git"],
+    ["ssh:// with an explicit port", "ssh://git@github.com:22/owner/name.git"],
+    ["SCP-style with a non-git user", "deploy@github.com:owner/name.git"],
+    ["ssh:// with a non-git user", "ssh://deploy@github.com/owner/name.git"],
+  ])("strips the host from an SSH URL — %s", (_label, url) => {
+    const r = stripRepoUrl(url, "github");
+    expect(r).toBe("owner/name");
+    expect(looksLikeUrl(r)).toBe(false);
+  });
+
+  it("negative control: an SCP-style URL for a foreign host is not stripped and still looks like a URL", () => {
+    // GitHub selected, but a GitLab SSH URL pasted — the strip must not fire for the wrong host.
+    // The trailing `.git` is still stripped unconditionally (pre-existing behavior, unrelated to the
+    // host match) — what must NOT happen is the host/user prefix coming off.
+    const r = stripRepoUrl("git@gitlab.com:owner/name.git", "github");
+    expect(r).toBe("git@gitlab.com:owner/name");
+    expect(looksLikeUrl(r)).toBe(true);
+  });
+
+  it("negative control: an ssh:// URL for a foreign host is not stripped and still looks like a URL", () => {
+    const r = stripRepoUrl("ssh://git@gitlab.com/owner/name.git", "github");
+    expect(r).toBe("ssh://git@gitlab.com/owner/name");
+    expect(looksLikeUrl(r)).toBe(true);
+  });
+});
+
 describe("RepoBrowser — per-provider URL paste (CPE-1620)", () => {
   it.each([
     ["gitlab", "https://gitlab.com/owner/name"],
@@ -161,6 +195,35 @@ describe("RepoBrowser — per-provider URL paste (CPE-1620)", () => {
     // GitLab selected, but a GitHub URL pasted — must not reach forge_browse with the raw URL.
     const calls = route({ browse: () => root });
     render(RepoBrowser, { props: { provider: "gitlab", repo: "https://github.com/owner/name" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+
+    expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+});
+
+// CPE-1650 — pasting an SCP-style/ssh:// SSH repo URL into a named-provider field used to bypass the
+// host strip entirely and reach forge_browse as a malformed identifier (the confusing not-found
+// failure CPE-1620 set out to remove, via a different input shape).
+describe("RepoBrowser — SSH repo URL paste (CPE-1650)", () => {
+  it.each([
+    ["SCP-style short form", "git@github.com:owner/name.git"],
+    ["ssh:// long form", "ssh://git@github.com/owner/name.git"],
+  ])("browses correctly after pasting a matching-host %s", async (_label, url) => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: url } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+
+    await waitFor(() =>
+      expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "owner/name")).toBe(true),
+    );
+    expect(await screen.findByText("src")).toBeTruthy();
+  });
+
+  it("shows the friendly owner/name guidance for a foreign-host SCP-style URL instead of forwarding it", async () => {
+    // GitHub selected, but a GitLab SSH URL pasted — must never reach forge_browse with the raw string.
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: "git@gitlab.com:owner/name.git" } });
     await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
 
     expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);

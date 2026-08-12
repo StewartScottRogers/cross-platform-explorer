@@ -8270,6 +8270,12 @@ struct AiConsoleState {
 }
 
 /// A session daemon process the host spawned + owns (CPE-309 S4). Dropping it reaps the child.
+///
+/// CPE-1658: on Windows, killing `child` here also reclaims the one hidden `conhost.exe` Windows
+/// allocated for this process's own (`CREATE_NO_WINDOW`) console — see the doc comment on
+/// [`AiConsoleState::ensure_session_daemon`] for the process-level evidence that this conhost belongs
+/// to the daemon, not to any one agent session, and so cannot (and should not) be reclaimed by a
+/// session-level `close_all` while the daemon is still meant to be running.
 #[cfg(feature = "sidecar-platform")]
 struct HostSessionDaemon {
     child: std::process::Child,
@@ -9795,6 +9801,26 @@ impl AiConsoleState {
     /// hidden console (`CREATE_NO_WINDOW`, matching how the UI sidecar is spawned — so ConPTY works)
     /// and owned by the host, so it outlives the UI sidecar being restarted/toggled. Returns `None`
     /// on any failure so the caller falls back to in-process sessions rather than blocking a launch.
+    ///
+    /// CPE-1658: on Windows, `CREATE_NO_WINDOW` suppresses the window but Windows still allocates the
+    /// daemon process a real (just hidden) console + **one** `conhost.exe` to host it — this is what
+    /// lets the daemon's own ConPTY calls work at all. That `conhost.exe` is a direct child of the
+    /// daemon's own pid, created the instant the daemon starts (before any session is launched), and
+    /// is *not* part of any individual session's process tree — confirmed with a real process-tree
+    /// capture (`Get-CimInstance Win32_Process`, walking `ParentProcessId`) that spawned this daemon
+    /// exactly as below, then launched + `close_all`-ed a session: the per-session
+    /// `conhost.exe --headless` (that session's own ConPTY host) and its whole `cmd.exe`/agent tree die
+    /// within ~1s of `close_all` as expected, while the daemon's own `conhost.exe` — present since
+    /// *before* the session even existed — is untouched, because it belongs to the daemon, not the
+    /// session. It does **not** accumulate per session or per close-all (there is exactly one, for the
+    /// daemon's whole lifetime); it is reclaimed the moment the daemon process itself dies, either via
+    /// `Drop for HostSessionDaemon` below (app exit) or CPE-483's orphan sweep on next startup — also
+    /// confirmed in the same repro by killing the spawned daemon pid and observing its conhost die with
+    /// it. Freeing it early while the daemon keeps running would tear down the very console ConPTY
+    /// needs for *future* sessions launched through this same daemon, which CPE-1621 established is
+    /// meant to survive "Close all consoles" — so this is Windows-owned, tied to the daemon's own
+    /// lifetime by design, not a per-console leak. Won't-fix, per CPE-1658's own documented-reason
+    /// carve-out.
     fn ensure_session_daemon(&self, bin: &str) -> Option<u16> {
         use std::io::{BufRead, BufReader};
         let mut guard = self.daemon.lock().ok()?;
