@@ -486,9 +486,11 @@ jobs:
           echo 'force_local_data_ssl=NO' >> "$conf"
           echo 'force_local_logins_ssl=NO' >> "$conf"
           echo 'require_ssl_reuse=NO' >> "$conf"
-          echo 'ssl_tlsv1=YES' >> "$conf"
-          echo 'ssl_sslv2=NO' >> "$conf"
-          echo 'ssl_sslv3=NO' >> "$conf"
+          # CPE-1659: deliberately NOT setting ssl_tlsv1/ssl_sslv2/ssl_sslv3 here. The first live run of
+          # this rig set `ssl_tlsv1=YES` (explicit legacy TLSv1.0) and vsftpd exited 147ms after start
+          # (exitCode=2) every time — consistent with a modern OpenSSL build refusing to enable TLSv1.0 at
+          # config load. Leaving these three directives out lets vsftpd negotiate with its own modern
+          # default TLS range; `ssl_enable=YES` above is what actually turns FTPS on.
           {
             echo "CPE_E2E_FTP_SSL_DIR=$ssl_dir"
             echo "CPE_E2E_FTP_CONF=$conf"
@@ -512,14 +514,49 @@ jobs:
             echo "CPE_E2E_FTP_ROOT=/"
           } >> "$GITHUB_ENV"
 
+      # CPE-1659: the first live run of this rig had ftp-e2e exit 147ms after `docker run -d` with
+      # exitCode=2 and NOTHING in `docker logs`, even with LOG_STDOUT=YES — the image's own
+      # `run-vsftpd.sh` hardcodes `&>/dev/null /usr/sbin/vsftpd …` on its final line (confirmed against
+      # fauria/docker-vsftpd's run-vsftpd.sh), and LOG_STDOUT only controls the xferlog symlink, never
+      # that redirect. So a real startup failure here is invisible by construction, and the "wait for
+      # connections" step below would otherwise just time out with no reason why. This step notices an
+      # immediate exit and replays the SAME script with that one redirect stripped, in the foreground, so
+      # vsftpd's actual stderr reaches this job's log instead of another guess.
+      - name: Verify the FTP container actually started; capture vsftpd's real startup error if not (CPE-1659)
+        run: |
+          sleep 1
+          status="$(docker inspect -f '{{.State.Status}}' ftp-e2e)"
+          if [ "$status" != "running" ]; then
+            exitCode="$(docker inspect -f '{{.State.ExitCode}}' ftp-e2e)"
+            echo "::error::ftp-e2e exited immediately (status=$status exitCode=$exitCode) — replaying its startup script with the '&>/dev/null vsftpd' redirect stripped to surface the real reason"
+            docker run --rm \
+              --network "net-e2e-${{ github.run_id }}" \
+              -v "$CPE_E2E_FTP_FIXTURE_DIR:/home/vsftpd/tester" \
+              -v "$CPE_E2E_FTP_CONF:/etc/vsftpd/vsftpd.conf" \
+              -v "$CPE_E2E_FTP_SSL_DIR:/etc/vsftpd/ssl" \
+              -e FTP_USER=tester -e FTP_PASS=testpass -e LOCAL_UMASK=022 -e LOG_STDOUT=YES \
+              -e PASV_ADDRESS=172.28.0.13 -e PASV_MIN_PORT=21100 -e PASV_MAX_PORT=21110 \
+              --entrypoint /bin/bash \
+              fauria/vsftpd:latest@sha256:6d71d7c7f1b0ab2844ec7dc7999a30aef6d758b6d8179cf5967513f87c79c177 \
+              -c "sed -i 's#&>/dev/null##' /usr/sbin/run-vsftpd.sh; /usr/sbin/run-vsftpd.sh" || true
+            exit 1
+          fi
+          echo "ftp-e2e is running"
+
       - name: Wait for the real servers to accept connections
         run: |
+          set -euo pipefail
           for hp in 172.28.0.11:22 172.28.0.12:80 172.28.0.13:21; do
             host="${hp%%:*}"; port="${hp##*:}"
+            up=""
             for _ in $(seq 1 30); do
-              (echo > "/dev/tcp/$host/$port") >/dev/null 2>&1 && { echo "$hp is up"; break; }
+              (echo > "/dev/tcp/$host/$port") >/dev/null 2>&1 && { up=1; echo "$hp is up"; break; }
               sleep 1
             done
+            if [ -z "$up" ]; then
+              echo "::error::$hp never accepted a TCP connection within 30s"
+              exit 1
+            fi
           done
 
       - name: Build the real cpe-server-ref binary (release, Slice 2 CPE-1659)

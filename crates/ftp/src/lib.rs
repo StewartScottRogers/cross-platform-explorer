@@ -50,7 +50,7 @@ use std::io::{Cursor, Read as _};
 use std::sync::{Arc, Mutex};
 
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
-use suppaftp::{list::ListParser, rustls, FtpError, RustlsConnector, RustlsFtpStream};
+use suppaftp::{list::ListParser, rustls, types::FileType, FtpError, RustlsConnector, RustlsFtpStream};
 
 /// How to authenticate to the FTP server.
 #[derive(Debug, Clone)]
@@ -153,6 +153,14 @@ impl FtpProvider {
             FtpAuth::Anonymous => ("anonymous", ANONYMOUS_PASSWORD),
         };
         stream.login(user, pass).map_err(|e| format!("ftp: login: {e}"))?;
+        // Explicit `TYPE I` (CPE-1659): `suppaftp` never sets a transfer type on its own — `retr_as_stream`
+        // and `put_file` just issue RETR/STOR over whatever type the server currently has, and RFC 959's
+        // default representation type at connection is ASCII, not binary. A hand-rolled in-process test
+        // server that ignores TYPE entirely can never catch a missing call here (nothing ever gets
+        // translated), but a real ASCII-mode-conformant daemon like vsftpd will silently rewrite every
+        // bare LF to CRLF and drop the RFC's own transparency exception on the way through, corrupting
+        // any binary payload the byte-exact 5 MiB read test would have caught immediately.
+        stream.transfer_type(FileType::Binary).map_err(|e| format!("ftp: TYPE I: {e}"))?;
         Ok(FtpProvider { session: Mutex::new(stream) })
     }
 }
