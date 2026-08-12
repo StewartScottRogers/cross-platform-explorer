@@ -1513,12 +1513,37 @@ fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
 /// and this loop zero-filled the victim through the alias while `lock` returned `Ok(())` and the UI said
 /// "Locked".
 ///
-/// So under [`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`] the count is re-read **per file,
-/// immediately before that file is overwritten**, with no window at all between the check and the write,
-/// and a file with another name is **unlinked rather than overwritten**: a name that has another name is
-/// not ours to destroy, and unlinking one of an inode's names destroys nothing. That closes the integrity
-/// half completely — independently of the caller, which is the discipline every other destructive step in
-/// this module already follows.
+/// So under [`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`] the count is re-read **per file, just
+/// before that file is overwritten**, and a file with another name is **unlinked rather than
+/// overwritten**: a name that has another name is not ours to destroy, and unlinking one of an inode's
+/// names destroys nothing. That closes the hard-link variant this round was filed for, and gives the
+/// destructive step a guard of its own instead of relying on the caller's earlier walk — the discipline
+/// every other destructive step in this module already follows.
+///
+/// **It does NOT close the class, and this comment must not say that it does (SEC-847 round-3 re-audit).**
+/// An earlier draft claimed "no window at all" and "closes the integrity half completely". Both are false,
+/// and the auditor reproduced a victim file being securely overwritten and unlinked 3/3 through the public
+/// [`VaultRegistry::lock`] with `lock` returning `Ok(())`:
+///
+/// - This loop is **collect-then-shred**. [`collect_files`] walks the tree first and freezes absolute
+///   paths; the loop then calls [`hard_link_count`] and `shred_file`, each of which **re-resolves the
+///   whole path from scratch**. So there IS a window — two independent path resolutions plus
+///   `shred_file`'s own `metadata` and up to three opens.
+/// - The per-file check has no-follow semantics on the **final component only**. Every *parent* component
+///   is resolved by the OS. So the attacker skips the hard link entirely: plant an innocuous real
+///   subdirectory before locking (it passes both alias walks — link count 1, not a reparse point, and it
+///   gets sealed into the blob), wait for the first shredded file to vanish (the same starting-gun
+///   problem, one level up), then `remove_dir_all` that subdirectory and drop a **junction** in its place
+///   pointing at `Documents`. The frozen path now resolves through the junction, the link count of the
+///   victim reads `One`, and it is shredded.
+/// - `wipe_session_dir`'s own root-is-not-a-link check is likewise a single pass before `collect_files`.
+///
+/// This structure is **pre-existing on `main`**, not introduced by CPE-1645, which is why that ticket
+/// landed with it open rather than growing a third time. It is filed with the full reproduction as
+/// **CPE-1672**. The proportionate fix is to stop collecting first — walk and shred inline, checking
+/// `symlink_metadata(dir).file_type().is_symlink()` immediately before descending — which removes both the
+/// frozen list and the observable starting gun. The complete fix is handle-based: open each file once
+/// no-follow, read `nNumberOfLinks` from *that* handle, and write through the same handle.
 fn shred_tree(root: &Path, scheme: ShredScheme, aliases: AliasPolicy) -> Result<(), VaultError> {
     let mut files = Vec::new();
     collect_files(root, &mut files)?;
