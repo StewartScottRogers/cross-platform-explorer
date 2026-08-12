@@ -10,6 +10,15 @@ estimate: 4h+
 created: 2026-07-18
 ---
 
+> **READ THIS BEFORE PICKING UP ANY PART OF THIS EPIC (added 2026-08-12).** The optimizations described
+> below are **already built and shipped** — list virtualization (CPE-692), streaming re-sort coalescing
+> (CPE-689) and time-to-first-paint instrumentation (CPE-691/1304) are all live. **The Diagnosis section
+> below describes the code as it was on 2026-07-18 and no longer matches reality**, including its line
+> numbers (streaming moved out of `App.svelte` into `ExplorerPane.svelte` in CPE-676). Do not implement
+> from it. The only thing left is an **attended before/after benchmark on a real build** to prove the 10×,
+> which needs the user at a keyboard — that is why this epic is dormant rather than finished. See the
+> "Status review 2026-08-06" section at the bottom for the current picture.
+
 ## Summary
 Opening a folder in the app takes **multiple seconds** where Windows Explorer is near-instant on the
 same directory. The target: **10× faster** on directory open and on all file-list operations (scroll,

@@ -11,6 +11,14 @@ created: 2026-07-20
 closed:
 ---
 
+> **READ THIS BEFORE PICKING UP ANY PART OF THIS EPIC (added 2026-08-12).** Most of it is **already
+> built**. The typed-bindings slice in particular is **shipped, not deferred** — `src/lib/bindings.gen.ts`
+> is live in the tree and `.github/workflows/ci.yml` runs a drift guard that names CPE-813 in its own
+> comment; CPE-812 and CPE-813 are both in `Tickets/Done/`. The "Board hygiene 2026-07-29" note at the
+> bottom of this file says otherwise and **is wrong** — it was never corrected after those tickets landed.
+> The genuinely unbuilt remainder is CPE-819 (frontend transport seam) and CPE-820 (end-to-end remote GUI),
+> both GUI-gated and attended. Verify against the code before writing anything here.
+
 > **Activated 2026-07-20.** Decomposed into children CPE-811–820 (below). Coordinate the "Server
 > decoupled from Tauri" pillar (CPE-814/815) with CPE-676 (in Doing) — both touch `App.svelte`/`lib.rs`.
 
@@ -199,4 +207,4 @@ the later pillars need a rewrite.
   CPE-811–820. Suggested start: CPE-811 (foundation) or CPE-812 (first user-visible slice).
 
 ## Board hygiene 2026-07-29 — reverted In Progress → Proposed
-Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30):** Typed-bindings first slice (CPE-812/813) deferred; frontend transport seam + end-to-end remote GUI (CPE-819/820) unbuilt (headless contract/dispatcher/cpe-net only).
+Not actively being worked: all decomposed child tickets are Done. Remaining DoD is user-gated (GUI / model-key / cert / Mac) or a deferred cap. Reverted to **Proposed** so the epic queue honestly shows what's dormant vs active; re-activate with `/ticketing-epic activate` to resume (like CPE-703 was this session). **Remaining (DoD review 2026-07-30, ~~superseded~~ corrected 2026-08-12):** ~~Typed-bindings first slice (CPE-812/813) deferred~~ — **this was true on 2026-07-30 and is false now.** CPE-812 and CPE-813 both landed and are in `Tickets/Done/2026/Q3/July/Week-30/`; `src/lib/bindings.gen.ts` is committed and CI enforces it with a drift guard. Corrected by the Foreman after the PM's epic sweep found this line would have sent a worker to rebuild shipped code. The actual remainder is the frontend transport seam + end-to-end remote GUI (CPE-819/820), still unbuilt and still GUI-gated (headless contract/dispatcher/cpe-net only).
