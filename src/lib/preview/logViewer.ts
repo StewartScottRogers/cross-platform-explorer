@@ -155,8 +155,27 @@ const LETTER_RUN_REGEX = /[A-Za-z]+/g;
  *  {@link leadHasIsolatedLetterWord} (F1, CPE-1636 followups) to exempt letters inside one of these from
  *  the isolated-word rule — a single flat character class with a `g` flag, no backtracking risk. Deliberately
  *  narrow: requires the WHOLE token between `[` and `]` to contain no whitespace, so it can't accidentally
- *  swallow a parenthetical prose remark ("[see the docs for more]" has spaces and never matches). */
+ *  swallow a parenthetical prose remark ("[see the docs for more]" has spaces and never matches).
+ *
+ *  **Only reached once {@link leadHasIsolatedLetterWord}'s timestamp-corroboration gate has already
+ *  passed** (round 3, PR #842) — see that function's doc comment for why the bracket alone is no longer
+ *  trusted on its own. */
 const BRACKET_TOKEN_REGEX = /\[[^[\]\s]+\]/g;
+
+/** A complete `[...]` bracket pair anywhere in a lead-in — unlike {@link BRACKET_TOKEN_REGEX}, this one
+ *  DOES allow internal whitespace, because it exists only to answer "is there a bracket here at all",
+ *  not to carve out an exemptable token. Used by {@link leadHasIsolatedLetterWord}'s timestamp-gate (round
+ *  3, PR #842). Flat and non-backtracking: `[^[\]]*` excludes brackets, so no nested-quantifier blowup,
+ *  and it only ever runs against the already-bounded `LEVEL_SCAN_CHARS` lead-in. */
+const ANY_BRACKET_PAIR_REGEX = /\[[^[\]]*\]/;
+
+/** A timestamp-shaped token: digits, a `:` or `-` separator, then exactly two more digits — the pattern a
+ *  real clock time (`17:04`, `09:14:05`) or ISO date (`2026-08-11`) always takes. Deliberately tight
+ *  (exactly two digits after the separator, and a real separator character, not just any punctuation) so
+ *  it doesn't fire on a version number (`3.1`, dot not colon/dash) or a bare PID (`1234`, digits with no
+ *  separator at all). Used by {@link leadHasIsolatedLetterWord}'s bracket-corroboration gate (round 3, PR
+ *  #842) — see that function's doc comment. */
+const TIMESTAMP_SHAPE_REGEX = /\d{1,4}[:-]\d{2}/;
 
 /** True when `lead` contains a run of letters that is NOT immediately preceded by a digit and NOT wholly
  *  inside a {@link BRACKET_TOKEN_REGEX} logger/thread-tag token — i.e. a standalone alphabetic word, as
@@ -170,6 +189,27 @@ const BRACKET_TOKEN_REGEX = /\[[^[\]\s]+\]/g;
  *  reject-2+-uppercase-run) used to check separately, and — found during this ticket's independent
  *  real-prose verification pass — catches the single-capitalized-word case those two missed. */
 function leadHasIsolatedLetterWord(lead: string): boolean {
+  // **Round 3 fix (PR #842 review): timestamp-corroboration gate for ANY bracket in the lead-in.**
+  // The F1 bracket exemption above only special-cases letters *inside* a bracket token — but when the
+  // bracket is the ONLY letter content in the lead-in (`[TODO]`, `[main]`), exempting it leaves nothing
+  // left for the loop below to flag, so the line sails through unchecked. And a bracket whose content has
+  // no NON-bracketed letter run to trigger the loop at all (`[1]`, a digit; `[ ]`, whitespace only) was
+  // never reached by the letter-run loop in the first place. Every one of these shapes is indistinguishable,
+  // on the bracket's content alone, from an ordinary prose opener: a markdown checkbox (`[x]`, `[ ]`), a
+  // TODO/FIXME tag, or a citation marker (`[1]`). Real Logback's own
+  // documented pattern is `%d [%thread] %level` — the bracket is ALWAYS preceded by a timestamp; nothing
+  // in ordinary prose (or this repo's own markdown) ever opens a sentence with a timestamp before a
+  // bracket. So a bracket now only earns trust when the lead-in ALSO carries a genuine
+  // {@link TIMESTAMP_SHAPE_REGEX} token; a bracket with nothing (or nothing but more brackets/punctuation)
+  // before the level word is treated as an isolated word regardless of what's inside it.
+  //
+  // This deliberately gives up the bare-PID shape (`"[1234] ERROR ..."` with NOTHING else before it) —
+  // real logs never emit a PID-bracket with no other context first (RFC3164 syslog's own PID-bracket
+  // format always has a timestamp+hostname lead — see the documented gap in the F1 test suite) — in
+  // exchange for closing the reopened prose false-positive class. Deliberate, documented trade-off, not
+  // an oversight: see CPE-1636's Work Log.
+  if (ANY_BRACKET_PAIR_REGEX.test(lead) && !TIMESTAMP_SHAPE_REGEX.test(lead)) return true;
+
   // `matchAll` operates on an internal copy of the regex, so no shared `lastIndex` state to reset here.
   const bracketTokenRanges: Array<[number, number]> = [];
   for (const m of lead.matchAll(BRACKET_TOKEN_REGEX)) {

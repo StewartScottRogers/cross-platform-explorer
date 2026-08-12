@@ -66,8 +66,19 @@ describe("detectLevel — recognized shapes", () => {
     expect(detectLevel("V/Layout: measure pass 3")).toBe("trace");
   });
 
-  it("detects a level after a pid-bracket prefix", () => {
-    expect(detectLevel("[1234] ERROR worker crashed")).toBe("error");
+  it(
+    "no longer detects a BARE pid-bracket prefix with nothing else before it (round 3, PR #842): " +
+      "structurally identical to a citation marker (\"[1] WARNING...\") once you strip the digits out, " +
+      "and no real log format emits a PID bracket with nothing else ahead of it (RFC3164 syslog's own " +
+      "PID-bracket shape always has a timestamp+hostname lead first — see the documented gap below). See " +
+      "leadHasIsolatedLetterWord's timestamp-corroboration gate and CPE-1636's Work Log.",
+    () => {
+      expect(detectLevel("[1234] ERROR worker crashed")).toBeNull();
+    },
+  );
+
+  it("still detects a pid-bracket prefix once a real timestamp corroborates it", () => {
+    expect(detectLevel("2026-08-11T09:14:05Z [1234] ERROR worker crashed")).toBe("error");
   });
 });
 
@@ -199,7 +210,8 @@ describe("detectLevel — CPE-1636 genuine levels must still be detected after t
     expect(detectLevel("2026-08-11T09:14:05Z ERROR Payment gateway timeout")).toBe("error");
     expect(detectLevel("ERROR: Unhandled exception in request handler")).toBe("error");
     expect(detectLevel("[ERROR] crash in worker thread")).toBe("error");
-    expect(detectLevel("[1234] ERROR worker crashed")).toBe("error");
+    // NOT "[1234] ERROR worker crashed" — round 3 (PR #842) intentionally stopped trusting a bare
+    // pid-bracket with nothing before it; see the dedicated describe block above for the rationale.
     expect(detectLevel("[2026-08-11] ERR disk write failed")).toBe("error");
     expect(detectLevel("WARNING: certificate expires soon")).toBe("warn");
     expect(detectLevel("E/NetworkClient: Failed to reach api.example.com")).toBe("error");
@@ -245,6 +257,55 @@ describe("detectLevel — F1: previously-undetected mainstream formats", () => {
       ).toBeNull();
     },
   );
+});
+
+// Round 3 (PR #842 review, attempt 3/3): F1's bracket exemption above reopened CPE-1636's own prose
+// false-positive bug. When the bracket token is the ONLY letter content in a lead-in — or contains no
+// letters at all — exempting it (or simply never reaching the letter-run loop) left the line looking like
+// a clean logger prefix, even though every one of these openers is ordinary prose/markdown: a `[TODO]` or
+// `[FIXME]` tag, a markdown checkbox (`[x]`/`[ ]`), or a citation marker (`[1]`, `[2]`). Fixed by requiring
+// a genuine timestamp-shaped token elsewhere in the lead-in before ANY bracket is trusted — see
+// leadHasIsolatedLetterWord's gate. These four are the exact reviewer-reproduced cases plus the
+// markdown-checkbox/citation-marker variants the reviewer asked for explicitly.
+describe("detectLevel — CPE-1636 round 3: bracket exemption reopened the prose false-positive class", () => {
+  it("does not flag a bracketed logger-tag-shaped word opening a sentence", () => {
+    expect(detectLevel("[main] ERROR handling is disabled in this build.")).toBeNull();
+  });
+
+  it("does not flag a TODO tag opening a sentence", () => {
+    expect(detectLevel("[TODO] ERROR handling needs review before ship.")).toBeNull();
+  });
+
+  it("does not flag a bracketed citation-marker-shaped number opening a sentence", () => {
+    expect(detectLevel("[1] WARNING signs were ignored by the team.")).toBeNull();
+  });
+
+  it("does not flag a checked markdown checkbox opening a sentence", () => {
+    expect(detectLevel("[x] ERROR checking disabled for this test.")).toBeNull();
+  });
+
+  it("does not flag an unchecked markdown checkbox opening a sentence", () => {
+    expect(detectLevel("[ ] ERROR checking disabled for this test (unchecked box).")).toBeNull();
+  });
+
+  it("does not flag a second citation-marker-shaped number opening a sentence", () => {
+    expect(detectLevel("[2] ERROR handling notes go here (citation).")).toBeNull();
+  });
+
+  it("does not flag a FIXME tag opening a sentence", () => {
+    expect(detectLevel("[FIXME] WARNING message needs a real implementation.")).toBeNull();
+  });
+
+  it("still detects [LEVEL] at line start — the level word INSIDE the bracket is a different code path " +
+    "(no complete bracket pair ever appears in the lead-in, since the level word itself is what's between " +
+    "the brackets) and must not be collateral damage from the round-3 gate", () => {
+    expect(detectLevel("[ERROR] msg")).toBe("error");
+    expect(detectLevel("[WARN] disk space low")).toBe("warn");
+  });
+
+  it("still detects the real Logback pattern once a genuine timestamp corroborates the bracket", () => {
+    expect(detectLevel("17:04:22.123 [main] ERROR c.e.MyService - Failed to connect")).toBe("error");
+  });
 });
 
 describe("parseLog — ANSI-coloured input", () => {

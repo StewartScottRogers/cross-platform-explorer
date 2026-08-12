@@ -149,3 +149,101 @@ explicit "stays null" regression test with its reasoning in the test name/body).
 Verification: `npm run check` 0 errors/0 warnings; `npx vitest run` — 287 files / 3670 tests pass (up from
 3660 baseline; +10 across this round's F1 and CPE-1638's F2 fixes, no regressions). No Rust touched by this
 round (JS/TS-only, same as before).
+
+2026-08-11 (sprint, Worker, PR #842 review round 3 — attempt 3/3, final) — Round 2's F1 bracket exemption
+reopened this ticket's own prose false-positive bug: an independent re-review measured the shipped
+`detectLevel` directly and found 4 real prose lines misclassified —
+
+| Line | Classified as (round 2) |
+|---|---|
+| `[main] ERROR handling is disabled in this build.` | error |
+| `[TODO] ERROR handling needs review before ship.` | error |
+| `[1] WARNING signs were ignored by the team.` | warn |
+| `[x] ERROR checking disabled for this test.` | error |
+
+**Root cause, more precisely than "the bracket exemption":** `leadHasIsolatedLetterWord` only flags an
+*isolated letter word*. When a bracket is the ONLY letter content in the lead-in (`[TODO]`, `[main]`),
+F1's exemption skips it, leaving nothing for the loop to flag — the `[main]`/`[TODO]` cases. But `[1]` and
+`[ ]` (an unchecked markdown checkbox) contain no letters at all, so the letter-run loop was never even
+reached for them — that gap predates F1 entirely (a bare `"[1234] ERROR worker crashed"` would have
+misclassified the exact same way before F1 ever shipped; verified by diffing against the pre-F1 revision).
+Both flavors are the same underlying problem: a lead-in that's just "[[short token]] " reads as a clean
+logger prefix to a rule that only looks for stray *words*, whether or not the bracket's contents happen to
+be letters.
+
+**Took Option A** (require corroboration, not Option B/revert) — after confirming Option B alone (just
+deleting the bracket exemption) would NOT have fixed the `[1]`/`[ ]` cases, since those never depended on
+the exemption in the first place; a real fix had to touch the lead-in check regardless of what happened to
+the bracket exemption, so keeping Logback detection alive under a tighter rule was the safer full fix, not
+the riskier one. **Fix:** `leadHasIsolatedLetterWord` (`src/lib/preview/logViewer.ts`) now gates ANY
+complete `[...]` bracket pair in the lead-in (new `ANY_BRACKET_PAIR_REGEX`, deliberately broader than the
+existing no-whitespace `BRACKET_TOKEN_REGEX` — it exists only to detect "is there a bracket here", not to
+carve out an exemptable token) behind a genuine timestamp-shaped token elsewhere in the lead-in (new
+`TIMESTAMP_SHAPE_REGEX = /\d{1,4}[:-]\d{2}/`, matching a clock `17:04` / `09:14:05` or ISO-date `2026-08-11`
+shape, deliberately tight so it doesn't fire on a version number like `3.1` or a bare digit run like
+`1234`). Real Logback's own documented pattern is `%d [%thread] %level` — the bracket is ALWAYS preceded by
+a timestamp; nothing in ordinary prose or this repo's own markdown ever opens a sentence with a timestamp
+before a bracket. A bracket with no timestamp corroborating it is now treated as an isolated word
+regardless of its contents, closing both flavors of the gap in one rule.
+
+**Consequence, and why it's the right trade:** this also stops trusting a BARE pid-bracket prefix with
+nothing before it (`"[1234] ERROR worker crashed"`, previously detected) — structurally identical to a
+citation marker once you strip the digits out, and no real log format emits a PID bracket with nothing else
+ahead of it (RFC3164 syslog's own PID-bracket shape always has a timestamp+hostname lead first, per the
+gap already documented in this ticket's F1 round). Updated the two existing tests asserting that bare shape
+to `toBeNull()` with the rationale inline, and added a positive-control test confirming the pid-bracket
+case still detects once a real timestamp corroborates it
+(`"2026-08-11T09:14:05Z [1234] ERROR worker crashed"` → `error`).
+
+**Red-then-green** (verbatim, via a throwaway scratch test run before/after the fix):
+```
+"[main] ERROR handling is disabled in this build."            -> error  (before) / null (after)
+"[TODO] ERROR handling needs review before ship."              -> error  (before) / null (after)
+"[1] WARNING signs were ignored by the team."                  -> warn   (before) / null (after)
+"[x] ERROR checking disabled for this test."                   -> error  (before) / null (after)
+"[ ] ERROR checking disabled for this test (unchecked box)."   -> error  (before) / null (after)  [new variant]
+"[2] ERROR handling notes go here (citation)."                 -> error  (before) / null (after)  [new variant]
+"17:04:22.123 [main] ERROR c.e.MyService - Failed to connect"  -> error  (before) / error (after) [unchanged, Logback]
+"[ERROR] msg"                                                  -> error  (before) / error (after) [unchanged, level-in-bracket]
+"2026-08-11T09:14:05Z [main] ERROR something happened"         -> error  (before) / error (after) [unchanged]
+```
+
+Added `detectLevel — CPE-1636 round 3: bracket exemption reopened the prose false-positive class` describe
+block: the 4 reviewer-reproduced cases, the unchecked-checkbox and second-citation-marker variants the
+reviewer asked for explicitly, a FIXME-tag variant, a regression guard that `[ERROR] msg`/`[WARN] ...` (the
+level word INSIDE the bracket — a different code path, since no complete bracket pair ever appears in the
+lead-in there) still detect, and a regression guard that the real Logback pattern still detects once
+corroborated by a timestamp.
+
+**12-format table, before/after this round** (re-run against the shipped detector):
+
+| Format | Line | Before (round 2) | After (round 3) |
+|---|---|---|---|
+| Bracketed timestamp | `[2026-08-11 09:14:05] ERROR Failed to connect` | error | error |
+| ISO timestamp | `2026-08-11T09:14:05Z ERROR Payment gateway timeout` | error | error |
+| Colon-suffixed level at start | `ERROR: Unhandled exception in request handler` | error | error |
+| Bracket-wrapped level (level inside bracket) | `[ERROR] crash in worker thread` | error | error |
+| Abbreviations | `[2026-08-11] ERR disk write failed` | error | error |
+| Android logcat | `E/NetworkClient: Failed to reach api.example.com` | error | error |
+| Logback `%d [%thread] %level` | `17:04:22.123 [main] ERROR c.e.MyService - Failed to connect` | error | error |
+| RFC3164 syslog (documented gap) | `Aug 11 17:04:22 myhost myapp[1234]: ERROR Failed to connect to database` | null | null |
+| JSON-per-line | `{"level":"error","msg":"payment failed"}` | null | null |
+| logfmt | `time=2026-08-11T09:14:05Z level=error msg=timeout` | null | null |
+| Prose mentioning error | `User asked about a checkout error they saw yesterday.` | null | null |
+| Markdown TODO tag (round 3 fix) | `[TODO] ERROR handling needs review before ship.` | **error (bug)** | **null (fixed)** |
+
+Only the last row changed; every other row — including the Logback bracket case and all prose negative
+controls — is identical before/after, confirming Logback detection survived while the reopened prose class
+closed.
+
+**Full `src/docs/*.md` prose corpus check:** ran every non-blank line (3,859 lines across 54 files) through
+`detectLevel`. **1 false positive** — `## Error handling` (a markdown heading in `explorer-archives.md`),
+already filed as CPE-1655 — matching the independent UAT's baseline exactly (not higher).
+
+Verification: `npm run check` 0 errors/0 warnings; `npx vitest run` — 287 files / 3680 tests pass (up from
+3670 baseline; +10 net: +7 new round-3 regression tests, +1 replacing the single removed pid-bracket
+assertion with 2 (one null, one positive-control), no other regressions). `cargo clippy --all-targets -- -D
+warnings` clean in all three CI feature combos (base, `--features index`, `--features
+pdf-thumb,video-thumb,waveform,dicom-thumb`) in `crates/server`; `cargo test` in `crates/server` — 1940
+passed, 0 failed, 2 ignored (matches baseline exactly). No Rust files touched this round (JS/TS-only, same
+as every round of this ticket).
