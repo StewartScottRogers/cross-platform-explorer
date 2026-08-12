@@ -371,6 +371,23 @@ mod tests {
         //    instead of pronouncing on contents nobody read.
         let denied = dir.join("denied.txt");
         std::fs::write(&denied, b"readable text\n").unwrap();
+
+        // `allow_read` must run even when an assertion below panics, or a red run leaves a
+        // permanently unreadable file behind in the temp dir — and this repo *mandates* a red run
+        // for every guard, so the leak would be once per ticket per developer machine, not a rare
+        // event. The reviewer of PR #865 found three such orphans, two from this PR's own
+        // red/green cycle. A `Drop` guard is the only thing that survives an unwind, and it has to
+        // be armed **before** the assertions: a plain call after them never runs on the one path
+        // that actually leaks.
+        struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                allow_read(self.0);
+                let _ = std::fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&denied, &dir);
+
         if deny_read(&denied) {
             let resp = d.dispatch(&ctx, req("text_stats", json!({ "path": denied.to_string_lossy() })));
             match resp.result {
@@ -391,12 +408,29 @@ mod tests {
                 }
                 Ok(_) => panic!("text_stats on an unreadable file must error"),
             }
-            allow_read(&denied);
+        } else {
+            // A machine that cannot construct a denied path (elevated/root, or an ACL-less
+            // filesystem) is not evidence of a bug, so this leg skips rather than fails. But it
+            // **says so**, because leg 3 is the only leg that tests CPE-1678 at all — legs 1 and 2
+            // assert behaviour that predates this fix. If the denial ever silently stops working
+            // (CI moves to a root container, a runner image changes `icacls`, a filesystem stops
+            // honouring mode bits), a silent skip would leave this test passing while guarding
+            // nothing, and every board would stay green. Reviewer of PR #865 proved the failure
+            // mode by patching `deny_read` to return `false`: the run was byte-identical to a real
+            // one. Announcing the skip is the difference between "verified" and "did not check".
+            //
+            // Deliberately not a hard failure: see CPE-1680, which is about exactly this shape —
+            // an unknown quietly folded into the one bucket that means "safe to ignore". The rule
+            // there is that "I don't know" must red the run **or be reported loudly**; this is the
+            // second. Use `--nocapture` to see it, or read the CI log, which shows it unconditionally.
+            eprintln!(
+                "[CPE-1678] SKIPPED the read-failure leg: could not make {} unreadable-but-stattable \
+                 on this machine (elevated/root, or a filesystem ignoring ACLs and mode bits). \
+                 The remaining assertions do NOT cover CPE-1678.",
+                denied.display()
+            );
         }
-        // else: this machine cannot construct a denied path (elevated/root, or an ACL-less
-        // filesystem) — skip that leg rather than fail on it.
-
-        let _ = std::fs::remove_dir_all(&dir);
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     #[test]
