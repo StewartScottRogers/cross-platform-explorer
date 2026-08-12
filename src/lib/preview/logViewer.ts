@@ -57,6 +57,22 @@
  * preceding one, so an indented line still has to clear the same shape bar once its own whitespace is
  * stripped. The chain breaks the instant a line doesn't look like a continuation, so unrelated lines are
  * never swept in; see that function's doc comment for the exact shapes recognized.
+ *
+ * **One coherent detection model (CPE-1655/1656/1657).** The level-word path above and the continuation
+ * grouping above it are the "narrow, structural signal only" foundation both a WIDEN and a TIGHTEN pass
+ * build on without contradicting it: CPE-1655 widens {@link detectLevel} with a handful of additional
+ * *structurally unambiguous, line-start-anchored* shapes for real error/crash output that carries no level
+ * word at all (Python's `Traceback (most recent call last):`, Rust's `thread '...' panicked at ...` and
+ * `stack backtrace:`, Go's `panic: ...` and `goroutine N [...]:`, DISM's `[pid.tid] [0xHEXCODE]
+ * Func:(line):` status shape) plus a markdown-ATX-heading lead-in rejection; CPE-1657 tightens
+ * {@link TIMESTAMP_SHAPE_REGEX} from "any digit-separator-digit run" to a genuine ISO-date-or-clock-time
+ * shape, closing an adversarial gap in the bracket-corroboration gate without touching anything the widen
+ * pass added; CPE-1656 widens {@link groupContinuations}'s recognized frame shapes (Go, Rust, Ruby) and
+ * grants Python's own source-excerpt/caret body lines a narrow bounded allowance. Every new "headerless"
+ * shape stays inside the SAME safety bar the rest of the module already enforces — anchored, structural,
+ * never a bare word match — so the widen and tighten halves of this pass never fight each other: one
+ * makes the level-position rule recognize more genuine structural markers, the other makes an existing
+ * corroboration check actually correspond to what it claims to check for.
  */
 import { stripAnsi } from "./notebook";
 
