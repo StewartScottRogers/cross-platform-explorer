@@ -1012,6 +1012,78 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// **REV-G2 (reviewer, PR #840 round 1) — the probe and the WRITER must address the same files.**
+    /// Every write in this crate goes through `std::fs`, which applies Windows' `\\?\` verbatim prefix and
+    /// therefore reaches paths past `MAX_PATH`. A raw `CreateFileW` does not. When the identity probe was
+    /// a raw Win32 call on the unprefixed path, an over-`MAX_PATH` output failed to open with
+    /// `ERROR_PATH_NOT_FOUND`, which classified as "nothing is there" — so a planted symlink in a deep
+    /// folder was judged contained and the outside victim's bytes really were replaced, a case the
+    /// pre-CPE-1642 code refused correctly. Byte-proven end to end.
+    ///
+    /// Windows-only: `MAX_PATH` is the Windows limit, and Linux/macOS `symlink_metadata` has no such
+    /// truncation, so there is nothing to regress there.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_over_max_path_symlink_alias_is_refused_and_the_victim_bytes_are_untouched() {
+        let d = scratch("cpe1642-longpath");
+        // Pad the selected folder past MAX_PATH (260). `create_dir_all` gets there because std prefixes.
+        let mut deep = d.clone();
+        while deep.to_string_lossy().chars().count() < 300 {
+            deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
+        }
+        let selected = deep.join("selected");
+        let outside = deep.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        assert!(
+            selected.to_string_lossy().chars().count() > 260,
+            "sanity: the selected folder must sit past MAX_PATH or this test proves nothing (len {})",
+            selected.to_string_lossy().chars().count()
+        );
+
+        let victim = outside.join("important.jpg");
+        let victim_original = b"VICTIM ORIGINAL CONTENT - must survive a >MAX_PATH probe".to_vec();
+        fs::write(&victim, &victim_original).unwrap();
+
+        // A RELATIVE target, resolved against the link's own parent exactly as the OS does — which means
+        // the probe has to cope with a `..` segment inside an over-MAX_PATH path too.
+        let link_a = selected.join("linkA.jpg");
+        if crate::links::create_symlink("..\\outside\\important.jpg", &link_a.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPING cpe_1642_over_max_path_symlink_alias: could not create a symlink here \
+                 (Windows needs Developer Mode or elevation) — this test verified NOTHING"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let input = selected.join("photo.jpg");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: link_a.to_string_lossy().to_string(),
+            summary: "hand-built, aliasing a symlink inside an over-MAX_PATH folder".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        job.confirmed_overwrite = true;
+
+        let outcome = execute_plan(&items, &job);
+        // Byte-level proof FIRST, so a wrong-reason failure can't be mistaken for the right one.
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_original,
+            "the victim behind an over-MAX_PATH symlink must be byte-for-byte untouched"
+        );
+        let err = outcome.expect_err(
+            "a symlink alias inside an over-MAX_PATH folder must be refused — the probe must reach every \
+             path the writer reaches",
+        );
+        assert!(!err.is_empty(), "the refusal must carry a specific reason");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// **Refusal messages must state what is actually true (CPE-1642).** An output whose identity could
     /// not be established has NOT been shown to leave the folder — saying "would land outside its own
     /// input's folder" about it tells the user something false about their own files. A symlink cycle is

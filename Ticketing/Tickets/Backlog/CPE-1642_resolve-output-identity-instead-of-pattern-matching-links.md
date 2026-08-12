@@ -189,3 +189,122 @@ ticket's 209-219 ms baseline. `cargo clippy --all-targets -- -D warnings` clean 
 each write is therefore a genuine re-resolution, not a replay of the plan-time answer; CPE-1624 can add
 that call in `execute_one`/`execute_plan_walk` without touching this logic. ADS/colon handling is
 untouched and remains 1624's.
+
+---
+
+## Work Log — round 2 (reviewer CHANGES REQUESTED / SEC FINDINGS on PR #840)
+
+The independent reviewer + security auditor confirmed both original escapes (symlink chain, contended
+hard link) are genuinely closed, clippy clean in all three CI feature combos, 1930 tests green, perf
+budget held, no new dependency and no bindings drift — and found one **regression this PR introduced**
+plus one latent fail-open. Both are fixed here.
+
+### F1 (BLOCKER, a regression) — the probe stopped addressing the files the writer does
+
+`probe_no_follow` and `identity_following_links` called `CreateFileW` with the **raw** path
+(`path.as_os_str().encode_wide()`). Without a `longPathAware` manifest that call is capped at
+`MAX_PATH` (260). But every write in this crate goes through `std::fs`, which applies `maybe_verbatim`
+and therefore *does* reach longer paths. Round 1 replaced a verbatim-aware `std::fs::symlink_metadata`
+probe with a raw Win32 one, so the probe and the writer stopped addressing the same set of files.
+
+`CreateFileW` failed with `ERROR_PATH_NOT_FOUND` (3) → `io::ErrorKind::NotFound` →
+`classify_open_failure` → `Probe::Absent` → `Containment::Inside`. **It failed OPEN**, and made this
+case strictly worse than `main`: on base commit `42dfcdcd` the identical scenario was refused.
+
+Fixed in two layers:
+
+1. **`verbatim_wide` (`batch_media.rs`, new)** — a `std::sys::path::windows::maybe_verbatim`
+   equivalent, used by BOTH Windows probes. Because `\\?\` disables *all* kernel path normalisation, it
+   only ever prefixes a path that `GetFullPathNameW` has already made fully-qualified, `..`-free and
+   back-slash-separated, then picks the prefix by shape exactly as `std` does: `C:\…` ⇒ `\\?\C:\…`,
+   `\\.\…` ⇒ `\\?\…`, `\\server\share` ⇒ `\\?\UNC\server\share`, and an already-verbatim (`\\?\`) or NT
+   (`\??\`) path is returned untouched. `GetFullPathNameW` comes from the `Win32_Storage_FileSystem`
+   feature already enabled — **no new dependency**.
+   *Cost:* a path that is already verbatim, or shorter than `std`'s 248 `LEGACY_MAX_PATH` and not UNC,
+   returns after two slice comparisons and a length test — no syscall and no allocation beyond the
+   `Vec<u16>` the raw encoding already needed. The per-entry directory census pays nothing.
+2. **Belt and braces in `classify_open_failure`** — at or past `MAX_PATH`, `ERROR_PATH_NOT_FOUND` /
+   `ERROR_INVALID_NAME` / `ERROR_BAD_PATHNAME` / `ERROR_FILENAME_EXCED_RANGE` are exactly what a
+   *truncation* looks like, so they now classify `Unreadable` (which both callers refuse on) instead of
+   `Absent`. `ERROR_FILE_NOT_FOUND` — the ordinary "this output doesn't exist yet" answer, and the
+   overwhelmingly common one — is deliberately NOT in that set, so the common path costs nothing.
+
+`follow_link_chain` is unchanged on purpose: it keeps building `parent().join(target)` with the `..`
+segment intact and lets path resolution collapse it (`GetFullPathNameW` for long paths, the kernel for
+short ones), rather than collapsing lexically here — lexical `..` collapsing is wrong when an
+intermediate component is itself a link.
+
+### F2 (medium) — a degenerate identity was accepted as a valid one
+
+`GetFileInformationByHandle` is documented as not supplying a usable file index on several network
+redirectors: it *succeeds* and returns zero. Every object on such a volume then carries the same
+`(volume, index)`, so the landing-dir-vs-selected-dir comparison in `resolve_output_containment` and
+the census lookup in `real_target_containment` would judge any two unrelated directories "the same
+place" — a fail-open invisible from the call site, because the API reported success.
+
+`FileIdentity::is_degenerate` now rejects a zero in either half (zero is not a legal value on either
+platform: `ino`/`st_dev` 0 denote no file / no device on Unix; a zero file index or volume serial is
+Windows' "not supported here"). It is applied through two pure helpers, `facts_or_unreadable` (⇒
+`Probe::Unreadable`) and `identity_or_none` (⇒ `None`, which `dir_identity`'s callers already treat as
+a containment failure), on **both** platforms. Pure by design so the volume CI has no access to can be
+reproduced by injecting the degenerate value.
+
+### F5 — one weak assertion tightened
+
+`cpe_1642_hard_link_alias_is_still_refused_while_the_file_is_held_exclusively` asserted only
+`assert_ne!(verdict, Inside)`, which would pass even if the identity probe were entirely broken and
+answered `Unverifiable` for everything — so it did not actually prove the
+`FILE_READ_ATTRIBUTES`-beats-`share_mode(0)` mechanism the contended-hard-link fix rests on. Now
+`assert_eq!(verdict, Escapes)`, which is only reachable if the attribute open *succeeded* through the
+exclusive hold, read a real link count of 2, and censused the folder. Paired with a new positive
+control, `cpe_1642_contended_hard_links_wholly_inside_the_folder_are_still_allowed` — same exclusive
+holder, both names inside the folder, must still be `Inside`.
+
+### New coverage (7 tests; there was previously NO long-path or `\\?\` coverage at all)
+
+| Test | File | Guards |
+|------|------|--------|
+| `cpe_1642_over_max_path_symlink_alias_is_refused_and_the_victim_bytes_are_untouched` | `batch_execute` | REV-G2 end-to-end through `execute_plan`, byte-verified |
+| `cpe_1642_symlink_alias_past_max_path_is_a_proven_escape` | `batch_media` | the same mechanism at the containment-check level |
+| `cpe_1642_ordinary_absent_output_past_max_path_is_still_allowed` | `batch_media` | no false refusal of ordinary deep-folder batches |
+| `cpe_1642_verbatim_prefixed_paths_are_probed_not_re_prefixed` | `batch_media` | a `\\?\` path is neither mangled nor waved through (escape + positive control) |
+| `cpe_1642_degenerate_identity_is_never_accepted_as_a_real_one` | `batch_media` | F2, by injection |
+| `cpe_1642_a_real_directory_still_has_a_readable_identity` | `batch_media` | F2 guard doesn't reject real volumes |
+| `cpe_1642_contended_hard_links_wholly_inside_the_folder_are_still_allowed` | `batch_media` | F5 positive control |
+
+### Red-then-green, actually run
+
+The production hunks were reverted in place (probes back to the raw `encode_wide` path, the length
+guard removed, both degeneracy helpers made pass-through) with the new tests left in. **3 of the 7
+failed**, in the way the reviewer described:
+
+- `cpe_1642_over_max_path_…` — `left: [137, 80, 78, 71, …]` (a PNG) vs `right: [86, 73, 67, …]`
+  ("VICTIM ORIGINAL CONTENT …"): the victim's bytes really were replaced.
+- `cpe_1642_symlink_alias_past_max_path_is_a_proven_escape` — `left: Inside, right: Escapes`.
+- `cpe_1642_degenerate_identity_is_never_accepted_as_a_real_one` — "a degenerate identity must probe as
+  Unreadable …, not Real".
+
+The four controls (`verbatim_prefixed`, `ordinary_absent_output_past_max_path`,
+`contended_hard_links_wholly_inside`, `hard_link_alias_is_still_refused`) passed in both states, as they
+must — they are false-refusal and non-vacuity guards, not the red case. Sources restored: all 7 green.
+
+### Verification
+
+- `cargo clippy --all-targets -- -D warnings` clean in all three CI feature combos: default,
+  `--features index`, and `--features pdf-thumb,video-thumb,waveform,dicom-thumb`.
+- Full `cargo test` in `crates/server`: **1937 passed / 0 failed / 2 ignored** (1930 baseline + the 7
+  new tests), plus every integration target green.
+- `cargo test --release --lib -- --ignored cpe_1623_plan_timing_for_2000_files`: **198.0 / 202.9 /
+  210.9 / 215.5 / 229.4 ms** against the ticket's 209-219 ms baseline. (Interleaved control runs of the
+  *unmodified* branch tip on the same machine spanned 194-423 ms, so this benchmark's noise band is far
+  wider than any effect of the change — as expected, since `verbatim_wide`'s fast path adds two slice
+  comparisons per probe and no syscall.)
+- No new dependency (`GetFullPathNameW` is in the already-enabled `Win32_Storage_FileSystem`), no
+  `Cargo.toml`/`Cargo.lock` change, no `specta::Type` struct touched — no bindings regen needed.
+
+### Deliberately NOT fixed here (filed separately by the Foreman)
+
+- **F3** — name-surrogate reparse tags `std` does not call symlinks (the probe identifies the stub, the
+  write follows it).
+- **F4** — the census perf cliff (`plan()` and `execute_plan_walk` build separate `ParentCache`s, so up
+  to two full censuses).

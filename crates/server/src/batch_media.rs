@@ -686,6 +686,44 @@ struct FileIdentity {
     index: u128,
 }
 
+impl FileIdentity {
+    /// **An identity that identifies nothing (CPE-1642, reviewer finding F2).** `GetFileInformationByHandle`
+    /// is documented as not supplying a usable file index on several network redirectors — it *succeeds* and
+    /// hands back a zero index. Every object on such a volume would then carry the SAME identity, so the two
+    /// places that compare identities — the landing directory versus the selected directory in
+    /// [`resolve_output_containment`], and the census lookup in [`real_target_containment`] — would judge
+    /// every unrelated directory "the same place" and wave a symlink out of the folder straight through.
+    /// That is a fail-open the ticket's own rule forbids, and it is invisible from the call site because the
+    /// API reported success. Zero is not a legal value on either platform (`ino`/`st_dev` 0 denotes no file
+    /// / no device on Unix; a zero file index or volume serial is Windows' "not supported here"), so a zero
+    /// in either half means **identity unknown**, and every caller must refuse rather than compare it.
+    fn is_degenerate(self) -> bool {
+        self.volume == 0 || self.index == 0
+    }
+}
+
+/// Gate a freshly-probed [`FileFacts`] on [`FileIdentity::is_degenerate`]: an identity that identifies
+/// nothing is *unreadable*, never a real one. Pure, so the volume this defends against (which CI has no
+/// access to) can be reproduced in a unit test by injecting the degenerate value directly.
+fn facts_or_unreadable(facts: FileFacts) -> Probe {
+    if facts.id.is_degenerate() {
+        Probe::Unreadable
+    } else {
+        Probe::Real(facts)
+    }
+}
+
+/// The [`identity_following_links`] counterpart of [`facts_or_unreadable`] — `None` (which
+/// [`ParentCache::dir_identity`]'s callers already treat as a containment FAILURE) for a degenerate
+/// identity.
+fn identity_or_none(id: FileIdentity) -> Option<FileIdentity> {
+    if id.is_degenerate() {
+        None
+    } else {
+        Some(id)
+    }
+}
+
 /// What one identity probe of an existing path yields: who it is, how many names it has, and whether it
 /// is a directory.
 #[derive(Debug, Clone, Copy)]
@@ -879,7 +917,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
     use std::os::unix::fs::MetadataExt;
     match std::fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => Probe::Link,
-        Ok(meta) => Probe::Real(FileFacts {
+        Ok(meta) => facts_or_unreadable(FileFacts {
             id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
             links: meta.nlink(),
             is_dir: meta.is_dir(),
@@ -911,9 +949,14 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
 /// A reparse point that std does not consider a symlink (a cloud placeholder, a dedup stub) is reported as
 /// the real file it is, not as a link — those are ordinary files to every reader, and calling them links
 /// would strand ordinary batches in OneDrive-backed folders.
+///
+/// **The path handed to `CreateFileW` goes through [`verbatim_wide`] first (CPE-1642, reviewer finding
+/// REV-G/REV-G2).** Without it the probe and the writer address different sets of files: every write in
+/// this crate goes through `std::fs`, which applies the same `\\?\` transformation and therefore reaches
+/// past `MAX_PATH`, while a raw `CreateFileW` is capped at it. That mismatch made an over-`MAX_PATH` output
+/// fail to open with `ERROR_PATH_NOT_FOUND`, classify as [`Probe::Absent`], and fail OPEN.
 #[cfg(windows)]
 fn probe_no_follow(path: &std::path::Path) -> Probe {
-    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, GetLastError, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -922,7 +965,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide = verbatim_wide(path);
     // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. Attributes-only
     // open of an already-existing file (`OPEN_EXISTING`, full sharing) — no create/write/truncate side
     // effect, and no data access. The handle is closed on every path before returning.
@@ -937,7 +980,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
             HANDLE::default(),
         ) {
             Ok(h) => h,
-            Err(_) => return classify_open_failure(GetLastError().0),
+            Err(_) => return classify_open_failure(GetLastError().0, wide.len()),
         };
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
         let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
@@ -950,7 +993,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
         {
             return Probe::Link;
         }
-        Probe::Real(FileFacts {
+        facts_or_unreadable(FileFacts {
             id: FileIdentity {
                 volume: u64::from(info.dwVolumeSerialNumber),
                 index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
@@ -961,15 +1004,120 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
     }
 }
 
+/// **`std`'s `maybe_verbatim`, reimplemented (CPE-1642, reviewer finding REV-G).** Every write in this crate
+/// goes through `std::fs`, which runs each path through this same transformation before calling into Win32
+/// — so it reaches paths longer than `MAX_PATH`. The identity probe calls Win32 directly, and without the
+/// same transformation it is capped at `MAX_PATH` while the writer is not: the probe would report "nothing
+/// is here" for a file the writer could happily overwrite. The probe must address exactly the set of files
+/// the writer does, or the safety check is checking a different filesystem.
+///
+/// The `\\?\` prefix **disables all path normalisation** in the kernel, so it may only be applied to a path
+/// that is already fully-qualified, `.`/`..`-free and back-slash-separated. `GetFullPathNameW` produces
+/// exactly that; the prefix is then chosen by shape, mirroring `std`'s table:
+/// `C:\…` ⇒ `\\?\C:\…`, `\\.\…` ⇒ `\\?\…`, `\\server\share` ⇒ `\\?\UNC\server\share`, and an
+/// already-verbatim (`\\?\`) or NT (`\??\`) path is returned untouched.
+///
+/// **Cost:** a path already verbatim, or shorter than the legacy limit and not UNC, is returned after two
+/// slice comparisons and a length test — no syscall, no extra allocation beyond the `Vec<u16>` the raw
+/// encoding already required. The per-entry directory census therefore pays nothing for this.
+#[cfg(windows)]
+fn verbatim_wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetFullPathNameW;
+
+    const SEP: u16 = b'\\' as u16;
+    const ALT_SEP: u16 = b'/' as u16;
+    const QUERY: u16 = b'?' as u16;
+    const COLON: u16 = b':' as u16;
+    const DOT: u16 = b'.' as u16;
+    /// `\\?\`
+    const VERBATIM: &[u16] = &[SEP, SEP, QUERY, SEP];
+    /// `\??\`
+    const NT: &[u16] = &[SEP, QUERY, QUERY, SEP];
+    /// `\\?\UNC\`
+    const UNC: &[u16] = &[SEP, SEP, QUERY, SEP, b'U' as u16, b'N' as u16, b'C' as u16, SEP];
+    /// `CreateDirectoryW`'s 248, the tighter of the two Windows limits — the same number `std` uses, so the
+    /// probe switches to the verbatim form no later than the writer does.
+    const LEGACY_MAX_PATH: usize = 248;
+
+    let raw: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    if raw.starts_with(VERBATIM) || raw.starts_with(NT) || raw.len() <= 1 {
+        return raw;
+    }
+    if raw.len() < LEGACY_MAX_PATH && !matches!(raw.as_slice(), [SEP | ALT_SEP, SEP | ALT_SEP, ..]) {
+        return raw;
+    }
+
+    // Fully qualify first — the verbatim prefix would otherwise freeze a relative path, a `/`, or a `..`
+    // segment into a name the filesystem cannot resolve.
+    let mut buf = vec![0u16; raw.len().max(LEGACY_MAX_PATH) + 64];
+    loop {
+        // SAFETY: `raw` is NUL-terminated and outlives the call; `buf` is a live, correctly-sized slice.
+        let n = unsafe { GetFullPathNameW(PCWSTR(raw.as_ptr()), Some(&mut buf), None) } as usize;
+        if n == 0 {
+            // Couldn't qualify it; hand back the raw form. `classify_open_failure`'s length guard then
+            // refuses to read a MAX_PATH truncation failure as "nothing is there".
+            return raw;
+        }
+        if n < buf.len() {
+            buf.truncate(n);
+            break;
+        }
+        buf = vec![0u16; n + 1];
+    }
+
+    let (prefix, body): (&[u16], &[u16]) = match buf.as_slice() {
+        // `C:\…` — a drive-rooted path.
+        [_, COLON, SEP, ..] => (VERBATIM, &buf[..]),
+        // `\\.\…` — a device path; `\\?\` is the same namespace without normalisation.
+        [SEP, SEP, DOT, SEP, ..] => (VERBATIM, &buf[4..]),
+        // Already verbatim / NT — leave alone.
+        [SEP, SEP, QUERY, SEP, ..] | [SEP, QUERY, QUERY, SEP, ..] => (&[], &buf[..]),
+        // `\\server\share\…` — the UNC spelling drops the leading `\\`.
+        [SEP, SEP, ..] => (UNC, &buf[2..]),
+        // Anything else (a rooted-but-driveless path, say) gains nothing from the prefix.
+        _ => (&[], &buf[..]),
+    };
+    let mut out = Vec::with_capacity(prefix.len() + body.len() + 1);
+    out.extend_from_slice(prefix);
+    out.extend_from_slice(body);
+    out.push(0);
+    out
+}
+
 /// Split a failed Windows open into "nothing is there" versus "something is there and I couldn't read
 /// it". Only codes that mean the path names nothing at all may become [`Probe::Absent`]; `std`'s own error
 /// classification covers the not-found family, and the malformed-path codes are listed explicitly because
 /// a name the filesystem rejects outright can never denote an existing file either.
+///
+/// **Belt and braces for the `MAX_PATH` mismatch (CPE-1642, reviewer finding REV-G).** [`verbatim_wide`]
+/// is what keeps the probe and the writer addressing the same files; this is the second line of defence for
+/// when it cannot (a `GetFullPathNameW` that fails, a shape its table leaves unprefixed). At or past
+/// `MAX_PATH`, a "path not found"/"invalid name" is exactly what a *truncation* looks like, and the one
+/// thing it must never be read as is "nothing is there" — so at that length those codes are
+/// [`Probe::Unreadable`], which both callers refuse on. `ERROR_FILE_NOT_FOUND` (the ordinary "this output
+/// doesn't exist yet" answer, and the overwhelmingly common one) is deliberately NOT in that set, so the
+/// common path costs nothing.
 #[cfg(windows)]
-fn classify_open_failure(code: u32) -> Probe {
+fn classify_open_failure(code: u32, wide_len: usize) -> Probe {
     const ERROR_INVALID_NAME: u32 = 123;
     const ERROR_BAD_PATHNAME: u32 = 161;
+    const ERROR_FILENAME_EXCED_RANGE: u32 = 206;
     const ERROR_DIRECTORY: u32 = 267;
+    const ERROR_PATH_NOT_FOUND: u32 = 3;
+    /// Windows' unprefixed path limit, NUL included.
+    const MAX_PATH: usize = 260;
+
+    if wide_len >= MAX_PATH
+        && matches!(
+            code,
+            ERROR_PATH_NOT_FOUND | ERROR_INVALID_NAME | ERROR_BAD_PATHNAME | ERROR_FILENAME_EXCED_RANGE
+        )
+    {
+        return Probe::Unreadable;
+    }
+
     let kind = std::io::Error::from_raw_os_error(code as i32).kind();
     if kind == std::io::ErrorKind::NotFound
         || matches!(code, ERROR_INVALID_NAME | ERROR_BAD_PATHNAME | ERROR_DIRECTORY)
@@ -999,12 +1147,14 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
 fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(path).ok()?;
-    Some(FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) })
+    identity_or_none(FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) })
 }
 
+/// Windows counterpart. Uses [`verbatim_wide`] for the same reason [`probe_no_follow`] does — the selected
+/// folder and a resolved chain's landing folder can both sit past `MAX_PATH`, and a directory this could not
+/// open would be reported as "identity unknown", which refuses the whole batch (CPE-1642 REV-G).
 #[cfg(windows)]
 fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{CloseHandle, HANDLE};
     use windows::Win32::Storage::FileSystem::{
@@ -1012,7 +1162,7 @@ fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
         FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
     };
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide = verbatim_wide(path);
     // SAFETY: as `probe_no_follow` — attributes-only `OPEN_EXISTING` open of a NUL-terminated path kept
     // alive for the call, handle closed on every path. No `FILE_FLAG_OPEN_REPARSE_POINT` here: this one
     // deliberately follows links to identify the real directory.
@@ -1033,7 +1183,7 @@ fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
         if !ok {
             return None;
         }
-        Some(FileIdentity {
+        identity_or_none(FileIdentity {
             volume: u64::from(info.dwVolumeSerialNumber),
             index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
         })
@@ -1913,11 +2063,57 @@ mod tests {
         let output = link.to_string_lossy().to_string();
         let mut cache = ParentCache::new();
         let verdict = classify_output_containment(&input, &output, &mut cache);
-        assert_ne!(
+        // `assert_eq!(…, Escapes)`, not `assert_ne!(…, Inside)` (reviewer finding F5): the weaker form
+        // would pass even if the identity probe were entirely broken and answered `Unverifiable` for
+        // everything, which is exactly the mechanism this test exists to prove. Reaching `Escapes` requires
+        // the `FILE_READ_ATTRIBUTES` open to have SUCCEEDED against the `share_mode(0)` holder, read a real
+        // link count of 2, and censused the folder to find only one of those names inside it.
+        assert_eq!(
             verdict,
+            Containment::Escapes,
+            "a hard link to a file outside the selected folder must be a PROVEN escape even while the file \
+             is held exclusively — a contended read must never be treated as \"not linked\", and must not \
+             degrade to merely \"unverifiable\" either"
+        );
+        drop(hold);
+    }
+
+    /// **The positive control for the test above (reviewer finding F5).** Same exclusive `share_mode(0)`
+    /// holder, but both hard-linked names live INSIDE the selected folder. It must still come back
+    /// `Inside` — proving the contended case above reaches `Escapes` because the probe genuinely read the
+    /// file's identity through the contention, not because contention refuses everything.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_contended_hard_links_wholly_inside_the_folder_are_still_allowed() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let dir = scratch("cpe1642-contended-inside");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let first = selected.join("a.jpg");
+        std::fs::write(&first, b"data").unwrap();
+        let second = selected.join("b.jpg");
+        crate::links::create_hard_link(&first.to_string_lossy(), &second.to_string_lossy())
+            .expect("hard link creation needs no elevation on any platform");
+
+        let hold = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&first)
+            .expect("holding an exclusive handle needs no privilege");
+        assert!(
+            std::fs::OpenOptions::new().read(true).open(&first).is_err(),
+            "sanity: the exclusive hold must actually block an ordinary GENERIC_READ open"
+        );
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = first.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
             Containment::Inside,
-            "a hard link to a file outside the selected folder must stay refused while the file is held \
-             exclusively — a contended read must never be treated as \"not linked\""
+            "contention alone must not refuse a file whose every name is inside the selected folder — \
+             otherwise the contended-escape test above passes vacuously"
         );
         drop(hold);
     }
@@ -1972,6 +2168,186 @@ mod tests {
             Containment::Escapes,
             "a hard link with a name outside the selected folder is a PROVEN escape, not merely unverified"
         );
+    }
+
+    // ---- CPE-1642 round 2 (reviewer findings REV-G / F1, F2): the probe must address the SAME set of -----
+    // ---- files the writer does, and an identity that identifies nothing is not an identity -------------
+
+    /// **REV-G — over-`MAX_PATH` output, at the containment-check level.** The end-to-end, byte-proven
+    /// version of this lives in `batch_execute` (`cpe_1642_over_max_path_symlink_alias_…`); this is the
+    /// fast unit-level guard on the same mechanism. Before the fix `CreateFileW` on the raw path failed
+    /// with `ERROR_PATH_NOT_FOUND`, which became `Probe::Absent` and therefore `Containment::Inside` — a
+    /// fail-open, and strictly worse than the code CPE-1642 replaced. Windows-only: `MAX_PATH` is a Windows
+    /// limit and `symlink_metadata` on Unix has no equivalent truncation.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_symlink_alias_past_max_path_is_a_proven_escape() {
+        let dir = scratch("cpe1642-longpath-unit");
+        let mut deep = dir.path().to_path_buf();
+        while deep.to_string_lossy().chars().count() < 300 {
+            deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
+        }
+        let selected = deep.join("selected");
+        let outside = deep.join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        assert!(
+            selected.to_string_lossy().chars().count() > 260,
+            "sanity: the selected folder must sit past MAX_PATH or this test proves nothing"
+        );
+
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        // A RELATIVE target, resolved against the link's own parent exactly as the OS does — which also
+        // means the probe has to cope with a `..` segment inside an over-MAX_PATH path.
+        let link = selected.join("linkA.jpg");
+        let target = std::path::Path::new("..").join("outside").join("important.jpg");
+        if !try_symlink(&target, &link, "cpe_1642_symlink_alias_past_max_path_is_a_proven_escape") {
+            return;
+        }
+
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = link.to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Escapes,
+            "a symlink out of an over-MAX_PATH folder must be a PROVEN escape — the identity probe has to \
+             reach every path `std::fs` (and therefore the writer) reaches"
+        );
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **An over-`MAX_PATH` output that is an ordinary, absent file must still be ALLOWED.** Without this,
+    /// the test above could pass by refusing every long path, and every legitimate deep-folder batch would
+    /// break. Also pins the belt-and-braces length guard in `classify_open_failure` to the codes that
+    /// actually mean truncation: a plain `ERROR_FILE_NOT_FOUND` at any length is still `Absent`.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_ordinary_absent_output_past_max_path_is_still_allowed() {
+        let dir = scratch("cpe1642-longpath-ok");
+        let mut deep = dir.path().to_path_buf();
+        while deep.to_string_lossy().chars().count() < 300 {
+            deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let input = deep.join("photo.jpg");
+        std::fs::write(&input, b"x").unwrap();
+        let output = deep.join("photo-800.jpg"); // does not exist yet — the overwhelmingly common case
+
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(
+                &input.to_string_lossy(),
+                &output.to_string_lossy(),
+                &mut cache
+            ),
+            Containment::Inside,
+            "an ordinary not-yet-existing output in a deep folder must not be refused"
+        );
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **A path handed in already in `\\?\` verbatim form.** `std::fs` returns such paths untouched, so the
+    /// probe must too — re-prefixing would produce `\\?\\\?\C:\…`, which names nothing, and (with the
+    /// length guard) would refuse every deep batch. `canonicalize` is the ordinary way one of these reaches
+    /// the engine. The symlink still has to be caught: the verbatim spelling must change nothing about the
+    /// verdict. There was no `\\?\` coverage in this module at all before.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1642_verbatim_prefixed_paths_are_probed_not_re_prefixed() {
+        let dir = scratch("cpe1642-verbatim");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let victim = outside.join("important.jpg");
+        std::fs::write(&victim, b"victim").unwrap();
+        let link = selected.join("linkA.jpg");
+        if !try_symlink(&victim, &link, "cpe_1642_verbatim_prefixed_paths_are_probed_not_re_prefixed") {
+            return;
+        }
+
+        // `canonicalize` hands back the `\\?\`-prefixed spelling on Windows.
+        let canon_selected = std::fs::canonicalize(&selected).unwrap();
+        assert!(
+            canon_selected.to_string_lossy().starts_with("\\\\?\\"),
+            "sanity: this test needs a verbatim path, got {}",
+            canon_selected.display()
+        );
+        let input = canon_selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = canon_selected.join("linkA.jpg").to_string_lossy().to_string();
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Escapes,
+            "a symlink out of the folder must be caught just the same when the paths arrive in \\\\?\\ form"
+        );
+
+        // Positive control: an ordinary absent output in verbatim form must still be allowed, so the
+        // assertion above can't be passing because verbatim paths are simply never openable.
+        let plain = canon_selected.join("photo-800.jpg").to_string_lossy().to_string();
+        assert_eq!(
+            classify_output_containment(&input, &plain, &mut cache),
+            Containment::Inside,
+            "an ordinary not-yet-existing output must not be refused just for arriving in \\\\?\\ form"
+        );
+    }
+
+    /// **F2 — a degenerate identity is not an identity.** `GetFileInformationByHandle` *succeeds* on
+    /// several network redirectors while supplying no usable file index: it returns zero. Every object on
+    /// such a volume would then compare EQUAL, so the landing-directory-versus-selected-directory test
+    /// would pass for any directory anywhere and a symlink out of the folder would be judged contained —
+    /// a fail-open invisible from the call site, because the API said "OK".
+    ///
+    /// Injected rather than reproduced: no such volume is available to CI (or to the reviewer), and the
+    /// guard is a property of the values, not of the syscall.
+    #[test]
+    fn cpe_1642_degenerate_identity_is_never_accepted_as_a_real_one() {
+        let real = FileIdentity { volume: 0x9ABC_DEF0, index: 42 };
+        let no_index = FileIdentity { volume: 0x9ABC_DEF0, index: 0 };
+        let other_no_index = FileIdentity { volume: 0x9ABC_DEF0, index: 7_000 - 7_000 };
+        let no_volume = FileIdentity { volume: 0, index: 42 };
+
+        // The trap itself: without the guard, two *unrelated* objects on an index-less volume are equal.
+        assert_eq!(
+            no_index, other_no_index,
+            "sanity: on a volume with no file index every object carries the same identity — that is \
+             exactly why a zero index must never be compared"
+        );
+
+        assert!(!real.is_degenerate(), "an ordinary identity must keep working");
+        assert!(no_index.is_degenerate(), "a zero file index identifies nothing");
+        assert!(no_volume.is_degenerate(), "a zero volume serial identifies nothing");
+
+        let facts = |id| FileFacts { id, links: 1, is_dir: true };
+        assert!(
+            matches!(facts_or_unreadable(facts(real)), Probe::Real(_)),
+            "a real identity must probe as Real"
+        );
+        for bad in [no_index, no_volume] {
+            assert!(
+                matches!(facts_or_unreadable(facts(bad)), Probe::Unreadable),
+                "a degenerate identity must probe as Unreadable (which every caller refuses on), not Real"
+            );
+            assert_eq!(
+                identity_or_none(bad),
+                None,
+                "a degenerate directory identity must be None — `dir_identity`'s callers treat None as a \
+                 containment failure, so nothing can compare equal to it"
+            );
+        }
+        assert_eq!(identity_or_none(real), Some(real));
+    }
+
+    /// The degeneracy guard has to leave the ordinary case alone: a real directory on a real volume must
+    /// still yield an identity, or every batch on this machine would be refused.
+    #[test]
+    fn cpe_1642_a_real_directory_still_has_a_readable_identity() {
+        let dir = scratch("cpe1642-real-identity");
+        let id = identity_following_links(dir.path())
+            .expect("an ordinary local directory must still resolve to a usable identity");
+        assert!(!id.is_degenerate(), "a real local directory must not look degenerate: {id:?}");
     }
 
     /// Manual-only timing measurement (CPE-1623 follow-up to the CPE-1613 perf fix): `#[ignore]`d so it
