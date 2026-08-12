@@ -460,7 +460,7 @@ pub(crate) fn canonicalize_call_count() -> usize {
 /// canonical **directory** (never a bare filename), so it hashes/compares cheaply and consistently
 /// regardless of which tier produced it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum PathKey {
+pub(crate) enum PathKey {
     /// Either the path itself resolved on disk (canonicalized, then split into its parent + final
     /// component — following symlinks/junctions and case-insensitive/NFC-NFD lookups for free), or only
     /// its parent directory resolved and the final component is compared as literal, case-folded text.
@@ -579,7 +579,12 @@ impl ParentCache {
 ///    fall back to a purely lexical, filesystem-free comparison ([`lexical_normalize`]), still case-folded
 ///    per platform. Doesn't catch symlinks/junctions or macOS NFC/NFD (those need real files to resolve),
 ///    but does catch case, separator, and `.`/`..` variants.
-fn path_key(path: &str, parent_cache: &mut ParentCache) -> PathKey {
+///
+/// `pub(crate)` (not just this module's own tests, as of CPE-1667): [`crate::batch_execute`] builds a
+/// `HashSet<PathKey>` of a batch's own inputs once per batch and probes it with this fn directly — an
+/// O(1) membership test instead of the O(n) pairwise [`same_file`] scan `is_foreign_overwrite` used to
+/// run, which sat *inside* [`crate::batch_execute::execute_one`]'s verify-to-write window.
+pub(crate) fn path_key(path: &str, parent_cache: &mut ParentCache) -> PathKey {
     // CPE-1624 finding B: `X.JPG:hidden` and `X.JPG` are one file on disk (the same MFT record), so they
     // must key identically. Stripped once, up front, so every tier below — canonicalize, parent+name, and
     // the purely lexical fallback — sees the underlying file. No-op off Windows.
@@ -1587,9 +1592,34 @@ fn identity_following_links(_path: &std::path::Path) -> Option<FileIdentity> {
 /// **What this closes, and what it does not.** The link-swap and name-substitution classes are closed
 /// outright: after step 1 the name is taken, so a later `hard_link`/`symlink` at it simply fails. The
 /// residual is one irreducible race: an attacker adding a *new outside name* for the very object we hold
-/// between step 3's link-count read and step 4's write. That window is two syscalls wide (microseconds,
-/// measured below) versus the 528 ms the audit exploited, and closing it entirely would need filesystem
-/// locking the platforms do not offer for this case. It is stated here rather than papered over.
+/// between step 3's link-count read and step 4's write, versus the 528 ms the audit exploited. Closing it
+/// entirely would need filesystem locking the platforms do not offer for this case, so it is stated here
+/// rather than papered over — and, per CPE-1667, stated with numbers actually measured on both of the two
+/// paths through this window, not a single figure asserted for both.
+///
+/// **All figures below are `--release` measurements.** Under `cargo test` — what CI runs, and what a
+/// reader re-running these tests will see — the same two tests print **491.8 ms transform / 207,700 ns
+/// window** and **534.4 ms / 566,400 ns**, because a debug build's image transform is roughly 12x slower.
+/// The conclusions hold in both profiles (both windows are hundreds of microseconds; neither branch is
+/// decisively the wider one), but do not be surprised when the printed numbers do not match these
+/// (PR #856 review). The `canonicalize` **counts** are profile-independent and are the durable figures.
+///
+/// - **`created == true`** (the output did not exist — no foreign-overwrite question to ask): a handful
+///   of syscalls, genuinely microseconds. Measured here: **224,400 ns** for a single 2000×2000-pixel item
+///   against a 39.8 ms transform. (The security audit measured 174,600 ns / 97,100 ns — single item /
+///   400-item batch — against a 445.6 ms transform on its own machine; different hardware, same order of
+///   magnitude.)
+/// - **`!created`** (something already occupied the name, so `is_foreign_overwrite` — "is that something
+///   one of this batch's own selected inputs?" — runs *inside* this window before the write). Before
+///   CPE-1667 this scanned the batch's inputs pairwise with [`same_file`], `O(n)` per check, so THIS
+///   branch's window scaled with batch size rather than being "two syscalls" — measured directly, on a
+///   300-item batch with the matching input placed at the far end (the linear scan's worst case): **18.6
+///   ms** (898 `canonicalize` calls) on unmodified `main`. CPE-1667 replaced the scan with a single lookup
+///   into a `HashSet<PathKey>` of the batch's own inputs, built once outside this window
+///   ([`crate::batch_execute`]'s `input_path_keys`): the same 300-item worst case now measures **434,000
+///   ns** (3 `canonicalize` calls) — batch-size-independent, and the same order of magnitude as
+///   `created == true` above rather than orders of magnitude wider. Neither branch is decisively the
+///   wider one now.
 pub(crate) struct VerifiedOutput {
     file: std::fs::File,
     /// True when *this* call created the file, so a later refusal knows the empty file is ours to remove
@@ -1608,11 +1638,29 @@ impl VerifiedOutput {
     /// Truncate and write. Separate from opening so the caller can apply its own last checks (the
     /// foreign-overwrite question, which needs the batch's own item list) between verification and the
     /// first destructive byte.
-    pub(crate) fn write_all(mut self, bytes: &[u8]) -> Result<(), String> {
+    ///
+    /// **Cleans up on failure, same as [`Self::abandon`] (CPE-1667).** If `set_len`/`write_all`/`flush`
+    /// itself errors — a genuine disk I/O fault (disk full, device yanked mid-write, quota hit), never an
+    /// adversarial path, since every attacker-controllable rejection already returned before any byte was
+    /// touched — the file this call created would otherwise be left behind empty or holding a partial
+    /// write. `path` is the same string the caller already has: this struct deliberately holds no path of
+    /// its own (see the struct doc for why identity is decided on the handle, never a name), so the caller
+    /// passes it through exactly as it does for [`Self::abandon`].
+    pub(crate) fn write_all(mut self, bytes: &[u8], path: &str) -> Result<(), String> {
         use std::io::Write;
-        self.file.set_len(0).map_err(|e| format!("could not truncate output: {e}"))?;
-        self.file.write_all(bytes).map_err(|e| format!("could not write output: {e}"))?;
-        self.file.flush().map_err(|e| format!("could not flush output: {e}"))
+        let result = self
+            .file
+            .set_len(0)
+            .map_err(|e| format!("could not truncate output: {e}"))
+            .and_then(|()| {
+                self.file.write_all(bytes).map_err(|e| format!("could not write output: {e}"))
+            })
+            .and_then(|()| self.file.flush().map_err(|e| format!("could not flush output: {e}")));
+        if result.is_err() && self.created {
+            drop(self.file);
+            let _ = std::fs::remove_file(path);
+        }
+        result
     }
 
     /// Give up without writing, removing the file **only** if this call created it.
@@ -1685,7 +1733,8 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
         verified.abandon(output);
         return Err(format!(
             "refusing at write time: \"{output}\" is a link, and a batch never writes through one — a \
-             link's target can be re-pointed after any check. Nothing was written for this file"
+             link's target can be re-pointed after any check, even a dangling link that happens to point \
+             back inside this same folder. Nothing was written for this file"
         ));
     }
 
@@ -3731,6 +3780,53 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir.path());
     }
 
+    /// **CPE-1667.** The belt-and-braces symlink refusal covers the attack case fine ("…is a link, and a
+    /// batch never writes through one — a link's target can be re-pointed after any check"), but says
+    /// nothing to a DIFFERENT, non-adversarial user: someone who left behind a **dangling** symlink that
+    /// happens to point back inside their OWN selected folder. That case used to be allowed (nothing
+    /// existed at the name, so `create_new` just created a fresh file there) and is now refused along with
+    /// every other link — correctly, but silently, as if it were the same attack. The message must name
+    /// that case, not just recite reasoning that doesn't apply to it.
+    ///
+    /// `#[cfg(windows)]`: `O_NOFOLLOW` on Unix makes the *open itself* fail on any symlink final
+    /// component — dangling or not — before this belt-and-braces `symlink_metadata` check is ever reached
+    /// (see [`open_output_verified`]'s own comment on that check, "for a platform that ignores the
+    /// no-follow flag"). This exact message is therefore only reachable in practice on Windows, where
+    /// `FILE_FLAG_OPEN_REPARSE_POINT` opens the reparse point object itself rather than erroring.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1667_the_symlink_refusal_names_the_dangling_inside_the_folder_case() {
+        let dir = scratch("cpe1667-symlink-message");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let input = selected.join("photo.png");
+        std::fs::write(&input, b"input bytes").unwrap();
+
+        // A dangling link whose target path is back INSIDE this same folder — the harmless, user-caused
+        // case the message must acknowledge, not the attack case above.
+        let dangling_target = selected.join("does-not-exist.png");
+        let link = selected.join("out.png");
+        if !try_symlink(
+            &dangling_target,
+            &link,
+            "cpe_1667_the_symlink_refusal_names_the_dangling_inside_the_folder_case",
+        ) {
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        let err = open_output_verified(&input.to_string_lossy(), &link.to_string_lossy())
+            .err()
+            .expect("a dangling symlink at the output must still be refused, never created through");
+        assert!(
+            err.contains("dangling"),
+            "the refusal must name the dangling-inside-the-folder case, not just recite the attack \
+             reasoning: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
     /// A refusal must leave no litter: when the verification creates the output and then refuses, it
     /// removes the empty file it made — but it must never remove a file it did NOT create.
     #[test]
@@ -3760,6 +3856,77 @@ mod tests {
             std::fs::read(&existing).unwrap(),
             existing_bytes,
             "abandoning must never remove or truncate a file this call did not create"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **CPE-1667.** `write_all` used to have no cleanup on failure: if `set_len`/`write_all`/`flush`
+    /// itself errored on a file THIS call created — a genuine disk I/O fault, never any of the adversarial
+    /// paths above (those are all refused before a single byte is touched) — the empty or
+    /// partially-written file was left on disk. Injects a real, deterministic, cross-platform I/O failure
+    /// rather than trying to fill a disk (which the UAT could not force): open a *second*, read-only
+    /// handle to the freshly-created output and hand THAT to `VerifiedOutput` in place of the writable one
+    /// `open_output_verified` would have produced. Every one of `set_len`/`write_all`/`flush` needs write
+    /// access, so the very first of them fails — on every platform, no `libc`/OS-specific trick needed —
+    /// and the cleanup path is exercised for real, not simulated.
+    #[test]
+    fn cpe_1667_write_all_removes_a_file_it_created_when_the_write_itself_fails() {
+        let dir = scratch("cpe1667-write-fail-cleanup");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let output = selected.join("out.png");
+        let output_s = output.to_string_lossy().to_string();
+
+        // Claim the name exactly like `open_output_verified` itself would, so `created` is genuinely true.
+        std::fs::OpenOptions::new().write(true).create_new(true).open(&output).unwrap();
+        assert!(output.exists(), "sanity: the file exists before the injected failure");
+
+        let readonly = std::fs::OpenOptions::new().read(true).open(&output).unwrap();
+        let verified = VerifiedOutput { file: readonly, created: true };
+
+        let err = verified
+            .write_all(b"whatever bytes would have gone here", &output_s)
+            .expect_err("a handle opened with no write access must fail the very first step (set_len) — \
+                         this test verifies NOTHING if it doesn't");
+        println!("CPE-1667 injected write failure: {err}");
+
+        assert!(
+            !output.exists(),
+            "CPE-1667: a write that fails on a file THIS call created must leave nothing behind — \
+             {output:?} is still on disk"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// **CPE-1667 companion.** The failure-cleanup test above only proves cleanup happens for a file THIS
+    /// call created. `abandon`'s own rule — never touch a file we did NOT create — must hold for a failed
+    /// `write_all` too, or a disk fault on someone else's pre-existing output would delete their file
+    /// instead of just failing the write.
+    #[test]
+    fn cpe_1667_write_all_never_removes_a_pre_existing_file_when_the_write_fails() {
+        let dir = scratch("cpe1667-write-fail-preexisting");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let output = selected.join("existing.png");
+        let original_bytes = b"someone else's bytes, already on disk".to_vec();
+        std::fs::write(&output, &original_bytes).unwrap();
+        let output_s = output.to_string_lossy().to_string();
+
+        let readonly = std::fs::OpenOptions::new().read(true).open(&output).unwrap();
+        let verified = VerifiedOutput { file: readonly, created: false };
+
+        let err = verified
+            .write_all(b"an attacker or a bug should not be able to blank this out", &output_s)
+            .expect_err("the read-only handle must still fail the write");
+        println!("CPE-1667 injected write failure (pre-existing file): {err}");
+
+        assert!(output.exists(), "the pre-existing file must not be deleted just because its write failed");
+        assert_eq!(
+            std::fs::read(&output).unwrap(),
+            original_bytes,
+            "a failed write on a file we did NOT create must leave its original bytes untouched"
         );
 
         let _ = std::fs::remove_dir_all(dir.path());

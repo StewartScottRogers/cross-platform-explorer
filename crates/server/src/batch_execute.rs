@@ -82,7 +82,8 @@ use std::fs;
 use std::path::Path;
 
 use crate::batch_media::{
-    classify_output_containment, same_file, BatchJob, Containment, ParentCache, PlannedItem,
+    classify_output_containment, path_key, same_file, BatchJob, Containment, ParentCache, PathKey,
+    PlannedItem,
 };
 use crate::batch_transform;
 use crate::model::OpResult;
@@ -96,13 +97,50 @@ pub struct BatchReport {
     pub skipped: Vec<(String /* input */, String /* why */)>,
 }
 
+/// The batch's own input identities, computed **once per batch** — the "against what" side of
+/// [`is_foreign_overwrite`]'s foreign-file question, as a `HashSet<PathKey>` rather than the
+/// `&[PlannedItem]` slice it used to take (CPE-1667).
+///
+/// **Why this exists.** `is_foreign_overwrite` used to answer "is the output one of this batch's own
+/// inputs?" by scanning `items` pairwise with [`same_file`] — `O(n)` [`same_file`] calls per item, each
+/// building its own throwaway `ParentCache` and paying up to two `canonicalize` syscalls, so the whole
+/// question cost `O(n)` *per item checked*. Called from [`execute_one`], that scan ran **inside** the
+/// verify-to-write window ([`crate::batch_media::VerifiedOutput`]'s doc), so a bigger batch meant a wider
+/// window on every one of its own items — the opposite of what a security-critical window wants. Building
+/// the set once, up front (outside any window: nothing has been opened or written yet), turns each
+/// in-window check into a single `HashSet` lookup — `O(1)` regardless of batch size.
+///
+/// **Where these keys are CONSUMED, and why a stale memo is acceptable here — read this before reusing
+/// the pattern (PR #856 review).** This file's whole history is memo-staleness findings, and
+/// [`crate::batch_media::ParentCache`]'s own doc codifies the opposing rule: *the write-time authority
+/// builds its own cache, per item, and never receives one*. This set breaks that rule deliberately, so the
+/// reasoning is recorded rather than left in a reviewer's head. Item 300 consults keys computed ~n
+/// transforms earlier — but the set only ever answers "was this name one of the batch's **own inputs**",
+/// which is a question about the *batch*, not about what is on disk right now; the in-place arm is still
+/// computed fresh at write time; and `open_output_verified` re-checks links, reparse tags, containment and
+/// link count on a fresh cache **before** this is consulted. The only reach an attacker gains over the old
+/// code is that having transiently aliased a batch input onto an in-folder victim, they may now revert the
+/// alias instead of having to leave it in place. A future change that makes this set answer anything about
+/// current on-disk state must move it back inside the per-item authority.
+///
+/// See
+/// `cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_canonicalize_calls_regardless_of_batch_size`
+/// (deterministic) and `cpe_1667_the_not_created_branch_window_stays_narrow_across_a_chained_batch`
+/// (wall-clock) for the measurement.
+fn input_path_keys(items: &[PlannedItem]) -> std::collections::HashSet<PathKey> {
+    let mut cache = ParentCache::new();
+    items.iter().map(|it| path_key(&it.input, &mut cache)).collect()
+}
+
 /// True when `item`'s planned write would replace bytes belonging to a file that was never submitted as
-/// one of `items`' own inputs — the original CPE-1613 in-place case (`item.output` is [`same_file`] as
+/// one of the batch's own inputs — the original CPE-1613 in-place case (`item.output` is [`same_file`] as
 /// `item.input`), OR (CPE-1623) `item.output` resolves onto some OTHER real, pre-existing file that isn't
 /// any input in this batch. The second check is gated behind a plain `Path::is_file()` stat — cheap, and
 /// false for the overwhelmingly common case (a freshly-computed non-destructive name that doesn't exist
-/// yet) — so only a genuine collision pays for the `O(n)` [`same_file`] scan over the batch's own inputs.
-fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
+/// yet) — so only a genuine collision pays for the [`path_key`]/`HashSet` lookup, and even that lookup is
+/// `O(1)` against `input_keys` (CPE-1667; see [`input_path_keys`]), not the `O(n)` pairwise scan this used
+/// to run.
+fn is_foreign_overwrite(item: &PlannedItem, input_keys: &std::collections::HashSet<PathKey>) -> bool {
     // **Security audit finding 4 (PR #848).** Standalone, this function fails OPEN for an alternate data
     // stream: a never-before-existing stream path makes the `Path::is_file()` arm below false, so it
     // reports "nothing sits there — not an overwrite of anything" and the hidden write is permitted with
@@ -122,7 +160,12 @@ fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
     }
     // A real file already occupies the output path. It's only a refusable overwrite if it's not one of
     // THIS batch's own inputs — a batch is always allowed to write into paths it explicitly selected.
-    !items.iter().any(|other| same_file(&other.input, &item.output))
+    // `cache` is fresh per call (never threaded across items), matching `open_output_verified`'s own rule
+    // for anything computed at write time — this isn't a live/dynamic fact `path_key`'s `Resolved` tier
+    // could serve stale (it always canonicalizes `item.output` itself, never memoizes it), but keeping the
+    // same discipline here avoids relying on that distinction staying true.
+    let mut cache = ParentCache::new();
+    !input_keys.contains(&path_key(&item.output, &mut cache))
 }
 
 /// True when running `items` would overwrite at least one file's bytes that isn't explicitly part of this
@@ -143,7 +186,8 @@ fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
 /// asking a question, and a future caller has to reach for that.
 #[cfg(test)]
 fn any_in_place(items: &[PlannedItem]) -> bool {
-    items.iter().any(|it| is_foreign_overwrite(it, items))
+    let input_keys = input_path_keys(items);
+    items.iter().any(|it| is_foreign_overwrite(it, &input_keys))
 }
 
 /// Execute a planned batch, calling `flush` with each file's [`OpResult`] as it completes — the shared
@@ -223,8 +267,13 @@ pub fn execute_plan_walk(
         ));
     }
 
+    // Built once for the whole batch (CPE-1667) — every `is_foreign_overwrite` call below, including the
+    // one inside `execute_one`'s per-item verify-to-write window, probes this same `HashSet` in O(1)
+    // instead of re-scanning `items` pairwise. See `input_path_keys`'s doc.
+    let input_keys = input_path_keys(items);
+
     if !job.confirmed_overwrite {
-        let count = items.iter().filter(|it| is_foreign_overwrite(it, items)).count();
+        let count = items.iter().filter(|it| is_foreign_overwrite(it, &input_keys)).count();
         if count > 0 {
             return Err(format!(
                 "refusing to run: this plan would overwrite {count} file{} not explicitly part of this \
@@ -243,7 +292,7 @@ pub fn execute_plan_walk(
         // false assurance, because `execute_one` then read and transformed the image (528 ms measured)
         // before writing, and a link planted anywhere in that window redirected the write. There is
         // deliberately no path-based per-item pre-check here to be defeated.
-        match execute_one(item, job, items) {
+        match execute_one(item, job, &input_keys) {
             Ok(()) => {
                 report.written += 1;
                 flush(OpResult::ok(Path::new(&item.output)));
@@ -280,9 +329,23 @@ pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> Result<BatchReport
 ///    cannot have been swapped for another in between because a handle names an object, not a name.
 ///
 /// Steps 2-4 are a handful of syscalls; the previously exploitable window was the entire transform.
-fn execute_one(item: &PlannedItem, job: &BatchJob, items: &[PlannedItem]) -> Result<(), String> {
+///
+/// `input_keys` is the batch's precomputed [`input_path_keys`] set (CPE-1667), not the raw `items` slice
+/// — step 3's `is_foreign_overwrite` call sits inside the verify-to-write window, so it must cost O(1),
+/// not an O(n) scan over the batch.
+fn execute_one(
+    item: &PlannedItem,
+    job: &BatchJob,
+    input_keys: &std::collections::HashSet<PathKey>,
+) -> Result<(), String> {
+    #[cfg(test)]
+    WINDOW_TRACE.with(|c| c.set(WindowTrace::default()));
+    #[cfg(test)]
+    trace_mark(|t| t.transform_start = Some(std::time::Instant::now()));
     let input_bytes = fs::read(&item.input).map_err(|e| format!("could not read input: {e}"))?;
     let output_bytes = batch_transform::apply_ops(&input_bytes, &job.ops)?;
+    #[cfg(test)]
+    trace_mark(|t| t.transform_end = Some(std::time::Instant::now()));
 
     if let Some(parent) = Path::new(&item.output).parent() {
         if !parent.as_os_str().is_empty() {
@@ -292,11 +355,11 @@ fn execute_one(item: &PlannedItem, job: &BatchJob, items: &[PlannedItem]) -> Res
 
     let verified = crate::batch_media::open_output_verified(&item.input, &item.output)?;
     #[cfg(test)]
-    let verified_at = std::time::Instant::now();
+    trace_mark(|t| t.window_start = Some(std::time::Instant::now()));
 
     // Something was already at this name. `confirmed_overwrite` is the only thing that can authorise
     // replacing it — and `created` is an atomic fact from the open, not a stat that can go stale.
-    if !verified.created() && !job.confirmed_overwrite && is_foreign_overwrite(item, items) {
+    if !verified.created() && !job.confirmed_overwrite && is_foreign_overwrite(item, input_keys) {
         verified.abandon(&item.output);
         return Err(format!(
             "refusing at write time: \"{}\" would overwrite a file this batch never selected — it \
@@ -306,18 +369,118 @@ fn execute_one(item: &PlannedItem, job: &BatchJob, items: &[PlannedItem]) -> Res
         ));
     }
 
-    let result = verified.write_all(&output_bytes);
+    let result = verified.write_all(&output_bytes, &item.output);
     #[cfg(test)]
-    VERIFY_TO_WRITE_NANOS.with(|c| c.set(verified_at.elapsed().as_nanos()));
+    trace_mark(|t| t.window_end = Some(std::time::Instant::now()));
     result
+}
+
+/// Four timestamps recorded from **inside a real [`execute_one`] run** (PR #856 review): the transform's
+/// start/end and the verify-to-write window's start/end. Ordering claims built from these (does the
+/// transform's interval lie entirely before the window's?) are exact and immune to both build profile and
+/// runner contention — unlike a ratio of measured durations, which cannot be made to work: under
+/// `--release` the window is roughly two orders of magnitude smaller than under `cargo test` (a debug
+/// build's image transform is far slower), and a shared CI runner can add two more orders of magnitude of
+/// noise on top of either. A fixed ratio bound that survives all of that does not exist — see the tests
+/// that read this trace for what a ratio bound got wrong in practice (a real CI failure on a saturated
+/// runner, 9.1× against a 10× gate, that turned out to be pure contention).
+///
+/// **What this does NOT cover, stated plainly because the alternative is a guard whose reputation exceeds
+/// its reach (PR #856 re-review).** The ordering assertion pins exactly one property: *the instrumented
+/// transform* does not overlap the window. It does **not** bound the window's size. The reviewer
+/// demonstrated the gap by adding a whole second transform inside the window — both tests stayed green
+/// while printing a **444 ms verify→write window**, which is the same shape and very nearly the same
+/// magnitude as the ~528 ms window the CPE-1624 audit actually exploited.
+///
+/// That coverage was traded away deliberately, because both walls have now been measured and no fixed
+/// ratio fits between them: a 10× gate failed on a saturated CI runner at 9.1× (pure contention), and a
+/// 100× gate fails under `--release`, where the window is ~405,000 ns against a ~35.9 ms transform. The
+/// ratio also never caught the regression this ticket was filed for — the reviewer restored the genuine
+/// O(n) scan and the ratio passed with a 24× margin. The `canonicalize`-count seam cannot cover the
+/// residual either: a second `apply_ops` plus an `fs::read` make zero canonicalize calls.
+///
+/// **So: new work introduced between `window_start` and `write_all` is a CODE-REVIEW obligation with no
+/// automated net.** If you are adding anything there, that is the check — there is no test that will stop
+/// you.
+///
+/// `Instant` is `Copy`, so a plain `Cell` (not `RefCell`) suffices — no borrow to hold across the
+/// read-modify-write. Thread-local for the same reason the other test counters in this module are: tests
+/// run on separate threads and must not see each other's runs. The trace is reset at the top of every
+/// [`execute_one`], so in a multi-item batch [`assert_transform_precedes_window`] necessarily inspects
+/// only the **last** item — harmless for today's callers (SEC-7 plans exactly one input; the CPE-1667
+/// test calls `execute_one` directly), but an ordering regression affecting only item 0 of an n-item
+/// batch would go unseen by a future reuse.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+struct WindowTrace {
+    transform_start: Option<std::time::Instant>,
+    transform_end: Option<std::time::Instant>,
+    window_start: Option<std::time::Instant>,
+    window_end: Option<std::time::Instant>,
 }
 
 #[cfg(test)]
 thread_local! {
-    /// How long the last [`execute_one`] spent between finishing verification and finishing the write —
-    /// the real exploitable window, which the security audit's SEC-7 probe measures against the transform
-    /// it used to contain. Thread-local for the same reason the other test counters are.
-    static VERIFY_TO_WRITE_NANOS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    static WINDOW_TRACE: std::cell::Cell<WindowTrace> = std::cell::Cell::new(WindowTrace::default());
+}
+
+/// Read-modify-write one field of the current thread's [`WindowTrace`]. `Cell::get`/`set` (not `RefCell`)
+/// because `WindowTrace` is `Copy` — no borrow needs to live across the mutation.
+#[cfg(test)]
+fn trace_mark(set: impl FnOnce(&mut WindowTrace)) {
+    WINDOW_TRACE.with(|c| {
+        let mut t = c.get();
+        set(&mut t);
+        c.set(t);
+    });
+}
+
+/// The deterministic replacement for a ratio bound (PR #856 review, following CI red on a saturated
+/// runner: 9.1× against a 10× gate, pure contention — see [`WindowTrace`]'s doc for why no fixed ratio
+/// survives both build profile and runner load). Reads the trace left by the [`execute_one`] call the
+/// caller just made and asserts an **ordering** property instead of a duration comparison: the transform's
+/// whole interval must end at or before the window opens, i.e. it is provably not overlapping the window
+/// at all, regardless of how fast or slow either one ran. `Instant` is monotonic, so this is exact on every
+/// build profile and every runner, loaded or not — there is no bound to tune.
+///
+/// **Read [`WindowTrace`]'s doc for what this deliberately does not cover** — it pins the ordering of the
+/// instrumented transform, not the window's size, and a reviewer demonstrated a 444 ms window passing
+/// green. Do not cite this assertion as evidence that the window is bounded.
+///
+/// Red→green evidence for this assertion is the **faithful** mutation, not a synthetic one: moving
+/// `fs::read` + `apply_ops` bodily to after `open_output_verified`, with the trace marks travelling with
+/// the code exactly as a real regression would move them, turns both tests red deterministically
+/// (`the transform's interval ends 480.4241ms AFTER the window opened`). Moving `window_start` instead
+/// mutates the *instrumentation* and only proves this function works — that was the original proof and it
+/// was the weaker one.
+///
+/// Prints both measured durations (still genuinely useful context) but gates on ordering alone.
+#[cfg(test)]
+fn assert_transform_precedes_window(context: &str) {
+    let t = WINDOW_TRACE.with(|c| c.get());
+    let transform_start =
+        t.transform_start.expect("transform_start was never recorded — this test verified NOTHING");
+    let transform_end =
+        t.transform_end.expect("transform_end was never recorded — this test verified NOTHING");
+    let window_start =
+        t.window_start.expect("window_start was never recorded — this test verified NOTHING");
+    let window_end = t.window_end.expect("window_end was never recorded — this test verified NOTHING");
+
+    println!(
+        "{context}: transform took {:?}; the verify->write window took {:?}",
+        transform_end.duration_since(transform_start),
+        window_end.duration_since(window_start)
+    );
+
+    assert!(
+        transform_end <= window_start,
+        "{context}: THE INSTRUMENTED TRANSFORM MOVED INTO THE WINDOW — its interval ends {:?} AFTER the \
+         window opened. This is an exact ordering check on monotonic `Instant`s, not a duration ratio, so \
+         it cannot flake on build profile or runner load; a failure here means the ordering itself \
+         regressed. NOTE it pins only THIS transform's ordering — it does not bound the window's size, \
+         and other work added inside the window passes it silently (see `WindowTrace`'s doc).",
+        transform_end.duration_since(window_start)
+    );
 }
 
 #[cfg(test)]
@@ -1629,7 +1792,7 @@ mod tests {
             summary: "an alternate data stream of an unrelated, non-existent file".into(),
         }];
         assert!(
-            is_foreign_overwrite(&items[0], &items),
+            is_foreign_overwrite(&items[0], &input_path_keys(&items)),
             "a stream-named output must be refused by this function alone, with no other check having \
              run and nothing existing at the path to trip the is_file() arm"
         );
@@ -1737,11 +1900,13 @@ mod tests {
     /// written to fail on that build and is meaningless once the ordering is fixed.
     ///
     /// The regression form asserts the property the fix actually establishes: **the transform happens
-    /// before verification, so the window no longer contains it.** `VERIFY_TO_WRITE_NANOS` records the
-    /// real gap — from the handle being verified to the bytes being on disk — and it must be a small
-    /// fraction of the transform it used to contain. The bound is deliberately loose (10×, against a
-    /// measured ratio of ~4 orders of magnitude) so it cannot flake on a loaded CI runner while still
-    /// failing instantly if the transform ever moves back inside the window.
+    /// before verification, so the window no longer contains it.** This used to be a duration ratio
+    /// (`window * 10 < transform`); a ratio bound cannot survive both build profile and a shared CI
+    /// runner (PR #856 review — this bound went red at 9.1× on a saturated runner while the branch's own
+    /// logic was fine), so it is now the exact claim the property actually is: an **ordering** check on
+    /// [`WindowTrace`]'s monotonic timestamps via [`assert_transform_precedes_window`] — the transform's
+    /// whole interval must end at or before the window opens. That is immune to both concerns and cannot
+    /// flake for either reason; it can only fail if the ordering itself regresses.
     #[test]
     fn secaudit_the_transform_is_no_longer_inside_the_verify_to_write_window() {
         let d = scratch("secaudit-gap");
@@ -1751,27 +1916,143 @@ mod tests {
         job.confirmed_overwrite = true;
         let items = plan(&job, &[photo.to_string_lossy().to_string()]).unwrap();
 
-        // How long the work that USED to sit inside the window takes.
-        let t1 = std::time::Instant::now();
-        let input_bytes = fs::read(&items[0].input).unwrap();
-        let _out = crate::batch_transform::apply_ops(&input_bytes, &job.ops).unwrap();
-        let transform = t1.elapsed();
-
-        // The real window, recorded from inside `execute_one`.
-        VERIFY_TO_WRITE_NANOS.with(|c| c.set(0));
+        // The trace is recorded from inside `execute_one`, driven through the real `execute_plan`.
         let report = execute_plan(&items, &job).expect("the batch runs");
         assert_eq!(report.written, 1);
-        let window_ns = VERIFY_TO_WRITE_NANOS.with(|c| c.get());
-        assert!(window_ns > 0, "the window was never recorded — this test verified NOTHING");
 
+        assert_transform_precedes_window("SEC-7");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1667 — SEC-7 covered only `created == true`.** A 1-item batch with `confirmed_overwrite =
+    /// true` always takes that branch: `!verified.created()` is false, so `is_foreign_overwrite` short
+    /// circuits away and never runs at all. It pinned the branch that was already fine and said nothing
+    /// about the other one, where `is_foreign_overwrite` sits **inside** the window.
+    ///
+    /// This forces `!created && !confirmed_overwrite`: item 0's planned output is made to be a real,
+    /// pre-existing file — chained onto the batch's OWN last input (see [`input_path_keys`]'s doc for why
+    /// that shape, not an arbitrary existing file, is what's needed) — so `open_output_verified` reports
+    /// `created == false`, and `confirmed_overwrite` is left at its default `false` so the flag doesn't
+    /// short-circuit `is_foreign_overwrite` away.
+    ///
+    /// **The trap this avoids (per the ticket: the auditor's worktree was destroyed mid-measurement).** If
+    /// item 0's output is made to collide with a file that is NOT one of the batch's own inputs,
+    /// `is_foreign_overwrite` correctly answers "foreign" and `execute_one` refuses before ever reaching
+    /// `write_all` — `.unwrap_or_else(|e| panic!(...))` below turns that refusal into a hard test failure
+    /// rather than a silent "pass" having measured nothing, exactly as SEC-7's own copy guards the same
+    /// trap (see [`assert_transform_precedes_window`]'s own `.expect`s for the second line of defence).
+    ///
+    /// **Not a duration ratio, for the same reason SEC-7 no longer is one (PR #856 review).** This used to
+    /// assert `window * 10 < transform`; the reviewer restored the GENUINE pre-CPE-1667 pairwise scan and
+    /// that assertion still passed with a 24× margin under `cargo test` (a debug build's transform is slow
+    /// enough to hide even the O(n) cost it was meant to catch) — the exact defect this ticket exists to
+    /// fix, re-introduced in a new assertion. The deterministic canonicalize-count test below is what owns
+    /// the O(1) claim (it caught that same restoration at exactly 898 calls); this test's job is only the
+    /// ordering claim [`assert_transform_precedes_window`] checks, which a ratio was never suited to prove
+    /// or disprove in the first place.
+    #[test]
+    fn cpe_1667_the_not_created_branch_window_stays_narrow_across_a_chained_batch() {
+        let d = scratch("cpe1667-not-created-window");
+        let n = 300usize;
+
+        let photo = d.join("photo0000.png");
+        fs::write(&photo, png_bytes(2000, 2000)).unwrap();
+
+        // The batch's own last input — the real object item 0's output is chained onto.
+        let last_input = d.join(format!("photo{:04}.png", n - 1));
+        let last_input_orig = png_bytes(4, 4);
+        fs::write(&last_input, &last_input_orig).unwrap();
+
+        let mut items: Vec<PlannedItem> = vec![PlannedItem {
+            input: photo.to_string_lossy().to_string(),
+            output: last_input.to_string_lossy().to_string(),
+            summary: "item under test — output chained onto the batch's own last input".into(),
+        }];
+        for i in 1..n {
+            items.push(PlannedItem {
+                input: d.join(format!("photo{i:04}.png")).to_string_lossy().to_string(),
+                output: d.join(format!("photo{i:04}-out.png")).to_string_lossy().to_string(),
+                summary: "chain filler — never executed, only present so the batch is genuinely n items \
+                          wide for is_foreign_overwrite's own scan"
+                    .into(),
+            });
+        }
+        assert_eq!(items.len(), n);
+
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 1000 }]);
+        // Precomputed once, outside the window — exactly like `execute_plan_walk` does (CPE-1667).
+        let input_keys = input_path_keys(&items);
+
+        // The trace is recorded from inside this real `execute_one` call.
+        execute_one(&items[0], &job, &input_keys).unwrap_or_else(|e| {
+            panic!(
+                "the batch's own last input must be a permitted write target for item 0's output, not a \
+                 refused foreign overwrite: {e}"
+            )
+        });
+
+        // The overwrite genuinely happened — this is the "return false, item actually written" the ticket
+        // asked for, not a refusal that happened to also leave the trace unset.
+        let written = fs::read(&last_input).unwrap();
+        assert_ne!(written, last_input_orig, "item 0 must actually have been written, not skipped");
+
+        assert_transform_precedes_window("CPE-1667 !created branch (n=300, match at the far end)");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1667.** The wall-clock test above is loose on purpose (it can't afford to flake on a loaded
+    /// CI runner), so it cannot by itself prove the fix is `O(1)` rather than merely "fast enough at
+    /// n=300". This is the precise, deterministic companion: it counts real `canonicalize` syscalls
+    /// (the same seam [`crate::batch_media::canonicalize_call_count`] backs other perf-regression guards
+    /// in this crate) rather than timing anything, isolates `is_foreign_overwrite` from everything else
+    /// `execute_one` does, and asserts a small constant bound that an `O(n)` scan reaching all the way to
+    /// the far end of a 300-item batch could not possibly hit.
+    ///
+    /// Same chain shape as the test above and for the same reason: item 0's output equals the batch's
+    /// LAST item's input, so the pairwise scan `is_foreign_overwrite` used to run would have had to walk
+    /// past every other item before finding its match — the worst case for that algorithm, not one that
+    /// happens to terminate early no matter which algorithm runs.
+    #[test]
+    fn cpe_1667_is_foreign_overwrite_costs_a_bounded_number_of_canonicalize_calls_regardless_of_batch_size(
+    ) {
+        let d = scratch("cpe1667-foreign-overwrite-o1");
+        let n = 300usize;
+
+        let first_input = d.join("photo0000.png");
+        fs::write(&first_input, png_bytes(4, 4)).unwrap();
+        let last_input = d.join(format!("photo{:04}.png", n - 1));
+        fs::write(&last_input, png_bytes(4, 4)).unwrap();
+
+        let mut items: Vec<PlannedItem> = vec![PlannedItem {
+            input: first_input.to_string_lossy().to_string(),
+            output: last_input.to_string_lossy().to_string(),
+            summary: "item under test".into(),
+        }];
+        for i in 1..n {
+            items.push(PlannedItem {
+                input: d.join(format!("photo{i:04}.png")).to_string_lossy().to_string(),
+                output: d.join(format!("photo{i:04}-out.png")).to_string_lossy().to_string(),
+                summary: "chain filler".into(),
+            });
+        }
+        assert_eq!(items.len(), n);
+
+        let input_keys = input_path_keys(&items);
+        crate::batch_media::reset_canonicalize_call_count();
+        let foreign = is_foreign_overwrite(&items[0], &input_keys);
+        let calls = crate::batch_media::canonicalize_call_count();
+
+        assert!(!foreign, "item 0's output IS one of the batch's own inputs, so this must be permitted");
         println!(
-            "SEC-7 read+transform (outside the window, where it belongs) took {transform:?}; the \
-             verify->write window is {window_ns} ns"
+            "CPE-1667 is_foreign_overwrite canonicalize calls for n={n}, match at the far end: {calls}"
         );
         assert!(
-            window_ns * 10 < transform.as_nanos(),
-            "EXPLOIT WINDOW: the verify->write window ({window_ns} ns) is not decisively smaller than \
-             the transform ({transform:?}) — the transform may have moved back inside it"
+            calls <= 4,
+            "EXPECTED O(1): is_foreign_overwrite made {calls} canonicalize call(s) against a {n}-item \
+             batch whose matching input sits at the far end — a bound this small is unreachable for an \
+             O(n) pairwise scan that has to walk the whole batch to find it"
         );
 
         let _ = fs::remove_dir_all(&d);
