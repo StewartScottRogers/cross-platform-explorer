@@ -516,6 +516,80 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// **CPE-1675 — the DELETE-side counterpart to the write-side test above.** Before this fix,
+    /// `PlanEntry::Delete` refused a `win32_name_is_unstable` component on **every** platform, so a stale
+    /// destination entry named `notes.` or `My Report ` — a legal, everyday POSIX filename — could never
+    /// be removed by a mirror-delete plan: the same refused delete on every run, forever, so the job could
+    /// never report clean. `contained_under`, asserted on the resolved path, already makes the delete safe
+    /// on POSIX (the name addresses exactly what it spells, no aliasing), so the fix scopes the
+    /// delete-side refusal to Windows too — same as the write side.
+    ///
+    /// Verified by **listing the destination directory back off disk**, not by trusting the `OpResult` —
+    /// the return-value-only check is what let the CPE-1664 regression above ship silently; this repo's
+    /// backup tests read the filesystem back deliberately (see `assert_victim_intact`). On Windows the
+    /// refusal is unchanged and still asserted, matching the write-side test's shape.
+    #[test]
+    fn a_posix_legal_trailing_dot_name_is_removed_by_a_mirror_delete_not_refused() {
+        let d = scratch("posix_delete_names");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        // Windows won't even let these be created — same guard as the write-side test.
+        #[cfg(not(windows))]
+        {
+            fs::write(dst.join("notes."), b"stale - no longer in src").unwrap();
+            fs::write(dst.join("My Report "), b"also stale").unwrap();
+        }
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &[],
+            &[],
+            &["notes.".to_string(), "My Report ".to_string()],
+            false,
+            true, // consented — this is about the NAME rule, not the gate
+        )
+        .expect("a consented plan runs");
+        assert_eq!(results.len(), 2);
+
+        #[cfg(not(windows))]
+        {
+            assert!(
+                results.iter().all(|r| r.ok),
+                "a POSIX-legal trailing-dot/space stale entry must be REMOVED, not refused: {results:?}"
+            );
+            // Off disk, not just the return value (see this test's own doc).
+            let names: Vec<String> = fs::read_dir(&dst)
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "notes."),
+                "notes. must actually be gone off disk, not just reported ok: {names:?}"
+            );
+            assert!(
+                !names.iter().any(|n| n == "My Report "),
+                "My Report  must actually be gone off disk, not just reported ok: {names:?}"
+            );
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                results.iter().all(|r| !r.ok),
+                "on Windows such a name aliases another path, so the delete must still be refused: \
+                 {results:?}"
+            );
+            assert!(
+                results[0].error.contains("trailing dots/spaces"),
+                "and the refusal must explain why: {results:?}"
+            );
+        }
+        let _ = fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn apply_backup_plan_copies_updates_and_verifies() {
         let d = scratch("apply");
