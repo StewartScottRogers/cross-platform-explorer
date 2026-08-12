@@ -447,6 +447,6 @@
     border-radius: 4px;
     font-size: 12px;
   }
-  .add-loc .add-go { background: var(--accent); color: var(--accent-fg, #fff); }
+  .add-loc .add-go { background: var(--accent); color: var(--accent-fg); }
   .add-loc .add-cancel { color: var(--text-dim); }
 </style>

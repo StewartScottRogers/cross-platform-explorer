@@ -154,6 +154,15 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  /* CPE-1632 (guard review round 2): foreground text/icon colour for something painted ON TOP of a
+     solid `--accent` fill (e.g. HomeView's "Add" button, MetadataStudioDialog's `.btn.primary`) —
+     the SAME literal-white role `.btn.primary` already gets via a plain `color: #fff`, just given a
+     real name instead of leaning on an undefined token + hard-coded `var(--x, #fff)` fallback (which
+     is exactly the pattern that let a background regress under white text with zero test noticing —
+     see src/app.css.solid-fill-contrast.test.ts). White clears WCAG's 3:1 UI floor against --accent
+     in every theme this token is defined for (light 5.68:1; dark/hc already covered by the existing
+     `.btn.primary`-pattern pairing that guard derives). */
+  --accent-fg: var(--pal-white);
   --selection: var(--pal-blue-100);     /* selected row fill */
   --selection-hover: var(--pal-blue-150);
 
@@ -223,6 +232,7 @@
 
   --accent: var(--pal-blue-600);
   --accent-hover: var(--pal-blue-650);
+  --accent-fg: var(--pal-white);
   --selection: var(--pal-blue-100);
   --selection-hover: var(--pal-blue-150);
 
@@ -270,6 +280,9 @@
   --pal-dark-gray-300: #9c9c9c; /* text-faint */
   --pal-dark-gray-200: #c5c5c5; /* text-dim */
   --pal-dark-gray-100: #f3f3f3; /* text */
+  --pal-dark-white: #ffffff; /* accent-fg — literal white text painted on solid-fill accent
+                                  buttons/pills (dark theme's own primitive, mirroring the light
+                                  layer's --pal-white, rather than reaching across layers) */
 
   --pal-dark-blue-900: #0f3550; /* selection */
   --pal-dark-blue-850: #123f5e; /* selection-hover */
@@ -381,6 +394,7 @@
 
   --accent: var(--pal-dark-blue-400);
   --accent-hover: var(--pal-dark-blue-300);
+  --accent-fg: var(--pal-dark-white);
   --selection: var(--pal-dark-blue-900);
   --selection-hover: var(--pal-dark-blue-850);
 
@@ -541,6 +555,7 @@
 
   --accent: var(--pal-hc-light-blue-900);
   --accent-hover: var(--pal-hc-light-blue-950);
+  --accent-fg: var(--pal-hc-light-white);
   --selection: var(--pal-hc-light-blue-100);
   --selection-hover: var(--pal-hc-light-blue-150);
 
@@ -598,6 +613,7 @@
 
   --accent: var(--pal-hc-dark-blue-300);
   --accent-hover: var(--pal-hc-dark-blue-200);
+  --accent-fg: var(--pal-hc-dark-white);
   --selection: var(--pal-hc-dark-blue-900);
   --selection-hover: var(--pal-hc-dark-blue-850);
 

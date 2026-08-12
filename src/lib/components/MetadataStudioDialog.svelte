@@ -554,7 +554,7 @@
   }
   .btn.primary {
     background: var(--accent);
-    color: var(--accent-contrast, #fff);
+    color: var(--accent-fg);
     border-color: var(--accent);
   }
   .btn:disabled {

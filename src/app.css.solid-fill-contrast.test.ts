@@ -72,35 +72,9 @@ const darkPaletteDecls = extractDecls(darkPaletteBlock);
 const lightSemanticDecls = extractDecls(lightBlocks[0]);
 const darkSemanticDecls = extractDecls(darkBlocks[0]);
 
-function resolveHex(
-  value: string | undefined,
-  paletteDecls: Map<string, string>,
-  semanticDecls: Map<string, string>,
-  depth = 0,
-): string | undefined {
-  if (!value || depth > 5) return undefined;
-  const hexMatch = value.match(/^#[0-9a-fA-F]{3,8}$/);
-  if (hexMatch) return value;
-  const varMatch = value.match(/^var\(\s*(--[a-zA-Z0-9-]+)/);
-  if (!varMatch) return undefined;
-  const name = varMatch[1];
-  if (paletteDecls.has(name)) return resolveHex(paletteDecls.get(name), paletteDecls, semanticDecls, depth + 1);
-  if (semanticDecls.has(name)) return resolveHex(semanticDecls.get(name), paletteDecls, semanticDecls, depth + 1);
-  return undefined;
-}
-
-/** Resolve a semantic/palette token name to a concrete hex in one theme; falls back to a literal
- *  fallback hex captured at the CSS usage site (`var(--undefined-token, #abc)`) when the token
- *  itself isn't defined anywhere in that theme (e.g. `--accent-2`, `--warn` — components that lean
- *  on a CSS custom-property fallback instead of a real theme token). Returns undefined only when
- *  neither resolves (e.g. a runtime-set custom property like TagEditor's `--sw`, which is
- *  genuinely dynamic per-tag data, not a static theme value this guard can check). */
-function resolveTokenOrFallback(theme: "light" | "dark", token: string, fallbackHex: string | undefined): string | undefined {
-  const [paletteDecls, semanticDecls] = theme === "light" ? [lightPaletteDecls, lightSemanticDecls] : [darkPaletteDecls, darkSemanticDecls];
-  const direct = resolveHex(semanticDecls.get(token) ?? paletteDecls.get(token), paletteDecls, semanticDecls);
-  if (direct) return direct;
-  return resolveHex(fallbackHex, paletteDecls, semanticDecls);
-}
+// Token/fallback resolution (both the `resolveCssValue`/`resolveTokenOrFallback` pair used by the
+// scanner below) lives just after the WHITE_RE/HEX_RE constants a little further down, so it can
+// share those patterns instead of duplicating them.
 
 // ---------------------------------------------------------------------------------------------
 // WCAG 2.1 relative luminance + contrast ratio math (inline, no dependency), duplicated per this
@@ -194,12 +168,108 @@ function classesOf(branchSelector: string): string[] {
 }
 
 const WHITE_RE = /^(#fff(fff)?|white|rgba?\(\s*255\s*,\s*255\s*,\s*255\b)/i;
-const VAR_RE = /var\(\s*(--[a-zA-Z0-9-]+)\s*(?:,\s*([^)]+))?\)/;
 const HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+
+/** Parse a `var(--token[, fallback])` call, returning the token and the RAW fallback text
+ *  (unparsed — it may itself be another `var(...)`, a hex, or a keyword like `white`).
+ *
+ *  CPE-1632 review round 2: a plain regex like `/var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\)/` (this
+ *  file's previous `VAR_RE`) truncates a NESTED fallback at the first `)` it sees — for
+ *  `var(--border-strong, var(--border, #3a3a3a))` it would capture fallback text
+ *  `"var(--border, #3a3a3a"` (missing its closing paren), which then fails every "is this a hex"
+ *  check downstream and gets silently dropped. This balances parens instead, so a nested fallback
+ *  round-trips intact through to `resolveCssValue` below, which can then walk it recursively.
+ *  `text` must already be trimmed and start with "var(". Returns null if malformed. */
+function parseVarCall(text: string): { token: string; fallback?: string } | null {
+  const head = text.match(/^var\(\s*(--[a-zA-Z0-9-]+)\s*/i);
+  if (!head) return null;
+  let i = head[0].length;
+  if (text[i] === ")") return { token: head[1] };
+  if (text[i] !== ",") return null;
+  i++;
+  while (text[i] === " ") i++;
+  const start = i;
+  let depth = 0;
+  for (; i < text.length; i++) {
+    if (text[i] === "(") depth++;
+    else if (text[i] === ")") {
+      if (depth === 0) break;
+      depth--;
+    }
+  }
+  const fallback = text.slice(start, i).trim();
+  return { token: head[1], fallback: fallback || undefined };
+}
+
+/** Resolve ANY CSS colour value — a literal hex, the `white` keyword / an opaque-white
+ *  `rgb(a)(255,255,255...)` literal, or a (possibly nested) `var(--token[, fallback])` chain — to
+ *  a concrete hex in one theme. This is the single implementation both the background side
+ *  (`background`/`background-color`) and the foreground side (`color`) use below, so a token
+ *  resolves identically regardless of which property it's declared on.
+ *
+ *  CPE-1632 review round 2 — the bug this fixes: the guard's earlier foreground detection
+ *  (`WHITE_RE` alone, matched against the raw `color:` text) only recognised a LITERAL white —
+ *  `var(--accent-fg, #fff)` never matched, so a background this dark ALWAYS renders literal white
+ *  text (the token doesn't exist anywhere in app.css; the fallback is unconditional) sailed
+ *  through with zero assertion generated. This resolves the token first (walking palette then
+ *  semantic decls, matching `--danger`/`--accent`'s own reference order) and, only when the token
+ *  itself isn't defined in this theme, falls back to resolving the fallback text — which may
+ *  itself be another `var(...)`, so this recurses rather than requiring a bare hex. */
+function resolveCssValue(rawValue: string | undefined, theme: "light" | "dark", depth = 0): string | undefined {
+  if (!rawValue || depth > 8) return undefined;
+  const value = rawValue.trim();
+  if (HEX_RE.test(value)) return value;
+  if (WHITE_RE.test(value)) return "#ffffff";
+  if (/^var\(/i.test(value)) {
+    const parsed = parseVarCall(value);
+    if (!parsed) return undefined;
+    const [paletteDecls, semanticDecls] = theme === "light" ? [lightPaletteDecls, lightSemanticDecls] : [darkPaletteDecls, darkSemanticDecls];
+    const declared = semanticDecls.get(parsed.token) ?? paletteDecls.get(parsed.token);
+    if (declared !== undefined) {
+      const resolved = resolveCssValue(declared, theme, depth + 1);
+      if (resolved) return resolved;
+    }
+    return resolveCssValue(parsed.fallback, theme, depth + 1);
+  }
+  return undefined;
+}
+
+/** Resolve a semantic/palette token name to a concrete hex in one theme; falls back to a literal
+ *  fallback (captured at the CSS usage site, `var(--undefined-token, <fallback>)`) when the token
+ *  itself isn't defined anywhere in that theme (e.g. `--warn` — components that lean on a CSS
+ *  custom-property fallback instead of a real theme token). Returns undefined only when neither
+ *  resolves (e.g. a runtime-set custom property like TagEditor's `--sw`, which is genuinely
+ *  dynamic per-tag data, not a static theme value this guard can check). Thin wrapper over
+ *  `resolveCssValue` so background-token resolution and foreground-token resolution
+ *  (`isWhiteishForeground` below) share one code path. */
+function resolveTokenOrFallback(theme: "light" | "dark", token: string, fallbackRaw: string | undefined): string | undefined {
+  return resolveCssValue(fallbackRaw !== undefined ? `var(${token}, ${fallbackRaw})` : `var(${token})`, theme);
+}
+
+function isWhiteHex(hex: string): boolean {
+  const h = hex.replace("#", "");
+  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  return full.slice(0, 6).toLowerCase() === "ffffff";
+}
+
+/** Does this `color:` declaration's value render literal or near-white text in AT LEAST ONE theme
+ *  — resolving `var(--token[, fallback])` (including an undefined token falling back to its
+ *  literal, and chained/nested fallbacks) exactly like the background side does, instead of only
+ *  matching a literal white written directly in the declaration. This is the fix for the
+ *  reviewer's regression #2: `color: var(--nonexistent-fg-token, #fff)` now resolves to `#ffffff`
+ *  in both light and dark (the token is undefined in both, so both fall through to the literal
+ *  `#fff` fallback) and is correctly classified as white. */
+function isWhiteishForeground(rawValue: string): boolean {
+  for (const theme of ["light", "dark"] as const) {
+    const hex = resolveCssValue(rawValue, theme);
+    if (hex && isWhiteHex(hex)) return true;
+  }
+  return false;
+}
 
 interface Pairing {
   token?: string;
-  fallbackHex?: string;
+  fallbackRaw?: string;
   literalHex?: string;
   examples: Set<string>;
 }
@@ -212,7 +282,7 @@ function scanCss(label: string, cssText: string) {
     hasWhite: boolean;
     hasOwnNonWhiteColor: boolean;
     bgToken?: string;
-    bgFallbackHex?: string;
+    bgFallbackRaw?: string;
     bgHex?: string;
     selector: string;
   }
@@ -221,26 +291,52 @@ function scanCss(label: string, cssText: string) {
     const bodyNorm = ";" + body;
     const bgMatch = bodyNorm.match(/;\s*background(?:-color)?\s*:\s*([^;]+);/);
     let bgToken: string | undefined;
-    let bgFallbackHex: string | undefined;
+    let bgFallbackRaw: string | undefined;
     let bgHex: string | undefined;
     if (bgMatch) {
       const val = bgMatch[1].trim();
-      const vm = val.match(VAR_RE);
-      if (vm) {
-        bgToken = vm[1];
-        if (vm[2] && HEX_RE.test(vm[2].trim())) bgFallbackHex = vm[2].trim();
+      if (/^var\(/i.test(val)) {
+        const parsed = parseVarCall(val);
+        if (parsed) {
+          bgToken = parsed.token;
+          // Only a LITERAL hex fallback is trusted here (unchanged from before this review round —
+          // this file's `parseVarCall` now parses a nested fallback like `var(--sw, var(--surface-
+          // alt))` correctly instead of truncating it, but a background token's own CSS fallback is
+          // deliberately NOT walked into further tokens: e.g. TagEditor's `.swatch { background:
+          // var(--sw, var(--surface-alt)) }` — `--sw` is a per-row *inline* style the component sets
+          // for every real swatch except `.swatch.none`, which separately overrides BOTH background
+          // and color, so the base rule's `--surface-alt` fallback never actually paints text; a
+          // dynamic-per-instance custom property standing in front of a token fallback is exactly the
+          // "genuinely dynamic, not a static theme value this guard can check" case the sanity-check
+          // comment below already calls out, not a new pairing to assert against).
+          if (parsed.fallback && HEX_RE.test(parsed.fallback)) bgFallbackRaw = parsed.fallback;
+        }
       } else if (HEX_RE.test(val)) {
         bgHex = val.toLowerCase();
       }
+      // CPE-1632 review round 2 — disclosed scanner limitation: a `background`/`background-color`
+      // value that is anything other than a literal hex or a `var(--token[, fallback])` chain —
+      // `rgba(...)`, `hsl(...)`, `color-mix(...)`, or a gradient (`linear-gradient(...)` etc.) — is
+      // silently SKIPPED here (bgToken/bgHex both stay undefined, so no pairing is recorded and no
+      // assertion is ever generated for that rule). This is a real, currently-audited-safe gap, not
+      // a false pass: every such background paired with white text in this codebase today was
+      // hand-checked and clears WCAG (see the CPE-1632 ticket's Work Log), but this scanner cannot
+      // verify that claim itself, and a FUTURE `background: rgba(...)`-with-white-text rule would
+      // sail through unchecked exactly like the `var(--undefined-token, #fff)` foreground bug this
+      // same review round fixed. `rgba()`/`hsl()` were deliberately left unextended: unlike a solid
+      // `var()`/hex fill, their actual on-screen colour depends on alpha-compositing against
+      // whatever sits behind them, which this static per-rule scanner has no way to know — "cheap"
+      // support here would mean treating them as opaque and asserting a contrast ratio that doesn't
+      // match what actually renders, which is worse than not asserting at all.
     }
     const colorMatch = bodyNorm.match(/;\s*color\s*:\s*([^;]+);/);
-    const hasWhite = !!(colorMatch && WHITE_RE.test(colorMatch[1].trim()));
+    const hasWhite = !!(colorMatch && isWhiteishForeground(colorMatch[1].trim()));
     // A rule that declares `color` to something OTHER than white explicitly OVERRIDES any base
     // rule's white text and must not fall back to it via the subset heuristic below (e.g.
     // `.swatch.none { color: var(--text-dim); }` overrides `.swatch { color: #fff; }`).
-    const hasOwnNonWhiteColor = !!(colorMatch && !WHITE_RE.test(colorMatch[1].trim()));
+    const hasOwnNonWhiteColor = !!colorMatch && !hasWhite;
     for (const branchSel of splitSelectorBranches(selector)) {
-      records.push({ classSet: classesOf(branchSel), hasWhite, hasOwnNonWhiteColor, bgToken, bgFallbackHex, bgHex, selector: branchSel });
+      records.push({ classSet: classesOf(branchSel), hasWhite, hasOwnNonWhiteColor, bgToken, bgFallbackRaw, bgHex, selector: branchSel });
     }
   }
   for (const r of records) {
@@ -258,7 +354,7 @@ function scanCss(label: string, cssText: string) {
     if (!matched) continue;
     const example = `${label}: ${r.selector}`;
     if (r.bgToken) {
-      const p = tokenPairings.get(r.bgToken) ?? { token: r.bgToken, fallbackHex: r.bgFallbackHex, examples: new Set<string>() };
+      const p = tokenPairings.get(r.bgToken) ?? { token: r.bgToken, fallbackRaw: r.bgFallbackRaw, examples: new Set<string>() };
       p.examples.add(example);
       tokenPairings.set(r.bgToken, p);
     } else if (r.bgHex) {
@@ -305,7 +401,7 @@ const UI_FLOOR = 3;
 describe("solid-fill white-on-token backgrounds clear WCAG's 3:1 UI-component floor (CPE-1632)", () => {
   for (const [token, pairing] of tokenPairings) {
     for (const theme of ["light", "dark"] as const) {
-      const hex = resolveTokenOrFallback(theme, token, pairing.fallbackHex);
+      const hex = resolveTokenOrFallback(theme, token, pairing.fallbackRaw);
       if (!hex) {
         // Genuinely dynamic (e.g. TagEditor's per-tag `--sw` custom property) or a token this
         // guard doesn't know how to resolve — nothing to assert against statically.
