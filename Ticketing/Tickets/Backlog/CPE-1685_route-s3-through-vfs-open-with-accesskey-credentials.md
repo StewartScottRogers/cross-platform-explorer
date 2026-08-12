@@ -84,6 +84,14 @@ now live in `src/lib/network.ts` (see `schemeFieldHints`'s doc comment) and asse
   the second line of defence, not the only one.
 - `src/docs/31-network.md` carries a transitional paragraph ("saving works now; the provider ships alongside
   it"). **Delete that paragraph as part of this ticket** — once `s3` routes, it becomes a lie.
+- **And flip the tense with it.** The "Honest limits of object storage" list and the `## Limits` section
+  are written in the **future** tense ("there will be no rename", "listing will be paged") because they
+  describe the provider, not the form. The UAT on PR #866 caught them originally written in the present
+  tense, which told a reader that S3 browsing worked with caveats when no S3 code path existed at all —
+  and the `## Limits` copy repeated it out of sight of the hedge, where a reader skimming from the bottom
+  would never see the qualification. Once the provider lands, those sentences become true and should read
+  in the present tense. **Do both edits together**: deleting the hedge while leaving the future tense, or
+  flipping the tense while leaving the hedge, each produces a page that contradicts itself.
 
 ## Notes
 

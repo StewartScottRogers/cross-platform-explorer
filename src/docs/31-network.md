@@ -80,23 +80,27 @@ If no secret is stored, the app asks *before* connecting rather than signing a r
 one — a blank secret produces a request that looks valid and comes back `SignatureDoesNotMatch`, which
 sends you hunting for a clock or permissions problem that doesn't exist.
 
-### Honest limits of object storage
+### Honest limits of object storage — how browsing *will* behave
 
-An object store is not a filesystem, and this is where that shows:
+An object store is not a filesystem, and this is where that shows. **Everything in this list describes
+the object-store client that ships alongside the form** (see *Arriving in stages* above) — it is written
+in the future tense on purpose, because none of it is what your build does today if a saved S3 row
+reports an unsupported protocol.
 
-- **There is no rename.** S3 has no atomic rename or move operation. Rather than fake it with a
+- **There will be no rename.** S3 has no atomic rename or move operation. Rather than fake it with a
   copy-then-delete that can leave you with two copies or none if it fails halfway, renaming an object
-  is refused outright with an explanation.
+  will be refused outright with an explanation.
 - **Directories aren't real.** A bucket is a flat list of keys; what looks like a folder is just the
-  part of a key before a `/`. So "folders" are a naming convention the app reconstructs as it lists,
-  an empty folder generally can't exist (nothing is there to name it), and creating one only writes a
-  marker object. Deleting a "folder" means deleting the objects under that prefix.
-- **Uploads are a single request**, so an individual file larger than 5 GB can't be uploaded yet
-  (multi-part upload isn't implemented).
-- **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins aren't supported —
-  the connection needs a long-lived access key ID and secret.
-- Listing very large buckets is paged as you browse, so a prefix with hundreds of thousands of objects
-  fills in progressively rather than all at once.
+  part of a key before a `/`. So "folders" will be a naming convention the app reconstructs as it lists,
+  an empty folder generally can't exist (nothing is there to name it), and creating one will only write
+  a marker object. Deleting a "folder" will mean deleting the objects under that prefix.
+- **Uploads will be a single request**, so an individual file larger than 5 GB won't be uploadable
+  (multi-part upload isn't planned for the first version).
+- **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
+  the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
+  is why **Access key** is the only authentication S3 offers.
+- Listing very large buckets will be paged as you browse, so a prefix with hundreds of thousands of
+  objects fills in progressively rather than all at once.
 
 ## The row menu
 
@@ -148,8 +152,10 @@ there's no NFS client yet, so an NFS row can't be turned into a saved connection
 
 ## Limits
 
-S3 connections carry their own limits — no rename, virtual directories, single-request uploads and
-access-key-only credentials — described in the S3 section above.
+S3 connections **will** carry their own limits — no rename, virtual directories, single-request uploads
+and access-key-only credentials — described in the S3 section above. Today you can save and edit an S3
+connection; the client that browses the bucket ships alongside it, so if a saved S3 row reports an
+unsupported protocol when you click it, your build has the form but not yet the provider.
 
 Reconnecting after an app restart may ask for your password/passphrase again even if you didn't
 check **Remember** — the app only holds a not-remembered secret for the current session. There is
