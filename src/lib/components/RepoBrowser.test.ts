@@ -7,7 +7,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-import RepoBrowser, { stripRepoUrl, looksLikeUrl } from "./RepoBrowser.svelte";
+import RepoBrowser, { stripRepoUrl, looksLikeUrl, isRepoId } from "./RepoBrowser.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -228,5 +228,112 @@ describe("RepoBrowser — SSH repo URL paste (CPE-1650)", () => {
 
     expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
     expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+});
+
+// CPE-1663 — the guard was `!r.includes("/") || looksLikeUrl(r)`, a growing list of negative special
+// cases (scheme://, user@host:) that was already two exceptions deep and still let a Windows path and
+// an ordinary colon-bearing sentence through — neither looks like a recognized URL shape, so both
+// reached forge_browse as a fake owner/name. Fixed by tightening the *positive* test instead: isRepoId
+// requires exactly one "/" and only repo-name characters (letters, digits, ., _, -) in each segment,
+// which rejects everything the old guard missed — plus two more holes an independent reviewer found
+// that the same predicate closes for free (a double-@ SCP string, a bare host:owner/repo with no user).
+describe("isRepoId (CPE-1663)", () => {
+  it.each([
+    "owner/name",
+    "tauri-apps/tauri",
+    "owner-name/repo.name_v2",
+    "a/b",
+    // GitLab nested groups (PR #852 UAT). The first version of isRepoId required EXACTLY one slash and
+    // silently broke these — common in real organisations, previously reachable, and supported all the
+    // way through the backend: is_safe_repo_slug accepts `segs.len() >= 2`, and browse_path builds
+    // GitLab's project id with `repo.replace('/', "%2F")`, which replaces every slash precisely so an
+    // arbitrary depth works. A client guard stricter than its own server is a regression.
+    "group/subgroup/project",
+    "group/sub/deeper/project",
+  ])("accepts a well-formed repo id — %s", (r) => {
+    expect(isRepoId(r)).toBe(true);
+  });
+
+  it.each([
+    ["a Windows path with forward slashes", "C:/repos/thing"],
+    ["an ordinary sentence with a colon and a slash", "Fix: update src/main.rs docs"],
+    ["a double-@ SCP-style string", "git@github.com@evil.com:o/r"],
+    ["a bare host:owner/repo with no user", "github.com:owner/repo"],
+    ["a scheme:// URL", "https://github.com/owner/name"],
+    ["an SCP-style SSH URL", "git@github.com:owner/name"],
+    ["no slash at all", "justaname"],
+    ["a trailing slash / empty second segment", "owner/"],
+    ["a leading slash / empty first segment", "/name"],
+    ["whitespace inside a segment", "owner/na me"],
+    // These three mirror is_safe_repo_slug's own rules, so the client and the server now agree on what a
+    // repository id is instead of each holding a separate opinion.
+    ["an empty middle segment", "group//project"],
+    ["a `..` segment", "owner/../secrets"],
+    ["a segment starting with a dash (reads as a flag)", "owner/-rf"],
+  ])("rejects %s — %s", (_label, r) => {
+    expect(isRepoId(r)).toBe(false);
+  });
+});
+
+describe("RepoBrowser — non-URL junk rejected without hitting forge_browse (CPE-1663)", () => {
+  it.each([
+    ["a Windows path with forward slashes", "C:/repos/thing"],
+    ["an ordinary sentence with a colon and a slash", "Fix: update src/main.rs docs"],
+    ["a double-@ SCP-style string", "git@github.com@evil.com:o/r"],
+    ["a bare host:owner/repo with no user", "github.com:owner/repo"],
+  ])("rejects %s", async (_label, input) => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: input } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+
+  // Everything CPE-1650 fixed must still work through the new positive guard.
+  it.each([
+    ["SCP-style short form", "git@github.com:owner/name.git"],
+    ["ssh:// long form", "ssh://git@github.com/owner/name.git"],
+    ["ssh:// with an explicit port", "ssh://git@github.com:22/owner/name.git"],
+  ])("still browses correctly for a matching-host SSH URL — %s", async (_label, url) => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: url } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "owner/name")).toBe(true),
+    );
+    expect(await screen.findByText("src")).toBeTruthy();
+  });
+
+  it("browses a GitLab nested-group project through the real component (PR #852 UAT regression)", async () => {
+    // The end-to-end half of the nested-group fix: the UAT found this rejected in the UI with
+    // "Enter a repository as owner/name." and forge_browse never called, even though GitLab supports
+    // nested namespaces and the backend encodes every slash for exactly this case.
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "gitlab", repo: "group/subgroup/project" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await waitFor(() =>
+      expect(
+        calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "group/subgroup/project"),
+      ).toBe(true),
+    );
+    expect(await screen.findByText("src")).toBeTruthy();
+  });
+
+  it("still rejects a foreign-host SSH URL that the selected provider's strip doesn't touch", async () => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: "git@gitlab.com:owner/name.git" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+
+  it("still accepts a plain owner/name with dots, dashes and underscores", async () => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "github", repo: "some-org_1/repo.name_2" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    await waitFor(() =>
+      expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "some-org_1/repo.name_2")).toBe(true),
+    );
   });
 });

@@ -1,0 +1,20 @@
+<!doctype html>
+<!--
+  CPE-1660 notice-overflow verification harness — INNER document, loaded inside index.html's <iframe>.
+  Mounts the REAL StatusBar.svelte with the app's real src/app.css. See index.html's header comment for
+  why an iframe (not a sized wrapper div) is required for the measured viewport to be trustworthy.
+-->
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>CPE-1660 inner</title>
+    <link rel="stylesheet" href="/src/app.css" />
+    <style>
+      html, body { margin: 0; padding: 0; background: #dcdcdc; }
+    </style>
+  </head>
+  <body>
+    <div id="mount"></div>
+    <script type="module" src="./inner-main.ts"></script>
+  </body>
+</html>
