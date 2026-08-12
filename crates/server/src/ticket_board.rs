@@ -134,9 +134,41 @@ pub struct Epic {
     pub tags: Vec<String>,
 }
 
+/// The Epics queue's status folders — the **same five** as [`COLUMNS`], since CPE-1676 gave
+/// `Ticketing/Epics/` the identical shape to `Ticketing/Tickets/`.
+pub const EPIC_COLUMNS: [&str; 5] = COLUMNS;
+
+/// The epic `status:` a folder under `Ticketing/Epics/` means (CPE-1676). Folder location is
+/// authoritative there exactly as it is under `Tickets/`; the only difference from
+/// [`status_for_column`] is that a dormant epic brief is `Proposed`, not `Open`. `None` for a folder
+/// that isn't one of the five.
+pub fn epic_status_for_folder(folder: &str) -> Option<&'static str> {
+    match EPIC_COLUMNS.iter().copied().find(|c| c.eq_ignore_ascii_case(folder))? {
+        "Backlog" => Some("Proposed"),
+        "Doing" => Some("In Progress"),
+        "Blocked" => Some("Blocked"),
+        "Deferred" => Some("Deferred"),
+        "Done" => Some("Done"),
+        _ => None,
+    }
+}
+
 /// Parse an epic from a ticket's markdown. Returns `None` if it has no id **or** isn't an epic (its
-/// `tags` must include `epic`). Used to list epics from `Ticketing/Epics/` + closed epics in `Tickets/Done/`.
+/// `tags` must include `epic`). Status comes from the frontmatter — use [`epic_from_in`] for a file
+/// read out of an `Ticketing/Epics/` status folder, where the **folder** is authoritative. Still used
+/// for closed epics that live in `Tickets/Done/`.
 pub fn epic_from(md: &str) -> Option<Epic> {
+    epic_parse(md, None)
+}
+
+/// Like [`epic_from`], but the status folder the file was found in supplies the status (CPE-1676) —
+/// so a stale `status:` line can never make the board disagree with the queue's own layout. An
+/// unrecognised `folder` falls back to the frontmatter.
+pub fn epic_from_in(md: &str, folder: &str) -> Option<Epic> {
+    epic_parse(md, epic_status_for_folder(folder))
+}
+
+fn epic_parse(md: &str, folder_status: Option<&str>) -> Option<Epic> {
     let fm = frontmatter(md);
     let id = fm.get("id").map(|s| unquote(s)).filter(|s| !s.is_empty())?;
     let tags: Vec<String> = fm.get("tags").map(|s| parse_tags(s)).unwrap_or_default();
@@ -146,7 +178,10 @@ pub fn epic_from(md: &str) -> Option<Epic> {
     Some(Epic {
         id,
         title: fm.get("title").map(|s| unquote(s)).unwrap_or_default(),
-        status: fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        status: match folder_status {
+            Some(s) => s.to_string(),
+            None => fm.get("status").map(|s| unquote(s)).unwrap_or_default(),
+        },
         tags,
     })
 }
@@ -625,6 +660,29 @@ mod tests {
         // A normal (non-epic) ticket is not an epic.
         assert!(epic_from("---\nid: CPE-1\ntitle: x\ntags: [ready]\n---\nb").is_none());
         assert!(epic_from("no frontmatter").is_none());
+    }
+
+    /// CPE-1676: the Epics queue has the Tickets queue's five status folders, and there too the
+    /// **folder** is the authoritative status — the only vocabulary difference being that a dormant
+    /// epic brief is `Proposed`, not `Open`.
+    #[test]
+    fn epic_status_comes_from_the_folder_not_the_frontmatter() {
+        assert_eq!(EPIC_COLUMNS, COLUMNS, "same five folders as the Tickets queue");
+        assert_eq!(epic_status_for_folder("backlog"), Some("Proposed")); // NOT "Open"
+        assert_eq!(epic_status_for_folder("Doing"), Some("In Progress"));
+        assert_eq!(epic_status_for_folder("Blocked"), Some("Blocked"));
+        assert_eq!(epic_status_for_folder("Deferred"), Some("Deferred"));
+        assert_eq!(epic_status_for_folder("Done"), Some("Done"));
+        assert_eq!(epic_status_for_folder("Sprints"), None);
+
+        // A stale `status:` line loses to the folder…
+        let stale = "---\nid: CPE-9\ntitle: \"EPIC: x\"\nstatus: Proposed\ntags: [epic]\n---\nb";
+        assert_eq!(epic_from_in(stale, "Doing").unwrap().status, "In Progress");
+        // …but an unrecognised folder falls back to it, and `epic_from` never overrides.
+        assert_eq!(epic_from_in(stale, "Nonsense").unwrap().status, "Proposed");
+        assert_eq!(epic_from(stale).unwrap().status, "Proposed");
+        // The epic-tag requirement still applies at the new depth.
+        assert!(epic_from_in("---\nid: CPE-1\ntags: [ready]\n---\nb", "Doing").is_none());
     }
 
     #[test]

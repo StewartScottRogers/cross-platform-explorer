@@ -4,7 +4,7 @@ title: Sidecar reliability & self-healing
 type: epic
 status: Done
 priority: high
-tags: reliability
+tags: [epic, reliability]
 created: 2026-07-21
 ---
 

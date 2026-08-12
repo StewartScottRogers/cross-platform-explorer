@@ -95,3 +95,46 @@ One thing to decide during slice 1 and record: whether `Done/` gets the same
 there are ~70 epics and few will ever close, so flat `Done/` is probably right — but say so deliberately
 rather than by omission, because `/ticketing-organize` is what maintains that nesting and it will need to
 know which shape to expect.
+
+## Decisions (recorded 2026-08-12, during implementation)
+
+### `Epics/Done/` is FLAT — no dated `YYYY/QN/Month/Week-NN/` nesting
+
+`Tickets/Done/` is nested because it holds thousands of tickets and would otherwise be unbrowsable.
+The whole epic queue is ~70 files and only 26 of them are closed after a year; realistically a handful
+close per quarter. Dated buckets would add four levels of depth to a folder that will never need them,
+and every reader would have to walk recursively instead of doing one `read_dir`. Flat also keeps the
+guard test's contract simple: exactly five folders, each holding files directly.
+
+`/ticketing-organize` and `scripts/organize-done.mjs` are therefore scoped to `Tickets/Done/` **only**
+and must never touch `Epics/Done/` — stated explicitly in `.claude/commands/ticketing-organize.md` and
+in `Ticketing/Epics/Done/wiki.md`. Revisit only if `Epics/Done/` ever passes a few hundred files.
+
+### Empty `Blocked/` and `Deferred/` survive a clone via a `wiki.md`, not a `.gitkeep`
+
+Git does not track empty directories, so both would vanish on clone. `Ticketing/Sprints/` uses a
+`.gitkeep` for this, so that was the house fallback — but each of the five Epics status folders got a
+short `wiki.md` explainer instead, matching the convention already used by `Tickets/Blocked/wiki.md`
+and `Tickets/Deferred/wiki.md`. It is tracked content, so the folder survives; and unlike a zero-byte
+placeholder it answers the question someone opening an empty folder actually has ("what goes in here,
+and how is this different from Deferred?"). The old `Ticketing/Epics/README.md` was `git mv`'d into
+`Backlog/wiki.md` and rewritten for the new layout, so the queue root holds only the five folders.
+
+### Closed epics from before this migration stay in `Tickets/Done/`
+
+26 closed epics were sitting loose in `Epics/` and moved to `Epics/Done/`. Older ones were closed into
+`Tickets/Done/` (including its dated subfolders) by the pre-existing `/ticketing-epic close` flow and
+were **not** moved — rewriting archive paths across a year of history buys nothing. Both boards
+therefore keep reading epics from `Epics/**` *and* from `Tickets/Done/`; only the former takes its
+status from its folder.
+
+## Findings — two silent board lies, found by actually running the boards
+
+Both predate this epic and were invisible until the boards were run side by side against the real repo:
+
+- **CPE-862** (`Epics/Done/`) had `tags: reliability` — a bare scalar, not a list — so `parse_tags`
+  returned `[]`, the `epic` tag was absent, and **neither board had ever listed it**. An epic missing
+  from the queue entirely, with nothing on disk looking wrong. Fixed to `tags: [epic, reliability]`,
+  and a third guard test now fails on any epic that isn't `epic`-tagged.
+- **CPE-547** (`Tickets/Done/`) is a shipped, closed epic whose `status:` still read `In Progress`, so
+  both boards showed it as active work. Fixed to `status: Done` + `closed:`.

@@ -96,6 +96,35 @@ describe("BoardView empty-state (CPE-551)", () => {
     expect(writeText).toHaveBeenCalledWith("CPE-42");
   });
 
+  // CPE-1676: the Epics queue now has the tickets queue's five status folders, and the backend derives
+  // each epic's status from its folder. The Epics view must lay those out across the same five columns —
+  // a Blocked/Deferred epic landing in Backlog would be the board quietly disagreeing with the queue.
+  it("lays epics out across the same five status columns as the tickets board (CPE-1676)", async () => {
+    localStorage.setItem("cpe.boardView", "epics");
+    const epic = (id: string, status: string) => ({ id, title: `${id} title`, status, tags: ["epic"] });
+    invokeMock.mockImplementation(async (cmd: string) =>
+      cmd === "find_project_root"
+        ? null
+        : cmd === "board_epics"
+          ? [
+              epic("CPE-1", "Proposed"),
+              epic("CPE-2", "In Progress"),
+              epic("CPE-3", "Blocked"),
+              epic("CPE-4", "Deferred"),
+              epic("CPE-5", "Done"),
+            ]
+          : []);
+    const { container, findByText } = render(BoardView, { root: "/x" });
+    await findByText("CPE-3"); // the Blocked epic rendered at all
+
+    const cols = [...container.querySelectorAll(".board-col")].map((c) => ({
+      name: c.querySelector(".board-col-name")?.textContent?.trim(),
+      ids: [...c.querySelectorAll(".card-id")].map((n) => n.textContent?.trim()),
+    }));
+    expect(cols.map((c) => c.name)).toEqual(["Backlog", "Doing", "Blocked", "Deferred", "Done"]);
+    expect(cols.map((c) => c.ids)).toEqual([["CPE-1"], ["CPE-2"], ["CPE-3"], ["CPE-4"], ["CPE-5"]]);
+  });
+
   it("shows a no-match hint and Escape clears the filter (CPE-560)", async () => {
     const aCard = { id: "CPE-1", title: "hello", ticket_type: "Feature", priority: "Medium", tags: [], column: "Backlog" };
     invokeMock.mockImplementation(async (cmd: string) =>

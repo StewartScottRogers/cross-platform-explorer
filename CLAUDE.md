@@ -173,22 +173,34 @@ scheduled tasks and the `gh`-driven release helpers (which also work from a CLI 
 The ticket system lives under the `Ticketing/` container: the status-flow queue in `Ticketing/Tickets/`,
 plus the sibling `Epics/` and `Sprints/` queues. Folder location is the authoritative status:
 
-| Folder | Status |
-|--------|--------|
-| `Ticketing/Epics/`   | Umbrella trackers — a **separate queue**, decomposed just-in-time (`Proposed` = dormant brief, `In Progress` = activated) |
-| `Ticketing/Sprints/` | Time-boxed ticket batches — a **separate queue** (`SPR-NN`; `Planned` / `Active` / `Closed`); orthogonal to epics, managed via `/ticketing-sprint` |
-| `Ticketing/Tickets/Backlog/` | Open â€” ready to work |
-| `Ticketing/Tickets/Doing/`   | In Progress â€” one at a time |
-| `Ticketing/Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
-| `Ticketing/Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
-| `Ticketing/Tickets/Done/`    | Closed |
+`Ticketing/Tickets/` and `Ticketing/Epics/` have the **same five status folders** (CPE-1676), so both
+queues read the same way; `Ticketing/Sprints/` is flat.
+
+| Folder | Tickets queue | Epics queue (same folders, epic vocabulary) |
+|--------|---------------|---------------------------------------------|
+| `Backlog/`  | Open — ready to work | `Proposed` — dormant brief, not yet decomposed |
+| `Doing/`    | In Progress — one at a time | `In Progress` — activated; children in `Tickets/Backlog/` (several epics may be active) |
+| `Blocked/`  | Deferred on an **external** gate — not workable until it clears | same, for an epic (normally empty) |
+| `Deferred/` | Postponed by **our** choice / an internal prereq — pickable anytime | same, for an epic (normally empty) |
+| `Done/`     | Closed — dated `YYYY/QN/Month/Week-NN/` nesting via `/ticketing-organize` | Closed — **flat**, never nested (~70 epics total) |
+
+`Ticketing/Sprints/` — time-boxed ticket batches, a **separate queue** (`SPR-NN`; `Planned` /
+`Active` / `Closed`); orthogonal to epics, managed via `/ticketing-sprint`.
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`. To file one
 interactively: `/ticketing-new`. See `Ticketing/wiki.md` for full workflow rules.
 
-**Epics** are handled specially: they live in `Ticketing/Epics/` and are **not** researched, planned, or
-sub-ticketed until *activated* with `/ticketing-epic activate CPE-NNN`. A dormant epic is just a brief;
-`/ticketing-work` never builds one directly. See `Ticketing/wiki.md` → "Epics" and the `ticketing-epic` skill.
+**Epics** are handled specially: they live in `Ticketing/Epics/**` and are **not** researched, planned,
+or sub-ticketed until *activated* with `/ticketing-epic activate CPE-NNN` (which `git mv`s the file
+`Epics/Backlog/ → Epics/Doing/`). A dormant epic is just a brief; `/ticketing-work` never builds one
+directly. See `Ticketing/wiki.md` → "Epics" and the `ticketing-epic` skill.
+
+**Folder location is authoritative in both queues**, mirrored in each file's `status:`. For the Epics
+queue that invariant is enforced by `src/lib/epicsQueueLayout.test.ts`: it fails CI if any `.md` sits
+loose in `Ticketing/Epics/` (the pre-CPE-1676 flat shape) or if a file's `status:` disagrees with its
+folder. Both board implementations (`crates/server` + `src-tauri`, and the `sidecar/agent-board`
+sidecar) and the ticket MCP read these folders directly, so drift makes them **lie** rather than error
+— change every reader in lockstep.
 
 ### Showing open tickets â€” ALWAYS include Blocked, Deferred, Epics, and Sprints
 
@@ -205,9 +217,12 @@ sprints**.):
 3. **Deferred** — all `Ticketing/Tickets/Deferred/CPE-*.md`, as a table of ID, title, tags, and a one-line
    *deferred-on / revisit-when* note. These are postponed by our choice (often an internal prereq),
    not externally gated, so they remain pickable.
-4. **Epics** — all `Ticketing/Epics/CPE-*.md`, as a table of ID, title, status (`Proposed`/`In Progress`),
-   tags, and a one-line goal (plus `X of Y children Done` for an activated epic). This is the separate
-   epic queue; epics are decomposed via `/ticketing-epic`, not worked by `/ticketing-work`.
+4. **Epics** — all `Ticketing/Epics/*/CPE-*.md` (skipping each folder's `wiki.md`), as a table of ID,
+   title, status, tags, and a one-line goal (plus `X of Y children Done` for an activated epic). The
+   **folder gives the status** — `Backlog/`→`Proposed`, `Doing/`→`In Progress`, plus `Blocked/`,
+   `Deferred/`, `Done/`. List the open ones (Backlog/Doing/Blocked/Deferred); `Epics/Done/` is history,
+   surfaced only on request. This is the separate epic queue; epics are decomposed via
+   `/ticketing-epic`, not worked by `/ticketing-work`.
 5. **Sprints** — all `Ticketing/Sprints/SPR-*.md`, **Active first then Planned**, as a table of ID, title,
    status (`Active`/`Planned`), window (`start â†’ end`), a one-line goal, and progress (`X of Y tickets
    Done`, counting tickets whose `sprint:` frontmatter names it). This is the separate, time-boxed sprint

@@ -70,6 +70,13 @@ The sidecar reads the full `Ticketing/` container, not just the status-flow queu
 **Board / Epics / Sprints** view switcher, reading `Ticketing/Epics/` and `Ticketing/Sprints/` (the
 sibling queues lifted out in CPE-1128) at parity with the in-process board's Epics view (CPE-1129).
 
+Since CPE-1676 `Ticketing/Epics/` has the **same five status folders** as `Ticketing/Tickets/`, and
+there too **the folder is the status** — so `read_epics` walks `Epics/{Backlog,Doing,Blocked,Deferred,Done}/`
+and takes each epic's status from its folder rather than its `status:` line. That folder→status map is
+deliberately **duplicated** in `sidecar/agent-board/src/board.rs` and `crates/server/src/ticket_board.rs`
+(the sidecar must not depend on `cpe-server` — ADR 0001), so the board exists twice and both copies must
+change together or one of them silently shows a wrong or empty epic queue.
+
 ## Related
 
 - Boot-mode selection: `src/lib/bootMode.ts` (+ `bootMode.test.ts`).

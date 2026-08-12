@@ -2,12 +2,13 @@
 id: CPE-547
 title: "EPIC: Busy/wait cursor — show a spinner/hourglass when an operation runs long"
 type: Task
-status: In Progress
+status: Done
 priority: Medium
 component: Multiple
 tags: [epic, big-design]
 estimate: 4h+
 created: 2026-07-16
+closed: 2026-08-12
 ---
 
 ## Summary

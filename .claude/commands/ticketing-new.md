@@ -18,9 +18,10 @@ just-in-time, via `/ticketing-epic activate`.
 
 ## Step 1 — Find the Next ID
 
-Scan **all** ticket folders recursively — `Ticketing/Epics/`, `Backlog/`, `Doing/`, `Blocked/`,
-`Deferred/`, `Done/` — for every CPE-NNN_*.md file. Find the highest NNN. New ID = that number + 1,
-zero-padded to three digits (e.g. CPE-022). (IDs are shared across all queues, epics included.)
+Scan **all** ticket folders recursively — everything under `Ticketing/Tickets/` and everything under
+`Ticketing/Epics/` (both are five status folders: `Backlog/ Doing/ Blocked/ Deferred/ Done/`) — for
+every CPE-NNN_*.md file. Find the highest NNN. New ID = that number + 1, zero-padded to three digits
+(e.g. CPE-022). (IDs are shared across all queues, epics included.)
 
 ## Step 2 — Gather Details
 
@@ -68,10 +69,12 @@ If the item is too big for one unit of work — a Mega-Feature, or something tha
 many child tickets — it is an **epic**, and epics take a different path. Do **not** file it into
 `Backlog/`, and do **not** decompose it now. Instead:
 
-1. Create it in **`Ticketing/Epics/`** with `status: Proposed` and `tags: [epic]`, as a one-page
-   **brief only**: the goal (Summary), a rough scope, and any open `## Open questions` — **no child
-   tickets, no research, no acceptance-criteria breakdown of sub-work**. (An epic-level Definition of
-   Done is fine; per-slice detail is not.)
+1. Create it in **`Ticketing/Epics/Backlog/`** with `status: Proposed` and `tags: [epic]`, as a
+   one-page **brief only**: the goal (Summary), a rough scope, and any open `## Open questions` — **no
+   child tickets, no research, no acceptance-criteria breakdown of sub-work**. (An epic-level
+   Definition of Done is fine; per-slice detail is not.) The Epics queue has the same five status
+   folders as `Tickets/` and the folder IS the status (CPE-1676), so a `Proposed` brief goes in
+   `Backlog/` — **never** loose in `Ticketing/Epics/`, which a guard test rejects.
 2. Report: "Filed epic CPE-NNN in the Epics queue — decompose it later with
    `/ticketing-epic activate CPE-NNN`."
 3. **Skip the rest of this skill.** An epic is never worked directly; its research, planning, and

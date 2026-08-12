@@ -30,12 +30,17 @@ still outstanding. If `Deferred/` is empty, print "Deferred: none" rather than d
 Also glob `Ticketing/Tickets/Doing/CPE-*.md`. If anything is in-flight or stalled there, show it under its own
 heading so abandoned work-in-progress can be restarted.
 
-ALWAYS show an **Epics** table (the separate epic queue). Glob `Ticketing/Epics/CPE-*.md` and
-render: ID, title, **status** (`Proposed` = dormant brief / `In Progress` = activated), **Tags**, and
-a one-line goal. For an `In Progress` epic, add a child-progress note (`X of Y children Done`, counting
-tickets whose `epic:` frontmatter names it). Epics are **not** in the Backlog Work options — they are
-decomposed via `/ticketing-epic activate CPE-NNN`, not built by `/ticketing-work`. If `Epics/` is
-empty, print "Epics: none". (See the `ticketing-epic` skill and `Ticketing/wiki.md` → "Epics".)
+ALWAYS show an **Epics** table (the separate epic queue). Since CPE-1676 that queue has the **same
+five status folders** as `Tickets/`, with folder location authoritative, so glob
+`Ticketing/Epics/*/CPE-*.md` (skipping each folder's `wiki.md`) and take the status from the folder:
+`Backlog/`→`Proposed` (dormant brief), `Doing/`→`In Progress` (activated), plus `Blocked/`,
+`Deferred/`, `Done/`. Render: ID, title, **status**, **Tags**, and a one-line goal. For an
+`In Progress` epic, add a child-progress note (`X of Y children Done`, counting tickets whose `epic:`
+frontmatter names it). List the open ones (Backlog/Doing/Blocked/Deferred); closed epics in
+`Epics/Done/` are history — surface them only if asked. Epics are **not** in the Backlog Work
+options — they are decomposed via `/ticketing-epic activate CPE-NNN`, not built by `/ticketing-work`.
+If the queue holds no open epics, print "Epics: none". (See the `ticketing-epic` skill and
+`Ticketing/wiki.md` → "Epics".)
 
 Finally, ALWAYS show a **Sprints** table too (mandatory — the user asked for epics **and** sprints on
 every listing). Glob `Ticketing/Sprints/SPR-*.md` and render, **Active first then Planned**: ID, title,

@@ -60,12 +60,18 @@ says so rather than showing empty columns.
 
 ## Epics view
 
-Toggle **Epics** to see your epics as their own **kanban** — laid out just like the ticket board. Each
-epic is a card in the column that matches its status:
+Toggle **Epics** to see your epics as their own **kanban** — laid out just like the ticket board,
+across the **same five columns**, because the epic queue on disk has exactly the same five status
+folders as the ticket queue. Each epic is a card in the column that matches its folder:
 
 - **Backlog** — proposed (dormant) epics, not yet started.
-- **Doing** — activated epics that are in progress.
+- **Doing** — activated epics that are in progress. Unlike tickets, several epics can be here at once.
+- **Blocked** — epics waiting on an external gate. Usually empty.
+- **Deferred** — epics parked by choice. Usually empty.
 - **Done** — closed epics. Like the ticket board, older ones are archived behind a **+N archived** toggle.
+
+The **folder is the status**: moving an epic's file between those folders is what changes its state,
+so the board always agrees with the queue on disk.
 
 Every epic card shows its **id**, **status**, and a **progress bar** (how many of its tickets are done).
 **Click an epic card** to open its **details** (below); its popup has a **View tickets →** button that

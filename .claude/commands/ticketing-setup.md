@@ -56,7 +56,12 @@ Ticketing/              <- container: system-level wiki.md + _template.md live h
     Blocked/wiki.md  <- EXTERNAL-gate tickets, what a blocked note must contain
     Deferred/wiki.md <- OUR-choice/internal-prereq postponements (pickable); Blocked-vs-Deferred rule
     Done/wiki.md     <- terminal statuses, what a closed ticket contains, how to reopen
-  Epics/               <- sibling queue: umbrella trackers, decomposed just-in-time
+  Epics/                <- sibling queue: umbrella trackers, decomposed just-in-time.
+    Backlog/wiki.md  <- SAME five status folders as Tickets/, folder = status (CPE-1676):
+    Doing/wiki.md       Backlog=Proposed brief, Doing=activated, Blocked/Deferred=parked,
+    Blocked/wiki.md     Done=closed (FLAT — no dated nesting; ~70 epics total).
+    Deferred/wiki.md    The per-folder wiki.md is also what keeps the normally-empty
+    Done/wiki.md        Blocked/ and Deferred/ in git, so no .gitkeep is needed.
   Sprints/             <- sibling queue: time-boxed SPR-NN ticket batches
 ```
 
@@ -102,6 +107,9 @@ plus the sibling `Epics/` and `Sprints/` queues. Folder location is the authorit
 | `Ticketing/Tickets/Blocked/` | Deferred on an **external** gate — not workable until it clears |
 | `Ticketing/Tickets/Deferred/`| Postponed by **our** choice / an internal prereq — pickable anytime |
 | `Ticketing/Tickets/Done/`    | Closed |
+
+`Ticketing/Epics/` has the **same five folders** with the same meaning (`Backlog/` = a `Proposed`
+brief, `Doing/` = activated); `Ticketing/Sprints/` is flat.
 
 IDs are sequential: `CPE-NNN`. To work a ticket: `/ticketing-work CPE-NNN`.
 To file one interactively: `/ticketing-new`. When the user says "tasks", list all

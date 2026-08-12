@@ -93,8 +93,9 @@
   $: persistView(viewMode);
   let epics: Epic[] = [];
 
-  // Epics as a kanban (CPE-922): epics laid out across Backlog/Doing/Done like the tickets board, with
-  // the Done column's archive toggle surfacing closed epics from the dated Done/** subfolders.
+  // Epics as a kanban (CPE-922): epics laid out across the tickets board's five status columns (the
+  // Epics queue has the same folders since CPE-1676), with the Done column's archive toggle surfacing
+  // closed epics from the dated Done/** subfolders.
   $: epicCols = groupEpicsByColumn(filterEpics(epics, boardQuery));
   $: archivedEpicList = archivedEpics(filterCards(archived, boardQuery));
   $: epicDoneDisplay = showArchived ? [...epicCols.Done, ...archivedEpicList] : epicCols.Done;
@@ -282,7 +283,9 @@
         <button class="board-btn" on:click={clearFilter}>✕ Clear filter</button>
       </div>
     {:else if viewMode === "epics"}
-      <!-- Epics kanban (CPE-922): epics as cards across Backlog/Doing/Done, mirroring the tickets board;
+      <!-- Epics kanban (CPE-922): epics as cards across the same five status columns as the tickets
+           board — since CPE-1676 the Epics queue has the identical status folders, so the two views
+           read the same way and Blocked/Deferred epics get real lanes instead of landing in Backlog;
            the Done column carries the same "+N archived" toggle for closed epics. Read-only (moving an
            epic between states means activating/closing it, which is a heavier /ticketing-epic action). -->
       <div class="board-columns">
