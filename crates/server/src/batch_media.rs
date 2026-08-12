@@ -895,6 +895,10 @@ const WHY_CENSUS_FAILED: &str = "the selected folder could not be enumerated to 
 const WHY_CENSUS_TOO_BIG: &str = "the selected folder holds too many entries to account for the output's \
                                   other hard links within a bounded scan";
 /// CPE-1652 finding A: a reparse tag with the name-surrogate bit set that this code does not understand.
+/// Reparse tags are a Windows concept, so this reason is only ever produced by the Windows probe — the
+/// same `allow(dead_code)` shape [`WHY_MAX_PATH_AMBIGUOUS`] needs, and the reason CI's Linux/macOS legs
+/// exist: a Windows-only reference is invisible from a Windows dev box.
+#[cfg_attr(not(windows), allow(dead_code))]
 const WHY_SURROGATE_TAG: &str = "the planned output is a reparse point whose type is not understood, and \
                                  whose tag says it stands in for another name — a write would follow it \
                                  somewhere this check cannot predict";
