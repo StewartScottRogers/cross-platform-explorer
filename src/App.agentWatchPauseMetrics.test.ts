@@ -91,6 +91,10 @@ function mockBackend() {
       case "agent_watch_stop_all": return null;
       case "metrics_record": return null;
       case "sidecar_stop": return null;
+      // "closed" (not the bare null this used to return) — CPE-1621 F1: closeAllConsoles() now only
+      // clears the Agents leaves on a genuine close, so this test's leaf-clear-triggered flush must
+      // simulate the console having actually reached and closed the session, not a no-URL no-op.
+      case "sidecar_close_all_sessions": return "closed";
       case "sidecar_registry_ids": return [];
       default: return null;
     }
@@ -220,6 +224,10 @@ describe("Agent Watch: pause vs end (CPE-1626 wiring)", () => {
     await fireEvent.contextMenu(deckBtn);
     const closeAllBtn = await screen.findByText("Close all consoles");
     await fireEvent.click(closeAllBtn);
+    // CPE-1621: "Close all consoles" now confirms first (it genuinely terminates every agent) rather
+    // than acting instantly — click through the confirm dialog to reach the real close.
+    const confirmBtn = await screen.findByRole("button", { name: "Close all" });
+    await fireEvent.click(confirmBtn);
 
     await waitFor(() => expect(metricsRecordCalls().length).toBeGreaterThan(0));
     const rec = metricsRecordCalls()[0][1] as { rec: Record<string, unknown> };

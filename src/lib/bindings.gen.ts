@@ -2903,6 +2903,34 @@ async sidecarCloseSession(sessionId: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Close **every** running AI Console session at once (CPE-1621) — the main-window/sidebar "Close all
+ * consoles" path's real fan-out teardown. Routes to the console's own `POST /api/close-all` over its
+ * loopback UI server, the SAME endpoint the in-console "Close all" button already uses
+ * (`sidecar/ai-console/src/launcher.html`) — `ConsoleState::close_all` there kills each session's
+ * `SessionIo` regardless of whether it's a `LocalIo` or a `DaemonIo` (the production case once a
+ * session daemon is running), so this genuinely reaches the host-owned session-daemon process's own
+ * PTYs, not just the console UI's local bookkeeping. Must be called BEFORE `sidecar_stop` drops the
+ * connection/URL (CPE-464) — once that happens there is nothing left to reach. Deliberately does NOT
+ * touch `AiConsoleState.daemon`: the session daemon process itself is left running (empty), matching
+ * its documented "outlives a UI-sidecar restart" design (see `AiConsoleState::daemon`'s doc comment)
+ * — this only ends every session inside it.
+ * 
+ * Returns `Ok(CloseAllOutcome::Nothing)` rather than a bare `Ok(())` when the console isn't running
+ * (F1 fix): before this, that no-op was indistinguishable from a genuine close on the wire, and
+ * `App.svelte` cleared every Agents leaf either way — silently lying about a kill it never performed
+ * whenever `state.url` had gone `None` (e.g. after `sidecar_repair`, or a crashed-but-not-yet-stopped
+ * console) while leaves for daemon-backed sessions were still showing. A POST failure/timeout still
+ * surfaces as `Err` unchanged, for the same reason.
+ */
+async sidecarCloseAllSessions() : Promise<Result<CloseAllOutcome, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("sidecar_close_all_sessions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Enable or disable a sidecar (CPE-274). Disabling stops it (if running) and prevents it
  * from starting until re-enabled. Independent per sidecar — never touches others.
  */
@@ -3998,6 +4026,27 @@ export type ChecksumEntry = { path: string; sha256: string; size: number; modifi
  * symlinked dir contributes `0` (not followed). Serialized to match the frontend `ChildSize`.
  */
 export type ChildSize = { name: string; path: string; is_dir: boolean; size: number }
+/**
+ * What `sidecar_close_all_sessions` actually did (CPE-1621 F1). The caller (`App.svelte`'s
+ * `closeAllConsoles`) uses this to decide whether it may honestly clear the Agents leaves — a bare
+ * `Ok(())` used to mean both "genuinely closed" and "console wasn't running, nothing happened" alike,
+ * so the UI cleared its leaves on both, even though the second case reaches every daemon-backed
+ * session that survives a UI-sidecar restart (CPE-464/CPE-309 S4) and leaves it running untouched.
+ */
+export type CloseAllOutcome = 
+/**
+ * The console was running (`state.url` was `Some`) and `POST /api/close-all` returned success —
+ * every session's `SessionIo` was genuinely asked to end, including any daemon-backed one.
+ */
+"closed" | 
+/**
+ * No console was running (`state.url` was `None`), so there was no loopback server to reach at
+ * all. This is NOT proof there was nothing to close — the Agents leaves are a client-side store
+ * that persists independently of the live connection (CPE-461 reattach design) — so the caller
+ * must only treat this as "genuinely nothing to close" when it independently knows the leaf list
+ * is already empty; otherwise it's "couldn't reach anything to close" wearing an `Ok`.
+ */
+"nothing"
 /**
  * One flagged file: its `name` and the [`ClutterReason`] it matched.
  */

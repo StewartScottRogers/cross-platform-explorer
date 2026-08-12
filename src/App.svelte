@@ -1286,19 +1286,74 @@
       Console button. `label` differs per source; confirming stops the console + clears the leaves. */
   let agentMenu: { x: number; y: number; label: string; sessionId?: string; sessionLabel?: string } | null = null;
 
-  /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves. The console
-      process is reaped, so no per-session `ended` arrives — clear the leaves here (CPE-457).
-      CPE-1626: flush every session's metrics row FIRST, forcibly for anything still running (no
-      `ended` will ever come now the process is gone) — otherwise `clearAgentSessions()` below empties
-      `$agentSessions`, and the reactive full-stop reconcile wipes the whole accumulator store with a
-      still-running session's activity never persisted anywhere. A forced row is honestly marked
-      `endedCleanly: false` rather than fabricated as a clean end (see `flushAllSessionsForcibly`). */
+  /** Ask before closing the Agent Deck entirely (CPE-1621): now that `closeAllConsoles` genuinely
+   *  terminates every running agent (see its own doc below — it used to only hide them), a single
+   *  accidental click on "Close all consoles" can silently kill in-progress work across every session
+   *  at once. The in-console "Close all" button already warns "Any running agents will be terminated"
+   *  before acting (`sidecar/ai-console/src/launcher.html`); this makes the main-window entry point say
+   *  the same thing rather than acting instantly. Per-session close (`closeOneConsole`) stays
+   *  unconfirmed and unchanged — a single, deliberately-targeted kill is the same risk it always was,
+   *  and this ticket's scope is explicit that that path must not change. (Not gated by a backend
+   *  `confirmed` boolean the way `shred_paths`/`vault_create` are — see the CPE-1621 work log: this
+   *  destructive action is reachable ONLY via a deliberate right-click, never silently or at launch, so
+   *  a UI-level confirm here is judged sufficient, and adding a backend gate just for this path while
+   *  leaving the identical-risk per-session path ungated would be an inconsistent asymmetry.) */
+  function confirmCloseAllConsoles() {
+    confirm = {
+      title: "Close all consoles?",
+      message: "Every running agent will be terminated. Any work an agent hasn't saved elsewhere will be lost.",
+      label: "Close all",
+      onYes: closeAllConsoles,
+    };
+  }
+  /** Close the Agent Deck entirely (all running agents) and clear the Agents leaves — but ONLY when the
+   *  close genuinely happened (CPE-1621 F1 review fix). CPE-1621's original cut ran the leaf-clear
+   *  unconditionally, so the UI could claim a kill it never performed: `sidecarCloseAllSessions()`
+   *  no-ops (`Ok(CloseAllOutcome::Nothing)`) whenever `state.url` is `None` — after `sidecar_repair`, or
+   *  whenever the console sidecar crashed/exited without an explicit stop — and the Agents leaves are a
+   *  client-side store that persists independently of the live connection (the whole point of the
+   *  CPE-461 reattach design), so leaves showing daemon-backed sessions with no live URL is a normal
+   *  state, not a corner case. Treat that no-op as success ONLY if there were no leaves to lose in the
+   *  first place; otherwise — same as an outright POST failure/timeout — leave the leaves in place and
+   *  tell the user, rather than silently wiping evidence of agents that are, for all we know, still
+   *  running.
+   *  First reach `/api/close-all` on the console's OWN loopback UI server — the same endpoint the
+   *  in-console "Close all" button already uses — so every session's PTY is actually killed, including
+   *  one held by the separate, host-owned session daemon (`state.daemon` in `src-tauri/src/lib.rs`),
+   *  which `sidecarStop` below never touches by design (it survives a UI sidecar restart on purpose).
+   *  This MUST run before `sidecarStop`: that call drops the host's connection/URL to the console
+   *  (CPE-464), and once it's gone there is nothing left to reach — ordering it after would silently
+   *  no-op and leave every agent running, which was exactly this ticket's bug (F2: order pinned by
+   *  `App.closeAllConsoles.test.ts`). `sidecarStop` still runs regardless of the close outcome —
+   *  it only tears down the local console UI process, a separate concern from whether the sessions
+   *  inside it were reached.
+   *  CPE-1626: on the genuine-success path, flush every session's metrics row FIRST, forcibly for
+   *  anything still running (no `ended` will ever come now the process is gone) — otherwise
+   *  `clearAgentSessions()` below empties `$agentSessions`, and the reactive full-stop reconcile wipes
+   *  the whole accumulator store with a still-running session's activity never persisted anywhere. A
+   *  forced row is honestly marked `endedCleanly: false` rather than fabricated as a clean end (see
+   *  `flushAllSessionsForcibly`). */
   async function closeAllConsoles() {
     agentMenu = null;
+    confirm = null;
+    let closedGenuinely: boolean;
+    try {
+      const outcome = unwrap(await commands.sidecarCloseAllSessions());
+      // "nothing" only counts as success if there was truly nothing to close — otherwise it means we
+      // couldn't REACH the sessions the leaves still show, not that they don't exist (F1).
+      closedGenuinely = outcome === "closed" || currentSessions().length === 0;
+    } catch (e) {
+      console.debug("close all sessions failed:", e);
+      closedGenuinely = false;
+    }
     try {
       unwrap(await commands.sidecarStop("ai-console"));
     } catch (e) {
       console.debug("close consoles failed:", e);
+    }
+    if (!closedGenuinely) {
+      showNotice($t("notice.closeAllConsolesUnreachable"), true);
+      return;
     }
     await flushAllSessionsForcibly();
     clearAgentSessions();
@@ -6181,6 +6236,11 @@
     unlistenTrayOpen?.();
     unlistenOsDrop?.();
     unlistenActivity?.();
+    // CPE-1643: these two are armed alongside `unlistenActivity` (same reconcile block, ~L1476-1492)
+    // but were missed here — a watch still armed at destroy time left both listeners registered past
+    // the component's life.
+    unlistenDiffs?.();
+    unlistenCost?.();
     if (watchRefreshTimer) clearTimeout(watchRefreshTimer);
     if (autoMirrorTimer) clearInterval(autoMirrorTimer);
     window.removeEventListener("focus", maybeAutoSync);
@@ -6188,6 +6248,9 @@
     stopDriveScheduler();
     stopDriveWatch(); // CPE-1280: stop live drive polling
     window.removeEventListener("focus", pokeDriveWatch); // CPE-1280
+    // CPE-1643: `showNotice`'s timer was only ever cleared by the NEXT notice replacing it, never on
+    // destroy — a pending one otherwise outlives the component.
+    if (noticeTimer) clearTimeout(noticeTimer);
   });
 </script>
 
@@ -7260,7 +7323,7 @@
     label={agentMenu.label}
     sessionId={agentMenu.sessionId}
     sessionLabel={agentMenu.sessionLabel}
-    on:confirm={closeAllConsoles}
+    on:confirm={confirmCloseAllConsoles}
     on:closeOne={(e) => closeOneConsole(e.detail)}
     on:open={(e) => { openSession(e.detail); agentMenu = null; }}
     on:close={() => (agentMenu = null)}
