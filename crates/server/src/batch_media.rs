@@ -852,10 +852,14 @@ fn strip_stream_suffix(path: &str) -> &str {
 /// catalogue of path-string patterns to pattern-match (the approach CPE-1623 exhausted).
 ///
 /// `index` is `u128` so both platforms' widest form fits without truncation.
+///
+/// `pub(crate)` since CPE-1672: [`crate::vault_manager`]'s session shredder pins each object it is about
+/// to overwrite by identity for the same reason this module does — a *name* can be re-pointed between any
+/// check and the write that follows it, and only the object can be pinned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-struct FileIdentity {
-    volume: u64,
-    index: u128,
+pub(crate) struct FileIdentity {
+    pub(crate) volume: u64,
+    pub(crate) index: u128,
 }
 
 impl FileIdentity {
@@ -869,7 +873,7 @@ impl FileIdentity {
     /// API reported success. Zero is not a legal value on either platform (`ino`/`st_dev` 0 denotes no file
     /// / no device on Unix; a zero file index or volume serial is Windows' "not supported here"), so a zero
     /// in either half means **identity unknown**, and every caller must refuse rather than compare it.
-    fn is_degenerate(self) -> bool {
+    pub(crate) fn is_degenerate(self) -> bool {
         self.volume == 0 || self.index == 0
     }
 }
@@ -1793,15 +1797,17 @@ pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<Verified
 
 /// Identity facts read from an **already-open handle** — no path involved, so nothing can have been
 /// substituted between the open and this read.
-struct HandleFacts {
-    id: FileIdentity,
-    links: u64,
-    is_dir: bool,
-    is_reparse_point: bool,
+///
+/// `pub(crate)` since CPE-1672 — see [`FileIdentity`].
+pub(crate) struct HandleFacts {
+    pub(crate) id: FileIdentity,
+    pub(crate) links: u64,
+    pub(crate) is_dir: bool,
+    pub(crate) is_reparse_point: bool,
 }
 
 #[cfg(unix)]
-fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
+pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     use std::os::unix::fs::MetadataExt;
     let meta = file.metadata().ok()?;
     Some(HandleFacts {
@@ -1814,7 +1820,7 @@ fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
 }
 
 #[cfg(windows)]
-fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
+pub(crate) fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
     use std::os::windows::io::AsRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
@@ -1843,7 +1849,7 @@ fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
 }
 
 #[cfg(not(any(windows, unix)))]
-fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
+pub(crate) fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
     None // fail closed on a platform whose identity model this module does not know
 }
 
@@ -1872,6 +1878,29 @@ fn open_no_follow(path: &std::path::Path) -> std::io::Result<(std::fs::File, boo
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok((existing.open(path)?, false)),
         Err(e) => Err(e),
     }
+}
+
+/// Open an **existing** file for writing without following a link at the final component (CPE-1672).
+///
+/// [`open_no_follow`]'s sibling for the one caller that must never create anything: the vault session
+/// shredder, which overwrites files it has already enumerated. Creating a missing name there would be a
+/// bug (it would write shred patterns into a file that was not in the tree), so this has no `create`
+/// mode at all — a vanished name is an `Err`, never a fresh empty file. Same no-follow flags, so the
+/// handle it returns is addressable by [`handle_facts`] on exactly the terms [`open_no_follow`]'s is.
+pub(crate) fn open_existing_no_follow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        opts.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT_U32);
+    }
+    opts.open(path)
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),

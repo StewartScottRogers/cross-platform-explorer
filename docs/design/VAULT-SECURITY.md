@@ -182,10 +182,60 @@ as a normal location; locking **re-seals that session directory back into the bl
         exists, which shrinks the confidentiality half (a victim's plaintext sealed into the attacker's
         vault) to the encrypt walk itself and refuses before the blob is replaced — and before the
         starting gun is fired.
+    **This did not close the class, and the round-3 re-audit proved it (CPE-1672).** The wipe was
+    **collect-then-shred**: it froze absolute paths, then called `hard_link_count` and `shred_file`, each
+    of which re-resolved the whole path again — and the per-file link check had no-follow semantics on the
+    **final component only**, with every parent component resolved by the OS. So the attacker skipped hard
+    links entirely: plant an innocuous *real* subdirectory before locking (link count 1, not a reparse
+    point, so every alias walk passes and it is sealed into the blob), wait for the first shredded file to
+    vanish, then `remove_dir_all` it and drop a **junction** in its place pointing at `Documents`. The
+    frozen path resolved through the junction, the victim's link count read `One`, and it was securely
+    overwritten and unlinked — reproduced 3/3 through the public `VaultRegistry::lock`, with `lock`
+    returning `Ok(())` and the UI saying "Locked". Strictly worse than the hard-link variant above: there
+    the victim's inode kept its other name, so nothing was lost; here the victim's only name was destroyed.
+    Closed by **pinning objects instead of names** — see the next bullet.
     Pinned by `the_session_wipe_unlinks_an_alias_instead_of_overwriting_it` (deterministic),
     `an_alias_planted_after_the_alias_guards_is_unlinked_not_shredded_through` (the auditor's own timing
     exploit, assertion flipped), `an_alias_appearing_during_the_encrypt_walk_is_caught_before_the_blob_is_replaced`
     (via an `after_encrypt` seam, so it needs no thread) and `the_wipe_never_overwrites_a_file_it_cannot_prove_is_ours`.
+  - **The wipe destroys objects, not names (CPE-1672).** The shredder no longer collects paths and then
+    revisits them. It walks and destroys **inline**, and every destructive step is decided on the
+    *object*: each overwrite goes through a single handle opened no-follow whose filesystem identity
+    (`(dev, ino)` / volume serial + file index) must match the identity probed when that entry was
+    enumerated, and each descent into a subdirectory compares the same way. Per directory the order is
+    (1) enumerate and probe — purely observational, so every subdirectory's identity is captured *before*
+    the first byte is overwritten anywhere in that directory, i.e. before the attacker's starting gun can
+    have fired; (2) re-pin the directory itself, before anything is destroyed; (3) overwrite the files;
+    (4) descend, re-pinned. The hard-link count that decides is likewise re-read from the handle rather
+    than taken from the earlier probe. **Nothing unlinks by path at all**: the single
+    `remove_dir_all(root)` at the end does every removal, and std hardened that against exactly this swap
+    in 1.58.1 (CVE-2022-21658) — it recurses through directory handles rather than re-resolving path
+    strings, and deletes a reparse point instead of descending into it. This is the same "one handle, one
+    answer" shape PR #848 adopted for the Batch Media write path after the identical class of finding, and
+    it reuses that module's `FileIdentity`/`handle_facts` primitives rather than a second copy.
+
+    **The residual, with its real size — this is not "no window".** Between a directory's re-pin and the
+    `read_dir` that follows it sits a single syscall. To exploit it an attacker must swap a directory
+    **in and back out** inside that gap, restoring an object with the *same* identity (the re-pins bracket
+    the enumeration on both sides), while getting no observable signal about when the gap is — the
+    starting gun is gone, because nothing is unlinked mid-walk any more. The old exploit needed neither
+    precision nor a signal. Closing the remainder entirely needs handle-relative traversal
+    (`openat`/`NtCreateFile` with a root directory handle), which std does not expose and which is not
+    worth a new dependency here.
+
+    Every one of these guards was neutralised individually and each turned a **distinct** test red:
+    the identity arm → `the_wipe_refuses_a_directory_that_is_not_the_object_it_was_told_to_wipe`; the link
+    arm → `a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against` and
+    `shred_tree_refuses_a_root_that_is_itself_a_link`; the handle identity check →
+    `the_overwrite_refuses_a_name_that_now_denotes_a_different_object`; the handle link-count re-read →
+    `the_overwrite_re_reads_the_link_count_from_the_handle_it_will_write_through`; the probe-side decline →
+    `an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it`. Neutralising the identity arm **and**
+    the link arm together — each is independently sufficient — reproduces the original exploit in
+    `the_wipe_refuses_a_{junction,symlink}_swapped_in_at_a_parent_directory_mid_wipe`, which rebuild the
+    auditor's reproduction from real filesystem objects and read the victim's bytes back off disk. Two
+    guards that no test could tell apart were **removed** rather than kept as reassurance: a duplicate
+    root-is-a-link check in `shred_tree`, and a "was a real one when the wipe started" phrase that was not
+    true for the wipe's own root.
   - **One lock at a time, per vault** (SEC-847 reviewer blocker A). The re-seal and the wipe are slow and
     hold no mutex, so two concurrent `lock` calls for the same vault interleaved: the second re-sealed the
     tree the first was already shredding and wrote *that* over the vault, **both returning `Ok`** over a
@@ -202,8 +252,32 @@ as a normal location; locking **re-seals that session directory back into the bl
     counter at the moment it runs) — and on Unix the vault's parent directory is fsynced after the
     rename, so the new directory entry is durable too. Without both, a power loss between the rename and
     the wipe could leave the vault's name pointing at unwritten data with the plaintext already securely
-    shredded. `create_vault` has the identical gap and is filed as follow-up **CPE-1669** rather than
-    widened into this change.
+    shredded.
+  - **…and so does `create_vault` (CPE-1669).** It had the identical gap — `std::fs::write` then a verify
+    that re-read the page cache, then a shred that `sync_all`s every pass: the *destruction* was durable
+    and the *replacement* was not. It now takes the same four steps through the same helpers (stage
+    exclusively beside the destination → `sync_all` → verify the bytes that landed → rename → fsync the
+    parent on Unix), so the fsync provably precedes the verify and therefore any shred. Pinned by
+    `create_vault_fsyncs_the_blob_before_it_is_verified_and_therefore_before_any_shred` and, on Unix,
+    `create_vault_fsyncs_the_destination_directory_after_the_rename`. Both counters are now
+    **thread-local** rather than a process-wide atomic: as an `AtomicUsize` another test running in
+    parallel could satisfy "the count went up" without this call site having synced at all — which was
+    caught by neutralising the create-side write and watching its ordering test stay green, so the older
+    `the_staging_blob_is_fsynced_before_it_is_verified` was quietly weaker than it read too.
+  - **A symlinked `.cpevault` path is replaced, not written through — and both ends now agree
+    (CPE-1670).** The lock-time re-seal finishes with `rename`, which replaces the *link itself*;
+    `create_vault` used `std::fs::write`, which **follows** a symlink and updates its target. The two
+    halves of one feature disagreed about what a symlinked vault path means. Settled in favour of
+    **replace**, and `create_vault` now stages and renames through the same code path. Replace was chosen
+    over resolving the link (which would let a re-seal be redirected into writing a vault somewhere the
+    user never chose) and over refusing (which would wedge a legitimately-linked vault "unlocked" with its
+    plaintext still on disk). The consequence, stated in `src/docs/20-vaults.md`: a deliberately-symlinked
+    `.cpevault` stops being a link the first time it is created or locked, the file at the far end keeps
+    whatever it last held, and the path the user opens holds the current contents. Nothing is destroyed —
+    both files exist and both decrypt. *Reads* still follow a link (unlock reads the blob with
+    `std::fs::read`); only writes replace it. Pinned end to end (seal → unlock → edit → lock → unlock,
+    plus the create half) by `a_symlinked_vault_path_is_replaced_by_both_create_and_lock_never_written_through`,
+    which skips loudly where the OS will not create a file symlink.
   - **Lock failures are reported by a structured code, not by matching text** (SEC-847 finding 3). The
     frontend's recovery differs completely between the failure shapes — one clears the "unlocked" banner
     and refuses a retry, the others must keep the banner and offer one — and the messages interpolate
@@ -331,6 +405,17 @@ An **independent** reviewer (not the implementer) adversarially reviewed each sl
   backend produces deliberately (`UNTRUSTED_SESSION`, whose doc comment names the frontend function, and
   `reseal_failed`); only the tamper case clears the store entry, and only a retryable one navigates back
   into the session dir.
+- **The session wipe followed a junction swapped in at a *parent* directory (CPE-1672):** found by the
+  independent security auditor re-auditing PR #847, and reproduced 3/3 end-to-end through the public
+  `VaultRegistry::lock`. Pre-existing on `main` — the collect-then-shred structure was not introduced by
+  CPE-1645, which is why that ticket landed with this filed rather than growing a fourth round. Closed by
+  pinning every destructive step to a filesystem **identity** captured before anything is destroyed, and
+  by writing through one no-follow handle per file (§5). The regression tests rebuild the auditor's
+  reproduction from real filesystem objects (junction on Windows, symlink elsewhere) and print his own
+  probe line on red and green runs alike; on the unfixed code they report
+  `swapped=true lock_ok=true victim_exists=false victim_dir_exists=true bystander_exists=true` — the
+  un-named bystander surviving is what proves it was the shredder writing *through* the junctioned parent
+  rather than `remove_dir_all` recursing into it.
 - Verify-before-shred is enforced with an injectable verifier and a falsifiable test proving the original
   survives a failed verify; the re-seal on lock has the same seam (`reseal_session_with_verifier`) and the
   same falsifiable test, proving the old blob survives a failed verify byte-for-byte and the working copy
