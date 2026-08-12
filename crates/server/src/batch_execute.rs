@@ -57,10 +57,15 @@
 //! must not, license writing to a folder the user never selected. The engine is now the actual enforcement
 //! point end-to-end, not just this one IPC command's two former layers.
 //!
-//! **Known, out-of-scope gap: TOCTOU.** [`any_in_place`]'s scan (and the new containment re-check) run
-//! once per batch, before any bytes are touched — not once per write. A file that changes identity between
-//! the check and its own write (e.g. swapped for a symlink mid-batch) isn't re-checked. Filed separately
-//! as CPE-1624; not fixed here.
+//! **TOCTOU: both guards are re-asked immediately before each write (CPE-1624).** They used to run once
+//! per batch, before any bytes were touched — so for item N they were an answer about a filesystem that no
+//! longer existed. Measured: `same_file(link.jpg -> A, A)` is `true`, and after re-pointing the symlink at
+//! `B` a repeat check correctly returns `false`; nothing re-validated at write time, and the window grows
+//! with batch size and with slow per-file ops (watermark, compress). [`execute_plan_walk`] now calls
+//! [`write_time_guard`] before every single `execute_one`, re-deriving containment **and** the
+//! foreign-overwrite question per item. A late detection **skips that item with a reported reason** rather
+//! than writing it (and rather than aborting a batch that has already written files) — the up-front scan
+//! keeps its all-or-nothing refusal for a plan that arrives wrong.
 
 use std::fs;
 use std::path::Path;
@@ -142,20 +147,30 @@ pub fn execute_plan_walk(
     // has not been shown to leave the folder — reporting it as one that "would land outside" tells the
     // user something factually untrue about their own files.
     let mut escaping = 0usize;
+    let mut rejected: Vec<&'static str> = Vec::new();
     let mut unverifiable: Vec<&'static str> = Vec::new();
     for it in items {
         match classify_output_containment(&it.input, &it.output, &mut parent_cache) {
             Containment::Inside => {}
             Containment::Escapes => escaping += 1,
+            Containment::Refused(why) => rejected.push(why),
             Containment::Unverifiable(why) => unverifiable.push(why),
         }
     }
-    if escaping > 0 || !unverifiable.is_empty() {
+    if escaping > 0 || !rejected.is_empty() || !unverifiable.is_empty() {
         let mut reasons: Vec<String> = Vec::new();
         if escaping > 0 {
             reasons.push(format!(
                 "{escaping} planned output{} would land outside its own input's folder",
                 if escaping == 1 { "" } else { "s" }
+            ));
+        }
+        if !rejected.is_empty() {
+            reasons.push(format!(
+                "{} planned output{} {}",
+                rejected.len(),
+                if rejected.len() == 1 { "" } else { "s" },
+                rejected[0]
             ));
         }
         if !unverifiable.is_empty() {
@@ -190,6 +205,13 @@ pub fn execute_plan_walk(
 
     let mut report = BatchReport::default();
     for item in items {
+        // CPE-1624 finding A: re-ask both questions immediately before THIS item's write, not once for
+        // the whole batch (see [`write_time_guard`]).
+        if let Err(reason) = write_time_guard(item, items, job, &mut parent_cache) {
+            flush(OpResult::err(Path::new(&item.input), &reason));
+            report.skipped.push((item.input.clone(), reason));
+            continue;
+        }
         match execute_one(item, job) {
             Ok(()) => {
                 report.written += 1;
@@ -202,6 +224,80 @@ pub fn execute_plan_walk(
         }
     }
     Ok(report)
+}
+
+/// **The write-time re-check (CPE-1624 finding A).** Both guards above run once, before the loop — so
+/// every one of them is a *stale* answer by the time item N is actually written. Measured on a real
+/// filesystem: `same_file(link.jpg -> A, A)` is `true`, and after swapping the symlink's target to `B` a
+/// repeat check correctly returns `false` — i.e. the pre-batch answer does not describe what the write
+/// will hit. The window between the up-front scan and a given item's write grows with batch size and with
+/// slow per-file operations (watermark, compress), and closing it costs one extra identity probe per item.
+///
+/// Both questions are re-asked, because both can change underneath the batch:
+/// 1. **Containment** — a name inside the folder can be turned into a link out of it (or a link's target
+///    re-pointed) after the scan.
+/// 2. **Foreign overwrite** — a file that did not exist at scan time can appear at a planned output
+///    between the scan and the write, at which point writing it is exactly the unconfirmed clobber
+///    `confirmed_overwrite` exists to prevent.
+///
+/// **A late detection skips the ITEM, it does not fail the batch.** The up-front scan keeps its
+/// all-or-nothing refusal: a plan that is already wrong when it arrives should be rejected whole, before a
+/// single byte moves. But once the batch is running, files have been written; aborting mid-way would leave
+/// a half-applied batch with no report, and the module's whole ethos is skip-on-error with a reported
+/// reason (`list_dir`/`revert_engine`). The item is recorded in `BatchReport::skipped` with a reason
+/// naming the late change, and the surviving items still run.
+///
+/// **Cost, measured against a control.** One [`classify_output_containment`] (which re-probes `output`'s
+/// identity — [`ParentCache`] deliberately memoizes only *directory* facts, so this is a genuine
+/// re-resolution, not a replay) plus [`is_foreign_overwrite`]'s `same_file` + one `Path::is_file()` stat.
+/// The deterministic measure is the `canonicalize` count, and it is an exact 2× by construction — the
+/// same two questions, asked a second time: **5 calls per item before this fix, 10 after**, on the
+/// worst-case shape `cpe_1623_execute_plan_walk_containment_recheck_stays_bounded` builds (every fast
+/// path defeated). In wall-clock terms, on 1000 tiny 16×16 PNGs in a release build, the whole walk
+/// measured 536–569 µs/item with the guard against 543–563 µs/item without it — i.e. **inside
+/// run-to-run noise**, because even a trivial decode/encode dwarfs a handful of attribute reads. On real
+/// photographs the ratio is far smaller still. The guard measured in isolation, cold, is ~85–112 µs/item.
+fn write_time_guard(
+    item: &PlannedItem,
+    items: &[PlannedItem],
+    job: &BatchJob,
+    parent_cache: &mut ParentCache,
+) -> Result<(), String> {
+    match classify_output_containment(&item.input, &item.output, parent_cache) {
+        Containment::Inside => {}
+        Containment::Escapes => {
+            return Err(format!(
+                "skipped at write time: \"{}\" no longer stays inside this file's own folder — it \
+                 changed after the batch's up-front check (a link re-pointed, or a name replaced). \
+                 Nothing was written for this file",
+                item.output
+            ));
+        }
+        Containment::Refused(why) => {
+            return Err(format!(
+                "skipped at write time: \"{}\" {why}. Nothing was written for this file",
+                item.output
+            ));
+        }
+        Containment::Unverifiable(why) => {
+            return Err(format!(
+                "skipped at write time: couldn't verify that \"{}\" still stays inside this file's own \
+                 folder — {why}. Nothing was written for this file; this is a refusal to guess, not a \
+                 detected escape",
+                item.output
+            ));
+        }
+    }
+
+    if !job.confirmed_overwrite && is_foreign_overwrite(item, items) {
+        return Err(format!(
+            "skipped at write time: \"{}\" would now overwrite a file this batch never selected — it \
+             appeared after the batch's up-front check, and `confirmed_overwrite` was not set. Nothing \
+             was written for this file",
+            item.output
+        ));
+    }
+    Ok(())
 }
 
 /// Execute a planned batch without streaming per-file progress — the cargo-test correctness path.
@@ -1162,14 +1258,351 @@ mod tests {
         let calls = crate::batch_media::canonicalize_call_count();
         assert_eq!(report.written, n);
 
-        // Same generous linear bound as plan()'s own guard — O(n) allows a small constant number of
-        // canonicalize calls per file (one path_key resolution per item for each of out_dir/dir, both
-        // memoized after the first). O(n²) would blow far past this even at n=300.
+        // O(n) allows a small constant number of canonicalize calls per file (one `path_key` resolution
+        // per item for each of out_dir/dir, both memoized after the first). O(n²) would blow far past
+        // this even at n=300.
+        //
+        // **Raised from 10 to 14 by CPE-1624**, deliberately and by exactly the amount the fix costs:
+        // the write-time re-check asks the same two questions a second time, immediately before each
+        // write, so the per-item count doubles by design. Measured on this worst-case shape (the `"./"`
+        // template defeats every fast path): **5 calls/item before, 10 after** — an exact 2×, not a
+        // creeping regression. The headroom above 10 is for platform variation in how many tiers
+        // `path_key` has to fall through, not for a future doubling; a regression to per-item uncached
+        // resolution would still be orders of magnitude past it.
         assert!(
-            calls <= n * 10,
+            calls <= n * 14,
             "expected O(n) canonicalize calls for execute_plan_walk's containment re-check (bound {}), got \
              {calls} for n={n} files — it may have regressed to a per-item uncached resolution",
-            n * 10
+            n * 14
+        );
+        println!("execute_plan_walk canonicalize calls for n={n}: {calls} ({} per item)", calls / n);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Manual-only measurement of the CPE-1624 write-time re-check's per-item overhead — the ticket asks
+    /// for a stated number, and this is where it comes from. `#[ignore]`d like the other timing tests
+    /// (wall-clock assertions are flaky in CI); run with
+    /// `cargo test --release -- --ignored --nocapture cpe_1624_write_time_recheck_overhead`.
+    ///
+    /// Times the guard itself in isolation as well as the whole walk, so the number is not swamped by the
+    /// image transform each item also pays. The **control** is the same run with the guard neutralised
+    /// (see the PR's guard-neutralisation table); this test prints both the total and the per-item cost so
+    /// the two runs are directly comparable.
+    #[test]
+    #[ignore]
+    fn cpe_1624_write_time_recheck_overhead() {
+        let d = scratch("cpe1624-overhead");
+        let n = 1000usize;
+        let inputs: Vec<String> = (0..n)
+            .map(|i| {
+                let p = d.join(format!("photo{i:04}.png"));
+                fs::write(&p, png_bytes(16, 16)).unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 8 }]);
+        let items = plan(&job, &inputs).unwrap();
+
+        // The guard alone, over one shared cache — exactly how execute_plan_walk calls it.
+        let mut cache = ParentCache::new();
+        let start = std::time::Instant::now();
+        for item in &items {
+            write_time_guard(item, &items, &job, &mut cache).unwrap();
+        }
+        let guard_only = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let report = execute_plan(&items, &job).unwrap();
+        let whole_walk = start.elapsed();
+        assert_eq!(report.written, n);
+
+        println!(
+            "CPE-1624 write-time re-check over n={n}: guard alone {guard_only:?} ({:?}/item); whole \
+             execute_plan_walk {whole_walk:?} ({:?}/item)",
+            guard_only / n as u32,
+            whole_walk / n as u32
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1624 finding A: the guards are re-asked immediately before each write -------------------
+
+    /// **The TOCTOU, demonstrated without needing any link privilege.** Both guards used to run once,
+    /// before the loop; a file that appears at a planned output *after* that scan but before its own
+    /// item's write was therefore clobbered with no confirmation, because the only question ever asked
+    /// about it was asked while it did not exist.
+    ///
+    /// The `flush` callback is the seam that makes the race deterministic: it fires after item 0 is
+    /// written and before item 1 is, which is exactly the window. **Red on base `main`:** `written == 2`
+    /// and the foreign file's bytes are replaced by PNG data. Green here: item 1 is skipped with a
+    /// reason, the foreign file is byte-for-byte intact, and item 0 still succeeds (a late detection
+    /// skips the ITEM, it does not abort a batch that has already written files).
+    #[test]
+    fn cpe_1624_a_file_appearing_at_a_planned_output_mid_batch_is_skipped_not_clobbered() {
+        let d = scratch("cpe1624-toctou-appearing-file");
+        let a = d.join("a.png");
+        let b = d.join("b.png");
+        fs::write(&a, png_bytes(32, 32)).unwrap();
+        fs::write(&b, png_bytes(32, 32)).unwrap();
+
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+        let inputs = vec![a.to_string_lossy().to_string(), b.to_string_lossy().to_string()];
+        let items = plan(&job, &inputs).unwrap();
+        assert_eq!(items.len(), 2);
+        let victim_path = items[1].output.clone();
+        assert!(!Path::new(&victim_path).exists(), "the second output must be free when the batch starts");
+
+        // Plant a stranger's file at item 1's planned output the instant item 0 finishes — after the
+        // up-front scan said "nothing is there", and before item 1's own write.
+        let victim_bytes = b"a stranger's file, planted mid-batch".to_vec();
+        let planted = std::cell::Cell::new(false);
+        let report = execute_plan_walk(&items, &job, |_| {
+            if !planted.get() {
+                planted.set(true);
+                fs::write(&victim_path, &victim_bytes).unwrap();
+            }
+        })
+        .expect("a late collision must not fail the whole batch — the first file was already written");
+
+        assert!(planted.get(), "the test never planted the file, so it verified nothing");
+        assert_eq!(report.written, 1, "only the first item may be written");
+        assert_eq!(report.skipped.len(), 1, "the second item must be skipped, not written");
+        assert_eq!(report.skipped[0].0, items[1].input);
+        assert!(
+            report.skipped[0].1.contains("write time"),
+            "the skip reason must say this was caught at write time: {}",
+            report.skipped[0].1
+        );
+        assert_eq!(
+            fs::read(&victim_path).unwrap(),
+            victim_bytes,
+            "the planted file's bytes must be untouched — this is the clobber the re-check prevents"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The ticket's own worded scenario: a link whose target is swapped **mid-batch**, so a check made
+    /// before the swap is stale for what actually gets written afterwards. Same `flush` seam. Skips
+    /// (rather than aborts) and leaves the outside victim's bytes untouched.
+    ///
+    /// Skipped with a visible message where symlinks can't be created (Windows without Developer Mode),
+    /// exactly like this module's other link tests — never a silent pass.
+    #[test]
+    fn cpe_1624_a_link_repointed_mid_batch_is_caught_at_write_time() {
+        let d = scratch("cpe1624-toctou-link-swap");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let a = selected.join("a.png");
+        let b = selected.join("b.png");
+        fs::write(&a, png_bytes(32, 32)).unwrap();
+        fs::write(&b, png_bytes(32, 32)).unwrap();
+        let inside_target = selected.join("inside-target.png");
+        fs::write(&inside_target, png_bytes(8, 8)).unwrap();
+        let victim = outside.join("important.png");
+        let victim_bytes = b"the outside victim's original bytes".to_vec();
+        fs::write(&victim, &victim_bytes).unwrap();
+
+        // b's planned output is a symlink that, at scan time, points INSIDE the selected folder — so the
+        // up-front containment check correctly says "contained".
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+        let items = plan(&job, &[a.to_string_lossy().to_string(), b.to_string_lossy().to_string()]).unwrap();
+        let link_path = PathBuf::from(&items[1].output);
+        if crate::links::create_symlink(&inside_target.to_string_lossy(), &link_path.to_string_lossy())
+            .is_err()
+        {
+            eprintln!(
+                "SKIPPING cpe_1624_a_link_repointed_mid_batch_is_caught_at_write_time: could not create \
+                 a symlink here (Windows needs Developer Mode or elevation) — this test verified NOTHING"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        // The batch is allowed to write onto a name it planned, so confirm the overwrite — this isolates
+        // the containment re-check from the foreign-overwrite guard.
+        let mut job = job;
+        job.confirmed_overwrite = true;
+        let swapped = std::cell::Cell::new(false);
+        let report = execute_plan_walk(&items, &job, |_| {
+            if !swapped.get() {
+                swapped.set(true);
+                fs::remove_file(&link_path).unwrap();
+                crate::links::create_symlink(&victim.to_string_lossy(), &link_path.to_string_lossy())
+                    .unwrap();
+            }
+        })
+        .expect("a mid-batch swap must skip the item, not fail the whole batch");
+
+        assert!(swapped.get(), "the test never swapped the link, so it verified nothing");
+        assert_eq!(report.written, 1, "only the first item may be written");
+        assert_eq!(report.skipped.len(), 1);
+        assert!(
+            report.skipped[0].1.contains("write time"),
+            "the skip reason must say this was caught at write time: {}",
+            report.skipped[0].1
+        );
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            victim_bytes,
+            "the outside victim's bytes must be untouched — this is the write the re-check prevents"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The negative control for both tests above: with nothing changing underneath it, an ordinary batch
+    /// must run to completion. A re-check that refused everything would pass the two tests above and be
+    /// useless.
+    #[test]
+    fn cpe_1624_the_write_time_recheck_does_not_disturb_an_ordinary_batch() {
+        let d = scratch("cpe1624-negative-control");
+        let inputs: Vec<String> = (0..8)
+            .map(|i| {
+                let p = d.join(format!("photo{i}.png"));
+                fs::write(&p, png_bytes(24, 24)).unwrap();
+                p.to_string_lossy().to_string()
+            })
+            .collect();
+        let job = BatchJob::new(vec![MediaOp::Resize { max_px: 8 }]);
+        let items = plan(&job, &inputs).unwrap();
+
+        let report = execute_plan(&items, &job).expect("an ordinary batch must not be refused");
+        assert_eq!(report.written, 8, "every item must still be written: {:?}", report.skipped);
+        assert!(report.skipped.is_empty(), "no false alarms: {:?}", report.skipped);
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1624 finding B, end to end through the real engine entry point.** The audit's PoC:
+    /// `plan()` computed `…\workdir\C:foo.png` — same directory, contained — and `execute_plan` returned
+    /// `Ok(written: 1)`, with 120 bytes of transformed PNG readable at the `foo.png` stream of the
+    /// unrelated file `C`, whose visible size and content never changed. `Path::is_file()` on a
+    /// never-before-existing stream returns `false`, so no confirmation was ever required.
+    ///
+    /// Hand-built `PlannedItem` on purpose: the template-level colon rule cannot see this path, which is
+    /// the whole reason the refusal had to move to the shared engine boundary. **Red on base `main`:**
+    /// `Ok(written: 1)` and readable bytes at the stream. Windows-only — an alternate data stream is an
+    /// NTFS concept, and off Windows this same path is an ordinary (legal) filename.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1624_a_hand_built_alternate_data_stream_output_is_refused_and_writes_nothing() {
+        let d = scratch("cpe1624-ads-engine-boundary");
+        let photo = d.join("photo.png");
+        fs::write(&photo, png_bytes(32, 32)).unwrap();
+        // The unrelated, never-selected file whose hidden stream the write would land on.
+        let host = d.join("C");
+        let host_bytes = b"an unrelated file the user can see".to_vec();
+        fs::write(&host, &host_bytes).unwrap();
+
+        let stream_path = format!("{}:foo.png", host.to_string_lossy());
+        let items = vec![PlannedItem {
+            input: photo.to_string_lossy().to_string(),
+            output: stream_path.clone(),
+            summary: "hand-built, targeting an NTFS alternate data stream".into(),
+        }];
+
+        for confirmed in [false, true] {
+            let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+            job.confirmed_overwrite = confirmed;
+            let err = execute_plan(&items, &job).expect_err(
+                "an alternate-data-stream output must be refused — confirmed_overwrite authorises \
+                 overwriting a FILE, never writing hidden bytes onto an unrelated one",
+            );
+            assert!(
+                err.contains("alternate data stream"),
+                "the refusal must name the real reason: {err}"
+            );
+            assert!(
+                !err.contains("would land outside"),
+                "an ADS output does NOT leave the folder — saying so would be untrue: {err}"
+            );
+        }
+
+        assert!(fs::read(&stream_path).is_err(), "no bytes may exist at the stream path");
+        assert_eq!(fs::read(&host).unwrap(), host_bytes, "the host file must be untouched");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **Pins the one direction in which CPE-1624's ADS-aware identity could *relax* a rule.** Making
+    /// `X.png:evil` and `X.png` compare as the same file is conservative everywhere except
+    /// [`is_foreign_overwrite`]'s "the output is one of this batch's OWN inputs, so it's permitted" arm —
+    /// where fusing them would license the hidden write with no confirmation at all. It is unreachable
+    /// because the containment refusal is co-gated with the stripping and runs first; this test is what
+    /// keeps that true if either gate is ever moved. See `strip_stream_suffix`'s reach audit.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1624_an_alternate_stream_of_the_batchs_own_input_is_still_refused() {
+        let d = scratch("cpe1624-ads-of-own-input");
+        let photo = d.join("photo.png");
+        fs::write(&photo, png_bytes(32, 32)).unwrap();
+        let photo_bytes = fs::read(&photo).unwrap();
+
+        // The stream's host file IS this batch's own (only) input — the case the "permitted" arm covers.
+        let items = vec![PlannedItem {
+            input: photo.to_string_lossy().to_string(),
+            output: format!("{}:evil.png", photo.to_string_lossy()),
+            summary: "hand-built, ADS of the batch's own input".into(),
+        }];
+        let err = execute_plan(&items, &BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]))
+            .expect_err("an ADS output must be refused even when its host is one of the batch's inputs");
+        assert!(err.contains("alternate data stream"), "refusal reason: {err}");
+        assert!(fs::read(&items[0].output).is_err(), "no bytes may exist at the stream path");
+        assert_eq!(fs::read(&photo).unwrap(), photo_bytes, "the input must be untouched");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1652 finding B through the real engine entry point: past the census cap the verdict degrades
+    /// to `Unverifiable`, and `execute_plan_walk` refuses — **fail closed, not fail slow, and never
+    /// "allowed because we stopped looking"**. The uncapped run in the same test is the positive control.
+    #[test]
+    fn cpe_1652_a_census_past_the_cap_refuses_the_write_rather_than_allowing_it() {
+        let d = scratch("cpe1652-census-cap-engine");
+        let photo = d.join("photo.png");
+        fs::write(&photo, png_bytes(32, 32)).unwrap();
+        let a = d.join("shared.png");
+        fs::write(&a, png_bytes(8, 8)).unwrap();
+        let b = d.join("shared-2.png");
+        if fs::hard_link(&a, &b).is_err() {
+            eprintln!(
+                "SKIPPING cpe_1652_a_census_past_the_cap_refuses_the_write: no hard-link support here \
+                 — this test verified NOTHING"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        for i in 0..6 {
+            fs::write(d.join(format!("filler{i}.png")), b"filler").unwrap();
+        }
+
+        let items = vec![PlannedItem {
+            input: photo.to_string_lossy().to_string(),
+            output: b.to_string_lossy().to_string(),
+            summary: "writes onto a multiply-linked name inside the folder".into(),
+        }];
+        let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+        job.confirmed_overwrite = true; // the overwrite itself is authorised; only the census is at issue
+
+        // Positive control: uncapped, every name is accounted for inside the folder, so this is allowed.
+        crate::batch_media::set_census_cap_for_test(None);
+        let ok = execute_plan(&items, &job);
+        assert!(ok.is_ok(), "an uncapped census must still allow a wholly-inside hard link: {ok:?}");
+
+        // Capped below the folder's entry count: refuse rather than guess.
+        crate::batch_media::set_census_cap_for_test(Some(1));
+        let err = execute_plan(&items, &job);
+        crate::batch_media::set_census_cap_for_test(None);
+        let err = err.expect_err("past the cap the engine must refuse, not write");
+        assert!(
+            err.contains("too many entries"),
+            "the refusal must say the folder was too big to account for, not blame a lock: {err}"
         );
 
         let _ = fs::remove_dir_all(&d);

@@ -28,7 +28,8 @@ export function canBatchTransform(name: string): boolean {
 /**
  * CPE-1623: true when a Rename (or Convert `to_ext`) template could move the computed output into a
  * different directory than its input, or off the volume its input's own directory names entirely — a
- * path separator (`/` or `\`) anywhere, a `:` anywhere, or a **whole-segment** `..` traversal. Mirrors
+ * path separator (`/` or `\`) anywhere, a `:` anywhere **on Windows only** (CPE-1640 — see
+ * {@link colonIsAPathCharacter}), or a **whole-segment** `..` traversal. Mirrors
  * `crates/server/src/batch_media.rs`'s `template_escapes_directory()`/`validate()` rejection exactly
  * (kept in lockstep — see that fn's doc for the reasoning behind each character), so the dialog can
  * disable "+ Add" and explain why *before* the user ever reaches the backend — the engine
@@ -40,13 +41,42 @@ export function canBatchTransform(name: string): boolean {
  * **`..` is only a traversal risk as a whole path segment (UAT follow-up), not any occurrence:** an
  * earlier cut of this check flagged `..` as a bare substring, which wrongly rejected ordinary filenames
  * like `"shot..final"` or a version stamp `"v1..2"` — see the ticket's acceptance criterion "ordinary
- * rename templates (no separators) are unaffected". Once any separator/`:` has already returned `true`
- * above, the template is guaranteed to contain none of them, so "is `..` a whole segment" reduces to "is
- * the (trimmed) template exactly `..`".
+ * rename templates (no separators) are unaffected". Once any separator (or, on Windows, `:`) has already
+ * returned `true` above, the template is guaranteed to contain none of them, so "is `..` a whole segment"
+ * reduces to "is the (trimmed) template exactly `..`".
+ *
+ * `platform` defaults to the live navigator sniff; pass it explicitly in tests, exactly like
+ * {@link sameFile}/{@link overwritesInPlace} already do.
  */
-export function templateEscapesDirectory(template: string): boolean {
-  if (template.includes("/") || template.includes("\\") || template.includes(":")) return true;
+export function templateEscapesDirectory(
+  template: string,
+  platform: string = defaultPlatform(),
+): boolean {
+  if (template.includes("/") || template.includes("\\")) return true;
+  if (colonIsAPathCharacter(platform) && template.includes(":")) return true;
   return template.trim() === "..";
+}
+
+/**
+ * CPE-1640: **`:` is a Windows rule, not a universal one.** The colon rejection above exists because on
+ * Windows `C:foo` is a *drive-relative* reference (it resolves against drive `C:`'s own current directory)
+ * and a colon anywhere else in a path is the NTFS **alternate-data-stream** separator — neither of which
+ * exists on Linux (where `:` is an ordinary ext4 filename character) or macOS (where `:` is legal at the
+ * raw APFS/HFS+ level; Finder's `/`↔`:` display swap is cosmetic, not a filesystem restriction). Shipped
+ * without a platform gate, the rule refused an entirely ordinary template — a timestamp like
+ * `10:30am-photo`, or `session:final` — for a reason that did not exist on the user's machine, and CI
+ * could not see it: a guard that is *consistently* wrong is invisible to a matrix that checks for
+ * *inconsistency*.
+ *
+ * Mirrors `crates/server/src/batch_media.rs`'s `colon_is_a_path_character()` exactly, so the two stay in
+ * lockstep (the property the reviewer asked to preserve): the backend gates on `cfg!(windows)`, this
+ * gates on the same live platform sniff {@link isCaseInsensitivePlatform} already uses, and both run on
+ * the same host. When `navigator` isn't available (a non-DOM test runner) the sniff is `""`, which reads
+ * as "not Windows" — the direction that only ever *accepts* a template the backend is still free to
+ * refuse, never the reverse.
+ */
+function colonIsAPathCharacter(platform: string): boolean {
+  return /win/i.test(platform);
 }
 
 /**

@@ -231,30 +231,51 @@ describe("templateEscapesDirectory (CPE-1623)", () => {
     expect(templateEscapesDirectory("..\\..\\cpe1613_traversal_victim\\important")).toBe(true);
   });
 
-  it("rejects any path separator, forward or backward, a colon, and a whole-segment '..'", () => {
-    expect(templateEscapesDirectory("sub/name")).toBe(true);
-    expect(templateEscapesDirectory("sub\\name")).toBe(true);
-    expect(templateEscapesDirectory("..")).toBe(true);
-    expect(templateEscapesDirectory(" .. ")).toBe(true); // whole segment once trimmed
-    expect(templateEscapesDirectory("../x")).toBe(true);
-    expect(templateEscapesDirectory("..\\x")).toBe(true);
-    expect(templateEscapesDirectory("a/../../b")).toBe(true);
-    expect(templateEscapesDirectory("x/..")).toBe(true);
-    expect(templateEscapesDirectory("C:foo")).toBe(true); // reviewer finding A: drive-relative reference
-    expect(templateEscapesDirectory("secrets:hidden")).toBe(true); // colon anywhere
+  it("rejects any path separator, forward or backward, and a whole-segment '..', on every platform", () => {
+    for (const platform of ["Win32", "MacIntel", "Linux x86_64", ""]) {
+      expect(templateEscapesDirectory("sub/name", platform)).toBe(true);
+      expect(templateEscapesDirectory("sub\\name", platform)).toBe(true);
+      expect(templateEscapesDirectory("..", platform)).toBe(true);
+      expect(templateEscapesDirectory(" .. ", platform)).toBe(true); // whole segment once trimmed
+      expect(templateEscapesDirectory("../x", platform)).toBe(true);
+      expect(templateEscapesDirectory("..\\x", platform)).toBe(true);
+      expect(templateEscapesDirectory("a/../../b", platform)).toBe(true);
+      expect(templateEscapesDirectory("x/..", platform)).toBe(true);
+    }
+  });
+
+  // CPE-1640: the colon half of the rule is Windows-only, and must stay in lockstep with
+  // `crates/server/src/batch_media.rs`'s `colon_is_a_path_character()` (which gates on `cfg!(windows)`).
+  it("rejects a colon on Windows only — it is an ordinary filename character on Linux/macOS (CPE-1640)", () => {
+    for (const template of ["C:foo", "secrets:hidden", "10:30am-photo", "session:final"]) {
+      // Windows: `:` is the drive separator AND the NTFS alternate-data-stream separator.
+      expect(templateEscapesDirectory(template, "Win32")).toBe(true);
+      expect(templateEscapesDirectory(template, "Windows NT 10.0; Win64; x64")).toBe(true);
+      // Linux/macOS: an ordinary, legal filename character — refusing it was a pure false positive.
+      expect(templateEscapesDirectory(template, "MacIntel")).toBe(false);
+      expect(templateEscapesDirectory(template, "Linux x86_64")).toBe(false);
+      // No navigator at all (a non-DOM test runner) reads as "not Windows": the direction that only ever
+      // accepts a template the backend is still free to refuse, never the reverse.
+      expect(templateEscapesDirectory(template, "")).toBe(false);
+      // A separator alongside the colon is still refused everywhere — the colon gate can't mask one.
+      expect(templateEscapesDirectory(`${template}/x`, "Linux x86_64")).toBe(true);
+    }
   });
 
   it("accepts ordinary templates with no separators/colon or whole-segment traversal (UAT follow-up)", () => {
     // ".." inside an otherwise ordinary filename, with no separator anywhere, can never walk anywhere —
     // the ticket's own acceptance criterion: "ordinary rename templates (no separators) are unaffected".
-    expect(templateEscapesDirectory("{stem}")).toBe(false);
-    expect(templateEscapesDirectory("{stem}-{n}")).toBe(false);
-    expect(templateEscapesDirectory("photo-{n}")).toBe(false);
-    expect(templateEscapesDirectory("vacation 2024")).toBe(false);
-    expect(templateEscapesDirectory("shot..final")).toBe(false);
-    expect(templateEscapesDirectory("v1..2")).toBe(false);
-    expect(templateEscapesDirectory("a..b")).toBe(false);
-    expect(templateEscapesDirectory("...")).toBe(false);
+    // Asserted on every platform: these are unaffected by CPE-1640's colon gate.
+    for (const platform of ["Win32", "MacIntel", "Linux x86_64", ""]) {
+      expect(templateEscapesDirectory("{stem}", platform)).toBe(false);
+      expect(templateEscapesDirectory("{stem}-{n}", platform)).toBe(false);
+      expect(templateEscapesDirectory("photo-{n}", platform)).toBe(false);
+      expect(templateEscapesDirectory("vacation 2024", platform)).toBe(false);
+      expect(templateEscapesDirectory("shot..final", platform)).toBe(false);
+      expect(templateEscapesDirectory("v1..2", platform)).toBe(false);
+      expect(templateEscapesDirectory("a..b", platform)).toBe(false);
+      expect(templateEscapesDirectory("...", platform)).toBe(false);
+    }
   });
 });
 

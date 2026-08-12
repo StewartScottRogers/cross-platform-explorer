@@ -215,7 +215,8 @@ pub struct PlannedItem {
 /// True when `template` could move a [`MediaOp::Rename`]'s (or, as of the Convert-extension fix below,
 /// a [`MediaOp::Convert`]'s `to_ext`) computed output into a different directory than its input, or off
 /// the volume the input's own directory names entirely: a path separator (`/` or `\`) anywhere, a `:`
-/// anywhere, or a **whole-segment** `..` traversal (CPE-1623; narrowed by a UAT follow-up — see below).
+/// anywhere **on Windows only** (CPE-1640 — see [`colon_is_a_path_character`]), or a **whole-segment**
+/// `..` traversal (CPE-1623; narrowed by a UAT follow-up — see below).
 /// The template only ever substitutes into the file's STEM (or, for Convert, the extension) — see
 /// `plan()`'s `Rename`/`Convert` arms, which run the result straight through [`join`] alongside the
 /// input's own unchanged directory — so it has no legitimate reason to name a directory, let alone walk
@@ -225,9 +226,11 @@ pub struct PlannedItem {
 /// segment"): `template.replace("{stem}", ...)` means the attacker doesn't need it to occupy a whole
 /// segment on its own (see the ticket's worked example, `"..\\..\\cpe1613_traversal_victim\\important"`,
 /// which has no `{stem}`/`{n}`/`{ext}` token at all and is used completely literally) — and a filename
-/// can never legitimately contain a raw `/`, `\`, or `:` at all on any mainstream filesystem (all three
-/// are reserved on NTFS; `:` doubles as the drive-letter separator on Windows), so there is no
-/// false-positive risk in flagging any of them anywhere they appear.
+/// can never legitimately contain a raw `/` or `\` at all on any mainstream filesystem, so there is no
+/// false-positive risk in flagging either of them anywhere they appear. **`:` is the exception and is now
+/// gated to Windows (CPE-1640)**: it is reserved on NTFS (drive separator *and* alternate-data-stream
+/// separator) but is an ordinary, legal filename character on Linux and macOS, where rejecting it was a
+/// pure false positive — see [`colon_is_a_path_character`].
 ///
 /// **`:` (reviewer finding, PR #828 attempt 2).** A template like `"C:foo"` contains none of the three
 /// original characters this fn checked — only `/`, `\`, `..` were rejected — so it passed straight
@@ -235,25 +238,52 @@ pub struct PlannedItem {
 /// **bare-filename input** (no directory component at all, so both `dir` and the computed `out_dir` are
 /// textually empty and compare equal): a classic Windows drive-relative reference, which resolves against
 /// drive `C:`'s *current directory* at write time — not the folder the user picked. Rejecting `:` outright
-/// closes it at this field-level layer; [`classify_output_containment`] carries a second, independent guard
-/// for the same case (see its doc) so a caller that skips this check entirely (bypassing `validate()`)
-/// is still caught.
+/// closes it at this field-level layer **on Windows**; [`classify_output_containment`] carries a second,
+/// independent guard for the same case (see its doc) so a caller that skips this check entirely (bypassing
+/// `validate()`) is still caught. Both are Windows-gated (CPE-1640): off Windows there is no drive-relative
+/// syntax for `C:foo` to mean, so the string is simply a filename containing a colon.
 ///
 /// **`..` is different (UAT follow-up to CPE-1623).** The very first cut of this check flagged `..`
 /// as a **substring** — `template.contains("..")` — which rejected perfectly ordinary filenames like
 /// `"shot..final"` or a version stamp `"v1..2"` that contain the two characters but can never walk
 /// anywhere: with no separator present at all, the whole template is exactly ONE path segment, so `..`
-/// is only a traversal risk when it occupies that entire segment. Once any separator/`:` has already
-/// failed the check above and returned `true`, there's nothing further to decide here — so by the time
-/// this line runs, `template` is guaranteed to contain no `/`, `\`, or `:`, and "is `..` a whole segment"
+/// is only a traversal risk when it occupies that entire segment. Once any separator (or, on Windows, `:`)
+/// has already failed the check above and returned `true`, there's nothing further to decide here — so by
+/// the time this line runs, `template` contains no `/` or `\` (nor `:` on Windows), and "is `..` a whole segment"
 /// reduces to "is the (trimmed) template exactly `..`". This stays exactly as strict for every case the
 /// module's own tests already pinned (`".."`, `"../evil"`, `"..\\evil"`, `"a/../b"` all still contain a
 /// separator and are still rejected above) while accepting the two the auditor's own worked examples name.
 fn template_escapes_directory(template: &str) -> bool {
-    if template.contains('/') || template.contains('\\') || template.contains(':') {
+    if template.contains('/') || template.contains('\\') {
+        return true;
+    }
+    if colon_is_a_path_character() && template.contains(':') {
         return true;
     }
     template.trim() == ".."
+}
+
+/// **`:` is a Windows rule, not a universal one (CPE-1640).** The colon rejection above was added for two
+/// Windows-only reasons — `C:foo` is a *drive-relative* reference that resolves against drive `C:`'s own
+/// current directory, and a colon anywhere else in a Windows path is the NTFS **alternate-data-stream**
+/// separator (CPE-1624) — but it shipped with no platform gate at all, so it fired identically on Linux and
+/// macOS, where `:` is an ordinary, legal filename character. A Linux user typing a perfectly reasonable
+/// template (a timestamp like `10:30am-photo`, or `session:final`) was refused for a reason that does not
+/// exist on their machine. CI could not catch it: the rule was *consistently* wrong, and a 3-OS matrix only
+/// detects *inconsistency*.
+///
+/// Relaxing it off Windows cannot reopen a containment escape. This check is a friendly, field-level early
+/// warning; the actual guarantee is [`classify_output_containment`], which runs on the fully-substituted
+/// output path, is unconditional on every platform, and is re-derived independently by
+/// [`crate::batch_execute::execute_plan_walk`] for outputs that never went through `plan()` at all. Nor does
+/// it reopen CPE-1624's alternate-data-stream hole: that is closed on Windows inside
+/// [`classify_output_containment`] itself (see [`final_component_names_alternate_stream`]), which a
+/// template-level check never covered anyway — it cannot see a hand-built `PlannedItem`.
+///
+/// A `const fn`-shaped `cfg!` (not `#[cfg]` blocks) deliberately: the rule compiles on **all three** CI legs,
+/// so the surrounding code is type-checked and clippy-linted everywhere rather than only on Windows.
+fn colon_is_a_path_character() -> bool {
+    cfg!(windows)
 }
 
 /// Reject a job that can't be executed: no ops, a bad rotation angle, an empty convert extension, an
@@ -521,6 +551,11 @@ impl ParentCache {
 ///    per platform. Doesn't catch symlinks/junctions or macOS NFC/NFD (those need real files to resolve),
 ///    but does catch case, separator, and `.`/`..` variants.
 fn path_key(path: &str, parent_cache: &mut ParentCache) -> PathKey {
+    // CPE-1624 finding B: `X.JPG:hidden` and `X.JPG` are one file on disk (the same MFT record), so they
+    // must key identically. Stripped once, up front, so every tier below — canonicalize, parent+name, and
+    // the purely lexical fallback — sees the underlying file. No-op off Windows.
+    let path = strip_stream_suffix(path);
+
     if let Ok(canonical) = canonicalize_path(path) {
         if let (Some(parent), Some(name)) = (canonical.parent(), canonical.file_name()) {
             return PathKey::Resolved(parent.to_path_buf(), fold_case(&name.to_string_lossy()));
@@ -643,8 +678,14 @@ pub(crate) fn classify_output_containment(
 
     let (dir, _, _) = split(input);
     let (out_dir, out_stem, _) = split(output);
-    if dir.is_empty() && out_stem.contains(':') {
+    if colon_is_a_path_character() && dir.is_empty() && out_stem.contains(':') {
         return Containment::Escapes;
+    }
+    // CPE-1624 finding B: an NTFS alternate data stream. Checked BEFORE the directory comparison, because
+    // an ADS output is not a directory question at all — `selected\C:foo.png` names a hidden stream of the
+    // file `selected\C`, which sits perfectly *inside* the selected folder.
+    if final_component_names_alternate_stream(out_final) {
+        return Containment::Refused(WHY_ALTERNATE_STREAM);
     }
     // `out_dir == dir` is the cheap fast path (identical TEXT ⇒ identical place); only a genuinely
     // different directory string pays for `path_key`'s resolution, which still folds trailing separators,
@@ -659,18 +700,95 @@ pub(crate) fn classify_output_containment(
     resolve_output_containment(output, &dir, parent_cache)
 }
 
-/// The verdict on one planned output (CPE-1642). Three-valued on purpose: "I could not establish this
-/// output's identity" is a distinct fact from "this output provably leaves the folder", and conflating
-/// them produced a refusal message that told the user something untrue.
+/// The verdict on one planned output (CPE-1642, extended by CPE-1624). Multi-valued on purpose: "I could
+/// not establish this output's identity" is a distinct fact from "this output provably leaves the folder",
+/// and conflating them produced a refusal message that told the user something untrue. `Refused` is a
+/// third distinct fact for the same reason — an alternate-data-stream output does *not* leave the folder
+/// and is *not* unverifiable; it is a place a batch may not write at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Containment {
     /// Proven to land inside the input's own folder.
     Inside,
     /// Proven to land somewhere else.
     Escapes,
+    /// Provably inside the folder by path, but not a place a batch may write — the payload is the true
+    /// reason. Currently only [`WHY_ALTERNATE_STREAM`] (CPE-1624 finding B).
+    Refused(&'static str),
     /// Could not be established — **treated exactly like `Escapes` by every caller** (fail closed); the
     /// payload is the true reason, for an accurate refusal message.
     Unverifiable(&'static str),
+}
+
+/// **Windows NTFS alternate data streams (CPE-1624 finding B).** A colon inside a *final path component*
+/// is NTFS' alternate-data-stream separator: writing to `C:foo.png` where `C` is an ordinary file in the
+/// same folder does **not** create a file called `C:foo.png` — it writes hidden bytes into the `foo.png`
+/// stream of the existing, unrelated file `C`. That file's visible size and content never change, Explorer
+/// shows nothing, and `Path::is_file()` on a never-before-existing stream path returns `false`, so both the
+/// planner's collision check and [`crate::batch_execute::is_foreign_overwrite`] see "nothing is there".
+///
+/// The security audit reproduced it end-to-end from the ordinary rename box (template `"C:foo"` against a
+/// folder containing a plain file named `C`): `plan()` computed a *contained* output in the *same
+/// directory*, the CPE-1623 containment check correctly saw no escape, and `execute_plan` returned
+/// `Ok(written: 1)` with 120 bytes of transformed PNG readable at the stream path. Any colon does it
+/// (`secrets:hidden` as well as a drive-letter shape), so this is scoped to colons generally.
+///
+/// **Rejected outright at the engine boundary** rather than "resolved to the underlying file": no
+/// legitimate Batch Media flow produces one — `plan()`'s own path construction never emits a colon — so
+/// there is nothing to preserve, and refusing is the one answer that cannot be wrong. This lives in
+/// [`classify_output_containment`], which BOTH `plan()` and [`crate::batch_execute::execute_plan_walk`]
+/// call, so it also covers a hand-built `PlannedItem` that never went through `plan()` — the surface a
+/// template-level check can never reach. It is deliberately independent of
+/// [`template_escapes_directory`]'s colon rule, which CPE-1640 has now gated to Windows: that one is a
+/// friendly field-level echo, this one is the enforcement point.
+///
+/// Windows-only via [`colon_is_a_path_character`]: on Linux/macOS a colon in a filename is an ordinary
+/// character naming an ordinary file, and refusing it would be exactly the CPE-1640 false positive.
+/// A *whole path's* drive prefix (`C:\dir\x.jpg`) is never seen here — the caller passes the FINAL
+/// component, which for any rooted path has already had the drive prefix split off.
+fn final_component_names_alternate_stream(final_component: &str) -> bool {
+    colon_is_a_path_character() && final_component.contains(':')
+}
+
+/// Drop a Windows alternate-data-stream suffix from a path's final component, so [`path_key`] (and hence
+/// [`same_file`]) resolves `X.JPG:hidden` to the SAME identity as `X.JPG` — the second half of CPE-1624
+/// finding B, measured on a real file: `same_file("…\IMG_1.JPG", "…\IMG_1.JPG:hidden")` returned `false`,
+/// because [`parent_and_name`] splits on `/` and `\` only, leaving the colon inside the name component
+/// where it never matched lexically or under case-folding. The two paths are the same MFT record, so
+/// every "would this write touch that file?" question must answer yes.
+///
+/// **Not applied to a drive-relative reference.** With no directory separator anywhere and a colon at
+/// index 1 after an ASCII letter, `C:foo` is drive `C:`'s current directory + `foo` — an entirely
+/// different file from `C`, so stripping there would fuse two unrelated paths into one identity (the
+/// fail-OPEN direction). Left intact; [`classify_output_containment`] refuses that shape separately.
+///
+/// No-op off Windows ([`colon_is_a_path_character`]), where a colon is an ordinary filename character and
+/// `photo:final.jpg` is a real, distinct file that must never collapse onto `photo`.
+///
+/// **Reach audit — the one direction where "same file" *relaxes* a rule.** Making two paths compare equal
+/// is the conservative answer at three of [`same_file`]'s four uses (`plan()`'s collision set renames
+/// past it; [`crate::batch_execute::is_foreign_overwrite`]'s first arm demands confirmation for it). The
+/// fourth is not: `is_foreign_overwrite`'s `!items.iter().any(|other| same_file(&other.input, …))`
+/// treats "this output IS one of the batch's own inputs" as *permitted*, so fusing `X.JPG:evil` onto the
+/// selected input `X.JPG` would license writing the stream without confirmation. That is unreachable by
+/// construction: this stripping and [`final_component_names_alternate_stream`]'s outright refusal are
+/// gated on the *same* [`colon_is_a_path_character`], and the refusal runs first — in both `plan()` and
+/// `execute_plan_walk`, ahead of any overwrite question — so on every platform where a path could be
+/// stripped, that path has already been refused. The two must stay co-gated.
+fn strip_stream_suffix(path: &str) -> &str {
+    if !colon_is_a_path_character() {
+        return path;
+    }
+    let name_start = path.rfind(['/', '\\']).map(|i| i + 1).unwrap_or(0);
+    let name = &path[name_start..];
+    let Some(colon) = name.find(':') else { return path };
+    if colon == 0 {
+        return path; // ":stream" — no base name to attribute it to; leave it alone.
+    }
+    if name_start == 0 && colon == 1 && name.as_bytes()[0].is_ascii_alphabetic() {
+        return path; // drive-relative `C:foo`, not a stream of a file called `C`
+    }
+    // `:` is ASCII, so `name_start + colon` is always a char boundary.
+    &path[..name_start + colon]
 }
 
 /// A file's **true filesystem identity** (CPE-1642): the pair every OS uses to answer "are these two
@@ -707,7 +825,7 @@ impl FileIdentity {
 /// access to) can be reproduced in a unit test by injecting the degenerate value directly.
 fn facts_or_unreadable(facts: FileFacts) -> Probe {
     if facts.id.is_degenerate() {
-        Probe::Unreadable
+        Probe::Unreadable(WHY_PROBE_FAILED)
     } else {
         Probe::Real(facts)
     }
@@ -744,8 +862,10 @@ enum Probe {
     /// A real file or directory, with its identity established.
     Real(FileFacts),
     /// Something is there but its identity could NOT be established. **Never treat as `Absent`** — this
-    /// is exactly CPE-1642 finding B (a contended open used to fall back to "assume unlinked").
-    Unreadable,
+    /// is exactly CPE-1642 finding B (a contended open used to fall back to "assume unlinked"). Carries
+    /// the true reason (CPE-1652 finding A added a second one), so the refusal message stays accurate
+    /// rather than blaming a lock for an unrecognised reparse tag.
+    Unreadable(&'static str),
 }
 
 /// An identity→name-count census of ONE directory (CPE-1642), used to decide whether a multiply-linked
@@ -756,6 +876,11 @@ struct DirLinkScan {
     /// At least one entry's identity could not be read, so `counts` may undercount — a shortfall must
     /// then be reported as *unverifiable*, not as a proven escape.
     incomplete: bool,
+    /// The folder held more than [`census_cap`] entries and the scan stopped early (CPE-1652 finding B).
+    /// Like `incomplete` this means `counts` may undercount, but it gets its own flag so the refusal can
+    /// say *why* — "this folder is too big to check cheaply" is a different fact from "something in it
+    /// was unreadable", and the user's remedy differs.
+    capped: bool,
 }
 
 const WHY_PROBE_FAILED: &str = "the planned output exists but its filesystem identity could not be read \
@@ -765,6 +890,24 @@ const WHY_CHAIN_FAILED: &str = "the planned output is a link whose chain could n
 const WHY_DIR_IDENTITY_FAILED: &str = "the folder a linked output resolves into could not be identified";
 const WHY_CENSUS_FAILED: &str = "the selected folder could not be enumerated to account for the output's \
                                  other hard links";
+/// CPE-1652 finding B: the census is bounded, and a folder past the bound degrades to a refusal rather
+/// than to a slow scan — fail closed, never fail slow.
+const WHY_CENSUS_TOO_BIG: &str = "the selected folder holds too many entries to account for the output's \
+                                  other hard links within a bounded scan";
+/// CPE-1652 finding A: a reparse tag with the name-surrogate bit set that this code does not understand.
+const WHY_SURROGATE_TAG: &str = "the planned output is a reparse point whose type is not understood, and \
+                                 whose tag says it stands in for another name — a write would follow it \
+                                 somewhere this check cannot predict";
+/// CPE-1642 REV-G's second line of defence: at or past `MAX_PATH`, a "path not found"/"invalid name" is
+/// indistinguishable from a truncation, and must never be read as "nothing is there".
+#[cfg_attr(not(windows), allow(dead_code))]
+const WHY_MAX_PATH_AMBIGUOUS: &str = "the planned output's path is at or past Windows' legacy MAX_PATH \
+                                      limit and could not be opened, which is indistinguishable from the \
+                                      path having been truncated";
+/// CPE-1624 finding B — see [`final_component_names_alternate_stream`].
+const WHY_ALTERNATE_STREAM: &str = "names an NTFS alternate data stream (a \":\" in its final path \
+                                    component), which would write hidden bytes into a different, \
+                                    unrelated file instead of creating a file of its own";
 
 /// **The identity half of the containment check (CPE-1642).** `output` is already known to sit in the
 /// input's own directory *by path*; this asks what it actually IS on disk and where the bytes a write
@@ -793,7 +936,7 @@ const WHY_CENSUS_FAILED: &str = "the selected folder could not be enumerated to 
 fn resolve_output_containment(output: &str, input_dir: &str, cache: &mut ParentCache) -> Containment {
     match probe_no_follow(std::path::Path::new(output)) {
         Probe::Absent => Containment::Inside,
-        Probe::Unreadable => Containment::Unverifiable(WHY_PROBE_FAILED),
+        Probe::Unreadable(why) => Containment::Unverifiable(why),
         Probe::Real(facts) => real_target_containment(facts, input_dir, cache),
         Probe::Link => {
             let terminal = match follow_link_chain(output) {
@@ -816,7 +959,7 @@ fn resolve_output_containment(output: &str, input_dir: &str, cache: &mut ParentC
                 Probe::Absent => Containment::Inside, // dangling, but dangling *inside* the folder
                 Probe::Real(facts) => real_target_containment(facts, input_dir, cache),
                 Probe::Link => Containment::Unverifiable(WHY_CHAIN_FAILED),
-                Probe::Unreadable => Containment::Unverifiable(WHY_PROBE_FAILED),
+                Probe::Unreadable(why) => Containment::Unverifiable(why),
             }
         }
     }
@@ -836,8 +979,15 @@ fn real_target_containment(facts: FileFacts, input_dir: &str, cache: &mut Parent
     if inside >= facts.links {
         // Every one of this file's names is a name in the selected folder — nothing can be reached
         // outside it, so this is genuinely safe (CPE-1623 had to refuse this case for want of a cheap
-        // way to prove it).
+        // way to prove it). Sound even for a partial census: `counts` can only ever UNDERcount (a capped
+        // or incomplete scan misses entries, never invents them), so having already found every one of
+        // this file's names inside the folder is a proof that does not depend on the scan being complete.
         Containment::Inside
+    } else if scan.capped {
+        // CPE-1652 finding B: the folder is past the bounded-scan cap, so the shortfall may be an
+        // artefact of stopping early rather than a real outside name. Refuse (fail closed) instead of
+        // either claiming a proven escape or paying an unbounded scan.
+        Containment::Unverifiable(WHY_CENSUS_TOO_BIG)
     } else if scan.incomplete {
         Containment::Unverifiable(WHY_CENSUS_FAILED)
     } else {
@@ -861,7 +1011,7 @@ fn follow_link_chain(start: &str) -> Result<std::path::PathBuf, &'static str> {
         match probe_no_follow(&current) {
             Probe::Link => {}
             Probe::Absent | Probe::Real(_) => return Ok(current),
-            Probe::Unreadable => return Err(WHY_PROBE_FAILED),
+            Probe::Unreadable(why) => return Err(why),
         }
         let target = std::fs::read_link(&current).map_err(|_| WHY_CHAIN_FAILED)?;
         let next = if target.is_absolute() {
@@ -884,10 +1034,25 @@ fn follow_link_chain(start: &str) -> Result<std::path::PathBuf, &'static str> {
 ///
 /// Symlink entries are skipped deliberately: a symlink *pointing at* the file is not another hard link to
 /// it, and counting one would inflate the census and could mask a real out-of-folder name.
+///
+/// **Bounded (CPE-1652 finding B).** Cheap as this is *relative to the work it replaces*, it is still one
+/// `CreateFileW`/`symlink_metadata` per entry of whatever folder the user selected, on a user-facing path
+/// — on a 100k-entry folder that is 100k handle opens, against PURPOSE.md's fast/small/predictable
+/// tiebreaker. The scan therefore stops at [`census_cap`] entries and marks itself `capped`, which
+/// [`real_target_containment`] turns into [`Containment::Unverifiable`] unless containment was already
+/// *proven* by the names found so far. Fail closed, never fail slow: the cap can only ever cause a
+/// refusal, never an acceptance (see the `inside >= links` arm's soundness note).
 fn scan_dir_link_census(dir: &std::path::Path) -> Option<DirLinkScan> {
     let entries = std::fs::read_dir(dir).ok()?;
+    let cap = census_cap();
     let mut scan = DirLinkScan::default();
+    let mut seen = 0usize;
     for entry in entries {
+        seen += 1;
+        if seen > cap {
+            scan.capped = true;
+            break;
+        }
         let Ok(entry) = entry else {
             scan.incomplete = true;
             continue;
@@ -903,10 +1068,103 @@ fn scan_dir_link_census(dir: &std::path::Path) -> Option<DirLinkScan> {
         match probe_no_follow(&entry.path()) {
             Probe::Real(facts) => *scan.counts.entry(facts.id).or_insert(0) += 1,
             Probe::Absent => {} // vanished mid-scan; it holds no name now
-            Probe::Link | Probe::Unreadable => scan.incomplete = true,
+            Probe::Link | Probe::Unreadable(_) => scan.incomplete = true,
         }
     }
     Some(scan)
+}
+
+/// How many entries [`scan_dir_link_census`] will identify before giving up and refusing (CPE-1652
+/// finding B). 20,000 is deliberately far above any folder a person browses by hand (and above every
+/// folder this app's own perf tests build) while keeping the absolute worst case bounded at ~20k handle
+/// opens — tens of milliseconds — instead of growing with the folder. The census is only reached at all
+/// when a planned output turns out to be **multiply linked**, which no ordinary batch ever is, so in
+/// practice this ceiling is never approached.
+fn census_cap() -> usize {
+    const MAX_CENSUS_ENTRIES: usize = 20_000;
+    #[cfg(test)]
+    if let Some(n) = CENSUS_CAP_OVERRIDE.with(|c| c.get()) {
+        return n;
+    }
+    MAX_CENSUS_ENTRIES
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only override for [`census_cap`], so the cap's fail-closed behaviour can be proven against a
+    /// three-entry folder instead of building a 20,001-entry one. Thread-local for the same reason
+    /// `CANONICALIZE_CALLS` is: the default test harness runs each `#[test]` on its own thread.
+    static CENSUS_CAP_OVERRIDE: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// `pub(crate)` so [`crate::batch_execute`]'s tests can prove the cap fails closed through the real
+/// `execute_plan` entry point, not just through this module's internals.
+#[cfg(test)]
+pub(crate) fn set_census_cap_for_test(cap: Option<usize>) {
+    CENSUS_CAP_OVERRIDE.with(|c| c.set(cap));
+}
+
+/// What a Windows reparse point actually is, as far as this module's "probe and writer must agree" rule is
+/// concerned (CPE-1652 finding A). Pure `u32` logic, compiled on **every** platform (only *called* on
+/// Windows) so all three CI legs type-check and unit-test the classification table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+enum ReparseKind {
+    /// Not a reparse point at all — an ordinary file or directory.
+    NotReparse,
+    /// A link this module knows how to follow: `IO_REPARSE_TAG_SYMLINK` or `IO_REPARSE_TAG_MOUNT_POINT`
+    /// (a junction). [`follow_link_chain`] walks these.
+    Link,
+    /// A reparse point with **no** name-surrogate bit: a cloud placeholder (OneDrive), a dedup stub, a
+    /// compression/HSM filter. These are ordinary files to every reader — a write lands on this very file
+    /// — so the probe describes them as the real file they are. Calling them links would strand ordinary
+    /// batches in OneDrive-backed folders.
+    OpaqueData,
+    /// A reparse point whose tag carries the **name-surrogate** bit (`0x2000_0000`) but which this module
+    /// does not recognise. The bit's whole meaning is "this object stands in for another named object", so
+    /// a write *will* be redirected — somewhere this code cannot predict. Fail closed.
+    UnknownSurrogate,
+}
+
+/// The classification table for [`ReparseKind`] (CPE-1652 finding A).
+///
+/// **Why this replaced `std`'s `is_symlink()`.** The previous probe asked
+/// `std::fs::symlink_metadata(path).file_type().is_symlink()`, and `std` answers `true` for exactly two
+/// tags — `IO_REPARSE_TAG_SYMLINK` and `IO_REPARSE_TAG_MOUNT_POINT`. Every *other* reparse point was
+/// therefore reported as the real file it appeared to be. That is right for a cloud placeholder or a dedup
+/// stub (which the old doc comment cited as the justification) but those are **non-surrogate** tags — a
+/// different set from the one the rule actually covered. For a *name-surrogate* tag `std` doesn't know,
+/// the probe opened the stub with `FILE_FLAG_OPEN_REPARSE_POINT` and described the stub, while the
+/// subsequent write — plain `std::fs::write`, no such flag — followed the reparse point wherever it leads.
+/// Probe and writer disagreed: the same shape of bug as the `MAX_PATH` fail-open (REV-G) that blocked
+/// PR #840, and the one thing this module's rules forbid.
+///
+/// **Reach diff versus what it replaces.** Every case `std` called a symlink is still `Link` (identical
+/// tags). Every case `std` called an ordinary file is still `OpaqueData` **unless** its tag sets the
+/// name-surrogate bit, which is the strictly-narrower set that now fails closed. Nothing that used to be
+/// refused is now allowed; the only movement is in the safe direction. The tag is read from the **handle
+/// already open** (`GetFileInformationByHandleEx`), not from a second path-based call, so it also inherits
+/// [`verbatim_wide`]'s `MAX_PATH` reach rather than re-deriving it — and cannot disagree with the
+/// attributes it is classified alongside.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn classify_reparse_tag(file_attributes: u32, reparse_tag: u32) -> ReparseKind {
+    /// `FILE_ATTRIBUTE_REPARSE_POINT`.
+    const ATTR_REPARSE_POINT: u32 = 0x0000_0400;
+    /// A junction/mount point.
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    /// An NTFS symbolic link.
+    const IO_REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+    /// `IsReparseTagNameSurrogate` — "this tag stands in for another named entity".
+    const NAME_SURROGATE: u32 = 0x2000_0000;
+
+    if file_attributes & ATTR_REPARSE_POINT == 0 {
+        return ReparseKind::NotReparse;
+    }
+    match reparse_tag {
+        IO_REPARSE_TAG_SYMLINK | IO_REPARSE_TAG_MOUNT_POINT => ReparseKind::Link,
+        t if t & NAME_SURROGATE != 0 => ReparseKind::UnknownSurrogate,
+        _ => ReparseKind::OpaqueData,
+    }
 }
 
 /// Probe a path's identity **without following links** — Unix reads it straight off the one
@@ -924,7 +1182,7 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
         }),
         // ENOTDIR (a path component isn't a directory) means nothing can exist at this path either.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.raw_os_error() == Some(20) => Probe::Absent,
-        Err(_) => Probe::Unreadable,
+        Err(_) => Probe::Unreadable(WHY_PROBE_FAILED),
     }
 }
 
@@ -946,9 +1204,14 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
 ///
 /// `FILE_FLAG_BACKUP_SEMANTICS` lets the same call open directories (needed to identify a folder);
 /// `FILE_FLAG_OPEN_REPARSE_POINT` keeps it from following a link, so the probe describes the name itself.
-/// A reparse point that std does not consider a symlink (a cloud placeholder, a dedup stub) is reported as
-/// the real file it is, not as a link — those are ordinary files to every reader, and calling them links
-/// would strand ordinary batches in OneDrive-backed folders.
+/// A reparse point is then classified by its real **tag** ([`classify_reparse_tag`], CPE-1652 finding A),
+/// read from this same handle by [`reparse_tag_of`]: a symlink/junction is a [`Probe::Link`], a
+/// non-surrogate reparse point (cloud placeholder, dedup stub) is reported as the real file it is — those
+/// are ordinary files to every reader, and calling them links would strand ordinary batches in
+/// OneDrive-backed folders — and a **name-surrogate** tag this code does not recognise is
+/// [`Probe::Unreadable`], because the write (which does *not* pass `FILE_FLAG_OPEN_REPARSE_POINT`) would
+/// follow it somewhere the probe cannot predict. That last case is what `std`'s `is_symlink()` used to get
+/// wrong here.
 ///
 /// **The path handed to `CreateFileW` goes through [`verbatim_wide`] first (CPE-1642, reviewer finding
 /// REV-G/REV-G2).** Without it the probe and the writer address different sets of files: every write in
@@ -984,14 +1247,23 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
         };
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
         let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
+        // CPE-1652 finding A: read the actual reparse TAG off the same handle, before closing it.
+        let tag = reparse_tag_of(handle);
         let _ = CloseHandle(handle);
         if !ok {
-            return Probe::Unreadable;
+            return Probe::Unreadable(WHY_PROBE_FAILED);
         }
-        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
-            && std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(true)
-        {
-            return Probe::Link;
+        if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            // A reparse point whose tag could not be read cannot be classified, and an unclassifiable
+            // reparse point is exactly the "probe and writer may disagree" case — refuse.
+            let Some(tag) = tag else { return Probe::Unreadable(WHY_SURROGATE_TAG) };
+            match classify_reparse_tag(info.dwFileAttributes, tag) {
+                ReparseKind::Link => return Probe::Link,
+                ReparseKind::UnknownSurrogate => return Probe::Unreadable(WHY_SURROGATE_TAG),
+                // Non-surrogate (cloud placeholder, dedup stub): an ordinary file to every reader, and a
+                // write really does land on this file. Fall through to the identity below.
+                ReparseKind::NotReparse | ReparseKind::OpaqueData => {}
+            }
         }
         facts_or_unreadable(FileFacts {
             id: FileIdentity {
@@ -1001,6 +1273,35 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
             links: u64::from(info.nNumberOfLinks),
             is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
         })
+    }
+}
+
+/// Read a reparse point's **tag** off an already-open handle (CPE-1652 finding A), via
+/// `GetFileInformationByHandleEx(FileAttributeTagInfo)`. `None` when the query fails, which the caller
+/// treats as "unclassifiable ⇒ refuse" for anything carrying `FILE_ATTRIBUTE_REPARSE_POINT`.
+///
+/// Handle-based on purpose: the alternative (`std::fs::symlink_metadata`, what this replaces) is a second
+/// **path**-based resolution, which can disagree with the handle already open — a different file if the
+/// name was swapped in between, and a different reach if the path form differs. One handle, one answer.
+#[cfg(windows)]
+fn reparse_tag_of(handle: windows::Win32::Foundation::HANDLE) -> Option<u32> {
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandleEx, FileAttributeTagInfo, FILE_ATTRIBUTE_TAG_INFO,
+    };
+
+    // SAFETY: `handle` is a live handle owned by the caller (closed by it, not here). `info` is a
+    // correctly-sized, properly-aligned out-parameter of exactly the type `FileAttributeTagInfo` names,
+    // and its size is passed as the buffer length — the standard shape for this API.
+    unsafe {
+        let mut info: FILE_ATTRIBUTE_TAG_INFO = std::mem::zeroed();
+        GetFileInformationByHandleEx(
+            handle,
+            FileAttributeTagInfo,
+            std::ptr::addr_of_mut!(info).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+        .ok()?;
+        Some(info.ReparseTag)
     }
 }
 
@@ -1115,7 +1416,7 @@ fn classify_open_failure(code: u32, wide_len: usize) -> Probe {
             ERROR_PATH_NOT_FOUND | ERROR_INVALID_NAME | ERROR_BAD_PATHNAME | ERROR_FILENAME_EXCED_RANGE
         )
     {
-        return Probe::Unreadable;
+        return Probe::Unreadable(WHY_MAX_PATH_AMBIGUOUS);
     }
 
     let kind = std::io::Error::from_raw_os_error(code as i32).kind();
@@ -1124,7 +1425,7 @@ fn classify_open_failure(code: u32, wide_len: usize) -> Probe {
     {
         Probe::Absent
     } else {
-        Probe::Unreadable
+        Probe::Unreadable(WHY_PROBE_FAILED)
     }
 }
 
@@ -1135,9 +1436,9 @@ fn classify_open_failure(code: u32, wide_len: usize) -> Probe {
 #[cfg(not(any(windows, unix)))]
 fn probe_no_follow(path: &std::path::Path) -> Probe {
     match std::fs::symlink_metadata(path) {
-        Ok(_) => Probe::Unreadable,
+        Ok(_) => Probe::Unreadable(WHY_PROBE_FAILED),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Probe::Absent,
-        Err(_) => Probe::Unreadable,
+        Err(_) => Probe::Unreadable(WHY_PROBE_FAILED),
     }
 }
 
@@ -1309,6 +1610,11 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                         "computed output for \"{input}\" would land at \"{output}\", outside its own \
                          folder — a Convert extension or Rename template can only change a file's \
                          name/extension, never its folder"
+                    ));
+                }
+                Containment::Refused(why) => {
+                    return Err(format!(
+                        "refusing \"{input}\": the computed output \"{output}\" {why}"
                     ));
                 }
                 Containment::Unverifiable(why) => {
@@ -2250,7 +2556,7 @@ mod tests {
             ERROR_FILENAME_EXCED_RANGE,
         ] {
             assert!(
-                matches!(classify_open_failure(code, LONG), Probe::Unreadable),
+                matches!(classify_open_failure(code, LONG), Probe::Unreadable(_)),
                 "os error {code} on a past-MAX_PATH path must fail CLOSED as Unreadable, never Absent"
             );
         }
@@ -2279,7 +2585,7 @@ mod tests {
             "259 wide chars is still addressable unprefixed"
         );
         assert!(
-            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 260), Probe::Unreadable),
+            matches!(classify_open_failure(ERROR_PATH_NOT_FOUND, 260), Probe::Unreadable(_)),
             "260 wide chars (NUL included) is the limit — at it, truncation is possible"
         );
 
@@ -2287,7 +2593,7 @@ mod tests {
         // identify it. Never `Absent`.
         for len in [SHORT, LONG] {
             assert!(
-                matches!(classify_open_failure(ERROR_ACCESS_DENIED, len), Probe::Unreadable),
+                matches!(classify_open_failure(ERROR_ACCESS_DENIED, len), Probe::Unreadable(_)),
                 "a permissions failure is Unreadable, not Absent"
             );
         }
@@ -2405,7 +2711,7 @@ mod tests {
         );
         for bad in [no_index, no_volume] {
             assert!(
-                matches!(facts_or_unreadable(facts(bad)), Probe::Unreadable),
+                matches!(facts_or_unreadable(facts(bad)), Probe::Unreadable(_)),
                 "a degenerate identity must probe as Unreadable (which every caller refuses on), not Real"
             );
             assert_eq!(
@@ -2472,8 +2778,13 @@ mod tests {
         reject(" .. "); // whole segment once trimmed — still a traversal
         reject("a/../b");
         reject("x/..");
-        reject("C:foo"); // reviewer finding A: drive-relative reference
-        reject("secrets:hidden"); // colon anywhere, not just drive-letter position
+        // `:` moved to `cpe_1640_the_colon_rule_is_windows_only` — it is a Windows rule (drive-relative
+        // reference + NTFS alternate-data-stream separator) and an ordinary filename character elsewhere,
+        // so it cannot be asserted uniformly here. Still rejected on Windows; still checked, per-platform.
+        if colon_is_a_path_character() {
+            reject("C:foo"); // reviewer finding A: drive-relative reference
+            reject("secrets:hidden"); // colon anywhere, not just drive-letter position
+        }
 
         // Ordinary templates — no separators, no ":", no WHOLE-SEGMENT ".." — must still validate fine.
         // "shot..final"/"v1..2" are the UAT tester's exact worked examples: two literal dots inside an
@@ -2491,7 +2802,9 @@ mod tests {
     fn cpe_1623_convert_extension_is_sanitised_the_same_way_as_rename_template() {
         // The Convert-extension gap: to_ext feeds the exact same join()'d output path but wasn't checked
         // at all before this fix. Mirrors the Rename-template accept/reject split exactly (same helper).
-        for bad in ["../evil", "..\\evil", "sub/ext", "C:foo", "..", "a/.."] {
+        // "C:foo" lives in `cpe_1640_convert_extension_colon_rule_is_windows_only_too` — the colon half
+        // of this rule is Windows-only (CPE-1640), so it can't be asserted uniformly in this list.
+        for bad in ["../evil", "..\\evil", "sub/ext", "..", "a/.."] {
             let job = BatchJob::new(vec![MediaOp::Convert { to_ext: bad.into() }]);
             let err = validate(&job).expect_err(&format!("expected convert to_ext {bad:?} to be rejected"));
             assert!(err.contains("convert extension"), "message should name the actual op: {err}");
@@ -2537,10 +2850,21 @@ mod tests {
         // `:`), so the old fast-path `out_dir == dir` comparison (two empty strings) would silently accept
         // a drive-relative escape. Bypasses validate() (which now also rejects `:` at the field level) to
         // exercise plan()'s own independent structural backstop.
+        //
+        // **Windows-only as of CPE-1640.** Drive-relative syntax is a Windows concept: off Windows
+        // `C:foo.jpg` is simply a file called `C:foo.jpg` in the current directory — contained, and
+        // refusing it was the false positive that ticket is about. The structural backstop is gated to
+        // match, so this asserts the platform-appropriate answer on both sides rather than skipping.
         let job = BatchJob::new(vec![MediaOp::Rename { template: "C:foo".into() }]);
-        let err = plan(&job, &v(&["innocuous.jpg"]))
-            .expect_err("a drive-relative output for a bare-filename input must be refused, not planned");
-        assert!(err.contains("folder"), "refusal reason: {err}");
+        let planned = plan(&job, &v(&["innocuous.jpg"]));
+        if colon_is_a_path_character() {
+            let err = planned
+                .expect_err("a drive-relative output for a bare-filename input must be refused, not planned");
+            assert!(err.contains("folder") || err.contains("alternate data stream"), "refusal reason: {err}");
+        } else {
+            let out = planned.expect("off Windows this is an ordinary filename in the current directory");
+            assert_eq!(out[0].output, "C:foo.jpg");
+        }
     }
 
     #[test]
@@ -2679,6 +3003,354 @@ mod tests {
         assert_ne!(out[0].output, foreign.to_string_lossy(), "must not plan straight onto the foreign file");
         assert_eq!(out[0].output, dir.path().join("vacation-2.jpg").to_string_lossy());
         assert_eq!(std::fs::read(&foreign).unwrap(), foreign_original, "the foreign file must be untouched");
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ---- CPE-1640: the colon rule is Windows logic, and was being applied everywhere -----------------
+
+    /// A colon is reserved on NTFS but is an **ordinary filename character** on Linux and macOS, so a
+    /// perfectly reasonable template (`10:30am-photo`, `session:final`) was refused off Windows for a
+    /// reason that does not exist there. CI could not see it: the rule was *consistently* wrong, and a
+    /// 3-OS matrix only detects *inconsistency* — so this test asserts the platform-appropriate answer
+    /// per leg rather than one answer everywhere.
+    #[test]
+    fn cpe_1640_the_colon_rule_is_windows_only() {
+        for t in ["10:30am-photo", "session:final", "C:foo", "secrets:hidden"] {
+            let job = BatchJob::new(vec![MediaOp::Rename { template: t.into() }]);
+            if colon_is_a_path_character() {
+                assert!(
+                    validate(&job).is_err(),
+                    "{t:?} must still be refused on Windows: `:` is the drive separator AND the NTFS \
+                     alternate-data-stream separator"
+                );
+            } else {
+                assert!(
+                    validate(&job).is_ok(),
+                    "{t:?} must be ACCEPTED off Windows, where `:` is an ordinary filename character"
+                );
+            }
+            // Separators are universal and stay refused on every platform.
+            let sep = BatchJob::new(vec![MediaOp::Rename { template: format!("{t}/x") }]);
+            assert!(validate(&sep).is_err(), "a path separator must be refused on every platform");
+        }
+    }
+
+    /// The same gate on the Convert-extension half of `validate()` (they share one helper, so this pins
+    /// that they cannot drift apart).
+    #[test]
+    fn cpe_1640_convert_extension_colon_rule_is_windows_only_too() {
+        let job = BatchJob::new(vec![MediaOp::Convert { to_ext: "j:pg".into() }]);
+        assert_eq!(
+            validate(&job).is_err(),
+            colon_is_a_path_character(),
+            "the Convert extension check must use the same platform rule as the Rename template check"
+        );
+    }
+
+    /// The acceptance criterion the ticket calls out explicitly: relaxing the *field-level* colon check
+    /// off Windows must not relax **containment**, which is the actual guarantee and is unconditional.
+    /// A separator-bearing template still escapes on every platform, and a colon-bearing template plans
+    /// to a path that provably stays in the input's own folder off Windows.
+    #[test]
+    fn cpe_1640_containment_is_unaffected_by_the_relaxed_colon_rule() {
+        // Genuine traversal: refused on every platform, at plan()'s own backstop (validate() bypassed).
+        let escaping = BatchJob::new(vec![MediaOp::Rename { template: "../evil".into() }]);
+        assert!(
+            plan(&escaping, &v(&["/pics/vacation/photo1.jpg"])).is_err(),
+            "a traversal template must be refused on EVERY platform, colon rule or not"
+        );
+
+        let colon = BatchJob::new(vec![MediaOp::Rename { template: "10:30am".into() }]);
+        let planned = plan(&colon, &v(&["/pics/vacation/photo1.jpg"]));
+        if colon_is_a_path_character() {
+            assert!(planned.is_err(), "on Windows the colon output is an alternate data stream — refused");
+        } else {
+            let out = planned.expect("off Windows a colon is an ordinary filename character");
+            assert_eq!(
+                out[0].output, "/pics/vacation/10:30am.jpg",
+                "the output must be a single component inside the input's own folder"
+            );
+        }
+    }
+
+    // ---- CPE-1624 finding B: NTFS alternate data streams ---------------------------------------------
+
+    /// The pure decision table. `:` in a FINAL path component is an alternate-data-stream separator on
+    /// Windows and an ordinary character everywhere else, so this asserts per-leg.
+    #[test]
+    fn cpe_1624_alternate_stream_detection_is_windows_only_and_looks_at_the_final_component() {
+        assert_eq!(final_component_names_alternate_stream("C:foo.png"), colon_is_a_path_character());
+        assert_eq!(final_component_names_alternate_stream("IMG_1.JPG:hidden"), colon_is_a_path_character());
+        assert_eq!(final_component_names_alternate_stream("secrets:hidden"), colon_is_a_path_character());
+        // An ordinary final component is never a stream, on any platform — including the one a rooted
+        // path leaves behind once its drive prefix has been split off.
+        assert!(!final_component_names_alternate_stream("photo.jpg"));
+        assert!(!final_component_names_alternate_stream("shot..final.jpg"));
+    }
+
+    /// `strip_stream_suffix` is what makes `X.JPG` and `X.JPG:hidden` key to ONE identity. Two shapes must
+    /// survive untouched even on Windows: a drive-relative `C:foo` (a different file from `C`, so fusing
+    /// them would be the fail-OPEN direction) and a leading-colon name with no base to attribute it to.
+    #[test]
+    fn cpe_1624_stream_suffix_stripping_is_windows_only_and_spares_drive_relative_paths() {
+        if colon_is_a_path_character() {
+            assert_eq!(strip_stream_suffix(r"C:\pics\IMG_1.JPG:hidden"), r"C:\pics\IMG_1.JPG");
+            assert_eq!(strip_stream_suffix("/pics/IMG_1.JPG:hidden"), "/pics/IMG_1.JPG");
+            assert_eq!(strip_stream_suffix(r"sub\C:foo.png"), r"sub\C");
+        } else {
+            // Off Windows a colon is part of the real filename — collapsing it would fuse two distinct
+            // files into one identity, which is exactly the CPE-1640 class of false positive.
+            assert_eq!(strip_stream_suffix("/pics/IMG_1.JPG:hidden"), "/pics/IMG_1.JPG:hidden");
+        }
+        // Never stripped anywhere: a drive-relative reference, and a name that is only a stream.
+        assert_eq!(strip_stream_suffix("C:foo"), "C:foo");
+        assert_eq!(strip_stream_suffix(":stream"), ":stream");
+        assert_eq!(strip_stream_suffix("/pics/IMG_1.JPG"), "/pics/IMG_1.JPG");
+    }
+
+    /// **The ticket's measured finding, on a real file:** `same_file("…\IMG_1.JPG", "…\IMG_1.JPG:hidden")`
+    /// returned `false` — the two paths are the same MFT record, so every "would this write touch that
+    /// file?" question had been answering no. Off Windows the same pair is genuinely two different files
+    /// and must stay distinct (CPE-1640's rule, applied to identity rather than to templates).
+    #[test]
+    fn cpe_1624_same_file_recognises_an_alternate_data_stream_as_the_same_file() {
+        let dir = scratch("cpe1624-ads-same-file");
+        let base = dir.path().join("IMG_1.JPG");
+        std::fs::write(&base, b"real photo bytes").unwrap();
+        let base_s = base.to_string_lossy().to_string();
+        let stream_s = format!("{base_s}:hidden");
+
+        assert_eq!(
+            same_file(&base_s, &stream_s),
+            colon_is_a_path_character(),
+            "on Windows an ADS path names the same underlying file; elsewhere ':' is just a filename \
+             character and the two are distinct files"
+        );
+        // Symmetric, and never accidentally equal to an unrelated neighbour.
+        assert_eq!(same_file(&stream_s, &base_s), colon_is_a_path_character());
+        let other = dir.path().join("IMG_2.JPG").to_string_lossy().to_string();
+        assert!(!same_file(&stream_s, &other), "unrelated files must never fuse");
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// The engine boundary, not just the template field: an output whose final component carries a colon
+    /// is refused by the ONE check both `plan()` and `execute_plan_walk` call — so it also covers a
+    /// hand-built `PlannedItem` that never went through `plan()`, which no template-level rule can reach.
+    /// The refusal must say what is TRUE (CPE-1642's rule): the stream stays *inside* the folder, so
+    /// calling it an escape would be a lie.
+    #[test]
+    fn cpe_1624_an_alternate_data_stream_output_is_refused_at_the_shared_engine_boundary() {
+        let mut cache = ParentCache::new();
+        let verdict = classify_output_containment(
+            "/pics/workdir/photo.png",
+            "/pics/workdir/C:foo.png",
+            &mut cache,
+        );
+        if colon_is_a_path_character() {
+            assert_eq!(
+                verdict,
+                Containment::Refused(WHY_ALTERNATE_STREAM),
+                "an ADS output must be refused outright — and NOT as an escape: the bytes stay in the \
+                 folder, they just land hidden on an unrelated file"
+            );
+        } else {
+            assert_eq!(
+                verdict,
+                Containment::Inside,
+                "off Windows this is an ordinary filename inside the input's own folder"
+            );
+        }
+    }
+
+    // ---- CPE-1652 finding A: name-surrogate reparse tags --------------------------------------------
+
+    /// The classification table `std`'s `is_symlink()` used to stand in for. Pure `u32` logic, so all
+    /// three CI legs run it even though only Windows ever calls it in production.
+    ///
+    /// **Injected tags, not planted files** — the shapes that matter (a cloud placeholder, a dedup stub,
+    /// a WCI/appexeclink surrogate) cannot be created on a CI machine or on this developer's box, so the
+    /// tag values are asserted directly. **Not exercised against a real on-disk object:** every
+    /// non-symlink, non-junction tag below. The two that *can* be planted (symlink, junction) are covered
+    /// by `cpe_1652_the_probe_never_calls_a_redirecting_reparse_point_an_ordinary_file`.
+    #[test]
+    fn cpe_1652_reparse_tag_classification_fails_closed_on_an_unknown_name_surrogate() {
+        const ATTR_REPARSE: u32 = 0x0000_0400;
+        const ATTR_NORMAL: u32 = 0x0000_0080;
+
+        // Not a reparse point at all — the tag field is meaningless and must be ignored.
+        assert_eq!(classify_reparse_tag(ATTR_NORMAL, 0xA000_000C), ReparseKind::NotReparse);
+        assert_eq!(classify_reparse_tag(0, 0), ReparseKind::NotReparse);
+
+        // The two `std` knows: IO_REPARSE_TAG_SYMLINK and IO_REPARSE_TAG_MOUNT_POINT (a junction).
+        assert_eq!(classify_reparse_tag(ATTR_REPARSE, 0xA000_000C), ReparseKind::Link);
+        assert_eq!(classify_reparse_tag(ATTR_REPARSE, 0xA000_0003), ReparseKind::Link);
+
+        // Non-surrogate tags: a write lands on THIS file, so they are ordinary files — the cloud
+        // placeholder / dedup-stub case the old doc comment cited, which is genuinely fine.
+        for ordinary in [
+            0x9000_001A_u32, // IO_REPARSE_TAG_CLOUD (OneDrive placeholder)
+            0x8000_0017,     // IO_REPARSE_TAG_WOF (compressed/WIM-backed file)
+            0x8000_0013,     // IO_REPARSE_TAG_DEDUP
+        ] {
+            assert_eq!(
+                classify_reparse_tag(ATTR_REPARSE, ordinary),
+                ReparseKind::OpaqueData,
+                "tag {ordinary:#x} has no name-surrogate bit — refusing it would strand ordinary \
+                 batches in OneDrive-backed folders"
+            );
+        }
+
+        // Name-surrogate tags this code does not know: the write WILL be redirected somewhere the probe
+        // cannot predict, so it must fail closed rather than describe the stub as an ordinary file.
+        for surrogate in [
+            0xA000_0019_u32, // IO_REPARSE_TAG_GLOBAL_REPARSE
+            0xA000_0027,     // IO_REPARSE_TAG_WCI
+            0xA000_0030,     // vendor tag, surrogate bit set
+            0x2000_0000,     // the bare bit, no other structure
+        ] {
+            assert_eq!(
+                classify_reparse_tag(ATTR_REPARSE, surrogate),
+                ReparseKind::UnknownSurrogate,
+                "tag {surrogate:#x} sets the name-surrogate bit and must fail closed"
+            );
+        }
+
+        // Property form: the ONLY surrogate tags allowed through as links are the two known ones.
+        for high in 0u32..=0xFF {
+            let tag = 0x2000_0000 | (high << 8);
+            let kind = classify_reparse_tag(ATTR_REPARSE, tag);
+            assert!(
+                matches!(kind, ReparseKind::UnknownSurrogate | ReparseKind::Link),
+                "a name-surrogate tag must never be classified as ordinary data: {tag:#x} -> {kind:?}"
+            );
+        }
+    }
+
+    /// The AC's "the probe and the writer provably agree" for every reparse shape this suite can build.
+    /// The writer is plain `std::fs::write`, which does **not** pass `FILE_FLAG_OPEN_REPARSE_POINT` and
+    /// therefore follows any redirecting reparse point; the probe must never describe such a path as an
+    /// ordinary file, or the two are looking at different objects.
+    #[test]
+    fn cpe_1652_the_probe_never_calls_a_redirecting_reparse_point_an_ordinary_file() {
+        let dir = scratch("cpe1652-probe-agrees");
+        let target = dir.path().join("target.jpg");
+        std::fs::write(&target, b"target bytes").unwrap();
+
+        // An ordinary file is Real — the negative control (without it, "everything is a Link" would pass).
+        assert!(
+            matches!(probe_no_follow(&target), Probe::Real(_)),
+            "an ordinary file must probe as a real file, or every batch on this machine would be refused"
+        );
+
+        let link = dir.path().join("link.jpg");
+        if try_symlink(&target, &link, "cpe_1652_the_probe_never_calls_a_redirecting_reparse_point...") {
+            assert!(
+                matches!(probe_no_follow(&link), Probe::Link),
+                "a symlink redirects the writer, so the probe must report a link, not the stub"
+            );
+        }
+
+        // A junction (IO_REPARSE_TAG_MOUNT_POINT) needs no elevation on Windows, unlike a symlink.
+        #[cfg(windows)]
+        {
+            let real_dir = dir.path().join("real_dir");
+            std::fs::create_dir_all(&real_dir).unwrap();
+            let junction = dir.path().join("junction");
+            if junction::create(&real_dir, &junction).is_ok() {
+                assert!(
+                    matches!(probe_no_follow(&junction), Probe::Link),
+                    "a junction redirects the writer, so the probe must report a link"
+                );
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ---- CPE-1652 finding B: the link-census cost cliff ---------------------------------------------
+
+    /// The cap must **fail closed**: past the bound the verdict degrades to `Unverifiable` (which every
+    /// caller refuses on), never to "allowed because we stopped looking". The positive control in the
+    /// same test is what makes that meaningful — with the ordinary cap the identical folder is allowed.
+    #[test]
+    fn cpe_1652_the_census_cap_fails_closed_instead_of_scanning_an_unbounded_folder() {
+        let dir = scratch("cpe1652-census-cap");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let a = selected.join("a.jpg");
+        std::fs::write(&a, b"shared bytes").unwrap();
+        // A second NAME for the same data, inside the selected folder: multiply-linked, which is the only
+        // shape that reaches the census at all.
+        let b = selected.join("b.jpg");
+        if std::fs::hard_link(&a, &b).is_err() {
+            eprintln!(
+                "SKIPPING cpe_1652_the_census_cap_fails_closed: this filesystem does not support hard \
+                 links — this test verified NOTHING"
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+        for i in 0..6 {
+            std::fs::write(selected.join(format!("filler{i}.jpg")), b"filler").unwrap();
+        }
+        let input = selected.join("photo.jpg").to_string_lossy().to_string();
+        let output = b.to_string_lossy().to_string();
+
+        // Positive control: with the ordinary cap the census completes, finds both names inside the
+        // folder, and correctly ALLOWS the write (the CPE-1642 false positive that was retired).
+        set_census_cap_for_test(None);
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&input, &output, &mut cache),
+            Containment::Inside,
+            "an uncapped census must still allow a file whose every name is inside the selected folder"
+        );
+
+        // Capped below the folder's entry count: the shortfall may be an artefact of stopping early, so
+        // the verdict degrades to a refusal rather than either a false escape or an unbounded scan.
+        set_census_cap_for_test(Some(1));
+        let mut capped_cache = ParentCache::new();
+        let verdict = classify_output_containment(&input, &output, &mut capped_cache);
+        set_census_cap_for_test(None);
+        assert_eq!(
+            verdict,
+            Containment::Unverifiable(WHY_CENSUS_TOO_BIG),
+            "past the cap the census must fail CLOSED with its own accurate reason"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// Manual-only measurement for the ticket's "state a number for the large-folder census case"
+    /// (`cargo test --release -- --ignored --nocapture cpe_1652_census_timing_for_a_large_folder`).
+    /// `#[ignore]`d like the CPE-1623 plan-timing test: wall-clock assertions are flaky in CI.
+    #[test]
+    #[ignore]
+    fn cpe_1652_census_timing_for_a_large_folder() {
+        let dir = scratch("cpe1652-census-timing");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let n = 20_000usize;
+        for i in 0..n {
+            std::fs::write(selected.join(format!("f{i:06}.jpg")), b"x").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let scan = scan_dir_link_census(&selected).expect("the selected folder must enumerate");
+        let elapsed = start.elapsed();
+        println!(
+            "census of {n} entries took {elapsed:?} (capped={}, distinct identities={})",
+            scan.capped,
+            scan.counts.len()
+        );
+
+        set_census_cap_for_test(Some(500));
+        let start = std::time::Instant::now();
+        let capped = scan_dir_link_census(&selected).expect("the selected folder must enumerate");
+        let capped_elapsed = start.elapsed();
+        set_census_cap_for_test(None);
+        println!("same folder with the cap at 500 took {capped_elapsed:?} (capped={})", capped.capped);
 
         let _ = std::fs::remove_dir_all(dir.path());
     }
