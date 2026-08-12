@@ -1469,6 +1469,14 @@ mod tests {
 
         let result = reg.lock(&blob_path);
 
+        // Checked FIRST, because it is the sharpest symptom: with this guard removed, the re-seal runs
+        // through the link and the vault's real contents are replaced by the link target's — a second,
+        // quieter kind of data loss that the wipe-side refusal (which fires later) does not prevent.
+        assert_eq!(
+            std::fs::read(&blob_path).unwrap(),
+            before,
+            "nothing may be re-sealed through a link — the vault's own contents would be replaced"
+        );
         match result {
             Err(VaultError::Format(msg)) => {
                 assert!(msg.contains(UNTRUSTED_SESSION), "the refusal must name the reason, got: {msg}");
@@ -1476,11 +1484,6 @@ mod tests {
             }
             other => panic!("locking through an in-root link must be refused, got {other:?}"),
         }
-        assert_eq!(
-            std::fs::read(&blob_path).unwrap(),
-            before,
-            "nothing may be re-sealed through a link — the vault's own contents would be replaced"
-        );
         assert_eq!(
             std::fs::read(decoy.join("someone-elses.txt")).unwrap(),
             b"live plaintext",
