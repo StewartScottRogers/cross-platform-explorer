@@ -1,6 +1,44 @@
-import { describe, it, expect, vi } from "vitest";
-import { OscillationGuard, handleFolderBatch, undoPlan, type FolderWatchEvent, type WatchFire } from "./folderWatch";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { OscillationGuard, handleFolderBatch, undoFire, undoPlan, type FolderWatchEvent, type WatchFire } from "./folderWatch";
 import { addRule, type WatchRule } from "./watchRules";
+
+// CPE-1666 — `undoFire` re-stats each recorded delete right before acting, on a fake `commands` module
+// whose `entryInfo`/`deletePermanent` are backed by the REAL filesystem (mirroring
+// `delete_permanent_impl`'s own `is_dir()` -> `remove_dir_all` dispatch in src-tauri/src/lib.rs). That
+// lets the test drive `undoFire` exactly as production code does and then check survival by listing the
+// real directory back off disk — asserting a return value would miss the exact bug this ticket exists to
+// catch (nothing about `deletePermanent`'s resolved value says whether a whole tree got wiped).
+vi.mock("./bindings.gen", () => ({
+  commands: {
+    entryInfo: vi.fn(async (p: string) => {
+      try {
+        const st = fs.statSync(p);
+        return { status: "ok", data: { name: path.basename(p), path: p, is_dir: st.isDirectory(), size: st.size, modified: null, created: null, readonly: false, hidden: false } };
+      } catch (e) {
+        return { status: "error", error: String(e) };
+      }
+    }),
+    deletePermanent: vi.fn(async (paths: string[], _confirmed: boolean) => {
+      const data = paths.map((p) => {
+        try {
+          // Mirrors delete_permanent_impl's own dispatch: is_dir() -> remove_dir_all (recursive),
+          // else remove_file — including the recursive branch that CPE-1666 is about not reaching
+          // for a swapped-in directory.
+          if (fs.existsSync(p) && fs.statSync(p).isDirectory()) fs.rmSync(p, { recursive: true, force: true });
+          else fs.rmSync(p, { force: true });
+          return { path: p, ok: true, error: "" };
+        } catch (e) {
+          return { path: p, ok: false, error: String(e) };
+        }
+      });
+      return { status: "ok", data };
+    }),
+    moveExact: vi.fn(async () => [{ path: "", ok: true, error: "" }]),
+  },
+}));
 
 describe("OscillationGuard (CPE-794)", () => {
   it("guards a path within the window and expires after it", () => {
@@ -152,5 +190,91 @@ describe("handleFolderBatch (CPE-794)", () => {
 
       warn.mockRestore();
     });
+  });
+});
+
+describe("undoFire (CPE-1666) — re-stats a recorded delete before acting", () => {
+  const tmpRoots: string[] = [];
+  function makeTmp(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cpe-undo-"));
+    tmpRoots.push(dir);
+    return dir;
+  }
+  afterEach(() => {
+    for (const dir of tmpRoots.splice(0)) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    }
+    vi.clearAllMocks();
+  });
+
+  const fire = (over: Partial<WatchFire>): WatchFire => ({
+    id: "f", rule: "R", source: "/dl/a.pdf", finalPath: "/dl/a.pdf", copies: [], summary: "", ...over,
+  });
+
+  it(
+    "skips a copy path swapped for a real directory since fire time, and the swapped-in tree survives " +
+      "— verified by listing it back off disk",
+    async () => {
+      const root = makeTmp();
+      const copyPath = path.join(root, "backup", "invoice.pdf");
+      fs.mkdirSync(path.dirname(copyPath), { recursive: true });
+      fs.writeFileSync(copyPath, "app-made copy"); // the fire's actual copy, as recorded at fire time
+
+      // Attacker (or anything else with write access), sometime between fire and Undo: delete the
+      // recorded copy and swap a real directory tree into its exact path — same attack the PR #844
+      // auditor used to reach delete_permanent_impl's remove_dir_all branch.
+      fs.rmSync(copyPath);
+      fs.mkdirSync(copyPath);
+      fs.writeFileSync(path.join(copyPath, "keep-me.txt"), "important data");
+      fs.mkdirSync(path.join(copyPath, "nested"));
+      fs.writeFileSync(path.join(copyPath, "nested", "also-keep-me.txt"), "more important data");
+
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      await undoFire(fire({ copies: [copyPath] }));
+      expect(warn).toHaveBeenCalled();
+      warn.mockRestore();
+
+      // The assertion CPE-1666 requires: list the directory back OFF DISK — not a return value — and
+      // confirm the swapped-in tree is completely intact.
+      expect(fs.existsSync(copyPath)).toBe(true);
+      expect(fs.statSync(copyPath).isDirectory()).toBe(true);
+      expect(fs.readdirSync(copyPath).sort()).toEqual(["keep-me.txt", "nested"]);
+      expect(fs.readFileSync(path.join(copyPath, "keep-me.txt"), "utf8")).toBe("important data");
+      expect(fs.existsSync(path.join(copyPath, "nested", "also-keep-me.txt"))).toBe(true);
+      expect(fs.readFileSync(path.join(copyPath, "nested", "also-keep-me.txt"), "utf8")).toBe(
+        "more important data",
+      );
+    },
+  );
+
+  it("a normal undo still deletes the app-created copy — verified by listing the directory off disk", async () => {
+    const root = makeTmp();
+    const copyPath = path.join(root, "backup", "invoice.pdf");
+    fs.mkdirSync(path.dirname(copyPath), { recursive: true });
+    fs.writeFileSync(copyPath, "app-made copy");
+
+    await undoFire(fire({ copies: [copyPath] }));
+
+    expect(fs.existsSync(copyPath)).toBe(false);
+    expect(fs.readdirSync(path.dirname(copyPath))).toEqual([]);
+  });
+
+  it("a normal undo still moves the source back when the fire relocated it", async () => {
+    const root = makeTmp();
+    const finalPath = path.join(root, "archive", "invoice.pdf");
+    fs.mkdirSync(path.dirname(finalPath), { recursive: true });
+    fs.writeFileSync(finalPath, "the moved file");
+
+    await undoFire(fire({ source: path.join(root, "dl", "invoice.pdf"), finalPath, copies: [] }));
+
+    // moveExact itself is mocked (no real backend to move it for real in this unit test) — what's under
+    // test here is that undoFire still calls it for the move leg, unaffected by the CPE-1666 re-stat
+    // gate, which only applies to `plan.deletes`.
+    const bindings = await import("./bindings.gen");
+    expect(bindings.commands.moveExact).toHaveBeenCalledWith([[finalPath, path.join(root, "dl", "invoice.pdf")]]);
   });
 });

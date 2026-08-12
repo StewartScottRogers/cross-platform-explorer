@@ -157,15 +157,39 @@ export async function undoFire(fire: WatchFire): Promise<void> {
     await commands.moveExact([[plan.moveBack.from, plan.moveBack.to]]);
   }
   for (const p of plan.deletes) {
+    // Re-stat immediately before acting (CPE-1666). `plan.deletes` only ever holds copies THIS fire
+    // created — true at fire time, and the auditor who attacked that claim directly could not break it
+    // (`do_copy_into` never resolves onto an existing entry, and `watchLog` is in-memory only). But fire
+    // time and undo time can be minutes apart — Undo is a later user gesture — and nothing re-checked
+    // the path in between. `delete_permanent_impl` dispatches on `path.is_dir()` -> `remove_dir_all`, so
+    // if anything replaced this exact path with a real directory tree after the fire recorded it, Undo
+    // would take the recursive branch and destroy it. A copy this module made is always a plain file; if
+    // it is now a directory, the thing being undone is not the thing that was done — skip it rather than
+    // trust the stale record.
+    let info: { is_dir: boolean } | null = null;
+    try {
+      const res = await commands.entryInfo(p);
+      if (res.status === "ok") info = res.data;
+    } catch {
+      // Gone, or unreadable — fall through to deletePermanent below, which reports its own per-path
+      // failure rather than this loop guessing at one.
+    }
+    if (info?.is_dir) {
+      console.warn(
+        `folderWatch undo: skipped deleting ${p} — it is now a directory, not the file this fire copied; leaving it in place`,
+      );
+      continue;
+    }
     guard.guard(p, now);
     // `confirmed: true` (CPE-1651): the user pressed Undo on this specific fire, and `plan.deletes` is
     // only ever the set of COPIES that fire itself created (recorded on the fire record at the moment
-    // the rule ran) — never a pre-existing file the user put there. That is a genuine, targeted user
-    // action on app-created artefacts, not a blanket constant threaded through to satisfy the compiler:
-    // nothing else in this module may set it, and the source file is moved back rather than deleted.
-    // Don't discard the result: a batch-level refusal (the CPE-1651 gate) or a per-path failure would
-    // otherwise vanish silently and leave the user believing Undo removed a copy it did not. Matches how
-    // this module already reports a failed watch action (PR #844 review).
+    // the rule ran) — app-created *at fire time*, and re-verified immediately above, right before this
+    // call, rather than trusted untouched from a record that may be minutes stale. That is a genuine,
+    // targeted user action on app-created artefacts, not a blanket constant threaded through to satisfy
+    // the compiler: nothing else in this module may set it, and the source file is moved back rather
+    // than deleted. Don't discard the result: a batch-level refusal (the CPE-1651 gate) or a per-path
+    // failure would otherwise vanish silently and leave the user believing Undo removed a copy it did
+    // not. Matches how this module already reports a failed watch action (PR #844 review).
     const res = await commands.deletePermanent([p], true);
     if (res.status === "error") {
       // A batch-level error means the CPE-1651 consent gate refused the call outright.

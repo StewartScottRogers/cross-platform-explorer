@@ -61,9 +61,15 @@
     phase = "repairing";
     error = "";
     try {
-      // Re-verify the link is STILL broken right before the destructive delete. Closes a TOCTOU: if a
-      // directory-symlink's target reappeared after the context-menu's broken-check, delete_permanent would
-      // see is_dir()==true and remove_dir_all the now-real target directory. Abort instead of deleting.
+      // Re-verify the link is STILL broken right before the destructive delete. NOT because
+      // remove_dir_all would recurse into and destroy a real target directory if a directory-symlink's
+      // target reappeared — it wouldn't: on Windows, Rust's remove_dir_all special-cases a reparse point
+      // (symlink or NTFS junction) and only unlinks the link entry itself, leaving the target directory
+      // and its files intact (confirmed by the PR #844 security audit — CPE-1666 — which planted a
+      // junction at a delete target and watched exactly that happen, same for a directory symlink). The
+      // actual reason to abort is narrower: if the link's target reappeared since the context menu's
+      // broken-check, this delete would remove a link that now correctly resolves to something real —
+      // not what "repair a broken link" was asked to do. Abort instead of deleting.
       const recheck = await commands.linkStatus(linkPath);
       if (!recheck.broken) {
         throw new Error("This link is no longer broken — refresh the folder and try again.");

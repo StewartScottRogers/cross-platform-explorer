@@ -3,7 +3,7 @@
  * remember the token. Uses a command-router `invoke` mock (the component also calls forge_get_token
  * on mount and forge_set/delete_token on Remember, so a sequential mock would mis-align).
  */
-import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor, cleanup } from "@testing-library/svelte";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
@@ -335,5 +335,94 @@ describe("RepoBrowser — non-URL junk rejected without hitting forge_browse (CP
     await waitFor(() =>
       expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "some-org_1/repo.name_2")).toBe(true),
     );
+  });
+});
+
+// CPE-1668 — clone() used its own weaker guard (`!r.includes("/")`), while browse() gates on the
+// isRepoId predicate CPE-1663 introduced. Clone is reachable directly (paste + click Clone, no Browse
+// click required — the "does nothing if the folder pick is cancelled" test above already proves that
+// path), so a pasted Windows path or a colon-bearing sentence reached forge_clone unguarded. Fixed by
+// routing clone() through the same stripRepoUrl + isRepoId gate browse() uses. These tests drive the
+// REAL component — type into the real repo input, click the real Clone button, read what the UI shows —
+// rather than calling isRepoId directly, since a direct predicate call can't prove clone() is wired to it.
+describe("RepoBrowser — Clone shares the Browse-side repo-id guard (CPE-1668)", () => {
+  async function typeAndClickClone(provider: string, input: string) {
+    render(RepoBrowser, { props: { provider, repo: "" } });
+    const repoInput = screen.getByPlaceholderText(/owner\/name/i) as HTMLInputElement;
+    await fireEvent.input(repoInput, { target: { value: input } });
+    await fireEvent.click(screen.getByRole("button", { name: "Clone" }));
+  }
+
+  it.each([
+    ["a Windows path with forward slashes", "C:/repos/thing"],
+    ["a Windows path with backslashes", "C:\\repos\\thing"],
+    ["an ordinary sentence with a colon and a slash", "Fix: update src/main.rs docs"],
+    ["a double-@ SCP-style string", "git@github.com@evil.com:o/r"],
+    ["a bare host:owner/repo with no user", "github.com:owner/repo"],
+  ])("rejects %s without ever reaching forge_clone", async (_label, input) => {
+    // A folder IS available to pick, so a guard that fails to reject `input` would sail straight
+    // through to forge_clone — a folder-pick that's never offered (default unmocked `undefined`)
+    // would mask a missing guard by returning early for an unrelated reason.
+    openMock.mockResolvedValueOnce("/home/me/code");
+    const calls = route({ clone: "ok" });
+    await typeAndClickClone("github", input);
+    expect(calls.some((c) => c.cmd === "forge_clone")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
+  });
+
+  it("gives the same friendly message Browse gives for the same bad input", async () => {
+    const calls = route({ browse: () => root });
+    // Browse-side message for a Windows path.
+    render(RepoBrowser, { props: { provider: "github", repo: "C:/repos/thing" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+    const browseMsg = (await screen.findByText(/owner\/name/i)).textContent;
+    expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
+    cleanup(); // tear down the Browse render before mounting a second component for Clone
+
+    // Clone-side message for the same input, on a fresh render.
+    await typeAndClickClone("github", "C:/repos/thing");
+    const cloneMsg = (await screen.findByText(/owner\/name/i)).textContent;
+    expect(cloneMsg).toBe(browseMsg);
+  });
+
+  // Every form CPE-1650 fixed, and a plain owner/name (incl. dots/dashes/underscores/digits), must still
+  // clone through Clone directly — not just through Browse.
+  it.each([
+    ["SCP-style short form", "git@github.com:owner/name.git", "owner/name"],
+    ["ssh:// long form", "ssh://git@github.com/owner/name.git", "owner/name"],
+    ["ssh:// with an explicit port", "ssh://git@github.com:22/owner/name.git", "owner/name"],
+    ["ssh:// without .git", "ssh://git@github.com/owner/name", "owner/name"],
+    ["SCP-style without .git", "git@github.com:owner/name", "owner/name"],
+    ["plain owner/name", "owner/name", "owner/name"],
+    [
+      "plain owner/name with dots, dashes, underscores, digits",
+      "some-org_1/repo.name_2",
+      "some-org_1/repo.name_2",
+    ],
+  ])("still clones — %s", async (_label, input, expectedRepo) => {
+    openMock.mockResolvedValueOnce("/home/me/code");
+    const calls = route({ clone: "ok" });
+    await typeAndClickClone("github", input);
+    await waitFor(() => expect(calls.some((c) => c.cmd === "forge_clone")).toBe(true));
+    const cloneCall = calls.find((c) => c.cmd === "forge_clone")!;
+    // The stripped/validated owner/name form is what reaches forge_clone, matching what browse() sends.
+    expect(cloneCall.args.repo).toBe(expectedRepo);
+    expect(await screen.findByText(new RegExp(`Cloned to`))).toBeTruthy();
+  });
+
+  it("a GitLab nested group still clones through Clone directly", async () => {
+    openMock.mockResolvedValueOnce("/home/me/code");
+    const calls = route({ clone: "ok" });
+    await typeAndClickClone("gitlab", "group/subgroup/project");
+    await waitFor(() => expect(calls.some((c) => c.cmd === "forge_clone")).toBe(true));
+    const cloneCall = calls.find((c) => c.cmd === "forge_clone")!;
+    expect(cloneCall.args.repo).toBe("group/subgroup/project");
+  });
+
+  it("still rejects a foreign-host SSH URL the selected provider's strip doesn't touch", async () => {
+    const calls = route({});
+    await typeAndClickClone("github", "git@gitlab.com:owner/name.git");
+    expect(calls.some((c) => c.cmd === "forge_clone")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
   });
 });
