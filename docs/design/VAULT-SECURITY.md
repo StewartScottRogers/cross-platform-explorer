@@ -292,14 +292,31 @@ as a normal location; locking **re-seals that session directory back into the bl
     neutralising the create-side write and watching its ordering test stay green, where the thread-local
     version fails.
 
-    **What this does *not* mean, corrected (SEC-861 blocking 3).** An earlier draft extrapolated that
-    #847's `the_staging_blob_is_fsynced_before_it_is_verified` had therefore been "quietly weaker than it
-    read". That is wrong, and the audit falsified it: on `main` the re-seal was the **only** increment
-    source in the process, so removing `sync_durably` from `write_new_exclusive` removed every increment
-    and the test **failed**. It was genuinely falsifiable against the mutation it exists to catch. What
-    was weak was the assertion *form* — a shared monotonic counter compared with `>` — and that form only
-    became exploitable when CPE-1669 added a **second** increment source in this very PR. The bug was
-    introduced by the fix, not uncovered by it.
+    **What this does *not* mean — and the correction to the correction (SEC-861 blocking 3, then the
+    re-review).** This paragraph has now been wrong twice in opposite directions, so here is the measured
+    version. An earlier draft called #847's `the_staging_blob_is_fsynced_before_it_is_verified` "quietly
+    weaker than it read" — imprecise. The first correction replaced that with "genuinely falsifiable
+    against the mutation it exists to catch" — precise, and **false for the mutation that matters**.
+
+    Both readings picked the wrong mutation. Against **removal** of `sync_durably`, the test on `main` did
+    always fail: the re-seal was the only increment source, so deleting the guard deleted every increment.
+    But the test is named `..._is_fsynced_before_it_is_verified`; what it pins is **ordering**. The
+    reviewer rebuilt a faithful `main` — process-wide atomic, re-seal as sole increment source,
+    `create_vault` back on `fs::write` — and moved the fsync to *after* the verify, ten times:
+
+    ```
+    GREEN (mutation MASKED) = 4      RED (mutation caught) = 6
+    ```
+
+    **40% masked on `main`, with no CPE-1669 in the picture at all.** A shared counter makes falsification
+    depend on parallel interleaving, which is why the first attempt at this reconstruction came back green
+    and the second red.
+
+    So: on `main` the test was falsifiable against removal but only ~60% reliable against the ordering
+    mutation it names. CPE-1669's second increment source did not create that weakness — it made it
+    **deterministic** (`before=1`). The thread-local fixes the cross-thread half; the load-bearing
+    before-snapshot at the re-seal site fixes the same-thread half. The "introduced by the fix" framing
+    holds for the *deterministic* form only.
 
     That coupling has a second edge, same cause: `sealed_vault` (the re-seal test's own fixture) calls
     `create_vault`, which now fsyncs **on the same thread**, so the re-seal test's before-snapshot is

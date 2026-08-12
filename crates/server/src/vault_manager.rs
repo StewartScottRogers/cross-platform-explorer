@@ -4241,9 +4241,12 @@ mod tests {
 
         // The counter is THREAD-LOCAL (see `VAULT_BLOB_SYNCS`), so the value observed inside our own
         // verify was produced by this test's own call site and nothing else. Do not "simplify" it back
-        // to a process-wide atomic: that is exactly what made both ordering tests weaker than they read,
-        // because another test's fsync could satisfy "the count went up" while this call site synced
-        // nothing (PR #861 review — reconstructed and confirmed against `main`'s atomic version). The
+        // to a process-wide atomic: with a shared counter another test's fsync can satisfy "the count
+        // went up" while this call site synced nothing. Measured on a faithful reconstruction of `main`
+        // (PR #861 re-review): the ordering mutation — moving the fsync to AFTER the verify — was masked
+        // 4 times in 10. Not "always weaker" and not "genuinely falsifiable"; ~60% reliable, because a
+        // shared counter makes falsification depend on parallel interleaving.
+        //
         // The before-snapshot is **load-bearing here**, unlike at the create-side copy of this comment:
         // `sealed_vault` above calls `create_vault`, which since CPE-1669 fsyncs through the very same
         // `write_new_exclusive` **on this thread**, so the counter is already non-zero when the re-seal
