@@ -1,6 +1,6 @@
 ---
 id: CPE-1503
-title: "EPIC: Network protocol — S3-compatible object-store provider (cpe-s3) [unlocks B2/GCS free]"
+title: "EPIC: Network protocol — S3-compatible object-store provider (cpe-s3) [unlocks B2/Wasabi/MinIO; GCS TBD]"
 type: Task
 status: In Progress
 priority: Medium
@@ -16,8 +16,16 @@ closed:
 
 ## Why (high leverage — one provider, many backends)
 S3 auth is *simpler* than interactive/OAuth cloud (static access-key + secret, SigV4 — no browser flow), so it
-ranks easier than Drive/OneDrive. And **Backblaze B2, Google Cloud Storage, Wasabi, MinIO** are all
-S3-compatible → they come **free** once S3 works (point the client at their endpoint).
+ranks easier than Drive/OneDrive. **Backblaze B2, Wasabi and MinIO** are S3-compatible → they come **free**
+once S3 works (point the client at their endpoint).
+
+**Claim narrowed 2026-08-12 — Google Cloud Storage is no longer part of the "free" list.** The CPE-1681
+worker, having just built the SigV4 signer, flagged that GCS's S3 shim (the XML API) carries its own
+SigV4 quirks and **does not support ListObjectsV2 the same way** — which is precisely the call CPE-1683 is
+built on. Compatible addressing is necessary but not sufficient. GCS is therefore **explicitly undecided**
+and must be scoped in or out at CPE-1683, on evidence rather than on this line. B2, Wasabi and MinIO alone
+still carry the epic's rationale. Recorded per the Evidence Rules in `Ticketing/wiki.md`: state the scope
+of a claim rather than letting a headline outrun what was verified.
 
 ## Scope
 - New `crates/s3` (`cpe-s3`) implementing `FileSystemProvider` over an object store: bucket/prefix listing
