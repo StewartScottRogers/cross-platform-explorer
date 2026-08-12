@@ -64,14 +64,43 @@ worked SVG `<filter>` example.)
 
 Ran this check against the real CPE-1631/CPE-1543 `--hljs-*` palette (all four themes: light, dark,
 hc-light, hc-dark) on real Rust code containing all six highlighted buckets (keyword, title, string,
-comment, number, tag), under both protanopia and deuteranopia emulation. **No pair was genuinely hard
-to tell apart** — every pair stayed clearly separated by hue and/or the existing non-hue cues
-(keyword/title are bold, comment is italic). The closest pair by eye was `string` vs `tag` in
-hc-dark (both read as pale green under protanopia/deuteranopia) — visually distinguishable but the
-smallest margin found; not a collision, and no fix was made because none was warranted (re-hueing a
-non-colliding pair would just be matrix-chasing, the exact anti-pattern this ticket exists to end).
-See CPE-1648's ticket work log for the full screenshot set and the redmean colour-distance table
-computed under both matrices, across all four themes and all six-choose-two token pairs.
+comment, number, tag), under both protanopia and deuteranopia emulation. See CPE-1648's ticket work
+log for the full screenshot set and the redmean colour-distance table computed under both matrices,
+across all four themes and all six-choose-two token pairs.
+
+**In rendered code, no pair was genuinely hard to tell apart — but read the next paragraph before
+you believe that.** The result depends on cues that are not colour, and an earlier draft of this
+section got the supporting detail wrong, so it is spelled out here rather than summarised.
+
+> **The non-colour cues are load-bearing. Do not remove them.**
+>
+> **The colours alone DO collapse.** Under protanopia and deuteranopia, `keyword`, `comment`, and
+> `tag` all land in one near-neutral grey family in both `dark` and `hc-dark` — sampled from the
+> hc-dark/protanopia render: keyword `#c6c8c3`, comment `#97969e`, tag `#ababab`. Those differ by
+> 20–50 units of *lightness* with essentially **zero hue difference**. What keeps them apart in real
+> code is typographic: keyword renders **bold**, comment renders *italic*, tag renders plain. Three
+> different treatments, so the rendered code stays unambiguous even with the colours pooled.
+>
+> That makes bold and italic part of the accessibility contract, not decoration. A future change that
+> drops the italic on comments, or normalises the keyword weight, would make three categories
+> indistinguishable for a red-green colour-blind reader **without changing a single colour**, and no
+> contrast guard would notice.
+>
+> **The earlier claim that `string` vs `tag` in hc-dark is "the closest pair" was wrong.** Those two
+> are a warm khaki (`#d7d0bd`) against a neutral grey (`#ababab`) and are comfortably separable in
+> every mode. The tightest *colour* cluster is keyword/comment/tag. Recorded here because a wrong
+> finding on file is worse than no finding: the next person to ask would have got a confident wrong
+> answer.
+>
+> **One genuine gap is open, tracked as CPE-1661:** `keyword` vs `title` in the **light** and
+> **hc-light** themes. Both render bold, so the typographic cue that rescues the other pairs does not
+> discriminate between *these two* — it only separates both of them from plain code — and their hues
+> converge into the same indigo-blue family under CVD (protanopia: keyword `#434a9a`, title
+> `#3d56b3`), where under normal vision they are magenta vs blue. That pair has no redundant
+> non-colour cue and needs one.
+
+No palette change was made for the pairs that are cue-separated: re-hueing a pair that a reader can
+already tell apart would just be matrix-chasing, the exact anti-pattern this ticket exists to end.
 
 WCAG luminance contrast is a **separate, unaffected concern** — `app.css.hljs-contrast.test.ts`
 already asserts every `--hljs-*` token clears its theme's WCAG bar against `--surface`/

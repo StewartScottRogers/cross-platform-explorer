@@ -1703,7 +1703,11 @@
     opacity: 0.4;
     cursor: default;
   }
-  /* Destructive treatment reuses the app-wide --danger token (CPE-1212), matching CheckpointDialog. */
+  /* Destructive treatment reuses the app-wide danger tokens (CPE-1212), matching CheckpointDialog.
+     The solid fill takes --danger-fill rather than --danger (CPE-1649): in hc-dark the two diverge,
+     because --danger has to stay bright enough to clear its AAA bar as TEXT while a fill carrying white
+     text has to be dark enough to clear 3:1 — a window that doesn't exist for one token. Everywhere else
+     --danger-fill aliases --danger, so this is a no-op outside hc-dark. */
   .cp-btn.danger {
     border-color: var(--danger-fill);
     color: #fff;
