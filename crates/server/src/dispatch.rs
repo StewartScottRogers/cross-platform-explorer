@@ -285,6 +285,120 @@ mod tests {
         }
     }
 
+    /// Try to make `path` readable-to-`stat` but unreadable-to-`read`, and report whether the denial
+    /// actually took. Used by [`text_stats_separates_a_read_failure_from_a_not_text_verdict`].
+    ///
+    /// Deliberately conservative: it returns `false` unless the resulting file is *both* unreadable
+    /// (so the read-failure branch is genuinely exercised) *and* still stattable (so `compute` reaches
+    /// that branch instead of failing earlier at `metadata`). Running elevated / as root, or on a
+    /// filesystem that ignores ACLs and mode bits, leaves the file readable — the caller then skips
+    /// rather than fails, because a machine that cannot construct a denied path is not evidence of a
+    /// bug. CI runs Linux + macOS + Windows, so both branches are exercised somewhere.
+    fn deny_read(path: &std::path::Path) -> bool {
+        #[cfg(windows)]
+        {
+            // `(RD)` denies FILE_READ_DATA *only*, leaving READ_ATTRIBUTES intact — a broader
+            // `(R)`/`(F)` deny would also break `fs::metadata` and short-circuit the test above the
+            // code it is meant to cover.
+            let Ok(user) = std::env::var("USERNAME") else { return false };
+            if user.is_empty() {
+                return false;
+            }
+            let _ = std::process::Command::new("icacls")
+                .arg(path)
+                .arg("/deny")
+                .arg(format!("{user}:(RD)"))
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000));
+        }
+        std::fs::read(path).is_err() && std::fs::metadata(path).is_ok()
+    }
+
+    /// Undo [`deny_read`] so the scratch directory can be removed.
+    fn allow_read(path: &std::path::Path) {
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                let _ = std::process::Command::new("icacls")
+                    .arg(path)
+                    .arg("/remove:d")
+                    .arg(&user)
+                    .output();
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    #[test]
+    fn text_stats_separates_a_read_failure_from_a_not_text_verdict() {
+        // CPE-1678. The UAT on PR #860 found `text_stats` answering a *read* failure with a *content*
+        // verdict: a permission-denied path came back `Internal` — the right code — with the message
+        // "not a text file", sending the user to inspect bytes nobody had managed to read. All three
+        // outcomes are asserted here through the real `Dispatcher`, not the `compute` helper, because
+        // the message is what reaches a caller and the helper's return type isn't.
+        let ctx = HeadlessCtx::new(scratch("base"));
+        let d = Dispatcher::with_builtins();
+        let dir = scratch("textstats");
+
+        // 1. Missing path -> NotFound (the CPE-1673 taxonomy, unchanged).
+        let missing = d.dispatch(&ctx, req("text_stats", json!({ "path": "/definitely/not/a/real/path/xyz" })));
+        match missing.result {
+            Err(e) => assert_eq!(e.code, ErrorCode::NotFound, "got {:?}: {}", e.code, e.message),
+            Ok(_) => panic!("text_stats on a missing path must error"),
+        }
+
+        // 2. A file that was read fine and simply isn't UTF-8 -> the honest content verdict.
+        let bin = dir.join("bin");
+        std::fs::write(&bin, [0xff, 0xfe, 0x00]).unwrap();
+        let not_text = d.dispatch(&ctx, req("text_stats", json!({ "path": bin.to_string_lossy() })));
+        match not_text.result {
+            Err(e) => {
+                assert_eq!(e.code, ErrorCode::Internal, "got {:?}: {}", e.code, e.message);
+                assert!(e.message.contains("not a text file"), "got {}", e.message);
+            }
+            Ok(_) => panic!("text_stats on a binary file must error"),
+        }
+
+        // 3. A file that could not be read at all -> still `Internal`, but naming the access failure
+        //    instead of pronouncing on contents nobody read.
+        let denied = dir.join("denied.txt");
+        std::fs::write(&denied, b"readable text\n").unwrap();
+        if deny_read(&denied) {
+            let resp = d.dispatch(&ctx, req("text_stats", json!({ "path": denied.to_string_lossy() })));
+            match resp.result {
+                Err(e) => {
+                    assert_eq!(e.code, ErrorCode::Internal, "got {:?}: {}", e.code, e.message);
+                    assert!(
+                        !e.message.contains("not a text file"),
+                        "a read failure must not be reported as a content verdict: {}",
+                        e.message
+                    );
+                    // The OS's own words: "Access is denied. (os error 5)" / "Permission denied (os
+                    // error 13)". Matching on "denied" keeps this true on every platform in the matrix.
+                    assert!(
+                        e.message.to_lowercase().contains("denied"),
+                        "the message must name the real cause: {}",
+                        e.message
+                    );
+                }
+                Ok(_) => panic!("text_stats on an unreadable file must error"),
+            }
+            allow_read(&denied);
+        }
+        // else: this machine cannot construct a denied path (elevated/root, or an ACL-less
+        // filesystem) — skip that leg rather than fail on it.
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn classify_path_error_maps_not_found_kind_to_not_found_code() {
         let e = classify_path_error(Some(std::io::ErrorKind::NotFound), "missing".to_string());

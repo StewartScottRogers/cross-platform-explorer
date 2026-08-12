@@ -22,6 +22,13 @@ pub const TEXT_STATS_MAX_BYTES: u64 = 25 * 1024 * 1024;
 /// Compute line/word/char/byte counts for `path`. Lines follow `str::lines`; words are
 /// whitespace-separated; chars are Unicode scalar values. A directory, an over-cap file, or a
 /// non-UTF-8 file is an `Err` (never a panic).
+///
+/// "I could not read it" and "I read it and it isn't text" are **different answers** (CPE-1678). The
+/// read and the UTF-8 decode are therefore two separate steps: an I/O failure (permission denied, a
+/// vanished file, a dead network mount) reports the OS's own cause, and only bytes that were actually
+/// read and then failed to decode get the content-shaped "not a text file" verdict. Collapsing both
+/// into the latter — what this used to do with `read_to_string(..).map_err(|_| "not a text file")` —
+/// sent a user with a permissions problem to inspect their file's contents.
 pub fn compute(path: &str) -> Result<TextStats, String> {
     let p = Path::new(path);
     let meta = fs::metadata(p).map_err(|e| format!("{path}: {e}"))?;
@@ -31,7 +38,11 @@ pub fn compute(path: &str) -> Result<TextStats, String> {
     if meta.len() > TEXT_STATS_MAX_BYTES {
         return Err("file is too large to analyze (25 MB limit)".into());
     }
-    let content = fs::read_to_string(p).map_err(|_| format!("{path}: not a text file"))?;
+    // Read first (I/O errors keep their real cause) ...
+    let bytes = fs::read(p).map_err(|e| format!("{path}: could not be read: {e}"))?;
+    // ... then decode (only a decode failure means "not text"). `from_utf8` takes the `Vec` by value,
+    // so this is the same single allocation `read_to_string` made — no extra copy.
+    let content = String::from_utf8(bytes).map_err(|_| format!("{path}: not a text file"))?;
     Ok(TextStats {
         lines: content.lines().count() as u64,
         words: content.split_whitespace().count() as u64,
@@ -75,7 +86,12 @@ mod tests {
         let d = scratch();
         // Non-UTF-8 (binary) and a folder are errors, not panics.
         fs::write(d.join("bin"), [0xff, 0xfe, 0x00]).unwrap();
-        assert!(compute(&d.join("bin").to_string_lossy()).is_err());
+        let Err(e) = compute(&d.join("bin").to_string_lossy()) else {
+            panic!("a non-UTF-8 file must be an error")
+        };
+        // CPE-1678: bytes that were read and failed to decode keep the content-shaped verdict — that
+        // is the honest case, and splitting the read from the decode must not regress it.
+        assert!(e.contains("not a text file"), "got {e}");
         assert!(compute(&d.to_string_lossy()).is_err());
         let _ = fs::remove_dir_all(&d);
     }
