@@ -554,6 +554,45 @@ describe("parseLog — CPE-1656 B: over-grouping guard still holds under the wid
     expect(result.lines[1].isContinuation).toBe(false);
   });
 
+  it("does not sweep a real source path followed by ordinary prose (PR #846 review, near-miss shape)", () => {
+    // The reviewer's demonstrated over-grouping: the first CONTINUATION_SOURCE_LOCATION_REGEX allowed
+    // ARBITRARY trailing text after `file.ext:NN`, so an indented sentence that merely opens with a real
+    // source location was swept into an unrelated preceding error. Only Go's own `+0xHEX` offset (or
+    // nothing at all) may follow now. This is the near-miss the widened shape left unpinned — bare
+    // indentation without any shape match was already covered, this one wasn't.
+    const text = [
+      "ERROR Connection failed on worker-thread-1",
+      "\tsrc/main.rs:42 was recently modified by CPE-1656",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("does not sweep a bare function call that lacks Go's package qualifier (PR #846 review, near-miss shape)", () => {
+    // Same class, other regex: CONTINUATION_GO_FRAME_REGEX matched ANY call-shaped line. A real Go frame
+    // is always package-qualified (`main.main()`), so an unqualified call is not a frame.
+    const text = ["ERROR Connection failed on worker-thread-1", "processRequest(ctx)"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("still groups the GENUINE Go frame shapes the tightening had to preserve", () => {
+    // The other half of the tightening: both real shapes must survive it, or the fix traded one bug for
+    // another. Package-qualified call + tab-indented `file.go:NN +0xHEX` location.
+    const text = [
+      "panic: runtime error: index out of range [3] with length 3",
+      "",
+      "goroutine 1 [running]:",
+      "main.main()",
+      "\t/app/main.go:10 +0x1b",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[3].filterLevel, "main.main()").toBe("error");
+    expect(result.lines[4].filterLevel, "/app/main.go:10 +0x1b").toBe("error");
+  });
+
   it("still does not sweep several interleaved indented lines from unrelated threads (re-run of the CPE-1638 guard)", () => {
     const text = [
       "2026-08-11T09:00:00Z ERROR worker-1 failed to acquire lock",

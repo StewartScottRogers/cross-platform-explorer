@@ -441,14 +441,25 @@ const CONTINUATION_RUST_FRAME_INDEX_REGEX = /^\d+:\s/;
  *  `runtime.gopanic(...)` — Go's own documented panic-output shape, always unindented, immediately
  *  followed by an indented file:line location line. Checked against the line unindented, same as
  *  {@link CONTINUATION_AT_FRAME_REGEX}'s unindented case, since real Go frame lines carry no leading
- *  whitespace of their own. */
-const CONTINUATION_GO_FRAME_REGEX = /^[\w./*]+\([^)]*\)\s*$/;
+ *  whitespace of their own.
+ *
+ *  **Package qualifier required (PR #846 review).** The first version of this shape was
+ *  `/^[\w./*]+\([^)]*\)\s*$/`, which matches ANY bare function-call-shaped line — the reviewer
+ *  demonstrated `processRequest(ctx)` sitting under an unrelated `ERROR` being swept into that error's
+ *  group. Real Go frames are always package-qualified (`main.main()`, `runtime.gopanic(...)`), never a
+ *  bare call, so requiring the dot keeps every genuine frame and drops the near-miss. */
+const CONTINUATION_GO_FRAME_REGEX = /^[\w./*]+\.[\w*]+\([^)]*\)\s*$/;
 
 /** A Go or Rust bare source-location continuation: `path/to/file.ext:line` optionally followed by more
  *  text (Go's own `+0xNN` offset suffix, or nothing) — Go's `/app/main.go:10 +0x1b` frame-location line,
  *  which (unlike Java/Node/Rust) carries no `at ` prefix of its own. Only ever checked against an indented
- *  line's trimmed remainder (Go/Rust always indent this line with a tab). */
-const CONTINUATION_SOURCE_LOCATION_REGEX = /^\S*\.\w+:\d+(?:[\s+:].*)?$/;
+ *  line's trimmed remainder (Go/Rust always indent this line with a tab).
+ *
+ *  **Trailing text bounded to Go's own offset suffix (PR #846 review).** The first version ended
+ *  `(?:[\s+:].*)?$` — arbitrary trailing prose — so an indented `src/main.rs:42 was recently modified by
+ *  CPE-1656` under an unrelated `ERROR` was swept into that error's group. Only Go's `+0xHEX` offset (or
+ *  nothing) may follow, which still matches every genuine frame-location line. */
+const CONTINUATION_SOURCE_LOCATION_REGEX = /^\S+\.\w+:\d+(?:\s+\+0x[0-9a-fA-F]+)?\s*$/;
 
 /** A Ruby backtrace frame: `from /path/to/file.rb:10:in \`method'` — Ruby's own documented backtrace
  *  format (this repo has no local Ruby toolchain to capture a live run — CPE-1656 notes this gap
