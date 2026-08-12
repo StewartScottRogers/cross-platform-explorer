@@ -60,3 +60,36 @@ and should be left alone.
 ## Work Log
 
 - 2026-08-11 — Filed by the Foreman from the PR #838 re-review.
+- 2026-08-11 — Fixed in the [[CPE-1645]] PR, sequenced **after** that ticket's product decision as the
+  notes asked, so the message work was done once against the final set of failure shapes (there are now
+  three, not two — re-sealing can fail too).
+
+  **A.** New pure `classifyLockError(raw, name)` in `src/lib/vaultStore.ts` returns `{ kind, retryable,
+  message }` for `tamper` / `reseal` / `transient`. It classifies on wording the backend produces
+  deliberately: `UNTRUSTED_SESSION` (a new const in `vault_manager.rs` carried by every containment/link
+  refusal and **only** those — its doc comment names this function, and vice versa) and `reseal_failed`.
+  Ordering is load-bearing and pinned by a test: the tamper copy itself contains the words "nothing was
+  re-sealed", so the tamper check must run first or it would be mis-sorted as retryable.
+  - `tamper` → `retryable: false`, its own honest copy (no "try again", no "files in use"), it says
+    nothing was deleted and that the vault is sealed and now shown as locked. `lockVault` clears the store
+    entry for this kind only — matching the backend, which has already dropped its mapping — so the
+    banner goes away; and `App.lockActiveVault` no longer navigates back into `sessionDir`, which is the
+    bug: that path resolves somewhere else entirely (the user's own Documents, in the demonstrated
+    exploit).
+  - `transient` keeps the exact previous copy and behaviour (navigate back in, retry) — the re-run UAT
+    confirmed that path works, and a test pins it.
+  - `reseal` (new, from CPE-1645) is retryable, navigates back in, and says the changes couldn't be saved
+    back but that nothing was deleted and the files are still in the unlocked folder.
+
+  **B.** Corrected — with one clarification: the wrong claim is in **§6** (the adversarial review record's
+  CPE-1647 review #1 bullet), not §7; the ticket's section reference was off by one. It now states the
+  symptom per guard: removing `wipe_session_dir`'s symlink refusal fails the swap tests on
+  `assert_precious_intact` ("it was DESTROYED"), while removing the lock-time containment re-check fails
+  them one assertion later on the wedged-unlocked check, because the other guard still saves the bytes.
+  §5's guarantee statement was left alone as instructed.
+
+  **Red→green.** `a tamper refusal clears the vault entry…` fails on the unfixed store (`expected true to
+  be false` — the vault stays "unlocked" with a live banner), and the classifier test covers all three
+  shapes landing on different messages and different recovery. A control test asserts a re-seal failure
+  keeps the vault unlocked. Deleting the tamper branch from `classifyLockError`, or the store-clearing in
+  `lockVault`, turns them red again (verified separately).

@@ -3447,14 +3447,22 @@ async vaultUnlock(blobPath: string, passphrase: string, sessionDir: string) : Pr
 }
 },
 /**
- * Lock the vault at `blob_path`: drop its unlocked state and securely wipe (shred + remove) its session
- * directory so no plaintext lingers. Async + `spawn_blocking`: shreds + removes files (CPE-760/761).
+ * Lock the vault at `blob_path`: **re-seal its session directory back into the blob**, securely wipe
+ * (shred + remove) that directory so no plaintext lingers, and drop its unlocked state. Async +
+ * `spawn_blocking`: a full tree walk/encrypt/write + a verifying decrypt + shreds (CPE-760/761) — locking
+ * now costs roughly what creating the vault did.
  * 
- * The engine re-checks containment here, immediately before shredding (CPE-1647): the session dir was
- * validated at unlock, but other registered commands (`deletePermanent`/`moveExact` + `createJunction`)
- * can replace it with a link afterwards, so the *path* being contained at unlock is not the same claim as
- * the *directory* being contained at wipe. A failed re-check wipes nothing, forgets the session, and
- * surfaces the refusal here rather than reporting a successful lock.
+ * Locking re-seals (CPE-1645): everything the user edited while the vault was unlocked is encrypted back
+ * into the blob, and the working copy is wiped ONLY after the new blob has been written and proven to
+ * decrypt from disk. A failed re-seal or wipe leaves the vault unlocked and everything intact, so the
+ * error surfaced here is retryable; `classifyLockError` (`src/lib/vaultStore.ts`) sorts that from the
+ * tamper refusal below, which is not.
+ * 
+ * The engine re-checks containment here, immediately before re-sealing and shredding (CPE-1647): the
+ * session dir was validated at unlock, but other registered commands (`deletePermanent`/`moveExact` +
+ * `createJunction`) can replace it with a link afterwards, so the *path* being contained at unlock is not
+ * the same claim as the *directory* being re-sealed and wiped. A failed re-check re-seals nothing, wipes
+ * nothing, forgets the session, and surfaces the refusal here rather than reporting a successful lock.
  */
 async vaultLock(blobPath: string) : Promise<Result<null, string>> {
     try {

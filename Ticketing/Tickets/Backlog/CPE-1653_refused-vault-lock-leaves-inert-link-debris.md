@@ -51,3 +51,29 @@ recognise a link-shaped child as debris and unlink the link itself without ever 
 ## Work Log
 
 - 2026-08-11 — Filed by the Foreman from the PR #838 UAT re-run observation.
+- 2026-08-11 — Fixed in the [[CPE-1645]] PR (same files). `sweep_orphan_sessions` now recognises a
+  link-shaped child of the sessions root *before* the `is_dir()` filter and unlinks **the link itself**
+  via a new `remove_link` (`remove_file`, else `remove_dir` — `RemoveDirectoryW` deletes a junction's
+  reparse point without recursing into the target). Nothing traverses it and nothing at the other end is
+  touched. The `is_dir()` filter — the property that makes the sweep safe — is unchanged; the link case is
+  handled ahead of it rather than by loosening it, exactly as the ticket asked.
+
+  **Where the cleanup happens, and why: the startup sweep only, not the refused-lock path.** The refused
+  lock's discipline is deliberately "touch *nothing* at a path we have decided we cannot trust" (CPE-1647),
+  and that is worth keeping literal — unlinking a link is safe in principle, but adding a filesystem
+  mutation to the one code path whose whole guarantee is that it mutates nothing invites a future edit to
+  blur the line. The debris is inert (never followed again; a fresh unlock allocates a new UUID path
+  regardless), so nothing is blocked in the meantime, and the sweep already runs at every app start —
+  before any vault can be unlocked — which is where the app tidies its own root and the earliest point
+  that is plainly safe.
+
+  Link debris is not counted in the sweep's return value, which stays "session directories wiped" (the
+  adapter logs it under that wording).
+
+  **Red→green.** `sweep_unlinks_link_debris_without_ever_touching_what_it_points_at` plants a junction
+  (Windows) / symlink (elsewhere) in the sessions root pointing at a seeded victim dir, runs the sweep,
+  and asserts the link is gone while the victim's bytes read back identical off disk — plus a real orphan
+  alongside it is still wiped and counted, and a stray file is still left alone. It fails on the unfixed
+  sweep with *"the link debris must be unlinked from the app's own sessions root"*. A Unix-only companion
+  covers a **file** symlink so the cleanup isn't accidentally directory-only. Removing the new branch
+  turns the first test red again (verified).

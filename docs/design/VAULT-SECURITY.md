@@ -16,8 +16,8 @@ encryption that locks/unlocks with a passphrase and mounts transparently for bro
 
 A vault is a folder that has been sealed into a single encrypted file, `<name>.cpevault`. Sealing encrypts
 the whole tree; unlocking decrypts it (with the passphrase) into a session directory the explorer browses
-as a normal location; locking wipes that session directory. The `.cpevault` blob is the only at-rest
-artifact once sealed.
+as a normal location; locking **re-seals that session directory back into the blob** and then wipes it
+(CPE-1645 — see §5). The `.cpevault` blob is the only at-rest artifact once sealed.
 
 ## 2. Threat model
 
@@ -89,6 +89,41 @@ artifact once sealed.
   session directory (`appCacheDir()/vault-sessions/<uuid>`) so the explorer can browse it as a real
   location. While unlocked, that plaintext is on disk. Locking securely wipes it. A future in-memory or
   OS-level (FUSE/dokan) mount could avoid on-disk plaintext but was out of scope for v1.
+- **The passphrase is held in memory while UNLOCKED (CPE-1645).** Locking re-seals, and sealing needs the
+  passphrase, so the live `Session` holds it as an `age` `SecretString` (zeroize-on-drop, redacted in
+  `Debug`) until the vault locks. It still never persists — no file, no log, no status struct, no IPC
+  payload — and the exposure is strictly smaller than the one the mount tradeoff above already accepts:
+  for that same window the entire decrypted tree is sitting on disk, where an attacker who could scrape
+  the passphrase out of process memory could simply read the files instead. Consistent with §2's stated
+  non-goal (a compromised OS / memory scraping on the live machine is out of scope).
+- **Locking re-seals, verify-before-destroy (CPE-1645).** Until CPE-1645, `encrypt_tree` was called only
+  from `create_vault`: `lock` shredded the session directory and left the blob exactly as it was at
+  creation, so everything the user wrote while the vault was unlocked was destroyed **silently** — while
+  both the user docs and the code comment promised locking would "re-seal". Closed by re-sealing on lock
+  under the same discipline `create_vault` applies to its shred: encrypt the session tree, write it to a
+  staging file **beside the blob**, re-read that file **from disk** and decrypt it in full
+  (`verify_blob`, in memory, no plaintext written), and only then rename it over the vault — and only
+  then wipe the working copy. Every failure (encrypt, write, verify, rename) returns `Err` having wiped
+  nothing, removed the staging file, and left the old blob byte-for-byte intact, with the mapping kept so
+  the lock stays retryable and the user's edits stay reachable. Two refusals guard the re-seal itself: a
+  session path that is a link is refused before anything is read through it (it would seal a stranger's
+  files INTO the vault as well as shredding them), and a vault file living *inside* the session directory
+  is refused (re-sealing there would write a good vault and then shred it with the working copy) — the
+  same guard shape as `create_vault`'s `resolves_inside`. A session directory that has vanished re-seals
+  nothing and locks cleanly rather than wedging the vault "unlocked" forever.
+  - **Residual, stated plainly:** re-sealing happens at lock, not continuously. Killing the app while a
+    vault is unlocked still loses the edits made in that session (the startup sweep wipes the orphaned
+    session dir), and `VaultRegistry::unlock` called again on an already-unlocked vault still supersedes
+    (and best-effort wipes) the prior session dir — CPE-1249's deliberate no-orphaned-plaintext
+    behaviour — which discards any edits in it. The frontend never re-unlocks an unlocked vault
+    (`App.tryUnlockVault` navigates to the live session instead), so that path is reachable only from a
+    devtools/automation caller.
+- **Link debris in the sessions root (CPE-1653).** A refused lock correctly leaves the planted link alone
+  (it shreds nothing at a path it has decided not to trust), so the link accumulates in the app's own
+  `vault-sessions` root. The startup sweep now **unlinks** a link-shaped child — `remove_file`, else
+  `remove_dir`, both of which operate on the reparse point itself — never traversing it and never touching
+  its target. The `is_dir()` filter that keeps the sweep from following reparse points is unchanged; the
+  link case is handled *before* it, not by loosening it.
 - **Orphaned sessions on abnormal exit.** If the app is killed while a vault is unlocked, the session dir
   can linger. **CPE-1252** (filed) adds a startup sweep that securely wipes any `vault-sessions/*` not in
   the live registry (the registry is empty at boot, so all are orphans).
@@ -110,11 +145,13 @@ artifact once sealed.
   runs. So containment is enforced **twice**, and the guarantee is:
     1. **At unlock** — `session_dir` must resolve strictly inside the app's `vault-sessions` root, checked
        before the blob is read and before anything is decrypted.
-    2. **At lock, immediately before the wipe** — the root is stored alongside the session dir in the
-       registry and the *same* check is re-run against the path as it resolves *now*. A swapped-in
-       link canonicalizes to its target, which then fails `starts_with(root)`. A failed re-check shreds
-       nothing, drops the mapping (so the vault is not left wedged "unlocked" pointing at a path we have
-       decided not to trust), and returns a clear error rather than reporting a successful lock.
+    2. **At lock, immediately before the re-seal and the wipe** — the root is stored alongside the
+       session dir in the registry and the *same* check is re-run against the path as it resolves *now*.
+       A swapped-in link canonicalizes to its target, which then fails `starts_with(root)`. A failed
+       re-check re-seals nothing, shreds nothing, drops the mapping (so the vault is not left wedged
+       "unlocked" pointing at a path we have decided not to trust), and returns a clear error rather than
+       reporting a successful lock. Since CPE-1645 it also guards the re-seal: following a planted link
+       would pull the target's files INTO the user's vault, replacing its real contents.
     3. **Independently, at the wipe itself** — `wipe_session_dir` refuses outright when
        `symlink_metadata` reports the session path is a symlink or junction. A genuine session dir is a
        real directory this module extracted into and is never a link, while `exists()` and `read_dir()`
@@ -165,9 +202,38 @@ An **independent** reviewer (not the implementer) adversarially reviewed each sl
   in `lock`, immediately before the wipe**, and (b) `wipe_session_dir` refusing a session path that is
   itself a symlink/junction. Both changes fail closed independently. Regression tests rebuild the exploit
   from real filesystem objects (junction on Windows, symlink elsewhere) and assert the victim's bytes are
-  still readable off disk; with either guard removed they fail with "it was DESTROYED".
+  still readable off disk.
+
+  **Each guard is independently pinned red by the suite — with the symptom differing per guard**
+  (corrected under CPE-1654 §B; the earlier text claimed "it was DESTROYED" for both, which is right for
+  only one of them). Remove `wipe_session_dir`'s symlink refusal and the swap tests fail on
+  `assert_precious_intact` — the victim's files really are shredded, "it was DESTROYED". Remove the
+  lock-time containment re-check instead and the *other* guard still saves the bytes, so the same tests
+  fail one assertion later, on the **wedged-unlocked** check (`vault_manager.rs`'s "a refused lock must
+  not leave the vault wedged 'unlocked'…"). The substantive claim — that neither guard is unpinned — was
+  verified both times; only the stated symptom was wrong for one.
+- **Lock destroyed edits made while unlocked (CPE-1645):** found by the independent UAT of CPE-1630 while
+  sanity-checking the one ungated shred caller — pre-existing, and a live data-loss path on a feature
+  whose purpose is protecting files. Locking never called `encrypt_tree`, so it shredded the working copy
+  and left the blob at its creation-time contents, silently discarding everything the user had written
+  while unlocked, against a documentation promise to "re-seal". Closed by re-sealing on lock with
+  `create_vault`'s verify-before-destroy discipline (§5). Pinned by a test that performs the reporter's
+  exact five-step sequence (seal → unlock → write/edit → lock → unlock again) and reads the edits back off
+  disk; it fails on the unfixed code with "a file CREATED while the vault was unlocked was DESTROYED by
+  locking".
+- **A refused lock was reported as a busy file, and navigated into the tampered path (CPE-1654):** the
+  frontend surfaced *every* failed lock as "some files may still be in use. Try again." and then navigated
+  back into `sessionDir` — wrong on both counts for a containment refusal, where retrying can never help
+  and the path now resolves somewhere else entirely (the user's own Documents, in the demonstrated
+  exploit), while the backend had already dropped the mapping. Closed by `classifyLockError`
+  (`src/lib/vaultStore.ts`), which sorts a lock failure into tamper / re-seal / transient on wording the
+  backend produces deliberately (`UNTRUSTED_SESSION`, whose doc comment names the frontend function, and
+  `reseal_failed`); only the tamper case clears the store entry, and only a retryable one navigates back
+  into the session dir.
 - Verify-before-shred is enforced with an injectable verifier and a falsifiable test proving the original
-  survives a failed verify.
+  survives a failed verify; the re-seal on lock has the same seam (`reseal_session_with_verifier`) and the
+  same falsifiable test, proving the old blob survives a failed verify byte-for-byte and the working copy
+  is never wiped.
 
 ## 7. Recommendation
 

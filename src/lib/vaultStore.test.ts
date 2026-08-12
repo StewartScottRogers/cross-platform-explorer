@@ -9,6 +9,7 @@ import {
   vaultOfSessionPath,
   vaultDisplayName,
   classifyUnlockError,
+  classifyLockError,
   vaults,
   unlockVault,
   lockVault,
@@ -140,5 +141,83 @@ describe("vaultStore actions (CPE-1249)", () => {
     // The session dir mapping survives a failed lock, so App.lockActiveVault can navigate BACK into it to
     // re-expose the banner's Lock button for a retry (review #2 — no unreachable retry).
     expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
+  });
+
+  // ---- CPE-1654: a tamper refusal is not a busy file -------------------------------------------
+  //
+  // After CPE-1647 a lock can fail for a second, quite different reason: the session path no longer
+  // resolves inside the app's own vault-sessions root (someone swapped a link in). The backend has
+  // ALREADY dropped its mapping in that case, wipes nothing, and leaves the vault's own file sealed — so
+  // the UI must clear its "unlocked" banner to match, must not offer a retry that can never work, and
+  // (App.lockActiveVault) must not navigate into the tampered path. A busy-file failure is the opposite
+  // in every respect and must keep working exactly as it did.
+
+  /** The refusal wording the backend produces for a tamper/containment failure — `trustworthy_session`
+   *  in `crates/server/src/vault_manager.rs`, surfaced through `VaultError`'s `Display`. Copied verbatim
+   *  on purpose, including the "nothing was re-sealed" clause: that phrase overlaps the re-seal failure's
+   *  wording, so this string is also the fixture that pins the classifier's ordering. */
+  const TAMPER_ERROR =
+    "vault format error: refusing to lock: the session directory can no longer be trusted — " +
+    "refusing to lock: session directory C:\\cache\\vault-sessions\\abc-123 does not resolve inside " +
+    "the app's own vault-sessions directory. Nothing was deleted and nothing was re-sealed; the " +
+    "vault's own file is untouched, so the vault is sealed and is now reported locked.";
+
+  it("a tamper refusal clears the vault entry, because the backend has already dropped it", async () => {
+    const unlockDeps = fakeDeps();
+    await unlockVault(BLOB, "pw", unlockDeps);
+    const tampered = fakeDeps({
+      lock: async () => {
+        throw new Error(TAMPER_ERROR);
+      },
+    });
+    await expect(lockVault(BLOB, tampered)).rejects.toThrow(/no longer be trusted/);
+    // The vault IS locked as far as the backend is concerned — leaving it "unlocked" here would show a
+    // banner (and a Lock button) for a session the backend has already forgotten.
+    expect(isUnlocked(get(vaults), BLOB)).toBe(false);
+    expect(sessionDirFor(get(vaults), BLOB)).toBeUndefined();
+  });
+
+  it("a re-seal failure keeps the vault unlocked so the user's edits stay reachable", async () => {
+    const unlockDeps = fakeDeps();
+    await unlockVault(BLOB, "pw", unlockDeps);
+    const failing = fakeDeps({
+      lock: async () => {
+        throw new Error(
+          "vault format error: could not re-seal the vault from its unlocked session (vault I/O " +
+            "error: disk full) — nothing was deleted, the vault file is unchanged, and your files are " +
+            "still in the unlocked folder",
+        );
+      },
+    });
+    await expect(lockVault(BLOB, failing)).rejects.toThrow(/re-seal/);
+    expect(isUnlocked(get(vaults), BLOB)).toBe(true);
+    expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
+  });
+
+  it("classifies the two failure shapes onto different messages and different recovery", () => {
+    const tamper = classifyLockError(TAMPER_ERROR, "secrets");
+    expect(tamper.kind).toBe("tamper");
+    expect(tamper.retryable).toBe(false);
+    expect(tamper.message).toMatch(/secrets/);
+    expect(tamper.message).not.toMatch(/try again/i); // retrying can never help in this state
+    expect(tamper.message).not.toMatch(/still be in use/i); // and it is NOT a busy file
+    expect(tamper.message).toMatch(/nothing was deleted/i); // say what actually happened
+
+    const busy = classifyLockError("could not remove: The process cannot access the file", "secrets");
+    expect(busy.kind).toBe("transient");
+    expect(busy.retryable).toBe(true);
+    expect(busy.message).toMatch(/still be in use/i);
+    expect(busy.message).toMatch(/try again/i);
+
+    const reseal = classifyLockError(
+      "vault format error: could not re-seal the vault from its unlocked session (disk full)",
+      "secrets",
+    );
+    expect(reseal.kind).toBe("reseal");
+    expect(reseal.retryable).toBe(true); // the working copy is still there — retrying is exactly right
+    expect(reseal.message).toMatch(/couldn't be saved back|re-seal/i);
+    expect(reseal.message).toMatch(/nothing was deleted/i);
+    // A re-seal failure must never be mistaken for the tamper case, whose recovery is the opposite.
+    expect(reseal.message).not.toMatch(/no longer be trusted/i);
   });
 });
