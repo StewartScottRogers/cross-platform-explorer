@@ -130,3 +130,50 @@ possibly `vault_crypto`, `src/docs/20-vaults.md`. Related to the pre-existing CP
   the change, alongside falsifiable tests for the injected verifier (the old blob survives byte-for-byte),
   the re-seal→wipe ordering (with a positive control), the two new refusals, and the vanished-session-dir
   case. All 32 pre-existing `vault_manager` tests still pass unchanged.
+
+- 2026-08-12 — **Round 3 of the PR #847 review: the alias guard was check-then-USE.** The re-audit
+  demonstrated a victim file zero-filled while `lock` returned `Ok(())` and the UI said "Locked".
+  `ensure_no_aliased_files` walked the session tree once, at the top of the re-seal, and the link counts
+  were never consulted again; `wipe_session_dir` → `shred_tree` → `collect_files` re-walked at the END and
+  overwrote every regular file it found, hard links included, with no check of its own — the one
+  destructive step in the module that leaned on a caller's earlier check. No race had to be won: the
+  staging file appearing beside the `.cpevault` is a publicly observable starting gun proving the guard
+  has already passed, so the attacker polls for it and then calls `create_hard_link(victim,
+  "<session>/loot.xlsx")` — a registered IPC command, unprivileged on NTFS.
+
+  **Fixed in two places.** (a) The session wipe re-reads each file's link count immediately before
+  overwriting *that* file, and **unlinks** rather than overwrites anything not provably single-named —
+  a name that has another name is not ours to destroy, and unlinking one of an inode's names destroys
+  nothing. Fail-closed against destruction: an unreadable count disposes exactly like a known alias.
+  `create_vault`'s optional shred-original keeps its old behaviour (`AliasPolicy::ShredEveryFile`) — that
+  folder is the user's own pick, not an app-owned session tree. (b) `ensure_no_aliased_files` runs a
+  second time after `encrypt_tree` and before the staging file exists, shrinking the confidentiality half
+  to the encrypt walk alone and refusing before the blob is replaced — and before the starting gun fires.
+
+  **Red→green.** The auditor's exploit test reproduced the destruction verbatim on this branch (victim
+  read back as 32 zero bytes, `lock` = `Ok(())`); it is kept as
+  `an_alias_planted_after_the_alias_guards_is_unlinked_not_shredded_through` with the assertion flipped,
+  joined by the deterministic `the_session_wipe_unlinks_an_alias_instead_of_overwriting_it` (no thread),
+  `an_alias_appearing_during_the_encrypt_walk_is_caught_before_the_blob_is_replaced` (via a new
+  `after_encrypt` seam on `reseal_session_with_hooks`, the same falsifiable-injection shape the verifier
+  already used) and the pure `the_wipe_never_overwrites_a_file_it_cannot_prove_is_ours`.
+
+  **Three previously-unpinned guards, each deletable with the whole suite green, now pinned.**
+  `sweep_stale_staging`'s "never delete an object we cannot prove we created" was `#[cfg(unix)]` — i.e.
+  unenforced on Windows, the platform where the unprivileged hard-link primitive exists — and now goes
+  through the same platform-independent `hard_link_count`
+  (`the_sweep_leaves_a_hard_link_planted_at_a_staging_name`). `hard_link_count`'s fail-closed-on-`Unknown`
+  is pinned by `a_link_count_that_cannot_be_read_is_refused_not_assumed_to_be_one` (a missing path, which
+  exercises the error arm of both platform implementations). The `sync_all`-before-verify ordering is
+  pinned by `the_staging_blob_is_fsynced_before_it_is_verified`: there is no portable way to ask the OS
+  after the fact, so `sync_durably` counts its calls in test builds and the injected verifier reads the
+  counter at the moment it runs. Every one of the six guards was neutralised on its own and confirmed to
+  turn a distinct test red.
+
+  **Two nits.** `App.lockActiveVault` now takes the `lockInFlightFor` claim inside the `try`, so a
+  rejected `navigate` can no longer latch it forever and disable *every* vault's Lock button for the
+  session (the banner binds `locking={lockInFlightFor !== null}`, not `=== blobPath`). The blocker-B
+  cross-language guard enumerates `LockFailureCode` through an exhaustive `match`
+  (`every_lock_failure_code`) instead of a hand-written list of four, so a fifth variant cannot be added
+  silently. Also renumbered this branch's follow-up ticket CPE-1667 → **CPE-1669**: `main` had already
+  merged a different CPE-1667 (batch-media) in #848, and VAULT-SECURITY.md pointed readers at the wrong bug.

@@ -222,7 +222,9 @@ fn create_vault_with_verifier(
         // bytes that actually landed on disk (not the in-memory `blob`), so a partial/failed write is
         // caught too. On any error we return WITHOUT shredding — the original is untouched.
         verify(dest_blob_path, passphrase)?;
-        shred_tree(folder, opts.shred_scheme)?;
+        // `ShredEveryFile`: this folder is the user's own pick, not an app-owned session tree — see
+        // [`AliasPolicy`]. Unchanged behaviour; the round-3 alias fix is scoped to the session wipe.
+        shred_tree(folder, opts.shred_scheme, AliasPolicy::ShredEveryFile)?;
     }
     Ok(())
 }
@@ -595,6 +597,23 @@ fn reseal_session_with_verifier(
     passphrase: &SecretString,
     verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
+    reseal_session_with_hooks(blob_path, session_dir, passphrase, verify, || {})
+}
+
+/// [`reseal_session_with_verifier`] with a second injected seam, `after_encrypt`, run in the instant
+/// between [`vault_crypto::encrypt_tree`] returning and the post-encrypt alias re-check.
+///
+/// It exists so the re-check is pinned **deterministically** rather than by a timing thread: a test
+/// plants a hard link from inside the hook, which stands in for an alias that appeared *while*
+/// `encrypt_tree` was still walking the tree — the exact window the first, top-of-function walk cannot
+/// see (SEC-847 round-3 audit). Production passes a no-op.
+fn reseal_session_with_hooks(
+    blob_path: &Path,
+    session_dir: &Path,
+    passphrase: &SecretString,
+    verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
+    after_encrypt: impl Fn(),
+) -> Result<(), VaultError> {
     // INDEPENDENT LINK GUARD (SEC-847 finding 2, security audit of PR #847). The caller re-proves
     // containment and refuses a linked session path, but this step must fail closed **on its own** —
     // exactly the belt-and-braces `wipe_session_dir` already has for the other destructive step. Without
@@ -637,6 +656,21 @@ fn reseal_session_with_verifier(
     ensure_no_aliased_files(session_dir).map_err(reseal_failed)?;
 
     let sealed = vault_crypto::encrypt_tree(session_dir, passphrase).map_err(reseal_failed)?;
+    after_encrypt();
+    // ALIAS GUARD, SECOND PASS (SEC-847 round-3 audit). The check above is a check-then-USE: the walk
+    // that reads the files into `sealed` happens *after* it, so an alias planted while `encrypt_tree` was
+    // still walking is sealed into the blob — the confidentiality half of the finding (a victim's
+    // plaintext ending up inside a vault whose passphrase the attacker chose). Re-walking here, before
+    // anything is written beside the vault and long before the rename, shrinks that window from
+    // "encrypt + staging write + fsync + a full scrypt verify + rename" to the encrypt walk alone, and
+    // refuses — discarding `sealed` — instead of replacing the blob. It costs one stat per file on a tree
+    // we have just read end to end.
+    //
+    // Deliberately BEFORE `create_staging_exclusive`: the staging file's appearance beside the
+    // `.cpevault` is the attacker's starting gun, so no observable signal is emitted until after the last
+    // read of the tree has been vetted. The wipe's own per-file check ([`shred_tree`]) is what closes the
+    // integrity half, which this cannot.
+    ensure_no_aliased_files(session_dir).map_err(reseal_failed)?;
     let staging = create_staging_exclusive(blob_path, &sealed).map_err(reseal_failed)?;
     // Verify the bytes that actually LANDED (not the in-memory `sealed`), so a short/failed write is
     // caught here rather than discovered on the next unlock, after the working copy is gone.
@@ -723,6 +757,27 @@ fn write_new_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)?;
     file.write_all(bytes)?;
+    sync_durably(&file)
+}
+
+/// Count of staging fsyncs this process has performed. **Test builds only** — it exists so the
+/// "durable before verify" ordering can be *asserted* instead of merely reviewed (SEC-847 round-3: the
+/// `sync_all` was removable with the whole 50-test vault suite still green). Compiled out of release.
+#[cfg(test)]
+static STAGING_SYNCS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// How many staging fsyncs have happened so far. Test-only observation point for [`sync_durably`].
+#[cfg(test)]
+fn staging_sync_count() -> usize {
+    STAGING_SYNCS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// `sync_all`, counted in test builds. Wrapping it is what makes the *ordering* — fsync happens before
+/// the caller verifies, and therefore before anything is destroyed — observable to a test; there is no
+/// portable way to ask the OS after the fact whether a given write reached the platter.
+fn sync_durably(file: &std::fs::File) -> std::io::Result<()> {
+    #[cfg(test)]
+    STAGING_SYNCS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     file.sync_all()
 }
 
@@ -730,11 +785,19 @@ fn write_new_exclusive(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// module can prove are its own debris (SEC-847 finding 1).
 ///
 /// Fail-closed on purpose: an entry is removed only when [`std::fs::symlink_metadata`] (which does not
-/// follow links) reports a **regular file**, not a symlink, and — on Unix, where the count is available
-/// without a handle — with a link count of exactly 1. Anything else is left alone: a hard link planted at
-/// one of these names is somebody else's file under an alias, and while unlinking an alias would not
-/// destroy its data, this module does not delete objects it cannot prove it created. Best-effort
-/// throughout; a leftover we skip is inert (nothing is ever written to a name that already exists).
+/// follow links) reports a **regular file**, not a symlink, and [`hard_link_count`] proves exactly one
+/// name points at it. Anything else is left alone: a hard link planted at one of these names is somebody
+/// else's file under an alias, and while unlinking an alias would not destroy its data, this module does
+/// not delete objects it cannot prove it created. Best-effort throughout; a leftover we skip is inert
+/// (nothing is ever written to a name that already exists).
+///
+/// The link check used to be `#[cfg(unix)]` (`st_nlink` off the metadata we already had), which left the
+/// invariant unenforced on **Windows — the very platform where the unprivileged hard-link primitive
+/// exists**: a planted alias matching `<vault>.cpe-reseal-tmp*` was `remove_file`d like ordinary debris.
+/// Nothing was destroyed by that (unlinking one of an inode's names destroys no data), but the stated
+/// rule was not the shipped rule, so it now goes through the same platform-independent
+/// [`hard_link_count`] the alias guards use — which additionally makes an unreadable count a skip rather
+/// than a delete, on both platforms.
 fn sweep_stale_staging(blob_path: &Path) {
     let (Some(parent), Some(name)) = (blob_path.parent(), blob_path.file_name()) else { return };
     let mut prefix = name.to_os_string();
@@ -750,12 +813,8 @@ fn sweep_stale_staging(blob_path: &Path) {
         if !md.is_file() || md.file_type().is_symlink() {
             continue;
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            if md.nlink() != 1 {
-                continue; // an alias for someone else's file — never ours to delete
-            }
+        if hard_link_count(&path) != HardLinks::One {
+            continue; // an alias for someone else's file, or a count we cannot read — never ours to delete
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -980,7 +1039,10 @@ pub fn wipe_session_dir(session_dir: &Path, scheme: ShredScheme) -> Result<(), V
         Ok(_) => {}
         Err(_) => return Ok(()),
     }
-    shred_tree(session_dir, scheme)
+    // `UnlinkAliasesInsteadOfOverwriting` (SEC-847 round-3): the wipe re-reads each file's link count
+    // immediately before overwriting it, so an alias planted AFTER the re-seal's one-shot
+    // `ensure_no_aliased_files` walk is unlinked, never written through. See [`shred_tree`].
+    shred_tree(session_dir, scheme, AliasPolicy::UnlinkAliasesInsteadOfOverwriting)
 }
 
 /// Startup orphan-session sweep (CPE-1252, VAULT-SECURITY.md §5). Enumerates the immediate child
@@ -1399,13 +1461,77 @@ fn account_for(blob_path: &Path) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// What the shredder is allowed to do to a file that turns out to have more than one name
+/// (SEC-847 round-3 audit: the alias guard was check-then-USE and the destructive step had no guard).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AliasPolicy {
+    /// Overwrite every regular file found, aliases included. Used by [`create_vault`]'s optional
+    /// shred-original: that folder is the **user's own**, chosen in a file picker, so a hard link in it
+    /// is their own arrangement of their own data and crosses no trust boundary. Unchanged behaviour.
+    ShredEveryFile,
+    /// Overwrite only files this module can prove have exactly one name; **unlink** anything else
+    /// instead of writing through it. Used by the session wipe — see [`wipe_disposition`].
+    UnlinkAliasesInsteadOfOverwriting,
+}
+
+/// How the session wipe must dispose of one file, given how many names point at it. Pure, so the
+/// fail-closed decision is pinned by a test rather than only by review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WipeDisposition {
+    /// Exactly one name: this file is the session's own, so overwrite it before unlinking.
+    Shred,
+    /// More than one name — or a count that could not be read at all. **Unlink the name only.**
+    UnlinkOnly,
+}
+
+/// The session wipe's per-file verdict (SEC-847 round-3).
+///
+/// Fails **closed against destroying data**: [`HardLinks::Unknown`] disposes exactly like
+/// [`HardLinks::Many`]. A file whose link count cannot be read cannot be shown to be ours, and
+/// overwriting is irreversible while leaving one un-shredded (already unlinked) session file is not.
+/// [`ensure_no_aliased_files`] refuses the whole re-seal on `Unknown`, so reaching the wipe with one is
+/// already anomalous — a file that became unreadable *after* the guard passed is exactly the shape of
+/// the attack this arm exists for.
+fn wipe_disposition(links: &HardLinks) -> WipeDisposition {
+    match links {
+        HardLinks::One => WipeDisposition::Shred,
+        HardLinks::Many(_) | HardLinks::Unknown(_) => WipeDisposition::UnlinkOnly,
+    }
+}
+
 /// Shred every file under `root` (each overwrite-then-unlinked via [`secure_shred::shred_file`]), then
 /// remove the now-fileless directory tree. Symlinks are skipped (never followed) — matching what the
 /// crypto core captured — but are removed with the tree.
-fn shred_tree(root: &Path, scheme: ShredScheme) -> Result<(), VaultError> {
+///
+/// **The destructive step carries its own link check** (SEC-847 round-3 audit). The re-seal's
+/// [`ensure_no_aliased_files`] walk is a check-then-USE: it runs once, at the very top, and the "use" is
+/// this shredder several seconds later, after encrypt + an exclusive staging write + `sync_all` + a full
+/// verifying decrypt (a real scrypt KDF, ~1s **by design**) + the rename. The attacker did not even need
+/// to win a race, because the staging file appearing beside the `.cpevault` is a publicly observable
+/// starting gun proving the guard has already passed: poll for it, then
+/// `create_hard_link(victim, "<session>/loot.xlsx")` — a registered IPC command, unprivileged on NTFS —
+/// and this loop zero-filled the victim through the alias while `lock` returned `Ok(())` and the UI said
+/// "Locked".
+///
+/// So under [`AliasPolicy::UnlinkAliasesInsteadOfOverwriting`] the count is re-read **per file,
+/// immediately before that file is overwritten**, with no window at all between the check and the write,
+/// and a file with another name is **unlinked rather than overwritten**: a name that has another name is
+/// not ours to destroy, and unlinking one of an inode's names destroys nothing. That closes the integrity
+/// half completely — independently of the caller, which is the discipline every other destructive step in
+/// this module already follows.
+fn shred_tree(root: &Path, scheme: ShredScheme, aliases: AliasPolicy) -> Result<(), VaultError> {
     let mut files = Vec::new();
     collect_files(root, &mut files)?;
     for file in &files {
+        if aliases == AliasPolicy::UnlinkAliasesInsteadOfOverwriting
+            && wipe_disposition(&hard_link_count(file)) == WipeDisposition::UnlinkOnly
+        {
+            // Best-effort, exactly like the shred path's own error handling below is not: a name we
+            // cannot unlink is left in place and the following `remove_dir_all` reports it. Nothing is
+            // written to it either way, which is the property that matters.
+            let _ = std::fs::remove_file(file);
+            continue;
+        }
         let p = file.to_string_lossy().to_string();
         secure_shred::shred_file(&p, scheme)
             .map_err(|e| VaultError::Format(format!("shred {p}: {e}")))?;
@@ -3343,9 +3469,35 @@ mod tests {
     /// tamper refusal as transient, leaving the banner up and navigating the user INTO the tampered path
     /// — the exact exploit CPE-1654 closed.
     ///
+    /// Every [`LockFailureCode`] variant, enumerated through an **exhaustive `match`** so the list cannot
+    /// silently fall behind the enum (SEC-847 round-3 nit).
+    ///
+    /// The guard below used to iterate a hand-written array of four. Because `classifyLockError` has a
+    /// `default:` arm, a FIFTH variant added later would compile, regenerate `bindings.gen.ts` cleanly,
+    /// be classified as `transient` in the UI, and leave both guards green — the exact "documentation,
+    /// not a guard" shape blocker B was about. Written as a successor chain: adding a variant makes this
+    /// `match` non-exhaustive, which is a compile error, and the only way to satisfy it is to give the
+    /// new variant a place in the chain — which puts it in front of the frontend guard.
+    fn every_lock_failure_code() -> Vec<LockFailureCode> {
+        fn next(c: LockFailureCode) -> Option<LockFailureCode> {
+            match c {
+                LockFailureCode::UntrustedSession => Some(LockFailureCode::ResealFailed),
+                LockFailureCode::ResealFailed => Some(LockFailureCode::WipeFailed),
+                LockFailureCode::WipeFailed => Some(LockFailureCode::AlreadyLocking),
+                LockFailureCode::AlreadyLocking => None,
+            }
+        }
+        let mut all = vec![LockFailureCode::UntrustedSession];
+        while let Some(n) = next(*all.last().unwrap()) {
+            all.push(n);
+        }
+        all
+    }
+
     /// Since SEC-847 finding 3 the contract is the serialised [`LockFailureCode`], not prose, so this
-    /// pins the four code strings: it serialises each variant through serde (so a `rename_all` change is
-    /// caught too) and asserts the frontend classifier still spells it the same way.
+    /// pins the code strings: it serialises each variant through serde (so a `rename_all` change is
+    /// caught too) and asserts the frontend classifier still spells it the same way. The variants come
+    /// from [`every_lock_failure_code`], which the compiler keeps complete.
     #[test]
     fn the_lock_failure_codes_are_spelled_the_same_in_the_frontend() {
         let store = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3362,12 +3514,7 @@ mod tests {
             )
         });
 
-        for code in [
-            LockFailureCode::UntrustedSession,
-            LockFailureCode::ResealFailed,
-            LockFailureCode::WipeFailed,
-            LockFailureCode::AlreadyLocking,
-        ] {
+        for code in every_lock_failure_code() {
             let wire = serde_json::to_string(&code).expect("a code must serialise");
             let literal = wire.trim_matches('"').to_string();
             assert!(
@@ -3418,6 +3565,298 @@ mod tests {
         // ...and the vault is still a working vault, not a corrupt file.
         assert!(is_vault(&blob_path));
         reg.lock(&blob_path).unwrap();
+    }
+
+    // ==== SEC-847 ROUND-3 AUDIT — the alias guard was check-then-USE ==============================
+    //
+    // `ensure_no_aliased_files` walked the tree ONCE, at the top of the re-seal, and the counts were
+    // never consulted again. `wipe_session_dir` → `shred_tree` → `collect_files` re-walked at the END and
+    // overwrote every regular file it found, hard links included, with no link check of its own. Between
+    // the two walks sat encrypt + the staging write + `sync_all` + a full verifying decrypt (a real
+    // scrypt KDF, ~1s by design) + the rename. And there was no race to win: the staging file appearing
+    // beside the `.cpevault` is a publicly observable starting gun proving the guard has already passed.
+    // The auditor demonstrated a victim file zero-filled while `lock` returned `Ok(())`.
+
+    /// The exploit itself, timing and all — the auditor's own test with the assertion flipped to the
+    /// fixed behaviour. Polls for the staging file next to the vault (the starting gun) and plants
+    /// `create_hard_link(victim, "<session>/loot.xlsx")` the instant it appears, i.e. strictly after both
+    /// alias walks have passed. The wipe's own per-file check must now unlink that name instead of
+    /// writing through it.
+    ///
+    /// Timing-dependent by nature, so it says so loudly when the window is missed rather than passing
+    /// quietly; the deterministic half of the same guard is
+    /// [`the_session_wipe_unlinks_an_alias_instead_of_overwriting_it`], which needs no thread at all.
+    #[test]
+    fn an_alias_planted_after_the_alias_guards_is_unlinked_not_shredded_through() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        let reg = VaultRegistry::default();
+
+        let victim_dir = dir.path().join("Documents");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("taxes.xlsx");
+        std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
+
+        let session = root.join("eeee0000-eeee-0000-eeee-000000000000");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session).unwrap();
+        std::fs::write(session.join("top.txt"), b"edited while unlocked").unwrap();
+
+        let parent = blob_path.parent().unwrap().to_path_buf();
+        let loot = session.join("loot.xlsx");
+        let loot_for_thread = loot.clone();
+        let victim_for_thread = victim.clone();
+        let planted = Arc::new(AtomicBool::new(false));
+        let planted_c = planted.clone();
+        let watcher = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+            while std::time::Instant::now() < deadline {
+                let seen = std::fs::read_dir(&parent)
+                    .map(|es| {
+                        es.flatten()
+                            .any(|e| e.file_name().to_string_lossy().contains(RESEAL_STAGING_SUFFIX))
+                    })
+                    .unwrap_or(false);
+                if seen {
+                    let ok = crate::links::create_hard_link(
+                        &victim_for_thread.to_string_lossy(),
+                        &loot_for_thread.to_string_lossy(),
+                    )
+                    .is_ok();
+                    planted_c.store(ok, Ordering::SeqCst);
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        });
+
+        let result = reg.lock(&blob_path);
+        watcher.join().unwrap();
+
+        if !planted.load(Ordering::SeqCst) {
+            eprintln!(
+                "SKIPPED an_alias_planted_after_the_alias_guards_is_unlinked_not_shredded_through: the \
+                 alias could not be planted inside the window on this run (no hard-link support, or the \
+                 lock outran the watcher). The timing form of this attack was NOT verified here — the \
+                 deterministic form still was."
+            );
+            return;
+        }
+
+        // The headline: the victim's own bytes, read back off disk after a lock that reported success.
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"VICTIM PLAINTEXT - the only copy",
+            "the victim was destroyed through an alias planted AFTER the link-count check (lock \
+             returned {result:?})"
+        );
+        // Whether the lock succeeded or refused is not the contract here — either is acceptable, since
+        // the plant may land before or after the post-encrypt re-check — but it must never both succeed
+        // AND have destroyed the victim, which the assertion above is what pins.
+        assert!(!loot.exists(), "the planted alias's NAME must be gone either way");
+    }
+
+    /// The same guard, deterministically and with no thread: a hard link is sitting in the session tree
+    /// when the wipe runs, exactly as it would be after being planted past the re-seal's walks. The
+    /// shredder must **unlink the name** rather than overwrite the inode through it.
+    ///
+    /// This is the test that goes red if the per-file check in [`shred_tree`] is removed.
+    #[test]
+    fn the_session_wipe_unlinks_an_alias_instead_of_overwriting_it() {
+        let dir = worktree_tempdir();
+        let victim = dir.path().join("taxes.xlsx");
+        std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
+
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(session.join("nested")).unwrap();
+        let ours = session.join("nested").join("mine.txt");
+        std::fs::write(&ours, b"the vault's own file").unwrap();
+
+        let loot = session.join("nested").join("loot.xlsx");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPED the_session_wipe_unlinks_an_alias_instead_of_overwriting_it: this OS/volume \
+                 refused a hard link. The wipe's alias case was NOT verified on this run."
+            );
+            return;
+        }
+
+        wipe_session_dir(&session, SESSION_WIPE_SCHEME).expect("the wipe must still succeed");
+
+        assert!(!session.exists(), "the session tree must still be removed");
+        assert_eq!(
+            std::fs::read(&victim).unwrap(),
+            b"VICTIM PLAINTEXT - the only copy",
+            "the wipe overwrote a file OUTSIDE the session dir through a hard link inside it"
+        );
+        assert!(!ours.exists(), "the session's own files must still be shredded and removed");
+    }
+
+    /// The wipe's per-file verdict, pinned as the pure decision it is — including the arm no filesystem
+    /// will reliably produce on demand: a link count that cannot be read **must not** be treated as
+    /// "probably one name, safe to overwrite". Fail closed against destroying data.
+    #[test]
+    fn the_wipe_never_overwrites_a_file_it_cannot_prove_is_ours() {
+        assert_eq!(wipe_disposition(&HardLinks::One), WipeDisposition::Shred);
+        assert_eq!(
+            wipe_disposition(&HardLinks::Many(2)),
+            WipeDisposition::UnlinkOnly,
+            "a file with another name is not ours to overwrite"
+        );
+        assert_eq!(
+            wipe_disposition(&HardLinks::Unknown("the filesystem did not say")),
+            WipeDisposition::UnlinkOnly,
+            "an unreadable link count must fail CLOSED — overwriting is irreversible, unlinking one of \
+             an inode's names destroys nothing"
+        );
+    }
+
+    /// The confidentiality half: an alias that appears while `encrypt_tree` is still walking the tree is
+    /// invisible to the walk at the top of the re-seal, so a second walk runs after the encrypt and
+    /// before anything is written beside the vault. The `after_encrypt` hook plants the link in exactly
+    /// that window, deterministically.
+    ///
+    /// Goes red if the post-encrypt `ensure_no_aliased_files` call is removed: the re-seal would return
+    /// `Ok` and replace the blob.
+    #[test]
+    fn an_alias_appearing_during_the_encrypt_walk_is_caught_before_the_blob_is_replaced() {
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let before = std::fs::read(&blob_path).unwrap();
+
+        let victim = dir.path().join("taxes.xlsx");
+        std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
+
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("top.txt"), b"edited while unlocked").unwrap();
+
+        let loot = session.join("loot.xlsx");
+        let planted = std::cell::Cell::new(false);
+        let result = reseal_session_with_hooks(&blob_path, &session, &pass("pw"), verify_recoverable, || {
+            planted.set(
+                crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy())
+                    .is_ok(),
+            );
+        });
+
+        if !planted.get() {
+            eprintln!(
+                "SKIPPED an_alias_appearing_during_the_encrypt_walk_is_caught_before_the_blob_is_replaced: \
+                 this OS/volume refused a hard link."
+            );
+            return;
+        }
+        let why = reason(result.expect_err("an alias that appeared during the encrypt walk must be refused"));
+        assert!(why.contains("hard link"), "the refusal must say why: {why}");
+        assert_eq!(
+            std::fs::read(&blob_path).unwrap(),
+            before,
+            "the vault must be byte-for-byte unchanged — nothing is replaced on a refusal"
+        );
+        assert!(
+            std::fs::read_dir(blob_path.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .all(|e| !e.file_name().to_string_lossy().contains(RESEAL_STAGING_SUFFIX)),
+            "and the refusal must land BEFORE the staging file — the attacker's starting gun — exists"
+        );
+    }
+
+    /// [`hard_link_count`] fails **closed** when the count cannot be established at all: a path that
+    /// cannot be opened/stat'd is [`HardLinks::Unknown`], never [`HardLinks::One`]. Both platform
+    /// implementations have an error arm that was previously assertion-free — flipping the Windows
+    /// `CreateFileW` failure to `One` left the whole vault suite green.
+    #[test]
+    fn a_link_count_that_cannot_be_read_is_refused_not_assumed_to_be_one() {
+        let dir = worktree_tempdir();
+        let missing = dir.path().join("no-such-file.txt");
+        assert!(
+            matches!(hard_link_count(&missing), HardLinks::Unknown(_)),
+            "a file whose link count cannot be read must be Unknown (refused), not assumed unaliased"
+        );
+        // NEGATIVE CONTROL: an ordinary file must still read as exactly one name, or the guard would
+        // just be "always refuse" and every lock would fail.
+        let real = dir.path().join("ordinary.txt");
+        std::fs::write(&real, b"hello").unwrap();
+        assert_eq!(hard_link_count(&real), HardLinks::One);
+        // ...and a genuine alias reads as Many, on whichever platform will make one.
+        let alias = dir.path().join("alias.txt");
+        if crate::links::create_hard_link(&real.to_string_lossy(), &alias.to_string_lossy()).is_ok() {
+            assert!(matches!(hard_link_count(&real), HardLinks::Many(n) if n >= 2));
+            assert!(matches!(hard_link_count(&alias), HardLinks::Many(n) if n >= 2));
+        }
+    }
+
+    /// The staging sweep never deletes an object it cannot prove it created — **on every platform**. The
+    /// check used to be `#[cfg(unix)]`, leaving it unenforced on Windows, which is the platform where the
+    /// unprivileged hard-link primitive actually exists. No data was at risk (unlinking one name of an
+    /// inode destroys nothing), but the shipped rule was not the stated rule.
+    #[test]
+    fn the_sweep_leaves_a_hard_link_planted_at_a_staging_name() {
+        let dir = worktree_tempdir();
+        let blob = dir.path().join("v.cpevault");
+        std::fs::write(&blob, b"not really a vault").unwrap();
+
+        let victim = dir.path().join("taxes.xlsx");
+        std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
+        let alias = staging_blob_path_with(&blob, "planted");
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &alias.to_string_lossy()).is_err() {
+            eprintln!(
+                "SKIPPED the_sweep_leaves_a_hard_link_planted_at_a_staging_name: this OS/volume refused \
+                 a hard link."
+            );
+            return;
+        }
+        // NEGATIVE CONTROL: genuine debris from an interrupted lock, which the sweep must still clear —
+        // otherwise "leave everything alone" would pass this test.
+        let ours = staging_blob_path_with(&blob, "ours");
+        std::fs::write(&ours, b"interrupted lock debris").unwrap();
+
+        sweep_stale_staging(&blob);
+
+        assert!(
+            alias.exists(),
+            "the sweep deleted a name it cannot prove it created — an alias for somebody else's file"
+        );
+        assert_eq!(std::fs::read(&victim).unwrap(), b"VICTIM PLAINTEXT - the only copy");
+        assert!(!ours.exists(), "genuine staging debris must still be swept");
+    }
+
+    /// The staging blob is `sync_all`ed **before** it is verified, and therefore before the working copy
+    /// is destroyed — verifying a page-cache copy proves the bytes parse, not that they reached the disk
+    /// (SEC-847 reviewer blocker C). There is no portable way to interrogate the OS about this after the
+    /// fact, so [`sync_durably`] counts its calls in test builds and the injected verifier reads the
+    /// counter at the moment it runs: removing the `sync_all` makes the count stand still and this fails.
+    #[test]
+    fn the_staging_blob_is_fsynced_before_it_is_verified() {
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let session = dir.path().join("session");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("top.txt"), b"edited while unlocked").unwrap();
+
+        // The whole process shares the counter and tests run in parallel, so compare a snapshot taken
+        // just before with the value observed inside our own verify — a monotonic counter can only have
+        // gone UP, and our own write is guaranteed to be one of the increments.
+        let before = staging_sync_count();
+        let at_verify = std::cell::Cell::new(usize::MAX);
+        reseal_session_with_verifier(&blob_path, &session, &pass("pw"), |p, pw| {
+            at_verify.set(staging_sync_count());
+            verify_recoverable(p, pw)
+        })
+        .expect("the re-seal itself must succeed");
+
+        assert!(
+            at_verify.get() > before,
+            "the staging blob must be fsynced BEFORE it is verified — the verify read back a copy that \
+             may never have reached the disk, and the caller destroys the only other copy next \
+             (syncs before={before}, at verify={})",
+            at_verify.get()
+        );
     }
 
     /// Create a FILE symlink; `false` when the OS refuses (unprivileged Windows without Developer Mode),

@@ -1,5 +1,5 @@
 ---
-id: CPE-1667
+id: CPE-1669
 title: "create_vault writes the blob without fsync, then shreds the original — a power loss in that window loses both copies"
 type: bug
 priority: Medium

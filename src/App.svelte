@@ -2526,11 +2526,16 @@
    *  disables the button so the user never provokes it in the first place. */
   async function lockActiveVault(blobPath: string) {
     if (lockInFlightFor) return; // already locking — the button is disabled, but the call is un-awaited
-    lockInFlightFor = blobPath;
     const sessionDir = sessionDirFor($vaults, blobPath);
     const back = parentOfPath(blobPath) || HOME;
-    await navigate(back);
+    // The claim is taken INSIDE the try (SEC-847 round-3 nit): it used to be set before `await
+    // navigate(back)`, which sits outside it, so a rejected navigate latched the flag forever — and the
+    // banner binds `locking={lockInFlightFor !== null}`, not `=== blobPath`, so that disabled EVERY
+    // vault's Lock button for the rest of the session. Everything from here on is inside the `finally`
+    // that clears it.
     try {
+      lockInFlightFor = blobPath;
+      await navigate(back);
       await lockVault(blobPath);
       showNotice($t("notice.vaultLocked", { name: vaultDisplayName(blobPath) }));
     } catch (e) {
