@@ -111,25 +111,32 @@ deletes it, that is a burndown regression under charter rule 2 and must be treat
 
 ## Acceptance criteria
 
-- [ ] `crates/vfs/tests/real_server_conformance.rs` exists, is one shared conformance fn run against
+- [x] `crates/vfs/tests/real_server_conformance.rs` exists, is one shared conformance fn run against
       sftp / webdav / ftp / ftps, and routes through `cpe_vfs::open` — not the provider constructors.
-- [ ] All 8 slice-1 assertion groups pass against the three real server images.
-- [ ] Mutations (mkdir/rename/delete/write) are verified against the **host-mounted directory on disk**,
+- [x] All 8 slice-1 assertion groups pass against the three real server images.
+- [x] Mutations (mkdir/rename/delete/write) are verified against the **host-mounted directory on disk**,
       not only via the client's own `list`.
-- [ ] SFTP host-key `Trusted` **and** `Changed`-is-refused both proven against a real OpenSSH key.
-- [ ] Slice 2: a `cpe-net` client↔server exchange over a non-loopback container IP, asserted.
-- [ ] `CI` job `Network E2E (ubuntu-latest, real servers)` is green on the PR, **blocking**, < 10 min.
-- [ ] A plain `cargo test` in `crates/{sftp,webdav,ftp,vfs,net}` on Windows/macOS is **unchanged** — the
-      new tests are `#[ignore]`d and the existing in-process tests all still run.
-- [ ] **Negative control, required before this is believed** (`history.md`, repeatedly): break one
+- [x] SFTP host-key `Trusted` **and** `Changed`-is-refused both proven against a real OpenSSH key.
+- [x] Slice 2: a `cpe-net` client↔server exchange over a non-loopback container IP, asserted.
+- [~] `CI` job `Network E2E (ubuntu-latest, real servers)` is green on the PR, **blocking** — confirmed,
+      but wall-clock is **~13-14 min**, over the ticket's `< 10 min` target (dominated by the
+      `--test-threads=1` conformance suite's 301s alone, plus the release `cpe-server-ref` build and
+      three real-server startups). Left open as a follow-up; not re-architected here to keep this
+      iteration's CI-cycle budget for the fixes actually blocking green.
+- [x] A plain `cargo test` in `crates/{sftp,webdav,ftp,vfs,net}` on Windows/macOS is **unchanged** — the
+      new tests are `#[ignore]`d and the existing in-process tests all still run (confirmed both locally
+      and on the Windows/macOS `Server crates` CI legs).
+- [x] **Negative control, required before this is believed** (`history.md`, repeatedly): break one
       provider deliberately — e.g. force FTP into ASCII mode, or strip percent-decoding from the WebDAV
       href parser — and show the new suite goes **red** while the existing in-process suite stays
       **green**. Paste both results in the Work Log. Without this the rig is unproven.
-- [ ] `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` rows #7 and #13 flipped to ✅ naming this job,
+- [x] `.claude/qa-architecture/MANUAL-TEST-BURNDOWN.md` rows #7 and #13 flipped to ✅ naming this job,
       and the MVD header count decremented by 2.
-- [ ] `CPE-1518` edited down to its genuine residue (QTS-specific behaviour, the live LAN discovery
+- [x] `CPE-1518` edited down to its genuine residue (QTS-specific behaviour, the live LAN discovery
       records for CPE-1517, and the sidebar state-dot check against a real device) with a note pointing
-      at this job for everything now covered.
+      at this job for everything now covered. Done by an earlier worker on this branch; verified present
+      (`Ticketing/Tickets/Backlog/CPE-1518_e2e-verify-providers-against-qnap.md` already names CPE-1659
+      and MANUAL-TEST-BURNDOWN rows #7/#13 as what it shrank against).
 
 ## Notes
 
@@ -147,3 +154,61 @@ deletes it, that is a burndown regression under charter rule 2 and must be treat
 
 - 2026-08-11 — Filed by the QA Architect from the MVD audit: three shipped protocols, zero tests against
   a server we did not write ourselves, and the only discharge plan on the books requiring the user's NAS.
+- 2026-08-11/12 — Rig built (PR #849): Docker bridge network, digest-pinned images, hostile fixture tree,
+  TLS cert generation, shared conformance fn routed through `cpe_vfs::open`. First live CI runs found and
+  fixed two real client bugs (WebDAV href `#` truncating the URL as a fragment; WebDAV directory `DELETE`
+  silently no-op'ing on Apache's `DirectorySlash` 301 redirect) — SFTP host-key TOFU and SFTP/WebDAV
+  conformance confirmed green. FTP/FTPS remained red: `ftp-e2e` exited 147ms after start (exitCode 2),
+  invisible in `docker logs` even with `LOG_STDOUT=YES`.
+- 2026-08-12 — **Picked up after the previous worktree was destroyed (Foreman cleanup error, no work
+  lost).** Fixed FTP/FTPS in three real, sequentially-discovered bugs (not the ticket's original
+  `ssl_tlsv1` hypothesis, which was tried first and found insufficient by CI):
+  1. Added a foreground diagnostic step that replays `run-vsftpd.sh` with its own `&>/dev/null` redirect
+     stripped when the container exits immediately — vsftpd's startup errors are hardcoded to `/dev/null`
+     in the image regardless of `LOG_STDOUT`, confirmed against `fauria/docker-vsftpd` upstream. First use
+     surfaced the REAL error: `500 OOPS: config file not owned by correct user, or not a file` — vsftpd
+     refuses to load a config file not owned by root; the generated `vsftpd.conf` was owned by the
+     unprivileged CI runner user and bind-mounted unchanged. Fixed with `sudo chown root:root`.
+  2. Past that, FTP/SFTP/WebDAV all passed but FTPS failed: `received fatal alert: HandshakeFailure`.
+     vsftpd's own documented default `ssl_ciphers` is the legacy `DES-CBC3-SHA`
+     ([vsftpd.conf(5)](https://linux.die.net/man/5/vsftpd.conf)), which shares no overlap with rustls'
+     modern AEAD-only cipher set. Fixed with `ssl_ciphers=HIGH`.
+  3. Past that, a third distinct FTPS bug: `invalid peer certificate: Other(OtherError(CaUsedAsEndEntity))`
+     — `openssl req -x509` without an explicit `basicConstraints` extension inherits `CA:TRUE` from
+     OpenSSL's default config, and rustls/webpki refuses a CA:TRUE certificate as a TLS leaf. Fixed by
+     adding `basicConstraints=critical,CA:FALSE` + `keyUsage` + `extendedKeyUsage=serverAuth` to the
+     `openssl req` call; verified locally with `openssl x509 -text`.
+  Also fixed the "Wait for the real servers to accept connections" step, whose 30-attempt-per-host loop
+  fell through on total failure with no `exit 1` — this is what let the vsftpd crash go undetected for
+  two full CI runs. Now asserts per host and fails loudly.
+  Also added an explicit `TYPE I` (`FileType::Binary`) call in `crates/ftp` — `suppaftp` never sets a
+  transfer type on its own and RFC 959's connection default is ASCII, not binary. Kept on RFC-conformance
+  principle even though the negative-control experiment below found this particular vsftpd build doesn't
+  actually translate line endings on the wire either way.
+  **First fully green run** (all fixes applied, Slice 2 executing for the first time ever):
+  https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/31584936382 — Network E2E
+  13m39s, all 8 slice-1 assertion groups + both SFTP TOFU cases + Slice 2 passing. Slice 2's first-ever
+  execution immediately found one more real bug: `list_dir`'s dispatcher handler mapped every domain
+  error (including a missing path) to `ErrorCode::Internal` instead of `NotFound`. Fixed in
+  `crates/server/src/dispatch.rs` (special-case `list_dir` to check `Path::exists()`) with an in-process
+  regression test added (`list_dir_of_a_missing_path_is_not_found`).
+  **Negative control** (required acceptance criterion): first attempted by forcing FTP into `TYPE A`
+  (ASCII mode) as the ticket suggested — this came back **green** on live CI
+  (https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/31588642603), a genuine
+  finding that this particular vsftpd build/config does not perform ASCII CRLF translation on the wire,
+  not a failure of the method. Switched the negative control to the already-proven-real WebDAV
+  directory-delete bug instead: reverted the `DirectorySlash`-redirect fix and pushed.
+  **RED run**: https://github.com/StewartScottRogers/cross-platform-explorer/actions/runs/31590466435 —
+  `webdav_conformance_against_real_apache_moddav ... FAILED` / "the now-empty directory must be gone from
+  disk after delete", while `ftp_conformance_against_real_vsftpd`, `ftps_conformance_against_real_vsftpd_with_tls`,
+  and `sftp_conformance_against_real_openssh` all still passed in the same job, and the in-process
+  `Server crates (ubuntu-latest)` job (running `cargo test -p cpe-webdav`, confirmed unchanged both
+  locally — 12/12 passing — and on CI) stayed **GREEN**. Reverted immediately after.
+  **Final green run** (fix restored, docs updated): pending — see the next commit's CI run for the URL.
+  MANUAL-TEST-BURNDOWN rows #7 and #13 flipped to ✅, MVD header 17→15. CPE-1518 already edited down by
+  an earlier worker on this branch — verified present, not re-touched.
+  **Left open:** the CI job's wall-clock is ~13-14 min against the ticket's `< 10 min` target, dominated
+  by the `--test-threads=1` conformance suite (301s alone) plus the release `cpe-server-ref` build and
+  three real-server container startups — not re-architected this session to keep the CI-cycle budget for
+  the fixes actually blocking green; a follow-up could parallelize the conformance tests or cache the
+  release build more aggressively.

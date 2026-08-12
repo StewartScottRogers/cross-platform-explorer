@@ -62,9 +62,14 @@ impl WebdavProvider {
         WebdavProvider { agent, base_url: config.base_url.clone(), auth_header }
     }
 
-    /// The absolute URL for a provider path (`/`-rooted).
+    /// The absolute URL for a provider path (`/`-rooted). Each segment is percent-encoded (CPE-1659
+    /// found this the hard way against a real Apache `mod_dav` server): `ureq`'s request URL is parsed
+    /// like any other URL, so a raw `#` in a path silently starts a fragment — everything after it is
+    /// dropped from what's actually sent on the wire — and other reserved bytes aren't safe to send raw
+    /// either. The in-process fake server this crate's own tests use reads the raw request-line text
+    /// with no URL parsing at all, so it never exercised this; a real server does.
     fn url_for(&self, path: &str) -> String {
-        format!("{}/{}", self.base_url.trim_end_matches('/'), path.trim_start_matches('/'))
+        format!("{}/{}", self.base_url.trim_end_matches('/'), percent_encode_path(path.trim_start_matches('/')))
     }
 
     fn request(&self, method: &str, path: &str) -> ureq::Request {
@@ -132,7 +137,28 @@ impl FileSystemProvider for WebdavProvider {
     }
 
     fn delete(&mut self, path: &str) -> Result<(), String> {
-        self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
+        let resp = self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
+        // CPE-1659 found this against a real Apache server: `.call()` only turns a >=400 status into
+        // an `Err` (see `ureq::Request::call`), so a 3xx response comes back as `Ok`. Apache's
+        // `mod_dir` `DirectorySlash` behaviour redirects (301) a request for a collection that's
+        // missing its trailing slash INSTEAD of performing it — deleting `/some-dir` (no slash) would
+        // otherwise silently "succeed" here while nothing was actually deleted. This agent disables
+        // auto-follow-redirect on purpose (CPE-1461: blindly following a server-supplied `Location`
+        // could bounce toward `file://` or an attacker-controlled host), so rather than trust the
+        // Location header, retry ONCE against the well-known WebDAV collection-URL convention (a
+        // trailing slash, RFC 4918 §8.3) — never a second, server-chosen destination.
+        //
+        // CPE-1659 negative-control proof (required acceptance criterion): this exact fix was reverted
+        // on this branch and pushed as a deliberate break — the real-server rig's
+        // `webdav_conformance_against_real_apache_moddav` test went RED ("the now-empty directory must
+        // be gone from disk after delete") while the in-process `cargo test -p cpe-webdav` suite (which
+        // never deletes a directory, only a file) stayed GREEN, proving the rig can fail and that a
+        // same-author fake server cannot catch this class of bug. See the CPE-1659 Work Log for both
+        // run URLs.
+        if (300..400).contains(&resp.status()) && !path.ends_with('/') {
+            let with_slash = format!("{}/", path.trim_end_matches('/'));
+            self.request("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
+        }
         Ok(())
     }
 
@@ -276,6 +302,23 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Percent-encode a `/`-rooted path for an OUTGOING request URL, preserving `/` as the segment
+/// separator — the mirror image of [`percent_decode`] above (which reverses this on the way IN, for
+/// `<d:href>` values a server sends back). Every byte outside the URL-safe unreserved set
+/// (`ALPHA / DIGIT / "-" / "." / "_" / "~"`, plus `/` itself) is escaped, so a name containing `#`,
+/// `%`, a space, or non-ASCII/emoji bytes reaches the server as the SAME literal name instead of being
+/// misparsed as a URL fragment/reserved character by the HTTP client library.
+fn percent_encode_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

@@ -50,7 +50,7 @@ use std::io::{Cursor, Read as _};
 use std::sync::{Arc, Mutex};
 
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
-use suppaftp::{list::ListParser, rustls, FtpError, RustlsConnector, RustlsFtpStream};
+use suppaftp::{list::ListParser, rustls, types::FileType, FtpError, RustlsConnector, RustlsFtpStream};
 
 /// How to authenticate to the FTP server.
 #[derive(Debug, Clone)]
@@ -134,8 +134,12 @@ impl FtpProvider {
             // example) — a real caller supplies its own. Mozilla's bundled roots (`webpki-roots`) match
             // what that example uses and need no OS trust-store access, so this behaves identically on
             // every CI OS and every user machine.
-            let root_store =
+            let mut root_store =
                 rustls::RootCertStore::from_iter(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            // CI/test-only (CPE-1659): trust one extra self-signed root IF (and only if) the harness set
+            // `CPE_E2E_FTPS_EXTRA_CA_PEM_FILE` — see `extra_test_root`'s doc comment. A no-op for every
+            // real app run.
+            extra_test_root(&mut root_store);
             let tls_config =
                 rustls::ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth();
             stream
@@ -149,8 +153,81 @@ impl FtpProvider {
             FtpAuth::Anonymous => ("anonymous", ANONYMOUS_PASSWORD),
         };
         stream.login(user, pass).map_err(|e| format!("ftp: login: {e}"))?;
+        // Explicit `TYPE I` (CPE-1659): `suppaftp` never sets a transfer type on its own — `retr_as_stream`
+        // and `put_file` just issue RETR/STOR over whatever type the server currently has, and RFC 959's
+        // default representation type at connection is ASCII, not binary. Kept explicit on principle (an
+        // RFC-conformant ASCII-mode daemon could otherwise silently rewrite line endings through a binary
+        // payload) even though CPE-1659's own negative-control experiment (forcing ASCII deliberately,
+        // then reverting it here) found this particular vsftpd build/config does NOT actually translate
+        // on the wire — a real, confirmed finding, not a guess: see the Work Log. The in-process fake FTP
+        // server ignores TYPE entirely regardless (`"CWD" | "TYPE" | "OPTS" => 200 OK`), so neither mode
+        // is visible to `cargo test -p cpe-ftp` either way.
+        stream.transfer_type(FileType::Binary).map_err(|e| format!("ftp: TYPE I: {e}"))?;
         Ok(FtpProvider { session: Mutex::new(stream) })
     }
+}
+
+/// CI/test-only escape hatch (CPE-1659): the env var naming a PEM file with ONE extra certificate to
+/// trust for FTPS, read by [`extra_test_root`]. Used ONLY by the real-server E2E rig
+/// (`crates/vfs/tests/real_server_conformance.rs`) to validate against a throwaway container
+/// certificate that no public CA could ever sign for a private, ephemeral Docker IP — a real public CA
+/// (Let's Encrypt et al.) fundamentally cannot issue for an address like that, so this is the only way
+/// to prove the FTPS handshake genuinely works against vsftpd's real certificate through the SAME
+/// `cpe_vfs::open` seam the app itself uses, rather than bypassing it with a second, test-only connect
+/// path. Unset (the overwhelming common case, including every real app run) this is inert — the
+/// production trust store is exactly `webpki_roots::TLS_SERVER_ROOTS`, unchanged. Never surfaced in the
+/// `Connection` model or any UI; this is not a general "trust a custom CA" feature.
+const EXTRA_TEST_CA_ENV: &str = "CPE_E2E_FTPS_EXTRA_CA_PEM_FILE";
+
+/// Add the certificate named by [`EXTRA_TEST_CA_ENV`] (if the env var is set and the file parses) to
+/// `store`. Any failure (var unset, file missing, bad PEM) is silently ignored — this must never turn
+/// into its own confusing error; the *real* signal is whichever TLS/handshake error the caller already
+/// surfaces when the certificate genuinely isn't trusted.
+fn extra_test_root(store: &mut rustls::RootCertStore) {
+    let Ok(path) = std::env::var(EXTRA_TEST_CA_ENV) else { return };
+    let Ok(pem) = std::fs::read_to_string(&path) else { return };
+    if let Some(der) = decode_pem_certificate(&pem) {
+        let _ = store.add(rustls::pki_types::CertificateDer::from(der));
+    }
+}
+
+/// Minimal single-certificate PEM -> DER decode: strip the `-----BEGIN/END CERTIFICATE-----` marker
+/// lines and base64-decode the rest. Hand-rolled (no new dependency) since this is a narrow CI/test-only
+/// need (see [`extra_test_root`]), not a general PEM-bundle parser.
+fn decode_pem_certificate(pem: &str) -> Option<Vec<u8>> {
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    base64_decode_standard(&body)
+}
+
+/// Minimal standard-alphabet base64 decoder (RFC 4648, `=`-padded), hand-rolled to avoid a new
+/// dependency for the one CI/test-only PEM decode above — not used anywhere else in this crate.
+fn base64_decode_standard(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let clean: Vec<u8> = s.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if clean.is_empty() || clean.len() % 4 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(clean.len() / 4 * 3);
+    for chunk in clean.chunks_exact(4) {
+        let mut vals = [0u8; 4];
+        let mut pad = 0u8;
+        for (i, &b) in chunk.iter().enumerate() {
+            if b == b'=' {
+                pad += 1;
+            } else {
+                vals[i] = ALPHABET.iter().position(|&a| a == b)? as u8;
+            }
+        }
+        let n = ((vals[0] as u32) << 18) | ((vals[1] as u32) << 12) | ((vals[2] as u32) << 6) | (vals[3] as u32);
+        out.push((n >> 16) as u8);
+        if pad < 2 {
+            out.push((n >> 8) as u8);
+        }
+        if pad < 1 {
+            out.push(n as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Turn a failed `suppaftp` call into a legible, path-prefixed message.
@@ -613,5 +690,37 @@ mod tests {
             Err(e) => e,
         };
         assert!(err.contains("TLS upgrade"), "expected a TLS-upgrade-flavoured error, got: {err}");
+    }
+
+    // CPE-1659: self-tests for the hand-rolled base64/PEM decoder `extra_test_root` uses to load the
+    // real-server E2E rig's throwaway FTPS trust anchor. Pure logic, no network — proves the decoder
+    // itself is correct independent of whether the env var is ever set in a given run.
+    #[test]
+    fn base64_decode_standard_matches_known_vectors() {
+        assert_eq!(base64_decode_standard("").unwrap_or_default(), Vec::<u8>::new());
+        assert_eq!(base64_decode_standard("aGVsbG8=").unwrap(), b"hello");
+        assert_eq!(base64_decode_standard("aGVsbG8h").unwrap(), b"hello!");
+        assert_eq!(base64_decode_standard("Zm9vYmFy").unwrap(), b"foobar");
+        assert_eq!(base64_decode_standard("Zg==").unwrap(), b"f");
+        // Whitespace/newlines (as a real PEM body wraps at 64 cols) must be tolerated.
+        assert_eq!(base64_decode_standard("aGVs\nbG8=\n").unwrap(), b"hello");
+        // Malformed input (not a multiple of 4, or an invalid character) is a clean `None`, never a panic.
+        assert!(base64_decode_standard("abc").is_none());
+        assert!(base64_decode_standard("!!!!").is_none());
+    }
+
+    #[test]
+    fn decode_pem_certificate_strips_markers_and_decodes_the_body() {
+        let pem = "-----BEGIN CERTIFICATE-----\naGVsbG8=\n-----END CERTIFICATE-----\n";
+        assert_eq!(decode_pem_certificate(pem).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn extra_test_root_is_a_no_op_when_the_env_var_is_unset() {
+        // Guard against test-order env-var leakage from any other test in this binary.
+        std::env::remove_var(EXTRA_TEST_CA_ENV);
+        let mut store = rustls::RootCertStore::empty();
+        extra_test_root(&mut store);
+        assert!(store.is_empty(), "no env var set — the store must be untouched");
     }
 }
