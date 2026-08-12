@@ -71,6 +71,6 @@
     color: #fff;
   }
   .btn.primary:hover { background: var(--accent-hover); }
-  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+  .btn.primary.danger { background: var(--danger-fill); border-color: var(--danger-fill); }
   .btn.primary.danger:hover { background: var(--danger-hover); }
 </style>

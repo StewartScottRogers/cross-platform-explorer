@@ -133,6 +133,10 @@
      consumed only by NotebookPreview.svelte's `.nb-error-output` (CPE-1616); keep it scoped to
      that kind of consumer rather than reaching for it as a general danger-text token. */
   --danger-on-tint: var(--danger);
+  /* Solid-fill-background role for `.btn.primary.danger`/`.agent-badge.removed`/etc. (CPE-1649).
+     Identical to --danger in every theme except hc-dark, whose --danger/white-on-fill contrast
+     windows don't overlap — see src/app.css's hc-dark palette block for the full explanation. */
+  --danger-fill: var(--danger);
 
   /* Log-preview WARN row/badge colour (CPE-1618, epic CPE-1568 slice 8) — scoped to LogPreview.svelte's
      level-tint only, not a general "warning" token elsewhere. ERROR/INFO reuse --danger/--accent (they
@@ -217,6 +221,7 @@
   --success: var(--pal-green-600);
   --danger-hover: var(--pal-red-700);
   --danger-on-tint: var(--danger);
+  --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above */
   --log-warn: var(--pal-amber-700);
 
   --hljs-keyword: var(--pal-hljs-keyword);
@@ -379,6 +384,7 @@
      this can't just be --danger. Not consumed by anything else; do not reach for this outside
      NotebookPreview.svelte's `.nb-error-output`. */
   --danger-on-tint: var(--pal-dark-red-450-notebook);
+  --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above */
   --log-warn: var(--pal-dark-amber-300);
 
   --hljs-keyword: var(--pal-dark-hljs-keyword);
@@ -486,12 +492,53 @@
 
   --pal-hc-dark-blue-900: #002347;    /* selection */
   --pal-hc-dark-blue-850: #003366;    /* selection-hover */
-  --pal-hc-dark-blue-300: #66b3ff;    /* accent — brightened well past the normal dark theme's
-                                          #3ea6ff so it clears 4.5:1 against black */
-  --pal-hc-dark-blue-200: #99ccff;    /* accent-hover */
+  /* CPE-1649: hc-dark's --accent/--accent-hover back the SAME two on-screen roles CPE-1632 found for
+     the normal dark theme's --accent — (a) foreground text/icon/border colour (this file's own
+     AAA-inspired guard, src/app.css.hc-contrast.test.ts, requires --accent >=4.5:1 against
+     --bg/--surface) and (b) the solid-fill BACKGROUND of every `.btn.primary`-style button app-wide,
+     paired with literal white text. The original #66b3ff/#99ccff cleared role (a) with huge margin
+     (8.75/9.46 vs the near-black --surface) but rendered white-on-#66b3ff = 2.22:1 and
+     white-on-#99ccff = 1.69:1 — both catastrophically under WCAG's 3:1 UI-component floor, i.e. the
+     theme built for MORE contrast rendered its primary buttons LESS legibly than the normal dark
+     theme's pre-CPE-1632 numbers (see CPE-1649). Unlike --danger below, accent's [vsSurface>=4.5,
+     whiteOnFill>=3] window is feasible with ONE token (it spans relative luminance [0.193, 0.30] —
+     positive, unlike --danger's). Darkened both until every role clears its bar with margin: accent
+     vsSurface=5.00 whiteOnFill=3.88; accent-hover (kept brighter than accent, preserving the light
+     theme's "hover brightens" direction; also the only text-role consumer of accent-hover anywhere in
+     the app, AboutDialog.svelte's `.link:hover`, stays comfortably legible at vsSurface=5.78, well
+     above the normal palette's own 4.5:1 body-text bar even though hc-dark's own guard doesn't test
+     accent-hover directly) vsSurface=5.78 whiteOnFill=3.36. See
+     src/app.css.hc-solid-fill-contrast.test.ts, which derives this pairing from real component CSS. */
+  --pal-hc-dark-blue-300: #4c85be;    /* accent */
+  --pal-hc-dark-blue-200: #5590cc;    /* accent-hover */
 
-  --pal-hc-dark-red-300: #ff8080;     /* danger — brightened past the normal #ff6659 to clear 7:1 */
-  --pal-hc-dark-red-200: #ffb3b3;     /* danger-hover */
+  /* CPE-1649: hc-dark's --danger has the SAME two-role tension as --accent above, but here the
+     window is NEGATIVE — no single hex can clear both bars at once. hc-dark's own AAA-inspired text
+     bar requires --danger >=7:1 against --surface (#0d0d0d), which needs relative luminance
+     >=0.3282; the white-on-solid-fill 3:1 UI floor needs relative luminance <=0.30. Those two ranges
+     don't overlap (a -0.028-wide gap) — unlike the normal dark theme's positive-but-narrow window
+     CPE-1632 found (~[0.284, 0.30], because that bar is only 4.5:1) or hc-dark's own --accent above
+     (positive because ITS bar is only 4.5:1, not 7:1). So --danger stays UNCHANGED here — it was
+     never the problem; #ff8080 already clears 8.01:1 against --surface — and a NEW token,
+     --danger-fill, is split off to carry the solid-fill-background role instead (see
+     --pal-hc-dark-red-fill below). --danger-hover needed no such split: grep confirms every
+     `var(--danger-hover)` consumer app-wide is a solid-fill background (no separate text-role use
+     the way plain --danger has via `.warn`/`.btn.danger`/etc.), so it was simply darkened directly
+     for the fill-role bar. See src/app.css.hc-solid-fill-contrast.test.ts (CPE-1649's negative
+     control + fix guard) for the red state this replaced. */
+  --pal-hc-dark-red-300: #ff8080;     /* danger — brightened past the normal #ff6659 to clear 7:1;
+                                          UNCHANGED by CPE-1649 (see comment above — this token's own
+                                          text-role bar was never the failure) */
+  --pal-hc-dark-red-200: #a65454;     /* danger-hover — pure fill role (CPE-1649, no text-role
+                                          consumer exists); darkened from #ffb3b3 (whiteOnFill was
+                                          only 1.70:1) until white-on-fill clears 3:1 (now 5.23:1) */
+  --pal-hc-dark-red-fill: #be6060;    /* NEW (CPE-1649): solid-fill-background role split off from
+                                          --danger (see comment above) — feeds --danger-fill, consumed
+                                          by `.btn.primary.danger`/`.agent-badge.removed`/
+                                          `.tl-badge.removed`/etc. instead of --danger. whiteOnFill
+                                          clears 3:1 with margin (4.17:1); not itself subject to
+                                          --danger's own text-role bar since nothing reads it as
+                                          foreground text. */
   --pal-hc-dark-green-300: #66ff66;   /* success — brightened past the normal #6bcf7f to clear 7:1 */
 
   /* Okabe-Ito colour-blind-safe agent set, brightened off the normal dark-theme hues until each
@@ -541,6 +588,9 @@
   --success: var(--pal-hc-light-green-900);
   --danger-hover: var(--pal-hc-light-red-950);
   --danger-on-tint: var(--danger);
+  --danger-fill: var(--danger);  /* CPE-1649 — see the bare :root block's comment above; hc-light
+                                     never had this problem (white on hc-light --danger/--accent
+                                     measure 10.01:1/7.79:1, both comfortably clear) */
 
   --hljs-keyword: var(--pal-hc-light-hljs-keyword);
   --hljs-title: var(--pal-hc-light-hljs-title);
@@ -599,6 +649,11 @@
   --success: var(--pal-hc-dark-green-300);
   --danger-hover: var(--pal-hc-dark-red-200);
   --danger-on-tint: var(--danger);
+  /* CPE-1649: the solid-fill-background role split off from --danger (see --pal-hc-dark-red-fill's
+     comment above) — the ONLY hc-dark token that differs from a plain `var(--danger)` alias. Every
+     other theme defines this identically to --danger (zero visual change there); only hc-dark needs
+     a different value because only hc-dark's --danger/white-on-fill windows don't overlap. */
+  --danger-fill: var(--pal-hc-dark-red-fill);
 
   --hljs-keyword: var(--pal-hc-dark-hljs-keyword);
   --hljs-title: var(--pal-hc-dark-hljs-title);

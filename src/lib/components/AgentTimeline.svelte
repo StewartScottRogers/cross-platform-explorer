@@ -1305,7 +1305,7 @@
   .tl-badge.created { background: #3a9d4a; }
   .tl-badge.modified { background: #b5872b; }
   .tl-badge.renamed { background: #3a72b5; }
-  .tl-badge.removed { background: var(--danger); }
+  .tl-badge.removed { background: var(--danger-fill); }
   /* CPE-405: a read is the weakest signal — a hollow, muted badge, visually subordinate to changes. */
   .tl-badge.read {
     background: transparent;
@@ -1705,9 +1705,9 @@
   }
   /* Destructive treatment reuses the app-wide --danger token (CPE-1212), matching CheckpointDialog. */
   .cp-btn.danger {
-    border-color: var(--danger);
+    border-color: var(--danger-fill);
     color: #fff;
-    background: var(--danger);
+    background: var(--danger-fill);
   }
   .cp-btn.danger:hover:not(:disabled) {
     background: var(--danger-hover);

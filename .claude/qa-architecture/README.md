@@ -29,6 +29,7 @@ Two hard rules give the ratchet teeth:
 |------|-----------|------------|
 | `README.md` | committed | This charter. |
 | `MANUAL-TEST-BURNDOWN.md` | committed | The MVD ledger — every human-verified surface, its current automation, and the ticket retiring it. The list the QA Architect burns down. |
+| `CVD-SIMULATION-METHOD.md` | committed | The crew's standing decision (CPE-1648) on which colour-blindness simulation matrix family to use when judging palette legibility, so this isn't re-litigated per theming ticket. |
 
 Cross-reference: `docs/MANUAL-TESTS.md` is the **user-facing runbook** ("how to hand-test X today"). Every
 procedure that lives there is, by definition, an MVD item — it should have a matching burndown row aimed at

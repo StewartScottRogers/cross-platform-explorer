@@ -239,5 +239,5 @@
   .btn.primary:not(:disabled):hover { background: var(--accent-hover); }
   /* The menu-colour rule bans red menu *text*; a destructive push-button may carry an accent fill. */
   .btn.danger { border-color: var(--danger); color: var(--danger); background: transparent; }
-  .btn.danger:not(:disabled):hover { background: var(--danger); color: #fff; }
+  .btn.danger:not(:disabled):hover { background: var(--danger-fill); color: #fff; }
 </style>
