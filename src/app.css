@@ -736,7 +736,22 @@
 
    Any class highlight.js can still emit that isn't listed below (e.g. hljs-subst, hljs-formula)
    inherits the surrounding --text colour — a safe, always-legible default for genuinely rare
-   classes, not a gap like hljs-attr was. */
+   classes, not a gap like hljs-attr was.
+
+   *** Load-bearing CVD cues — do not remove without re-running the CVD check. ***
+   `keyword` (bold, below) and `comment` (italic, further down) are not decoration: under protanopia
+   and deuteranopia simulation, `keyword`/`comment`/`tag` collapse into one near-neutral grey family
+   in the dark and hc-dark themes (near-zero hue difference — see CVD-SIMULATION-METHOD.md and
+   CPE-1648's ticket work log for the sampled hex values), and `keyword`/`title` collapse into one
+   indigo-blue family in the light and hc-light themes (CPE-1661). In both cases, what actually keeps
+   the pair legible for a colour-blind reader is the typographic split — bold vs italic vs plain —
+   not the hue. `src/app.css.hljs-contrast.test.ts` guards WCAG luminance contrast, which is a
+   SEPARATE concern and does not (cannot) notice a typographic cue disappearing; the CVD-cue guard in
+   `src/app.css.hljs-cvd.test.ts` (CPE-1661) is what would catch a regression here — it parses this
+   file's `font-weight`/`font-style` declarations for `.hljs-keyword` and `.hljs-comment` and fails if
+   either cue is dropped or its selector stops matching (verified red -> green: see that test file's
+   own header and the ticket's Work Log for the deliberate-breakage proof). Changing either cue is not
+   forbidden — dropping it silently, with no test noticing, is what this guard exists to prevent. */
 .hljs-keyword,
 .hljs-selector-tag {
   color: var(--hljs-keyword);
@@ -749,6 +764,30 @@
 .hljs-title,
 .hljs-section {
   color: var(--hljs-title);
+  /* CPE-1661: title is NOT bold by default (this covers the bare :root fallback + light + hc-light,
+     since the fallback shares light's palette values) — see the override right below for why
+     dark/hc-dark differ, and the "Load-bearing CVD cues" block near the bottom of this file for the
+     full accessibility rationale. */
+  font-weight: 400;
+}
+/* CPE-1661: keyword and title are the palette's only two BOLD buckets, and in light/hc-light their
+   hues collapse into the same indigo-blue family under protanopia/deuteranopia simulation (see the
+   ticket + .claude/qa-architecture/CVD-SIMULATION-METHOD.md) — bold only separates each of them
+   from plain code, it doesn't discriminate between the two of them, so that pair had colour and
+   nothing else. Fix: stop bolding `title` in the themes where the collision exists (the rule above),
+   leaving `keyword` as the SOLE bold token there — the same "one distinct typographic treatment per
+   near-collision pair" pattern that already rescues every other tight pair in this palette (comment
+   is italic, keyword is bold, everything else plain). Chosen over re-hueing `title` because it's the
+   cheaper fix, reuses a cue this palette already leans on, and matches how mainstream editor themes
+   usually treat keyword-vs-type-or-function-name (bold control flow, plain names) — it reads as MORE
+   conventional under normal vision, not a compromise.
+   dark/hc-dark never had this collision (CPE-1648 found no genuine collision there involving title),
+   so per the ticket's explicit "don't disturb dark" constraint this override restores their
+   pre-ticket bold `title` exactly as it was. */
+:root[data-theme="dark"] .hljs-title,
+:root[data-theme="dark"] .hljs-section,
+:root[data-theme="hc-dark"] .hljs-title,
+:root[data-theme="hc-dark"] .hljs-section {
   font-weight: 600;
 }
 .hljs-string,

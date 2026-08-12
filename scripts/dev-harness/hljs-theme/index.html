@@ -14,13 +14,14 @@
   page.
 
   Usage: `npm run harness:hljs-theme`, then open
-  http://localhost:4320/scripts/dev-harness/hljs-theme/index.html?theme=dark (theme = "light"|"dark",
-  default "light"). Dev-only; not part of the production build.
+  http://localhost:4320/scripts/dev-harness/hljs-theme/index.html?theme=dark (theme =
+  "light"|"dark"|"hc-light"|"hc-dark", default "light" — widened from light|dark by CPE-1661 so this
+  harness can also drive the two high-contrast themes). Dev-only; not part of the production build.
 -->
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <title>CPE-1631 harness — hljs theme</title>
+    <title>CPE-1631/1661 harness — hljs theme</title>
     <link rel="stylesheet" href="/src/app.css" />
     <style>
       body { padding: 16px; }
@@ -35,7 +36,7 @@
       /* Harness-local layout only (wrap + monospace + padding) — NOT a reproduction of
          PreviewPane.svelte's/NotebookPreview.svelte's real (Svelte-scoped) rules, see main.ts's
          comment. The colour rules under test (`.hljs-*`) come from the real, unscoped src/app.css. */
-      #code-preview, #nb-cell, #json-sample, #svelte-sample {
+      #rust-sample, #code-preview, #nb-cell, #json-sample, #svelte-sample {
         display: block; white-space: pre-wrap; word-break: break-word;
         font-family: var(--mono, ui-monospace, monospace); font-size: 12px;
         padding: 12px; background: var(--surface); color: var(--text);
@@ -44,6 +45,14 @@
   </head>
   <body>
     <div class="main with-details">
+      <section>
+        <h2>Rust sample (CPE-1661: the exact keyword/title tokens the ticket names — fn/let/struct vs Manifest/Path/Result)</h2>
+        <aside class="preview">
+          <div class="code-view">
+            <pre class="preview-text code-rows"><code class="cl-code" id="rust-sample"></code></pre>
+          </div>
+        </aside>
+      </section>
       <section>
         <h2>Plain code preview (PreviewPane.svelte markup: .code-view &gt; .cl-code &gt; .cl-row)</h2>
         <aside class="preview">
