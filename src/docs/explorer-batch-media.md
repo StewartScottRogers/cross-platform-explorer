@@ -59,7 +59,7 @@ operation twice** (e.g. two resizes), and remove any op from the list with its p
 | **Convert** | Target extension | `webp` | Re-encodes to a different format. Only **six** output formats exist: `png`, `jpg`/`jpeg`, `gif`, `webp`, `bmp`, `tif`/`tiff` — anything else (`heic`, `avif`, `psd`, `svg`, …) fails that file with a clear error rather than silently no-op'ing. The extension itself is folder-checked the same way a Rename template is (CPE-1623) — see *Where results land* below. |
 | **Rotate** | Degrees: 90 / 180 / 270 | 90 | Rotates clockwise by an exact right angle — no arbitrary-angle input. |
 | **Flip** | Horizontal / Vertical | Horizontal | Mirrors the image on the chosen axis. |
-| **Rename** | Template | `{stem}` | Renames the output using tokens `{stem}` (original filename, no extension), `{n}` (1-based position in the batch), and `{ext}` (the extension at that point in the pipeline) — e.g. `photo-{n}` on 3 files → `photo-1`, `photo-2`, `photo-3`. The template can only change the **name**, not the folder or the drive: `\`, `/`, `:`, and a whole `..` component are rejected (CPE-1623) — see *Where results land* below. A literal `..` inside an otherwise ordinary name (`shot..final`, a version stamp `v1..2`) is fine — only `..` occupying a whole path segment is a traversal risk. |
+| **Rename** | Template | `{stem}` | Renames the output using tokens `{stem}` (original filename, no extension), `{n}` (1-based position in the batch), and `{ext}` (the extension at that point in the pipeline) — e.g. `photo-{n}` on 3 files → `photo-1`, `photo-2`, `photo-3`. The template can only change the **name**, not the folder or the drive: `\`, `/`, and a whole `..` component are rejected everywhere, and `:` is rejected **on Windows only** (CPE-1623 / CPE-1640) — see *Where results land* below. A literal `..` inside an otherwise ordinary name (`shot..final`, a version stamp `v1..2`) is fine — only `..` occupying a whole path segment is a traversal risk. |
 | **Strip metadata** | — | — | Drops all embedded EXIF/IPTC/XMP by re-encoding from decoded pixels, which never carry it. Because a phone photo's on-disk orientation often depends on the EXIF `Orientation` tag, this first **bakes that orientation into the pixels** (an equivalent rotate/flip) so the image doesn't silently change apparent orientation once the tag is gone. |
 | **Compress** | Quality (1–100) | 80 | Re-encodes at the given quality. This **only has an effect when the output is a JPEG** — png/gif/bmp/tif have no quality knob, and this build's WebP encoder is lossless-only, so Compress on any of those is a graceful no-op (the file is still re-encoded, just at that format's normal settings). Order matters: **Convert then Compress** applies quality to the new format; Compress before a later Convert has nothing to act on. |
 | **Watermark** | Image (Browse…), corner (one of 5), opacity (0–100) | no image · bottom-right · 80 | Alpha-composites the chosen image onto each file at the given corner and opacity. **Optional by construction** — leave the image unset and the op contributes nothing (not even to the output filename). An overlay bigger than the base image is anchored at the corner and clipped, never scaled down. A missing or undecodable overlay file fails that op for that run (see *Failures* below), not the whole batch. |
@@ -102,16 +102,43 @@ that check (see next section) is what you can rely on, not a mental list of "saf
 
 There is **no subfolder option** — outputs always sit alongside their inputs. This is enforced, not just
 the default behaviour: a **Rename** template (and, as of the same fix, a **Convert** target extension)
-can't contain `\`, `/`, or `:`, or be a whole `..` path component (CPE-1623) — the field rejects it
+can't contain `\` or `/`, or be a whole `..` path component (CPE-1623) — the field rejects it
 immediately (before you can even click **+ Add**), and the backend independently re-derives the same
 "does this stay inside the input's own folder?" check — both when it plans a batch AND, again, right
-before it writes each file — so a template can't be used to walk the output out of the selected folder
-and quietly land on — and overwrite — an unrelated file elsewhere, no matter how the plan reached the
-write step. Separately, a computed output name that happens to already exist as a **real file this batch
+before it writes each file (CPE-1624) — so a template can't be used to walk the output out of the selected
+folder and quietly land on — and overwrite — an unrelated file elsewhere, no matter how the plan reached
+the write step. Separately, a computed output name that happens to already exist as a **real file this batch
 never selected** is treated exactly like an in-place overwrite: in non-destructive mode the planner picks
 a different, genuinely free name instead (the same `-2`, `-3` disambiguation already used for a collision
 within the batch); with the box unchecked, it's refused the same way an in-place overwrite is (see the
 next section) — Apply never silently clobbers a stranger's file.
+
+**A colon (`:`) is rejected on Windows only (CPE-1640).** On Windows a colon is reserved twice over — it
+separates a drive letter (`C:foo` means "drive C's current folder", not a file called `C:foo`) and it
+separates an NTFS *alternate data stream*, a hidden second body of bytes attached to an existing file. So
+on Windows a template containing a colon anywhere is refused, in the field and again in the engine. On
+**Linux and macOS a colon is an ordinary, legal filename character**, so a template like `10:30am-photo`
+or `session:final` is simply accepted there. This is not a relaxation of any safety rule: the guarantee
+that outputs stay in their input's folder is a separate, unconditional check on the finished path, and it
+behaves identically on all three platforms.
+
+**Every safety question is answered on the file the bytes actually go into, at the moment they go in
+(CPE-1624).** A long batch — or one with slow per-file work like watermarking — leaves a window in which
+something else on the machine (another app, a sync client, a malicious script) can change what a name
+points at after the batch has started. Checking the *name* again is not enough, because the whole trick
+is changing what the name refers to. So the app instead **opens the output file once, refuses to follow
+any shortcut or link at it, checks that exact opened file, and writes through it** — the file being
+checked and the file being written are guaranteed to be the same one. If the check fails, that file is
+**skipped with a reason** in the results panel and the rest of the batch carries on normally.
+
+Two consequences you may notice:
+
+- **Batch Media never writes through a shortcut, symlink or junction.** If a planned output name turns
+  out to be one, it is skipped rather than followed — following it could put your images somewhere you
+  never chose.
+- **A file with more than one name is checked properly.** On Windows and Linux a single file can have
+  several names (hard links). If a planned output has other names living outside the folder you picked,
+  writing to it would change a file outside that folder, so it is refused.
 
 ### Confirming an in-place overwrite (CPE-1590)
 
@@ -224,11 +251,17 @@ You've selected 40 JPEGs to prep for a web gallery: shrink them, convert to WebP
   run any plan containing an in-place overwrite unless it's explicitly told this confirmation happened —
   this dialog's "Overwrite N files" button is the only place that ever does. You won't notice this in
   normal use; it exists so nothing else that might call the batch-media engine can skip the confirmation.
-- **A Rename template (or Convert extension) can't leave the selected folder (CPE-1623).** `\`, `/`, `:`,
-  and a whole `..` path component are rejected in the field itself, and the backend independently
-  re-checks containment on its own — both when it plans a batch and again immediately before writing each
-  file — so outputs always stay in the same folder as their inputs, with no exception, regardless of how
-  a plan reached the write step. A rename that would otherwise land on a real, pre-existing file this batch
-  never selected is treated as an overwrite too: renamed past automatically in non-destructive mode, or
-  refused (same as an in-place overwrite) with the box unchecked.
+- **A Rename template (or Convert extension) can't leave the selected folder (CPE-1623).** `\`, `/`, and a
+  whole `..` path component are rejected in the field itself (plus `:` on Windows — see CPE-1640 above),
+  and the backend independently re-checks containment on its own — both when it plans a batch and again
+  immediately before writing each file — so outputs always stay in the same folder as their inputs, with no
+  exception, regardless of how a plan reached the write step. A rename that would otherwise land on a real,
+  pre-existing file this batch never selected is treated as an overwrite too: renamed past automatically in
+  non-destructive mode, or refused (same as an in-place overwrite) with the box unchecked.
+- **Hidden writes onto a *different* file are refused outright (CPE-1624).** On Windows, a path containing
+  a colon can name an "alternate data stream" — hidden bytes stored inside an existing, unrelated file,
+  invisible in Explorer and not counted in that file's size. Batch Media never produces such a path itself,
+  and now refuses one outright if anything hands it one, saying so in plain terms rather than reporting it
+  as a folder escape (it isn't one — the data would have stayed in the folder, just hidden on the wrong
+  file).
 - **No command-palette entry or shortcut** — right-click is the only way in.
