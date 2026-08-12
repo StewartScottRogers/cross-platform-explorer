@@ -489,6 +489,16 @@ enum PathKey {
 /// per-write re-check CPE-1624 adds) genuinely re-resolves that file's identity rather than replaying a
 /// plan-time answer — the cache narrows the TOCTOU window instead of widening it. Only facts about
 /// *directories* (which the batch neither creates nor moves) are reused.
+///
+/// **`dir_scans` IS reused across the write-time re-checks, and that is sound in the fail-closed
+/// direction (CPE-1624 × CPE-1652).** One cache is threaded through
+/// [`crate::batch_execute::execute_plan_walk`]'s up-front scan *and* every per-item re-check, so the new
+/// guard adds **zero** censuses — the whole point of CPE-1652 finding B. A stale census can only ever
+/// mis-decide in the safe direction, because the *link count* it is compared against is re-probed fresh
+/// every time: a name added outside the folder mid-batch raises `links` while the memoized `inside`
+/// count stays put, so the verdict flips to a refusal; a name added *inside* the folder likewise leaves
+/// the memo undercounting, which also refuses. Only removing an outside name relaxes the verdict, and
+/// that genuinely does make the write safe.
 #[derive(Debug, Default)]
 pub(crate) struct ParentCache {
     parents: std::collections::HashMap<String, Option<std::path::PathBuf>>,
