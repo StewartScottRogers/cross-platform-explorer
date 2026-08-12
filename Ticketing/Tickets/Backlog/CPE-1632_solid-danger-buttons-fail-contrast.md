@@ -82,3 +82,92 @@ colours and waiting for a third to be spotted, this ticket should:
 
 Note that CPE-1618's own component-scoped active-chip contrast issue is being fixed within that ticket and is
 not part of this one; only the shared `--text-faint` pairing is.
+
+---
+
+## Work Log — 2026-08-11 (resumed after a killed worker)
+
+Picked up mid-flight: a prior worker had already done the substantive work on disk, uncommitted. Verified
+it, closed two small gaps, and shipped it.
+
+**What was already done (verified correct):**
+- `src/app.css.light-contrast.test.ts` (new) — the light-theme mirror of the existing dark-theme WCAG guard
+  (`app.css.dark-contrast.test.ts`, CPE-1539): mathematically checks `--text`, `--danger`, `--success`,
+  `--text-dim`, `--text-faint`, `--border-strong`, `--dialog-border`, `--accent`, and the six agent colours
+  against every surface they actually render on, in the light palette. This is what should have existed
+  from CPE-1534/1539 and is why the `--text-faint` failure went undetected.
+- `src/app.css.solid-fill-contrast.test.ts` (new) — **the real deliverable**. Parses `app.css` + every
+  `.svelte` component's `<style>` block, finds every CSS rule with a `background`/`background-color`
+  declaration, and resolves the literal foreground colour that actually paints on top of it (same-rule
+  `color:`, or inherited via the app's dominant `.btn.primary { color:#fff }` + `.btn.primary.danger {
+  background: var(--danger) }` cascade pattern — checked by selector class-subset, real CSS semantics, not
+  a guess). Every resolved white-on-token pairing is asserted at WCAG's 3:1 UI-component floor in **both**
+  `light` and `dark`. This is derived from real usage, not a hand list — a `--warn` badge, `--accent-2`
+  fallback token (used only in `BackupDashboard.svelte`, never defined as a real token), and three
+  hard-coded-hex badges (`#3a9d4a`, `#b5872b`, `#3a72b5`) were picked up automatically alongside
+  `--accent`/`--accent-hover`/`--danger`/`--danger-hover`, none of which were in the ticket's own
+  hand-written surface list. A sanity test pins that the scanner still finds `--accent`/`--danger` as a
+  regression guard on the scanner itself.
+- `app.css.dark-contrast.test.ts` extended with `--surface-alt` and a `--text-faint` >= 4.5:1 assertion
+  (dark already passed at 5.16:1; the fix was needed in light only).
+- Colour fixes, all via semantic/palette tokens (no hard-coded hex added), defined in both light and dark
+  where applicable:
+  - `--pal-gray-400` (`--border-strong`): `#b3b3b3` → `#828282` (light only; dark already had its own
+    re-derived `--pal-dark-gray-500`).
+  - `--pal-gray-600` (`--text-faint`): `#8a8a8a` → `#6c6c6c` (light only; dark's `--pal-dark-gray-300`
+    already passed).
+  - `--pal-okabe-orange` / `--pal-okabe-sky-blue` (agent-legend swatches): darkened, hue preserved.
+  - `--pal-dark-blue-400`/`-300` (dark `--accent`/`--accent-hover`): darkened so the solid-fill role
+    (white-on-fill button background) clears 3:1 without regressing the existing foreground-text role.
+  - `--pal-dark-red-400`/`-300` (dark `--danger`/`--danger-hover`): same two-role treatment — this is
+    the ticket's original named defect (white-on-solid-danger).
+  - `src/lib/components/BackupDashboard.svelte`'s `.mirror.auto` background: the `var(--accent-2, #2a7)`
+    fallback (`--accent-2` is never defined as a real token anywhere) darkened to `#209764`, since the
+    guard resolves and checks literal CSS fallbacks too, not just real tokens.
+
+**What I did this session:**
+1. Read the ticket + the full uncommitted diff, ran `npm run check` (0 errors) and the full `npx vitest run`
+   suite (289 files / 3653 tests, all green, including the three contrast-guard files: 37/37) to confirm the
+   inherited work was actually correct and complete, not just plausible-looking.
+2. Found and fixed one inaccuracy: the `--pal-gray-600` change comment in `app.css` claimed the *old* value
+   measured 3.79:1 against `--bg` (#f3f3f3); recomputed with the guard's own contrast function and the real
+   figure is **3.11:1** (still under the 4.5:1 floor, same conclusion, but the number was wrong). Fixed the
+   comment. No test or token value depended on the wrong number — it was prose only.
+3. Confirmed CPE-1649 (the follow-on high-contrast-theme finding filed by the prior worker) stays in the
+   commit as a Backlog ticket, untouched, per instruction.
+4. Re-ran the full suite after the comment fix; still 289/3653 green, `npm run check` still 0 errors.
+
+**Judgment calls (none forced beyond what the prior worker already logged in-code):** the accent/danger
+"hover brightens / hover darkens" directionality was preserved from the existing light-theme convention
+rather than re-decided from scratch; `--success` is graded against the 3:1 non-text floor rather than 4.5:1
+because its only real consumer (`Sidebar`'s `.state-dot.state-connected`) is a status dot, not text — both
+calls are documented in-line in the test files' own comments, not just here.
+
+**Contrast ratios (before → after), light theme:**
+| Token | Pairing | Before | After | Floor |
+|---|---|---|---|---|
+| `--border-strong` | vs `--surface` (#fff) | 2.10:1 | 3.84:1 | 3:1 |
+| `--border-strong` | vs `--surface-alt` (#fbfbfb) | 2.03:1 | 3.71:1 | 3:1 |
+| `--text-faint` | vs `--surface` (#fff) | 3.45:1 | 5.25:1 | 4.5:1 |
+| `--text-faint` | vs `--surface-alt` (#fbfbfb) | 3.34:1 | 5.07:1 | 4.5:1 |
+| `--text-faint` | vs `--bg` (#f3f3f3) | 3.11:1 | 4.73:1 | 4.5:1 |
+| `--agent-5` (okabe-orange) | vs `--surface` | 2.25:1 | 3.68:1 | 3:1 |
+| `--agent-6` (okabe-sky-blue) | vs `--surface` | 2.31:1 | 3.69:1 | 3:1 |
+| `--accent-2` fallback (BackupDashboard) | white-on-fill | 2.96:1 | 3.70:1 | 3:1 |
+| `--accent` / `--danger` (light) | white-on-fill | 5.67 / 5.66 | unchanged | 3:1 (already passed) |
+
+**Contrast ratios (before → after), dark theme:**
+| Token | Pairing | Before | After | Floor |
+|---|---|---|---|---|
+| `--danger` | white-on-solid-fill (the ticket's named defect) | 2.88:1 | 3.08:1 | 3:1 |
+| `--danger-hover` | white-on-solid-fill | 2.28:1 | 3.57:1 | 3:1 |
+| `--accent` | white-on-solid-fill | 2.59:1 | 4.41:1 | 3:1 |
+| `--accent-hover` | white-on-solid-fill | 1.80:1 | 3.45:1 | 3:1 |
+| `--accent` | foreground vs `--bg` / `--surface` (pre-existing role, re-checked not regressed) | — | 3.70 / 3.21 | 3:1 |
+| `--text-faint` | vs `--bg`/`--surface`/`--surface-alt` | already passing (5.16:1+) | unchanged | 4.5:1 |
+
+**Verification:** `npm run check` → 0 errors, 0 warnings. `npx vitest run` → 289 files, 3653 tests, all
+passing, including the three contrast-guard files (dark 12, light 9, solid-fill 16 = 37 tests). Not
+independently re-verified in a real browser this session (the prior worker's Visual Critic finding is what
+seeded the two starting numbers; the new guard's own math is the regression backstop going forward) —
+flagging this per the ticket's acceptance criteria, which asks for real-browser confirmation in both themes.

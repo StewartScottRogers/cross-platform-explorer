@@ -179,8 +179,10 @@ describe("app.css dark palette completeness (CPE-1539)", () => {
 describe("app.css dark palette WCAG AA contrast (CPE-1539)", () => {
   const bg = resolveHex(darkSemanticDecls.get("--bg")!)!;
   const surface = resolveHex(darkSemanticDecls.get("--surface")!)!;
+  const surfaceAlt = resolveHex(darkSemanticDecls.get("--surface-alt")!)!;
   const text = resolveHex(darkSemanticDecls.get("--text")!)!;
   const textDim = resolveHex(darkSemanticDecls.get("--text-dim")!)!;
+  const textFaint = resolveHex(darkSemanticDecls.get("--text-faint")!)!;
   const accent = resolveHex(darkSemanticDecls.get("--accent")!)!;
   const borderStrong = resolveHex(darkSemanticDecls.get("--border-strong")!)!;
   const dialogBorder = resolveHex(darkSemanticDecls.get("--dialog-border")!)!;
@@ -191,8 +193,10 @@ describe("app.css dark palette WCAG AA contrast (CPE-1539)", () => {
     for (const [name, hex] of [
       ["--bg", bg],
       ["--surface", surface],
+      ["--surface-alt", surfaceAlt],
       ["--text", text],
       ["--text-dim", textDim],
+      ["--text-faint", textFaint],
       ["--accent", accent],
       ["--border-strong", borderStrong],
       ["--dialog-border", dialogBorder],
@@ -226,6 +230,18 @@ describe("app.css dark palette WCAG AA contrast (CPE-1539)", () => {
   it("--text-dim on --bg and --surface >= 3:1 (secondary/large text)", () => {
     expect(contrastRatio(textDim, bg)).toBeGreaterThanOrEqual(3);
     expect(contrastRatio(textDim, surface)).toBeGreaterThanOrEqual(3);
+  });
+
+  // CPE-1632: --text-faint renders real small/normal-weight body text (the log viewer's TRACE
+  // badge + gutter line numbers, "This file is empty."/"Loading…" notes) at sizes too small to
+  // qualify as WCAG "large text", so — unlike --text-dim above — it gets the full 4.5:1 body-text
+  // floor, checked against every surface it actually appears on. (Dark theme already clears this;
+  // the light-theme mirror in src/app.css.light-contrast.test.ts is where CPE-1632 found the real
+  // failure — 3.45:1/3.34:1, since fixed.)
+  it("--text-faint on --bg, --surface, and --surface-alt >= 4.5:1 (WCAG AA normal text)", () => {
+    expect(contrastRatio(textFaint, bg)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(textFaint, surface)).toBeGreaterThanOrEqual(4.5);
+    expect(contrastRatio(textFaint, surfaceAlt)).toBeGreaterThanOrEqual(4.5);
   });
 
   // Non-text UI component contrast — WCAG 2.1 SC 1.4.11 requires >=3:1 for a control's visual
