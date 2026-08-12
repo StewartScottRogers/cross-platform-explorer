@@ -553,13 +553,13 @@
       const reports = unwrap(await commands.verifyAllBaselines(integrityBaselines)) as Record<string, IntegrityReport>;
       const flagged = Object.values(reports).filter((r) => r.corrupted.length > 0 || r.missing.length > 0);
       if (flagged.length === 0) {
-        showNotice(`All ${paths.length} baselined folder${paths.length === 1 ? "" : "s"} verified — no issues.`, false);
+        showNotice($t(paths.length === 1 ? "notice.baselineCleanOne" : "notice.baselineCleanMany", { count: paths.length }), false);
       } else {
         const bad = flagged.reduce((n, r) => n + r.corrupted.length + r.missing.length, 0);
-        showNotice(`${flagged.length} of ${paths.length} baselined folders have issues — ${bad} file${bad === 1 ? "" : "s"} corrupted or missing. Open Integrity to review.`, true);
+        showNotice($t(bad === 1 ? "notice.baselineIssuesOne" : "notice.baselineIssuesMany", { flagged: flagged.length, total: paths.length, bad }), true);
       }
     } catch (e) {
-      showNotice(`Verify all failed: ${e}`, true);
+      showNotice($t("notice.verifyAllFailed", { error: String(e) }), true);
     }
   }
   let selectByOpen = false;
@@ -609,9 +609,9 @@
       });
       const failed = results.filter((r) => !r.ok).length;
       recordBackupRun(job.id, { when: Date.now(), ok: results.length - failed, failed, label: "auto" });
-      showNotice(`Auto-backup "${job.name}": ${results.length - failed} copied${failed ? `, ${failed} failed` : ""}`);
+      showNotice(failed ? $t("notice.autoBackupDoneWithFailures", { name: job.name, copied: results.length - failed, failed }) : $t("notice.autoBackupDone", { name: job.name, copied: results.length - failed }));
     } catch (e) {
-      showNotice(`Auto-backup "${job.name}" failed: ${e}`, true);
+      showNotice($t("notice.autoBackupFailed", { name: job.name, error: String(e) }), true);
     }
   }
 
@@ -928,7 +928,7 @@
     try {
       const macro = unwrap(await commands.macroLoad(name));
       if (!macro) {
-        showNotice(`Macro "${name}" is gone.`, true);
+        showNotice($t("notice.macroGone", { name }), true);
         await refreshMacroSummaries();
         return;
       }
@@ -1272,7 +1272,7 @@
       }
       lastAutoSync.set(path, Date.now());
       if (currentPath === path) { await refreshGitStatus(path); refresh(); }
-      showNotice(`Auto-synced ${new Date().toLocaleTimeString()}`, false);
+      showNotice($t("notice.autoSynced", { time: new Date().toLocaleTimeString() }), false);
     } catch (e) {
       // A failed background sync must never nag repeatedly: back off by marking it "done" for this
       // interval, and surface once.
@@ -1452,7 +1452,7 @@
         confirm = null;
         try {
           const results = await commands.deleteToTrash([item.path]);
-          reportResults(results, "Moved to Recycle Bin:");
+          reportResults(results, "moveToBin");
           if (canRestoreTrash) {
             const restored = results.filter((r) => r.ok).map((r) => ({ from: r.path, to: "" }));
             if (restored.length > 0) {
@@ -1626,9 +1626,9 @@
   async function ejectDrive(path: string, name: string) {
     try {
       unwrap(await commands.ejectDrive(path));
-      showNotice(`${name} is safe to remove.`);
+      showNotice($t("notice.safeToRemove", { name }));
     } catch (e) {
-      showNotice(typeof e === "string" ? e : `Couldn't eject ${name}.`, true);
+      showNotice(typeof e === "string" ? e : $t("notice.ejectFailed", { name }), true);
     }
     // Refresh drives + removable flags regardless: on success the drive is gone; on failure state is fresh.
     try {
@@ -1922,11 +1922,11 @@
         const { dest, name } = extractHereDest(entry);
         promptForExtractPassword(entry, dest, currentPath, () => {
           pendingSelectPath = dest;
-          showNotice(`"${entry.name}" is password-protected — extracted to "${name}" instead of opening in place.`);
+          showNotice($t("notice.archivePwProtectedExtracted", { archiveName: entry.name, destName: name }));
         });
         return;
       }
-      showNotice(`Couldn't open the archive "${entry.name}".`, true);
+      showNotice($t("notice.archiveOpenFailed", { name: entry.name }), true);
     }
   }
 
@@ -1997,14 +1997,14 @@
           extractArchiveEntryAny?: (zip: string, inner: string) => Promise<{ status: "ok"; data: string } | { status: "error"; error: unknown }>;
         };
         if (typeof anyCmds.extractArchiveEntryAny !== "function") {
-          showNotice(`Can't open "${entry.name}" from this archive type yet.`, true);
+          showNotice($t("notice.archiveTypeUnsupported", { name: entry.name }), true);
           return;
         }
         temp = unwrap(await anyCmds.extractArchiveEntryAny(zipPath, entry.path));
       }
       unwrap(await commands.openExternal(temp));
     } catch {
-      showNotice(`Couldn't open "${entry.name}" from the archive.`, true);
+      showNotice($t("notice.archiveEntryOpenFailed", { name: entry.name }), true);
     }
   }
 
@@ -2226,7 +2226,7 @@
       recents = settings.addRecent(recents, { path: entry.path, name: entry.name });
       settings.saveRecents(recents);
     } catch {
-      showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
+      showNotice($t("notice.noAssociatedApp", { name: entry.name }), true);
     }
   }
 
@@ -2274,7 +2274,7 @@
     if (sources.length === 0 || !to) return;
     try {
       const results = await commands.moveEntries(sources, to);
-      reportResults(results, "Moved");
+      reportResults(results, "move");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -2371,7 +2371,7 @@
       if (r.status !== "ok") throw new Error(r.error);
       await navigate(expanded);
     } catch {
-      showNotice(`Can't find "${raw}". Check the spelling and try again.`, true);
+      showNotice($t("notice.pathNotFound", { path: raw }), true);
     }
   }
 
@@ -2401,7 +2401,7 @@
       settings.saveRecents(recents);
     } catch (e) {
       console.debug("open failed:", e);
-      showNotice(`Can't open "${entry.name}" — no app is associated with this file type.`, true);
+      showNotice($t("notice.noAssociatedApp", { name: entry.name }), true);
     }
   }
 
@@ -2457,14 +2457,14 @@
       isVault = unwrap(await commands.vaultIs(entry.path));
     } catch (e) {
       // Transient read failure — surface it, but never open the encrypted blob externally as a fallback.
-      showNotice(`Couldn't read "${entry.name}": ${String(e)}`, true);
+      showNotice($t("notice.vaultReadFailed", { name: entry.name, error: String(e) }), true);
       return;
     }
     if (!isVault) {
       try {
         unwrap(await commands.openExternal(entry.path));
       } catch {
-        showNotice(`Can't open "${entry.name}".`, true);
+        showNotice($t("notice.cantOpen", { name: entry.name }), true);
       }
       return;
     }
@@ -2490,7 +2490,7 @@
           const sessionDir = await unlockVault(entry.path, passphrase);
           passwordPrompt = null;
           await navigate(sessionDir);
-          showNotice(`Unlocked "${entry.name}".`);
+          showNotice($t("notice.vaultUnlocked", { name: entry.name }));
         } catch (e) {
           promptForVaultPassphrase(entry, classifyUnlockError(e));
         }
@@ -2509,13 +2509,10 @@
     await navigate(back);
     try {
       await lockVault(blobPath);
-      showNotice(`Locked "${vaultDisplayName(blobPath)}".`);
+      showNotice($t("notice.vaultLocked", { name: vaultDisplayName(blobPath) }));
     } catch {
       if (sessionDir) await navigate(sessionDir); // re-expose the banner's Lock button for a retry
-      showNotice(
-        `Couldn't lock "${vaultDisplayName(blobPath)}" — some files may still be in use. Try again.`,
-        true,
-      );
+      showNotice($t("notice.vaultLockFailed", { name: vaultDisplayName(blobPath) }), true);
     }
   }
 
@@ -2576,7 +2573,7 @@
       await loadPath(currentPath, true);
     }
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
-    showNotice(`Created encrypted vault "${vaultDisplayName(dest)}".`);
+    showNotice($t("notice.vaultCreated", { name: vaultDisplayName(dest) }));
   }
 
   // ---- Certificate management (CPE-1423/1424, epic CPE-1417) ------------------------------------
@@ -2646,7 +2643,7 @@
       await loadPath(currentPath, true);
     }
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
-    showNotice(`Created certificate "${fileNameOf(certPath)}".`);
+    showNotice($t("notice.certCreated", { name: fileNameOf(certPath) }));
   }
 
   /** `SignCertDialog`'s `created` handler: the issued certificate's full path. Same refresh reasoning as
@@ -2661,7 +2658,7 @@
       await loadPath(currentPath, true);
     }
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
-    showNotice(`Issued certificate "${fileNameOf(certPath)}".`);
+    showNotice($t("notice.certIssued", { name: fileNameOf(certPath) }));
   }
 
   /** Basename of a full path, separator-agnostic — for the create/issue success toasts above. */
@@ -2707,7 +2704,7 @@
     if (norm === normalizePath(currentPath)) await loadPath(currentPath, true);
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
     const n = detail.manifest.part_count;
-    showNotice(`Split "${baseName(target.path)}" into ${n} part${n === 1 ? "" : "s"}.`);
+    showNotice($t(n === 1 ? "notice.splitDoneOne" : "notice.splitDoneMany", { name: baseName(target.path), count: n }));
   }
 
   /** `JoinPartsDialog`'s `joined` handler: `outPath`'s full path — refresh whichever pane(s) currently
@@ -2722,7 +2719,7 @@
       await loadPath(currentPath, true);
     }
     if (dualPane && paneBPath && norm === normalizePath(paneBPath)) await explorerPaneB?.loadListing(paneBPath, false);
-    showNotice(`Joined into "${baseName(outPath)}".`);
+    showNotice($t("notice.joinedInto", { name: baseName(outPath) }));
   }
 
   async function openRecent(path: string) {
@@ -2764,7 +2761,7 @@
     if (!entry?.is_dir) return;
     const tab: Tab = { id: nextTabId++, history: createHistory(entry.path) };
     tabs = [...tabs, tab];
-    showNotice(`Opened "${entry.name}" in a new tab.`);
+    showNotice($t("notice.openedInNewTab", { name: entry.name }));
   }
 
   function closeTab(id: number) {
@@ -2835,8 +2832,8 @@
     selection = selectIndices(idx, selection.lead);
     showNotice(
       idx.length === 0
-        ? "No items match that criterion."
-        : `Selected ${idx.length} item${idx.length === 1 ? "" : "s"}.`,
+        ? $t("notice.selectByNoneMatch")
+        : $t(idx.length === 1 ? "notice.selectedItemsOne" : "notice.selectedItemsMany", { count: idx.length }),
     );
   }
 
@@ -2864,8 +2861,8 @@
     selection = selectIndices(idx, selection.lead);
     showNotice(
       idx.length === 0
-        ? `No items match "${pattern}".`
-        : `Selected ${idx.length} item${idx.length === 1 ? "" : "s"} matching "${pattern}".`,
+        ? $t("notice.selectByPatternNoneMatch", { pattern })
+        : $t(idx.length === 1 ? "notice.selectedItemsMatchingOne" : "notice.selectedItemsMatchingMany", { count: idx.length, pattern }),
     );
   }
 
@@ -2965,18 +2962,46 @@
   }
 
   // ---- file operations ----
-  function reportResults(results: OpResult[], verb: string) {
+  /** Which file op just ran — drives the translated success/failure wording `reportResults` shows.
+   *  Kept as an identifier (not the display text itself, CPE-1634) so every caller stays English-free;
+   *  the actual per-language sentences live in the `op.*` catalog keys below. */
+  type OpKind = "move" | "moveToBin" | "rename" | "duplicate" | "deletePermanent" | "deleteSecure";
+  const OP_SUCCESS_ONE: Record<OpKind, string> = {
+    move: "op.moveOne",
+    moveToBin: "op.moveToBinOne",
+    rename: "op.renameOne",
+    duplicate: "op.duplicateOne",
+    deletePermanent: "op.deletePermanentOne",
+    deleteSecure: "op.deleteSecureOne",
+  };
+  const OP_SUCCESS_MANY: Record<OpKind, string> = {
+    move: "op.moveMany",
+    moveToBin: "op.moveToBinMany",
+    rename: "op.renameMany",
+    duplicate: "op.duplicateMany",
+    deletePermanent: "op.deletePermanentMany",
+    deleteSecure: "op.deleteSecureMany",
+  };
+  const OP_FAILED_SINGLE: Record<OpKind, string> = {
+    move: "op.failedSingleMove",
+    moveToBin: "op.failedSingleMoveToBin",
+    rename: "op.failedSingleRename",
+    duplicate: "op.failedSingleDuplicate",
+    deletePermanent: "op.failedSingleDeletePermanent",
+    deleteSecure: "op.failedSingleDeleteSecure",
+  };
+  function reportResults(results: OpResult[], opKind: OpKind) {
     const failed = results.filter((r) => !r.ok);
     if (failed.length === 0) {
-      showNotice(`${verb} ${results.length} item${results.length === 1 ? "" : "s"}.`);
+      showNotice($t(results.length === 1 ? OP_SUCCESS_ONE[opKind] : OP_SUCCESS_MANY[opKind], { count: results.length }));
     } else {
       // Never swallow a partial failure — name what went wrong.
       const first = failed[0];
-      const name = first.path.split(/[\\/]/).pop();
+      const name = first.path.split(/[\\/]/).pop() ?? first.path;
       showNotice(
         failed.length === 1
-          ? `Couldn't ${verb.toLowerCase()} "${name}": ${first.error}`
-          : `${failed.length} of ${results.length} items failed. First: "${name}" — ${first.error}`,
+          ? $t(OP_FAILED_SINGLE[opKind], { name, error: first.error })
+          : $t("op.failedMany", { failed: failed.length, total: results.length, name, error: first.error }),
         true,
       );
     }
@@ -3023,7 +3048,7 @@
     ]);
     try {
       const results = await commands.moveExact(pairs);
-      reportResults(results, "Renamed");
+      reportResults(results, "rename");
       const moves = results
         .map((r, i) => ({ from: pairs[i][0], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -3056,7 +3081,7 @@
       return;
     }
     if (skipped > 0) {
-      showNotice(`${skipped} of ${pane.selectedEntries.length} files aren't images and will be skipped.`);
+      showNotice($t("notice.imagesSkipped", { skipped, total: pane.selectedEntries.length }));
     }
     batchMediaFor = { entries: eligible, inPaneB, dir: inPaneB ? paneBPath : currentPath };
   }
@@ -3077,21 +3102,32 @@
     if (failures.length === 0 && partial.length === 0) return false;
     if (failures.length > 0) {
       const name = failures[0].split(/[\\/]/).pop() || failures[0];
-      const rest = failures.length === 1 ? "" : ` (+${failures.length - 1} more)`;
-      const partialNote =
-        partial.length > 0
-          ? ` Also, ${partial.length} other folder${partial.length === 1 ? "" : "s"} has a checkpoint that didn't fully cover every file.`
-          : "";
-      showNotice(
-        `No checkpoint was taken for "${name}"${rest} before the overwrite — no recovery net for the originals there.${partialNote}`,
-        true,
-      );
+      const extra = failures.length - 1;
+      const partialCount = partial.length;
+      // CPE-1634: a single $t() call per combination — never concatenate separately-translated
+      // fragments into one sentence (word order/pluralization differ too much across languages for
+      // that to read correctly; see the ticket). "folder(s)"/"file(s)" is a deliberate least-bad
+      // shorthand in the English source strings themselves since this i18n layer has no CLDR plural
+      // rules (see interpolate() in lib/i18n.ts) — documented in the ticket's work log.
+      const key =
+        extra === 0
+          ? partialCount === 0
+            ? "notice.checkpointFailed"
+            : "notice.checkpointFailedPartial"
+          : partialCount === 0
+            ? "notice.checkpointFailedExtra"
+            : "notice.checkpointFailedExtraPartial";
+      showNotice($t(key, { name, extra, partialCount }), true);
     } else {
       const p = partial[0];
       const name = p.dir.split(/[\\/]/).pop() || p.dir;
-      const rest = partial.length === 1 ? "" : ` (+${partial.length - 1} more)`;
+      const extra = partial.length - 1;
       showNotice(
-        `The pre-overwrite checkpoint for "${name}"${rest} didn't fully cover the originals there — recovery is incomplete for ${p.skippedCount} file${p.skippedCount === 1 ? "" : "s"} there.`,
+        $t(extra === 0 ? "notice.checkpointPartialOnly" : "notice.checkpointPartialOnlyExtra", {
+          name,
+          extra,
+          skippedCount: p.skippedCount,
+        }),
         true,
       );
     }
@@ -3109,12 +3145,12 @@
     if (noticeCheckpointFailures(checkpointFailures, checkpointPartial)) {
       // the checkpoint warning stands alone — don't overwrite it with the routine summary
     } else if (failed === 0) {
-      showNotice(`Converted ${report.written} item${report.written === 1 ? "" : "s"}.`);
+      showNotice($t(report.written === 1 ? "notice.convertedOne" : "notice.convertedMany", { count: report.written }));
     } else {
       const [firstPath, firstReason] = report.skipped[0];
-      const name = firstPath.split(/[\\/]/).pop();
+      const name = firstPath.split(/[\\/]/).pop() ?? firstPath;
       showNotice(
-        `${report.written} converted, ${failed} skipped: first "${name}" — ${firstReason}`,
+        $t("notice.convertedWithSkipped", { written: report.written, failed, name, reason: firstReason }),
         report.written === 0,
       );
     }
@@ -3199,11 +3235,11 @@
       if (failed.length > 0) {
         // Do NOT pop the entry on failure — the user can retry once they've
         // cleared whatever is in the way.
-        showNotice(`Couldn't undo: ${failed[0].error}`, true);
+        showNotice($t("notice.undoFailed", { error: failed[0].error }), true);
         return;
       }
       undoStack = rest;
-      showNotice(`Undone: ${entry.label}`);
+      showNotice($t("notice.undone", { label: entry.label }));
       await loadPath(currentPath);
     } catch (e) {
       showNotice(String(e), true);
@@ -3324,7 +3360,7 @@
    *  reload so its badge/status catches up, and close the dialog. */
   async function onLinkRepaired(newTarget: string) {
     repairLinkFor = null;
-    showNotice(`Repaired link → ${newTarget}`);
+    showNotice($t("notice.linkRepaired", { target: newTarget }));
     await loadPath(currentPath);
   }
 
@@ -3378,7 +3414,7 @@
     const pane = paneStateFor(inPaneB);
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
     clipboard = stage(pane.selectedEntries.map((e) => e.path), "copy");
-    showNotice(`Copied ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
+    showNotice($t(clipboard.paths.length === 1 ? "notice.copiedItemsOne" : "notice.copiedItemsMany", { count: clipboard.paths.length }));
   }
 
   /** Same pane-aware reasoning as `doCopy` (CPE-1380) — the cut set is captured from whichever pane was
@@ -3388,7 +3424,7 @@
     const pane = paneStateFor(inPaneB);
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
     clipboard = stage(pane.selectedEntries.map((e) => e.path), "cut");
-    showNotice(`Cut ${clipboard.paths.length} item${clipboard.paths.length === 1 ? "" : "s"}.`);
+    showNotice($t(clipboard.paths.length === 1 ? "notice.cutItemsOne" : "notice.cutItemsMany", { count: clipboard.paths.length }));
   }
 
   /** Add the pane's current selection to the Drop Stack (CPE-1531, epic CPE-1489) — the persistent
@@ -3403,7 +3439,7 @@
     const from = inPaneB ? paneBPath : currentPath;
     addToDropStack(pane.selectedEntries.map((e) => e.path), from);
     const n = pane.selectedEntries.length;
-    showNotice(`Added ${n} item${n === 1 ? "" : "s"} to the Drop Stack.`);
+    showNotice($t(n === 1 ? "notice.addedToDropStackOne" : "notice.addedToDropStackMany", { count: n }));
   }
 
   /** Browse to a folder via the native picker and navigate there (CPE-366) — avoids
@@ -3471,7 +3507,7 @@
     // MOVE → existing synchronous path (keeps undo).
     try {
       const results = await commands.moveEntries(sources, dest);
-      reportResults(results, "Moved");
+      reportResults(results, "move");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -3594,7 +3630,7 @@
     clipboard = emptyClipboard();
     try {
       const results = await commands.moveEntries(sources, destPath);
-      reportResults(results, "Moved");
+      reportResults(results, "move");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -3663,7 +3699,7 @@
     dropStackMoveInFlight = true;
     try {
       const results = await commands.moveEntries(sources, currentPath);
-      reportResults(results, "Moved");
+      reportResults(results, "move");
       const moves = results
         .map((r, i) => ({ from: sources[i], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -3794,7 +3830,7 @@
     const text = formatPathsForClipboard(entries.map((e) => e.path));
     try {
       await navigator.clipboard.writeText(text);
-      showNotice(`Copied path${entries.length === 1 ? "" : "s"} to the clipboard.`);
+      showNotice($t(entries.length === 1 ? "notice.copiedPathsOne" : "notice.copiedPathsMany"));
     } catch {
       showNotice($t("notice.copyPathFailed"), true);
     }
@@ -3807,7 +3843,7 @@
     if (!entry) return;
     try {
       await navigator.clipboard.writeText(entry.name);
-      showNotice(`Copied "${entry.name}".`);
+      showNotice($t("notice.copiedName", { name: entry.name }));
     } catch {
       showNotice($t("notice.copyNameFailed"), true);
     }
@@ -3846,7 +3882,7 @@
     const wasPinned = pins.includes(entry.path);
     pins = settings.togglePin(pins, entry.path);
     settings.savePins(pins);
-    showNotice(wasPinned ? `Unpinned "${entry.name}" from Home.` : `Pinned "${entry.name}" to Home.`);
+    showNotice(wasPinned ? $t("notice.unpinnedFromHome", { name: entry.name }) : $t("notice.pinnedToHome", { name: entry.name }));
   }
 
   /** "Work on this" — open the Agent Deck scoped to the selection (CPE-313). A single
@@ -3877,7 +3913,7 @@
       is_dir: entry.is_dir,
     });
     settings.saveFavorites(favorites);
-    showNotice(wasFav ? `Removed "${entry.name}" from Favorites.` : `Added "${entry.name}" to Favorites.`);
+    showNotice(wasFav ? $t("notice.removedFromFavorites", { name: entry.name }) : $t("notice.addedToFavorites", { name: entry.name }));
   }
 
   /** Duplicate the selection in place — copy it into the folder it lives in. Not undoable, for the
@@ -3894,7 +3930,7 @@
     const dir = inPaneB ? paneBPath : currentPath;
     try {
       const results = await commands.copyEntries(sources, dir);
-      reportResults(results, "Duplicated");
+      reportResults(results, "duplicate");
       if (inPaneB) { if (paneBPath) await explorerPaneB?.loadListing(paneBPath, false); }
       else await loadPath(currentPath);
     } catch (e) {
@@ -3908,11 +3944,7 @@
     const [a, b] = selectedEntries;
     try {
       const same = unwrap(await commands.filesIdentical(a.path, b.path));
-      showNotice(
-        same
-          ? `"${a.name}" and "${b.name}" are identical.`
-          : `"${a.name}" and "${b.name}" differ.`,
-      );
+      showNotice($t(same ? "notice.filesIdentical" : "notice.filesDiffer", { a: a.name, b: b.name }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -3973,10 +4005,10 @@
         dir,
         onSuccess: () => {
           if (!inPaneB) pendingSelectPath = dest;
-          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
+          showNotice($t(n === 1 ? "notice.compressedToOne" : "notice.compressedToMany", { count: n, name }));
         },
-        cancelledNotice: "Compress cancelled.",
-        failedNotice: `Couldn't compress to "${name}".`,
+        cancelledNotice: $t("notice.compressCancelled"),
+        failedNotice: $t("notice.compressFailedTo", { name }),
       });
     } catch (e) {
       showNotice(String(e), true);
@@ -4001,10 +4033,10 @@
         dir,
         onSuccess: () => {
           if (!inPaneB) pendingSelectPath = dest;
-          showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}".`);
+          showNotice($t(n === 1 ? "notice.compressedToOne" : "notice.compressedToMany", { count: n, name }));
         },
-        cancelledNotice: "Compress cancelled.",
-        failedNotice: `Couldn't compress to "${name}".`,
+        cancelledNotice: $t("notice.compressCancelled"),
+        failedNotice: $t("notice.compressFailedTo", { name }),
       });
     } catch (e) {
       showNotice(String(e), true);
@@ -4048,10 +4080,10 @@
             dir,
             onSuccess: () => {
               if (!inPaneB) pendingSelectPath = dest;
-              showNotice(`Compressed ${n} item${n === 1 ? "" : "s"} to "${name}" (password-protected).`);
+              showNotice($t(n === 1 ? "notice.compressedToPasswordOne" : "notice.compressedToPasswordMany", { count: n, name }));
             },
-            cancelledNotice: "Compress cancelled.",
-            failedNotice: `Couldn't compress to "${name}".`,
+            cancelledNotice: $t("notice.compressCancelled"),
+            failedNotice: $t("notice.compressFailedTo", { name }),
           });
         } catch (e) {
           showNotice(String(e), true);
@@ -4093,8 +4125,8 @@
       pendingArchiveOps.set(id, {
         onSuccess,
         dir: refreshDir,
-        cancelledNotice: "Extraction cancelled.",
-        failedNotice: `Couldn't extract "${entry.name}".`,
+        cancelledNotice: $t("notice.extractCancelled"),
+        failedNotice: $t("notice.extractFailedName", { name: entry.name }),
       });
     } catch (e) {
       if (!isPasswordError(e)) {
@@ -4124,8 +4156,8 @@
           pendingArchiveOps.set(id, {
             onSuccess,
             dir: refreshDir,
-            cancelledNotice: "Extraction cancelled.",
-            failedNotice: `Couldn't extract "${entry.name}".`,
+            cancelledNotice: $t("notice.extractCancelled"),
+            failedNotice: $t("notice.extractFailedName", { name: entry.name }),
           });
         } catch (e) {
           if (!isPasswordError(e)) {
@@ -4157,7 +4189,7 @@
     const { dest, name } = extractHereDest(entry, inPaneB);
     await extractWithPasswordFallback(entry, dest, dir, () => {
       if (!inPaneB) pendingSelectPath = dest;
-      showNotice(`Extracted "${entry.name}" to "${name}".`);
+      showNotice($t("notice.extractedTo", { entry: entry.name, dest: name }));
     });
   }
 
@@ -4188,7 +4220,7 @@
     if (!dest || typeof dest !== "string") return; // cancelled
     const target = dest;
     await extractWithPasswordFallback(entry, target, target, () => {
-      showNotice(`Extracted "${entry.name}" to "${target}".`);
+      showNotice($t("notice.extractedTo", { entry: entry.name, dest: target }));
     });
   }
 
@@ -4207,7 +4239,7 @@
     const { dest, name } = extractHereDest(entry);
     await extractWithPasswordFallback(entry, dest, currentPath, () => {
       pendingSelectPath = dest;
-      showNotice(`Extracted "${entry.name}" to "${name}".`);
+      showNotice($t("notice.extractedTo", { entry: entry.name, dest: name }));
     });
   }
 
@@ -4229,7 +4261,7 @@
     if (!dest || typeof dest !== "string") return; // cancelled
     const target = dest;
     await extractWithPasswordFallback(entry, target, target, () => {
-      showNotice(`Extracted "${entry.name}" to "${target}".`);
+      showNotice($t("notice.extractedTo", { entry: entry.name, dest: target }));
     });
   }
 
@@ -4324,7 +4356,7 @@
     // MOVE → synchronous path (fast same-folder-volume renames) so undo + tag-follow stay intact.
     try {
       const results = await commands.moveEntries(paths, dest);
-      reportResults(results, "Moved");
+      reportResults(results, "move");
       const moves = results
         .map((r, i) => ({ from: paths[i], to: r.path, ok: r.ok }))
         .filter((m) => m.ok)
@@ -4435,7 +4467,7 @@
       const results = permanent
         ? await commands.deletePermanent(paths)
         : await commands.deleteToTrash(paths);
-      reportResults(results, permanent ? "Permanently deleted" : "Moved to Recycle Bin:");
+      reportResults(results, permanent ? "deletePermanent" : "moveToBin");
 
       // A trashed delete is undoable — but ONLY where the platform can actually
       // restore. On macOS `canRestoreTrash` is false, so we don't push it, and
@@ -4500,7 +4532,7 @@
   async function onShredDone(results: OpResult[]) {
     const target = shredConfirmFor;
     shredConfirmFor = null;
-    reportResults(results, "Securely deleted");
+    reportResults(results, "deleteSecure");
     if (target) await refreshBatchApplyTarget(target.dir);
   }
 
@@ -4550,7 +4582,7 @@
     try {
       unwrap(await commands.openExternal(entry.path));
     } catch {
-      showNotice(`Couldn't run "${entry.name}".`, true);
+      showNotice($t("notice.runFailed", { name: entry.name }), true);
     }
   }
 
@@ -4561,7 +4593,7 @@
     try {
       unwrap(await commands.runAsAdmin(entry.path));
     } catch {
-      showNotice(`Couldn't run "${entry.name}" as administrator.`, true);
+      showNotice($t("notice.runAsAdminFailed", { name: entry.name }), true);
     }
   }
 
@@ -4913,7 +4945,7 @@
     if (next === networkLocations) return;
     networkLocations = next;
     settings.saveNetworkLocations(networkLocations);
-    showNotice(`Added network location "${path.trim()}".`);
+    showNotice($t("notice.networkLocationAdded", { path: path.trim() }));
     void loadShared();
   }
 
@@ -4931,7 +4963,7 @@
     if (!homeCtxPath) return;
     try {
       await commands.disconnectNetworkShare(homeCtxPath);
-      showNotice(`Disconnected "${homeCtxName}".`);
+      showNotice($t("notice.shareDisconnected", { name: homeCtxName }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5009,7 +5041,7 @@
     try {
       connections = unwrap(await commands.connectionsUpsert(conn));
       networkForm = null;
-      showNotice(`Saved connection "${conn.name}".`);
+      showNotice($t("notice.connectionSaved", { name: conn.name }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5029,7 +5061,7 @@
       // Best-effort; the profile is already gone either way.
     }
     connectionStates = { ...connectionStates, [conn.name]: "disconnected" };
-    showNotice(`Forgot connection "${conn.name}".`);
+    showNotice($t("notice.connectionForgotten", { name: conn.name }));
   }
 
   /** "Disconnect" (CPE-1513): client-side state reset only — there is no backend command yet to tear down
@@ -5107,7 +5139,7 @@
     const view = homeCtxView;
     try {
       const results = await commands.deleteToTrash([path]);
-      reportResults(results, "Moved to Recycle Bin:");
+      reportResults(results, "moveToBin");
       if (canRestoreTrash) {
         const restored = results.filter((r) => r.ok).map((r) => ({ from: r.path, to: "" }));
         if (restored.length > 0) {
@@ -5143,12 +5175,12 @@
   function favoriteHomeItem() {
     if (!homeCtxPath) return;
     if (favorites.some((f) => f.path === homeCtxPath)) {
-      showNotice(`"${homeCtxName}" is already in Favorites.`);
+      showNotice($t("notice.alreadyFavorite", { name: homeCtxName }));
       return;
     }
     favorites = settings.toggleFavorite(favorites, { path: homeCtxPath, name: homeCtxName, is_dir: homeCtxIsDir });
     settings.saveFavorites(favorites);
-    showNotice(`Added "${homeCtxName}" to Favorites.`);
+    showNotice($t("notice.addedToFavorites", { name: homeCtxName }));
   }
 
   /** Pin the clicked home folder to Quick access (cross-view action; folders only). */
@@ -5157,7 +5189,7 @@
     const wasPinned = pins.includes(homeCtxPath);
     pins = settings.togglePin(pins, homeCtxPath);
     settings.savePins(pins);
-    showNotice(wasPinned ? `Unpinned "${homeCtxName}".` : `Pinned "${homeCtxName}" to Quick access.`);
+    showNotice(wasPinned ? $t("notice.unpinnedHome", { name: homeCtxName }) : $t("notice.pinnedToQuickAccess", { name: homeCtxName }));
   }
 
   function openHomeItemProperties() {
@@ -5632,7 +5664,7 @@
       // must never execute just because a smart folder is open watching the same paths.
       await startFolderWatch(paths, () => (watchLive ? watchRules : []), (fire) => {
         watchLog = [fire, ...watchLog].slice(0, 50);
-        showNotice(`Watch: ${fire.summary}`);
+        showNotice($t("notice.watchFired", { summary: fire.summary }));
       });
     } else {
       await stopFolderWatch();
@@ -5644,7 +5676,7 @@
     try {
       await undoFire(fire);
       watchLog = watchLog.filter((f) => f.id !== fire.id);
-      showNotice(`Undid: ${fire.rule}`);
+      showNotice($t("notice.watchUndone", { rule: fire.rule }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5691,7 +5723,7 @@
       });
       if (!path) return;
       unwrap(await commands.writeFileText(path, payload.content));
-      showNotice(`Exported ${path.split(/[\\/]/).pop()}.`);
+      showNotice($t("notice.exported", { name: path.split(/[\\/]/).pop() ?? path }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5737,7 +5769,7 @@
       try {
         floatEntry = await resolveArchivePreviewEntry(archive.zipPath, entry);
       } catch {
-        showNotice(`Couldn't preview "${entry.name}" from the archive.`, true);
+        showNotice($t("notice.previewFromArchiveFailed", { name: entry.name }), true);
         return;
       }
     }
@@ -5791,8 +5823,8 @@
       case "find-empty-dirs": if (!isHome && !archive) openFileHealth("empty"); break;
       case "find-clutter": if (!isHome && !archive) declutterOpen = true; break;
       case "organize-folder": if (!isHome && !archive) organizeOpen = true; break;
-      case "copy-file-names": copyListing(namesList(visible), "file names"); break;
-      case "copy-file-list": copyListing(detailList(visible), "file list"); break;
+      case "copy-file-names": copyListing(namesList(visible), "names"); break;
+      case "copy-file-list": copyListing(detailList(visible), "rows"); break;
       case "save-file-list": saveFileList(); break;
     }
   }
@@ -5814,7 +5846,7 @@
       if (!path) return; // cancelled
       const text = path.toLowerCase().endsWith(".txt") ? detailList(visible) : csvList(visible);
       unwrap(await commands.writeFileText(path, text));
-      showNotice(`Saved ${visible.length} rows to ${path.split(/[\\/]/).pop()}.`);
+      showNotice($t("notice.savedRows", { count: visible.length, name: path.split(/[\\/]/).pop() ?? path }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5826,7 +5858,7 @@
       const path = await saveFileDialog({ defaultPath: "tags.json", filters: [{ name: "JSON", extensions: ["json"] }] });
       if (!path) return;
       unwrap(await commands.writeFileText(path, exportTags()));
-      showNotice(`Tags exported to ${path.split(/[\\/]/).pop()}.`);
+      showNotice($t("notice.tagsExportedTo", { name: path.split(/[\\/]/).pop() ?? path }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5845,15 +5877,25 @@
     }
   }
 
-  /** Copy the current (visible) folder listing to the clipboard as text (CPE-422). */
-  async function copyListing(text: string, what: string) {
+  /** Copy the current (visible) folder listing to the clipboard as text (CPE-422). `kind` (CPE-1634)
+   *  picks the translated wording ("names" vs "rows") — an identifier, not display text, so this stays
+   *  English-free; see `reportResults`' `OpKind` above for the same pattern. */
+  async function copyListing(text: string, kind: "names" | "rows") {
     if (isHome || visible.length === 0) {
       showNotice($t("notice.nothingToCopy"));
       return;
     }
     try {
       await navigator.clipboard.writeText(text);
-      showNotice(`Copied ${visible.length} ${what === "file names" ? "name" : "row"}${visible.length === 1 ? "" : "s"} to the clipboard.`);
+      const key =
+        kind === "names"
+          ? visible.length === 1
+            ? "notice.copiedNamesOne"
+            : "notice.copiedNamesMany"
+          : visible.length === 1
+            ? "notice.copiedRowsOne"
+            : "notice.copiedRowsMany";
+      showNotice($t(key, { count: visible.length }));
     } catch (e) {
       showNotice(String(e), true);
     }
@@ -5884,7 +5926,7 @@
     try {
       if (a.kind === "open-path") {
         unwrap(await commands.openExternal(a.target));
-        showNotice(`${a.label}…`);
+        showNotice($t("notice.actionLabel", { label: a.label }));
       } else if (a.kind === "open-github") {
         const url = await commands.gitRemoteUrl(a.target);
         if (url) await openUrl(url);
@@ -6053,8 +6095,9 @@
           // finish, still refresh pane A's folder so the entry shows up there; fall back to a generic
           // notice since the call site's specific wording isn't available here.
           if (!r.cancelled && r.failed === 0) {
-            const verb = r.op === "compress" ? "compressed" : "extracted";
-            showNotice(`${r.transferred} item${r.transferred === 1 ? "" : "s"} ${verb}.`);
+            const ONE = r.op === "compress" ? "notice.archiveCompressedOne" : "notice.archiveExtractedOne";
+            const MANY = r.op === "compress" ? "notice.archiveCompressedMany" : "notice.archiveExtractedMany";
+            showNotice($t(r.transferred === 1 ? ONE : MANY, { count: r.transferred }));
             loadPath(currentPath).catch(() => {});
           }
           return;
@@ -6089,8 +6132,8 @@
         loadPath(currentPath).catch(() => {});
       }
       if (r.cancelled) showNotice($t("xfer.cancelled"));
-      else if (r.failed > 0) showNotice(`Copied ${r.transferred}, ${r.failed} failed.`, true);
-      else showNotice(`Copied ${r.transferred} item${r.transferred === 1 ? "" : "s"}.`);
+      else if (r.failed > 0) showNotice($t("notice.copyFailedSome", { transferred: r.transferred, failed: r.failed }), true);
+      else showNotice($t(r.transferred === 1 ? "notice.copiedItemsOne" : "notice.copiedItemsMany", { count: r.transferred }));
     }).then((un) => (unlistenTransferDone = un)).catch(() => {});
 
     // Open the regular Documents dialog when another window (e.g. the Agent Deck's area "?" help) asks
