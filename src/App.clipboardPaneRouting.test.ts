@@ -64,7 +64,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
 
 let moveEntriesCalls: { paths: string[]; dest: string }[] = [];
-let startTransferCalls: { sources: string[]; dest: string; kind: string; policy: string }[] = [];
+let startTransferCalls: { sources: string[]; dest: string; kind: string; policy: string; confirmed?: boolean }[] = [];
 
 // Mutable "disk" state, keyed by folder path, so a move is reflected in the NEXT list_dir/list_dir_stream
 // call — lets the tests prove a pane actually refreshed rather than only asserting the backend call args.
@@ -117,7 +117,7 @@ beforeEach(() => {
         const dest = args.dest as string;
         const kind = args.kind as string;
         const policy = args.policy as string;
-        startTransferCalls.push({ sources, dest, kind, policy });
+        startTransferCalls.push({ sources, dest, kind, policy, confirmed: args.confirmed as boolean });
         return startTransferCalls.length; // fake transfer id
       }
       default: return null;
@@ -165,6 +165,7 @@ describe("App — clipboard copy/cut/paste is pane-aware (CPE-1380)", () => {
       dest: DEST_IN_B, // pane B's CURRENT folder at paste time — NOT pane A's currentPath
       kind: "copy",
       policy: "keepboth",
+      confirmed: false, // no dialog was shown and nothing is replaced — no consent claimed (CPE-1662)
     });
   });
 
@@ -286,9 +287,73 @@ describe("App — clipboard copy/cut/paste is pane-aware (CPE-1380)", () => {
       dest: DEST_IN_B, // pane B's current folder — NOT pane A's currentPath
       kind: "copy",
       policy: "keepboth",
+      confirmed: false, // no dialog was shown and nothing is replaced — no consent claimed (CPE-1662)
     });
     // Pane A's selection (still alpha.txt) was never disturbed by any of this.
     expect(within(paneAWrap).getByText("alpha.txt").closest(".row")?.className).toContain("selected");
+  });
+});
+
+/**
+ * CPE-1662's consent, on the MAIN paste path. The PR #855 audit mutation-tested it and found that
+ * inverting `resolveCopyConflict`'s `confirmed: true` left every frontend test green — only the
+ * Drop-Stack twin of this handler was covered. The backend refuses `policy: "overwrite"` without the
+ * flag, so an unpinned `true` here is the difference between the Replace button working and every
+ * overwrite paste failing (or, inverted the other way, between asking and not asking).
+ */
+describe("App — the copy-conflict dialog is what supplies overwrite consent (CPE-1662)", () => {
+  it("Replace sends policy overwrite WITH confirmed: true, and nothing is sent before the click", async () => {
+    const { paneBWrap } = await bootDualPane();
+
+    await fireEvent.click(paneBWrap);
+    await fireEvent.click(screen.getByText("bravo.txt"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    // Paste into the SAME folder the file is already in — a genuine name collision, so the CPE-624
+    // conflict dialog opens instead of the transfer starting.
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    expect(await screen.findByText("Some items already exist")).toBeTruthy();
+    // The user has been asked but has not answered: nothing may have reached the backend yet.
+    expect(startTransferCalls.length).toBe(0);
+
+    await fireEvent.click(screen.getByText("Replace"));
+
+    await waitFor(() => expect(startTransferCalls.length).toBe(1));
+    expect(startTransferCalls[0].policy).toBe("overwrite");
+    expect(startTransferCalls[0].confirmed).toBe(true);
+  });
+
+  it("Skip answers the same dialog but claims no overwrite — consent travels, intent does not", async () => {
+    const { paneBWrap } = await bootDualPane();
+
+    await fireEvent.click(paneBWrap);
+    await fireEvent.click(screen.getByText("bravo.txt"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    expect(await screen.findByText("Some items already exist")).toBeTruthy();
+    await fireEvent.click(screen.getByText("Skip"));
+
+    await waitFor(() => expect(startTransferCalls.length).toBe(1));
+    // Consent is a SEPARATE argument from the policy (the CPE-1646 lesson): answering the dialog is
+    // what sets it, and a non-destructive answer still destroys nothing regardless.
+    expect(startTransferCalls[0].policy).toBe("skip");
+    expect(startTransferCalls[0].confirmed).toBe(true);
+  });
+
+  it("cancelling the dialog sends nothing at all", async () => {
+    const { paneBWrap } = await bootDualPane();
+
+    await fireEvent.click(paneBWrap);
+    await fireEvent.click(screen.getByText("bravo.txt"));
+    await fireEvent.keyDown(window, { key: "c", ctrlKey: true });
+    await fireEvent.keyDown(window, { key: "v", ctrlKey: true });
+
+    expect(await screen.findByText("Some items already exist")).toBeTruthy();
+    await fireEvent.click(screen.getByText("Cancel"));
+
+    await waitFor(() => expect(screen.queryByText("Some items already exist")).toBeNull());
+    expect(startTransferCalls.length).toBe(0);
   });
 });
 
@@ -389,6 +454,7 @@ describe("App — doPaste is re-entrancy-safe against a double-fire cut/move (CP
       dest: DEST_IN_A,
       kind: "copy",
       policy: "keepboth",
+      confirmed: false, // no dialog was shown and nothing is replaced — no consent claimed (CPE-1662)
     });
   });
 

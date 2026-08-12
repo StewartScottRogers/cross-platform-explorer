@@ -67,7 +67,7 @@ function emitEvent(event: string, payload: unknown) {
 }
 
 let moveEntriesCalls: { paths: string[]; dest: string }[] = [];
-let startTransferCalls: { sources: string[]; dest: string; kind: string; policy: string }[] = [];
+let startTransferCalls: { sources: string[]; dest: string; kind: string; policy: string; confirmed: boolean }[] = [];
 let moveEntriesResult: { path: string; ok: boolean; error: string }[] | null = null; // set per-test to override the default all-ok result
 let nextTransferId = 1;
 let disks: Record<string, DirEntry[]> = {};
@@ -111,7 +111,10 @@ beforeEach(() => {
         const dest = args.dest as string;
         const kind = args.kind as string;
         const policy = args.policy as string;
-        startTransferCalls.push({ sources, dest, kind, policy });
+        // `confirmed` (CPE-1662) is captured too: the backend refuses an `overwrite` transfer without
+        // it, so the dialog wiring that supplies it is part of what these end-to-end cases pin.
+        const confirmed = args.confirmed as boolean;
+        startTransferCalls.push({ sources, dest, kind, policy, confirmed });
         return nextTransferId++;
       }
       default: return null;
@@ -170,6 +173,8 @@ describe("App — Drop Stack Move-all/Copy-all (CPE-1533)", () => {
       dest: PATH_A,
       kind: "copy",
       policy: "keepboth",
+      // No dialog was shown and nothing is being replaced, so no consent is claimed (CPE-1662).
+      confirmed: false,
     });
     // Not cleared yet — the transfer is still in flight (async, unlike the synchronous move path).
     expect(get(dropStackEntries)).toHaveLength(2);
@@ -224,7 +229,25 @@ describe("App — Drop Stack Move-all/Copy-all (CPE-1533)", () => {
       dest: PATH_A,
       kind: "copy",
       policy: "keepboth",
+      // The dialog was answered, so consent IS carried — it just isn't what keep-both needs.
+      confirmed: true,
     });
+  });
+
+  it("choosing Replace in that dialog is what supplies CPE-1662's consent — the destructive policy never travels without it", async () => {
+    disks[PATH_A] = [...disks[PATH_A], file("one.txt", PATH_A)];
+    await bootWithShelvedItems();
+
+    await fireEvent.click(screen.getByText("Copy all here"));
+    expect(await screen.findByText("Some items already exist")).toBeTruthy();
+    // Up to here nothing has been asked of the backend — the overwrite hasn't been consented to yet.
+    expect(startTransferCalls.length).toBe(0);
+
+    await fireEvent.click(screen.getByText("Replace"));
+
+    await waitFor(() => expect(startTransferCalls.length).toBe(1));
+    expect(startTransferCalls[0].policy).toBe("overwrite");
+    expect(startTransferCalls[0].confirmed).toBe(true);
   });
 
   it("both buttons are absent once the Drop Stack is empty (nothing left to act on)", async () => {

@@ -1,5 +1,8 @@
-import { describe, it, expect } from "vitest";
-import { upsertProgress, markFinished, dismiss, percent, collidingNames, type TransferState, type TransferProgress, type TransferReport } from "./transfers";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { upsertProgress, markFinished, dismiss, percent, collidingNames, startTransfer, type TransferState, type TransferProgress, type TransferReport } from "./transfers";
+
+const { startTransferMock } = vi.hoisted(() => ({ startTransferMock: vi.fn() }));
+vi.mock("./bindings.gen", () => ({ commands: { startTransfer: startTransferMock } }));
 
 const prog = (id: number, done: number, total: number): TransferProgress => ({
   id, op: "copy", total_bytes: total, done_bytes: done, total_items: 1, done_items: 0, current: "x",
@@ -72,5 +75,34 @@ describe("transfers reducer (CPE-622)", () => {
     expect(percent({ ...prog(1, 0, 0), total_items: 4, done_items: 1, finished: false })).toBe(25);
     expect(percent({ ...prog(1, 3, 100), finished: true })).toBe(100);
     expect(percent({ ...prog(1, 0, 0), finished: false })).toBe(0);
+  });
+});
+
+describe("startTransfer overwrite consent (CPE-1662)", () => {
+  beforeEach(() => {
+    startTransferMock.mockReset();
+    startTransferMock.mockResolvedValue({ status: "ok", data: 7 });
+  });
+
+  it("defaults `confirmed` to false, so intent (the policy) is never its own consent", async () => {
+    await startTransfer(["/a"], "/dest", "copy", "overwrite");
+    expect(startTransferMock).toHaveBeenCalledWith(["/a"], "/dest", "copy", "overwrite", false);
+  });
+
+  it("forwards consent as its own argument when the conflict dialog gave it", async () => {
+    await expect(startTransfer(["/a"], "/dest", "copy", "overwrite", true)).resolves.toBe(7);
+    expect(startTransferMock).toHaveBeenCalledWith(["/a"], "/dest", "copy", "overwrite", true);
+  });
+
+  it("leaves the non-destructive policies alone — they pass false and are unaffected", async () => {
+    await startTransfer(["/a"], "/dest", "copy", "keepboth");
+    await startTransfer(["/a"], "/dest", "move", "skip");
+    expect(startTransferMock).toHaveBeenNthCalledWith(1, ["/a"], "/dest", "copy", "keepboth", false);
+    expect(startTransferMock).toHaveBeenNthCalledWith(2, ["/a"], "/dest", "move", "skip", false);
+  });
+
+  it("surfaces the backend refusal as a rejection, so the caller can show it in a notice", async () => {
+    startTransferMock.mockResolvedValue({ status: "error", error: "`confirmed` was not set" });
+    await expect(startTransfer(["/a"], "/dest", "copy", "overwrite")).rejects.toBeTruthy();
   });
 });

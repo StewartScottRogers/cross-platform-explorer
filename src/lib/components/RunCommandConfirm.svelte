@@ -2,8 +2,9 @@
   /**
    * Confirm-before-launch for user commands (CPE-783, epic CPE-711): shows the exact command line(s) that
    * will run as EXTERNAL PROCESSES and requires an explicit Run click before invoking the backend
-   * `run_command`. This is the safety gate for the user-command feature — nothing spawns without it. After
-   * running, it shows each command's exit code + captured stdout/stderr.
+   * `run_command`. This is the safety gate for the user-command feature — nothing spawns without it, and
+   * since CPE-1665 that is enforced in Rust rather than promised in a comment: the backend refuses unless
+   * this dialog passes `confirmed: true`. After running, it shows each command's exit code + stdout/stderr.
    */
   import { createEventDispatcher } from "svelte";
   import { unwrap } from "../invoke";
@@ -31,7 +32,10 @@
     const out: Result[] = [];
     for (const command of commands) {
       try {
-        const r = unwrap(await api.runCommand(command, cwd || null));
+        // CPE-1665: `confirmed` is the backend's gate — it refuses to spawn anything without it. This
+        // `run()` is reachable only from the Run button below, after the resolved command line(s) have
+        // been shown, so this is the single call site in the app allowed to set it.
+        const r = unwrap(await api.runCommand(command, cwd || null, true));
         out.push({ command, ...r });
       } catch (e) {
         out.push({ command, stdout: "", stderr: "", code: null, truncated: false, error: String(e) });

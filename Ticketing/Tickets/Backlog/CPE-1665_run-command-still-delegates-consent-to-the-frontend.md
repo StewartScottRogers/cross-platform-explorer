@@ -67,3 +67,22 @@ comment that way from the start rather than having it corrected later.
 Filed by the Foreman from the PR #844 security audit, 2026-08-12. Same family sweep as **CPE-1662**
 (`start_transfer` Overwrite) and **CPE-1664** (`apply_backup_plan`, a verified one-message directory wipe).
 Of the three, this one is the smallest change and the largest primitive.
+
+### Scope item 4 — survey result (PR #855, recorded rather than closed silently)
+
+"Check whether anything else reaches a process launch without passing through that dialog." Answer: **yes,
+several — and they are deliberately NOT fixed here.** `run_command` is the only command taking a free-form
+shell string, but it is not the only route to a process:
+
+| Command | What it launches | Gated? |
+|---|---|---|
+| `open_pty` + `write_pty` | caller-supplied `shell` verbatim, then arbitrary bytes into its stdin | **No** — two ungated calls give everything `run_command` gives, and more |
+| `run_as_admin` | a caller-named executable, elevated | **No** in-app gate; the Windows UAC prompt is the only consent, and **on non-Windows it falls through to `open_external_impl` with no prompt at all** |
+| `open_external` | a caller-named path/executable via the OS handler | **No** |
+| `open_path` / `open_terminal` | `cmd`/`open`/`xdg-open`/`wt.exe` on a caller-named path | **No** (fixed program, structured args) |
+| the sidecar/agent launch | a bundled binary | **No** (fixed program) |
+
+Consequence for the fix that shipped: `run_command`'s `confirmed` flag is **consistency with the other
+gated commands, not coverage of process launching**. `run_command`'s doc comment now says exactly that and
+names these siblings, so nobody reads the gate as closing the surface. The Foreman is filing the
+`open_pty`/`write_pty` and `run_as_admin`/`open_external` findings as their own tickets.

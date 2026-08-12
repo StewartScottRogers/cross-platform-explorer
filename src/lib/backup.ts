@@ -63,6 +63,62 @@ export interface BackupJob {
   autoRun?: boolean;
 }
 
+/**
+ * Consent for an **unattended** backup run (CPE-1664): the backend refuses a plan unless it is told the
+ * user agreed, and for a run nobody is watching the only thing that can honestly say so is the per-job
+ * **auto-run on connect** box the user ticked. That opt-in is the consent.
+ *
+ * `=== true`, not `!!`, deliberately: `parseJobs`' validator never type-checks `autoRun`, so a
+ * hand-edited or migrated settings blob carrying `autoRun: "no"` would otherwise be truthy and read as
+ * consent.
+ *
+ * Attended runs do **not** come through here — BackupDashboard's Run/Restore buttons are a live click
+ * and pass their own consent.
+ */
+export function unattendedBackupConsent(job: Pick<BackupJob, "autoRun">): boolean {
+  return job.autoRun === true;
+}
+
+/**
+ * The full argument set for an unattended (`runBackupJobNow`) call of `apply_backup_plan_stream`,
+ * including its `confirmed` flag.
+ *
+ * **This function exists so the consent decision is computed in code a test can reach with an unticked
+ * job.** The scheduler cannot: `driveScheduler`'s `jobsForConnect` filters on `j.autoRun`, so it only
+ * ever delivers `autoRun: true` jobs, and therefore *no* test driving the real scheduler can tell
+ * `unattendedBackupConsent(job)` apart from a hard-coded `true`. Two earlier rounds of comments claimed
+ * an App-level test had pinned it; it had not, and hard-coding `true` at the call site left all 3879
+ * frontend tests green both times. `unattendedBackupArgs` is directly callable with `autoRun: false`,
+ * so `backup.test.ts` pins both directions — which is also the "even if something else calls this"
+ * scenario the consent is defence-in-depth against.
+ *
+ * **What remains unpinned, stated plainly:** that `App.svelte` spreads this result without overriding
+ * `confirmed` afterwards. That is one expression in one place, and it is the honest residual — not a
+ * protection any current test delivers.
+ */
+export function unattendedBackupArgs(
+  job: Pick<BackupJob, "source" | "dest" | "autoRun">,
+  plan: Pick<BackupPlan, "copy" | "update" | "delete">,
+): {
+  sourceRoot: string;
+  destRoot: string;
+  copy: string[];
+  update: string[];
+  deletePaths: string[];
+  verify: boolean;
+  confirmed: boolean;
+} {
+  return {
+    sourceRoot: job.source,
+    destRoot: job.dest,
+    copy: plan.copy,
+    update: plan.update,
+    deletePaths: plan.delete,
+    verify: true,
+    confirmed: unattendedBackupConsent(job),
+  };
+}
+
 function newId(): string {
   return `bj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }
