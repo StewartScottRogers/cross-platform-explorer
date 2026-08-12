@@ -62,7 +62,14 @@
    *  stricter than the server it guards is a regression, not extra safety.
    *
    *  The `..` and leading-`-` rules mirror `is_safe_repo_slug` exactly, so the two ends of the call
-   *  now agree on what a repository id is rather than each holding its own opinion. */
+   *  now agree on what a repository id is rather than each holding its own opinion.
+   *
+   *  **Shared by both entry points (CPE-1668).** `browse()` gating on this predicate closed nothing for
+   *  `clone()`, which is reachable directly (paste + Clone, no Browse click) and had its own weaker
+   *  `!r.includes("/")` check — so "closes the whole class" was true only for one of the two paths to
+   *  `forge_*`. `clone()` now runs the same `stripRepoUrl` + `isRepoId` gate before it does anything
+   *  else, so the two entry points can no longer disagree about what a valid repo id looks like. There
+   *  is no third entry point into `forge_browse`/`forge_clone` in this file. */
   export function isRepoId(r: string): boolean {
     const segs = r.split("/");
     return (
@@ -142,8 +149,9 @@
       (hardened git args, allow-listed host). Clones into `<chosen>/<repo-name>`. */
   async function clone(): Promise<void> {
     if (isGeneric) return cloneGeneric();
-    const r = repo.trim();
-    if (!r.includes("/")) { error = "Enter a repository as owner/name."; return; }
+    const r = stripRepoUrl(repo, provider);
+    if (!isRepoId(r)) { error = "Enter a repository as owner/name."; return; }
+    repo = r;
     const dir = await openFolderDialog({ directory: true, title: `Clone ${r} into which folder?` });
     if (!dir || typeof dir !== "string") return;
     const name = r.split("/").pop();
