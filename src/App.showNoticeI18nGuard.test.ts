@@ -13,11 +13,16 @@
  * are caught regardless of how they're nested in the expression tree.
  *
  * The walk only descends into subtrees that can actually BECOME the runtime message value — a
- * conditional's two branches, `+`/`||`/`??`/`&&` operands, parenthesized/`as`/`!` wrappers — and treats
- * any `$t(...)` call as an opaque, already-translated leaf it never opens. It deliberately does NOT
- * descend into a comparison's operands (`typeof e === "string"` must never flag "string") or into an
- * arbitrary function call's arguments (`String(e)` must never flag its input) — those aren't the
- * expression's own literal value.
+ * conditional's two branches, `+`/`||`/`??`/`&&` operands, parenthesized/`as`/`!` wrappers, and a
+ * function call's own arguments — and treats any `$t(...)` call as an opaque, already-translated leaf it
+ * never opens. It deliberately does NOT descend into a comparison's operands (`typeof e === "string"`
+ * must never flag "string"), nor into a bare identifier / property access handed to a call (`String(e)`
+ * must never flag its input) — those aren't the expression's own literal value.
+ *
+ * The call-argument descent is PR #845's review finding: treating every `CallExpression` as opaque left
+ * the guard blind to any literal wrapped in a call, so `showNotice(String("hardcoded English"))` — or,
+ * far more realistically, `showNotice(formatErr(`Couldn't do X: ${y}`))` through a local helper — passed
+ * green while carrying exactly the untranslated user-facing text this guard exists to stop.
  *
  * Escape hatch: a call that is genuinely not user-facing can be exempted by appending
  * `// i18n-exempt: <reason>` on the SAME line as the `showNotice(` call. CPE-1627's escape hatch was a
@@ -86,10 +91,21 @@ function collectNakedLiterals(node: ts.Node, out: ts.Node[]): void {
     collectNakedLiterals(node.expression, out);
     return;
   }
-  // Anything else — identifiers, property/element access, arbitrary call expressions (e.g. `String(e)`,
-  // `typeof e === "string"`'s comparison itself, `.toLowerCase()`) — is opaque: it isn't statically the
-  // argument's literal value, so don't descend (this is exactly what keeps `typeof e === "string"` from
-  // false-positiving on the word "string").
+  if (ts.isCallExpression(node)) {
+    // A literal handed to ANY call still becomes the message the user reads — `String("...")`, a local
+    // `formatErr(`...`)` helper, `[...].join(", ")`. So descend into the arguments, but skip a bare
+    // identifier / property or element access (`String(e)`, `err.message`): those carry a *runtime*
+    // value, not this expression's own literal text, and opening them is what would make
+    // `typeof e === "string"` false-positive. Nested calls recurse naturally.
+    for (const arg of node.arguments) {
+      if (ts.isIdentifier(arg) || ts.isPropertyAccessExpression(arg) || ts.isElementAccessExpression(arg)) continue;
+      collectNakedLiterals(arg, out);
+    }
+    return;
+  }
+  // Anything else — identifiers, property/element access, a comparison (`typeof e === "string"`) — is
+  // opaque: it isn't statically the argument's literal value, so don't descend (this is exactly what
+  // keeps `typeof e === "string"` from false-positiving on the word "string").
 }
 
 /** True when `line` exempts an offender on it via a REAL trailing `// i18n-exempt: <reason>` comment —
@@ -210,6 +226,51 @@ describe("showNotice() i18n regrowth guard (CPE-1627/CPE-1634)", () => {
       <script lang="ts">
         function f(e: unknown, name: string) {
           showNotice(typeof e === "string" ? e : $t("notice.ejectFailed", { name }), true);
+        }
+      </script>
+    `;
+    expect(findOffenders(snippet)).toEqual([]);
+  });
+
+  it("flags a literal smuggled through a function call (PR #845 review bypass — RED -> GREEN)", () => {
+    // The bypass PR #845's reviewer demonstrated live against the first version of this guard: it
+    // treated every CallExpression as opaque, so wrapping the hardcoded text in ANY call hid it.
+    const snippet = `
+      <script lang="ts">
+        function f() {
+          showNotice(String("hardcoded English wrapped in String()"), true);
+        }
+      </script>
+    `;
+    const offenders = findOffenders(snippet);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].text).toContain("hardcoded English wrapped in String()");
+  });
+
+  it("flags a template literal passed through a local formatting helper (the realistic regrowth shape)", () => {
+    // Far likelier than String("..."): someone adds a small local helper and the untranslated text rides
+    // in through it. Nested calls must recurse, so a helper inside a helper is caught too.
+    const snippet = `
+      <script lang="ts">
+        function f(name: string) {
+          showNotice(prefix(formatErr(\`Couldn't rename \${name} — the file is in use.\`)));
+        }
+      </script>
+    `;
+    const offenders = findOffenders(snippet);
+    expect(offenders).toHaveLength(1);
+    expect(offenders[0].text).toContain("Couldn't rename");
+  });
+
+  it("still does not flag a runtime value handed to a call (String(e), err.message) — the non-regression half", () => {
+    // The call-argument descent must not cost us the original non-flagging behaviour: an identifier or
+    // property access carries a runtime value, not this expression's own literal text.
+    const snippet = `
+      <script lang="ts">
+        function f(e: unknown, err: Error) {
+          showNotice(String(e), true);
+          showNotice(String(err.message), true);
+          showNotice(typeof e === "string" ? String(e) : $t("notice.failed"), true);
         }
       </script>
     `;
