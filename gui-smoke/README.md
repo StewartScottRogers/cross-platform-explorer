@@ -44,8 +44,8 @@ Self-contained: its own `package.json`/lockfile/`tsconfig.json`. Nothing here to
    filename list to maintain). `specs/samples.smoke.ts` then walks EVERY file discovered under it: for
    each, navigates to its folder via the address bar (`Ctrl+L` → type the absolute path → Enter),
    selects it, and asserts (a) the app/window is still responding — the crash guard — and (b) the
-   preview pane settled into real content (`.preview-img`/`.preview-media`/`.preview-pdf`/
-   `.preview-font`/`.preview-table-wrap`/`.preview-markdown`/`.code-view`/`pre.preview-text`/
+   preview pane settled into real content (`.preview-img`/`.mp-media`/`.preview-pdf`/
+   `[data-testid="font-preview"]`/`.preview-table-wrap`/`.preview-markdown`/`.code-view`/`pre.preview-text`/
    `[data-testid="hexview"]`/`.data-browser`) or an explicit graceful "can't preview this" note/fallback
    (`.preview-note`, or the `aside.details` metadata pane) — never a stuck spinner. `documents/
    malformed.pdf` (the ORIGINAL degenerate PDF that crashed the app, CPE-1357 — see `samples/README.md`'s
