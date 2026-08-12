@@ -254,6 +254,11 @@ describe("templateEscapesDirectory (CPE-1623)", () => {
       // Linux/macOS: an ordinary, legal filename character — refusing it was a pure false positive.
       expect(templateEscapesDirectory(template, "MacIntel")).toBe(false);
       expect(templateEscapesDirectory(template, "Linux x86_64")).toBe(false);
+      // "Darwin" CONTAINS "win": a bare substring test would read macOS as Windows and re-introduce the
+      // exact CPE-1640 false positive. Reachable because `defaultPlatform()` falls back to the userAgent
+      // when `navigator.platform` is empty (reviewer nit, PR #848).
+      expect(templateEscapesDirectory(template, "Darwin")).toBe(false);
+      expect(templateEscapesDirectory(template, "Mozilla/5.0 (Macintosh; Darwin 23.0.0)")).toBe(false);
       // No navigator at all (a non-DOM test runner) reads as "not Windows": the direction that only ever
       // accepts a template the backend is still free to refuse, never the reverse.
       expect(templateEscapesDirectory(template, "")).toBe(false);

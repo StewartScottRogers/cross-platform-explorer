@@ -57,15 +57,26 @@
 //! must not, license writing to a folder the user never selected. The engine is now the actual enforcement
 //! point end-to-end, not just this one IPC command's two former layers.
 //!
-//! **TOCTOU: both guards are re-asked immediately before each write (CPE-1624).** They used to run once
-//! per batch, before any bytes were touched — so for item N they were an answer about a filesystem that no
-//! longer existed. Measured: `same_file(link.jpg -> A, A)` is `true`, and after re-pointing the symlink at
-//! `B` a repeat check correctly returns `false`; nothing re-validated at write time, and the window grows
-//! with batch size and with slow per-file ops (watermark, compress). [`execute_plan_walk`] now calls
-//! [`write_time_guard`] before every single `execute_one`, re-deriving containment **and** the
-//! foreign-overwrite question per item. A late detection **skips that item with a reported reason** rather
-//! than writing it (and rather than aborting a batch that has already written files) — the up-front scan
-//! keeps its all-or-nothing refusal for a plan that arrives wrong.
+//! **TOCTOU: the write-time decision is made on the HANDLE the bytes go through (CPE-1624, corrected by
+//! the PR #848 security audit).** The checks above run once per batch, before any bytes are touched, so
+//! for item N they are an answer about a filesystem that no longer exists. An earlier cut of this fix
+//! re-asked them *by path* just before calling [`execute_one`] — and the audit executed straight through
+//! it: the path check passed in 25 µs, `execute_one` then spent 528 ms reading and transforming the
+//! image, and only then wrote, so an unprivileged `mklink /H` landing anywhere in that window redirected
+//! the write onto a file **outside the selected folder** (`written = 1`, `skipped = []`, victim
+//! 35 → 17120 bytes, `confirmed_overwrite` false and never consulted). Re-checking a *path* cannot fix
+//! that: a path is a name, and the whole attack is substituting what the name denotes.
+//!
+//! So there is deliberately **no path-based per-item pre-check** here to be defeated. The transform runs
+//! first (touching nothing), and then [`crate::batch_media::open_output_verified`] opens the output
+//! atomically, refuses to follow any link at it, settles identity/hard-links/directoriness **on that
+//! handle** against a freshly-scanned census, and the bytes are written **through that same handle**. See
+//! [`crate::batch_media::VerifiedOutput`] for the mechanism, what it closes outright, and the one
+//! microsecond-wide residual it does not.
+//!
+//! A refusal at that point **skips the item with a reported reason** rather than writing it, and rather
+//! than aborting a batch that has already written files — the up-front scan keeps its all-or-nothing
+//! refusal for a plan that arrives wrong.
 
 use std::fs;
 use std::path::Path;
@@ -92,6 +103,17 @@ pub struct BatchReport {
 /// false for the overwhelmingly common case (a freshly-computed non-destructive name that doesn't exist
 /// yet) — so only a genuine collision pays for the `O(n)` [`same_file`] scan over the batch's own inputs.
 fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
+    // **Security audit finding 4 (PR #848).** Standalone, this function fails OPEN for an alternate data
+    // stream: a never-before-existing stream path makes the `Path::is_file()` arm below false, so it
+    // reports "nothing sits there — not an overwrite of anything" and the hidden write is permitted with
+    // no confirmation. (The "output is one of this batch's own inputs, so it's permitted" arm is a second
+    // route to the same place once stream paths fuse onto their host.) That was previously safe only
+    // because `classify_output_containment` refuses a stream path first — an unenforced call-ordering
+    // convention, which is not a guarantee. Enforced here now, so the function is correct on its own and
+    // no caller can reach the fail-open by calling it in the wrong order.
+    if crate::batch_media::names_alternate_stream(&item.output) {
+        return true;
+    }
     if same_file(&item.input, &item.output) {
         return true;
     }
@@ -109,7 +131,18 @@ fn is_foreign_overwrite(item: &PlannedItem, items: &[PlannedItem]) -> bool {
 /// textually different from `input` yet be the SAME file on a case-insensitive filesystem (Windows,
 /// default macOS). Shared by the [`execute_plan_walk`] refusal check and available to any future caller
 /// that wants to ask "would this plan be destructive?" without duplicating the comparison.
-pub fn any_in_place(items: &[PlannedItem]) -> bool {
+///
+/// **Test-only as of security audit finding 4 (PR #848).** This is a *predicate*, not a gate: it answers
+/// "would this plan overwrite something?", and a caller outside the engine could easily read a `false` as
+/// permission to write — which is exactly the fail-open shape the finding is about, since a
+/// never-before-existing alternate data stream used to answer `false`. It was `pub`, and **nothing
+/// anywhere used it**: not the app adapter, not another crate, not even `execute_plan_walk` (which calls
+/// [`is_foreign_overwrite`] directly). Rather than keep a public advisory predicate that invites being
+/// mistaken for the enforcement point, it is now compiled only for this module's own tests. The engine's
+/// real write-time authority is [`crate::batch_media::open_output_verified`], which cannot be bypassed by
+/// asking a question, and a future caller has to reach for that.
+#[cfg(test)]
+fn any_in_place(items: &[PlannedItem]) -> bool {
     items.iter().any(|it| is_foreign_overwrite(it, items))
 }
 
@@ -205,14 +238,12 @@ pub fn execute_plan_walk(
 
     let mut report = BatchReport::default();
     for item in items {
-        // CPE-1624 finding A: re-ask both questions immediately before THIS item's write, not once for
-        // the whole batch (see [`write_time_guard`]).
-        if let Err(reason) = write_time_guard(item, items, job, &mut parent_cache) {
-            flush(OpResult::err(Path::new(&item.input), &reason));
-            report.skipped.push((item.input.clone(), reason));
-            continue;
-        }
-        match execute_one(item, job) {
+        // Every write-time question is asked inside `execute_one`, on the handle the bytes go through —
+        // NOT here. An earlier cut re-checked by path at this point; the security audit showed that gave
+        // false assurance, because `execute_one` then read and transformed the image (528 ms measured)
+        // before writing, and a link planted anywhere in that window redirected the write. There is
+        // deliberately no path-based per-item pre-check here to be defeated.
+        match execute_one(item, job, items) {
             Ok(()) => {
                 report.written += 1;
                 flush(OpResult::ok(Path::new(&item.output)));
@@ -226,87 +257,30 @@ pub fn execute_plan_walk(
     Ok(report)
 }
 
-/// **The write-time re-check (CPE-1624 finding A).** Both guards above run once, before the loop — so
-/// every one of them is a *stale* answer by the time item N is actually written. Measured on a real
-/// filesystem: `same_file(link.jpg -> A, A)` is `true`, and after swapping the symlink's target to `B` a
-/// repeat check correctly returns `false` — i.e. the pre-batch answer does not describe what the write
-/// will hit. The window between the up-front scan and a given item's write grows with batch size and with
-/// slow per-file operations (watermark, compress), and closing it costs one extra identity probe per item.
-///
-/// Both questions are re-asked, because both can change underneath the batch:
-/// 1. **Containment** — a name inside the folder can be turned into a link out of it (or a link's target
-///    re-pointed) after the scan.
-/// 2. **Foreign overwrite** — a file that did not exist at scan time can appear at a planned output
-///    between the scan and the write, at which point writing it is exactly the unconfirmed clobber
-///    `confirmed_overwrite` exists to prevent.
-///
-/// **A late detection skips the ITEM, it does not fail the batch.** The up-front scan keeps its
-/// all-or-nothing refusal: a plan that is already wrong when it arrives should be rejected whole, before a
-/// single byte moves. But once the batch is running, files have been written; aborting mid-way would leave
-/// a half-applied batch with no report, and the module's whole ethos is skip-on-error with a reported
-/// reason (`list_dir`/`revert_engine`). The item is recorded in `BatchReport::skipped` with a reason
-/// naming the late change, and the surviving items still run.
-///
-/// **Cost, measured against a control.** One [`classify_output_containment`] (which re-probes `output`'s
-/// identity — [`ParentCache`] deliberately memoizes only *directory* facts, so this is a genuine
-/// re-resolution, not a replay) plus [`is_foreign_overwrite`]'s `same_file` + one `Path::is_file()` stat.
-/// The deterministic measure is the `canonicalize` count, and it is an exact 2× by construction — the
-/// same two questions, asked a second time: **5 calls per item before this fix, 10 after**, on the
-/// worst-case shape `cpe_1623_execute_plan_walk_containment_recheck_stays_bounded` builds (every fast
-/// path defeated). In wall-clock terms, on 1000 tiny 16×16 PNGs in a release build, the whole walk
-/// measured 536–569 µs/item with the guard against 543–563 µs/item without it — i.e. **inside
-/// run-to-run noise**, because even a trivial decode/encode dwarfs a handful of attribute reads. On real
-/// photographs the ratio is far smaller still. The guard measured in isolation, cold, is ~85–112 µs/item.
-fn write_time_guard(
-    item: &PlannedItem,
-    items: &[PlannedItem],
-    job: &BatchJob,
-    parent_cache: &mut ParentCache,
-) -> Result<(), String> {
-    match classify_output_containment(&item.input, &item.output, parent_cache) {
-        Containment::Inside => {}
-        Containment::Escapes => {
-            return Err(format!(
-                "skipped at write time: \"{}\" no longer stays inside this file's own folder — it \
-                 changed after the batch's up-front check (a link re-pointed, or a name replaced). \
-                 Nothing was written for this file",
-                item.output
-            ));
-        }
-        Containment::Refused(why) => {
-            return Err(format!(
-                "skipped at write time: \"{}\" {why}. Nothing was written for this file",
-                item.output
-            ));
-        }
-        Containment::Unverifiable(why) => {
-            return Err(format!(
-                "skipped at write time: couldn't verify that \"{}\" still stays inside this file's own \
-                 folder — {why}. Nothing was written for this file; this is a refusal to guess, not a \
-                 detected escape",
-                item.output
-            ));
-        }
-    }
-
-    if !job.confirmed_overwrite && is_foreign_overwrite(item, items) {
-        return Err(format!(
-            "skipped at write time: \"{}\" would now overwrite a file this batch never selected — it \
-             appeared after the batch's up-front check, and `confirmed_overwrite` was not set. Nothing \
-             was written for this file",
-            item.output
-        ));
-    }
-    Ok(())
-}
-
 /// Execute a planned batch without streaming per-file progress — the cargo-test correctness path.
 /// Delegates to [`execute_plan_walk`] with a no-op flush so there is exactly one implementation.
 pub fn execute_plan(items: &[PlannedItem], job: &BatchJob) -> Result<BatchReport, String> {
     execute_plan_walk(items, job, |_| {})
 }
 
-fn execute_one(item: &PlannedItem, job: &BatchJob) -> Result<(), String> {
+/// Transform one item and write it — with **every** write-time safety question answered on the handle the
+/// bytes actually go through, in the last moment before they do (security audit finding 1, PR #848).
+///
+/// Ordering is load-bearing and is the whole fix:
+///
+/// 1. `fs::read` + `apply_ops` — the slow part (the audit measured 528 ms), deliberately **before** the
+///    output is opened or verified. Nothing has been created or touched yet, so a transform that fails
+///    still leaves no output behind, and the expensive work is outside the window rather than inside it.
+/// 2. [`crate::batch_media::open_output_verified`] — claims the name atomically, refuses to follow a link
+///    at it, and settles identity/hard-links/directoriness on the resulting handle against a freshly
+///    scanned census. This is the enforcement point.
+/// 3. The foreign-overwrite question, answered from `created` (an atomic fact from step 2) rather than a
+///    `Path::is_file()` stat that could already be stale.
+/// 4. Truncate + write **through the handle from step 2** — the same object that was verified, which
+///    cannot have been swapped for another in between because a handle names an object, not a name.
+///
+/// Steps 2-4 are a handful of syscalls; the previously exploitable window was the entire transform.
+fn execute_one(item: &PlannedItem, job: &BatchJob, items: &[PlannedItem]) -> Result<(), String> {
     let input_bytes = fs::read(&item.input).map_err(|e| format!("could not read input: {e}"))?;
     let output_bytes = batch_transform::apply_ops(&input_bytes, &job.ops)?;
 
@@ -315,8 +289,35 @@ fn execute_one(item: &PlannedItem, job: &BatchJob) -> Result<(), String> {
             fs::create_dir_all(parent).map_err(|e| format!("could not create output dir: {e}"))?;
         }
     }
-    fs::write(&item.output, output_bytes).map_err(|e| format!("could not write output: {e}"))?;
-    Ok(())
+
+    let verified = crate::batch_media::open_output_verified(&item.input, &item.output)?;
+    #[cfg(test)]
+    let verified_at = std::time::Instant::now();
+
+    // Something was already at this name. `confirmed_overwrite` is the only thing that can authorise
+    // replacing it — and `created` is an atomic fact from the open, not a stat that can go stale.
+    if !verified.created() && !job.confirmed_overwrite && is_foreign_overwrite(item, items) {
+        verified.abandon(&item.output);
+        return Err(format!(
+            "refusing at write time: \"{}\" would overwrite a file this batch never selected — it \
+             appeared after the batch's up-front check, and `confirmed_overwrite` was not set. Nothing \
+             was written for this file",
+            item.output
+        ));
+    }
+
+    let result = verified.write_all(&output_bytes);
+    #[cfg(test)]
+    VERIFY_TO_WRITE_NANOS.with(|c| c.set(verified_at.elapsed().as_nanos()));
+    result
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How long the last [`execute_one`] spent between finishing verification and finishing the write —
+    /// the real exploitable window, which the security audit's SEC-7 probe measures against the transform
+    /// it used to contain. Thread-local for the same reason the other test counters are.
+    static VERIFY_TO_WRITE_NANOS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -1262,12 +1263,13 @@ mod tests {
         // per item for each of out_dir/dir, both memoized after the first). O(n²) would blow far past
         // this even at n=300.
         //
-        // **Raised from 10 to 14 by CPE-1624**, deliberately and by exactly the amount the fix costs:
-        // the write-time re-check asks the same two questions a second time, immediately before each
-        // write, so the per-item count doubles by design. Measured on this worst-case shape (the `"./"`
-        // template defeats every fast path): **5 calls/item before, 10 after** — an exact 2×, not a
-        // creeping regression. The headroom above 10 is for platform variation in how many tiers
-        // `path_key` has to fall through, not for a future doubling; a regression to per-item uncached
+        // **Raised from 10 to 14 by CPE-1624** and kept there through the PR #848 security-audit
+        // rework. Measured on this worst-case shape (the `"./"` template defeats every fast path):
+        // **5 calls/item on base `main`, 10 with the original path-based re-check, 7 with the
+        // handle-based verification that replaced it** — the write-time check now resolves the path once
+        // per item instead of twice, because the second question is answered from the open handle rather
+        // than from another path resolution. The headroom is for platform variation in how many tiers
+        // `path_key` falls through, not for a future doubling; a regression to per-item uncached
         // resolution would still be orders of magnitude past it.
         assert!(
             calls <= n * 14,
@@ -1280,15 +1282,12 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// Manual-only measurement of the CPE-1624 write-time re-check's per-item overhead — the ticket asks
-    /// for a stated number, and this is where it comes from. `#[ignore]`d like the other timing tests
-    /// (wall-clock assertions are flaky in CI); run with
+    /// Manual-only measurement of the write-time verification's per-item overhead. `#[ignore]`d like the
+    /// other timing tests (wall-clock assertions are flaky in CI); run with
     /// `cargo test --release -- --ignored --nocapture cpe_1624_write_time_recheck_overhead`.
     ///
-    /// Times the guard itself in isolation as well as the whole walk, so the number is not swamped by the
-    /// image transform each item also pays. The **control** is the same run with the guard neutralised
-    /// (see the PR's guard-neutralisation table); this test prints both the total and the per-item cost so
-    /// the two runs are directly comparable.
+    /// The **control** is the same run with the verification neutralised (see the PR's
+    /// guard-neutralisation table), so the two runs are directly comparable.
     #[test]
     #[ignore]
     fn cpe_1624_write_time_recheck_overhead() {
@@ -1304,13 +1303,14 @@ mod tests {
         let job = BatchJob::new(vec![MediaOp::Resize { max_px: 8 }]);
         let items = plan(&job, &inputs).unwrap();
 
-        // The guard alone, over one shared cache — exactly how execute_plan_walk calls it.
-        let mut cache = ParentCache::new();
+        // The verification alone — open + decide on the handle, then abandon without writing.
         let start = std::time::Instant::now();
         for item in &items {
-            write_time_guard(item, &items, &job, &mut cache).unwrap();
+            crate::batch_media::open_output_verified(&item.input, &item.output)
+                .unwrap()
+                .abandon(&item.output);
         }
-        let guard_only = start.elapsed();
+        let verify_only = start.elapsed();
 
         let start = std::time::Instant::now();
         let report = execute_plan(&items, &job).unwrap();
@@ -1318,9 +1318,9 @@ mod tests {
         assert_eq!(report.written, n);
 
         println!(
-            "CPE-1624 write-time re-check over n={n}: guard alone {guard_only:?} ({:?}/item); whole \
+            "write-time verification over n={n}: verify alone {verify_only:?} ({:?}/item); whole \
              execute_plan_walk {whole_walk:?} ({:?}/item)",
-            guard_only / n as u32,
+            verify_only / n as u32,
             whole_walk / n as u32
         );
 
@@ -1604,6 +1604,257 @@ mod tests {
             err.contains("too many entries"),
             "the refusal must say the folder was too big to account for, not blame a lock: {err}"
         );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ==== SECURITY AUDIT (PR #848) — end-to-end attack attempts ======================================
+
+    /// **Security audit finding 4.** `is_foreign_overwrite` was correct only *in the order the engine
+    /// happens to call it* — `classify_output_containment` refuses an alternate-data-stream path first.
+    /// That is an unenforced convention, not a guarantee, and on its own the function fails open for a
+    /// stream: a never-before-existing stream path makes `Path::is_file()` false, so the early return
+    /// says "nothing sits there — not an overwrite of anything", and the write is permitted with no
+    /// confirmation. It now refuses a stream itself, so it is correct **standalone, in any order**.
+    ///
+    /// The host here is deliberately a *different* file from `item.input` and does not exist, so neither
+    /// the same-file arm nor the `is_file` arm can mask the check being tested. Red with the stream
+    /// refusal neutralised (B6); green with it.
+    #[cfg(windows)]
+    #[test]
+    fn secaudit_is_foreign_overwrite_refuses_a_stream_output_without_relying_on_call_order() {
+        let items = vec![PlannedItem {
+            input: r"C:\pics\photo.png".into(),
+            output: r"C:\pics\unrelated.png:evil.png".into(),
+            summary: "an alternate data stream of an unrelated, non-existent file".into(),
+        }];
+        assert!(
+            is_foreign_overwrite(&items[0], &items),
+            "a stream-named output must be refused by this function alone, with no other check having \
+             run and nothing existing at the path to trip the is_file() arm"
+        );
+        assert!(any_in_place(&items), "and therefore by the predicate built on it");
+    }
+
+    /// **SEC-8 (executed by the audit, now a permanent regression test).** The stale `dir_scans` memo let
+    /// an attacker swap an *inside* hard link for an *outside* one mid-batch: the link count is unchanged
+    /// at 2, so only a census can tell the difference, and the write-time check replayed the pre-swap
+    /// census. Measured against the vulnerable build: `written = 2`, `skipped = []`, and
+    /// `outside\exfil.png` went 34 → 168 bytes holding the batch's output.
+    ///
+    /// **The auditor's two assertions are deliberately inverted here.** Theirs asserted the exploit
+    /// (`assert_ne!(landed, original)` — "the outside bytes DID change"), which is how a demonstration
+    /// proves itself. As a regression test the security property is the opposite: the outside file must
+    /// be byte-for-byte untouched, and the item must be skipped. The `skipped.len() == 1` assertion is
+    /// unchanged — it was already the right way round and was the half that went red.
+    #[test]
+    fn secaudit_e2e_stale_census_memo_writes_outside_the_selected_folder() {
+        let d = scratch("secaudit-memo-e2e");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let first = selected.join("first.png");
+        let photo = selected.join("photo.png");
+        fs::write(&first, png_bytes(32, 32)).unwrap();
+        fs::write(&photo, png_bytes(64, 64)).unwrap();
+        // Resize names its output "<stem>-<max_px>.<ext>", so photo.png's output is photo-16.png. The
+        // attacker pre-plants that name PLUS a second INSIDE hard link to it: links = 2, census sees 2.
+        let target = selected.join("photo-16.png");
+        fs::write(&target, b"the attacker's planted target file").unwrap();
+        let decoy = selected.join("decoy.png");
+        if fs::hard_link(&target, &decoy).is_err() {
+            eprintln!("SKIP secaudit_e2e: no hard links on this fs — VERIFIED NOTHING");
+            return;
+        }
+        let original = fs::read(&target).unwrap();
+        let original_len = original.len();
+
+        let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 16 }]);
+        job.confirmed_overwrite = true; // the user confirmed overwriting an existing name
+        job.non_destructive = false;
+        let items =
+            plan(&job, &[first.to_string_lossy().to_string(), photo.to_string_lossy().to_string()])
+                .unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].output, target.to_string_lossy().to_string(), "planned output is the target");
+
+        // The attacker's window: after the up-front scan (which memoized the census) and before item 1's
+        // own write, drop the inside second name and create an outside one. Link count is UNCHANGED at 2.
+        let outside_name = outside.join("exfil.png");
+        let swapped = std::cell::Cell::new(false);
+        let report = execute_plan_walk(&items, &job, |_| {
+            if !swapped.get() {
+                swapped.set(true);
+                fs::remove_file(&decoy).unwrap();
+                fs::hard_link(&target, &outside_name).unwrap();
+            }
+        })
+        .expect("the batch runs");
+
+        assert!(swapped.get(), "the swap never happened — this test verified NOTHING");
+        let landed = fs::read(&outside_name).unwrap();
+        println!(
+            "SEC-8 report: written={} skipped={:?}; outside file now {} bytes (was {})",
+            report.written,
+            report.skipped,
+            landed.len(),
+            original_len
+        );
+        let photo_now = fs::read(&target).unwrap();
+        println!(
+            "SEC-8 target now {} bytes (was {}); outside link {} bytes; same_bytes_as_target={}",
+            photo_now.len(),
+            original_len,
+            landed.len(),
+            photo_now == landed
+        );
+        assert_eq!(
+            landed, original,
+            "EXPLOIT: the file OUTSIDE the selected folder now holds different bytes — the batch wrote \
+             through a name it was never allowed to touch ({outside_name:?})"
+        );
+        assert_eq!(
+            report.skipped.len(),
+            1,
+            "EXPLOIT: item 1 was written even though one of its names now lives outside the selected \
+             folder — {outside_name:?} now holds the batch's output bytes"
+        );
+        assert!(
+            report.skipped[0].1.contains("write time"),
+            "the skip must be attributed to the write-time verification: {}",
+            report.skipped[0].1
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **SEC-7 (the audit's window measurement, kept and inverted).** The auditor asked how wide the gap
+    /// is between the safety decision and the actual write, and measured the vulnerable answer: the check
+    /// passed in 25 µs and `execute_one` then spent 528 ms reading and transforming the image before
+    /// writing, so the entire transform sat inside the window. Their assertion (`transform < guard`) was
+    /// written to fail on that build and is meaningless once the ordering is fixed.
+    ///
+    /// The regression form asserts the property the fix actually establishes: **the transform happens
+    /// before verification, so the window no longer contains it.** `VERIFY_TO_WRITE_NANOS` records the
+    /// real gap — from the handle being verified to the bytes being on disk — and it must be a small
+    /// fraction of the transform it used to contain. The bound is deliberately loose (10×, against a
+    /// measured ratio of ~4 orders of magnitude) so it cannot flake on a loaded CI runner while still
+    /// failing instantly if the transform ever moves back inside the window.
+    #[test]
+    fn secaudit_the_transform_is_no_longer_inside_the_verify_to_write_window() {
+        let d = scratch("secaudit-gap");
+        let photo = d.join("photo.png");
+        fs::write(&photo, png_bytes(2000, 2000)).unwrap();
+        let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 1000 }]);
+        job.confirmed_overwrite = true;
+        let items = plan(&job, &[photo.to_string_lossy().to_string()]).unwrap();
+
+        // How long the work that USED to sit inside the window takes.
+        let t1 = std::time::Instant::now();
+        let input_bytes = fs::read(&items[0].input).unwrap();
+        let _out = crate::batch_transform::apply_ops(&input_bytes, &job.ops).unwrap();
+        let transform = t1.elapsed();
+
+        // The real window, recorded from inside `execute_one`.
+        VERIFY_TO_WRITE_NANOS.with(|c| c.set(0));
+        let report = execute_plan(&items, &job).expect("the batch runs");
+        assert_eq!(report.written, 1);
+        let window_ns = VERIFY_TO_WRITE_NANOS.with(|c| c.get());
+        assert!(window_ns > 0, "the window was never recorded — this test verified NOTHING");
+
+        println!(
+            "SEC-7 read+transform (outside the window, where it belongs) took {transform:?}; the \
+             verify->write window is {window_ns} ns"
+        );
+        assert!(
+            window_ns * 10 < transform.as_nanos(),
+            "EXPLOIT WINDOW: the verify->write window ({window_ns} ns) is not decisively smaller than \
+             the transform ({transform:?}) — the transform may have moved back inside it"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **SEC-9 (executed by the audit, now a permanent regression test) — the highest-severity finding.**
+    /// A racing, unprivileged process creates the planned output name as a **hard link** to a file outside
+    /// the selected folder (`mklink /H`, no elevation, no symlink privilege) after the safety check has
+    /// passed but while the transform is still running. On the vulnerable build the write followed that
+    /// name: `written = 1`, `skipped = []`, victim 35 → 17120 bytes, with `confirmed_overwrite` false and
+    /// never consulted, because at check time the output did not exist at all.
+    ///
+    /// **Two independent defences now cover it, and which one fires depends on when the racer lands.**
+    /// The test asserts the security property either way and reports which:
+    /// - Racer lands **before** the output is opened (the usual case here — it sleeps 300 ms, the
+    ///   transform takes ~500 ms): the open finds an existing file whose link count is 2 while the
+    ///   selected folder holds only one of those names, so it is refused and the item is skipped.
+    /// - Racer lands **after**: it fails outright, because the atomic `create_new` already claimed the
+    ///   name. Nothing to detect — the attack cannot be staged at all.
+    ///
+    /// The auditor's `assert!(linked)` precondition is therefore relaxed into a branch: with the fix, a
+    /// failed `hard_link` is itself the defence rather than a test that verified nothing. The victim-bytes
+    /// assertion — the one that went red — is unchanged.
+    #[test]
+    fn secaudit_race_between_the_guard_and_the_write_clobbers_an_outside_file() {
+        let d = scratch("secaudit-race");
+        let selected = d.join("selected");
+        let outside = d.join("outside");
+        fs::create_dir_all(&selected).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+
+        let photo = selected.join("photo.png");
+        fs::write(&photo, png_bytes(2000, 2000)).unwrap();
+        let victim = outside.join("victim.txt");
+        let victim_bytes = b"the outside victim's original bytes".to_vec();
+        fs::write(&victim, &victim_bytes).unwrap();
+
+        let mut job = BatchJob::new(vec![MediaOp::Resize { max_px: 1000 }]);
+        job.non_destructive = false; // confirmed_overwrite deliberately left FALSE
+        let items = plan(&job, &[photo.to_string_lossy().to_string()]).unwrap();
+        let out_path = PathBuf::from(&items[0].output);
+        assert!(!out_path.exists(), "the output must be free when the batch starts");
+
+        // The racing process: wait until the guard has passed and the transform is under way, then make
+        // the planned output a second NAME for the outside victim.
+        let v = victim.clone();
+        let o = out_path.clone();
+        let racer = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            fs::hard_link(&v, &o).map(|_| true).unwrap_or(false)
+        });
+
+        let report = execute_plan(&items, &job).expect("the batch runs");
+        let linked = racer.join().unwrap();
+
+        let victim_now = fs::read(&victim).unwrap();
+        println!(
+            "SEC-9 report: racer_linked={linked} written={} skipped={:?}; victim {} -> {} bytes",
+            report.written,
+            report.skipped,
+            victim_bytes.len(),
+            victim_now.len()
+        );
+        // THE security property, asserted whichever defence fired.
+        assert_eq!(
+            victim_now, victim_bytes,
+            "EXPLOIT: a file OUTSIDE the selected folder was overwritten by a race that landed between \
+             the safety check and the write"
+        );
+        if linked {
+            // The racer got the name in before the open: the handle check must have caught the
+            // multiply-linked object and skipped the item.
+            assert_eq!(
+                report.written, 0,
+                "the racer's link landed first, so the item must have been refused, not written"
+            );
+            assert_eq!(report.skipped.len(), 1, "the refused item must be reported, not silently dropped");
+            println!("SEC-9 defence: the handle check refused a multiply-linked output ({})", report.skipped[0].1);
+        } else {
+            // The atomic create claimed the name first, so the attack could not be staged at all.
+            assert_eq!(report.written, 1, "with the attack impossible, the ordinary write must succeed");
+            println!("SEC-9 defence: the atomic create claimed the name before the racer could link it");
+        }
 
         let _ = fs::remove_dir_all(&d);
     }

@@ -74,9 +74,19 @@ export function templateEscapesDirectory(
  * the same host. When `navigator` isn't available (a non-DOM test runner) the sniff is `""`, which reads
  * as "not Windows" — the direction that only ever *accepts* a template the backend is still free to
  * refuse, never the reverse.
+ *
+ * **`\bwin`, not `win` (reviewer nit, PR #848 — taken rather than waived).** The reviewer flagged the
+ * bare substring test as loose and judged it unreachable with real webview values, which is true for the
+ * `navigator.platform` strings the app actually sees. But there is a real collision one step away:
+ * **`"Darwin"` contains `"win"`**, and `defaultPlatform()` falls back to `navigator.userAgent` whenever
+ * `navigator.platform` is empty — a shape some webviews and non-DOM runners do produce. That would read
+ * macOS as Windows and refuse a colon there, which is precisely the CPE-1640 false positive this
+ * function exists to fix. A word-boundary anchor costs nothing and closes it: `Win32` and `Windows NT`
+ * still match (start of string), `Darwin` no longer does (preceded by `r`). {@link isCaseInsensitivePlatform}
+ * keeps its looser test deliberately — there, matching `Darwin` yields *macOS's own correct answer*.
  */
 function colonIsAPathCharacter(platform: string): boolean {
-  return /win/i.test(platform);
+  return /\bwin/i.test(platform);
 }
 
 /**

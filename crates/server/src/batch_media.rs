@@ -484,21 +484,30 @@ enum PathKey {
 /// - `dir_scans` — a directory's identity→name-count census ([`DirLinkScan`]), built lazily and only when
 ///   an output turns out to be multiply-linked.
 ///
-/// **Deliberately holds no memo for an individual output path's own probe.** Every call re-probes the
-/// `output` it is asked about, so calling the containment check again immediately before a write (the
-/// per-write re-check CPE-1624 adds) genuinely re-resolves that file's identity rather than replaying a
-/// plan-time answer — the cache narrows the TOCTOU window instead of widening it. Only facts about
-/// *directories* (which the batch neither creates nor moves) are reused.
+/// **This cache is only ever safe for a check that does not authorise a write, and the security audit of
+/// PR #848 proved why (findings 2 and 3).** An earlier version of this doc claimed the memos were sound
+/// because they hold "facts about *directories*, which the batch neither creates nor moves". That is the
+/// wrong invariant. The real requirement is that **no other principal can re-point them**, and that is
+/// simply false for anything reached through a symlink or a junction — which any directory path may be.
 ///
-/// **`dir_scans` IS reused across the write-time re-checks, and that is sound in the fail-closed
-/// direction (CPE-1624 × CPE-1652).** One cache is threaded through
-/// [`crate::batch_execute::execute_plan_walk`]'s up-front scan *and* every per-item re-check, so the new
-/// guard adds **zero** censuses — the whole point of CPE-1652 finding B. A stale census can only ever
-/// mis-decide in the safe direction, because the *link count* it is compared against is re-probed fresh
-/// every time: a name added outside the folder mid-batch raises `links` while the memoized `inside`
-/// count stays put, so the verdict flips to a refusal; a name added *inside* the folder likewise leaves
-/// the memo undercounting, which also refuses. Only removing an outside name relaxes the verdict, and
-/// that genuinely does make the write safe.
+/// Two concrete refutations, both against that earlier reasoning:
+///
+/// - **`dir_scans` (executed).** The old note argued a stale census could only err fail-closed, reasoning
+///   about a name being *added* or *removed* in isolation. It missed the **swap**: delete an inside hard
+///   link and create an outside one in the same window, and `links` is unchanged at 2 while the memo
+///   still reports 2 names inside, so `inside >= links` passes. Measured end to end: `written = 2`,
+///   `skipped = []`, and a file outside the selected folder went 34 → 168 bytes holding the batch's
+///   output. The identical sequence against a **fresh** cache correctly returns [`Containment::Escapes`]
+///   — the engine already knew; the memo blinded it.
+/// - **`dir_ids`.** Memoized by path *string*, and [`identity_following_links`] resolves *through* links,
+///   so a directory link re-pointed mid-batch is invisible. Unlike a census this staleness is not even
+///   monotone: it feeds an equality comparison with nothing re-probed alongside it to contradict it.
+///
+/// So the rule is now structural rather than argued: **the write-time authority
+/// ([`open_output_verified`]) builds its own cache, per item, and never receives one.** Whatever this
+/// cache is reused for can therefore only ever *refuse* a batch early — it can no longer permit a write.
+/// [`crate::batch_execute::execute_plan_walk`] still threads one through its up-front scan, where a stale
+/// answer costs at worst a batch refused for a condition that has since cleared.
 #[derive(Debug, Default)]
 pub(crate) struct ParentCache {
     parents: std::collections::HashMap<String, Option<std::path::PathBuf>>,
@@ -509,6 +518,16 @@ pub(crate) struct ParentCache {
 impl ParentCache {
     pub(crate) fn new() -> Self {
         Self::default()
+    }
+
+    /// Drop every memo of a **live filesystem fact** — a directory's identity and a directory's link
+    /// census — keeping only `parents`, which is a pure path-canonicalization memo. Called at the top of
+    /// every [`classify_output_containment`], so those two can only ever be reused *within* a single
+    /// decision, never across two. See that function for the two demonstrated exploits this closes
+    /// (security audit findings 2 and 3, PR #848).
+    fn forget_live_facts(&mut self) {
+        self.dir_ids.clear();
+        self.dir_scans.clear();
     }
 
     /// A directory's [`FileIdentity`], memoized. `""` (a bare-filename input's "directory") means the
@@ -681,6 +700,18 @@ pub(crate) fn classify_output_containment(
     output: &str,
     parent_cache: &mut ParentCache,
 ) -> Containment {
+    // **Security audit findings 2 and 3 (PR #848): the live-filesystem memos are per-CALL scratch, never
+    // cross-call state.** Both were demonstrated to make this function replay an answer about a
+    // filesystem that had since changed — the census by a hard-link swap that keeps the link count at 2
+    // (executed: a file outside the folder went 34 → 168 bytes), the directory-identity memo by
+    // re-pointing a directory link, which nothing else re-probes to contradict. Rather than asking every
+    // caller to remember to build a fresh cache, the footgun is removed here: whatever cache is threaded
+    // in, this call always resolves live filesystem facts itself. Only `parents` — a pure
+    // path-canonicalization memo, and CPE-1613's O(n) fix for `plan()`'s collision set — survives across
+    // calls, and it can no longer authorise anything on its own: the write-time authority
+    // ([`open_output_verified`]) builds its own cache per item regardless.
+    parent_cache.forget_live_facts();
+
     let out_final = output.rsplit(['/', '\\']).next().unwrap_or(output);
     if out_final == "." || out_final == ".." {
         return Containment::Escapes;
@@ -757,6 +788,14 @@ pub(crate) enum Containment {
 /// component, which for any rooted path has already had the drive prefix split off.
 fn final_component_names_alternate_stream(final_component: &str) -> bool {
     colon_is_a_path_character() && final_component.contains(':')
+}
+
+/// [`final_component_names_alternate_stream`] for a **whole path** — splits the final component off
+/// first. `pub(crate)` so [`crate::batch_execute::is_foreign_overwrite`] can enforce the rule itself
+/// rather than relying on being called after [`classify_output_containment`] (security audit finding 4,
+/// PR #848: an unenforced call-ordering convention is not a guarantee).
+pub(crate) fn names_alternate_stream(path: &str) -> bool {
+    final_component_names_alternate_stream(path.rsplit(['/', '\\']).next().unwrap_or(path))
 }
 
 /// Drop a Windows alternate-data-stream suffix from a path's final component, so [`path_key`] (and hence
@@ -1261,8 +1300,18 @@ fn probe_no_follow(path: &std::path::Path) -> Probe {
         };
         let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
         let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
-        // CPE-1652 finding A: read the actual reparse TAG off the same handle, before closing it.
-        let tag = reparse_tag_of(handle);
+        // CPE-1652 finding A: read the actual reparse TAG off the same handle, before closing it — but
+        // ONLY when the attributes say there is a reparse point to classify. The first cut of this asked
+        // unconditionally, which the independent reviewer caught as a real regression in the exact path
+        // CPE-1652 exists to make cheaper: an extra `GetFileInformationByHandleEx` on **every** probe of
+        // **every** ordinary file, and the link census probes up to `census_cap()` entries — roughly
+        // doubling its per-entry syscall cost for a value that is then not consulted. Ordinary files
+        // (the overwhelming majority of every census) now pay nothing for it.
+        let tag = if ok && info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+            reparse_tag_of(handle)
+        } else {
+            None
+        };
         let _ = CloseHandle(handle);
         if !ok {
             return Probe::Unreadable(WHY_PROBE_FAILED);
@@ -1508,6 +1557,272 @@ fn identity_following_links(path: &std::path::Path) -> Option<FileIdentity> {
 #[cfg(not(any(windows, unix)))]
 fn identity_following_links(_path: &std::path::Path) -> Option<FileIdentity> {
     None
+}
+
+/// A planned output that has been **opened** for writing and verified **on that handle** — the fix for
+/// the security audit's finding 1 on PR #848 (executed, byte-level data loss outside the selected folder).
+///
+/// The audit measured the previous design precisely: the path-based re-check passed in 25 µs, the image
+/// transform that ran after it took 528 ms, and `fs::write` came only then — so the entire transform sat
+/// inside the check-to-write window. An unprivileged `mklink /H outside\victim.txt selected\photo-1000.png`
+/// landing anywhere in that window redirected the write onto a file outside the folder: `written = 1`,
+/// `skipped = []`, victim 35 → 17120 bytes, with `confirmed_overwrite` false and never consulted. No
+/// amount of re-checking *by path* can fix that, because the name and the object it denotes are two
+/// different things and only the object can be pinned.
+///
+/// So this is "one handle, one answer" — the same argument [`reparse_tag_of`] already makes:
+///
+/// 1. **Claim the name atomically.** `create_new` (`O_CREAT|O_EXCL` / `CREATE_NEW`) either creates the
+///    output or tells us something was already there — no window in which a third party can slip a link
+///    in at that name, and no ambiguity about whether cleanup on refusal is ours to do.
+/// 2. **Never follow a link at the final component.** `O_NOFOLLOW` on Unix, `FILE_FLAG_OPEN_REPARSE_POINT`
+///    on Windows, so an existing symlink/junction yields either an error or a handle to the *link itself*,
+///    which step 3 refuses. The link-swap class stops being a race and becomes structurally impossible.
+/// 3. **Decide on the handle, not the path.** Identity, hard-link count and directoriness are read from
+///    the open handle via `fstat`/`GetFileInformationByHandle`; a multiply-linked file is settled against a
+///    **freshly scanned** census. Nothing is replayed from a memo (finding 2) and nothing is re-resolved
+///    from a path string (finding 3).
+/// 4. **Write through that same handle.** Truncate + write on the object already pinned in step 1-2.
+///
+/// **What this closes, and what it does not.** The link-swap and name-substitution classes are closed
+/// outright: after step 1 the name is taken, so a later `hard_link`/`symlink` at it simply fails. The
+/// residual is one irreducible race: an attacker adding a *new outside name* for the very object we hold
+/// between step 3's link-count read and step 4's write. That window is two syscalls wide (microseconds,
+/// measured below) versus the 528 ms the audit exploited, and closing it entirely would need filesystem
+/// locking the platforms do not offer for this case. It is stated here rather than papered over.
+pub(crate) struct VerifiedOutput {
+    file: std::fs::File,
+    /// True when *this* call created the file, so a later refusal knows the empty file is ours to remove
+    /// (and, just as importantly, that a refusal on a file we did NOT create must leave it untouched).
+    created: bool,
+}
+
+impl VerifiedOutput {
+    /// True when the output did not exist before this call — the write-time answer to "is anything being
+    /// overwritten at all?", read from the atomic create rather than from a `Path::is_file()` stat that
+    /// could be stale by the time it matters.
+    pub(crate) fn created(&self) -> bool {
+        self.created
+    }
+
+    /// Truncate and write. Separate from opening so the caller can apply its own last checks (the
+    /// foreign-overwrite question, which needs the batch's own item list) between verification and the
+    /// first destructive byte.
+    pub(crate) fn write_all(mut self, bytes: &[u8]) -> Result<(), String> {
+        use std::io::Write;
+        self.file.set_len(0).map_err(|e| format!("could not truncate output: {e}"))?;
+        self.file.write_all(bytes).map_err(|e| format!("could not write output: {e}"))?;
+        self.file.flush().map_err(|e| format!("could not flush output: {e}"))
+    }
+
+    /// Give up without writing, removing the file **only** if this call created it.
+    pub(crate) fn abandon(self, path: &str) {
+        if self.created {
+            drop(self.file);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Unix `O_NOFOLLOW`. Hard-coded per target rather than taking a `libc` dependency the crate does not
+/// otherwise have. The value is asserted at runtime by
+/// `secaudit_open_output_verified_refuses_a_symlink_final_component`: if it were wrong the open would
+/// follow the link and that test would fail, so a bad constant cannot ship silently.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: i32 = 0o400000;
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))]
+const O_NOFOLLOW: i32 = 0x0100;
+/// Any other Unix: 0 is a no-op flag, so the open would follow a link — the post-open `symlink_metadata`
+/// belt-and-braces check in [`open_output_verified`] is what refuses there. No such platform is shipped
+/// or tested; this exists so the module cannot fail to compile into one.
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos", target_os = "ios", target_os = "freebsd", target_os = "netbsd", target_os = "openbsd", target_os = "dragonfly"))))]
+const O_NOFOLLOW: i32 = 0;
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` — the same flag [`probe_no_follow`] passes, so the writer and the probe
+/// address objects the same way.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT_U32: u32 = 0x0020_0000;
+
+/// Open `output` for writing and verify **on the resulting handle** that writing through it stays inside
+/// `input`'s own folder. See [`VerifiedOutput`] for why this replaced the path-based re-check.
+///
+/// `cache` is deliberately **not** a parameter: this builds its own, per call, so no census
+/// ([`ParentCache::dir_scan`]) and no directory identity ([`ParentCache::dir_identity`]) can be replayed
+/// from an earlier item or from plan time. That is security-audit findings 2 and 3, and the cost argument
+/// against it does not apply — the census is only reached when the output is *multiply linked*, which no
+/// ordinary batch output ever is.
+pub(crate) fn open_output_verified(input: &str, output: &str) -> Result<VerifiedOutput, String> {
+    let mut cache = ParentCache::new();
+    // Structural + directory-level containment first: dot-segments, drive-relative shapes, alternate data
+    // streams, and "is the output's directory the input's own directory". These are questions about the
+    // PATH, so they cannot be answered from a handle; they run against a fresh cache every time.
+    match classify_output_containment(input, output, &mut cache) {
+        Containment::Inside => {}
+        Containment::Escapes => {
+            return Err(format!(
+                "refusing at write time: \"{output}\" does not stay inside this file's own folder. \
+                 Nothing was written for this file"
+            ));
+        }
+        Containment::Refused(why) => {
+            return Err(format!("refusing at write time: \"{output}\" {why}. Nothing was written for this file"));
+        }
+        Containment::Unverifiable(why) => {
+            return Err(format!(
+                "refusing at write time: couldn't verify that \"{output}\" stays inside this file's own \
+                 folder — {why}. Nothing was written for this file; this is a refusal to guess"
+            ));
+        }
+    }
+
+    let (file, created) = open_no_follow(std::path::Path::new(output))
+        .map_err(|e| format!("could not open output for writing: {e}"))?;
+    let verified = VerifiedOutput { file, created };
+
+    // Belt and braces for a platform that ignores the no-follow flag (or a wrong `O_NOFOLLOW` constant):
+    // if the name is a link at all, refuse regardless of what the open returned.
+    if std::fs::symlink_metadata(output).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        verified.abandon(output);
+        return Err(format!(
+            "refusing at write time: \"{output}\" is a link, and a batch never writes through one — a \
+             link's target can be re-pointed after any check. Nothing was written for this file"
+        ));
+    }
+
+    let facts = match handle_facts(&verified.file) {
+        Some(f) if !f.id.is_degenerate() => f,
+        _ => {
+            verified.abandon(output);
+            return Err(format!(
+                "refusing at write time: \"{output}\" was opened but its filesystem identity could not be \
+                 read, so there is no way to tell what a write would land on. Nothing was written"
+            ));
+        }
+    };
+    if facts.is_reparse_point {
+        verified.abandon(output);
+        return Err(format!(
+            "refusing at write time: \"{output}\" is a reparse point (a link, junction or stand-in for \
+             another name), and a batch never writes through one. Nothing was written for this file"
+        ));
+    }
+    if facts.is_dir {
+        verified.abandon(output);
+        return Err(format!("refusing at write time: \"{output}\" is a directory. Nothing was written"));
+    }
+
+    // The only remaining way a write here reaches outside the folder is a hard link: a second name for
+    // this very object, living somewhere else. Settled against a census scanned NOW, never a memo.
+    if facts.links > 1 {
+        let (dir, _, _) = split(input);
+        let key = if dir.is_empty() { "." } else { &dir };
+        let Some(scan) = scan_dir_link_census(std::path::Path::new(key)) else {
+            verified.abandon(output);
+            return Err(format!("refusing at write time: \"{output}\" — {WHY_CENSUS_FAILED}. Nothing was written"));
+        };
+        let inside = scan.counts.get(&facts.id).copied().unwrap_or(0);
+        if inside < facts.links {
+            verified.abandon(output);
+            let why = if scan.capped {
+                WHY_CENSUS_TOO_BIG
+            } else if scan.incomplete {
+                WHY_CENSUS_FAILED
+            } else {
+                "at least one of its other names lives outside the selected folder, so writing here would \
+                 change a file the batch was never allowed to touch"
+            };
+            return Err(format!(
+                "refusing at write time: \"{output}\" has {} names and only {inside} of them are in the \
+                 selected folder — {why}. Nothing was written for this file",
+                facts.links
+            ));
+        }
+    }
+
+    Ok(verified)
+}
+
+/// Identity facts read from an **already-open handle** — no path involved, so nothing can have been
+/// substituted between the open and this read.
+struct HandleFacts {
+    id: FileIdentity,
+    links: u64,
+    is_dir: bool,
+    is_reparse_point: bool,
+}
+
+#[cfg(unix)]
+fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = file.metadata().ok()?;
+    Some(HandleFacts {
+        id: FileIdentity { volume: meta.dev(), index: u128::from(meta.ino()) },
+        links: meta.nlink(),
+        is_dir: meta.is_dir(),
+        // Unix has no reparse points; `O_NOFOLLOW` already refused a symlink at the final component.
+        is_reparse_point: false,
+    })
+}
+
+#[cfg(windows)]
+fn handle_facts(file: &std::fs::File) -> Option<HandleFacts> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+        FILE_ATTRIBUTE_REPARSE_POINT,
+    };
+
+    let handle = HANDLE(file.as_raw_handle() as isize);
+    // SAFETY: `handle` is borrowed from a live `File` that outlives this call; `info` is a correctly-sized
+    // out-parameter. Read-only query — no ownership taken, nothing closed here.
+    unsafe {
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        if GetFileInformationByHandle(handle, &mut info).is_err() {
+            return None;
+        }
+        Some(HandleFacts {
+            id: FileIdentity {
+                volume: u64::from(info.dwVolumeSerialNumber),
+                index: (u128::from(info.nFileIndexHigh) << 32) | u128::from(info.nFileIndexLow),
+            },
+            links: u64::from(info.nNumberOfLinks),
+            is_dir: info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+            is_reparse_point: info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0,
+        })
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+fn handle_facts(_file: &std::fs::File) -> Option<HandleFacts> {
+    None // fail closed on a platform whose identity model this module does not know
+}
+
+/// Open for writing without following a link at the final component, reporting whether *we* created it.
+/// `create_new` first so the create is atomic (`O_EXCL`/`CREATE_NEW`): either the name was free and is
+/// now ours, or something was already there and we open that existing object explicitly.
+fn open_no_follow(path: &std::path::Path) -> std::io::Result<(std::fs::File, bool)> {
+    let mut create = std::fs::OpenOptions::new();
+    create.write(true).create_new(true);
+    let mut existing = std::fs::OpenOptions::new();
+    existing.write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        create.custom_flags(O_NOFOLLOW);
+        existing.custom_flags(O_NOFOLLOW);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        create.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT_U32);
+        existing.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT_U32);
+    }
+    match create.open(path) {
+        Ok(f) => Ok((f, true)),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok((existing.open(path)?, false)),
+        Err(e) => Err(e),
+    }
 }
 
 /// Plan the batch: for each input compute its output path (applying the ops' effect on name/extension),
@@ -3367,5 +3682,261 @@ mod tests {
         println!("same folder with the cap at 500 took {capped_elapsed:?} (capped={})", capped.capped);
 
         let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    // ==== SECURITY AUDIT (PR #848) — attack attempts ==================================================
+
+    fn probe_label(p: &Probe) -> String {
+        match p {
+            Probe::Absent => "Absent".into(),
+            Probe::Link => "Link".into(),
+            Probe::Real(f) => format!("Real(links={}, is_dir={})", f.links, f.is_dir),
+            Probe::Unreadable(w) => format!("Unreadable({w})"),
+        }
+    }
+
+    /// **The no-follow open, which is what makes the link-swap class structurally impossible** (security
+    /// audit finding 1). A symlink at the output's final component must never be written through, however
+    /// it got there — and this is also the runtime assertion that the hard-coded [`O_NOFOLLOW`] value is
+    /// right for this target: were it wrong, the open would quietly follow the link and the target's bytes
+    /// would change, failing here rather than shipping.
+    #[test]
+    fn secaudit_open_output_verified_refuses_a_symlink_final_component() {
+        let dir = scratch("secaudit-nofollow");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let input = selected.join("photo.png");
+        std::fs::write(&input, b"input bytes").unwrap();
+        let target = selected.join("target.png");
+        let target_bytes = b"the link target's own bytes".to_vec();
+        std::fs::write(&target, &target_bytes).unwrap();
+
+        let link = selected.join("out.png");
+        if !try_symlink(&target, &link, "secaudit_open_output_verified_refuses_a_symlink_final_component") {
+            let _ = std::fs::remove_dir_all(dir.path());
+            return;
+        }
+
+        let err = open_output_verified(&input.to_string_lossy(), &link.to_string_lossy())
+            .err()
+            .expect("a symlink at the output must be refused, never followed");
+        assert!(err.contains("link"), "the refusal must name the reason: {err}");
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            target_bytes,
+            "the link's TARGET must be byte-for-byte untouched — if this fails, O_NOFOLLOW did not take \
+             effect on this platform and the open followed the link"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// A refusal must leave no litter: when the verification creates the output and then refuses, it
+    /// removes the empty file it made — but it must never remove a file it did NOT create.
+    #[test]
+    fn secaudit_a_refused_write_leaves_no_file_it_created_and_never_deletes_one_it_did_not() {
+        let dir = scratch("secaudit-abandon");
+        let selected = dir.path().join("selected");
+        std::fs::create_dir_all(&selected).unwrap();
+        let input = selected.join("photo.png");
+        std::fs::write(&input, b"input bytes").unwrap();
+
+        // Created by us, then abandoned -> gone.
+        let fresh = selected.join("fresh.png").to_string_lossy().to_string();
+        let v = open_output_verified(&input.to_string_lossy(), &fresh).expect("an ordinary output opens");
+        assert!(v.created(), "the output did not exist, so this call must report having created it");
+        v.abandon(&fresh);
+        assert!(!std::path::Path::new(&fresh).exists(), "an output we created and abandoned must be removed");
+
+        // Pre-existing, then abandoned -> untouched, contents intact.
+        let existing = selected.join("existing.png");
+        let existing_bytes = b"someone else's bytes".to_vec();
+        std::fs::write(&existing, &existing_bytes).unwrap();
+        let existing_s = existing.to_string_lossy().to_string();
+        let v = open_output_verified(&input.to_string_lossy(), &existing_s).expect("opens");
+        assert!(!v.created(), "an output that already existed must NOT be reported as created");
+        v.abandon(&existing_s);
+        assert_eq!(
+            std::fs::read(&existing).unwrap(),
+            existing_bytes,
+            "abandoning must never remove or truncate a file this call did not create"
+        );
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// SEC-1: the memoized `dir_scans` census versus a freshly-probed link count.
+    #[test]
+    fn secaudit_stale_census_memo_allows_an_inside_name_to_be_swapped_for_an_outside_one() {
+        let dir = scratch("secaudit-census-memo");
+        let selected = dir.path().join("selected");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let out = selected.join("out.png");
+        std::fs::write(&out, b"the user's own bytes").unwrap();
+        let decoy = selected.join("decoy.png");
+        if std::fs::hard_link(&out, &decoy).is_err() {
+            eprintln!("SKIP secaudit census memo: no hard links here — VERIFIED NOTHING");
+            return;
+        }
+        let out_s = out.to_string_lossy().to_string();
+
+        // 1. Up-front check (execute_plan_walk's pre-loop): links=2, both names inside -> Inside.
+        //    This is what populates cache.dir_scans["…\selected\"].
+        let mut cache = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&out_s, &out_s, &mut cache),
+            Containment::Inside,
+            "precondition: both names inside the folder, so the up-front check allows it"
+        );
+
+        // 2. The attacker's window: delete the INSIDE second name, add an OUTSIDE one.
+        //    The link count is unchanged (2), so only the census can detect the swap.
+        let victim = outside.join("victim.png");
+        std::fs::remove_file(&decoy).unwrap();
+        std::fs::hard_link(&out, &victim).unwrap();
+
+        // 3. Control — a FRESH census sees the truth and refuses.
+        let mut fresh = ParentCache::new();
+        assert_eq!(
+            classify_output_containment(&out_s, &out_s, &mut fresh),
+            Containment::Escapes,
+            "control: a fresh census proves a name now lives outside the folder"
+        );
+
+        // 4. The write-time re-check, using the SAME cache execute_plan_walk threads through.
+        let verdict = classify_output_containment(&out_s, &out_s, &mut cache);
+        println!("SEC-1 write-time verdict with the shared cache: {verdict:?}");
+        assert_ne!(
+            verdict,
+            Containment::Inside,
+            "EXPLOIT: the stale census memo allowed a write whose bytes land outside the folder"
+        );
+    }
+
+    /// SEC-2: past-MAX_PATH probe/writer agreement — the fail-open class the brief says to assume present.
+    #[test]
+    fn secaudit_probe_and_writer_agree_past_max_path() {
+        let dir = scratch("secaudit-maxpath");
+        let mut deep = dir.path().to_path_buf();
+        while deep.to_string_lossy().len() < 300 {
+            deep = deep.join("abcdefghijklmnopqrstuvwxyz0123456789");
+        }
+        std::fs::create_dir_all(&deep).unwrap();
+        let victim = deep.join("victim.png");
+        let victim_s = victim.to_string_lossy().to_string();
+        println!("SEC-2 path length = {}", victim_s.len());
+        assert!(victim_s.len() > 260);
+        std::fs::write(&victim, b"a stranger's long-path bytes").unwrap();
+
+        // The writer can reach it...
+        assert!(std::fs::read(&victim).is_ok(), "std::fs reaches past MAX_PATH");
+        // ...so the probe must too. `Absent` here would be the fail-open.
+        let p = probe_no_follow(&victim);
+        println!("SEC-2 probe = {}", probe_label(&p));
+        assert!(!matches!(p, Probe::Absent), "EXPLOIT: probe says Absent for a file the writer can clobber");
+        assert!(matches!(p, Probe::Real(_)), "probe should resolve it fully");
+        // …and same_file must fuse the two spellings the engine compares.
+        assert!(same_file(&victim_s, &victim_s));
+
+        let _ = std::fs::remove_dir_all(dir.path());
+    }
+
+    /// SEC-3: Windows reserved device names as an output (`NUL.png`, `CON.png`, `COM1.png`).
+    #[test]
+    fn secaudit_reserved_device_name_outputs() {
+        let dir = scratch("secaudit-devices");
+        let d = dir.path();
+        for name in ["NUL.png", "CON.png", "COM1.png", "nul", "AUX.jpg"] {
+            let out = d.join(name).to_string_lossy().to_string();
+            let input = d.join("photo.jpg").to_string_lossy().to_string();
+            let mut cache = ParentCache::new();
+            let verdict = classify_output_containment(&input, &out, &mut cache);
+            let wrote = std::fs::write(&out, b"12345").is_ok();
+            let readback = std::fs::read(&out).map(|b| b.len());
+            println!("SEC-3 {name}: verdict={verdict:?} write_ok={wrote} readback={readback:?}");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// SEC-4: Win32 silently strips trailing dots/spaces on non-verbatim paths. Does an output spelled
+    /// `photo.png ` (which the writer lands on `photo.png`) get compared against the real `photo.png`?
+    #[test]
+    fn secaudit_trailing_dot_and_space_outputs_alias_an_existing_file() {
+        let dir = scratch("secaudit-trailing");
+        let d = dir.path();
+        let real = d.join("photo.png");
+        std::fs::write(&real, b"a stranger's file").unwrap();
+        let real_s = real.to_string_lossy().to_string();
+        for suffix in [" ", ".", "..", "  ", ". "] {
+            let spelled = format!("{real_s}{suffix}");
+            let fused = same_file(&real_s, &spelled);
+            let is_file = std::path::Path::new(&spelled).is_file();
+            let probe = probe_no_follow(std::path::Path::new(&spelled));
+            println!(
+                "SEC-4 {:?}: same_file={fused} is_file={is_file} probe={}", 
+                suffix, probe_label(&probe)
+            );
+            if cfg!(windows) {
+                assert!(
+                    fused && is_file,
+                    "EXPLOIT: `{spelled}` writes onto `{real_s}` but the engine does not see them as one file"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// SEC-5: Unicode colon look-alikes — does Windows fold any of them into an ADS separator?
+    #[test]
+    fn secaudit_unicode_colon_lookalikes_are_not_stream_separators() {
+        let dir = scratch("secaudit-unicolon");
+        let d = dir.path();
+        let host = d.join("host.png");
+        std::fs::write(&host, b"host bytes").unwrap();
+        let host_len = std::fs::metadata(&host).unwrap().len();
+        for (label, ch) in
+            [("U+2236", '\u{2236}'), ("U+A789", '\u{a789}'), ("U+FF1A", '\u{ff1a}'), ("U+F03A", '\u{f03a}')]
+        {
+            let spelled = format!("{}{ch}stream", host.to_string_lossy());
+            let refused = final_component_names_alternate_stream(
+                spelled.rsplit(['/', '\\']).next().unwrap_or(&spelled),
+            );
+            let wrote = std::fs::write(&spelled, b"attacker payload").is_ok();
+            let host_now = std::fs::metadata(&host).unwrap().len();
+            let separate = std::path::Path::new(&spelled).is_file();
+            println!(
+                "SEC-5 {label}: refused_as_ADS={refused} write_ok={wrote} host_len {host_len}->{host_now} \
+                 separate_file={separate}"
+            );
+            assert_eq!(host_now, host_len, "EXPLOIT: {label} wrote into the host file");
+        }
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    /// SEC-6: `::$DATA` and a stream on a directory.
+    #[test]
+    fn secaudit_dollar_data_and_directory_streams() {
+        let dir = scratch("secaudit-dollardata");
+        let d = dir.path();
+        let input = d.join("photo.png").to_string_lossy().to_string();
+        for out in [
+            format!("{}", d.join("host.png::$DATA").to_string_lossy()),
+            format!("{}", d.join("host.png:s:$DATA").to_string_lossy()),
+            format!("{}:dirstream", d.to_string_lossy()),
+        ] {
+            let mut cache = ParentCache::new();
+            let verdict = classify_output_containment(&input, &out, &mut cache);
+            println!("SEC-6 {out}\n   -> {verdict:?}");
+            if cfg!(windows) {
+                assert!(
+                    !matches!(verdict, Containment::Inside),
+                    "EXPLOIT: a stream path was accepted: {out}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(d);
     }
 }

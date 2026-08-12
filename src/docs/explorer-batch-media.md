@@ -122,13 +122,23 @@ or `session:final` is simply accepted there. This is not a relaxation of any saf
 that outputs stay in their input's folder is a separate, unconditional check on the finished path, and it
 behaves identically on all three platforms.
 
-**Checks are re-run immediately before each file is written, not just once for the batch (CPE-1624).**
-Both the "stays in its own folder" and "doesn't overwrite anything you didn't pick" questions are asked
-again for every single file, right before its bytes are written. A long batch (or one with slow
-per-file work like watermarking) leaves a window in which something else on the machine — another app, a
-sync client — can change what a name points at after the batch started. If that happens, the affected
-file is **skipped with a reason** in the results panel rather than written; the rest of the batch carries
-on normally.
+**Every safety question is answered on the file the bytes actually go into, at the moment they go in
+(CPE-1624).** A long batch — or one with slow per-file work like watermarking — leaves a window in which
+something else on the machine (another app, a sync client, a malicious script) can change what a name
+points at after the batch has started. Checking the *name* again is not enough, because the whole trick
+is changing what the name refers to. So the app instead **opens the output file once, refuses to follow
+any shortcut or link at it, checks that exact opened file, and writes through it** — the file being
+checked and the file being written are guaranteed to be the same one. If the check fails, that file is
+**skipped with a reason** in the results panel and the rest of the batch carries on normally.
+
+Two consequences you may notice:
+
+- **Batch Media never writes through a shortcut, symlink or junction.** If a planned output name turns
+  out to be one, it is skipped rather than followed — following it could put your images somewhere you
+  never chose.
+- **A file with more than one name is checked properly.** On Windows and Linux a single file can have
+  several names (hard links). If a planned output has other names living outside the folder you picked,
+  writing to it would change a file outside that folder, so it is refused.
 
 ### Confirming an in-place overwrite (CPE-1590)
 
