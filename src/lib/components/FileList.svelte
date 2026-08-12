@@ -924,7 +924,7 @@
   .agent-badge.created { background: #3a9d4a; }
   .agent-badge.modified { background: #b5872b; }
   .agent-badge.renamed { background: #3a72b5; }
-  .agent-badge.removed { background: var(--danger); }
+  .agent-badge.removed { background: var(--danger-fill); }
   /* CPE-405: a read is a consult, not a change — a muted, hollow badge. */
   .agent-badge.read {
     background: transparent;

@@ -394,5 +394,5 @@
   .actions { display: flex; justify-content: flex-end; margin-top: 6px; }
   .btn { height: 30px; padding: 0 14px; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-alt); color: var(--text); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+  .btn.primary.danger { background: var(--danger-fill); border-color: var(--danger-fill); }
 </style>

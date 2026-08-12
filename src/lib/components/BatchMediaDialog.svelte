@@ -819,7 +819,7 @@
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   .btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
   .btn:disabled { opacity: 0.5; }
-  .btn.primary.danger { background: var(--danger); border-color: var(--danger); }
+  .btn.primary.danger { background: var(--danger-fill); border-color: var(--danger-fill); }
   .btn.primary.danger:hover:not(:disabled) { background: var(--danger-hover); }
 
   /* CPE-1590: the destructive-overwrite confirm panel — replaces the normal action row rather than

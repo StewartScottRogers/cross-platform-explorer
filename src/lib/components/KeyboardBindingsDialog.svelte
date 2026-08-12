@@ -495,7 +495,7 @@
     border-color: var(--danger);
   }
   .btn.danger:hover {
-    background: var(--danger);
+    background: var(--danger-fill);
     color: var(--pal-white);
   }
   .btn.primary {

@@ -432,7 +432,13 @@ describe("solid-fill white-on-token backgrounds clear WCAG's 3:1 UI-component fl
 
 describe("solid-fill scanner sanity (CPE-1632)", () => {
   it("found the known real solid-fill consumers (regression pin — if these disappear, the scanner broke, not the app)", () => {
-    expect(tokenPairings.has("--danger"), "--danger should be found via .btn.primary.danger / .agent-badge.removed / .tl-badge.removed").toBe(true);
+    // CPE-1649 split the solid-fill-background role off --danger into a new --danger-fill token
+    // (hc-dark's --danger/white-on-fill contrast windows don't overlap for a single token — see
+    // app.css's hc-dark palette block) and repointed .btn.primary.danger/.agent-badge.removed/
+    // .tl-badge.removed/.agent-chip.removed/etc. at it. --danger-fill defaults to var(--danger) in
+    // every OTHER theme (light/dark/hc-light), so this guard's own light/dark WCAG assertions are
+    // unaffected (same resolved values) — only the token NAME this pin checks for changed.
+    expect(tokenPairings.has("--danger-fill"), "--danger-fill should be found via .btn.primary.danger / .agent-badge.removed / .tl-badge.removed").toBe(true);
     expect(tokenPairings.has("--accent"), "--accent should be found via .btn.primary (app-wide)").toBe(true);
   });
 });
