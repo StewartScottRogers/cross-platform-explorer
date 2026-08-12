@@ -91,3 +91,61 @@ a same-family "I saw an ERROR dialog..." case, and a positive-control test confi
 
 Verification: `npm run check` clean; `npx vitest run` — all 287 files / 3660 tests pass (up from 3657
 before this ticket's added tests). No Rust touched by this ticket's own fix (JS/TS-only).
+
+2026-08-11 (sprint, Worker, PR #842 review round 2 — F1) — An independent reviewer of PR #842 (which
+bundled this ticket with CPE-1638/CPE-1644) confirmed the detector's prose-false-positive fix is solid,
+but flagged a pre-existing gap (not a regression of this ticket's own change): two mainstream real log
+formats are never detected because their lead-in contains an "isolated letter word" by the letter of the
+new rule —
+- Logback's own documented `%d [%thread] %level` pattern, e.g.
+  `17:04:22.123 [main] ERROR c.e.MyService - Failed to connect` (the thread tag `main` inside `[...]`).
+- RFC3164 syslog/journald with a month-name date prefix, e.g.
+  `Aug 11 17:04:22 myhost myapp[1234]: ERROR Failed to connect to database` (`Aug`, plus the bare
+  hostname `myhost`).
+
+**Fixed the Logback case:** added `BRACKET_TOKEN_REGEX` (`src/lib/preview/logViewer.ts`) — a bracket span
+with no internal whitespace (`[main]`, `[Thread-3]`, `[pool-2-thread-1]`, `[http-nio-8080-exec-1]`, …) is
+the shape of a logger/thread-name tag, not a standalone prose word, so `leadHasIsolatedLetterWord` now
+exempts any letter run wholly inside one. Deliberately narrow: a bracket span containing whitespace (a
+parenthetical prose remark) never matches, so it can't quietly admit ordinary bracketed asides. Verified
+against the full existing prose-false-positive corpus (all five known false positives, JSON/logfmt/syslog/
+URL/`ERRORLEVEL=1`/stack-continuation) — none regressed; none of them contain a no-whitespace bracket span.
+
+**Left the RFC3164 gap open, deliberately:** the offending token is a bare hostname (`myhost`) with no
+digit, bracket, or other structural marker touching it — indistinguishable, by any general rule, from an
+ordinary English word starting a sentence (the exact ambiguity this whole ticket exists to resolve on the
+side of caution). Any rule broad enough to admit it would also admit real prose. Per the ticket's own
+"if you genuinely cannot separate the two, say so explicitly, leave the gap" guidance: left unclassified,
+same as before this round — not a regression, since this shape was never detected in the first place.
+Documented as a permanent, intentionally-failing-null test in `logViewer.test.ts` rather than silently
+dropped.
+
+Re-ran the reviewer's format classification before/after (12 representative formats spanning the already-
+supported shapes, both gap formats, and the five prose false-positive negative controls):
+
+| Format | Line | Before | After |
+|---|---|---|---|
+| Bracketed timestamp | `[2026-08-11 09:14:05] ERROR Failed to connect` | error | error |
+| ISO timestamp | `2026-08-11T09:14:05Z ERROR Payment gateway timeout` | error | error |
+| Colon-suffixed level at line start | `ERROR: Unhandled exception in request handler` | error | error |
+| Bracket-wrapped level | `[WARN] disk space low` | warn | warn |
+| Android logcat | `E/NetworkClient: Failed to reach api.example.com` | error | error |
+| RFC3164 syslog w/ month prefix | `Aug 11 17:04:22 myhost myapp[1234]: ERROR Failed to connect to database` | null | null (documented gap) |
+| Logback `%d [%thread] %level` | `17:04:22.123 [main] ERROR c.e.MyService - Failed to connect` | **null (gap)** | **error (fixed)** |
+| syslog, lowercase hostname+level | `Aug 11 09:14:05 web-server-01 app[1234]: error occurred during checkout` | null | null |
+| JSON-per-line | `{"level":"error","msg":"payment failed"}` | null | null |
+| logfmt | `time=2026-08-11T09:14:05Z level=error msg=timeout` | null | null |
+| Quoted mention of a level word | `"ERROR" is a reserved word in this DSL, see docs.` | null | null |
+| Fifth false positive (lone capitalized lead-in word) | `A warning icon appears next to any file that couldn't be scanned.` | null | null |
+
+Only the Logback row changed; every other row — including all prose negative controls — is identical
+before/after, confirming no new false positives were introduced while closing one of the two named gaps.
+
+Added `detectLevel — F1: previously-undetected mainstream formats` describe block (4 new tests: Logback
+bracket-tag detection, a second Logback line with a longer thread-pool-shaped tag, a bracketed-but-
+whitespace-containing prose remark confirmed still NOT flagged, and the RFC3164 gap committed as an
+explicit "stays null" regression test with its reasoning in the test name/body).
+
+Verification: `npm run check` 0 errors/0 warnings; `npx vitest run` — 287 files / 3670 tests pass (up from
+3660 baseline; +10 across this round's F1 and CPE-1638's F2 fixes, no regressions). No Rust touched by this
+round (JS/TS-only, same as before).

@@ -142,3 +142,73 @@ Verification: `npm run check` clean; `npx vitest run` 287/287 files, 3660/3660 t
 `--features index`, `--features pdf-thumb,video-thumb,waveform,dicom-thumb`); `cargo test` in
 `crates/server` — 19/19 `log_window` tests, 26/26 `text_encoding` tests, full crate suite green (no os
 error 225 hit this run).
+
+2026-08-11 (sprint, Worker, PR #842 review round 2 — F3, MOST SERIOUS finding of the whole review; F4) —
+An independent reviewer of PR #842 ran this exact reproduction and it panicked:
+```rust
+let text = "2026-08-11 00:00:00 INFO user reacted with \u{1F600} to the message\r\nnext line\r\n";
+let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+fs::write(&f, &utf16le).unwrap();
+read_window(&f, 4096, None).unwrap(); // Err("File is not valid UTF-8 text.")
+```
+**Root cause:** `classify_nul_bytes` (`crates/server/src/text_encoding.rs`, pre-existing logic this
+ticket's A′/A″ work built on top of, not code this ticket wrote) required the "other" NUL lane to have
+EXACTLY ZERO NUL bytes. The emoji's low surrogate (U+1F600 → LE code units `3D D8` `00 DE`) puts a `0x00`
+on the lane that's otherwise all non-NUL ASCII bytes; that single stray NUL flipped the whole window's
+classification to `Binary`, which then fell through to the byte-aligned UTF-8 path and failed outright.
+Confirmed by the reviewer as WORSE than the pre-A′ state: before A′, a detected UTF-16 file got an honest
+"looks like UTF-16, doesn't decode yet" refusal; after this bug, the same file silently misses UTF-16
+detection entirely and gets a generic "File is not valid UTF-8 text" — indistinguishable from real file
+corruption to a user already investigating a problem. Since this ticket's entire premise is "decode UTF-16,
+don't refuse it — it's a common Windows log encoding" and real Windows logs routinely contain non-ASCII
+(localised usernames, accented paths, smart quotes, emoji reactions in chat-adjacent logs), this was in
+scope to fix here even though the underlying heuristic predates this ticket.
+
+**Fix (`crates/server/src/text_encoding.rs`):** `classify_nul_bytes` now tolerates the minority NUL lane
+being up to `UTF16_MINORITY_NUL_RATIO` (25%) NUL, instead of demanding exactly 0%. Threshold chosen from
+measurement, not guessed — see the constant's doc comment for the full reasoning:
+- Realistic mixed-ASCII UTF-16 log text (English lines with an occasional emoji/accented name/CJK
+  username) puts at most ~1-2% of the minority lane's positions at NUL in practice (measured against
+  `.encode_utf16()`-generated fixtures) — an emoji's low surrogate is the only realistic case that pollutes
+  the "wrong" lane at all; accented Latin-1 (é, à) and BMP CJK/RTL characters all land with a zero *high*
+  byte, i.e. on the SAME lane as ASCII, contributing no minority-lane noise at all.
+- Real binary data that clears the *majority*-lane bar in the first place (unchanged `nul * 2 >= lane`
+  check) pollutes both lanes together rather than concentrating on one. The worst real-world case found by
+  scanning actual files on this machine was a Windows PE executable's zero-padded DOS/PE header
+  (`notepad.exe`'s first 512 bytes): ~46% minority-lane NUL alongside ~53% majority-lane NUL. A handful of
+  real PNG icons from this repo's own `src-tauri/icons/` measured only ~3-5% majority-lane NUL (nowhere
+  near the 50% majority bar at all).
+- 25% sits with wide margin above the realistic-text noise floor (~1-2%) and well below the binary floor
+  found by measurement (~46%).
+
+Verified BOTH directions with committed byte-level tests (not manual probing) in both `text_encoding.rs`
+and `log_window.rs`: non-BMP surrogate pair (emoji) mixed with ASCII, accented Latin, CJK, and a BOM-less
+BE file with RTL (Arabic) content all now decode/detect correctly as UTF-16; a real PNG signature + IHDR
+header (from this repo's own icon) followed by pseudo-random compressed-data bytes, and a PE-header-shaped
+buffer with ~50/50 NUL distribution across both lanes (modeling the real `notepad.exe` measurement), both
+stay classified `Binary` — the widened tolerance does not turn real binary data into a false UTF-16 report.
+
+Red-then-green, reviewer's exact repro (now committed as
+`bom_less_utf16le_with_an_emoji_decodes_not_refused` in `log_window.rs`):
+- **Red (before):** `thread '...' panicked at src\log_window.rs:574:45: UTF-16LE content with an emoji
+  must decode, not be refused: "File is not valid UTF-8 text."`
+- **Green (after):** test passes; `w.text` equals the original string exactly.
+
+**F4 (test coverage breadth):** every UTF-16 fixture in the PR before this round was pure ASCII, so the
+minority-lane tolerance was never exercised at all. Added, in both `log_window.rs` (full windowed-read
+level) and `text_encoding.rs` (unit level): a non-BMP surrogate-pair fixture, an accented-Latin fixture, a
+CJK fixture, and a BOM-less UTF-16BE fixture (every prior fixture was LE) — all with RTL content for the BE
+case, for extra coverage breadth. Also committed the reviewer's ad-hoc-probed "surrogate pair bisected by
+the window boundary" case as a permanent test
+(`utf16le_surrogate_pair_bisected_by_the_window_boundary_degrades_to_replacement_character_not_a_panic`):
+built as a single long line with NO newline (so line-boundary alignment doesn't simply discard the
+orphaned fragment before it's ever decoded — the more common case where a `\n` follows shortly after the
+bisection point), confirming the orphaned low surrogate degrades to `U+FFFD` with no panic, exactly the
+documented trade-off in `decode_utf16_window`'s doc comment.
+
+Verification: `npm run check` 0 errors/0 warnings; `npx vitest run` — 287 files / 3670 tests pass (no Rust
+tests affected by the JS-side count; this round's Rust changes are additive-only there). `cargo clippy
+--all-targets -- -D warnings` clean in all three CI feature-mode combos (default, `--features index`,
+`--features pdf-thumb,video-thumb,waveform,dicom-thumb`). `cargo test` in `crates/server` — 1940 passed, 0
+failed, 2 ignored (up from the 1929/2-ignored baseline; +11 new tests this round — 5 in `log_window`, 6 in
+`text_encoding` — no regressions, no os error 225 hit this run).

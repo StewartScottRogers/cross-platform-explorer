@@ -50,10 +50,13 @@
  * only; the frames themselves carry no level word of their own. Filtering to Errors-only would otherwise
  * hide exactly the detail the filter exists to surface. {@link parseLog} runs a second, O(n) pass
  * ({@link groupContinuations}) that gives an unleveled line following a classified one a `filterLevel`
- * inherited from that line when it *looks* like a continuation (indented, `at ...`, `Caused by: ...`, a
- * trailing `...`, or — only right after an error — a bare `XError:`/`XException:` header). The chain
- * breaks the instant a line doesn't look like a continuation, so unrelated lines are never swept in; see
- * that function's doc comment for the exact shapes recognized.
+ * inherited from that line when it *looks* like a continuation (`at ...`, `File "..."`, `Caused by: ...`,
+ * a trailing `...` — any of those optionally indented — or — only right after an error — a bare
+ * `XError:`/`XException:` header). Indentation alone is never enough (F2, PR #842 review): interleaved
+ * multi-thread/multi-process output is full of incidentally-indented lines with no relation to the
+ * preceding one, so an indented line still has to clear the same shape bar once its own whitespace is
+ * stripped. The chain breaks the instant a line doesn't look like a continuation, so unrelated lines are
+ * never swept in; see that function's doc comment for the exact shapes recognized.
  */
 import { stripAnsi } from "./notebook";
 
@@ -146,19 +149,38 @@ const ANDROID_LEVEL_MAP: Record<string, LogLevel> = {
  *  class with a `g` flag; no backtracking risk. */
 const LETTER_RUN_REGEX = /[A-Za-z]+/g;
 
-/** True when `lead` contains a run of letters that is NOT immediately preceded by a digit — i.e. a
- *  standalone alphabetic word, as opposed to a letter glued directly onto a timestamp's digits (the ISO
- *  `T`/`Z` in `09:14:05Z`, which always touch a digit with no separating space). This is what actually
- *  distinguishes "[2026-08-11T09:14:05Z] ERROR" (never flagged: T and Z both touch a digit) from
- *  "A warning icon appears..." (flagged: "A" touches nothing, i.e. a real word starting a sentence) or
- *  "SEE ERROR HANDLING DOCS" (flagged: "SEE" touches nothing) — a single general rule that subsumes what
- *  two narrower ones (reject-any-lowercase, reject-2+-uppercase-run) used to check separately, and — found
- *  during this ticket's independent real-prose verification pass — catches the single-capitalized-word
- *  case those two missed. */
+/** A bracket-wrapped token with no internal whitespace — the shape of a logger/thread-name tag a real
+ *  logging framework prefixes a level with (Logback's own documented `%d [%thread] %level` pattern:
+ *  `[main]`, `[Thread-3]`, `[pool-2-thread-1]`, `[http-nio-8080-exec-1]`, …). Used by
+ *  {@link leadHasIsolatedLetterWord} (F1, CPE-1636 followups) to exempt letters inside one of these from
+ *  the isolated-word rule — a single flat character class with a `g` flag, no backtracking risk. Deliberately
+ *  narrow: requires the WHOLE token between `[` and `]` to contain no whitespace, so it can't accidentally
+ *  swallow a parenthetical prose remark ("[see the docs for more]" has spaces and never matches). */
+const BRACKET_TOKEN_REGEX = /\[[^[\]\s]+\]/g;
+
+/** True when `lead` contains a run of letters that is NOT immediately preceded by a digit and NOT wholly
+ *  inside a {@link BRACKET_TOKEN_REGEX} logger/thread-tag token — i.e. a standalone alphabetic word, as
+ *  opposed to a letter glued directly onto a timestamp's digits (the ISO `T`/`Z` in `09:14:05Z`, which
+ *  always touch a digit with no separating space) or sitting inside a bracketed tag with no internal
+ *  whitespace (Logback's `[main]`). This is what actually distinguishes "[2026-08-11T09:14:05Z] ERROR"
+ *  (never flagged: T and Z both touch a digit) or "17:04:22.123 [main] ERROR" (never flagged, F1: "main"
+ *  is wholly inside a bracket token) from "A warning icon appears..." (flagged: "A" touches nothing and
+ *  isn't bracketed, i.e. a real word starting a sentence) or "SEE ERROR HANDLING DOCS" (flagged: "SEE"
+ *  touches nothing) — a single general rule that subsumes what two narrower ones (reject-any-lowercase,
+ *  reject-2+-uppercase-run) used to check separately, and — found during this ticket's independent
+ *  real-prose verification pass — catches the single-capitalized-word case those two missed. */
 function leadHasIsolatedLetterWord(lead: string): boolean {
   // `matchAll` operates on an internal copy of the regex, so no shared `lastIndex` state to reset here.
+  const bracketTokenRanges: Array<[number, number]> = [];
+  for (const m of lead.matchAll(BRACKET_TOKEN_REGEX)) {
+    bracketTokenRanges.push([m.index, m.index + m[0].length]);
+  }
+  const isInsideBracketToken = (idx: number) =>
+    bracketTokenRanges.some(([start, end]) => idx >= start && idx < end);
+
   for (const m of lead.matchAll(LETTER_RUN_REGEX)) {
     const idx = m.index;
+    if (isInsideBracketToken(idx)) continue;
     const precedingChar = idx > 0 ? lead[idx - 1] : "";
     if (!(precedingChar >= "0" && precedingChar <= "9")) return true;
   }
@@ -228,10 +250,16 @@ function emptyCounts(): Record<LogLevel, number> {
  *  of the line, so a short bounded window keeps this O(1) per line regardless of line length. */
 const CONTINUATION_SCAN_CHARS = 64;
 
-const CONTINUATION_LEADING_WS_REGEX = /^[ \t]/;
+/** Leading spaces/tabs, captured so the corroborating-signal checks below can be re-run against what's
+ *  left AFTER the indentation is stripped — see {@link looksLikeContinuation}'s F2 fix. */
+const CONTINUATION_LEADING_WS_REGEX = /^[ \t]+/;
 const CONTINUATION_ELLIPSIS_REGEX = /^\.\.\./;
 const CONTINUATION_CAUSED_BY_REGEX = /^Caused by:/i;
 const CONTINUATION_AT_FRAME_REGEX = /^at\s/;
+/** A Python traceback frame's own line shape: `File "path", line N, in name`. Only ever checked against
+ *  an already-indented line's trimmed remainder (real Python tracebacks always indent this line) — see
+ *  {@link looksLikeContinuation}. */
+const CONTINUATION_PYTHON_FRAME_REGEX = /^File "/;
 /** A bare exception-type header with no level word of its own (`"AbortError: Request aborted"`,
  *  `"NullPointerException: ..."`) — recognized ONLY as a continuation of an immediately preceding ERROR
  *  line (never a warn/info/etc.), and only when it ends in the conventional "Error"/"Exception" suffix,
@@ -241,14 +269,35 @@ const BARE_EXCEPTION_HEADER_REGEX = /^[A-Za-z][A-Za-z0-9]*(?:Error|Exception):\s
 /** True when `text` looks like it continues a line already classified as `parentLevel` — see the module
  *  doc comment's CPE-1638 section for the shapes recognized and why each is included. Deliberately
  *  conservative: prefers under-grouping (missing a real continuation) to over-grouping (sweeping in an
- *  unrelated line), per the ticket's explicit steer. */
+ *  unrelated line), per the ticket's explicit steer.
+ *
+ *  **F2 fix (PR #842 review):** bare leading whitespace used to be accepted as a continuation signal all
+ *  by itself. That's far too weak — interleaved multi-thread/multi-process log output is full of
+ *  incidentally-indented lines (sub-status messages, nested JSON, anything a logger chose to indent for
+ *  readability) that have nothing to do with the preceding line. Indentation is now necessary but never
+ *  sufficient: an indented line only counts once its OWN leading whitespace is stripped away and what
+ *  remains still matches one of the real corroborating shapes below (a stack frame, a Python traceback
+ *  frame line, a "Caused by:" continuation, or a trailing elision) — the same bar an unindented line has
+ *  to clear. */
 function looksLikeContinuation(text: string, parentLevel: LogLevel): boolean {
   const head = text.length > CONTINUATION_SCAN_CHARS ? text.slice(0, CONTINUATION_SCAN_CHARS) : text;
-  if (CONTINUATION_LEADING_WS_REGEX.test(head)) return true; // indented stack frame
   if (CONTINUATION_ELLIPSIS_REGEX.test(head)) return true; // "... 9 more"
   if (CONTINUATION_CAUSED_BY_REGEX.test(head)) return true; // "Caused by: ..."
   if (CONTINUATION_AT_FRAME_REGEX.test(head)) return true; // an unindented "at ..." frame
   if (parentLevel === "error" && BARE_EXCEPTION_HEADER_REGEX.test(head)) return true;
+
+  const wsMatch = CONTINUATION_LEADING_WS_REGEX.exec(head);
+  if (wsMatch) {
+    const trimmed = head.slice(wsMatch[0].length);
+    if (
+      CONTINUATION_AT_FRAME_REGEX.test(trimmed) || // an indented "at ..." frame
+      CONTINUATION_ELLIPSIS_REGEX.test(trimmed) || // an indented "... N more"
+      CONTINUATION_CAUSED_BY_REGEX.test(trimmed) || // an indented "Caused by: ..."
+      CONTINUATION_PYTHON_FRAME_REGEX.test(trimmed) // a Python `File "...", line N, in ...` frame
+    ) {
+      return true;
+    }
+  }
   return false;
 }
 

@@ -86,3 +86,46 @@ same test file, same describe blocks, all still passing).
 
 Verification: `npm run check` clean; `npx vitest run` — all 287 files / 3660 tests pass. JS/TS-only change,
 no Rust touched.
+
+2026-08-11 (sprint, Worker, PR #842 review round 2 — F2, MOST SERIOUS finding) — An independent reviewer
+of PR #842 found a real over-grouping bug in `looksLikeContinuation`'s broadest rule: bare leading
+whitespace (`/^[ \t]/`) alone was accepted as a continuation signal, with no corroborating shape check.
+Live reproduction (confirmed red before the fix):
+```
+ERROR Connection failed on worker-thread-1
+  Now processing next item in queue for worker-thread-2
+```
+`parseLog(text).lines[1]` came back `{ filterLevel: "error", isContinuation: true }` — an unrelated line
+of interleaved output from a different thread inherited the ERROR level purely because it happened to be
+indented two spaces. Under an errors-only filter this unrelated line would show up wearing a red border it
+has no business wearing — exactly the "over-grouping is its own kind of lie" failure mode this ticket's own
+acceptance criteria warned against, and the existing negative-control tests never caught it because every
+one of them used UNINDENTED unrelated lines.
+
+**Fix (`src/lib/preview/logViewer.ts`):** indentation is now necessary but never sufficient. The bare
+`CONTINUATION_LEADING_WS_REGEX` branch was removed from the main check list; instead, when a line starts
+with leading whitespace, its OWN leading whitespace is stripped and the remainder is re-checked against the
+same corroborating shapes an unindented line has to clear — an "at ..." stack frame, a Python
+`File "...", line N, in ...` traceback frame line (new — `CONTINUATION_PYTHON_FRAME_REGEX`), a "Caused by:"
+continuation, or a trailing "... N more" elision. A merely-indented line with none of those shapes (like the
+reviewer's repro) no longer inherits anything.
+
+Verified red-then-green: the reviewer's exact repro failed (`filterLevel` was `"error"`, expected `null`)
+against the pre-fix code, and passes after. Added it as a permanent test
+(`does NOT sweep an indented but otherwise unrelated line into a preceding error's group (reviewer's live
+reproduction)`), plus a second interleaved-multi-thread test with three differently-indented unrelated
+lines (`does not sweep in several interleaved indented lines from unrelated threads, even mid-chain`) — the
+"test the boundary explicitly with interleaved multi-thread output and incidental indentation" case the
+review round asked for.
+
+Confirmed the real stack traces this ticket exists to fix still group correctly under the new, stricter
+rule: the ticket's own `electron-2026-07-24.log`-shaped `REAL_EXCERPT` suite (all pre-existing tests, still
+green — its `at ...` frames and `... 9 more` elision line both survive stripping their leading whitespace),
+plus a new committed Node.js-style unhandled-rejection trace (`TypeError` header + 4 indented `at ...`
+frames + an unrelated trailing "Listening on port 3000" line) that shows fully under an errors-only filter
+while the unrelated line stays excluded. Also added committed tests for a genuine indented `at ...` frame,
+an indented Python `File "..."` frame, and an indented `... N more` elision, confirming each shape still
+groups correctly once bare indentation alone stopped being sufficient.
+
+Verification: `npm run check` 0 errors/0 warnings; `npx vitest run` — 287 files / 3670 tests pass (up from
+3660 baseline; +10 across this fix and CPE-1636's F1 fix, no regressions). No Rust touched (JS/TS-only).

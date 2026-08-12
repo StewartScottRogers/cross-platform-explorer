@@ -210,6 +210,43 @@ describe("detectLevel — CPE-1636 genuine levels must still be detected after t
   });
 });
 
+// F1 (PR #842 review): two mainstream real-world log formats the original detector never recognized —
+// confirmed by the reviewer as a PRE-EXISTING gap (not a regression of CPE-1636/1638's own changes).
+describe("detectLevel — F1: previously-undetected mainstream formats", () => {
+  it("detects the Logback manual's own documented '%d [%thread] %level' pattern (bracketed thread name)", () => {
+    // Fixed: a bracket-wrapped token with no internal whitespace ("[main]") is a logger/thread-name tag,
+    // not an isolated prose word — see BRACKET_TOKEN_REGEX / leadHasIsolatedLetterWord.
+    expect(detectLevel("17:04:22.123 [main] ERROR c.e.MyService - Failed to connect")).toBe("error");
+  });
+
+  it("detects the Logback pattern with a more realistic multi-word-shaped thread-pool tag", () => {
+    expect(
+      detectLevel("17:04:22.123 [http-nio-8080-exec-1] WARN c.e.MyService - Slow response"),
+    ).toBe("warn");
+  });
+
+  it("still does not flag a bracketed prose remark that contains whitespace (not a bare tag token)", () => {
+    // The exemption requires the WHOLE bracket span to contain no whitespace — a parenthetical aside like
+    // "[see the docs]" never qualifies, so this must stay unclassified same as before the fix.
+    expect(detectLevel("[see the docs] WARNING word only, not a real level marker here")).not.toBe(
+      "warn",
+    );
+  });
+
+  it(
+    "documents a gap deliberately left open: RFC3164 syslog/journald with a month-name prefix AND a bare " +
+      "hostname token (not bracket-wrapped, doesn't touch a digit) is indistinguishable from an isolated " +
+      "prose word without materially raising the risk of flagging real prose — per the ticket's explicit " +
+      "'leave the gap rather than guess' guidance. Left unclassified; not a regression, since this shape " +
+      "was never detected before either.",
+    () => {
+      expect(
+        detectLevel("Aug 11 17:04:22 myhost myapp[1234]: ERROR Failed to connect to database"),
+      ).toBeNull();
+    },
+  );
+});
+
 describe("parseLog — ANSI-coloured input", () => {
   it("strips ANSI colour codes before rendering and still detects the level underneath", () => {
     // A real SGR colour sequence (ESC [ 31 m ... ESC [ 0 m) built from the actual escape byte — the
@@ -410,6 +447,82 @@ describe("parseLog — CPE-1638 stack-trace continuations inherit their header's
     const result = parseLog(text);
     expect(result.lines[1].filterLevel).toBe("error");
     expect(result.lines[2].filterLevel).toBe("error");
+  });
+
+  // --- F2 (PR #842 review): bare leading whitespace alone is not a corroborating signal. An indented
+  // line only counts as a continuation once its own leading whitespace is stripped away AND what's left
+  // looks like an actual stack-frame/continuation shape — never indentation by itself, which is far too
+  // common in ordinary interleaved multi-thread/multi-process log output to mean anything on its own. ---
+
+  it("does NOT sweep an indented but otherwise unrelated line into a preceding error's group (reviewer's live reproduction)", () => {
+    // Exact reproduction from the reviewer: two lines of interleaved multi-thread output where the second
+    // line is merely indented (e.g. a nested/sub-status log convention) — not a stack frame, not a
+    // continuation of the first line's message, just incidentally indented.
+    const text = [
+      "ERROR Connection failed on worker-thread-1",
+      "  Now processing next item in queue for worker-thread-2",
+    ].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBeNull();
+    expect(result.lines[1].isContinuation).toBe(false);
+  });
+
+  it("does not sweep in several interleaved indented lines from unrelated threads, even mid-chain", () => {
+    const text = [
+      "2026-08-11T09:00:00Z ERROR worker-1 failed to acquire lock",
+      "  worker-2: heartbeat ok, queue depth 4",
+      "  worker-3: heartbeat ok, queue depth 1",
+      "\tworker-4: starting batch 17",
+    ].join("\n");
+    const result = parseLog(text);
+    for (const i of [1, 2, 3]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBeNull();
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(false);
+    }
+  });
+
+  it("still groups a genuine indented stack frame — the corroborating 'at ...' shape survives stripping the indentation", () => {
+    const text = ["ERROR outer failure", "    at com.example.Service.call(Service.java:10)"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it('still groups an indented Python-style File "..." traceback frame', () => {
+    const text = ["ERROR unhandled exception", '  File "app.py", line 10, in <module>'].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it("still groups an indented trailing elision line ('... N more')", () => {
+    const text = ["ERROR outer failure", "    ... 9 more lines omitted"].join("\n");
+    const result = parseLog(text);
+    expect(result.lines[1].filterLevel).toBe("error");
+    expect(result.lines[1].isContinuation).toBe(true);
+  });
+
+  it("a real Node.js-style unhandled-rejection trace still shows fully under an errors-only filter", () => {
+    // A realistic Node.js stack trace shape: header + several indented "at ..." frames, no level word on
+    // any of the frame lines.
+    const NODE_TRACE_LINES = [
+      "2026-08-11T09:14:05.201Z ERROR Unhandled promise rejection",
+      "TypeError: Cannot read properties of undefined (reading 'foo')",
+      "    at Object.<anonymous> (/app/index.js:42:11)",
+      "    at Module._compile (node:internal/modules/cjs/loader:1105:14)",
+      "    at Module._extensions..js (node:internal/modules/cjs/loader:1159:10)",
+      "    at Module.load (node:internal/modules/cjs/loader:981:32)",
+      "Listening on port 3000", // unrelated — must not be swept in
+    ];
+    const result = parseLog(NODE_TRACE_LINES.join("\n"));
+    for (const i of [1, 2, 3, 4, 5]) {
+      expect(result.lines[i].filterLevel, `line ${i}`).toBe("error");
+      expect(result.lines[i].isContinuation, `line ${i}`).toBe(true);
+    }
+    expect(result.lines[6].filterLevel).toBeNull();
+
+    const shown = filterLines(result.lines, { levels: new Set<LogLevel>(["error"]), showUnleveled: false });
+    expect(shown.map((l) => l.text)).toEqual(NODE_TRACE_LINES.slice(0, 6));
   });
 });
 

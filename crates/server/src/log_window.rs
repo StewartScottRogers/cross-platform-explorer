@@ -558,6 +558,97 @@ mod tests {
     }
 
     #[test]
+    fn bom_less_utf16le_with_an_emoji_decodes_not_refused() {
+        // Regression (reviewer's PR #842 repro, F3): `classify_nul_bytes` used to require the minority
+        // NUL lane to be EXACTLY zero, so any UTF-16 content that wasn't pure ASCII flipped the whole
+        // window to `Binary` and fell through to the byte-aligned UTF-8 path, which then failed outright
+        // — a regression from the honest "looks like UTF-16" refusal this ticket exists to replace. A
+        // realistic mixed-ASCII log line with one emoji (its low surrogate's low byte, 0x00, lands on the
+        // "wrong" lane) must still decode.
+        let d = scratch("utf16le-emoji");
+        let f = d.join("emoji.log");
+        let text = "2026-08-11 00:00:00 INFO user reacted with \u{1F600} to the message\r\nnext line\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with an emoji must decode, not be refused");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16le_with_accented_latin_decodes() {
+        let d = scratch("utf16le-accented");
+        let f = d.join("accented.log");
+        let text = "2026-08-11 00:00:00 INFO utilisateur a r\u{e9}agi avec \u{e9}motion \u{e0} la commande caf\u{e9}\r\nligne suivante\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with accented Latin must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16le_with_cjk_names_mixed_into_mostly_ascii_decodes() {
+        let d = scratch("utf16le-cjk");
+        let f = d.join("cjk.log");
+        let text = "2026-08-11 00:00:00 INFO \u{7528}\u{6237}\u{540d} \u{5f20}\u{4f1f} logged in successfully\r\nnext line\r\n";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("UTF-16LE content with CJK names must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bom_less_utf16be_no_bom_with_rtl_content_decodes() {
+        // A BOM-less BE fixture (F4 coverage gap: every prior UTF-16 fixture had a BOM or was LE) mixed
+        // with RTL (Arabic) text.
+        let d = scratch("utf16be-rtl");
+        let f = d.join("rtl.log");
+        let text = "2026-08-11 00:00:00 INFO \u{62a}\u{645} \u{62a}\u{633}\u{62c}\u{64a}\u{644} \u{627}\u{644}\u{62f}\u{62e}\u{648}\u{644}\r\nnext line\r\n";
+        let utf16be: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_be_bytes()).collect();
+        fs::write(&f, &utf16be).unwrap();
+
+        let w = read_window(&f, 4096, None).expect("BOM-less UTF-16BE content with RTL text must decode");
+        assert_eq!(w.text, text);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn utf16le_surrogate_pair_bisected_by_the_window_boundary_degrades_to_replacement_character_not_a_panic() {
+        // F4: commit the reviewer's ad-hoc probe as a permanent test. A window boundary that lands
+        // between the two code units of a surrogate pair (a non-BMP character split across a page) loses
+        // that one character to U+FFFD — a documented, accepted trade-off (see `decode_utf16_window`'s doc
+        // comment) — but must never panic and must decode everything else cleanly.
+        //
+        // Deliberately ONE long line with no newline at all: if a `\n` code unit followed the bisection
+        // point, line-boundary alignment would simply discard the orphaned fragment (the same "loss of a
+        // partial leading line is expected" behavior `align_window`'s UTF-8 path already documents) and
+        // the replacement character would never make it into the rendered text. The no-newline fallback
+        // path is what actually keeps (and thus decodes) the orphaned low surrogate — see
+        // `decode_utf16_window`'s "no newline code unit anywhere in this window" branch.
+        let d = scratch("utf16le-bisected");
+        let f = d.join("bisected.log");
+        // "aaaa" (8 bytes) + emoji (4 bytes: 2 code units at byte offsets 8..12) + "bbbb" (8 bytes), no
+        // newline anywhere. A max_bytes chosen so raw_start lands at byte 10 (mid-emoji) bisects it.
+        let text = "aaaa\u{1F600}bbbb";
+        let utf16le: Vec<u8> = text.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        fs::write(&f, &utf16le).unwrap();
+        let file_len = utf16le.len() as u64;
+        let max_bytes = file_len - 10; // raw_start = file_len - max_bytes = 10, mid-emoji
+
+        let w = read_window(&f, max_bytes, None).expect("a bisected surrogate pair must not panic or error");
+        assert!(!w.line_aligned, "no newline anywhere in this window — must be flagged unaligned");
+        // The emoji's second code unit (the low surrogate, now orphaned at the window's start) decodes to
+        // U+FFFD; the rest of the content after it is intact.
+        assert_eq!(w.text, "\u{FFFD}bbbb", "expected a replacement character for the orphaned low surrogate");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
     fn utf16le_tail_window_of_a_larger_file_decodes_correctly_even_when_the_window_lands_on_an_odd_byte_offset() {
         // The real "byte-pair-aligned seeks" concern the ticket calls out: a window into a UTF-16 file
         // whose start doesn't happen to land on an even absolute offset must still decode cleanly (no
