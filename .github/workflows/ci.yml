@@ -502,7 +502,7 @@ jobs:
             -v "$CPE_E2E_FTP_FIXTURE_DIR:/home/vsftpd/tester" \
             -v "$CPE_E2E_FTP_CONF:/etc/vsftpd/vsftpd.conf" \
             -v "$CPE_E2E_FTP_SSL_DIR:/etc/vsftpd/ssl" \
-            -e FTP_USER=tester -e FTP_PASS=testpass -e LOCAL_UMASK=022 \
+            -e FTP_USER=tester -e FTP_PASS=testpass -e LOCAL_UMASK=022 -e LOG_STDOUT=YES \
             -e PASV_ADDRESS=172.28.0.13 -e PASV_MIN_PORT=21100 -e PASV_MAX_PORT=21110 \
             fauria/vsftpd:latest@sha256:6d71d7c7f1b0ab2844ec7dc7999a30aef6d758b6d8179cf5967513f87c79c177
           {
@@ -574,7 +574,9 @@ jobs:
         if: failure()
         run: |
           for c in sftp-e2e webdav-e2e ftp-e2e net-e2e; do
-            echo "=== $c ==="
+            echo "=== $c state ==="
+            docker inspect "$c" --format 'status={{.State.Status}} exitCode={{.State.ExitCode}} startedAt={{.State.StartedAt}} finishedAt={{.State.FinishedAt}} oomKilled={{.State.OOMKilled}} error={{.State.Error}}' || true
+            echo "=== $c logs ==="
             docker logs "$c" 2>&1 | tail -n 200 || true
           done
 

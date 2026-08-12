@@ -137,7 +137,20 @@ impl FileSystemProvider for WebdavProvider {
     }
 
     fn delete(&mut self, path: &str) -> Result<(), String> {
-        self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
+        let resp = self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
+        // CPE-1659 found this against a real Apache server: `.call()` only turns a >=400 status into
+        // an `Err` (see `ureq::Request::call`), so a 3xx response comes back as `Ok`. Apache's
+        // `mod_dir` `DirectorySlash` behaviour redirects (301) a request for a collection that's
+        // missing its trailing slash INSTEAD of performing it — deleting `/some-dir` (no slash) would
+        // otherwise silently "succeed" here while nothing was actually deleted. This agent disables
+        // auto-follow-redirect on purpose (CPE-1461: blindly following a server-supplied `Location`
+        // could bounce toward `file://` or an attacker-controlled host), so rather than trust the
+        // Location header, retry ONCE against the well-known WebDAV collection-URL convention (a
+        // trailing slash, RFC 4918 §8.3) — never a second, server-chosen destination.
+        if (300..400).contains(&resp.status()) && !path.ends_with('/') {
+            let with_slash = format!("{}/", path.trim_end_matches('/'));
+            self.request("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
+        }
         Ok(())
     }
 
