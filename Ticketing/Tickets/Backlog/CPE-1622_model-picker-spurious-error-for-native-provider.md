@@ -56,3 +56,18 @@ possibly `sidecar/ai-console/src/console.rs` (`handle_models`) if the fix is ser
 ## Notes
 Low priority: cosmetic/confusing, not destructive — the Model field still works as free text regardless.
 Small, self-contained. Model: sonnet or haiku.
+
+## Work Log
+2026-08-11 — Claim confirmed against `sidecar/ai-console/src/launcher.html` and `console.rs` as
+described. Fixed client-side (per the ticket's suggested option): `populateModels()` now short-circuits
+for `reseller === "native"` before ever calling `/api/models`, setting a new `modelsState =
+"unavailable"` that `renderModelMenu()` renders as a neutral "This provider doesn't offer a model list —
+type a model id, or leave it blank for the default." (no dead-end Refresh button). Added jsdom-harness
+tests to `src/lib/ai-console-launcher.test.ts` asserting the error state never appears for `native` (and
+no fetch happens at all) while the genuine error state still appears for a real reseller failure
+(negative control); also updated three pre-existing Model-picker tests that unintentionally relied on
+the default catalog's keyless-first-timer `native` default to explicitly select `openrouter` first,
+since they were testing generic dropdown behavior, not the native case. `npm run check` clean; `npx
+vitest run` 287 files / 3640 tests green. Removed the now-resolved bug note from
+`src/docs/04-ai-console.md`'s Limits/notes. Batched with CPE-1620 and CPE-1639 into PR #837 (branch
+`cpe-1620-1622-1639-small-fixes`).

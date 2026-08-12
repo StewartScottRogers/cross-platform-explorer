@@ -7,7 +7,7 @@ import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
-import RepoBrowser from "./RepoBrowser.svelte";
+import RepoBrowser, { stripRepoUrl, looksLikeUrl } from "./RepoBrowser.svelte";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -106,5 +106,64 @@ describe("RepoBrowser", () => {
     const tokenInput = screen.getByPlaceholderText(/token/i) as HTMLInputElement;
     await waitFor(() => expect(tokenInput.value).toBe("ghp_saved123"));
     expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+  });
+});
+
+// CPE-1620 — the URL-stripping regex was hardcoded to github.com, so pasting a GitLab/Bitbucket/
+// Codeberg URL while that provider was selected fell through to the backend as a fake "owner/name"
+// instead of getting the friendly "enter owner/name" guidance.
+describe("stripRepoUrl / looksLikeUrl (CPE-1620)", () => {
+  it.each([
+    ["github", "https://github.com/owner/name"],
+    ["gitlab", "https://gitlab.com/owner/name"],
+    ["bitbucket", "https://bitbucket.org/owner/name"],
+    ["codeberg", "https://codeberg.org/owner/name"],
+  ])("strips the %s host from its own URL", (provider, url) => {
+    expect(stripRepoUrl(url, provider)).toBe("owner/name");
+    expect(looksLikeUrl(stripRepoUrl(url, provider))).toBe(false);
+  });
+
+  it("strips a trailing .git after the host strip", () => {
+    expect(stripRepoUrl("https://gitlab.com/owner/name.git", "gitlab")).toBe("owner/name");
+  });
+
+  it("leaves owner/name untouched for every provider", () => {
+    for (const provider of ["github", "gitlab", "bitbucket", "codeberg", "generic"]) {
+      expect(stripRepoUrl("owner/name", provider)).toBe("owner/name");
+    }
+  });
+
+  it("negative control: a foreign-host URL is not stripped and still looks like a URL", () => {
+    // Bitbucket selected, but a GitLab URL pasted — the strip must not fire for the wrong host.
+    const r = stripRepoUrl("https://gitlab.com/owner/name", "bitbucket");
+    expect(r).toBe("https://gitlab.com/owner/name");
+    expect(looksLikeUrl(r)).toBe(true);
+  });
+});
+
+describe("RepoBrowser — per-provider URL paste (CPE-1620)", () => {
+  it.each([
+    ["gitlab", "https://gitlab.com/owner/name"],
+    ["bitbucket", "https://bitbucket.org/owner/name"],
+    ["codeberg", "https://codeberg.org/owner/name"],
+  ])("browses correctly after pasting a %s URL", async (provider, url) => {
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider, repo: url } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+
+    await waitFor(() =>
+      expect(calls.some((c) => c.cmd === "forge_browse" && c.args.repo === "owner/name")).toBe(true),
+    );
+    expect(await screen.findByText("src")).toBeTruthy();
+  });
+
+  it("shows the friendly owner/name guidance for a foreign-host URL instead of forwarding it", async () => {
+    // GitLab selected, but a GitHub URL pasted — must not reach forge_browse with the raw URL.
+    const calls = route({ browse: () => root });
+    render(RepoBrowser, { props: { provider: "gitlab", repo: "https://github.com/owner/name" } });
+    await fireEvent.click(screen.getByRole("button", { name: "Browse" }));
+
+    expect(calls.some((c) => c.cmd === "forge_browse")).toBe(false);
+    expect(await screen.findByText(/owner\/name/i)).toBeTruthy();
   });
 });

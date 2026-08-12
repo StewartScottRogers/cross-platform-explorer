@@ -158,10 +158,6 @@ You want an agent to add tests to one module while you keep browsing the rest of
   consoles" from outside the Agent Deck window as clearing the UI, not as a guaranteed stop — close
   sessions from inside the Agent Deck window (or quit the app) if you need to be certain nothing is still
   running.
-- **The Model dropdown can show "Couldn't load models" for a provider that never had a model list to
-  begin with** — a tool's own built-in login (no gateway behind it) currently gets treated like a gateway
-  and the fetch fails. The Model **field** itself still works fine as free text, or blank for the
-  default; only the dropdown's list is affected. Tracked as **CPE-1622**.
 - **A setup, a key label, and a tab name are three different things that can't be renamed in place** —
   each can only be deleted/removed and recreated under a new name.
 - **Swarms share the Agent Deck's trust model.** A swarm agent only gets the working folder and

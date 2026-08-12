@@ -918,6 +918,7 @@ describe("Agent Deck launcher — Model picker combobox (CPE-454/460)", () => {
 
   it("opens a real dropdown of models, filters, and picks one into the field (CPE-460)", async () => {
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
+    w.document.getElementById("provider").value = "openrouter"; // default catalog boots on "native" (CPE-1622: no list)
     await w.populateModels();
     // A visible ▾ toggle + an anchored menu — not a bare input.
     expect(w.document.getElementById("model-toggle")).not.toBeNull();
@@ -941,6 +942,7 @@ describe("Agent Deck launcher — Model picker combobox (CPE-454/460)", () => {
     // The reported bug: after applyLastUsed pre-fills the field with a full model id, opening the
     // menu filtered the list down to that single exact match — "only one model for openrouter".
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? catalog : {}));
+    w.document.getElementById("provider").value = "openrouter"; // default catalog boots on "native" (CPE-1622: no list)
     await w.populateModels();
     // Simulate a returning user whose field already carries a committed selection.
     w.document.getElementById("model").value = "openai/gpt-4o";
@@ -968,12 +970,40 @@ describe("Agent Deck launcher — Model picker combobox (CPE-454/460)", () => {
 
   it("shows a visible error + Refresh when the model fetch fails (not a silent empty box)", async () => {
     const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? { ok: false, status: 502 } : {}));
+    w.document.getElementById("provider").value = "openrouter"; // default catalog boots on "native" (CPE-1622: no list)
     await w.populateModels();
     w.openModelMenu();
     const msg = w.document.querySelector(".model-msg");
     expect(msg?.textContent).toMatch(/Couldn't load models/i);
     expect(msg?.querySelector("button")?.textContent).toMatch(/Refresh/i);
     expect(w.document.getElementById("model").disabled).toBeFalsy(); // still editable
+  });
+
+  it("skips the fetch and shows a neutral message for the native provider, never the error state (CPE-1622)", async () => {
+    const calls: string[] = [];
+    const { w } = await mountLauncher((path) => {
+      if (path.startsWith("/api/models")) calls.push(path);
+      return path.startsWith("/api/models") ? { ok: false, status: 400 } : {}; // would error if ever called
+    });
+    w.document.getElementById("provider").value = "native";
+    await w.populateModels();
+    expect(calls).toHaveLength(0); // never hit the reseller live-fetch path for native
+    w.openModelMenu();
+    const msg = w.document.querySelector(".model-msg");
+    expect(msg?.textContent).not.toMatch(/Couldn't load models/i); // no alarming error
+    expect(msg?.textContent).toMatch(/doesn't offer a model list/i);
+    expect(msg?.querySelector("button")).toBeNull(); // no dead-end Refresh button
+    expect(w.document.getElementById("model").disabled).toBeFalsy(); // Model field still works as free text
+  });
+
+  it("still shows the real error state for a genuine reseller failure (negative control)", async () => {
+    const { w } = await mountLauncher((path) => (path.startsWith("/api/models") ? { ok: false, status: 502 } : {}));
+    w.document.getElementById("provider").value = "openrouter";
+    await w.populateModels();
+    w.openModelMenu();
+    const msg = w.document.querySelector(".model-msg");
+    expect(msg?.textContent).toMatch(/Couldn't load models/i);
+    expect(msg?.querySelector("button")?.textContent).toMatch(/Refresh/i);
   });
 });
 

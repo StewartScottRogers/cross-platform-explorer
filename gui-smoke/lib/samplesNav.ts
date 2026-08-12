@@ -28,7 +28,11 @@ export const PREVIEW_CONTENT_SELECTOR = [
   ".preview-img",
   ".mp-media",
   ".preview-pdf",
-  ".preview-font",
+  // CPE-1639: was ".preview-font", which matches zero elements — FontPreview.svelte's root is
+  // `<div class="font-preview" data-testid="font-preview">` (the words are swapped from the old
+  // selector), so the fonts/* case never actually matched on this entry; it only ever "passed" via
+  // the loop's other exit conditions. Fixed to the real testid, matching hexview's convention below.
+  '[data-testid="font-preview"]',
   ".preview-table-wrap",
   ".preview-markdown",
   ".code-view",

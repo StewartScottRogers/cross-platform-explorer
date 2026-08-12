@@ -1939,7 +1939,7 @@ $("history-overlay").addEventListener("click", (e) => { if (e.target === $("hist
 // loading/empty/error states with a Refresh. Source is the reseller's model list (live now; the
 // signed GitHub snapshot once CPE-450/451 land). Never a dead end — the field stays free-text.
 let modelOptions = [];
-let modelsState = "idle"; // idle | loading | ready | error
+let modelsState = "idle"; // idle | loading | ready | error | unavailable (no list for this provider, e.g. native)
 // The field doubles as selected-model display AND filter input. `modelQuery` is the filter, set ONLY
 // while the user types; opening the menu resets it to "" so the full list shows even when the field
 // already holds a committed model id (CPE-465 — a full id would otherwise match exactly one row).
@@ -1947,6 +1947,15 @@ let modelQuery = "";
 
 async function populateModels() {
   const reseller = ($("provider").value || "").trim() || "openrouter";
+  // "native" (a tool's own built-in login, e.g. `claude login`) isn't a reseller and has no model
+  // list to fetch — asking /api/models for it always errors, which showed as an alarming "Couldn't
+  // load models." with a Refresh button that could never succeed (CPE-1622). The Model field still
+  // works as free text / the agent's default regardless, so just skip the fetch and say so.
+  if (reseller === "native") {
+    modelOptions = []; modelsState = "unavailable";
+    renderModelMenu();
+    return;
+  }
   modelsState = "loading"; renderModelMenu();
   try {
     const d = await api("/api/models?reseller=" + encodeURIComponent(reseller));
@@ -1970,6 +1979,10 @@ function renderModelMenu() {
   if (!menu || menu.hidden) return;
   menu.innerHTML = "";
   if (modelsState === "loading") { menu.innerHTML = '<div class="model-msg">Loading models…</div>'; return; }
+  if (modelsState === "unavailable") {
+    menu.innerHTML = '<div class="model-msg">This provider doesn\'t offer a model list — type a model id, or leave it blank for the default.</div>';
+    return;
+  }
   if (modelsState === "error") {
     const d = document.createElement("div"); d.className = "model-msg";
     const span = document.createElement("span"); span.textContent = "Couldn't load models.";

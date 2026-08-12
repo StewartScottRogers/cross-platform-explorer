@@ -67,3 +67,25 @@ CPE-1507 known-failing reason/verification if the fonts case's behavior under th
 
 **Conflict surface:** `gui-smoke/lib/samplesNav.ts` only (one exported constant). Touches the same file
 CPE-1629 just extracted; sequence after that PR lands to avoid a rebase collision on the same lines.
+
+## Work Log
+2026-08-11 — Claim confirmed: `.preview-font` matches zero elements anywhere in `src/lib/components`;
+`FontPreview.svelte`'s real root is `<div class="font-preview" data-testid="font-preview">`. Fixed by
+changing the entry to `[data-testid="font-preview"]` (matching the testid convention already used for
+hexview). Audited the other 11 entries per the acceptance criteria — all match real elements (verified
+by grep against `src/lib/components/*.svelte`: `.preview-img`, `.mp-media`, `.preview-pdf`,
+`.preview-table-wrap`, `.preview-markdown`, `.code-view`, `pre.preview-text`, `.preview-editor`,
+`[data-testid="hexview"]`, `.data-browser`, `aside.details` all real). Added
+`gui-smoke/lib/samplesNav.test.ts` (new, runs via `tsx --test` under `npm run test:unit` — no build or
+tauri-driver needed) that locks in the fix and systematically greps every `PREVIEW_CONTENT_SELECTOR`
+entry against the shipped frontend so the same class of bug can't silently reappear for a different
+selector; confirmed it fails red on the old `.preview-font` entry and passes green on the fix. `gui-smoke
+npm run test:unit`: 35/35 green (32 pre-existing + 3 new).
+
+**Not done in this batch:** the ticket's fix note also calls for re-verifying `samples.smoke.ts`'s
+`fonts/mini.ttf` case against a **real build** (ideally under load) once this selector fix lands, and
+updating the CPE-1507 known-failing entry if the fonts case's behavior changes. That needs a full
+`tauri build` + `tauri-driver`/WebdriverIO session, which is out of scope for this headless three-ticket
+batch — left as a follow-up. The selector fix itself and the systematic audit are done and verified by
+the new unit test. Batched with CPE-1620 and CPE-1622 into PR #837 (branch
+`cpe-1620-1622-1639-small-fixes`).
