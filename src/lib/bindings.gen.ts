@@ -1069,20 +1069,31 @@ async deleteToTrash(paths: string[]) : Promise<OpResult[]> {
  * the flag itself is the entire gate.
  * 
  * Before this ticket the doc comment here said "the UI must confirm", i.e. the backend delegated the
- * safety decision to the frontend. That is not a gate: the IPC surface is reachable without the UI, and
- * the independent review of PR #838 used exactly this command as **step 2 of a working exploit chain**
- * (delete a vault's live session dir, plant a junction at the same path, let the locker's shredder walk
- * it). CPE-1647 closed the vault end of that chain by re-checking containment immediately before the
- * wipe; this closes **this command's** contribution to step 2. Three call sites, and only these three,
- * are allowed to set `confirmed: true`: `App.svelte`'s "Delete permanently?" confirm,
- * `RepairLinkDialog.svelte`'s replace-confirm, and `folderWatch.ts`'s `undoFire` (the user pressed Undo,
- * and `plan.deletes` only ever holds copies that fire itself created at freshly-uniqued paths).
+ * safety decision to the frontend. This flag moves that discipline into Rust, where a call site cannot
+ * simply forget it. Three call sites, and only these three, are allowed to set `confirmed: true`:
+ * `App.svelte`'s "Delete permanently?" confirm, `RepairLinkDialog.svelte`'s replace-confirm, and
+ * `folderWatch.ts`'s `undoFire` (the user pressed Undo, and `plan.deletes` only ever holds copies that
+ * fire itself created at freshly-uniqued paths).
  * 
- * **Still open, deliberately not claimed closed here (CPE-1662):** `start_transfer`'s
- * `ConflictPolicy::Overwrite` reaches `fs::remove_dir_all` on a caller-named path with no consent gate
- * of its own, so the step-2 primitive is *narrowed* by this ticket, not eliminated. Found by the PR #844
- * review. Do not restate this comment as "the primitive is gone" until that one is gated too — a doc
- * comment asserting an invariant the code does not hold is exactly the failure this ticket exists to fix.
+ * **Be precise about what this defends — it is UI discipline enforced in Rust, NOT an authorization
+ * boundary.** The flag rides on the same IPC message as `paths`, so any caller that can forge the call
+ * can also set the flag. What it genuinely stops: a frontend call site that forgets the dialog; a
+ * replayed pre-CPE-1651 payload (serde gives `confirmed` no default, so the old shape now fails to
+ * deserialize outright); and a mechanical enumerator working from `bindings.gen.ts` that doesn't know
+ * the field exists. What it does **not** do is stop a deliberate attacker who has already reached the
+ * IPC surface. The control that actually breaks the PR #838 exploit chain is CPE-1647's containment
+ * re-check inside `vault_lock`, immediately before the wipe — **do not relax that on the strength of
+ * this flag.** A real boundary would have to be something the caller cannot mint (backend-issued
+ * one-shot consent, or a deny-list on destructive commands); the boolean is kept because it matches
+ * `shred_paths` (CPE-1611) and `create_vault` (CPE-1630), and consistency is worth more than a token
+ * the caller still supplies.
+ * 
+ * **Siblings found by the PR #844 review and audit, still ungated — do not read this comment as
+ * "permanent deletion now requires consent" app-wide:** `start_transfer`'s `ConflictPolicy::Overwrite`
+ * reaches `fs::remove_dir_all` on a caller-named path (CPE-1662); `apply_backup_plan` does the same on a
+ * caller-chosen `dest_root`, with a verified one-message wipe (CPE-1664); and `run_command` still
+ * carries the exact "the frontend MUST confirm" promise this ticket was filed against, on a command that
+ * spawns a shell (CPE-1665). Gating this one narrows the step-2 primitive; it does not eliminate it.
  */
 async deletePermanent(paths: string[], confirmed: boolean) : Promise<Result<OpResult[], string>> {
     try {
