@@ -5680,12 +5680,28 @@
     }
   }
 
-  /** Undo a watched-folder rule fire (CPE-794): reverse the move/copy, then drop it from the log. */
+  /** Undo a watched-folder rule fire (CPE-794): reverse the move/copy, then drop it from the log.
+   *  CPE-1671: `undoFire` now reports what actually happened to the fire's recorded copies — a copy can
+   *  be skipped (CPE-1666's re-stat guard), refused by the backend consent gate, or fail per-path, and
+   *  every one of those used to be invisible past a devtools `console.warn` while this still showed the
+   *  same plain "Undid" toast as a full success. Only show that toast when nothing was left behind;
+   *  otherwise say so and name the count, so Undo never claims to be complete when it wasn't. */
   async function undoWatchFire(fire: WatchFire) {
     try {
-      await undoFire(fire);
+      const result = await undoFire(fire);
       watchLog = watchLog.filter((f) => f.id !== fire.id);
-      showNotice($t("notice.watchUndone", { rule: fire.rule }));
+      const skipped = result.skippedNotFile + result.refused + result.failed;
+      if (skipped === 0) {
+        showNotice($t("notice.watchUndone", { rule: fire.rule }));
+      } else {
+        showNotice(
+          $t(skipped === 1 ? "notice.watchUndonePartialOne" : "notice.watchUndonePartialMany", {
+            rule: fire.rule,
+            count: skipped,
+          }),
+          true,
+        );
+      }
     } catch (e) {
       showNotice(String(e), true);
     }
