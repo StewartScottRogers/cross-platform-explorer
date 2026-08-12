@@ -3,6 +3,9 @@
  * passphrase-match gate, the sibling-default destination, the shred-checkbox → honest-warning gate, the
  * remember-checkbox default + wiring, and the created/error dispatch contract. Mocks the Tauri `invoke`
  * boundary + the native save dialog, same convention as ShredConfirmDialog.test.ts.
+ *
+ * CPE-1646 adds a dedicated describe block proving `confirmed` is set by a genuinely separate act from
+ * `shredOriginal` — the bug this ticket fixed was the dialog passing the very same variable for both.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
@@ -149,13 +152,16 @@ describe("VaultCreateDialog — backend wiring + dispatch", () => {
     expect(invoke).not.toHaveBeenCalledWith("vault_remember_passphrase", expect.anything());
   });
 
-  // CPE-1630: this dialog is the ONE caller allowed to set `confirmed: true` on `vault_create` — the
-  // backend engine now refuses to shred the original unless it's set (mirroring CPE-1611's `shred_paths`
-  // gate). Submitting the form with the shred checkbox checked (and its inline warning shown) IS the
-  // confirmation, so `confirmed` must track `shredOriginal` — never hardcoded `false`.
-  it("passes confirmed: true alongside shredOriginal: true when the shred checkbox is checked", async () => {
+  // CPE-1630/1646: this dialog is the ONE caller allowed to set `confirmed: true` on `vault_create` — the
+  // backend engine refuses to shred the original unless it's set (mirroring CPE-1611's `shred_paths`
+  // gate). `confirmed` is set by the SEPARATE "I understand…" acknowledgement checkbox rendered inside
+  // the warning panel, not by the shred checkbox itself — see the dedicated describe block below for the
+  // tests that pin down the separation. This one just confirms the end-to-end wiring still works when
+  // both boxes are checked.
+  it("passes confirmed: true alongside shredOriginal: true once BOTH the shred box and its acknowledgement are checked", async () => {
     render(VaultCreateDialog, base);
     await fireEvent.click(screen.getByTestId("vault-shred"));
+    await fireEvent.click(screen.getByTestId("vault-shred-confirm"));
     await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
     await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
     await fireEvent.click(screen.getByTestId("vault-create-confirm"));
@@ -211,5 +217,94 @@ describe("VaultCreateDialog — backend wiring + dispatch", () => {
     await fireEvent.click(screen.getByTestId("vault-cancel"));
     expect(close).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalled();
+  });
+});
+
+// CPE-1646: the dialog used to pass ONE variable (`shredOriginal`) as BOTH the intent AND the consent
+// argument to `vault_create` — `commands.vaultCreate(folderPath, dest, passphrase, shredOriginal,
+// shredOriginal)`. A test that only asserts "the backend was called with confirmed: true" can't tell
+// that apart from a correctly-separated implementation, since both produce the same call once the user
+// has gone through the full checked-and-submitted flow. These tests are built to distinguish the two: they
+// assert that flipping the INTENT alone — with the separate acknowledgement never touched — can NOT put
+// the dialog into a state where `vault_create` would be called with `confirmed: true`. Under the old
+// (collapsed) code, checking the shred box alone flips `confirmed` to `true` for free; these go red
+// against that shape and green against the fix.
+describe("VaultCreateDialog — CPE-1646: shred consent is a separate act from shred intent", () => {
+  it("checking the shred checkbox (intent) alone never satisfies consent, no matter how many times it's toggled", async () => {
+    render(VaultCreateDialog, base);
+    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
+    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
+
+    const create = screen.getByTestId("vault-create-confirm") as HTMLButtonElement;
+    expect(create.disabled).toBe(false); // valid + non-destructive: no friction
+
+    const shred = screen.getByTestId("vault-shred") as HTMLInputElement;
+    await fireEvent.click(shred); // intent -> true
+    expect(create.disabled).toBe(true); // intent alone must not grant consent
+
+    // Toggling intent off and back on repeatedly must not launder consent through repetition either —
+    // this is the concrete "future drift" risk the ticket named (a restored draft, a deep-link default,
+    // a copy-paste refactor re-setting shredOriginal to true). End on intent = true (checked).
+    await fireEvent.click(shred); // -> false
+    await fireEvent.click(shred); // -> true
+    expect(shred.checked).toBe(true);
+    expect(create.disabled).toBe(true);
+
+    // Force the click through anyway: the component's own guard (not just the disabled attribute) must
+    // refuse to call the backend with an unconfirmed shred.
+    await fireEvent.click(create);
+    expect(invoke).not.toHaveBeenCalledWith("vault_create", expect.anything());
+  });
+
+  it("only the separate acknowledgement checkbox — not the shred checkbox — can make confirmed: true reach the backend", async () => {
+    render(VaultCreateDialog, base);
+    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
+    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
+    await fireEvent.click(screen.getByTestId("vault-shred"));
+
+    const create = screen.getByTestId("vault-create-confirm") as HTMLButtonElement;
+    expect(create.disabled).toBe(true); // intent set, consent not yet given
+
+    await fireEvent.click(screen.getByTestId("vault-shred-confirm")); // the distinct affirmative act
+    expect(create.disabled).toBe(false);
+
+    await fireEvent.click(create);
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith("vault_create", {
+        folder: "/home/me/Secrets",
+        dest: "/home/me/Secrets.cpevault",
+        passphrase: "pw",
+        shredOriginal: true,
+        confirmed: true,
+      }),
+    );
+  });
+
+  it("unchecking the shred box drops the consent too, so re-checking it demands a fresh acknowledgement", async () => {
+    render(VaultCreateDialog, base);
+    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
+    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
+
+    const shred = screen.getByTestId("vault-shred") as HTMLInputElement;
+    const create = screen.getByTestId("vault-create-confirm") as HTMLButtonElement;
+
+    await fireEvent.click(shred);
+    await fireEvent.click(screen.getByTestId("vault-shred-confirm"));
+    expect(create.disabled).toBe(false);
+
+    await fireEvent.click(shred); // uncheck — intent off, warning + ack unmount
+    expect(shred.checked).toBe(false);
+    await fireEvent.click(shred); // recheck — intent on again, a FRESH ack checkbox is mounted
+    expect((screen.getByTestId("vault-shred-confirm") as HTMLInputElement).checked).toBe(false);
+    expect(create.disabled).toBe(true);
+  });
+
+  it("with the shred option off entirely, Create is never gated by the (absent) acknowledgement", async () => {
+    render(VaultCreateDialog, base);
+    await fireEvent.input(screen.getByTestId("vault-passphrase"), { target: { value: "pw" } });
+    await fireEvent.input(screen.getByTestId("vault-passphrase-confirm"), { target: { value: "pw" } });
+
+    expect(screen.queryByTestId("vault-shred-confirm")).toBeNull();
+    expect((screen.getByTestId("vault-create-confirm") as HTMLButtonElement).disabled).toBe(false);
   });
 });

@@ -18,20 +18,35 @@
    * (verify-before-shred, vault_manager::create_vault). The default destination is a SIBLING of the
    * folder, never inside it, because the backend refuses an inside-the-folder dest when shredding.
    *
-   * **CPE-1630:** the backend engine (`vault_manager::create_vault`) now refuses to shred the original
+   * **CPE-1630:** the backend engine (`vault_manager::create_vault`) refuses to shred the original
    * unless a `confirmed: true` flag is passed too — separate from the `shredOriginal` intent bool —
    * mirroring CPE-1611's identical gate on `shred_paths`. This component is the ONE place in the
-   * codebase allowed to pass it: submitting this form with the checkbox checked (and its inline
-   * warning shown) IS the confirmation, so `create()` below passes `confirmed: shredOriginal`. That
-   * closes the gap where a devtools/automation call could invoke `vault_create(..., true)` directly and
-   * skip this dialog's warning entirely.
+   * codebase allowed to pass it. That closes the gap where a devtools/automation call could invoke
+   * `vault_create(..., true, true)` directly and skip this dialog's warning entirely.
+   *
+   * **CPE-1646:** the first cut of this dialog wired that up as `confirmed: shredOriginal` — the SAME
+   * variable passed as both the intent and the consent, re-creating one layer up the exact "one flag
+   * doing double duty" collapse CPE-1599 exists to prevent (see `BatchMediaDialog`'s
+   * `confirmed_overwrite`, set only via its own separate confirm-panel button). `shredConfirmed` below
+   * is now a genuinely separate piece of state: it is set ONLY by its own checkbox rendered inside the
+   * shred warning panel (`vault-shred-confirm`), never derived from or aliased to `shredOriginal`, and
+   * is reset to `false` whenever the shred checkbox is unchecked so a stale consent can never survive a
+   * later re-check. `create()` sends `shredConfirmed` — not `shredOriginal` — as `confirmed`, and the
+   * submit button stays disabled until it's set (`canSubmitCreate` in `../vaultCreate`). To be honest
+   * about what this defends: it's UI discipline enforced by keeping two independent `let` bindings in
+   * this one component, not an authorization boundary — both booleans ride on the same IPC call as the
+   * rest of the form data, so anything that can invoke Tauri commands at all can still call
+   * `vault_create(..., true, true)` directly, same as before. What this actually prevents is *this*
+   * component silently promoting "the shred box is checked" into "the user was asked and said yes"
+   * through a future refactor, a restored draft, or a copy-paste — the future-drift risk CPE-1646
+   * raised.
    */
   import { createEventDispatcher, onMount, tick } from "svelte";
   import { save as saveFileDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
   import { commands } from "../bindings.gen";
   import { unwrap } from "../invoke";
-  import { siblingVaultDest, checkPassphrases, canCreate, VAULT_EXT } from "../vaultCreate";
+  import { siblingVaultDest, checkPassphrases, canSubmitCreate, VAULT_EXT } from "../vaultCreate";
 
   /** Absolute path of the folder to seal. */
   export let folderPath: string;
@@ -46,6 +61,11 @@
   let confirm = "";
   let dest = siblingVaultDest(folderPath);
   let shredOriginal = false;
+  // CPE-1646: the CONSENT to actually shred, kept as its own binding, distinct from `shredOriginal`
+  // (the INTENT). Set only by the "I understand…" checkbox inside the warning panel below — never
+  // assigned from `shredOriginal` anywhere in this file. Reset below whenever `shredOriginal` goes
+  // false so re-checking the shred box always demands a fresh, explicit acknowledgement.
+  let shredConfirmed = false;
   let remember = rememberDefault;
   let busy = false;
   let error = ""; // backend error surfaced after a failed create
@@ -64,7 +84,10 @@
   // Live confirm-mismatch feedback: only once the user has typed something into the confirm field, so an
   // untouched form isn't pre-decorated with an error. `checkPassphrases` is the pure, unit-tested gate.
   $: mismatch = confirm.length > 0 && !checkPassphrases(passphrase, confirm).ok;
-  $: creatable = canCreate({ passphrase, confirm, dest, busy });
+  // Unchecking the shred box drops its warning panel (and the ack checkbox inside it) — drop the
+  // consent along with it, so it can never quietly outlive the intent that produced it.
+  $: if (!shredOriginal) shredConfirmed = false;
+  $: creatable = canSubmitCreate({ passphrase, confirm, dest, busy, shredOriginal, shredConfirmed });
 
   async function browseDest() {
     const suggested = dest || siblingVaultDest(folderPath);
@@ -80,10 +103,10 @@
     busy = true;
     error = "";
     try {
-      // `confirmed` mirrors `shredOriginal`: this dialog's submit IS the confirmation (checkbox +
-      // inline warning already shown above), and the flag is a no-op on the backend unless
-      // `shredOriginal` is also true (CPE-1630) — see the header doc comment.
-      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal, shredOriginal));
+      // `confirmed` is `shredConfirmed` — the separate acknowledgement — NEVER `shredOriginal` (CPE-1646).
+      // `creatable` already requires `shredConfirmed` whenever `shredOriginal` is true, so this can only
+      // be reached with a genuine, distinct consent; see the header doc comment.
+      unwrap(await commands.vaultCreate(folderPath, dest, passphrase, shredOriginal, shredConfirmed));
       // Opt-in keychain persistence — keyed to the NEW blob path, exactly what CPE-1249's unlock looks up.
       if (remember) unwrap(await commands.vaultRememberPassphrase(dest, passphrase));
       dispatch("created", dest);
@@ -238,6 +261,17 @@
             copy-on-write filesystem (APFS, Btrfs, ZFS) old data can remain in snapshots; copies in
             backups, temp files, or filesystem journals are not touched.
           </p>
+          <!-- CPE-1646: the separate affirmative act — checking THIS box is what sets `shredConfirmed`,
+               distinct from `shredOriginal` above. "Create vault" stays disabled until it's checked. -->
+          <label class="check-row ack-row">
+            <input
+              type="checkbox"
+              bind:checked={shredConfirmed}
+              disabled={busy}
+              data-testid="vault-shred-confirm"
+            />
+            <span>I understand — permanently delete the original after sealing</span>
+          </label>
         </div>
       </div>
     {/if}
@@ -371,6 +405,15 @@
   .caveat p { font-size: 12px; line-height: 1.5; margin: 0; }
   .caveat .permanence { color: var(--text); }
   .caveat .best-effort { color: var(--text-dim); margin-top: 8px; }
+  /* The explicit-consent checkbox nested inside the warning panel (CPE-1646) — same `.check-row` shape,
+     but no bottom margin since it's the last thing in `.caveat`'s padded box, and a border to read as a
+     distinct control rather than a third paragraph of the warning text. */
+  .caveat .ack-row {
+    margin: 10px 0 0;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    font-weight: 600;
+  }
   .err { font-size: 12.5px; font-weight: 600; color: var(--text); margin: -6px 0 12px; }
   .create-err { margin-top: 4px; }
   .actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
