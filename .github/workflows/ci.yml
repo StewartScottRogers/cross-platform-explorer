@@ -590,9 +590,29 @@ jobs:
             fi
           done
 
-      - name: Build the real cpe-server-ref binary (release, Slice 2 CPE-1659)
-        working-directory: crates/net
-        run: cargo build --release --bin cpe-server-ref
+      # CPE-1673 (job wall-clock, item 6): this release build was the single biggest step in the job
+      # (measured ~4 minutes on its own, cold OR warm cache — the existing `swatinem/rust-cache` restore
+      # above doesn't meaningfully speed it up, confirmed by comparing two real runs). It shares NO files
+      # with `crates/vfs` (a separate, standalone crate with its own `target/`), so there's nothing
+      # stopping it from running at the same time as the conformance suite's OWN compile-heavy step
+      # (building `real_server_conformance` — normally hidden inside the "TOFU part 1" step below). Doing
+      # both here, backgrounded, turns two serial compiles into one job bounded by the slower of the two.
+      # `--features e2e-extra-ca` on the vfs pre-build matches every other crates/vfs invocation in this
+      # job (TOFU steps + the full conformance suite below) so they all share one fingerprint and none of
+      # them re-triggers a rebuild the others already paid for.
+      - name: "Build the real cpe-server-ref binary (release) AND pre-build the vfs conformance test binary, in parallel (CPE-1673)"
+        run: |
+          set -euo pipefail
+          (cd crates/net && cargo build --release --bin cpe-server-ref) &
+          net_pid=$!
+          (cd crates/vfs && cargo test --no-run --features e2e-extra-ca --test real_server_conformance) &
+          vfs_pid=$!
+          fail=0
+          wait "$net_pid" || { echo "::error::cpe-server-ref release build failed"; fail=1; }
+          wait "$vfs_pid" || { echo "::error::crates/vfs real_server_conformance pre-build failed"; fail=1; }
+          if [ "$fail" != "0" ]; then
+            exit 1
+          fi
 
       - name: Containerise + start the real cpe-server-ref (Slice 2 CPE-1659)
         run: |
@@ -608,31 +628,92 @@ jobs:
 
       - name: "crates/vfs — SFTP host-key TOFU, part 1: first contact then trusts (real OpenSSH)"
         working-directory: crates/vfs
-        run: cargo test --test real_server_conformance sftp_host_key_tofu_first_contact_then_trusts_against_real_sshd -- --ignored --nocapture
+        # `--features e2e-extra-ca` here too (CPE-1673), purely so every crates/vfs test invocation in
+        # this job shares one fingerprint with the pre-build above — this test itself never touches FTPS.
+        run: cargo test --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_first_contact_then_trusts_against_real_sshd -- --ignored --nocapture
 
       - name: Recreate the SFTP container with a FRESH host key (CPE-1659 TOFU negative case)
         # Same static IP, no host-key volume mounted — atmoz/sftp generates brand-new ephemeral host
         # keys on a fresh container, so the address the previous step trusted now presents a DIFFERENT
         # key, exactly the "changed key" scenario CPE-1512 must refuse.
         run: |
+          set -euo pipefail
           docker rm -f sftp-e2e
           docker run -d --name sftp-e2e \
             --network "net-e2e-${{ github.run_id }}" --ip 172.28.0.11 \
             -v "$CPE_E2E_SFTP_FIXTURE_DIR:/home/tester/upload" \
             atmoz/sftp:latest@sha256:0960390462a4441dbb63698d7c185b76a41ffcee7b78ff4adf275f3e66f9c475 \
             "tester:testpass:1001:1001:upload"
+          # CPE-1673 follow-up: this loop used to fall through silently on a timeout — the exact pattern
+          # fixed in the WebDAV DELETE retry (items 1/2 above), and the pattern that hid a vsftpd startup
+          # crash for two full CI runs before CPE-1659 tracked it down (see the FTP steps above). Harmless
+          # *today* only because the TOFU test that follows asserts `err.contains("CHANGED")` rather than
+          # merely "connect failed", so a dead container still fails loudly — but fix it here for symmetry
+          # with the "Wait for the real servers" step above, before someone loosens that assertion and
+          # silently re-opens the hole.
+          up=""
           for _ in $(seq 1 30); do
-            (echo > "/dev/tcp/172.28.0.11/22") >/dev/null 2>&1 && break
+            (echo > "/dev/tcp/172.28.0.11/22") >/dev/null 2>&1 && { up=1; echo "172.28.0.11:22 is up"; break; }
             sleep 1
           done
+          if [ -z "$up" ]; then
+            echo "::error::172.28.0.11:22 never accepted a TCP connection within 30s after recreating sftp-e2e"
+            exit 1
+          fi
 
       - name: "crates/vfs — SFTP host-key TOFU, part 2: a changed key is refused (real OpenSSH)"
         working-directory: crates/vfs
-        run: cargo test --test real_server_conformance sftp_host_key_tofu_changed_key_is_refused_against_real_sshd -- --ignored --nocapture
+        # `--features e2e-extra-ca` here too (CPE-1673) — same fingerprint-consistency reason as part 1.
+        run: cargo test --features e2e-extra-ca --test real_server_conformance sftp_host_key_tofu_changed_key_is_refused_against_real_sshd -- --ignored --nocapture
 
-      - name: crates/vfs — full conformance suite (sftp / webdav / ftp / ftps) against real servers
+      - name: crates/vfs — full conformance suite (sftp / webdav / ftp / ftps) against real servers, in parallel by scheme
         working-directory: crates/vfs
-        run: cargo test --test real_server_conformance -- --ignored --nocapture --test-threads=1 --skip sftp_host_key_tofu
+        # CPE-1673 (job wall-clock, item 6): the 4 conformance tests below used to run one after another
+        # under `--test-threads=1` (~5 minutes). SFTP and WebDAV each have their OWN container and OWN
+        # fixture directory (see the "Start real … server" steps above), so they can run fully
+        # concurrently with each other and with the FTP pair — nothing shared, nothing to race. FTP and
+        # FTPS, though, share the SAME `ftp-e2e` container AND the SAME host fixture directory (FTPS is
+        # just the same vsftpd over TLS — see `assert_list_matches_seeded_set`'s comment in
+        # `tests/real_server_conformance.rs`), so those two stay serialised (`--test-threads=1`) relative
+        # to EACH OTHER, just as a group running alongside the other two. Net effect: wall-clock becomes
+        # roughly the slowest of the three groups instead of the sum of all four tests.
+        #
+        # `--features e2e-extra-ca` on every group (not just the FTP one) for the same fingerprint reason
+        # as the TOFU steps above and the pre-build step: all crates/vfs test invocations in this job must
+        # agree on features, or cargo treats them as different builds and re-links between them.
+        run: |
+          # NOTE: multiple test-name filters are a libtest harness feature (args AFTER `--`), not a
+          # `cargo test` feature — `cargo test <name1> <name2>` itself only accepts ONE positional
+          # TESTNAME before `--` and rejects a second (confirmed locally: "unexpected argument"). The FTP
+          # group below therefore passes both filters to the harness, after `--`, not to cargo.
+          set -euo pipefail
+          cargo test --features e2e-extra-ca --test real_server_conformance \
+            -- sftp_conformance_against_real_openssh --ignored --nocapture --test-threads=1 \
+            > "$RUNNER_TEMP/e2e-sftp.log" 2>&1 &
+          sftp_pid=$!
+          cargo test --features e2e-extra-ca --test real_server_conformance \
+            -- webdav_conformance_against_real_apache_moddav --ignored --nocapture --test-threads=1 \
+            > "$RUNNER_TEMP/e2e-webdav.log" 2>&1 &
+          webdav_pid=$!
+          cargo test --features e2e-extra-ca --test real_server_conformance \
+            -- ftp_conformance_against_real_vsftpd ftps_conformance_against_real_vsftpd_with_tls \
+               --ignored --nocapture --test-threads=1 \
+            > "$RUNNER_TEMP/e2e-ftp.log" 2>&1 &
+          ftp_pid=$!
+
+          fail=0
+          wait "$sftp_pid" || fail=1
+          wait "$webdav_pid" || fail=1
+          wait "$ftp_pid" || fail=1
+
+          echo "=== sftp group log ==="; cat "$RUNNER_TEMP/e2e-sftp.log"
+          echo "=== webdav group log ==="; cat "$RUNNER_TEMP/e2e-webdav.log"
+          echo "=== ftp/ftps group log ==="; cat "$RUNNER_TEMP/e2e-ftp.log"
+
+          if [ "$fail" != "0" ]; then
+            echo "::error::at least one parallel conformance group failed — see the group logs above"
+            exit 1
+          fi
 
       - name: "crates/net — Slice 2: real client<->server E2E over a non-loopback container IP"
         working-directory: crates/net

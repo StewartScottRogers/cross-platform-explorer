@@ -29,4 +29,14 @@ suppaftp = { version = "10", default-features = false, features = ["rustls-ring"
 # handed to `into_secure` is always the exact version suppaftp itself compiled against.
 webpki-roots = "1"
 
+[features]
+# CPE-1673 (defence in depth on top of the CPE-1659 env-var gate): compiles the real-server E2E rig's
+# throwaway-FTPS-CA trust hook (`extra_test_root` and its `CPE_E2E_FTPS_EXTRA_CA_PEM_FILE` env var) into
+# the binary AT ALL. OFF by default, so a normal build — including the shipped app — has NO extra-CA
+# code path present, not merely an inert one behind an unset env var; the production trust store is
+# unconditionally `webpki_roots::TLS_SERVER_ROOTS` with no way to extend it. Only the CI real-server-rig
+# job (crates/vfs's `real_server_conformance` test, which needs to trust vsftpd's throwaway self-signed
+# certificate — no public CA can issue for a private ephemeral Docker IP) turns this on.
+e2e-extra-ca = []
+
 [dev-dependencies]

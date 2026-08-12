@@ -4,8 +4,11 @@
 //! transport**, so it's fully unit-testable. Adding a method = register a handler, no core changes.
 //!
 //! Error taxonomy at the boundary: an unknown method → [`ErrorCode::NotFound`], params that don't
-//! deserialize → [`ErrorCode::BadRequest`], a domain `Err(String)` → [`ErrorCode::Internal`]; a handler
-//! never panics the dispatcher.
+//! deserialize → [`ErrorCode::BadRequest`]; a domain `Err(String)` from a **path-taking** handler goes
+//! through [`domain_path`], which is `NotFound` when the path genuinely doesn't exist and `Internal`
+//! otherwise (including when the path's existence can't even be determined, e.g. a permission-denied
+//! parent-directory traversal — "we don't know" must never be reported as "it isn't there"); every other
+//! domain `Err(String)` → [`ErrorCode::Internal`] via [`domain`]. A handler never panics the dispatcher.
 
 use std::collections::BTreeMap;
 
@@ -35,6 +38,33 @@ pub fn result<T: Serialize>(value: T) -> Result<serde_json::Value, ContractError
 /// Map a domain `Err(String)` (e.g. "not a folder") onto a structured contract error.
 pub fn domain(err: String) -> ContractError {
     ContractError::new(ErrorCode::Internal, err, false)
+}
+
+/// Map a domain `Err(String)` for a **path-taking** handler onto a structured contract error: a
+/// genuinely missing `path` is `NotFound` (the one domain failure a caller most needs to branch on
+/// structurally — CPE-1659, first applied to `list_dir` only); every other handler that takes a `path`
+/// goes through this same helper instead of re-deriving the check, so the mapping is one taxonomy
+/// instead of a one-off (CPE-1673 follow-up).
+pub fn domain_path(path: &str, err: String) -> ContractError {
+    classify_path_error(std::fs::metadata(path).err().map(|e| e.kind()), err)
+}
+
+/// The pure classification `domain_path` delegates to, split out so the EACCES-vs-missing distinction is
+/// unit-testable without touching the real filesystem (permission bits are platform- and
+/// privilege-dependent — e.g. inert when the test process runs as root — so a real `chmod`-based test
+/// would be flaky; this stays deterministic on every OS and CI account).
+///
+/// Deliberately does **not** collapse to `Path::exists()`, which swallows every `stat` failure — missing
+/// path AND permission-denied parent-directory traversal (EACCES) alike — into the same `false`. That
+/// would report "we don't know" as "it isn't there": only a `stat` that fails with
+/// `io::ErrorKind::NotFound` is a genuine `NotFound`; anything else (including `PermissionDenied`, or no
+/// error at all because the path exists but the domain call failed for an unrelated reason) stays
+/// `Internal`.
+fn classify_path_error(stat_err_kind: Option<std::io::ErrorKind>, err: String) -> ContractError {
+    match stat_err_kind {
+        Some(std::io::ErrorKind::NotFound) => ContractError::new(ErrorCode::NotFound, err, false),
+        _ => domain(err),
+    }
 }
 
 /// The method registry. Look up by name; the missing case is a structural `NotFound` (you can't
@@ -96,21 +126,12 @@ impl Dispatcher {
                 path: String,
             }
             let a: P = params(p)?;
-            let entries = crate::listing::list_dir(&a.path).map_err(|e| {
-                // CPE-1659: a missing path is a structured `NotFound` over the wire, not the generic
-                // `Internal` every other domain error gets — the real-server rig's Slice 2 E2E test
-                // (`crates/net/tests/real_server_e2e.rs`) asserts exactly this ("a missing remote path
-                // must be a clean error ... not a panic, not a silent success") and caught this gap for
-                // real: `domain()`'s blanket Err(String) -> Internal mapping is right for most handlers,
-                // but wrong for the single failure a caller most needs to branch on. `Path::exists()`
-                // (rather than matching the io::Error's Display text) keeps this portable — the OS wording
-                // for "no such file" differs across platforms, but non-existence doesn't.
-                if !std::path::Path::new(&a.path).exists() {
-                    ContractError::new(ErrorCode::NotFound, e, false)
-                } else {
-                    domain(e)
-                }
-            })?;
+            // CPE-1659 / CPE-1673: a missing path is a structured `NotFound` over the wire, not the
+            // generic `Internal` every other domain error gets — the real-server rig's Slice 2 E2E test
+            // (`crates/net/tests/real_server_e2e.rs`) asserts exactly this ("a missing remote path must
+            // be a clean error ... not a panic, not a silent success") and caught this gap for real.
+            // `domain_path` applies the same mapping to every path-taking handler (not just this one).
+            let entries = crate::listing::list_dir(&a.path).map_err(|e| domain_path(&a.path, e))?;
             result(entries)
         });
 
@@ -121,7 +142,7 @@ impl Dispatcher {
                 path: String,
             }
             let a: P = params(p)?;
-            result(crate::checksum::hash_file(&a.path).map_err(domain)?)
+            result(crate::checksum::hash_file(&a.path).map_err(|e| domain_path(&a.path, e))?)
         });
 
         // Path-arg: text statistics.
@@ -131,7 +152,7 @@ impl Dispatcher {
                 path: String,
             }
             let a: P = params(p)?;
-            result(crate::text_stats::compute(&a.path).map_err(domain)?)
+            result(crate::text_stats::compute(&a.path).map_err(|e| domain_path(&a.path, e))?)
         });
 
         // No-arg but ctx-using: the whole tag store (resolves the config dir via the ctx).
@@ -223,7 +244,9 @@ mod tests {
     #[test]
     fn domain_error_maps_to_internal() {
         let ctx = HeadlessCtx::new(scratch("base"));
-        // hash_file on a directory errors in the domain.
+        // hash_file on a directory errors in the domain, but the directory itself EXISTS — this must
+        // stay `Internal`, not `NotFound` (proves `domain_path` doesn't over-fire on every domain error,
+        // only a genuinely missing path).
         let d = scratch("hash");
         let resp = Dispatcher::with_builtins().dispatch(&ctx, req("hash_file", json!({ "path": d.to_string_lossy() })));
         match resp.result {
@@ -231,6 +254,58 @@ mod tests {
             Ok(_) => panic!("hashing a folder must error"),
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // CPE-1673 item 4: the missing-path taxonomy used to be a `list_dir`-only one-off. These tests prove
+    // `hash_file` and `text_stats` now get the same `NotFound` treatment through the shared
+    // `domain_path` helper, and that the classification logic itself never mistakes "can't tell" (a
+    // permission-denied traversal) for "isn't there".
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn hash_file_of_a_missing_path_is_not_found() {
+        let ctx = HeadlessCtx::new(scratch("base"));
+        let resp = Dispatcher::with_builtins()
+            .dispatch(&ctx, req("hash_file", json!({ "path": "/definitely/not/a/real/path/xyz" })));
+        match resp.result {
+            Err(e) => assert_eq!(e.code, ErrorCode::NotFound, "got {:?}: {}", e.code, e.message),
+            Ok(_) => panic!("hashing a missing path must error"),
+        }
+    }
+
+    #[test]
+    fn text_stats_of_a_missing_path_is_not_found() {
+        let ctx = HeadlessCtx::new(scratch("base"));
+        let resp = Dispatcher::with_builtins()
+            .dispatch(&ctx, req("text_stats", json!({ "path": "/definitely/not/a/real/path/xyz" })));
+        match resp.result {
+            Err(e) => assert_eq!(e.code, ErrorCode::NotFound, "got {:?}: {}", e.code, e.message),
+            Ok(_) => panic!("text_stats on a missing path must error"),
+        }
+    }
+
+    #[test]
+    fn classify_path_error_maps_not_found_kind_to_not_found_code() {
+        let e = classify_path_error(Some(std::io::ErrorKind::NotFound), "missing".to_string());
+        assert_eq!(e.code, ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn classify_path_error_permission_denied_stays_internal_not_not_found() {
+        // The exact regression this item closes: `Path::exists()` collapses ENOENT and EACCES into the
+        // same `false`, so a permission-denied parent-directory traversal used to be reported as
+        // `NotFound` ("we don't know" reported as "it isn't there"). `PermissionDenied` (or any kind
+        // other than `NotFound`) must stay `Internal`.
+        let e = classify_path_error(Some(std::io::ErrorKind::PermissionDenied), "denied".to_string());
+        assert_eq!(e.code, ErrorCode::Internal);
+    }
+
+    #[test]
+    fn classify_path_error_existing_path_stays_internal() {
+        // No stat error at all (the path exists) — the domain failure is unrelated to existence.
+        let e = classify_path_error(None, "not a folder".to_string());
+        assert_eq!(e.code, ErrorCode::Internal);
     }
 
     #[test]

@@ -16,3 +16,10 @@ cpe-server = { path = "../server" }
 cpe-sftp = { path = "../sftp" }
 cpe-webdav = { path = "../webdav" }
 cpe-ftp = { path = "../ftp" }
+
+[features]
+# Forwards to cpe-ftp's own `e2e-extra-ca` (CPE-1673): OFF by default, so a normal build of this crate
+# (including the shipped app, via src-tauri's plain dependency on cpe-vfs) never compiles in cpe-ftp's
+# throwaway-FTPS-CA test hook. Only `tests/real_server_conformance.rs`'s `ftps_conformance_against_real_vsftpd_with_tls`
+# needs it — turned on by the CI real-server-rig job passing `--features e2e-extra-ca` to `cargo test`.
+e2e-extra-ca = ["cpe-ftp/e2e-extra-ca"]
