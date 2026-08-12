@@ -185,6 +185,20 @@ committed, named list — and the unit of exemption is **one test case**, not a 
   which is unlisted by construction and therefore red — a `before` hook that throws usually means its
   suite's cases never reported at all, and "absent" must never read as green.
 
+**`"intermittent": true` — the one escape hatch, and how not to abuse it.** Case granularity turns a
+genuinely flaky case into a coin-flip gate: clause 1 reds the runs where it fails, clause 2 reds the runs
+where it passes, and the job is red either way regardless of the change under test. An entry marked
+`"intermittent": true` is exempt in **both** directions. It must still exist (clause 3 still applies),
+and `npm run ratchet` prints every intermittent entry **with its observed status on every run**, so it
+stays visible and drainable instead of becoming a quiet permanent hole. The bar is evidence, not
+annoyance: the entry's `reason` must cite the real runs where the same case both passed and failed on
+unchanged code. A case that fails *every* run is a plain entry, not an intermittent one.
+
+The three `samples/audio/*` cases are the current (and only) users of it — CPE-1677's first live run
+found them flipping across six real runs (`31593963928`, `31598207125`, `31602466829`, `31617196015`,
+`31621443412`, `31622660088` attempts 1 and 2), which the old whole-file exemption had hidden completely.
+They are owed a real fix to the audio preview's settle path.
+
 **Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
 is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
 nothing: the CPE-1639 worker deliberately broke the font-preview case inside that file, ran the real

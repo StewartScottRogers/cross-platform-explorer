@@ -39,6 +39,17 @@
 //   5. DUPLICATE EXEMPTION     — the same `spec` + `test` is listed twice in known-failing.json. Not a
 //      product signal; a list-hygiene one, caught here because a duplicate makes the "delete its entry"
 //      instruction in clauses 2/3 silently insufficient.
+//
+// One narrow escape hatch, `intermittent: true` on an entry (CPE-1677, forced by the evidence): case
+// granularity turns a genuinely FLAKY case into a coin-flip gate — clause 1 reds the runs where it
+// fails, clause 2 reds the runs where it passes, and the job is red either way through no fault of the
+// change under test. The `samples/audio/*` cases are exactly that today: across six real runs
+// (31593963928, 31598207125, 31602466829, 31617196015, 31621443412, 31622660088 attempts 1+2) each of
+// `track.flac`, `track.mp3` and `track.ogg` has been seen both passing and failing on unchanged code —
+// invisible until now precisely because the whole `samples.smoke.ts` file was exempt. An intermittent
+// entry is exempt in BOTH directions but must still exist (clause 3), and `run-ratchet.ts` prints every
+// one with its observed status on every run so it can't go quiet. It is not a way to silence a test that
+// fails every time — that is a plain entry.
 
 /** A case's outcome as the JSON reporter records it. `skipped`/`pending` are neither a pass nor a
  *  failure: they can't red the job (clause 1) and can't retire an exemption (clause 2), but they DO
@@ -63,6 +74,16 @@ export interface KnownFailingCase {
   test: string;
   reason: string;
   ticket: string;
+  /** `true` for a case PROVEN intermittent across real runs (cite the run ids in `reason`): it may pass
+   *  or fail without redding the job, and passing does NOT retire it (clause 2 is skipped) — otherwise a
+   *  coin-flip case would red every other run in one direction or the other. It must still EXIST
+   *  (clause 3 applies), and `run-ratchet.ts` prints every intermittent entry with its observed status
+   *  on every run, so these stay visible and drainable rather than becoming quiet permanent holes.
+   *
+   *  Deliberately narrow. This is NOT "the test is annoying" — it is "this exact case has been observed
+   *  both passing and failing on unchanged code, it has an owning ticket, and until that ticket lands it
+   *  cannot be a gate". A case that fails EVERY run is a plain entry, not an intermittent one. */
+  intermittent?: boolean;
 }
 
 /** The shape of the committed `gui-smoke/known-failing.json`. `$comment` is optional/ignored — it
@@ -92,6 +113,9 @@ export interface EvaluateResult {
   unmatchedListings: string[];
   /** Keys listed more than once in known-failing.json. */
   duplicateListings: string[];
+  /** Keys listed with `intermittent: true`, paired with what they actually did this run — printed every
+   *  run by the CLI wrapper so a proven-flaky exemption stays visible instead of going quiet. */
+  intermittentListings: { key: string; statuses: CaseStatus[] }[];
   /** True when fewer spec FILES reported a result than `expectedSpecCount` — a timeout/crash/hang, not
    *  a clean run. This alone is enough to flip `ok` false, independent of the other clauses. */
   incomplete: boolean;
@@ -121,6 +145,7 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
   const fixedButStillListed: string[] = [];
   const unmatchedListings: string[] = [];
   const duplicateListings: string[] = [];
+  const intermittentListings: { key: string; statuses: CaseStatus[] }[] = [];
 
   const reportedSpecs = new Set(results.map((r) => r.spec));
   const reportedSpecCount = reportedSpecs.size;
@@ -196,6 +221,10 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
       );
       continue;
     }
+    if (known.get(key)!.intermittent) {
+      intermittentListings.push({ key, statuses });
+      continue; // proven flaky: passing is expected some runs, so it can't retire the entry either
+    }
     if (statuses.includes("failed")) continue; // still failing: the exemption is doing its job
     if (!statuses.includes("passed")) continue; // skipped/pending only — neither retires nor reds it
     fixedButStillListed.push(key);
@@ -220,6 +249,7 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
     fixedButStillListed,
     unmatchedListings,
     duplicateListings,
+    intermittentListings,
     incomplete,
     reportedSpecCount,
     messages,

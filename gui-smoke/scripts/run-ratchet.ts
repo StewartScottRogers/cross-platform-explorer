@@ -159,6 +159,20 @@ function main(): void {
     for (const key of failing) console.log(`[gui-smoke ratchet]   ✖ ${key}`);
   }
 
+  // Proven-flaky entries are exempt in BOTH directions, so they are the one thing here that could go
+  // quiet. Print them, with what they actually did, on every single run — that is what keeps them
+  // drainable instead of permanent.
+  if (verdict.intermittentListings.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(
+      `[gui-smoke ratchet] intermittent entr${verdict.intermittentListings.length === 1 ? "y" : "ies"} ` +
+        `(${verdict.intermittentListings.length}) — exempt in both directions, still owed a fix:`,
+    );
+    for (const { key, statuses } of verdict.intermittentListings) {
+      console.log(`[gui-smoke ratchet]   ~ ${statuses.join("/")}: ${key}`);
+    }
+  }
+
   if (verdict.ok) {
     // eslint-disable-next-line no-console
     console.log(

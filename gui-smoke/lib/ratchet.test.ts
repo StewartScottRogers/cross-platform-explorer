@@ -297,6 +297,64 @@ describe("evaluate — clause 5: DUPLICATE EXEMPTION (list hygiene)", () => {
   });
 });
 
+describe("evaluate — the `intermittent` escape hatch (CPE-1677)", () => {
+  // A genuinely flaky case is a coin-flip gate under case granularity: clause 1 reds the runs where it
+  // fails, clause 2 reds the runs where it passes. `intermittent: true` exempts BOTH directions — but
+  // only both directions, and only for a case that still exists.
+  const FLAKY = "opens samples/audio/track.ogg: no crash + preview renders or gracefully degrades";
+  const WITH_FLAKY: KnownFailingFile = {
+    cases: [
+      ...KNOWN_FAILING.cases,
+      { spec: SAMPLES, test: FLAKY, reason: "proven flaky across runs A/B/C", ticket: "CPE-1677", intermittent: true },
+    ],
+  };
+
+  it("stays green when the intermittent case FAILS", () => {
+    const results: CaseResult[] = [...mainStateResults(), { spec: SAMPLES, test: FLAKY, status: "failed" }];
+    const result = evaluate({ results, knownFailing: WITH_FLAKY, expectedSpecCount: EXPECTED_SPECS });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.newFailures, []);
+  });
+
+  it("stays green when the intermittent case PASSES, and does NOT demand its removal", () => {
+    const results: CaseResult[] = [...mainStateResults(), { spec: SAMPLES, test: FLAKY, status: "passed" }];
+    const result = evaluate({ results, knownFailing: WITH_FLAKY, expectedSpecCount: EXPECTED_SPECS });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.fixedButStillListed, []);
+  });
+
+  it("reports the intermittent entry with its observed status either way, so it can't go quiet", () => {
+    const results: CaseResult[] = [...mainStateResults(), { spec: SAMPLES, test: FLAKY, status: "passed" }];
+    const result = evaluate({ results, knownFailing: WITH_FLAKY, expectedSpecCount: EXPECTED_SPECS });
+
+    assert.deepEqual(result.intermittentListings, [{ key: caseKey(SAMPLES, FLAKY), statuses: ["passed"] }]);
+  });
+
+  it("still reds the job when the intermittent case stops existing (clause 3 is NOT waived)", () => {
+    const result = evaluate({
+      results: mainStateResults(), // no case with that title at all
+      knownFailing: WITH_FLAKY,
+      expectedSpecCount: EXPECTED_SPECS,
+    });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.unmatchedListings, [caseKey(SAMPLES, FLAKY)]);
+  });
+
+  it("exempts only itself — a different case failing in the same spec still reds the job", () => {
+    const results: CaseResult[] = [
+      ...withStatus(mainStateResults(), SAMPLES, FONT_CASE, "failed"),
+      { spec: SAMPLES, test: FLAKY, status: "failed" },
+    ];
+    const result = evaluate({ results, knownFailing: WITH_FLAKY, expectedSpecCount: EXPECTED_SPECS });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.newFailures, [caseKey(SAMPLES, FONT_CASE)]);
+  });
+});
+
 describe("evaluate — combined failure modes in one run", () => {
   it("reports incomplete + newFailures + fixedButStillListed + unmatchedListings all at once", () => {
     const listedThatPasses = "opens samples/text/data.json: no crash + preview renders or gracefully degrades";
