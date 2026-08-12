@@ -10,6 +10,8 @@ import {
   vaultDisplayName,
   classifyUnlockError,
   classifyLockError,
+  VaultLockError,
+  type LockFailureCode,
   vaults,
   unlockVault,
   lockVault,
@@ -143,34 +145,36 @@ describe("vaultStore actions (CPE-1249)", () => {
     expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
   });
 
-  // ---- CPE-1654: a tamper refusal is not a busy file -------------------------------------------
+  // ---- CPE-1654 + SEC-847 finding 3: a lock failure is classified by CODE, never by text -------
   //
-  // After CPE-1647 a lock can fail for a second, quite different reason: the session path no longer
-  // resolves inside the app's own vault-sessions root (someone swapped a link in). The backend has
-  // ALREADY dropped its mapping in that case, wipes nothing, and leaves the vault's own file sealed — so
-  // the UI must clear its "unlocked" banner to match, must not offer a retry that can never work, and
-  // (App.lockActiveVault) must not navigate into the tampered path. A busy-file failure is the opposite
-  // in every respect and must keep working exactly as it did.
+  // A lock can fail four quite different ways, and the recovery is opposite between them. The first
+  // version of this classifier matched substrings of the backend's message — and the security audit of
+  // PR #847 showed that could not stand: the wipe and re-seal errors interpolate FULL FILE PATHS, so a
+  // file *inside the vault* could choose its own name to impersonate a tamper refusal, and the UI would
+  // then clear the banner and report the vault sealed while its whole decrypted tree was still on disk.
+  // Everything below therefore switches on the backend's structured `code`.
 
-  /** The refusal wording the backend produces for a tamper/containment failure — `trustworthy_session`
-   *  in `crates/server/src/vault_manager.rs`, surfaced through `VaultError`'s `Display`. Copied verbatim
-   *  on purpose, including the "nothing was re-sealed" clause: that phrase overlaps the re-seal failure's
-   *  wording, so this string is also the fixture that pins the classifier's ordering. */
-  const TAMPER_ERROR =
-    "vault format error: refusing to lock: the session directory can no longer be trusted — " +
-    "refusing to lock: session directory C:\\cache\\vault-sessions\\abc-123 does not resolve inside " +
-    "the app's own vault-sessions directory. Nothing was deleted and nothing was re-sealed; the " +
-    "vault's own file is untouched, so the vault is sealed and is now reported locked.";
+  /** A structured backend failure, exactly as `defaultDeps.lock` re-throws it. */
+  const lockError = (code: string, message = "backend detail") =>
+    new VaultLockError(code as LockFailureCode, message);
+
+  /** The EXACT string `shred_tree` produces for a file it cannot shred (`vault_manager.rs`), surfaced
+   *  through `VaultError`'s `Display`. `{p}` is the full path of a file inside the unlocked session dir
+   *  — a name the user (or anything that can write into the unlocked vault) chooses. This is the audit's
+   *  attack string: an ordinary busy-file wipe failure wearing the tamper wording. */
+  const WIPE_FAILURE_WITH_HOSTILE_FILENAME =
+    "shred C:\\cache\\app\\vault-sessions\\abc-123\\why my landlord can no longer be trusted.txt: " +
+    "The process cannot access the file because it is being used by another process. (os error 32)";
 
   it("a tamper refusal clears the vault entry, because the backend has already dropped it", async () => {
     const unlockDeps = fakeDeps();
     await unlockVault(BLOB, "pw", unlockDeps);
     const tampered = fakeDeps({
       lock: async () => {
-        throw new Error(TAMPER_ERROR);
+        throw lockError("untrusted_session");
       },
     });
-    await expect(lockVault(BLOB, tampered)).rejects.toThrow(/no longer be trusted/);
+    await expect(lockVault(BLOB, tampered)).rejects.toThrow();
     // The vault IS locked as far as the backend is concerned — leaving it "unlocked" here would show a
     // banner (and a Lock button) for a session the backend has already forgotten.
     expect(isUnlocked(get(vaults), BLOB)).toBe(false);
@@ -182,11 +186,7 @@ describe("vaultStore actions (CPE-1249)", () => {
     await unlockVault(BLOB, "pw", unlockDeps);
     const failing = fakeDeps({
       lock: async () => {
-        throw new Error(
-          "vault format error: could not re-seal the vault from its unlocked session (vault I/O " +
-            "error: disk full) — nothing was deleted, the vault file is unchanged, and your files are " +
-            "still in the unlocked folder",
-        );
+        throw lockError("reseal_failed", "could not re-seal … (disk full)");
       },
     });
     await expect(lockVault(BLOB, failing)).rejects.toThrow(/re-seal/);
@@ -194,30 +194,80 @@ describe("vaultStore actions (CPE-1249)", () => {
     expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
   });
 
-  it("classifies the two failure shapes onto different messages and different recovery", () => {
-    const tamper = classifyLockError(TAMPER_ERROR, "secrets");
-    expect(tamper.kind).toBe("tamper");
-    expect(tamper.retryable).toBe(false);
-    expect(tamper.message).toMatch(/secrets/);
-    expect(tamper.message).not.toMatch(/try again/i); // retrying can never help in this state
-    expect(tamper.message).not.toMatch(/still be in use/i); // and it is NOT a busy file
-    expect(tamper.message).toMatch(/nothing was deleted/i); // say what actually happened
+  // SEC-847 finding 3, the regression the audit demonstrated: a WIPE failure whose message carries the
+  // tamper wording, because a file inside the vault is named that way. Misclassifying it strands the
+  // decrypted tree on disk with no banner and tells the user the vault is sealed — every clause false.
+  it("a wipe failure is still a wipe failure however the files inside the vault are named", async () => {
+    const f = classifyLockError(lockError("wipe_failed", WIPE_FAILURE_WITH_HOSTILE_FILENAME));
+    expect(f.kind).toBe("transient");
+    expect(f.retryable).toBe(true);
+    expect(f.messageKey).toBe("notice.vaultLockFailed");
+    // The fixture must really carry the impersonating text, or this proves nothing.
+    expect(f.reason).toMatch(/no longer be trusted/);
+  });
 
-    const busy = classifyLockError("could not remove: The process cannot access the file", "secrets");
+  it("keeps the vault unlocked when a hostile-looking wipe failure comes back", async () => {
+    await unlockVault(BLOB, "pw", fakeDeps());
+    const failing = fakeDeps({
+      lock: async () => {
+        throw lockError("wipe_failed", WIPE_FAILURE_WITH_HOSTILE_FILENAME);
+      },
+    });
+    await expect(lockVault(BLOB, failing)).rejects.toThrow(/shred/);
+    // The backend kept its mapping (the wipe failed before it forgot the session) and the session dir is
+    // still full of decrypted plaintext. The store MUST agree, or the banner + Lock button vanish.
+    expect(isUnlocked(get(vaults), BLOB)).toBe(true);
+    expect(sessionDirFor(get(vaults), BLOB)).toBe(SESSION);
+  });
+
+  it("classifies every failure shape onto its own message key and recovery", () => {
+    const tamper = classifyLockError(lockError("untrusted_session"));
+    expect(tamper.kind).toBe("tamper");
+    expect(tamper.retryable).toBe(false); // → App must NOT navigate back into the tampered path
+    expect(tamper.messageKey).toBe("notice.vaultLockTampered");
+
+    const busy = classifyLockError(lockError("wipe_failed"));
     expect(busy.kind).toBe("transient");
     expect(busy.retryable).toBe(true);
-    expect(busy.message).toMatch(/still be in use/i);
-    expect(busy.message).toMatch(/try again/i);
+    expect(busy.messageKey).toBe("notice.vaultLockFailed"); // the UAT-confirmed retry copy
 
-    const reseal = classifyLockError(
-      "vault format error: could not re-seal the vault from its unlocked session (disk full)",
-      "secrets",
-    );
+    const reseal = classifyLockError(lockError("reseal_failed"));
     expect(reseal.kind).toBe("reseal");
     expect(reseal.retryable).toBe(true); // the working copy is still there — retrying is exactly right
-    expect(reseal.message).toMatch(/couldn't be saved back|re-seal/i);
-    expect(reseal.message).toMatch(/nothing was deleted/i);
-    // A re-seal failure must never be mistaken for the tamper case, whose recovery is the opposite.
-    expect(reseal.message).not.toMatch(/no longer be trusted/i);
+    expect(reseal.messageKey).toBe("notice.vaultLockResealFailed");
+
+    const inFlight = classifyLockError(lockError("already_locking"));
+    expect(inFlight.kind).toBe("busy");
+    expect(inFlight.retryable).toBe(true);
+    expect(inFlight.messageKey).toBe("notice.vaultLockInProgress");
+
+    // Every kind must be distinguishable — four codes, four keys.
+    const keys = [tamper, busy, reseal, inFlight].map((f) => f.messageKey);
+    expect(new Set(keys).size).toBe(4);
+  });
+
+  it("falls back to the SAFEST reading when there is no usable code", () => {
+    // A transport error, an older backend, a thrown string: we do not know whether anything was
+    // destroyed, so we must not claim the vault is sealed and must not clear the banner.
+    for (const raw of [new Error("ipc transport died"), "some string", null, { code: "made_up" }]) {
+      const f = classifyLockError(raw);
+      expect(f.kind).toBe("transient");
+      expect(f.retryable).toBe(true);
+      expect(f.messageKey).toBe("notice.vaultLockFailed");
+    }
+  });
+
+  it("does not clear the store for any failure except a tamper refusal", async () => {
+    for (const code of ["reseal_failed", "wipe_failed", "already_locking"]) {
+      resetVaults();
+      await unlockVault(BLOB, "pw", fakeDeps());
+      const failing = fakeDeps({
+        lock: async () => {
+          throw lockError(code);
+        },
+      });
+      await expect(lockVault(BLOB, failing)).rejects.toThrow();
+      expect(isUnlocked(get(vaults), BLOB), `${code} must leave the vault unlocked`).toBe(true);
+    }
   });
 });

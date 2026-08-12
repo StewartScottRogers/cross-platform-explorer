@@ -86,60 +86,90 @@ export function classifyUnlockError(raw: unknown): string {
   return `Couldn't unlock the vault: ${String(raw)}`;
 }
 
+/** The backend's structured lock-failure code — the generated mirror of `LockFailureCode` in
+ *  `crates/server/src/vault_manager.rs` (serialised snake_case), so the *type* cannot drift.
+ *
+ *  The **literals** below in `classifyLockError`/`lockFailureCodeOf` are hand-written, and they are the
+ *  half that decides behaviour, so a Rust guard test
+ *  (`the_lock_failure_codes_are_spelled_the_same_in_the_frontend`) reads THIS FILE and fails if any code
+ *  stops appearing in it. Reciprocal doc comments were not enough: a reviewer changed the old wording-based
+ *  contract and every test on both sides stayed green while, in production, every tamper refusal silently
+ *  reclassified as transient — leaving the banner up and navigating the user into the tampered path. */
+export type { LockFailureCode } from "./bindings.gen";
+import type { LockFailureCode } from "./bindings.gen";
+
+/** An error thrown by the lock action, carrying the backend's structured failure code. */
+export class VaultLockError extends Error {
+  constructor(
+    readonly code: LockFailureCode | null,
+    message: string,
+  ) {
+    super(message);
+    this.name = "VaultLockError";
+  }
+}
+
 /** How a failed `vaultLock` should be reported and recovered from (CPE-1654). */
 export interface LockFailure {
   /** `tamper` — the backend refused because the session path is no longer the directory it extracted
    *  into (a link was swapped in). It wiped nothing, DROPPED its mapping, and left the vault's own file
-   *  sealed. `reseal` — the edits couldn't be written back into the vault. `transient` — the wipe failed
-   *  (a file still in use, a read-only file). The last two leave the vault unlocked. */
-  kind: "tamper" | "reseal" | "transient";
+   *  sealed. `reseal` — the edits couldn't be written back into the vault. `busy` — another lock for the
+   *  same vault is already running and this call did nothing. `transient` — the wipe failed (a file still
+   *  in use, a read-only file). All but `tamper` leave the vault unlocked. */
+  kind: "tamper" | "reseal" | "busy" | "transient";
   /** Whether clicking Lock again could plausibly work. `false` for `tamper`: every retry re-resolves the
    *  same tampered path and fails the same way, so offering a retry would be a lie. Also gates whether
    *  the caller navigates BACK into the session dir — for a tamper refusal it must not, since that path
    *  now points at somewhere else entirely (the user's own Documents, in the demonstrated exploit). */
   retryable: boolean;
-  /** User-facing copy: what happened, what it means for their files, and what to do. */
-  message: string;
+  /** i18n key for the user-facing copy; interpolates `{name}` and (for `reseal`) `{reason}`. */
+  messageKey: string;
+  /** The backend's own explanation, for display only — never for a decision. */
+  reason: string;
 }
 
 /** Classify a failed lock (CPE-1654) into distinct, honest copy + the right recovery.
  *
- *  Before this, EVERY lock failure was reported as "some files may still be in use. Try again." — which
- *  after CPE-1647 is wrong for a containment/tamper refusal: retrying can never help there, the vault is
- *  in fact sealed, and the backend has already dropped its mapping. Classified by wording, like
- *  {@link classifyUnlockError}; the phrases below are produced by `vault_manager.rs` — `UNTRUSTED_SESSION`
- *  (whose doc comment points back here) and `reseal_failed` — and only by those. Pure. */
-export function classifyLockError(raw: unknown, name: string): LockFailure {
-  const msg = String(raw ?? "").toLowerCase();
-  // ORDER MATTERS: the tamper refusal's own copy says "nothing was re-sealed", so it must be recognised
-  // BEFORE the re-seal case or it would be mis-sorted into the retryable branch — the exact confusion
-  // this function exists to prevent. Its marker phrase is the narrower of the two, and no re-seal failure
-  // ever carries it (`UNTRUSTED_SESSION` in vault_manager.rs is produced by one function only).
-  if (msg.includes("no longer be trusted")) {
-    return {
-      kind: "tamper",
-      retryable: false,
-      message:
-        `Couldn't lock "${name}" — its private unlocked folder was moved or replaced, so the app ` +
-        `stopped trusting it. Nothing was deleted and the vault file itself is unchanged, so the vault ` +
-        `is sealed and is now shown as locked.`,
-    };
+ *  **Switches on the backend's structured code, never on its text** (SEC-847 finding 3). It used to match
+ *  substrings, and the security audit showed why that could not stand: the other lock failures interpolate
+ *  **full file paths** into their messages, so a file named `why my landlord can no longer be trusted.txt`
+ *  — held open by Word, an entirely ordinary wipe failure — was classified as a tamper refusal. The UI
+ *  then cleared the store, reported the vault sealed and unchanged, and left the whole decrypted tree on
+ *  disk with the banner gone. Every clause of that was false, and no attacker was needed. A code chosen by
+ *  which step of the backend failed cannot be forged by anything inside the vault.
+ *
+ *  An unrecognised or missing code (a transport error, an older backend) falls back to the **safest**
+ *  reading: retryable, vault still unlocked, no claim about what was or wasn't destroyed. Pure. */
+export function classifyLockError(raw: unknown): LockFailure {
+  const reason = raw instanceof Error ? raw.message : String(raw ?? "");
+  switch (lockFailureCodeOf(raw)) {
+    case "untrusted_session":
+      return { kind: "tamper", retryable: false, messageKey: "notice.vaultLockTampered", reason };
+    case "reseal_failed":
+      return { kind: "reseal", retryable: true, messageKey: "notice.vaultLockResealFailed", reason };
+    case "already_locking":
+      return { kind: "busy", retryable: true, messageKey: "notice.vaultLockInProgress", reason };
+    case "wipe_failed":
+    default:
+      // The UAT-confirmed copy for the one failure the user can actually act on ("close the file and try
+      // again"), and the safe default for anything unrecognised.
+      return { kind: "transient", retryable: true, messageKey: "notice.vaultLockFailed", reason };
   }
-  if (msg.includes("could not re-seal")) {
-    return {
-      kind: "reseal",
-      retryable: true,
-      message:
-        `Couldn't lock "${name}" — your changes couldn't be saved back into the vault. Nothing was ` +
-        `deleted: the vault file is unchanged and your files are still in the unlocked folder, so you ` +
-        `can try again or copy them out first.`,
-    };
-  }
-  return {
-    kind: "transient",
-    retryable: true,
-    message: `Couldn't lock "${name}" — some files may still be in use. Try again.`,
-  };
+}
+
+/** The `code` carried by a thrown lock error, or `null` if there isn't one. Accepts a
+ *  {@link VaultLockError} or any object with a `code` string (so a raw IPC payload works too). */
+function lockFailureCodeOf(raw: unknown): LockFailureCode | null {
+  const code =
+    raw instanceof VaultLockError
+      ? raw.code
+      : typeof raw === "object" && raw !== null && "code" in raw
+        ? (raw as { code: unknown }).code
+        : null;
+  return typeof code === "string" &&
+    ["untrusted_session", "reseal_failed", "wipe_failed", "already_locking"].includes(code)
+    ? (code as LockFailureCode)
+    : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -175,8 +205,14 @@ const defaultDeps: VaultDeps = {
   unlock: async (blobPath, passphrase, sessionDir) => {
     unwrap(await commands.vaultUnlock(blobPath, passphrase, sessionDir));
   },
+  // Deliberately NOT `unwrap` (SEC-847 finding 3): `vault_lock`'s error is a structured
+  // `{ code, message }`, and `unwrap`'s `String(error)` would flatten it to "[object Object]", throwing
+  // away the only thing the UI can safely make a decision on.
   lock: async (blobPath) => {
-    unwrap(await commands.vaultLock(blobPath));
+    const res = await commands.vaultLock(blobPath);
+    if (res.status === "error") {
+      throw new VaultLockError(res.error.code as LockFailureCode, res.error.message);
+    }
   },
 };
 
@@ -213,7 +249,7 @@ export async function lockVault(blobPath: string, deps: VaultDeps = defaultDeps)
     // The backend re-seals + wipes the session dir; it throws (and keeps state) if either fails.
     await deps.lock(blobPath);
   } catch (e) {
-    if (classifyLockError(e, blobPath).kind === "tamper") store.update((s) => recordLocked(s, blobPath));
+    if (classifyLockError(e).kind === "tamper") store.update((s) => recordLocked(s, blobPath));
     throw e;
   }
   store.update((s) => recordLocked(s, blobPath));

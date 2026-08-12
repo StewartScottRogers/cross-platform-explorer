@@ -54,9 +54,16 @@ was unlocked is kept — then removes the decrypted copy from disk. The badge re
   it was, and the old vault file unchanged. The app says so and you can try again, or copy the files out
   first.
 - **Locking is a snapshot of the whole folder.** A file you deleted while unlocked stays deleted after
-  locking; it is not merged back in.
+  locking; it is not merged back in. Taken to its limit, this means that if you delete *everything* in
+  an unlocked vault and then lock it, you get an empty vault — that is the same rule, not a bug.
 - **Big vaults take a moment to lock.** Locking re-encrypts the whole folder, so it takes about as long
-  as creating the vault did.
+  as creating the vault did. The **Lock** button is disabled while that is happening; let it finish
+  rather than clicking again.
+- **A couple of things can't be stored in a vault.** Shortcuts/symlinks and files that are a second name
+  for a file elsewhere on your disk (hard links) aren't sealed in: shortcuts are skipped, and locking
+  **refuses** if it finds a hard-linked file, telling you which one. Copy the real file into the vault
+  instead. This is deliberate — a link points at something outside the vault, so storing it would either
+  drag an unrelated file in or leave you with a shortcut to nothing.
 
 Note that changes are written back **when you lock**, not as you work. If the app is closed or crashes
 while a vault is unlocked, the decrypted folder is left behind and cleaned up on the next start — the

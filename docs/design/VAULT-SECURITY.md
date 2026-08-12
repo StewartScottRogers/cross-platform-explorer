@@ -111,13 +111,78 @@ as a normal location; locking **re-seals that session directory back into the bl
   is refused (re-sealing there would write a good vault and then shred it with the working copy) — the
   same guard shape as `create_vault`'s `resolves_inside`. A session directory that has vanished re-seals
   nothing and locks cleanly rather than wedging the vault "unlocked" forever.
+  - **`vault_lock` can now empty a vault — by design, and it is the one thing here that destroys data.**
+    "Always re-seal, never diff" means a deletion made while unlocked is carried into the blob; carried to
+    its limit, emptying the session directory's *contents* (the directory itself survives, so containment,
+    the link guards and the alias guard all correctly pass) re-seals an empty tree over the vault, and the
+    lock reports success. Note the asymmetry with the case above: a **vanished** session directory
+    preserves the blob, an **emptied** one replaces it. Before CPE-1645 neither could touch the blob at
+    all. The alternative — refusing when the result would be empty — was rejected: it would contradict the
+    "a deletion must be carried" rule the whole design rests on, and it is a heuristic, whereas the
+    verify-before-destroy ordering is a guarantee. Deleting everything and locking is a legitimate thing
+    for a user to do; it is stated in `src/docs/20-vaults.md` and pinned by
+    `emptying_the_session_dir_empties_the_vault_and_this_is_deliberate`.
   - **Residual, stated plainly:** re-sealing happens at lock, not continuously. Killing the app while a
     vault is unlocked still loses the edits made in that session (the startup sweep wipes the orphaned
     session dir), and `VaultRegistry::unlock` called again on an already-unlocked vault still supersedes
     (and best-effort wipes) the prior session dir — CPE-1249's deliberate no-orphaned-plaintext
     behaviour — which discards any edits in it. The frontend never re-unlocks an unlocked vault
     (`App.tryUnlockVault` navigates to the live session instead), so that path is reachable only from a
-    devtools/automation caller.
+    devtools/automation caller. Symlinks created *inside* an unlocked vault are skipped by the crypto
+    core's walk (as they always have been) and then removed with the working copy, so they do not survive
+    a lock — also stated in the user docs.
+  - **The staging file is created exclusively, under an unpredictable name** (SEC-847 finding 1). The
+    first version composed a **deterministic** name (`<blob>.cpe-reseal-tmp`) and wrote it with
+    `std::fs::write` — `CREATE_ALWAYS`/`O_CREAT|O_TRUNC`, which follows a symlink and writes *through* a
+    hard link. That was a plant-once-and-wait primitive requiring no race and no privilege:
+    `create_hard_link(victim, "<blob>.cpe-reseal-tmp")` (a registered IPC command, unelevated on NTFS),
+    and the next time the **user** clicked Lock the victim's inode was truncated and filled with vault
+    ciphertext — verified byte-for-byte as `CPEVLT1\x01` + `age-encryption.org/v1`, with the UI reporting
+    "Locked". Closed by `create_new(true)` (`O_EXCL`: fails `AlreadyExists` on a regular file, a hard link
+    *and* a symlink, with no check-then-open window) plus a per-attempt nonce in the name, so the trap
+    cannot be set in advance. Stale staging debris from an interrupted lock is swept at the start of the
+    next re-seal, but only after `symlink_metadata` proves it is a regular non-symlink file (Unix:
+    `nlink == 1`) — this module never deletes an object it cannot prove it created.
+  - **A hard link inside the session directory is refused** (SEC-847 finding 2). Every other guard here
+    reasons about links you can *see* in a directory entry; a hard link is simply another **name** for an
+    inode and is indistinguishable from an ordinary file, so the crypto core's skip-every-reparse-point
+    walk reads straight through it. `create_hard_link(victim, "<session>/loot.xlsx")` therefore both
+    sealed a file from anywhere on the volume into a vault whose passphrase the attacker chose
+    (confidentiality — verified by reading the victim's plaintext back out of the blob) and let the wipe's
+    shredder overwrite the victim's real file through the alias (integrity). `ensure_no_aliased_files`
+    now refuses — never silently skips, which would be the same quiet data loss CPE-1645 exists to end —
+    any session-tree file whose link count is not exactly 1, and fails **closed** when the count cannot be
+    read (`st_nlink` on Unix; `GetFileInformationByHandle` on Windows, where the std accessor is still
+    unstable, reusing `batch_media`'s audited probe details). Scoped to the session re-seal: `create_vault`
+    still seals a user-chosen folder as it always has, where hard links are the user's own arrangement of
+    their own files.
+  - **One lock at a time, per vault** (SEC-847 reviewer blocker A). The re-seal and the wipe are slow and
+    hold no mutex, so two concurrent `lock` calls for the same vault interleaved: the second re-sealed the
+    tree the first was already shredding and wrote *that* over the vault, **both returning `Ok`** over a
+    vault of zero bytes. It needed no attacker — the Lock button fires un-awaited and stays mounted across
+    a re-seal that is slow by design, so a double-click on a large vault did it. The registry now claims an
+    in-flight slot for the blob in the same mutex acquisition that reads the session, releases it via RAII
+    on every exit including a panic, and refuses a second caller with `LockFailureCode::AlreadyLocking`
+    having done nothing at all; the banner's button is disabled for the duration as well.
+  - **The replacement is durable before the original is destroyed** (SEC-847 reviewer blocker C). The
+    staging blob is `sync_all`ed before it is verified — verifying a page-cache copy proves the bytes
+    parse, not that they reached the disk — and on Unix the vault's parent directory is fsynced after the
+    rename, so the new directory entry is durable too. Without both, a power loss between the rename and
+    the wipe could leave the vault's name pointing at unwritten data with the plaintext already securely
+    shredded. `create_vault` has the identical gap and is filed as follow-up **CPE-1667** rather than
+    widened into this change.
+  - **Lock failures are reported by a structured code, not by matching text** (SEC-847 finding 3). The
+    frontend's recovery differs completely between the failure shapes — one clears the "unlocked" banner
+    and refuses a retry, the others must keep the banner and offer one — and the messages interpolate
+    **full file paths**. Classifying on wording therefore let a file *inside the vault* choose its own
+    name to impersonate a tamper refusal: a file called `why my landlord can no longer be trusted.txt`,
+    held open by another program, turned an ordinary wipe failure into "the vault is sealed and nothing
+    was deleted" with the banner cleared and the entire decrypted tree still on disk. `vault_lock` now
+    returns `LockError { code, message }`, the code is decided by *which step failed*, and the four code
+    strings are pinned across the language boundary by a guard test that reads `src/lib/vaultStore.ts`
+    (blocker B: the reciprocal doc comments were documentation, not a guard — a reviewer changed the
+    wording and all 62 Rust and 13 TS tests stayed green while every tamper refusal silently
+    reclassified).
 - **Link debris in the sessions root (CPE-1653).** A refused lock correctly leaves the planted link alone
   (it shreds nothing at a path it has decided not to trust), so the link accumulates in the app's own
   `vault-sessions` root. The startup sweep now **unlinks** a link-shaped child — `remove_file`, else

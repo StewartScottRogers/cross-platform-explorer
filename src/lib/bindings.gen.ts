@@ -3463,8 +3463,13 @@ async vaultUnlock(blobPath: string, passphrase: string, sessionDir: string) : Pr
  * `createJunction`) can replace it with a link afterwards, so the *path* being contained at unlock is not
  * the same claim as the *directory* being re-sealed and wiped. A failed re-check re-seals nothing, wipes
  * nothing, forgets the session, and surfaces the refusal here rather than reporting a successful lock.
+ * 
+ * The error is a **structured** `LockError { code, message }`, not a string (SEC-847 finding 3): the
+ * frontend's recovery differs completely between the three failure shapes, and the messages interpolate
+ * file paths — so a file *inside* the vault could otherwise choose its name to impersonate a tamper
+ * refusal and make the UI report a vault sealed while its whole decrypted tree was still on disk.
  */
-async vaultLock(blobPath: string) : Promise<Result<null, string>> {
+async vaultLock(blobPath: string) : Promise<Result<null, LockError>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("vault_lock", { blobPath }) };
 } catch (e) {
@@ -4955,6 +4960,53 @@ target: string | null;
  * True only for a symlink whose target does not currently resolve.
  */
 broken: boolean }
+/**
+ * A failed [`VaultRegistry::lock`]: a machine-readable [`LockFailureCode`] plus the human explanation.
+ */
+export type LockError = { 
+/**
+ * Which step failed. Decided structurally — never parsed out of `message`.
+ */
+code: LockFailureCode; 
+/**
+ * The underlying reason, for display/logging. May contain file paths, so it must never be used to
+ * make a decision.
+ */
+message: string }
+/**
+ * Which step of [`VaultRegistry::lock`] failed — the **structured** reason, decided by control flow
+ * rather than by matching text that can contain user-supplied file names (SEC-847 finding 3).
+ * 
+ * Crosses the IPC boundary as `vault_lock`'s error type and is what `classifyLockError`
+ * (`src/lib/vaultStore.ts`) switches on to choose the message and the recovery.
+ */
+export type LockFailureCode = 
+/**
+ * The session directory is no longer the one this vault was extracted into (it does not resolve
+ * inside the app-owned root any more, or a link has been put in its place). **Nothing was re-sealed
+ * and nothing was deleted**, the vault's own file is untouched — so the vault genuinely is sealed —
+ * and the mapping has been dropped. Retrying can never help: the UI must clear its "unlocked" state
+ * and must NOT navigate into that path.
+ */
+"untrusted_session" | 
+/**
+ * The edits could not be written back into the vault. Nothing was deleted, the vault file is
+ * unchanged, the working copy is intact and the vault is still unlocked — retryable.
+ */
+"reseal_failed" | 
+/**
+ * The re-seal succeeded (the vault file now holds the edits) but the secure wipe of the working copy
+ * did not — a file still open in another program, a read-only file. The vault is still unlocked and
+ * its plaintext is still on disk, so the UI must keep showing it as unlocked — retryable.
+ */
+"wipe_failed" | 
+/**
+ * A lock for this same vault is **already in flight** (SEC-847 reviewer blocker A). This call did
+ * nothing at all — it did not re-seal, wipe, or drop the mapping; the lock that is already running
+ * owns the outcome. The UI disables its Lock button for the duration, so a user should never meet
+ * this; it is the engine's own backstop against a second caller of any kind.
+ */
+"already_locking"
 /**
  * One bounded window of a text file, decoded to a `String` — see the module docs for the alignment and
  * work-bounding guarantees.
