@@ -2717,15 +2717,19 @@ fn resolve_conflict(
             // CONTAINMENT (PR #855 audit): overwriting the destination directory itself is never a
             // legitimate transfer outcome. Asserted on the canonicalised paths, so it holds for any
             // spelling — not just the five Win32 ones the audit enumerated.
-            if let (Ok(a), Ok(b)) = (fs::canonicalize(base_target), fs::canonicalize(dest_dir)) {
-                if a == b {
-                    return Err(
-                        "refusing to overwrite the destination folder itself — the source's name \
-                         resolves to the destination directory rather than to an item inside it"
-                            .to_string(),
-                    );
-                }
-            }
+            //
+            // Shares `cpe_server::fsutil::contained_under` with the backup mirror-delete loop so both
+            // destructive sites have ONE implementation and ONE failure policy. The first version here
+            // was a local `if let (Ok(a), Ok(b)) = (canonicalize(..), canonicalize(..))`, which SKIPPED
+            // the assertion whenever either canonicalisation failed and fell straight through to
+            // `remove_dir_all` — the destructive call as the default on IO failure, the opposite of the
+            // sibling's deliberate fail-closed, and it omitted the `starts_with` half entirely.
+            //
+            // The precondition holds here: `contained_under` returns `Ok` for a path that doesn't
+            // resolve, which is sound only for a target about to be REMOVED, and this arm is reached
+            // only after `base_target.exists()` returned true above.
+            cpe_server::fsutil::contained_under(base_target, dest_dir)
+                .map_err(|e| format!("refusing to overwrite: {e}"))?;
             if base_target.is_dir() {
                 let _ = fs::remove_dir_all(base_target);
             } else {
@@ -2895,10 +2899,20 @@ fn run_transfer(
         };
         // PR #855 audit: a name Windows normalises away (`" "`, `"..."`, `". "`) makes `dest_dir.join(name)`
         // resolve to `dest_dir` ITSELF, which under Overwrite deleted the user's whole destination folder.
-        // Refused here, before the target is computed, for every policy and every kind: such a name can
-        // never address the item the user picked, so transferring it is wrong even where it isn't fatal.
-        // `resolve_conflict`'s containment assertion is the backstop; this is the cheap, reportable filter.
-        if cpe_server::fsutil::win32_name_is_unstable(name) {
+        // Refused here, before the target is computed, for every policy and every kind: on Windows such a
+        // name can never address the item the user picked, so transferring it is wrong even where it isn't
+        // fatal. `resolve_conflict`'s containment assertion is the backstop; this is the cheap filter.
+        //
+        // **`cfg!(windows)`-scoped, and that scoping is a bug fix** (round-3 review + security audit).
+        // `notes.` and `My Report ` are legal, everyday filenames on Linux and macOS, where
+        // `dest/notes.` is a real distinct path and nothing is aliased. Unscoped, this filter ran for
+        // every kind and every policy, so a plain additive keep-both copy of such a file reported
+        // `transferred=0 failed=1` with a message about Windows path normalisation that is simply false
+        // on POSIX — a macOS user moving `My Documents ` had the move fail outright. Nothing is lost by
+        // scoping it: the audit's mutation test neutralised this filter and every off-disk survival
+        // assertion still passed, because `resolve_conflict`'s containment check holds the guarantee on
+        // its own.
+        if cfg!(windows) && cpe_server::fsutil::win32_name_is_unstable(name) {
             report.failed += 1;
             report.errors.push(format!(
                 "{name:?}: name has trailing dots/spaces, which Windows strips — it would resolve to the \
@@ -15236,9 +15250,11 @@ overlay / overlay rw,relatime 0 0
     /// — the one handler authorised to send consent. Consenting to replace an item is not consenting to
     /// lose the folder, so this is a correctness fix.
     ///
-    /// WINDOWS-AWARE: only Windows normalises these names away, so the *wipe* reproduces there alone. The
-    /// refusal is asserted on every OS leg (the name rule is IO-free and uniform); a green Linux leg is
-    /// not evidence that the destructive path is covered.
+    /// WINDOWS-ONLY: these names only alias on Windows, so both the wipe and the refusal exist only
+    /// there — on POSIX `dest/ ` is a real distinct path and the copy is an ordinary (missing-source)
+    /// failure. `a_posix_legal_trailing_dot_name_still_transfers` covers the other leg, so neither is
+    /// silently uncovered.
+    #[cfg(windows)]
     #[test]
     fn run_transfer_refuses_a_source_whose_name_windows_normalises_away() {
         for name in [" ", "  ", "...", ". ", " ."] {
@@ -15287,6 +15303,49 @@ overlay / overlay rw,relatime 0 0
         }
     }
 
+    /// **The POSIX half of the same finding** (round-3 review, BLOCKING 1): `notes.` and `My Report `
+    /// are legal, everyday names on Linux and macOS. The first version of this fix ran the Win32 name
+    /// filter for every kind and every policy on every platform, so an ordinary additive **keep-both
+    /// copy** of such a file failed outright — the audit measured `transferred=0 failed=1` — with an
+    /// error message about Windows path normalisation that is factually wrong there.
+    ///
+    /// So: on POSIX the transfer must simply work. On Windows the name can't even be created, and the
+    /// refusal is covered by `run_transfer_refuses_a_source_whose_name_windows_normalises_away`.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_posix_legal_trailing_dot_name_still_transfers() {
+        let d = scratch("xfer_posix_names");
+        let src_dir = d.join("src");
+        let dest = d.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest).unwrap();
+        fs::write(src_dir.join("notes."), b"real contents").unwrap();
+        fs::create_dir_all(src_dir.join("My Documents ")).unwrap();
+        fs::write(src_dir.join("My Documents ").join("inner.txt"), b"nested real").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+
+        let r = run_transfer(
+            1,
+            &[src_dir.join("notes."), src_dir.join("My Documents ")],
+            &dest,
+            TransferKind::Copy,
+            ConflictPolicy::Keepboth, // the plain additive case the audit measured failing
+            false,                    // keep-both needs no consent
+            &cancel,
+            |_| {},
+        );
+
+        assert_eq!(r.failed, 0, "a POSIX-legal name must not be refused: {:?}", r.errors);
+        assert_eq!(r.transferred, 2);
+        assert_eq!(fs::read(dest.join("notes.")).unwrap(), b"real contents");
+        assert_eq!(
+            fs::read(dest.join("My Documents ").join("inner.txt")).unwrap(),
+            b"nested real",
+            "the folder and its contents must arrive"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// The backstop for the same finding, exercised directly: even if a name slipped past the filter
     /// above, `resolve_conflict` refuses to overwrite a `base_target` that resolves to `dest_dir`.
     /// Asserted on canonicalised paths, so it holds for spellings nobody enumerated.
@@ -15301,7 +15360,8 @@ overlay / overlay rw,relatime 0 0
         let via_traversal = dest.join("nested").join("..");
         let e = resolve_conflict(&via_traversal, &dest, ConflictPolicy::Overwrite)
             .expect_err("overwriting the destination directory itself must be refused");
-        assert!(e.contains("destination folder itself"), "{e}");
+        assert!(e.contains("refusing to overwrite"), "the refusal must name the operation: {e}");
+        assert!(e.contains("containing directory itself"), "…and the reason: {e}");
         assert!(dest.join("taxes.docx").exists(), "and nothing may be deleted");
 
         // A real colliding child is still overwritten — the check must not break ordinary Replace.

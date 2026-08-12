@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::fsutil::{sha256_file, win32_name_is_unstable};
+use crate::fsutil::{contained_under, sha256_file, win32_name_is_unstable};
 use crate::model::OpResult;
 
 /// Join a `dest_root` with a plan-relative path, rejecting anything that would escape the root (`..`,
@@ -25,26 +25,23 @@ use crate::model::OpResult;
 /// [`contained_under`], asserted on the *resolved* path immediately before the destructive call.
 ///
 /// What this function still does, cheaply and IO-free: reject non-`Normal` components (`..`, absolute
-/// paths, drive prefixes, `.`), reject an entry with no components at all (`""`, since `root.join("")`
-/// is `root`), and reject any component [`win32_name_is_unstable`] flags — which also catches the
-/// milder aliasing variant where `"report. "` would delete `root/report`, the wrong file, silently.
+/// paths, drive prefixes, `.`) and reject an entry with no components at all (`""`, since
+/// `root.join("")` is `root`). Whether it *also* rejects a [`win32_name_is_unstable`] component depends
+/// on `entry` — see [`PlanEntry`].
 ///
 /// **Not an attacker-only concern.** `deletePaths` is derived from a real listing —
 /// `scan_tree(job.dest)` → `planBackup` → `p.delete` — and a directory named `" "` is creatable and
 /// enumerates verbatim. It arrives from a Samba/NAS share (the QNAP is a live test target here), a
 /// WSL-created name, or an extracted archive. The user presses **Run** on a mirror job, entirely
-/// legitimately, and without these checks the whole backup destination is deleted.
-///
-/// Applied uniformly rather than under `#[cfg(windows)]` so all three CI legs exercise the same
-/// behaviour — see [`win32_name_is_unstable`] for that trade-off.
-fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
+/// legitimately, and on Windows the whole backup destination used to be deleted.
+fn safe_join(root: &Path, rel: &str, entry: PlanEntry) -> Result<PathBuf, String> {
     let candidate = Path::new(rel);
     let mut named = 0usize;
     for comp in candidate.components() {
         use std::path::Component;
         match comp {
             Component::Normal(part) => {
-                if win32_name_is_unstable(&part.to_string_lossy()) {
+                if entry.refuses_unstable_names() && win32_name_is_unstable(&part.to_string_lossy()) {
                     return Err(format!(
                         "plan entry component {part:?} has trailing dots/spaces, which Windows strips — \
                          it would address a different path (often the backup root itself) than it names: \
@@ -62,42 +59,41 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(root.join(candidate))
 }
 
-/// **The actual containment guarantee** for the mirror-delete loop (CPE-1664, PR #855 audit): assert on
-/// the *resolved* path, not on the spelling that produced it.
+/// Which half of a backup plan an entry came from — the two halves get **different** treatment of a
+/// [`win32_name_is_unstable`] name, and the asymmetry is the point (PR #855 round-3 review).
 ///
-/// Canonicalise both sides and require `joined` to be strictly **inside** `root` — `starts_with(root)`
-/// **and** `!= root`. That is the only formulation that holds without enumerating spellings, so it
-/// covers the five the audit found, the two found before it, and whatever normalisation quirk, junction,
-/// case-folding share or Unicode-folding filesystem produces the next one. [`safe_join`]'s textual rules
-/// are a cheap filter in front of it, never a substitute for it.
+/// `foo ` and `notes.` are legal, creatable, everyday filenames on Linux and macOS, where `root/notes.`
+/// is a real distinct path and nothing is aliased. The first version of this change refused them on
+/// every platform and for both halves, so **a Linux backup of a file named `notes.` was silently never
+/// copied** — breaking a basic operation on two platforms to defend against a hazard that exists only
+/// on the third. What each half does now:
 ///
-/// Failure modes are chosen so the destructive call is the one that gets refused:
-/// - `root` won't canonicalise → refuse. There is nothing legitimate to delete under a root that
-///   doesn't resolve.
-/// - `joined` won't canonicalise → allow. The path does not exist, so no `remove_*` can destroy
-///   anything, and the loop's normal per-entry "not found" error reporting stays intact.
-fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
-    let Ok(real_root) = std::fs::canonicalize(root) else {
-        return Err(format!(
-            "refusing to delete: the backup destination root {root:?} could not be resolved"
-        ));
-    };
-    let Ok(real) = std::fs::canonicalize(joined) else {
-        return Ok(()); // doesn't exist — nothing to destroy; the delete itself will report it
-    };
-    if real == real_root {
-        return Err(
-            "refusing to delete the backup destination root itself — a mirror plan may only delete \
-             paths inside it"
-                .to_string(),
-        );
+/// - [`PlanEntry::Write`] (the `copy` + `update` lists) — refuse only on Windows. Elsewhere the name
+///   addresses exactly what it spells, so refusing it loses the user's file for no safety gain. The
+///   failure mode of being wrong here is a file that never gets backed up, which is bad.
+/// - [`PlanEntry::Delete`] (the mirror-delete list) — refuse **everywhere**. A refused delete is a
+///   reported no-op: the stale file simply stays, which is the safe direction, and keeping the rule
+///   uniform means all three CI legs exercise the same shape on the destructive path. The cost is that
+///   a POSIX mirror job will report rather than remove a stale entry named `notes.`; renaming it clears
+///   that.
+///
+/// Neither setting is what carries the safety — [`cpe_server::fsutil::contained_under`] does, on the
+/// resolved path, platform-independently.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PlanEntry {
+    /// A `copy`/`update` entry: something is about to be **written** at this path.
+    Write,
+    /// A `delete` entry: something is about to be **removed** at this path.
+    Delete,
+}
+
+impl PlanEntry {
+    fn refuses_unstable_names(self) -> bool {
+        match self {
+            PlanEntry::Write => cfg!(windows),
+            PlanEntry::Delete => true,
+        }
     }
-    if !real.starts_with(&real_root) {
-        return Err(format!(
-            "refusing to delete {real:?}: it resolves outside the backup destination root {real_root:?}"
-        ));
-    }
-    Ok(())
 }
 
 /// The refusal message [`apply_backup_plan_walk`] returns when `confirmed` is `false` (CPE-1664).
@@ -148,12 +144,22 @@ fn copy_one_verified(src: &Path, dst: &Path, verify: bool) -> Result<(), String>
 /// from `bindings.gen.ts` that doesn't know the field exists. What it does **not** do is stop a
 /// deliberate attacker already on the IPC surface.
 ///
-/// The half that holds **regardless of what the caller sets `confirmed` to** is [`contained_under`],
-/// asserted on the *resolved* delete path immediately before the `remove_dir_all`: canonicalise, then
-/// require the target to be strictly inside the root. [`safe_join`]'s textual rules sit in front of it
-/// as a cheap filter, but they are **not** the guarantee — an earlier version of this comment claimed
-/// they were, and the PR #855 audit then wiped the root through five spellings that satisfied them.
-/// State the protection as the containment assertion, never as a list of rejected spellings.
+/// The half that holds **regardless of what the caller sets `confirmed` to** is
+/// [`cpe_server::fsutil::contained_under`], asserted on the *resolved* delete path immediately before
+/// the `remove_dir_all`: canonicalise, then require the target to be strictly inside the root.
+/// [`safe_join`]'s textual rules sit in front of it as a cheap filter, but they are **not** the
+/// guarantee — an earlier version of this comment claimed they were, and the PR #855 audit then wiped
+/// the root through five spellings that satisfied them. State the protection as the containment
+/// assertion, never as a list of rejected spellings.
+///
+/// **Known asymmetry, recorded rather than fixed (PR #855 audit).** `contained_under` guards the
+/// *delete* loop only; the copy/update loop still relies on `safe_join` alone, because the containment
+/// check's fail-open on an unresolvable path is sound only for a target that is about to be removed —
+/// a write target is *expected* not to exist yet, so applying it there would fail open every time (see
+/// that function's precondition). The consequence: a **junction or symlink inside `dest_root`** lets a
+/// copy/update entry *write* through it to a location outside the root. That is writes, not deletes,
+/// and no privilege gain for a caller who can already invoke this; guarding it properly needs a
+/// parent-directory containment check on the write side, which is a separate change.
 // One over clippy's threshold since CPE-1664 added `confirmed`. The list mirrors the plan the frontend
 // sends; bundling it into a struct would only move the same fields somewhere less readable, and the
 // consent flag in particular is deliberately a positional argument the caller cannot forget.
@@ -178,7 +184,11 @@ pub fn apply_backup_plan_walk(
     let dst_root = PathBuf::from(dest_root);
 
     for rel in copy.iter().chain(update.iter()) {
-        let (src, dst) = match (safe_join(&src_root, rel), safe_join(&dst_root, rel)) {
+        let joined = (
+            safe_join(&src_root, rel, PlanEntry::Write),
+            safe_join(&dst_root, rel, PlanEntry::Write),
+        );
+        let (src, dst) = match joined {
             (Ok(s), Ok(d)) => (s, d),
             (Err(e), _) | (_, Err(e)) => {
                 emit(OpResult::err(Path::new(rel), e));
@@ -192,7 +202,7 @@ pub fn apply_backup_plan_walk(
     }
 
     for rel in delete {
-        let dst = match safe_join(&dst_root, rel) {
+        let dst = match safe_join(&dst_root, rel, PlanEntry::Delete) {
             Ok(d) => d,
             Err(e) => {
                 emit(OpResult::err(Path::new(rel), e));
@@ -200,9 +210,10 @@ pub fn apply_backup_plan_walk(
             }
         };
         // THE containment check (CPE-1664, PR #855 audit), on the RESOLVED path, immediately before the
-        // destructive call — never trusting that `safe_join` above has enumerated every spelling.
+        // destructive call — never trusting that `safe_join` above has enumerated every spelling. Shared
+        // with `resolve_conflict`'s Overwrite arm so both destructive sites have ONE failure policy.
         if let Err(e) = contained_under(&dst, &dst_root) {
-            emit(OpResult::err(&dst, e));
+            emit(OpResult::err(&dst, format!("refusing to delete: {e}")));
             continue;
         }
         let result = if dst.is_dir() {
@@ -349,17 +360,23 @@ mod tests {
     /// `ok: true`.
     ///
     /// The table exists so a regression names its spelling, **not** as the specification — the
-    /// specification is `contained_under`'s containment assertion on the resolved path, which is why
-    /// `contained_under_is_the_guarantee_not_the_spelling_list` exercises it directly rather than
-    /// through this list. Enumerating spellings is exactly the approach the audit showed cannot work.
-    const ROOT_SPELLINGS: [&str; 7] = [
-        ".",    // the spelling the ticket was filed for
-        "",     // `root.join("")` is `root`
+    /// specification is `contained_under`'s containment assertion on the resolved path, which is tested
+    /// directly in `fsutil` rather than through this list. Enumerating spellings is exactly the approach
+    /// the audit showed cannot work.
+    ///
+    /// These five resolve to the root **on Windows only**; on POSIX they are ordinary, distinct names.
+    const WIN32_ROOT_SPELLINGS: [&str; 5] = [
         " ",    // Win32: trailing space stripped → `root`
         "  ",   // ditto, two
         "...",  // Win32: trailing dots stripped → `root`
         ". ",   // ditto, mixed
         " .",   // ditto, mixed the other way
+    ];
+
+    /// Every spelling the end-to-end sweep drives: the two that resolve to the root everywhere, plus the
+    /// Windows-only ones.
+    const ROOT_SPELLINGS: [&str; 7] = [
+        ".", "", " ", "  ", "...", ". ", " .",
     ];
 
     /// Names that Win32 rewrites to address a *different* path than they spell — the milder variant of
@@ -374,25 +391,43 @@ mod tests {
     #[test]
     fn safe_join_refuses_a_plan_entry_that_names_the_root_itself() {
         let root = Path::new("/backup/root");
-        let all = ROOT_SPELLINGS.iter().copied().chain(ALIASING_SPELLINGS).chain(["./", "sub/.."]);
-        for rel in all {
-            let e = safe_join(root, rel)
-                .expect_err("an entry addressing something other than what it names must be rejected");
-            assert!(!e.is_empty(), "the rejection must carry a reason for {rel:?}");
+        // `.` / `""` / `./` / `sub/..` resolve to the root on EVERY platform — always refused, for both
+        // halves of a plan.
+        for rel in [".", "", "./", "sub/.."] {
+            for entry in [PlanEntry::Write, PlanEntry::Delete] {
+                let e = safe_join(root, rel, entry)
+                    .expect_err("an entry resolving to the root must be rejected everywhere");
+                assert!(!e.is_empty(), "the rejection must carry a reason for {rel:?}/{entry:?}");
+            }
         }
-        // Ordinary entries — what `planBackup` actually emits — still join untouched.
-        assert_eq!(safe_join(root, "sub/a.txt").unwrap(), root.join("sub/a.txt"));
-        assert_eq!(safe_join(root, "a b/c.txt").unwrap(), root.join("a b/c.txt"));
-        assert_eq!(safe_join(root, ".gitignore").unwrap(), root.join(".gitignore"));
+        // The Win32-normalised spellings: refused on the DELETE half everywhere (a refused delete is a
+        // reported no-op), and on the WRITE half only where they are actually dangerous. See `PlanEntry`.
+        for rel in WIN32_ROOT_SPELLINGS.iter().copied().chain(ALIASING_SPELLINGS) {
+            assert!(
+                safe_join(root, rel, PlanEntry::Delete).is_err(),
+                "{rel:?} must be refused as a DELETE entry on every platform"
+            );
+            assert_eq!(
+                safe_join(root, rel, PlanEntry::Write).is_err(),
+                cfg!(windows),
+                "{rel:?} as a WRITE entry must be refused on Windows and allowed elsewhere — refusing \
+                 it on POSIX silently drops a legitimate file from the backup"
+            );
+        }
+        // Ordinary entries — what `planBackup` actually emits — still join untouched, both halves.
+        for entry in [PlanEntry::Write, PlanEntry::Delete] {
+            assert_eq!(safe_join(root, "sub/a.txt", entry).unwrap(), root.join("sub/a.txt"));
+            assert_eq!(safe_join(root, "a b/c.txt", entry).unwrap(), root.join("a b/c.txt"));
+            assert_eq!(safe_join(root, ".gitignore", entry).unwrap(), root.join(".gitignore"));
+        }
 
         // …and end to end, with full consent, against a real tree: every spelling is a per-entry error
         // and the victim survives. `confirmed: true` throughout — the gate is NOT what is under test.
         //
         // WINDOWS-AWARE (PR #855 audit): on Linux/macOS these names address real, distinct, absent files,
         // so the plan would report "not found" and the tree would survive *even with the fix removed* —
-        // a green Linux leg must not be read as coverage. The refusal is asserted everywhere (the rules
-        // are IO-free and uniform); only the *wipe* is Windows-specific, so the survival assertion is
-        // annotated as load-bearing only there.
+        // a green Linux leg must not be read as coverage. Both legs assert the entry is refused and the
+        // tree survives; only on Windows is that survival load-bearing.
         let d = scratch("root_spellings");
         let src = d.join("src");
         fs::create_dir_all(&src).unwrap();
@@ -419,29 +454,65 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// **The guarantee, tested as a guarantee.** `contained_under` is asserted on the resolved path, so
-    /// it holds for spellings nobody has enumerated — which is the whole lesson of the PR #855 audit
-    /// (`Path::components()` reports every non-`.`/`..` string as `Normal`, so classification cannot
-    /// work). Driven directly with real paths rather than through the spelling table on purpose.
-    #[test]
-    fn contained_under_is_the_guarantee_not_the_spelling_list() {
-        let d = scratch("contained");
-        let dst = victim_dest(&d);
+    // `contained_under`'s own spec — the containment guarantee, the failure policy, and the junction
+    // cases — lives with the function in `crate::fsutil`, since `resolve_conflict` shares it.
 
-        // The root itself, however it is reached.
-        assert!(contained_under(&dst, &dst).is_err(), "the root itself must be refused");
-        assert!(contained_under(&dst.join("nested/.."), &dst).is_err(), "…and a traversal back to it");
-        // Outside the root entirely.
-        assert!(contained_under(&d, &dst).is_err(), "the root's PARENT must be refused");
-        // Real children must pass — the check must not break ordinary mirror deletes.
-        assert!(contained_under(&dst.join("nested"), &dst).is_ok(), "a real child must be allowed");
-        assert!(contained_under(&dst.join("taxes.docx"), &dst).is_ok(), "…and a real file");
-        assert!(contained_under(&dst.join("nested/deep.txt"), &dst).is_ok(), "…and a nested file");
-        // A path that doesn't exist can't destroy anything: allowed, so the delete's own "not found"
-        // error is what the user sees (pinned by `apply_backup_plan_mirror_deletes_and_reports_per_file`).
-        assert!(contained_under(&dst.join("never-existed.txt"), &dst).is_ok());
-        // A root that doesn't resolve refuses everything — there is nothing legitimate to delete.
-        assert!(contained_under(&dst.join("nested"), &d.join("no-such-root")).is_err());
+    /// **The POSIX regression this round exists to prevent** (PR #855 round-3 review, BLOCKING 1).
+    ///
+    /// `notes.` and `My Report ` are legal, creatable, everyday filenames on Linux and macOS. The first
+    /// version of the CPE-1664 fix refused them on every platform and in both halves of a plan, so a
+    /// Linux backup of such a file was **silently never copied** — a real user losing a real file from
+    /// their backup, to defend against a hazard that only exists on Windows.
+    ///
+    /// There was no test in either direction, which is why it shipped. This is that test: on POSIX the
+    /// file must be backed up normally; on Windows — where the name genuinely aliases — the entry is
+    /// refused instead. Asserted per platform rather than skipped, so neither leg is silently uncovered.
+    #[test]
+    fn a_posix_legal_trailing_dot_name_is_backed_up_not_refused() {
+        let d = scratch("posix_names");
+        let (src, dst) = (d.join("src"), d.join("dst"));
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        // Windows won't even let these be created, so build the plan from names rather than a scan.
+        #[cfg(not(windows))]
+        {
+            fs::write(src.join("notes."), b"real contents").unwrap();
+            fs::write(src.join("My Report "), b"also real").unwrap();
+        }
+
+        let results = apply_backup_plan(
+            &src.to_string_lossy(),
+            &dst.to_string_lossy(),
+            &["notes.".to_string(), "My Report ".to_string()],
+            &[],
+            &[],
+            false,
+            true, // consented — this is about the NAME rule, not the gate
+        )
+        .expect("a consented plan runs");
+        assert_eq!(results.len(), 2);
+
+        #[cfg(not(windows))]
+        {
+            assert!(
+                results.iter().all(|r| r.ok),
+                "a POSIX-legal trailing-dot/space name must be COPIED, not refused: {results:?}"
+            );
+            assert_eq!(fs::read(dst.join("notes.")).unwrap(), b"real contents");
+            assert_eq!(fs::read(dst.join("My Report ")).unwrap(), b"also real");
+        }
+        #[cfg(windows)]
+        {
+            assert!(
+                results.iter().all(|r| !r.ok),
+                "on Windows such a name aliases another path, so it must be refused: {results:?}"
+            );
+            assert!(
+                results[0].error.contains("trailing dots/spaces"),
+                "and the refusal must explain why: {results:?}"
+            );
+        }
         let _ = fs::remove_dir_all(&d);
     }
 

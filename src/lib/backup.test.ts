@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planBackup, addJob, removeJob, updateJob, parseJobs, serializeJobs, unattendedBackupConsent, type BackupJob } from "./backup";
+import { planBackup, addJob, removeJob, updateJob, parseJobs, serializeJobs, unattendedBackupConsent, unattendedBackupArgs, type BackupJob } from "./backup";
 import type { CompareNode } from "./treeDiff";
 
 const f = (name: string, size = 0, modified = 0): CompareNode => ({ name, isDir: false, size, modified });
@@ -71,9 +71,47 @@ describe("unattendedBackupConsent (CPE-1664)", () => {
     expect(unattendedBackupConsent({ autoRun: undefined })).toBe(false);
   });
 
+  it("requires the flag to be exactly true — a truthy non-boolean is not consent", () => {
+    // `parseJobs` never type-checks `autoRun`, so a hand-edited or migrated settings blob can carry a
+    // string here. `!!job.autoRun` would read "no" as consent to delete.
+    expect(unattendedBackupConsent({ autoRun: "no" as unknown as boolean })).toBe(false);
+    expect(unattendedBackupConsent({ autoRun: 1 as unknown as boolean })).toBe(false);
+  });
+
   it("is a real read of the flag, not a constant — the two answers differ", () => {
     // Guards against the decision being inlined back to a hard-coded `true`: if it were, both of these
     // would agree and this assertion would fail.
     expect(unattendedBackupConsent({ autoRun: true })).not.toBe(unattendedBackupConsent({ autoRun: false }));
+  });
+});
+
+describe("unattendedBackupArgs (CPE-1664)", () => {
+  // THE pin for the unattended consent decision. It lives here, not in an App-level test, because
+  // `driveScheduler` only ever delivers `autoRun: true` jobs — so nothing driving the real scheduler can
+  // distinguish the decision from a constant. This function can be called with an unticked job directly.
+  const plan = { copy: ["a.txt"], update: ["b.txt"], delete: ["stale.txt"] };
+  const job = (autoRun?: boolean) => ({ source: "C:\\pics", dest: "D:\\backup", autoRun });
+
+  it("carries consent for a job the user ticked auto-run for", () => {
+    expect(unattendedBackupArgs(job(true), plan).confirmed).toBe(true);
+  });
+
+  it("WITHHOLDS consent for an unticked job — the case the scheduler can never reach", () => {
+    // If `confirmed` were hard-coded `true`, this is the assertion that catches it.
+    expect(unattendedBackupArgs(job(false), plan).confirmed).toBe(false);
+    expect(unattendedBackupArgs(job(undefined), plan).confirmed).toBe(false);
+  });
+
+  it("passes the plan through unchanged, so consent is the only thing it decides", () => {
+    const args = unattendedBackupArgs(job(true), plan);
+    expect(args).toEqual({
+      sourceRoot: "C:\\pics",
+      destRoot: "D:\\backup",
+      copy: ["a.txt"],
+      update: ["b.txt"],
+      deletePaths: ["stale.txt"], // renamed for the backend's argument name
+      verify: true,
+      confirmed: true,
+    });
   });
 });

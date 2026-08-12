@@ -1,15 +1,22 @@
 /**
- * CPE-1664 — the **unattended** backup consent, pinned at its real call site.
+ * CPE-1664 — the drive-connect scheduler's **wiring** to the backup backend.
  *
  * `apply_backup_plan_stream` refuses without `confirmed`, and a mirror plan deletes files under the
- * destination root with no Recycle Bin copy and no undo. For a run nobody is watching, the consent is the
- * per-job "auto-run on connect" box the user ticked — read via `unattendedBackupConsent`.
+ * destination root with no Recycle Bin copy and no undo. For a run nobody is watching, the consent is
+ * the per-job "auto-run on connect" box the user ticked.
  *
- * This file exists because the PR #855 security audit mutation-tested that decision and nothing caught
- * it: inverting the flag inside `App.svelte`'s `runBackupJobNow` left all 3867 frontend tests green,
- * because the drive-connect scheduler is the only thing that calls it and no test drove the scheduler.
- * So this test drives the scheduler for real — fake timers, a drive appearing between polls — and
- * asserts what actually goes over the wire.
+ * **What this file does NOT do — read this before adding a claim to it.** It does not pin the consent
+ * decision. `driveScheduler`'s `jobsForConnect` filters on `j.autoRun`, so the scheduler can only ever
+ * deliver `autoRun: true` jobs: the flag's expected value here is *necessarily* `true`, and hard-coding
+ * `confirmed: true` in `App.svelte` passes every test below. Two earlier rounds of this PR claimed
+ * otherwise in this very docstring; the reviewer and the security auditor each reproduced the
+ * hard-coding independently and found the whole suite green. **The decision is pinned in
+ * `backup.test.ts`, on `unattendedBackupArgs`, which can be called with an unticked job.**
+ *
+ * What this file genuinely covers, and why it is still worth having: that the scheduler reaches the
+ * backend at all on a drive-connect transition, with a real mirror plan and consent set; and that a job
+ * with auto-run off is never started unattended by any drive connect. Both are real regressions
+ * otherwise, and nothing else drives the scheduler end to end.
  *
  * Harness follows App.dropStackTransfer.test.ts (mounted App, mocked backend, multi-handler event bus).
  */
@@ -18,6 +25,7 @@ import { render, waitFor } from "@testing-library/svelte";
 import App from "./App.svelte";
 import { resetSettings, saveBackupJobs } from "./lib/settings";
 import { stopDriveScheduler } from "./lib/driveScheduler";
+import { unattendedBackupConsent } from "./lib/backup";
 import type { Place } from "./lib/types";
 
 const PATH_A = "C:\\d";
@@ -93,16 +101,19 @@ async function connectTheBackupDrive(job: Record<string, unknown>) {
   await vi.advanceTimersByTimeAsync(20_000); // …and the next poll sees the transition
 }
 
-describe("App — unattended backup consent (CPE-1664)", () => {
-  it("a job the user ticked auto-run for runs with confirmed: true when its drive connects", async () => {
-    await connectTheBackupDrive({
+describe("App — the drive-connect scheduler's backup wiring (CPE-1664)", () => {
+  it("a job the user ticked auto-run for runs, consented, when its drive connects", async () => {
+    const job = {
       id: "j1", name: "Photos", source: "C:\\pics", dest: JOB_DEST, mirror: true, autoRun: true,
-    });
+    };
+    await connectTheBackupDrive(job);
 
     await waitFor(() => expect(backupCalls.length).toBe(1));
-    // THE assertion the audit found unpinned: the per-job opt-in is what authorises the run.
-    expect(backupCalls[0].confirmed).toBe(true);
-    // …and it really is the destructive shape being consented to.
+    // Written against the helper rather than a literal so the intent is legible — but note this CANNOT
+    // fail for a hard-coded `true`, since the scheduler only delivers `autoRun: true` jobs. The
+    // decision itself is pinned in backup.test.ts; see this file's header.
+    expect(backupCalls[0].confirmed).toBe(unattendedBackupConsent(job));
+    // …and it really is the destructive shape reaching the backend.
     expect(backupCalls[0].deletePaths).toEqual(["stale.txt"]);
     expect(backupCalls[0].destRoot).toBe(JOB_DEST);
   });

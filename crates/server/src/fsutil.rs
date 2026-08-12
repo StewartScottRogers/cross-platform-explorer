@@ -88,15 +88,72 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
 /// [`std::path::Component::Normal`]. That is why the containment check on the *resolved* path is the
 /// real defence and this predicate is only the cheap first filter.
 ///
-/// Deliberately **not** `#[cfg(windows)]`: the rule is applied uniformly so all three CI legs exercise
-/// identical behaviour, and a plan built on one OS can be executed against a share mounted from
-/// another. The cost is that a POSIX file legitimately named `notes.` is refused with a per-file error
-/// rather than deleted — a reported no-op, never data loss, which is the right way round.
+/// **The predicate is uniform; acting on it must NOT be.** `foo ` and `notes.` are legal, creatable,
+/// everyday filenames on Linux and macOS, where `dir/notes.` is a real distinct path and nothing is
+/// aliased. Callers must therefore gate the **refusal** on `cfg!(windows)` — the first version of this
+/// change did not, and the result was that a macOS user moving a folder named `My Documents ` got an
+/// error about Windows path normalisation and the move failed, while a Linux backup of `notes.` was
+/// silently never copied. That is breaking a basic operation on two platforms to defend against a
+/// hazard that exists only on the third, and [`contained_under`] already covers the destructive case
+/// platform-independently, so this predicate is not the thing carrying the safety.
+///
+/// The function itself stays uniform so both legs compile and test the same shape, and so a caller can
+/// report or warn on such a name without refusing it.
 ///
 /// The empty string is **not** unstable by this rule (`"".trim_end_matches(..) == ""`); callers reject
 /// empty components separately, since an empty component is a different bug with a different message.
 pub fn win32_name_is_unstable(name: &str) -> bool {
     name != name.trim_end_matches([' ', '.'])
+}
+
+/// **The containment guarantee** shared by every "remove the thing already at this path" site
+/// (CPE-1664/CPE-1662, PR #855 security audit): assert on the *resolved* path, never on the spelling
+/// that produced it.
+///
+/// Canonicalise both sides and require `joined` to be strictly **inside** `root` — `starts_with(root)`
+/// **and** `!= root`. That is the only formulation that holds without enumerating spellings, so it
+/// covers the seven the audit found and whatever normalisation quirk, junction, case-folding share or
+/// Unicode-folding filesystem produces the next one. Textual filters in front of it are a cheap first
+/// pass, never a substitute.
+///
+/// # Failure policy — fails CLOSED on the side that matters
+///
+/// - `root` won't canonicalise → **`Err`**. There is nothing legitimate to remove under a container
+///   that doesn't resolve, so the destructive call must not be the default when IO fails. (The first
+///   version of the transfer-side copy of this check used `if let (Ok(a), Ok(b)) = …`, which fell
+///   straight through to `remove_dir_all` when either `canonicalize` errored — the wrong way round for
+///   the one check standing between a consented Replace and the user's folder. That is why there is now
+///   exactly one implementation with one failure policy.)
+/// - `joined` won't canonicalise → **`Ok`**.
+///
+/// # Precondition — `joined` must be an EXISTING target that is about to be removed
+///
+/// The `Ok` on an unresolvable `joined` is only sound because a path that does not exist cannot be
+/// destroyed: the caller's `remove_*` will fail and be reported normally. **Do not reuse this to
+/// validate a create/copy destination.** Such a target is *expected* not to exist yet, so this would
+/// return `Ok` for exactly the case it was meant to judge — a guard that fails open every time. A
+/// create-side check needs to canonicalise the target's *parent* instead.
+///
+/// Both current callers satisfy the precondition: the backup mirror-delete loop is about to
+/// `remove_dir_all`/`remove_file` `joined`, and `resolve_conflict`'s Overwrite arm is only reached
+/// after `base_target.exists()` has already returned true.
+pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
+    let Ok(real_root) = std::fs::canonicalize(root) else {
+        return Err(format!("the containing directory {root:?} could not be resolved"));
+    };
+    let Ok(real) = std::fs::canonicalize(joined) else {
+        return Ok(()); // doesn't exist — nothing to destroy; the caller's remove reports it normally
+    };
+    if real == real_root {
+        return Err(
+            "the path resolves to the containing directory itself, not to something inside it"
+                .to_string(),
+        );
+    }
+    if !real.starts_with(&real_root) {
+        return Err(format!("{real:?} resolves outside the containing directory {real_root:?}"));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -126,6 +183,58 @@ mod tests {
         }
         // The empty string is a separate error class, handled by the callers, not by this predicate.
         assert!(!win32_name_is_unstable(""));
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("cpe-fsutil-{}-{}-{}", tag, std::process::id(), n));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The guarantee, tested as a guarantee: driven with real resolved paths rather than through any
+    /// list of spellings, because enumerating spellings is exactly the approach the PR #855 audit
+    /// showed cannot work.
+    #[test]
+    fn contained_under_admits_only_paths_strictly_inside_the_root() {
+        let d = scratch("contained");
+        let root = d.join("root");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        std::fs::write(root.join("nested/deep.txt"), b"y").unwrap();
+
+        // The root itself, however it is reached.
+        assert!(contained_under(&root, &root).is_err(), "the root itself must be refused");
+        assert!(contained_under(&root.join("nested/.."), &root).is_err(), "…and a traversal back to it");
+        // Outside the root entirely.
+        assert!(contained_under(&d, &root).is_err(), "the root's PARENT must be refused");
+        // Real children must pass — the check must not break ordinary removes.
+        assert!(contained_under(&root.join("nested"), &root).is_ok(), "a real child must be allowed");
+        assert!(contained_under(&root.join("a.txt"), &root).is_ok(), "…and a real file");
+        assert!(contained_under(&root.join("nested/deep.txt"), &root).is_ok(), "…and a nested file");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The failure policy, asserted in both directions — the half the first transfer-side copy of this
+    /// check got backwards by using `if let (Ok(a), Ok(b)) = …` and falling through to the destructive
+    /// call whenever `canonicalize` errored.
+    #[test]
+    fn contained_under_fails_closed_on_an_unresolvable_root_and_open_on_a_missing_target() {
+        let d = scratch("contained_io");
+        let root = d.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // Root can't be resolved → refuse. Nothing legitimate can be removed under it.
+        assert!(
+            contained_under(&root.join("x"), &d.join("no-such-root")).is_err(),
+            "an unresolvable root must REFUSE, never fall through to the destructive call"
+        );
+        // Target doesn't exist → allow (see the precondition: it cannot be destroyed, and the caller's
+        // own remove reports it). This is sound ONLY for a remove target.
+        assert!(contained_under(&root.join("never-existed.txt"), &root).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -236,7 +236,7 @@
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import { pruneMissing, type Workspace, type WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
-  import { planBackup, unattendedBackupConsent, type BackupJob } from "./lib/backup";
+  import { planBackup, unattendedBackupArgs, type BackupJob } from "./lib/backup";
   import type { CompareNode } from "./lib/treeDiff";
   import { startDriveScheduler, stopDriveScheduler } from "./lib/driveScheduler";
   import { startDriveWatch, stopDriveWatch, pokeDriveWatch } from "./lib/driveWatch";
@@ -602,15 +602,12 @@
       const results: OpResult[] = [];
       const channel = createChannel<OpResult[]>();
       channel.onmessage = (batch) => { for (const r of batch) results.push(r); };
-      await rawInvoke("apply_backup_plan_stream", {
-        sourceRoot: job.source, destRoot: job.dest,
-        copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
-        // CPE-1664: consent for an *unattended* run is the per-job auto-run opt-in the user ticked.
-        // The decision lives in `unattendedBackupConsent` so it is pinned by a test — inlining it here
-        // as `!!job.autoRun` left it unpinned (PR #855 audit).
-        confirmed: unattendedBackupConsent(job),
-        onResult: channel,
-      });
+      // CPE-1664: every argument — including the `confirmed` consent flag, which is the per-job auto-run
+      // opt-in the user ticked — is built by `unattendedBackupArgs`, which `backup.test.ts` pins with
+      // BOTH a ticked and an unticked job. It cannot be pinned from here: the scheduler only ever hands
+      // this function `autoRun: true` jobs, so no test reaching it can distinguish the real value from a
+      // constant. See that function for exactly what is and is not covered.
+      await rawInvoke("apply_backup_plan_stream", { ...unattendedBackupArgs(job, p), onResult: channel });
       const failed = results.filter((r) => !r.ok).length;
       recordBackupRun(job.id, { when: Date.now(), ok: results.length - failed, failed, label: "auto" });
       showNotice(failed ? $t("notice.autoBackupDoneWithFailures", { name: job.name, copied: results.length - failed, failed }) : $t("notice.autoBackupDone", { name: job.name, copied: results.length - failed }));

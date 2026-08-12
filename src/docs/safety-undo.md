@@ -54,14 +54,18 @@ something, that no Undo can walk back:
 
 Three details are worth knowing, because they are deliberate:
 
-- **Some odd file names are refused rather than acted on.** A file or folder whose name is made only of
-  spaces and dots — `" "`, `"..."`, `". "` — or whose name merely *ends* in one is skipped, with an
-  error naming it, instead of being copied, replaced or mirror-deleted. Windows quietly strips trailing
-  spaces and dots when it opens a path, so such a name does not address the item you can see: it
-  addresses the **folder containing it**. Acting on it would replace or delete the whole destination
+- **On Windows, some odd file names are refused rather than acted on.** A file or folder whose name
+  ends in a space or a dot — `" "`, `"..."`, `"report. "` — is skipped, with an error naming it,
+  instead of being copied, replaced or mirror-deleted. Windows quietly strips trailing spaces and dots
+  when it opens a path, so such a name does not address the item you can see: it addresses a *different*
+  item, often the **folder containing it**. Acting on it would replace or delete the whole destination
   folder rather than the one item, which is exactly what used to happen. Names like this reach you from
   a NAS or Samba share, a WSL-created folder, or an extracted archive. The app refuses the item and
   carries on with the rest of the batch; nothing is lost, and you can rename it and retry.
+  - **On macOS and Linux these are ordinary names and are handled normally** — `notes.` is a real,
+    distinct file there and nothing is ambiguous, so it is copied and moved like any other. The one
+    exception is a mirror backup's *delete* step, which still declines such a name and reports it
+    rather than removing it; renaming the file clears that.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you
