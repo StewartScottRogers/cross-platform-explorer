@@ -52,7 +52,16 @@ something, that no Undo can walk back:
 | **Running a backup job** | A *mirror* job deletes files under the destination that are no longer in the source. | Only the Backup jobs dashboard's **Run** / **Restore** buttons, or a job you ticked **auto-run on connect** for. |
 | **[User commands](organizing-user-commands)** | Anything — the command line runs as a real external process on your machine. | Only the **Run** button in the confirm dialog, after it has shown you the exact command line. |
 
-Two details are worth knowing, because they are deliberate:
+Three details are worth knowing, because they are deliberate:
+
+- **Some odd file names are refused rather than acted on.** A file or folder whose name is made only of
+  spaces and dots — `" "`, `"..."`, `". "` — or whose name merely *ends* in one is skipped, with an
+  error naming it, instead of being copied, replaced or mirror-deleted. Windows quietly strips trailing
+  spaces and dots when it opens a path, so such a name does not address the item you can see: it
+  addresses the **folder containing it**. Acting on it would replace or delete the whole destination
+  folder rather than the one item, which is exactly what used to happen. Names like this reach you from
+  a NAS or Samba share, a WSL-created folder, or an extracted archive. The app refuses the item and
+  carries on with the rest of the batch; nothing is lost, and you can rename it and retry.
 
 - **Only the destructive choice asks.** A copy that keeps both files, or skips the ones that collide,
   destroys nothing and is not gated — nothing new to click. A prompt on every copy would just teach you

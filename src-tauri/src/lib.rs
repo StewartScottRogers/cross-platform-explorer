@@ -2679,27 +2679,59 @@ fn require_overwrite_consent(policy: ConflictPolicy, confirmed: bool) -> Result<
     Ok(())
 }
 
-/// Resolve a collision at `base_target` per `policy`. `Some(path)` is where to write; `None` means
-/// skip this source (policy `Skip` with an existing target). `Overwrite` removes the existing entry —
-/// which is why every route to here passes `require_overwrite_consent` first (CPE-1662).
-fn resolve_conflict(base_target: &Path, policy: ConflictPolicy) -> Option<PathBuf> {
+/// Resolve a collision at `base_target` per `policy`. `Ok(Some(path))` is where to write; `Ok(None)`
+/// means skip this source (policy `Skip` with an existing target); `Err` means the collision could not
+/// be resolved safely and the item must be reported as failed rather than transferred.
+///
+/// **`Overwrite` removes the existing entry, so it carries the containment assertion** (PR #855 security
+/// audit): `base_target` must not resolve to `dest_dir` itself. `base_target` is `dest_dir.join(name)`
+/// with `name` taken straight from `src.file_name()`, and on Windows a name of `" "`, `"..."` or `". "`
+/// normalises away entirely — making `base_target` **the destination folder**, so this arm called
+/// `remove_dir_all(dest_dir)` and deleted the user's whole target folder. The source did not even have
+/// to exist: the destruction happens here, before the copy is attempted, so the returned report carried
+/// only "file not found" while the destination was already gone.
+///
+/// Neither pre-existing guard fired: `is_self_or_descendant` requires `src.is_dir()` (false for a
+/// missing source) and `same_path(&base_target, src)` compares two genuinely different paths. Nor did
+/// CPE-1662's consent gate narrow it — the *gated* path is the one that reaches it, since dragging an
+/// entry named `" "` off a NAS share and clicking **Replace** in the collision dialog is exactly the
+/// handler authorised to send `confirmed: true`. Consent to replace *an item* is not consent to lose
+/// *the folder*, so this is a correctness check, not a consent one, and it is asserted on the resolved
+/// path rather than by pattern-matching names.
+fn resolve_conflict(
+    base_target: &Path,
+    dest_dir: &Path,
+    policy: ConflictPolicy,
+) -> Result<Option<PathBuf>, String> {
     if !base_target.exists() {
-        return Some(base_target.to_path_buf());
+        return Ok(Some(base_target.to_path_buf()));
     }
     match policy {
-        ConflictPolicy::Skip => None,
+        ConflictPolicy::Skip => Ok(None),
         ConflictPolicy::Keepboth => {
             let dir = base_target.parent().unwrap_or_else(|| Path::new("."));
             let name = base_target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-            Some(unique_target(dir, name))
+            Ok(Some(unique_target(dir, name)))
         }
         ConflictPolicy::Overwrite => {
+            // CONTAINMENT (PR #855 audit): overwriting the destination directory itself is never a
+            // legitimate transfer outcome. Asserted on the canonicalised paths, so it holds for any
+            // spelling — not just the five Win32 ones the audit enumerated.
+            if let (Ok(a), Ok(b)) = (fs::canonicalize(base_target), fs::canonicalize(dest_dir)) {
+                if a == b {
+                    return Err(
+                        "refusing to overwrite the destination folder itself — the source's name \
+                         resolves to the destination directory rather than to an item inside it"
+                            .to_string(),
+                    );
+                }
+            }
             if base_target.is_dir() {
                 let _ = fs::remove_dir_all(base_target);
             } else {
                 let _ = fs::remove_file(base_target);
             }
-            Some(base_target.to_path_buf())
+            Ok(Some(base_target.to_path_buf()))
         }
     }
 }
@@ -2861,6 +2893,19 @@ fn run_transfer(
             report.errors.push(format!("{}: invalid name", src.display()));
             continue;
         };
+        // PR #855 audit: a name Windows normalises away (`" "`, `"..."`, `". "`) makes `dest_dir.join(name)`
+        // resolve to `dest_dir` ITSELF, which under Overwrite deleted the user's whole destination folder.
+        // Refused here, before the target is computed, for every policy and every kind: such a name can
+        // never address the item the user picked, so transferring it is wrong even where it isn't fatal.
+        // `resolve_conflict`'s containment assertion is the backstop; this is the cheap, reportable filter.
+        if cpe_server::fsutil::win32_name_is_unstable(name) {
+            report.failed += 1;
+            report.errors.push(format!(
+                "{name:?}: name has trailing dots/spaces, which Windows strips — it would resolve to the \
+                 destination folder itself rather than to an item inside it"
+            ));
+            continue;
+        }
         if src.is_dir() && is_self_or_descendant(src, dest_dir) {
             report.failed += 1;
             report.errors.push(format!("{name}: can't transfer a folder into itself"));
@@ -2882,13 +2927,18 @@ fn run_transfer(
             emit(&prog);
             continue;
         }
-        let target = match resolve_conflict(&base_target, policy) {
-            Some(t) => t,
-            None => {
+        let target = match resolve_conflict(&base_target, dest_dir, policy) {
+            Ok(Some(t)) => t,
+            Ok(None) => {
                 report.skipped += 1;
                 prog.done_bytes += sb;
                 prog.done_items += sf;
                 emit(&prog);
+                continue;
+            }
+            Err(e) => {
+                report.failed += 1;
+                report.errors.push(format!("{name}: {e}"));
                 continue;
             }
         };
@@ -2929,13 +2979,38 @@ fn transfer_registry(
     TRANSFER_CANCELS.get_or_init(Default::default)
 }
 
+/// Check consent, then — only if it passes — issue the transfer id and register its cancel flag
+/// (CPE-1662).
+///
+/// Split out of [`start_transfer`] so the ordering is **testable**, not merely asserted in prose: the
+/// PR #855 audit mutation-tested the gate by deleting `require_overwrite_consent(policy, confirmed)?`
+/// from the command and the whole Rust suite stayed green, because nothing could reach the command
+/// without an `AppHandle`. With the guard and the two side effects in one small function, a test can
+/// prove that a refused transfer advances no id and leaves no registry entry. Everything after this in
+/// `start_transfer` — the app-op ledger note, the spawned thread — is sequenced by its `?`, so a
+/// refusal reaches none of it and no phantom entry appears in the operations panel.
+fn begin_transfer(
+    policy: ConflictPolicy,
+    confirmed: bool,
+) -> Result<(u64, std::sync::Arc<std::sync::atomic::AtomicBool>), String> {
+    use std::sync::atomic::Ordering;
+    // Before the id and the registry entry — a refused transfer must leave nothing behind at all
+    // (mirroring `delete_permanent`'s "note only once we're actually about to").
+    require_overwrite_consent(policy, confirmed)?;
+    let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    Ok((id, cancel))
+}
+
 /// Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
 /// `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
 ///
-/// **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no ledger note, no
-/// thread spawned, so there is no partial state and no phantom entry in the operations panel — unless
-/// `confirmed` is `true`. See [`require_overwrite_consent`] for why only that policy is gated, why the
-/// flag is a separate argument from `policy`, and exactly what it does and does not defend. The check is
+/// **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no registry entry,
+/// no ledger note, no thread spawned, so there is no partial state and no phantom entry in the
+/// operations panel — unless `confirmed` is `true`. See [`require_overwrite_consent`] for why only that
+/// policy is gated, why the flag is a separate argument from `policy`, and exactly what it does and does
+/// not defend; [`begin_transfer`] carries the check so that claim is pinned by a test. The check is
 /// repeated inside [`run_transfer`] so the engine can't be driven past it by a future caller.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
@@ -2947,13 +3022,7 @@ fn start_transfer(
     policy: ConflictPolicy,
     confirmed: bool,
 ) -> Result<u64, String> {
-    use std::sync::atomic::Ordering;
-    // Before the id, the registry entry, the app-op note and the thread — a refused transfer must leave
-    // nothing behind at all (mirroring `delete_permanent`'s "note only once we're actually about to").
-    require_overwrite_consent(policy, confirmed)?;
-    let id = TRANSFER_SEQ.fetch_add(1, Ordering::Relaxed);
-    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    transfer_registry().lock().unwrap().insert(id, cancel.clone());
+    let (id, cancel) = begin_transfer(policy, confirmed)?;
     // Record the planned per-source destination up front, before the transfer thread starts, so its
     // watcher events read `actor:"user"` (CPE-1102). Best-effort: the engine's collision auto-rename
     // (`resolve_conflict`) may pick a different name than `dest/<name>`, in which case the miss just
@@ -7653,6 +7722,16 @@ fn capped_string(mut bytes: Vec<u8>, cap: usize) -> (String, bool) {
 /// fails to deserialize outright); and a mechanical enumerator working from `bindings.gen.ts` that
 /// doesn't know the field exists. A real boundary would have to be something the caller cannot mint — a
 /// backend-issued one-shot consent token, or dropping the command from the IPC surface entirely.
+///
+/// **This gate is consistency, not coverage — do not read it as "shell execution now requires
+/// consent".** The PR #855 security audit found several ungated siblings that reach a process launch
+/// without passing through any dialog: `open_pty` takes a caller-supplied `shell` verbatim and
+/// `write_pty` pushes arbitrary bytes into its stdin, so those two ungated calls give everything this
+/// command gives and more; `run_as_admin` and `open_external` each launch a caller-named executable.
+/// And `run_as_admin`'s "the UAC prompt is the consent" defence is **Windows-only** — on other
+/// platforms it falls through to `open_external_impl` with no prompt at all. Those are filed separately
+/// and deliberately not fixed here; this comment names them so a reader of *this* command doesn't
+/// conclude the surface is closed.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn run_command(command: String, cwd: Option<String>, confirmed: bool) -> Result<CommandOutput, String> {
@@ -15111,6 +15190,128 @@ overlay / overlay rw,relatime 0 0
         for (p, name) in [(ConflictPolicy::Skip, "skip"), (ConflictPolicy::Keepboth, "keep-both")] {
             assert!(require_overwrite_consent(p, false).is_ok(), "{name} must never require consent");
         }
+    }
+
+    /// Pins the doc claim "no id issued, no registry entry" (PR #855 audit): deleting the consent check
+    /// from `start_transfer` used to leave the whole Rust suite green, because the command needs an
+    /// `AppHandle` no test can build. `begin_transfer` carries the guard *and* both side effects, so the
+    /// ordering is now observable — a refused transfer must not advance the id sequence or register a
+    /// cancel flag, which is exactly what would otherwise strand a phantom row in the operations panel.
+    #[test]
+    fn a_refused_transfer_issues_no_id_and_registers_nothing() {
+        use std::sync::atomic::Ordering;
+        let seq_before = TRANSFER_SEQ.load(Ordering::Relaxed);
+        let registered_before = transfer_registry().lock().unwrap().len();
+
+        let err = begin_transfer(ConflictPolicy::Overwrite, false)
+            .expect_err("an unconfirmed overwrite must be refused before anything is allocated");
+        assert!(err.contains("`confirmed` was not set"), "the refusal must name the flag: {err}");
+        assert_eq!(
+            TRANSFER_SEQ.load(Ordering::Relaxed),
+            seq_before,
+            "a refused transfer must not consume an id — the operations panel would show a phantom row"
+        );
+        assert_eq!(
+            transfer_registry().lock().unwrap().len(),
+            registered_before,
+            "a refused transfer must not register a cancel flag"
+        );
+
+        // Consented, the identical call really does allocate — so the assertions above have teeth.
+        let (id, _cancel) = begin_transfer(ConflictPolicy::Overwrite, true)
+            .expect("a consented overwrite must be allowed to start");
+        assert!(TRANSFER_SEQ.load(Ordering::Relaxed) > seq_before, "a consented transfer takes an id");
+        assert!(transfer_registry().lock().unwrap().contains_key(&id), "…and registers its cancel flag");
+        transfer_registry().lock().unwrap().remove(&id); // don't leak into the shared registry
+    }
+
+    /// PR #855 security audit, HIGH: a source whose last component is `" "` / `"..."` / `". "` made
+    /// `dest_dir.join(name)` normalise to **`dest_dir` itself** on Windows, so `resolve_conflict`'s
+    /// Overwrite arm called `remove_dir_all` on the user's whole destination folder. **The source never
+    /// had to exist** — measurement tolerates a missing path and the destruction happened before the copy
+    /// was attempted, so the report came back saying only "file not found" while the folder was gone.
+    ///
+    /// `confirmed: true` throughout: this is *inside* CPE-1662's gated path, not something the gate
+    /// narrows. The real route is dragging an entry named `" "` off a NAS share and clicking **Replace**
+    /// — the one handler authorised to send consent. Consenting to replace an item is not consenting to
+    /// lose the folder, so this is a correctness fix.
+    ///
+    /// WINDOWS-AWARE: only Windows normalises these names away, so the *wipe* reproduces there alone. The
+    /// refusal is asserted on every OS leg (the name rule is IO-free and uniform); a green Linux leg is
+    /// not evidence that the destructive path is covered.
+    #[test]
+    fn run_transfer_refuses_a_source_whose_name_windows_normalises_away() {
+        for name in [" ", "  ", "...", ". ", " ."] {
+            let d = scratch("xfer_blank_name");
+            // The victim: the user's chosen destination folder, with real content in it.
+            let dest = d.join("Documents");
+            fs::create_dir_all(dest.join("nested")).unwrap();
+            fs::write(dest.join("taxes.docx"), b"irreplaceable").unwrap();
+            fs::write(dest.join("nested/deep.txt"), b"also irreplaceable").unwrap();
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+
+            let r = run_transfer(
+                1,
+                &[d.join("elsewhere").join(name)], // the source need not exist
+                &dest,
+                TransferKind::Copy,
+                ConflictPolicy::Overwrite,
+                true, // consented — the CPE-1662 gate is satisfied; this is the path handling
+                &cancel,
+                |_| {},
+            );
+
+            // OFF-DISK first: the destination folder and everything in it must still be there.
+            assert!(dest.is_dir(), "the destination folder must survive a source named {name:?}");
+            let names: Vec<String> = fs::read_dir(&dest)
+                .unwrap_or_else(|e| panic!("the destination must still be listable for {name:?}: {e}"))
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .collect();
+            assert!(names.iter().any(|n| n == "taxes.docx"), "taxes.docx must survive {name:?}: {names:?}");
+            assert_eq!(
+                fs::read(dest.join("nested/deep.txt")).unwrap_or_default(),
+                b"also irreplaceable",
+                "the nested file must survive {name:?} — this is the remove_dir_all arm"
+            );
+
+            // …and the refusal is reported, naming why, rather than a bare "file not found".
+            assert_eq!(r.failed, 1, "the refusal must be reported for {name:?}: {:?}", r.errors);
+            assert_eq!(r.transferred, 0);
+            assert!(
+                r.errors.iter().any(|e| e.contains("trailing dots/spaces")),
+                "the error must explain the name, not just say not-found, for {name:?}: {:?}",
+                r.errors
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The backstop for the same finding, exercised directly: even if a name slipped past the filter
+    /// above, `resolve_conflict` refuses to overwrite a `base_target` that resolves to `dest_dir`.
+    /// Asserted on canonicalised paths, so it holds for spellings nobody enumerated.
+    #[test]
+    fn resolve_conflict_refuses_to_overwrite_the_destination_directory_itself() {
+        let d = scratch("xfer_resolve_root");
+        let dest = d.join("Documents");
+        fs::create_dir_all(dest.join("nested")).unwrap();
+        fs::write(dest.join("taxes.docx"), b"irreplaceable").unwrap();
+
+        // `dest` reached by a path that is textually different but resolves to the same directory.
+        let via_traversal = dest.join("nested").join("..");
+        let e = resolve_conflict(&via_traversal, &dest, ConflictPolicy::Overwrite)
+            .expect_err("overwriting the destination directory itself must be refused");
+        assert!(e.contains("destination folder itself"), "{e}");
+        assert!(dest.join("taxes.docx").exists(), "and nothing may be deleted");
+
+        // A real colliding child is still overwritten — the check must not break ordinary Replace.
+        let child = dest.join("taxes.docx");
+        let t = resolve_conflict(&child, &dest, ConflictPolicy::Overwrite)
+            .expect("a real collision resolves")
+            .expect("…to a target path");
+        assert_eq!(t, child);
+        assert!(!child.exists(), "the consented overwrite really does remove the old file");
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

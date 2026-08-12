@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { planBackup, addJob, removeJob, updateJob, parseJobs, serializeJobs, type BackupJob } from "./backup";
+import { planBackup, addJob, removeJob, updateJob, parseJobs, serializeJobs, unattendedBackupConsent, type BackupJob } from "./backup";
 import type { CompareNode } from "./treeDiff";
 
 const f = (name: string, size = 0, modified = 0): CompareNode => ({ name, isDir: false, size, modified });
@@ -54,5 +54,26 @@ describe("BackupJob CRUD + parse (CPE-796)", () => {
     expect(parseJobs(null)).toEqual([]);
     expect(parseJobs("nope")).toEqual([]);
     expect(parseJobs(JSON.stringify([{ id: "x" }, list[0]]))).toEqual([list[0]]);
+  });
+});
+
+describe("unattendedBackupConsent (CPE-1664)", () => {
+  // The backend refuses a backup plan without consent, and a mirror plan deletes files under the
+  // destination outright. For a run nobody is watching, the ticked "auto-run on connect" box is the
+  // only honest source of that consent — so it must be READ, never assumed.
+  it("grants consent only for a job the user actually ticked auto-run for", () => {
+    expect(unattendedBackupConsent({ autoRun: true })).toBe(true);
+  });
+
+  it("withholds consent when auto-run is off or was never set", () => {
+    expect(unattendedBackupConsent({ autoRun: false })).toBe(false);
+    expect(unattendedBackupConsent({})).toBe(false);
+    expect(unattendedBackupConsent({ autoRun: undefined })).toBe(false);
+  });
+
+  it("is a real read of the flag, not a constant — the two answers differ", () => {
+    // Guards against the decision being inlined back to a hard-coded `true`: if it were, both of these
+    // would agree and this assertion would fail.
+    expect(unattendedBackupConsent({ autoRun: true })).not.toBe(unattendedBackupConsent({ autoRun: false }));
   });
 });

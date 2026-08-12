@@ -236,7 +236,7 @@
   import WorkspacesDialog from "./lib/components/WorkspacesDialog.svelte";
   import { pruneMissing, type Workspace, type WorkspaceTab } from "./lib/workspaces";
   import BackupDashboard from "./lib/components/BackupDashboard.svelte";
-  import { planBackup, type BackupJob } from "./lib/backup";
+  import { planBackup, unattendedBackupConsent, type BackupJob } from "./lib/backup";
   import type { CompareNode } from "./lib/treeDiff";
   import { startDriveScheduler, stopDriveScheduler } from "./lib/driveScheduler";
   import { startDriveWatch, stopDriveWatch, pokeDriveWatch } from "./lib/driveWatch";
@@ -605,10 +605,10 @@
       await rawInvoke("apply_backup_plan_stream", {
         sourceRoot: job.source, destRoot: job.dest,
         copy: p.copy, update: p.update, deletePaths: p.delete, verify: true,
-        // CPE-1664: consent for an *unattended* run is the per-job auto-run opt-in the user ticked —
-        // read from the job rather than hard-coded `true`, so a job that never opted in is refused by
-        // the backend even if something else calls this helper.
-        confirmed: !!job.autoRun,
+        // CPE-1664: consent for an *unattended* run is the per-job auto-run opt-in the user ticked.
+        // The decision lives in `unattendedBackupConsent` so it is pinned by a test — inlining it here
+        // as `!!job.autoRun` left it unpinned (PR #855 audit).
+        confirmed: unattendedBackupConsent(job),
         onResult: channel,
       });
       const failed = results.filter((r) => !r.ok).length;

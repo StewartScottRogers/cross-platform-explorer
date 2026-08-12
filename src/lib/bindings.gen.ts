@@ -1231,10 +1231,11 @@ async runWatchActions(path: string, actions: WatchAction[]) : Promise<OpResult[]
  * Start a copy/move on a background thread, returning its id immediately. Progress is emitted as
  * `transfer://progress` events and the final `TransferReport` as `transfer://done` (CPE-620).
  * 
- * **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no ledger note, no
- * thread spawned, so there is no partial state and no phantom entry in the operations panel — unless
- * `confirmed` is `true`. See [`require_overwrite_consent`] for why only that policy is gated, why the
- * flag is a separate argument from `policy`, and exactly what it does and does not defend. The check is
+ * **CPE-1662:** an `Overwrite` transfer is refused up front — `Err`, no id issued, no registry entry,
+ * no ledger note, no thread spawned, so there is no partial state and no phantom entry in the
+ * operations panel — unless `confirmed` is `true`. See [`require_overwrite_consent`] for why only that
+ * policy is gated, why the flag is a separate argument from `policy`, and exactly what it does and does
+ * not defend; [`begin_transfer`] carries the check so that claim is pinned by a test. The check is
  * repeated inside [`run_transfer`] so the engine can't be driven past it by a future caller.
  */
 async startTransfer(sources: string[], dest: string, kind: TransferKind, policy: ConflictPolicy, confirmed: boolean) : Promise<Result<number, string>> {
@@ -2876,6 +2877,16 @@ async openTerminal(path: string) : Promise<Result<null, string>> {
  * fails to deserialize outright); and a mechanical enumerator working from `bindings.gen.ts` that
  * doesn't know the field exists. A real boundary would have to be something the caller cannot mint — a
  * backend-issued one-shot consent token, or dropping the command from the IPC surface entirely.
+ * 
+ * **This gate is consistency, not coverage — do not read it as "shell execution now requires
+ * consent".** The PR #855 security audit found several ungated siblings that reach a process launch
+ * without passing through any dialog: `open_pty` takes a caller-supplied `shell` verbatim and
+ * `write_pty` pushes arbitrary bytes into its stdin, so those two ungated calls give everything this
+ * command gives and more; `run_as_admin` and `open_external` each launch a caller-named executable.
+ * And `run_as_admin`'s "the UAC prompt is the consent" defence is **Windows-only** — on other
+ * platforms it falls through to `open_external_impl` with no prompt at all. Those are filed separately
+ * and deliberately not fixed here; this comment names them so a reader of *this* command doesn't
+ * conclude the surface is closed.
  */
 async runCommand(command: string, cwd: string | null, confirmed: boolean) : Promise<Result<CommandOutput, string>> {
     try {

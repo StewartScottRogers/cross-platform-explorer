@@ -63,6 +63,24 @@ export interface BackupJob {
   autoRun?: boolean;
 }
 
+/**
+ * Consent for an **unattended** backup run (CPE-1664): the backend refuses a plan unless it is told the
+ * user agreed, and for a run nobody is watching the only thing that can honestly say so is the per-job
+ * **auto-run on connect** box the user ticked. That opt-in is the consent — so it is read from the job
+ * rather than hard-coded `true` at the call site, and a job that never opted in is refused by the
+ * backend even if something else calls the scheduler's helper.
+ *
+ * A one-line predicate rather than an inline `!!job.autoRun` on purpose (PR #855 audit): inverting that
+ * expression inside `App.svelte` left all 3867 frontend tests green, so the decision the comment
+ * presents as the whole point was pinned by nothing. Here it is directly testable.
+ *
+ * Attended runs do **not** come through here — BackupDashboard's Run/Restore buttons are a live click,
+ * and pass their own consent.
+ */
+export function unattendedBackupConsent(job: Pick<BackupJob, "autoRun">): boolean {
+  return job.autoRun === true;
+}
+
 function newId(): string {
   return `bj_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 }

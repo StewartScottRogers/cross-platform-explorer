@@ -73,6 +73,32 @@ pub fn sha256_file(path: &Path) -> std::io::Result<String> {
     Ok(hex)
 }
 
+/// True when Win32 path normalisation would silently rewrite this single path **component** — i.e. it
+/// carries trailing spaces or dots (CPE-1664/CPE-1662, PR #855 security audit).
+///
+/// Win32 strips trailing `' '` and `'.'` from the last component of a path before opening it, so a
+/// component that is *entirely* spaces/dots addresses **its own parent**: `dir\ `, `dir\...` and
+/// `dir\. ` all open `dir`. A component that merely *ends* in one addresses a different sibling:
+/// `dir\report. ` opens `dir\report`. Neither is ever what a caller meant, and both are catastrophic
+/// where the resolved path is then handed to `remove_dir_all` — a plan entry or a transfer source name
+/// spelled this way deletes the destination root instead of an item inside it.
+///
+/// Rust's `Path::components()` cannot be used to detect this: it special-cases exactly `.` and `..`,
+/// and classifies **every** other string — including `" "`, `"..."` and `". "` — as
+/// [`std::path::Component::Normal`]. That is why the containment check on the *resolved* path is the
+/// real defence and this predicate is only the cheap first filter.
+///
+/// Deliberately **not** `#[cfg(windows)]`: the rule is applied uniformly so all three CI legs exercise
+/// identical behaviour, and a plan built on one OS can be executed against a share mounted from
+/// another. The cost is that a POSIX file legitimately named `notes.` is refused with a per-file error
+/// rather than deleted — a reported no-op, never data loss, which is the right way round.
+///
+/// The empty string is **not** unstable by this rule (`"".trim_end_matches(..) == ""`); callers reject
+/// empty components separately, since an empty component is a different bug with a different message.
+pub fn win32_name_is_unstable(name: &str) -> bool {
+    name != name.trim_end_matches([' ', '.'])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,6 +106,26 @@ mod tests {
     #[test]
     fn epoch_ms_of_unix_epoch_is_zero() {
         assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
+    }
+
+    /// The five spellings the PR #855 audit drove through a consented `apply_backup_plan` and watched
+    /// wipe the destination root, plus the milder "wrong file" variant. All must read as unstable.
+    #[test]
+    fn win32_unstable_names_are_recognised() {
+        for name in [" ", "  ", "...", ". ", " .", "....", ".", "..", "report. ", "notes.", "a "] {
+            assert!(win32_name_is_unstable(name), "{name:?} must be recognised as Win32-unstable");
+        }
+    }
+
+    /// …and ordinary names, including ones with interior dots/spaces or a leading dot, must not be —
+    /// otherwise the rule would refuse most of a real backup plan.
+    #[test]
+    fn ordinary_names_are_not_flagged() {
+        for name in ["notes", "taxes.docx", "my report.txt", ".gitignore", "a.b.c", " leading"] {
+            assert!(!win32_name_is_unstable(name), "{name:?} must NOT be flagged");
+        }
+        // The empty string is a separate error class, handled by the callers, not by this predicate.
+        assert!(!win32_name_is_unstable(""));
     }
 
     #[test]
