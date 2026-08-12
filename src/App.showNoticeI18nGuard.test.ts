@@ -22,7 +22,18 @@
  * The call-argument descent is PR #845's review finding: treating every `CallExpression` as opaque left
  * the guard blind to any literal wrapped in a call, so `showNotice(String("hardcoded English"))` — or,
  * far more realistically, `showNotice(formatErr(`Couldn't do X: ${y}`))` through a local helper — passed
- * green while carrying exactly the untranslated user-facing text this guard exists to stop.
+ * green while carrying exactly the untranslated user-facing text this guard exists to stop. The
+ * receiver/array/spread/tagged-template descent is that review's SECOND round: arguments alone weren't
+ * enough, because `showNotice(["Hardcoded sentence."].join())` keeps the whole message on the left of the
+ * dot, where no argument-descent can reach it.
+ *
+ * KNOWN-UNCOVERED SHAPES (accepted residual risk, not oversights). Call-site AST analysis can't be made
+ * airtight against arbitrary indirection, and each of these requires a future author to deliberately write
+ * something nobody in this codebase writes today:
+ *   1. A literal reached by property/element access on an INLINE object/array literal, with no intervening
+ *      method call — `showNotice(({ msg: "hardcoded" }).msg)`, `showNotice(["hardcoded"][0])`.
+ *   2. A call receiver that is itself an IIFE — `showNotice((() => "hardcoded")())`.
+ * If one of these ever shows up for real, extend the walk rather than assuming the guard covered it.
  *
  * Escape hatch: a call that is genuinely not user-facing can be exempted by appending
  * `// i18n-exempt: <reason>` on the SAME line as the `showNotice(` call. CPE-1627's escape hatch was a
