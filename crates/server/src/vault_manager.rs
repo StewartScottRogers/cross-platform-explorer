@@ -436,21 +436,79 @@ pub fn unlock_to_session(
 // Re-seal on lock (CPE-1645)
 // ---------------------------------------------------------------------------
 
-/// The exact wording every "this session directory is no longer the one we extracted" refusal carries —
-/// and the ONLY refusals that carry it.
+/// The wording every "this session directory is no longer the one we extracted" refusal carries.
 ///
-/// Shared, deliberately, with the frontend: `classifyLockError` in `src/lib/vaultStore.ts` (CPE-1654)
-/// matches this phrase to tell a **tamper refusal** (the backend has already dropped the mapping, the
-/// blob is untouched, retrying can never help, and the UI must clear its "unlocked" banner and must NOT
-/// navigate into the tampered path) apart from a **transient** failure (a busy file, a failed re-seal —
-/// the vault is still unlocked, the working copy is still there, and retrying is exactly right). Change
-/// this string and you must change it there too; both sides say so.
+/// **Human-readable only.** It used to be a contract: `classifyLockError` in `src/lib/vaultStore.ts`
+/// matched this phrase to decide how to recover. The security audit of PR #847 (finding 3) showed why
+/// that was wrong — the other lock failures interpolate **full file paths** into their messages, so a
+/// file named `why my landlord can no longer be trusted.txt`, held open by another program, turned a
+/// genuine wipe failure into a "tamper refusal": the UI cleared its banner, reported the vault sealed,
+/// and left the whole decrypted tree on disk with no in-app way back to it. Decisions now switch on
+/// [`LockFailureCode`], which no file name can forge; this string is just prose for the log and the
+/// developer.
 const UNTRUSTED_SESSION: &str = "the session directory can no longer be trusted";
 
-/// File name suffix of the staging blob written beside the vault while re-sealing. Deterministic rather
-/// than random so an interrupted lock leaves one obvious, transient artefact next to the vault instead of
-/// a scatter of them; it is truncated by the next attempt and removed on every failure path below.
+/// Which step of [`VaultRegistry::lock`] failed — the **structured** reason, decided by control flow
+/// rather than by matching text that can contain user-supplied file names (SEC-847 finding 3).
+///
+/// Crosses the IPC boundary as `vault_lock`'s error type and is what `classifyLockError`
+/// (`src/lib/vaultStore.ts`) switches on to choose the message and the recovery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "snake_case")]
+pub enum LockFailureCode {
+    /// The session directory is no longer the one this vault was extracted into (it does not resolve
+    /// inside the app-owned root any more, or a link has been put in its place). **Nothing was re-sealed
+    /// and nothing was deleted**, the vault's own file is untouched — so the vault genuinely is sealed —
+    /// and the mapping has been dropped. Retrying can never help: the UI must clear its "unlocked" state
+    /// and must NOT navigate into that path.
+    UntrustedSession,
+    /// The edits could not be written back into the vault. Nothing was deleted, the vault file is
+    /// unchanged, the working copy is intact and the vault is still unlocked — retryable.
+    ResealFailed,
+    /// The re-seal succeeded (the vault file now holds the edits) but the secure wipe of the working copy
+    /// did not — a file still open in another program, a read-only file. The vault is still unlocked and
+    /// its plaintext is still on disk, so the UI must keep showing it as unlocked — retryable.
+    WipeFailed,
+}
+
+/// A failed [`VaultRegistry::lock`]: a machine-readable [`LockFailureCode`] plus the human explanation.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct LockError {
+    /// Which step failed. Decided structurally — never parsed out of `message`.
+    pub code: LockFailureCode,
+    /// The underlying reason, for display/logging. May contain file paths, so it must never be used to
+    /// make a decision.
+    pub message: String,
+}
+
+impl LockError {
+    fn new(code: LockFailureCode, e: VaultError) -> Self {
+        Self { code, message: reason(e) }
+    }
+}
+
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for LockError {}
+
+/// File name **prefix-suffix** of the staging blob written beside the vault while re-sealing: the full
+/// name is `<vault file name><this><per-attempt nonce>`.
+///
+/// It used to be exactly this, with no nonce — deterministic, and that was the whole of SEC-847 finding 1
+/// (see [`create_staging_exclusive`]): a name an attacker can compute is a name they can pre-create as a
+/// hard link to any file they want destroyed. The fixed part survives only so an interrupted lock's debris
+/// is recognisable to [`sweep_stale_staging`].
 const RESEAL_STAGING_SUFFIX: &str = ".cpe-reseal-tmp";
+
+/// How many distinct staging names to try before giving up. More than one so that a squatter who guesses
+/// a name (or an unlucky nonce collision) costs the user a retry inside the same lock, not a failed lock.
+const STAGING_ATTEMPTS: usize = 8;
 
 /// Is this session directory still the one we extracted into? Run at lock time, before anything is
 /// re-sealed or shredded (see [`VaultRegistry::lock_with`]).
@@ -532,8 +590,24 @@ fn reseal_session_with_verifier(
     passphrase: &SecretString,
     verify: impl Fn(&Path, &SecretString) -> Result<(), VaultError>,
 ) -> Result<(), VaultError> {
-    if std::fs::symlink_metadata(session_dir).is_err() {
-        return Ok(()); // already gone — nothing to re-seal, and the blob keeps its last sealed contents
+    // INDEPENDENT LINK GUARD (SEC-847 finding 2, security audit of PR #847). The caller re-proves
+    // containment and refuses a linked session path, but this step must fail closed **on its own** —
+    // exactly the belt-and-braces `wipe_session_dir` already has for the other destructive step. Without
+    // it, the re-seal was the one destructive operation in this module with no guard of its own: anything
+    // that reaches it with a link at the session path (a TOCTOU between the check and here, a future
+    // caller) seals the LINK TARGET's files into the user's vault, replacing its real contents.
+    match std::fs::symlink_metadata(session_dir) {
+        // Already gone — nothing to re-seal, and the blob keeps its last sealed contents.
+        Err(_) => return Ok(()),
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(VaultError::Format(format!(
+                "refusing to re-seal session directory {}: it is a symbolic link or junction, not the \
+                 real directory this vault was extracted into — following it would seal whatever it \
+                 points at into the vault, replacing the vault's real contents",
+                session_dir.display()
+            )))
+        }
+        Ok(_) => {}
     }
     // DATA-LOSS GUARD (before anything is written), mirroring `create_vault`'s `resolves_inside` check:
     // if the vault file itself lives inside the directory locking is about to wipe, re-sealing there
@@ -548,11 +622,20 @@ fn reseal_session_with_verifier(
             session_dir.display()
         )));
     }
+    // ALIAS GUARD (SEC-847 finding 2): refuse any file in the session tree that is a hard link. See
+    // [`ensure_no_aliased_files`] — a hard link is NOT a reparse point, so the crypto core's
+    // skip-every-link walk reads straight through it.
+    ensure_no_aliased_files(session_dir).map_err(reseal_failed)?;
 
     let sealed = vault_crypto::encrypt_tree(session_dir, passphrase).map_err(reseal_failed)?;
-    let staging = staging_blob_path(blob_path);
+    let (staging, mut file) = create_staging_exclusive(blob_path).map_err(reseal_failed)?;
     let write_then_verify = || -> Result<(), VaultError> {
-        std::fs::write(&staging, &sealed)?;
+        use std::io::Write;
+        file.write_all(&sealed)?;
+        // `sync_all` before the rename: the replacement must be durable on disk BEFORE it displaces the
+        // only other copy of the data, not merely in the page cache.
+        file.sync_all()?;
+        drop(file);
         // Verify the bytes that actually LANDED (not the in-memory `sealed`), so a short/failed write is
         // caught here rather than discovered on the next unlock, after the working copy is gone.
         verify(&staging, passphrase)
@@ -568,6 +651,242 @@ fn reseal_session_with_verifier(
     Ok(())
 }
 
+/// Create the staging file for a re-seal **exclusively**, returning its path and the open handle
+/// (SEC-847 finding 1, security audit of PR #847).
+///
+/// The original version composed a deterministic name and called [`std::fs::write`] — `CREATE_ALWAYS` /
+/// `O_CREAT|O_TRUNC`, which follows a symlink and writes straight **through** a hard link. Because the
+/// name was deterministic *by design*, that was a plant-once-and-wait primitive needing no race and no
+/// privilege: `create_hard_link(victim, "<blob>.cpe-reseal-tmp")` — a registered IPC command, unelevated
+/// on NTFS — and the next time the **user** clicked Lock, the victim's inode was truncated and filled
+/// with vault ciphertext. Verify then read back that same inode and passed, the rename left victim and
+/// vault as two names for one inode, and the UI said "Locked". Two changes close it:
+///
+/// - **`create_new(true)`** — `O_EXCL` / `CREATE_NEW`. The open **fails** with `AlreadyExists` if
+///   anything is already at that name: a regular file, a hard link, a symlink (it is never followed),
+///   a directory. One flag, every variant, no `symlink_metadata` race window in front of it.
+/// - **A per-attempt random suffix** so a crashed lock cannot leave a name that blocks the next attempt,
+///   and so an attacker cannot pre-create the name we are about to use. Several attempts are made, so
+///   squatting a guessed name costs the attacker a retry rather than a wedged vault.
+///
+/// Stale staging debris from an interrupted lock is swept first, but ONLY when it is unambiguously our
+/// own — see [`sweep_stale_staging`].
+fn create_staging_exclusive(blob_path: &Path) -> Result<(PathBuf, std::fs::File), VaultError> {
+    sweep_stale_staging(blob_path);
+    let mut last: Option<std::io::Error> = None;
+    for _ in 0..STAGING_ATTEMPTS {
+        let candidate = staging_blob_path_with(blob_path, &staging_nonce());
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&candidate) {
+            Ok(file) => return Ok((candidate, file)),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(VaultError::Io(last.unwrap_or_else(|| {
+        std::io::Error::other("could not create a staging file next to the vault")
+    })))
+}
+
+/// Remove leftover staging files beside `blob_path` from an interrupted lock — but only entries this
+/// module can prove are its own debris (SEC-847 finding 1).
+///
+/// Fail-closed on purpose: an entry is removed only when [`std::fs::symlink_metadata`] (which does not
+/// follow links) reports a **regular file**, not a symlink, and — on Unix, where the count is available
+/// without a handle — with a link count of exactly 1. Anything else is left alone: a hard link planted at
+/// one of these names is somebody else's file under an alias, and while unlinking an alias would not
+/// destroy its data, this module does not delete objects it cannot prove it created. Best-effort
+/// throughout; a leftover we skip is inert (nothing is ever written to a name that already exists).
+fn sweep_stale_staging(blob_path: &Path) {
+    let (Some(parent), Some(name)) = (blob_path.parent(), blob_path.file_name()) else { return };
+    let mut prefix = name.to_os_string();
+    prefix.push(RESEAL_STAGING_SUFFIX);
+    let prefix = prefix.to_string_lossy().to_string();
+    let Ok(entries) = std::fs::read_dir(parent) else { return };
+    for entry in entries.flatten() {
+        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
+        if !md.is_file() || md.file_type().is_symlink() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            if md.nlink() != 1 {
+                continue; // an alias for someone else's file — never ours to delete
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// A per-attempt, unpredictable-enough staging suffix (SEC-847 finding 1). No new dependency: the
+/// process id, the nanosecond clock and a process-lifetime counter together make the name neither
+/// guessable in advance nor repeatable across attempts. It does not need to be cryptographic — the
+/// `create_new` open is what actually enforces safety; randomness only stops an attacker cheaply
+/// squatting the one name we would otherwise always use.
+fn staging_nonce() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!(
+        "{:x}-{:x}-{:x}",
+        std::process::id(),
+        nanos,
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    )
+}
+
+/// Refuse a session tree containing a **hard link** (SEC-847 finding 2, security audit of PR #847).
+///
+/// The re-seal's link guards — and [`vault_crypto`]'s own walk, which skips every reparse point at every
+/// depth — all reason about *links you can see in the directory entry*. A hard link is not one: it is an
+/// additional **name** for an existing inode, indistinguishable from an ordinary regular file to
+/// `file_type()`. So `create_hard_link(victim, "<session>/loot.xlsx")` (a registered IPC command, needing
+/// neither elevation nor Developer Mode) put a file from anywhere on the volume inside the session tree,
+/// and locking then (a) sealed the victim's plaintext into a vault whose passphrase the attacker chose,
+/// and (b) let the wipe's shredder overwrite the victim's real file through the alias.
+///
+/// **Refuses rather than skips** — deliberately. Silently skipping an entry would drop a file the user can
+/// see in the unlocked folder, which is the same class of quiet data loss CPE-1645 exists to end. The
+/// error is retryable (nothing is written or destroyed), and the user can copy the file in properly.
+///
+/// Fails **closed**: a link count that cannot be read at all is refused, not assumed to be 1. Directories
+/// are walked, not counted (no OS here lets an ordinary user hard-link a directory), and symlinks are
+/// skipped without being followed, exactly as [`collect_files`] and the crypto core's walk do.
+///
+/// Scoped to the session re-seal only: [`create_vault`] still seals a user-chosen folder as it always has,
+/// where hard links are the user's own arrangement of their own files and cross no trust boundary.
+fn ensure_no_aliased_files(dir: &Path) -> Result<(), VaultError> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            continue; // never followed — the crypto core skips these too
+        }
+        let path = entry.path();
+        if ft.is_dir() {
+            ensure_no_aliased_files(&path)?;
+        } else if ft.is_file() {
+            match hard_link_count(&path) {
+                HardLinks::One => {}
+                HardLinks::Many(n) => {
+                    return Err(VaultError::Format(format!(
+                        "refusing to re-seal {}: it is a hard link ({n} names point at this same file), so \
+                         it may be another file on this machine wearing a name inside the vault — sealing \
+                         it would copy that file's contents into the vault and locking would then \
+                         overwrite the original. Replace it with a real copy of the data, then lock again",
+                        path.display()
+                    )))
+                }
+                HardLinks::Unknown(why) => {
+                    return Err(VaultError::Format(format!(
+                        "refusing to re-seal {}: could not read how many names point at this file ({why}), \
+                         so it cannot be shown to be an ordinary file rather than a hard link to something \
+                         outside the vault",
+                        path.display()
+                    )))
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// How many directory entries name the same file. [`HardLinks::Unknown`] is a refusal, never a "probably
+/// fine" — see [`ensure_no_aliased_files`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HardLinks {
+    /// Exactly one name — an ordinary file.
+    One,
+    /// More than one name: an alias.
+    Many(u64),
+    /// The count could not be established (payload: why).
+    Unknown(&'static str),
+}
+
+/// Unix link count: `st_nlink`, straight off `symlink_metadata` (no follow — the caller has already
+/// established this entry is not a symlink).
+#[cfg(unix)]
+fn hard_link_count(path: &Path) -> HardLinks {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::symlink_metadata(path) {
+        Ok(md) if md.nlink() > 1 => HardLinks::Many(md.nlink()),
+        Ok(_) => HardLinks::One,
+        Err(_) => HardLinks::Unknown("its metadata could not be read"),
+    }
+}
+
+/// Windows link count: `nNumberOfLinks` from `GetFileInformationByHandle`.
+/// `std::os::windows::fs::MetadataExt::number_of_links()` is still behind the unstable
+/// `windows_by_handle` feature (rust-lang/rust#63010), so this makes the same call the std wrapper would,
+/// via the `windows` crate already vendored for [`crate::batch_media`]'s identity probe — whose two
+/// load-bearing details are reproduced here for the same reasons (CPE-1642 finding B):
+///
+/// - `FILE_READ_ATTRIBUTES`, not `GENERIC_READ`: Windows' share-mode conflict check ignores
+///   attribute-read rights, so this still succeeds against a file another process holds exclusively. With
+///   `GENERIC_READ` a locked file would fail to open and — fail-closed — refuse every lock while any
+///   editor had a vault file open.
+/// - The path goes through [`crate::batch_media::verbatim_wide`] first: every other read/write in the
+///   vault path goes through `std::fs`, which applies the same `\\?\` transformation and so reaches past
+///   `MAX_PATH`. A raw `CreateFileW` without it is capped at `MAX_PATH`, and the mismatch would make a
+///   deep session file unopenable — here that is a refusal (fail-closed), but it would wedge a legitimate
+///   deep vault, so the transformation is required for the feature to work at all.
+///
+/// `FILE_FLAG_OPEN_REPARSE_POINT` keeps it from following a link, `FILE_FLAG_BACKUP_SEMANTICS` lets the
+/// same call work for any entry kind. Any failure is [`HardLinks::Unknown`] — refused, never assumed safe.
+#[cfg(windows)]
+fn hard_link_count(path: &Path) -> HardLinks {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+
+    let wide = crate::batch_media::verbatim_wide(path);
+    // SAFETY: `wide` is a valid NUL-terminated UTF-16 string kept alive for the whole call. This is an
+    // attributes-only open of an already-existing file (`OPEN_EXISTING`, full sharing) — no create, no
+    // write, no truncate, no data access — and the handle is closed on every path before returning.
+    unsafe {
+        let handle = match CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_READ_ATTRIBUTES.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            HANDLE::default(),
+        ) {
+            Ok(h) => h,
+            Err(_) => return HardLinks::Unknown("it could not be opened to read its link count"),
+        };
+        let mut info: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+        let ok = GetFileInformationByHandle(handle, &mut info).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return HardLinks::Unknown("the filesystem did not report its link count");
+        }
+        match info.nNumberOfLinks {
+            0 => HardLinks::Unknown("the filesystem reported a link count of zero"),
+            1 => HardLinks::One,
+            n => HardLinks::Many(u64::from(n)),
+        }
+    }
+}
+
+/// Neither Unix nor Windows: refuse rather than guess (no such platform ships today; this keeps the
+/// guard fail-closed by construction rather than by omission).
+#[cfg(not(any(unix, windows)))]
+fn hard_link_count(_path: &Path) -> HardLinks {
+    HardLinks::Unknown("this platform cannot report a file's link count")
+}
+
 /// Wrap a re-seal failure with wording that (a) tells the user their work is safe and (b) is
 /// distinguishable by the frontend from a tamper refusal — it deliberately does NOT carry
 /// [`UNTRUSTED_SESSION`], because the mapping is kept and retrying is the right move.
@@ -580,11 +899,17 @@ fn reseal_failed(e: VaultError) -> VaultError {
     ))
 }
 
-/// Where the staging blob for a re-seal of `blob_path` lives: the same file name plus
-/// [`RESEAL_STAGING_SUFFIX`], in the same directory (so the replacing rename stays same-volume).
-fn staging_blob_path(blob_path: &Path) -> PathBuf {
+/// Where one attempt's staging blob lives: the vault's own file name, plus [`RESEAL_STAGING_SUFFIX`],
+/// plus a per-attempt `nonce`, in the same directory (so the replacing rename stays same-volume).
+///
+/// The nonce is what stops the name being predictable (SEC-847 finding 1). It is **not** the guard —
+/// [`create_staging_exclusive`]'s `create_new` open is — but a name an attacker cannot compute in advance
+/// means they cannot even set the trap.
+fn staging_blob_path_with(blob_path: &Path, nonce: &str) -> PathBuf {
     let mut name = blob_path.file_name().unwrap_or_default().to_os_string();
     name.push(RESEAL_STAGING_SUFFIX);
+    name.push(".");
+    name.push(nonce);
     match blob_path.parent().filter(|p| !p.as_os_str().is_empty()) {
         Some(parent) => parent.join(name),
         None => PathBuf::from(name),
@@ -819,7 +1144,7 @@ impl VaultRegistry {
     ///
     /// Containment is **re-validated here** (CPE-1647 review #1) against the root recorded at unlock,
     /// immediately before the re-seal and wipe — see [`lock_with`](Self::lock_with).
-    pub fn lock(&self, blob_path: &Path) -> Result<(), VaultError> {
+    pub fn lock(&self, blob_path: &Path) -> Result<(), LockError> {
         self.lock_with_wiper(blob_path, |dir| wipe_session_dir(dir, SESSION_WIPE_SCHEME))
     }
 
@@ -829,7 +1154,7 @@ impl VaultRegistry {
         &self,
         blob_path: &Path,
         wipe: impl Fn(&Path) -> Result<(), VaultError>,
-    ) -> Result<(), VaultError> {
+    ) -> Result<(), LockError> {
         self.lock_with(blob_path, reseal_session, wipe)
     }
 
@@ -865,23 +1190,30 @@ impl VaultRegistry {
         blob_path: &Path,
         reseal: impl Fn(&Path, &Path, &SecretString) -> Result<(), VaultError>,
         wipe: impl Fn(&Path) -> Result<(), VaultError>,
-    ) -> Result<(), VaultError> {
+    ) -> Result<(), LockError> {
         // Read (don't remove) the session first, so a failing re-seal/wipe leaves the mapping in place.
         let session = self.0.lock().unwrap().get(blob_path).cloned();
         let Some(Session { dir, root, passphrase }) = session else {
             return Ok(()); // not unlocked → nothing to re-seal, nothing to wipe
         };
 
+        // Each step's failure carries its OWN code, decided here by which call returned `Err` — the
+        // reason the caller acts on can therefore never be forged by a file name inside the vault
+        // (SEC-847 finding 3).
         if let Err(e) = trustworthy_session(&root, &dir) {
             // Tampered: re-seal NOTHING, shred NOTHING, and forget the session rather than leaving the
             // vault wedged (see the doc comment).
             self.forget_session_at(blob_path, &dir);
-            return Err(e);
+            return Err(LockError::new(LockFailureCode::UntrustedSession, e));
         }
         // On Err from either step: the mapping is untouched → is_unlocked stays true → retryable, and
         // the session directory (holding the user's edits) is still there to retry from.
-        reseal(blob_path, &dir, &passphrase)?;
-        wipe(&dir)?;
+        if let Err(e) = reseal(blob_path, &dir, &passphrase) {
+            return Err(LockError::new(LockFailureCode::ResealFailed, e));
+        }
+        if let Err(e) = wipe(&dir) {
+            return Err(LockError::new(LockFailureCode::WipeFailed, e));
+        }
         self.forget_session_at(blob_path, &dir);
         Ok(())
     }
@@ -1317,17 +1649,40 @@ mod tests {
             before,
             "an unverified re-seal must NEVER replace the vault file"
         );
-        assert!(
-            !staging_blob_path(&blob_path).exists(),
+        assert_eq!(
+            staging_leftovers(&blob_path),
+            Vec::<PathBuf>::new(),
             "the staging blob must be cleaned up, not left beside the vault"
         );
         // And the working copy — the user's edit — is still there to retry from.
         assert_eq!(std::fs::read(session.join("top.txt")).unwrap(), b"edited while unlocked");
         reg.lock(&blob_path).unwrap();
-        assert!(
-            !staging_blob_path(&blob_path).exists(),
+        assert_eq!(
+            staging_leftovers(&blob_path),
+            Vec::<PathBuf>::new(),
             "a successful lock must leave no staging blob behind either"
         );
+    }
+
+    /// Every `<blob><RESEAL_STAGING_SUFFIX>*` sibling of `blob_path` currently on disk. The staging name
+    /// carries a per-attempt nonce since SEC-847 finding 1, so tests match the family, not one name.
+    fn staging_leftovers(blob_path: &Path) -> Vec<PathBuf> {
+        let parent = blob_path.parent().unwrap();
+        let prefix = format!(
+            "{}{}",
+            blob_path.file_name().unwrap().to_string_lossy(),
+            RESEAL_STAGING_SUFFIX
+        );
+        let mut found: Vec<PathBuf> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name().map(|n| n.to_string_lossy().starts_with(&prefix)).unwrap_or(false)
+            })
+            .collect();
+        found.sort();
+        found
     }
 
     /// ORDERING, pinned directly: when the re-seal fails, the wipe **never runs**. Both steps are
@@ -1478,9 +1833,13 @@ mod tests {
             "nothing may be re-sealed through a link — the vault's own contents would be replaced"
         );
         match result {
-            Err(VaultError::Format(msg)) => {
-                assert!(msg.contains(UNTRUSTED_SESSION), "the refusal must name the reason, got: {msg}");
-                assert!(msg.contains("refusing to lock"), "house-style refusal, got: {msg}");
+            Err(LockError { code, message }) => {
+                assert_eq!(
+                    code,
+                    LockFailureCode::UntrustedSession,
+                    "the frontend recovers on the CODE, not the text: {message}"
+                );
+                assert!(message.contains(UNTRUSTED_SESSION), "the reason must be named: {message}");
             }
             other => panic!("locking through an in-root link must be refused, got {other:?}"),
         }
@@ -1492,11 +1851,13 @@ mod tests {
         assert!(!reg.is_unlocked(&blob_path), "a tamper refusal must not leave the vault wedged unlocked");
     }
 
-    /// The tamper marker the frontend keys off (CPE-1654) is on the containment refusal — and is NOT on
-    /// an ordinary transient failure, which must stay retryable. If these two ever collided, a busy-file
-    /// lock failure would clear the user's banner and strand the plaintext out of UI reach.
+    /// Each failure step reports its OWN code, and — SEC-847 finding 3 — the code is decided by which
+    /// step failed, so **a file inside the vault cannot forge it**. The regression this pins: a wipe
+    /// failure naming a file called `…can no longer be trusted.txt` used to be classified as a tamper
+    /// refusal, which cleared the user's banner and told them the vault was sealed while its entire
+    /// decrypted tree was still on disk.
     #[test]
-    fn only_a_tamper_refusal_carries_the_untrusted_session_marker() {
+    fn each_lock_failure_reports_its_own_code_and_no_file_name_can_forge_one() {
         let dir = tempfile::tempdir().unwrap();
         let blob_path = sealed_vault(dir.path());
         let root = sessions_root(dir.path());
@@ -1504,27 +1865,35 @@ mod tests {
         let session = root.join("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
         reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session).unwrap();
 
-        // (a) A transient wipe failure: retryable, still unlocked, and NOT marked as untrusted.
-        let transient = reg
-            .lock_with_wiper(&blob_path, |_| {
-                Err(VaultError::Io(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    "cannot remove",
-                )))
-            })
+        // (a) A wipe failure whose message contains the tamper wording, because a FILE IN THE VAULT is
+        //     named that way and the shred error interpolates its full path. It must still be WipeFailed.
+        let hostile = format!("shred {}: cannot access — {UNTRUSTED_SESSION}", session.display());
+        let wipe_failed = reg
+            .lock_with_wiper(&blob_path, |_| Err(VaultError::Format(hostile.clone())))
             .unwrap_err();
-        assert!(
-            !transient.to_string().contains(UNTRUSTED_SESSION),
-            "a busy-file failure must not read as a tamper refusal: {transient}"
+        assert_eq!(
+            wipe_failed.code,
+            LockFailureCode::WipeFailed,
+            "a wipe failure must stay a wipe failure however the files inside the vault are named"
         );
+        assert!(
+            wipe_failed.message.contains(UNTRUSTED_SESSION),
+            "the fixture must actually carry the impersonating text, or it proves nothing"
+        );
+        assert!(reg.is_unlocked(&blob_path), "a wipe failure must leave the vault unlocked (retryable)");
+
+        // (b) A re-seal failure is its own code, and also leaves the vault unlocked.
+        let reseal_failed_err = reg
+            .lock_with(
+                &blob_path,
+                |_, _, _| Err(VaultError::Format(hostile.clone())),
+                |_| Ok(()),
+            )
+            .unwrap_err();
+        assert_eq!(reseal_failed_err.code, LockFailureCode::ResealFailed);
         assert!(reg.is_unlocked(&blob_path));
 
-        // (b) A re-seal failure: also retryable, also not a tamper refusal, and it says so plainly.
-        let reseal_err = reseal_failed(VaultError::Io(std::io::Error::other("disk full"))).to_string();
-        assert!(!reseal_err.contains(UNTRUSTED_SESSION), "{reseal_err}");
-        assert!(reseal_err.contains("re-seal"), "the frontend keys off this wording: {reseal_err}");
-
-        // (c) The containment refusal, built by the same helper `lock` uses, DOES carry the marker.
+        // (c) Only the containment step produces UntrustedSession — and it drops the mapping.
         let outside = dir.path().join("Documents");
         precious_dir(&outside);
         let tamper = trustworthy_session(&root, &outside).unwrap_err().to_string();
@@ -2527,5 +2896,162 @@ mod tests {
         let orphan = sessions_root.join("55555555-5555-5555-5555-555555555555");
         sample_folder(&orphan);
         assert!(orphan.join("top.txt").exists(), "an un-swept orphan still holds its plaintext");
+    }
+
+    // ================= SECURITY AUDIT (PR #847) — throwaway exploit tests =========================
+
+    /// SEC-847-1: the re-seal's link refusal only covers the session dir's ROOT. A **hard link**
+    /// planted as a CHILD is not a reparse point, so `collect_dir`'s `is_symlink()` skip does not see
+    /// it: the re-seal reads the victim's bytes and seals them into the attacker's blob, and the wipe
+    /// then shreds the victim's file in place through the same alias.
+    ///
+    /// Every primitive is a registered IPC command (`create_hard_link`, `vault_unlock`, `vault_lock`)
+    /// — the same adversary CPE-1647 already models with `createJunction` + `deletePermanent`.
+    #[test]
+    fn sec847_hard_link_child_seals_and_shreds_a_file_outside_the_session_dir() {
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        let reg = VaultRegistry::default();
+
+        // The victim: the user's own file, well outside any app-owned scratch space.
+        let victim_dir = dir.path().join("Documents");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        let victim = victim_dir.join("taxes.xlsx");
+        std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
+
+        // (1) A perfectly legitimate, contained unlock of the ATTACKER's own vault.
+        let session = root.join("cccccccc-cccc-cccc-cccc-cccccccccccc");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session).unwrap();
+
+        // (2) createHardLink(victim, <session>/loot.xlsx) — no elevation, no Developer Mode.
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &session.join("loot.xlsx").to_string_lossy()).is_err() {
+            eprintln!("SKIPPED sec847 hard-link test: this OS/volume refused a hard link.");
+            return;
+        }
+
+        // (3) vault_lock — the whole exploit is this one call.
+        reg.lock(&blob_path).unwrap();
+
+        // IMPACT B (confidentiality): the victim's bytes are now inside the ATTACKER's vault, which
+        // the attacker can open with a passphrase they chose.
+        let loot = root.join("dddddddd-dddd-dddd-dddd-dddddddddddd");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &loot).unwrap();
+        let exfiltrated = std::fs::read(loot.join("loot.xlsx"));
+        eprintln!("EXFIL: {exfiltrated:?}");
+        assert!(
+            exfiltrated.is_err(),
+            "a file from OUTSIDE the session dir was sealed into the vault: {exfiltrated:?}"
+        );
+
+        // IMPACT A (integrity/destruction): the victim's file is gone/overwritten.
+        let after = std::fs::read(&victim);
+        assert!(
+            after.as_deref().ok() == Some(b"VICTIM PLAINTEXT - the only copy".as_ref()),
+            "the victim's file outside the session dir was DESTROYED by the wipe: {after:?}"
+        );
+    }
+
+    /// SEC-847-3: emptying the session dir (no link, no race) makes `lock` REPLACE the vault with an
+    /// empty one and report success. A **vanished** session dir keeps the blob's contents; an
+    /// **emptied** one destroys them. Before CPE-1645 neither could touch the blob.
+    #[test]
+    fn sec847_emptying_the_session_dir_destroys_the_whole_vault_and_lock_reports_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        let reg = VaultRegistry::default();
+        let session = root.join("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session).unwrap();
+
+        // `deletePermanent` on the session dir's CONTENTS — the dir itself survives, so every guard
+        // (containment, symlink, exists) still passes.
+        for e in std::fs::read_dir(&session).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() { std::fs::remove_dir_all(&p).unwrap() } else { std::fs::remove_file(&p).unwrap() }
+        }
+
+        reg.lock(&blob_path).expect("lock reports SUCCESS");
+
+        let after = root.join("00000000-0000-0000-0000-00000000ffff");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &after).unwrap();
+        let survivors: Vec<_> = std::fs::read_dir(&after).unwrap().map(|e| e.unwrap().file_name()).collect();
+        eprintln!("VAULT CONTENTS AFTER: {survivors:?}");
+        assert!(!survivors.is_empty(), "the entire vault was DESTROYED and lock reported success");
+    }
+
+    /// SEC-847-2: unlike the wipe, the re-seal has NO independent link guard of its own. Neutralise
+    /// nothing — just call the re-seal the way a TOCTOU race reaches it (after `trustworthy_session`
+    /// has already passed) and it happily seals the link target.
+    ///
+    /// Compare `wipe_session_dir`, which refuses this exact shape on its own (CPE-1647 review #1,
+    /// "belt-and-braces: (2) and (3) fail closed independently"). Step (2) of the re-seal has only the
+    /// braces.
+    #[test]
+    fn sec847_reseal_has_no_independent_link_guard_of_its_own() {
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+
+        let victim = dir.path().join("Documents");
+        precious_dir(&victim);
+
+        std::fs::create_dir_all(&root).unwrap();
+        let session = root.join("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        #[cfg(windows)]
+        let made = try_junction_dir(&victim, &session);
+        #[cfg(not(windows))]
+        let made = try_symlink_dir(&victim, &session);
+        if !made {
+            eprintln!("SKIPPED sec847 reseal-guard test: cannot create a directory link here.");
+            return;
+        }
+        let before = std::fs::read(&blob_path).unwrap();
+
+        // This is exactly what `lock_with` calls once `trustworthy_session` has returned Ok.
+        let result = reseal_session(&blob_path, &session, &pass("pw"));
+
+        assert!(
+            result.is_err(),
+            "the re-seal must refuse a link at the session path on its own, like wipe_session_dir does"
+        );
+        assert_eq!(
+            std::fs::read(&blob_path).unwrap(),
+            before,
+            "the vault's real contents were REPLACED by the link target's files"
+        );
+    }
+
+    /// SEC-847-4: the staging path `<blob>.cpe-reseal-tmp` is DETERMINISTIC and is opened with
+    /// `std::fs::write` (CREATE_ALWAYS / O_CREAT|O_TRUNC — no O_EXCL, no symlink_metadata check).
+    /// Pre-create that name as a hard link to a victim file and the next lock truncates the victim's
+    /// inode and fills it with vault ciphertext. No race: the attacker plants it once and waits.
+    #[test]
+    fn sec847_precreated_staging_hard_link_destroys_an_arbitrary_file() {
+        let dir = worktree_tempdir();
+        let blob_path = sealed_vault(dir.path());
+        let root = sessions_root(dir.path());
+        let reg = VaultRegistry::default();
+
+        let victim = dir.path().join("tax-2025.xlsx");
+        std::fs::write(&victim, b"VICTIM SPREADSHEET - the only copy").unwrap();
+
+        // The attacker only needs the vault's path, which `list_dir` hands out.
+        let staging = staging_blob_path(&blob_path);
+        if crate::links::create_hard_link(&victim.to_string_lossy(), &staging.to_string_lossy()).is_err() {
+            eprintln!("SKIPPED sec847 staging test: hard link refused on this volume.");
+            return;
+        }
+
+        let session = root.join("12121212-1212-1212-1212-121212121212");
+        reg.unlock(SessionsRoot::new(&root), &blob_path, &pass("pw"), &session).unwrap();
+        reg.lock(&blob_path).expect("lock reports SUCCESS to the user");
+
+        let after = std::fs::read(&victim).unwrap_or_default();
+        eprintln!("VICTIM AFTER LOCK: len={} first8={:?}", after.len(), &after[..after.len().min(8)]);
+        assert_eq!(
+            after, b"VICTIM SPREADSHEET - the only copy",
+            "an unrelated file was DESTROYED (and replaced with vault ciphertext) by locking"
+        );
     }
 }

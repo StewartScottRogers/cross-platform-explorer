@@ -7200,18 +7200,26 @@ async fn vault_unlock(
 /// `createJunction`) can replace it with a link afterwards, so the *path* being contained at unlock is not
 /// the same claim as the *directory* being re-sealed and wiped. A failed re-check re-seals nothing, wipes
 /// nothing, forgets the session, and surfaces the refusal here rather than reporting a successful lock.
+///
+/// The error is a **structured** `LockError { code, message }`, not a string (SEC-847 finding 3): the
+/// frontend's recovery differs completely between the three failure shapes, and the messages interpolate
+/// file paths — so a file *inside* the vault could otherwise choose its name to impersonate a tamper
+/// refusal and make the UI report a vault sealed while its whole decrypted tree was still on disk.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn vault_lock(
     state: tauri::State<'_, cpe_server::vault_manager::VaultRegistry>,
     blob_path: String,
-) -> Result<(), String> {
+) -> Result<(), cpe_server::vault_manager::LockError> {
     let registry = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        registry.lock(Path::new(&blob_path)).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || registry.lock(Path::new(&blob_path)))
+        .await
+        .map_err(|e| cpe_server::vault_manager::LockError {
+            // A join failure means the blocking task itself died; nothing was re-sealed or wiped, so the
+            // vault is still unlocked and a retry is the right advice.
+            code: cpe_server::vault_manager::LockFailureCode::ResealFailed,
+            message: e.to_string(),
+        })?
 }
 
 /// The lifecycle status of `blob_path`: is-vault (by magic), unlocked (from the registry), and whether a
