@@ -299,8 +299,13 @@ fn resolves_inside(folder: &Path, dest: &Path) -> Result<bool, VaultError> {
         // A bare file name with no parent resolves against the current dir.
         None => std::fs::canonicalize(".")?,
     };
-    // `file_name()` is `None` for a path ending in `..` or a root/prefix — nothing is created at such a
-    // name, so the directory it denotes is the landing site.
+    // `file_name()` is `None` for a path ending in `..` or a root/prefix. Fall back to `parent_canon` and
+    // be precise about what that is (SEC-861 nit 2): for `F/..` this yields `F`, which is NOT the
+    // directory `F/..` denotes — that is F's parent. It is deliberately the conservative approximation:
+    // it can only ever answer "inside" where the true landing might be outside, i.e. it over-refuses and
+    // never under-refuses, and the writer's `rename` onto a directory errors regardless. An earlier
+    // comment here claimed the fallback *was* the landing site, which is the category of claim this whole
+    // PR exists to stop making.
     let dest_landing = match dest.file_name() {
         Some(name) => parent_canon.join(name),
         None => parent_canon,

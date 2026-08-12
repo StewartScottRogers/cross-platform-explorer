@@ -340,6 +340,16 @@ as a normal location; locking **re-seals that session directory back into the bl
     `std::fs::read`); only writes replace it. Pinned end to end (seal → unlock → edit → lock → unlock,
     plus the create half) by `a_symlinked_vault_path_is_replaced_by_both_create_and_lock_never_written_through`,
     which skips loudly where the OS will not create a file symlink.
+
+    **It also closed a sharper, unnamed instance of the same data-loss class (SEC-861 re-audit).** The
+    write-through hazard was never only about symlinks: a `.cpevault` **hard-linked** to a name inside the
+    folder being shredded had the same shape, and needs **no elevation and no Developer Mode on NTFS** —
+    unlike the symlink form. On `main`, `fs::write` wrote the vault *through* the link into the shared
+    inode and `shred_tree` then overwrote that inode, so `create_vault` returned `Ok(())` with **both**
+    copies gone (measured: `plaintext_survives=false vault_somewhere=false`). Stage-beside + `rename`
+    gives the vault a fresh inode, so the shred of the inside name cannot reach it (`vault_somewhere=true`
+    on this branch). The replace-don't-follow decision is therefore load-bearing against the *cheaper*
+    variant, not only the privileged one.
   - **Lock failures are reported by a structured code, not by matching text** (SEC-847 finding 3). The
     frontend's recovery differs completely between the failure shapes — one clears the "unlocked" banner
     and refuses a retry, the others must keep the banner and offer one — and the messages interpolate
