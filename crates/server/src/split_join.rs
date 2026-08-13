@@ -578,8 +578,13 @@ mod tests {
     /// folder but unstattable came back "manifest not found". It runs *before* any part is touched, so
     /// `join_files` could give the wrong answer without ever reaching the line this ticket fixed.
     ///
-    /// Deliberately pure: the classification is tested here on every OS and account, and the end-to-end
-    /// test below constructs a real unstattable entry. Same split as `part_stat_error`.
+    /// Deliberately pure: the classification is tested here on every OS and account, without depending on
+    /// permission bits. Same split as `part_stat_error`.
+    ///
+    /// The end-to-end test below makes a **part** unstattable, not a manifest — it does not exercise this
+    /// guard, and an earlier version of this comment implied it did. The wiring from `join_files` into
+    /// `manifest_must_be_a_file` is covered instead by
+    /// `join_files_reports_an_absent_manifest_and_a_directory_in_its_place_differently`.
     #[test]
     fn a_manifest_that_cannot_be_stat_ed_is_not_reported_as_not_found() {
         let p = Path::new("some/dir/a.bin.split-manifest.json");
@@ -622,6 +627,44 @@ mod tests {
         let part = part_stat_error(2, p, &e);
         assert!(!part.contains("missing"), "{part}");
         assert!(part.contains("Access is denied.") && with_part.contains("Access is denied."));
+    }
+
+    /// The classifier above is pure, so it proves the *taxonomy* and nothing about the wiring. The PR #869
+    /// reviewer's point: swap the `Err(NotFound)` and `Ok(_)` arms in `manifest_must_be_a_file` and the
+    /// pure test still passes, because it never calls it. This drives the real `join_files` at both, which
+    /// is what pins which arm each condition actually reaches.
+    ///
+    /// Needs no unstattable entry and therefore no privileges — the two conditions it covers (nothing
+    /// there, and a directory wearing a manifest's name) are constructible on every OS and CI account, so
+    /// unlike the part test it can never skip.
+    #[test]
+    fn join_files_reports_an_absent_manifest_and_a_directory_in_its_place_differently() {
+        let d = scratch("manifest-wiring");
+        let out = d.join("out.bin");
+
+        // 1. Genuinely absent manifest — must still say "not found". The honest case.
+        let absent = join_files(&d.join("a.bin.001"), &out).unwrap_err();
+        assert!(absent.contains("manifest not found"), "a real absence must say so: {absent}");
+        assert!(absent.contains("for part a.bin.001"), "and which part sent us looking: {absent}");
+
+        // 2. A *directory* wearing the manifest's name. `!Path::is_file()` reported this as "not found"
+        //    too, which sent the user looking for a file that is right there — as a folder.
+        let manifest_dir = d.join(format!("b.bin{MANIFEST_SUFFIX}"));
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let wrong_type = join_files(&d.join("b.bin.001"), &out).unwrap_err();
+        assert!(
+            !wrong_type.contains("not found"),
+            "a directory in the manifest's place is not an absence: {wrong_type}"
+        );
+        assert!(wrong_type.contains("not a file"), "it must say what is actually wrong: {wrong_type}");
+
+        // Same, reached by naming the manifest directly rather than a numbered part — the other call site.
+        let direct = join_files(&manifest_dir, &out).unwrap_err();
+        assert!(!direct.contains("not found"), "{direct}");
+        assert!(direct.contains("not a file"), "{direct}");
+
+        assert!(!out.exists(), "no output should be left behind on failure");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
