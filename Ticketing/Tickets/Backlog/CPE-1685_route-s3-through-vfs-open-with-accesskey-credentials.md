@@ -133,3 +133,14 @@ must be a provider to route to).
 
 `crates/vfs/src/lib.rs` and `crates/vfs/src/connect.rs` are the two files; **CPE-1514** (the FTP scheme arm)
 is the worked example to copy.
+
+## Second prerequisite: CPE-1709
+
+Added by the Foreman from the PR #890 review, 2026-08-13.
+
+**CPE-1709 must also land before this ticket.** Downloading an S3 key containing : silently writes a
+0-byte file on Windows — the bytes go into an NTFS alternate data stream and the user sees an empty file
+named only the part before the colon. Measured through the real sink, not inferred. It is a data-integrity
+bug, not a security one (traversal was checked and does not escape).
+
+This ticket is what makes it reachable, so it inherits the gate the same way it inherits CPE-1704's.
