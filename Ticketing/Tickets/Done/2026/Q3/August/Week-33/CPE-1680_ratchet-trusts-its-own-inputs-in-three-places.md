@@ -3,11 +3,11 @@ id: CPE-1680
 title: The GUI-smoke ratchet trusts its own inputs in three places — an unknown test state, an unescaped title, and an unevidenced exemption
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
