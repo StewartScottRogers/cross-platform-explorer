@@ -29,6 +29,10 @@
 //! Because the canonical URI must match the path actually sent byte for byte, the caller hands this
 //! module a path that is **already encoded** - by the very same [`encode_path`] the URL builder in
 //! [`crate::S3Config`] uses. One encoder, one output, used on both sides: they cannot drift.
+//!
+//! The **query** has the same requirement and the same answer: [`canonical_query`] is public, and
+//! [`crate::RequestTarget::url_with_query`] builds the on-wire URL from it, so the request layer never
+//! has to re-implement the encode-and-sort rule and then drift from what was signed (CPE-1689).
 
 use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
@@ -126,7 +130,14 @@ pub fn encode_query_component(s: &str) -> String {
 
 /// Build the canonical query string: encode every name and value, then sort by encoded name and, for
 /// repeated names, by encoded value. A parameter with no value still contributes its `=`.
-fn canonical_query(query: &[(&str, &str)]) -> String {
+///
+/// **Public because the string it returns is also the one that goes on the wire.** SigV4 signs the
+/// canonical query, so a request layer that builds its own `?a=1&b=2` can encode or order a parameter
+/// differently from what was signed and get an opaque `SignatureDoesNotMatch` - the exact failure the
+/// single-encoder rule already prevents for the path. Callers build the URL with
+/// [`crate::RequestTarget::url_with_query`], which calls this function, and pass the same `query` slice
+/// to [`SigningInput::query`]: one construction, two uses, no way to drift (CPE-1689).
+pub fn canonical_query(query: &[(&str, &str)]) -> String {
     let mut pairs: Vec<(String, String)> = query
         .iter()
         .map(|(k, v)| (encode_query_component(k), encode_query_component(v)))
@@ -136,9 +147,13 @@ fn canonical_query(query: &[(&str, &str)]) -> String {
 }
 
 /// Normalize one header value for signing: trim the ends, and collapse each run of internal spaces/tabs
-/// to a single space. (SigV4 exempts quoted strings from the collapse; no header this crate signs - host,
-/// range, the `x-amz-*` family - is ever a quoted string, so the simple rule is applied uniformly and
-/// noted here rather than silently.)
+/// to a single space, uniformly.
+///
+/// Uniformly is not a shortcut. An earlier version of this comment claimed SigV4 exempts quoted strings
+/// from the collapse and that this crate deliberately deviates; it does not, and there is no deviation.
+/// The published `get-header-value-trim` vector signs `"a   b   c"` (quotes included) and its canonical
+/// request carries `"a b c"` - collapsed **inside** the quotes. The claim was deleted at CPE-1689
+/// because it invited a future "fix" that would break a passing vector.
 fn normalize_header_value(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     let mut in_space = false;
@@ -182,11 +197,12 @@ fn canonical_headers(headers: &[(&str, &str)]) -> (String, String) {
 ///
 /// `encoded_path` is the absolute request path **already percent-encoded** by [`encode_path`], exactly as
 /// it will be sent; see the module docs. `headers` must include `host` - S3 rejects a signature that does
-/// not cover it - and is signed exactly as given, so a caller signs the headers that matter rather than
-/// every header the HTTP client happens to add.
+/// not cover it, and [`Signer::sign`] enforces that rather than leaving it as advice - and is signed
+/// exactly as given, so a caller signs the headers that matter rather than every header the HTTP client
+/// happens to add.
 #[derive(Debug, Clone, Copy)]
 pub struct SigningInput<'a> {
-    /// Uppercase HTTP method (`GET`, `PUT`, ...).
+    /// Uppercase HTTP method (`GET`, `PUT`, ...). Checked, not assumed: see [`Signer::sign`].
     pub method: &'a str,
     /// Absolute, already-encoded request path (`/` for the bucket root).
     pub encoded_path: &'a str,
@@ -248,11 +264,21 @@ impl<'a> Signer<'a> {
 
     /// Sign `input`, returning every stage.
     ///
-    /// Fails only on a malformed `amz_date`; the error names the expected shape and never echoes the
-    /// secret (nothing in this module ever formats the secret into a string other than the HMAC input).
+    /// Fails on a malformed `amz_date`, a method that is not an uppercase HTTP token, or a header list
+    /// with no `host` in it. Each of those three would otherwise produce a signature that derives
+    /// cleanly and can only fail at the server as an opaque `SignatureDoesNotMatch` - the failure mode
+    /// this module exists to keep out of the user's hands. No error ever echoes the secret (nothing in
+    /// this module formats it into a string other than the HMAC input).
     pub fn sign(&self, input: &SigningInput<'_>) -> Result<SignedRequest, String> {
+        validate_method(input.method)?;
         let date = short_date(input.amz_date)?;
         let (header_block, signed_headers) = canonical_headers(input.headers);
+        if !signed_headers.split(';').any(|n| n == "host") {
+            return Err(format!(
+                "s3: the headers to sign must include \"host\" - SigV4 covers it and S3 rejects a \
+                 signature that does not; got [{signed_headers}]"
+            ));
+        }
 
         let canonical_request = format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
@@ -288,6 +314,22 @@ impl<'a> Signer<'a> {
             authorization,
         })
     }
+}
+
+/// Reject an HTTP method that is not already an uppercase token.
+///
+/// The method is the first line of the canonical request, byte for byte, so `"get"`, `"Get"` and
+/// `" GET "` each sign to a different - and silently wrong - signature. Uppercasing here would fix the
+/// signature while quietly disagreeing with whatever the caller's HTTP client puts on the request line,
+/// so this refuses instead: the field is documented as uppercase, and the crate's rule is that failing
+/// loudly beats doing something different in silence (CPE-1689).
+fn validate_method(method: &str) -> Result<(), String> {
+    if method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(format!(
+            "s3: HTTP method must be an uppercase token with no whitespace (GET, PUT, ...), got {method:?}"
+        ));
+    }
+    Ok(())
 }
 
 /// The `YYYYMMDD` prefix of a `YYYYMMDDTHHMMSSZ` timestamp, validated. The shape is checked rather than
@@ -598,10 +640,23 @@ mod tests {
             })
             .unwrap();
 
-        assert!(
-            signed.canonical_request.starts_with("GET\n/\nmax-keys=2&prefix=J\n"),
-            "got:\n{}",
-            signed.canonical_request
+        // Equality, not `starts_with`: a prefix assertion would have tolerated anything appended after
+        // the part being checked, which is precisely what a canonical-request bug looks like. The
+        // pinned signature below carried the load on its own before CPE-1689; now the vector text does
+        // too, so a failure says *where* it diverged instead of only *that* it did.
+        assert_eq!(
+            signed.canonical_request,
+            concat!(
+                "GET\n",
+                "/\n",
+                "max-keys=2&prefix=J\n",
+                "host:examplebucket.s3.amazonaws.com\n",
+                "x-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n",
+                "x-amz-date:20130524T000000Z\n",
+                "\n",
+                "host;x-amz-content-sha256;x-amz-date\n",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            )
         );
         assert_eq!(
             signed.signature,
@@ -678,6 +733,123 @@ mod tests {
             "got:\n{}",
             signed.canonical_request
         );
+    }
+
+    /// `get-header-value-trim` from AWS's published SigV4 test suite — the vector that settles what the
+    /// collapse rule does inside a quoted string.
+    ///
+    /// It matters because the module used to carry a comment claiming SigV4 exempts quoted strings from
+    /// the collapse and that this crate deliberately deviates. It does not: the published canonical
+    /// request for this vector contains `my-header2:"a b c"`, collapsed **inside** the quotes, which is
+    /// what the code already produced. The comment described a deviation that did not exist and invited
+    /// a future "fix" that would have broken this vector; it is deleted, and this test is what stops the
+    /// claim coming back (CPE-1689).
+    ///
+    /// Scope of the evidence: the **canonical request** below is the published vector text. The
+    /// signature is not asserted here because the suite's `.authz` line for this vector was not
+    /// re-derived from the published file — the canonical request is the stage the claim was about, and
+    /// the vectors above already pin the stages after it.
+    #[test]
+    fn header_value_whitespace_collapses_inside_a_quoted_string_too() {
+        let creds = suite_credentials();
+        let signer = Signer::for_service(&creds, "us-east-1", "service");
+        let signed = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[
+                    ("Host", "example.amazonaws.com"),
+                    ("My-Header1", "value1"),
+                    ("My-Header2", "\"a   b   c\""),
+                    ("X-Amz-Date", "20150830T123600Z"),
+                ],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20150830T123600Z",
+            })
+            .unwrap();
+
+        assert_eq!(
+            signed.canonical_request,
+            concat!(
+                "GET\n",
+                "/\n",
+                "\n",
+                "host:example.amazonaws.com\n",
+                "my-header1:value1\n",
+                "my-header2:\"a b c\"\n",
+                "x-amz-date:20150830T123600Z\n",
+                "\n",
+                "host;my-header1;my-header2;x-amz-date\n",
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            ),
+            "get-header-value-trim.creq"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // What `sign` refuses (CPE-1689). Each of these produced a signature that could only fail at the
+    // server, as an opaque `SignatureDoesNotMatch` with nothing in it to say why.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The `host` header is documented as mandatory — S3 will not accept a signature that does not cover
+    /// it. Signing without one used to succeed and emit `SignedHeaders=`, producing exactly the opaque
+    /// server-side failure this module exists to prevent. The error names the missing header.
+    #[test]
+    fn signing_without_a_host_header_is_refused_by_name() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1");
+        let sign_with = |headers: &[(&str, &str)]| {
+            signer.sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/test.txt",
+                query: &[],
+                headers,
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+        };
+
+        let err = sign_with(&[]).unwrap_err();
+        assert!(err.contains("host"), "the error must name the missing header: {err}");
+        assert!(!err.contains("wJalrXUtnFEMI"), "the secret must never reach an error message: {err}");
+
+        // A header list that has other headers but no host is refused just the same.
+        let err = sign_with(&[("x-amz-date", "20130524T000000Z")]).unwrap_err();
+        assert!(err.contains("host"), "{err}");
+        // A name that merely *contains* "host" is not a host header.
+        assert!(sign_with(&[("x-forwarded-host", "example.com")]).is_err());
+
+        // Any capitalisation of the real thing is accepted — the canonical form is lowercased first.
+        assert!(sign_with(&[("HOST", "examplebucket.s3.amazonaws.com")]).is_ok());
+        assert!(sign_with(&[(" Host ", "examplebucket.s3.amazonaws.com")]).is_ok());
+    }
+
+    /// The method is the first line of the canonical request byte for byte, so `"get"`, `"Get"` and
+    /// `" GET "` each signed to a different and silently wrong signature. They are refused.
+    #[test]
+    fn a_method_that_is_not_an_uppercase_token_is_refused() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1");
+        let sign_method = |method: &str| {
+            signer.sign(&SigningInput {
+                method,
+                encoded_path: "/test.txt",
+                query: &[],
+                headers: &[("host", "examplebucket.s3.amazonaws.com")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+        };
+
+        for bad in ["get", "Get", " GET ", "GET ", "", "GET\r\nX-Injected: 1", "G3T"] {
+            let err = sign_method(bad).unwrap_err();
+            assert!(err.contains("uppercase token"), "for {bad:?}: {err}");
+            assert!(!err.contains("wJalrXUtnFEMI"), "{err}");
+        }
+        for good in ["GET", "PUT", "HEAD", "DELETE", "POST"] {
+            assert!(sign_method(good).is_ok(), "rejected a valid method {good:?}");
+        }
     }
 
     /// An empty query value still contributes its `=` - `?acl` signs as `acl=`, which is exactly the
