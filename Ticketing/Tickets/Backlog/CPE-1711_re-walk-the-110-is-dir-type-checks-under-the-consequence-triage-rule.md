@@ -1,5 +1,5 @@
 ---
-id: CPE-1710
+id: CPE-1711
 title: Re-walk the ~110 `.is_dir()` type-checks under the consequence-triage rule
 type: bug
 priority: Medium
@@ -62,5 +62,11 @@ each one, read the **false branch** and classify:
 Filed by the CPE-1705 worker, 2026-08-13, as that ticket's PR promised — the ~110-site re-walk was sized
 up front and split out deliberately rather than quietly narrowed.
 
-Related: **CPE-1678**, **CPE-1687**, **CPE-1692**, **CPE-1696**, **CPE-1705** (the same bug class, six
-rounds), **CPE-1673** (the taxonomy).
+Originally filed as CPE-1710 and renumbered: the Foreman had taken that id for the sibling ticket below
+while this one was mid-round. Nothing outside this branch ever referenced the old number.
+
+Related: **CPE-1710** — the other follow-up out of the same PR #893 review pass, and the closer sibling of
+the two. It covers `copilot`'s two `fs::rename`-destructive sites missing `symlink_slot_refusal`; this one
+covers the `.is_dir()` family. Both are cases of *"the enumeration was right and the sorting was wrong"*,
+and a reader landing on either should read the other. **CPE-1678**, **CPE-1687**, **CPE-1692**,
+**CPE-1696**, **CPE-1705** (the same bug class, six rounds), **CPE-1673** (the taxonomy).

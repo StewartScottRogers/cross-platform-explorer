@@ -355,7 +355,9 @@ What I did in round 2:
 5. **One genuinely missed site**, inside the sweep this PR claimed: `sidecar/host/src/bin/create_sidecar.rs`
    — `if root.exists()` guarding `File::create` + `write_all` over a whole crate tree. Dev-only CLI, low
    severity, now fixed rather than disclosed.
-6. **Filed CPE-1710** for the ~110 `.is_dir()` re-walk, which this PR had promised and not done.
+6. **Filed CPE-1711** for the ~110 `.is_dir()` re-walk, which this PR had promised and not done. (Filed
+   first as CPE-1710 and renumbered — the Foreman had taken that id for the sibling follow-up on
+   `copilot`'s missing `symlink_slot_refusal`, filed from the same review pass.)
 
 ### The headline finding — RETRACTED, see round 2 above. Preserved for the record.
 

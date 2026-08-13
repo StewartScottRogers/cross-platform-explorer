@@ -538,8 +538,11 @@ pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
         // and enumerate the file to rewrite its ACL, and it cannot do that while the containing directory
         // still denies list-directory: the call fails silently (this helper ignores its exit status), the
         // target keeps its `(R)` deny, and the caller's `fs::read` of the victim then dies with
-        // `PermissionDenied` — which reads exactly like the test's own byte assertion failing. Measured:
-        // reordering target-first → parent-first turned four red CPE-1705 tests green.
+        // `PermissionDenied` — which reads exactly like the test's own byte assertion failing, so the
+        // next person debugs a guard that was never broken. Measured: reordering target-first →
+        // parent-first turned four red CPE-1705 tests green in this crate. The two `src-tauri` tests that
+        // stage the same denies inline (they cannot call this `pub(crate)` helper) needed the identical
+        // reordering separately — see their `Restore` impls.
         if let Ok(user) = std::env::var("USERNAME") {
             let mut dirs = vec![parent];
             if let Some(real_parent) = target.parent() {

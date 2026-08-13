@@ -15251,9 +15251,12 @@ overlay / overlay rw,relatime 0 0
             impl Drop for Restore<'_> {
                 fn drop(&mut self) {
                     if let Ok(user) = std::env::var("USERNAME") {
-                        // PARENT FIRST, target last: `icacls <file>` cannot rewrite a file's ACL while
-                        // the containing directory still denies list-directory — it fails silently and
-                        // the target keeps its deny. See `cpe_server::fsutil::undo_deny_stat_of`.
+                        // **PARENT FIRST, target last, and the order is not cosmetic.** `icacls <file>`
+                        // cannot rewrite a file's ACL while the containing directory still denies
+                        // list-directory: it fails silently, the target keeps its `(R)` deny, and the
+                        // `fs::read(&victim)` below then dies with `PermissionDenied` — which reads
+                        // exactly like this test's own byte assertion failing, sending the next person
+                        // after a guard that was never broken. See `cpe_server::fsutil::undo_deny_stat_of`.
                         for p in [self.2, self.0] {
                             let _ = std::process::Command::new("icacls")
                                 .arg(p)
@@ -15465,8 +15468,13 @@ overlay / overlay rw,relatime 0 0
                     if let Ok(user) = std::env::var("USERNAME") {
                         // Both denies come off — the target's `(R)` and the parent's `(RD)`. Leaving the
                         // parent unlistable would break `remove_dir_all` and the next test in that tree.
-                        // PARENT FIRST: `icacls <file>` cannot rewrite a file's ACL while its directory
-                        // still denies list-directory. See `cpe_server::fsutil::undo_deny_stat_of`.
+                        //
+                        // **PARENT FIRST, target last, and the order is not cosmetic.** `icacls <file>`
+                        // cannot rewrite a file's ACL while its directory still denies list-directory:
+                        // it fails silently, the target keeps its `(R)` deny, and the `fs::read(&victim)`
+                        // below then dies with `PermissionDenied` — which reads exactly like this test's
+                        // own byte assertion failing, sending the next person after a guard that was
+                        // never broken. See `cpe_server::fsutil::undo_deny_stat_of`.
                         for p in [self.1, self.0] {
                             let _ = std::process::Command::new("icacls")
                                 .arg(p)
