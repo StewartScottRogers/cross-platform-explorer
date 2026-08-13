@@ -547,6 +547,10 @@ mod tests {
                 }
                 "RNTO" => match rename_from.take() {
                     Some(from) => {
+                        // CPE-1710: this is an FTP server implementing RNFR/RNTO against its own sandbox
+                        // root — the wire protocol's rename semantics, not an app-side destination guard.
+                        // A test rig; the client, not this crate, decides what may be replaced.
+                        #[allow(clippy::disallowed_methods)]
                         match std::fs::rename(real_path(&root, &from), real_path(&root, &arg)) {
                             Ok(()) => send(&mut ctrl, "250 Renamed\r\n"),
                             Err(_) => send(&mut ctrl, "550 Rename failed\r\n"),

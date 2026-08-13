@@ -629,6 +629,9 @@ mod tests {
                     .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default()))
                     .unwrap_or_default();
                 let dest_real = root.join(dest_path.trim_start_matches('/'));
+                // CPE-1710: WebDAV MOVE against this server's own sandbox root — the protocol's
+                // semantics (MOVE with Overwrite is defined to replace), not an app-side guard.
+                #[allow(clippy::disallowed_methods)]
                 let code = if std::fs::rename(&real, &dest_real).is_ok() { 201 } else { 404 };
                 let _ = req.respond(tiny_http::Response::empty(code));
             }

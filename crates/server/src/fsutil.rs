@@ -238,6 +238,40 @@ pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
     clobber_refusal(target, occupied).or_else(|| symlink_slot_refusal(target))
 }
 
+/// **Guard and rename in one call — the only sanctioned way to `fs::rename` onto a user-named slot**
+/// (CPE-1710 round 3, on the PR #895 reviewer's recommendation).
+///
+/// [`rename_slot_refusal`] on `target`, then the rename. Returns the guard's refusal or the OS's error,
+/// both already stringified, because every call site did exactly that mapping by hand.
+///
+/// # Why this exists when `rename_slot_refusal` already did the deciding
+///
+/// The refusal helper made it possible to guard correctly; it did nothing to make guarding *happen*. The
+/// source scan in this module's tests was round 1's answer to that and it was oversold: the PR #895
+/// reviewer and UAT independently smuggled a destructive rename past it three ways (>25 lines from the
+/// guard, `use std::fs::rename as move_entry`, one call deep in a helper), and it is structurally blind to
+/// the more dangerous case — a rename with **no** guard at all.
+///
+/// `clippy.toml`'s `disallowed-methods` closes both. It resolves the **path**, not the text, so an alias,
+/// a distance or a helper indirection cannot dodge it, and it fires on *every* `std::fs::rename` rather
+/// than on a recognised-wrong shape. This function carries the single `#[allow]` for the guarded path, so
+/// a site either calls this or writes its own `#[allow(clippy::disallowed_methods)]` **with a reason** —
+/// which is the real win: the out-of-class justification ends up in the code, at the site, permanently,
+/// instead of in a PR description nobody reads twice. Round 1's lived in a PR description and was wrong
+/// twice.
+///
+/// **Known gap, stated rather than papered over:** `disallowed_methods` cannot see a rename reached
+/// through a `dyn` trait object, so a `Provider::rename` implementation is not covered by it.
+pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(), String> {
+    if let Some(e) = rename_slot_refusal(target, occupied) {
+        return Err(e);
+    }
+    // The one sanctioned `fs::rename` in the codebase: it is three lines below the guard that makes it
+    // safe, and nothing can get between them.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::rename(src, target).map_err(|e| e.to_string())
+}
+
 /// Whether a directory entry is a symlink (without following it). Used to avoid symlink cycles in the
 /// recursive walks (CPE-609/611).
 pub fn entry_is_symlink(entry: &std::fs::DirEntry) -> bool {
@@ -882,11 +916,15 @@ mod tests {
     }
 
     /// **A lint for one specific mistake — NOT a structural guarantee** (CPE-1710, scoped down by the
-    /// PR #895 UAT).
+    /// PR #895 UAT and reviewer).
     ///
-    /// It catches the exact shape CPE-1710 found four instances of: a bare [`clobber_refusal`] standing in
-    /// for the whole guard immediately above an `fs::rename`. It also rejects a direct
-    /// [`symlink_slot_refusal`] call outside this module, so the halves cannot be re-separated by hand.
+    /// The structural guard is `clippy.toml`'s `disallowed-methods` on `std::fs::rename` (see
+    /// [`rename_into_slot`]): it resolves paths rather than text, so it survives aliasing, distance and
+    /// helper indirection, and it fires on an **unguarded** rename — the case this scan is blind to. This
+    /// stays as a second, cheaper net for the one shape that actually shipped four times: a bare
+    /// [`clobber_refusal`] standing in for the whole guard immediately above an `fs::rename`. It also
+    /// rejects a direct [`symlink_slot_refusal`] call outside this module, unless the site says
+    /// `LINK-ONLY: <reason>` in the comment above it.
     ///
     /// # What it does NOT catch — measured, not guessed
     ///
@@ -928,16 +966,26 @@ mod tests {
         );
         assert!(
             offences.is_empty(),
-            "half-applied rename guards:\n{}\n\nScope of this scan: crates/*/src, src-tauri/src, \
-             sidecar/*/src, production code only. It catches ONE shape (a bare `clobber_refusal` within \
-             {SCAN_WINDOW} lines of a literal `fs::rename(` in the same function). It does NOT catch an \
-             unguarded rename, an aliased `fs::rename`, or one behind a helper.",
+            "half-applied rename guards:\n{}\n\n\
+             ---\n\
+             What this check does NOT cover, so that a green run is not mistaken for a proof:\n\
+             - an `fs::rename` with NO guard at all, or the pre-CPE-1705 `if dst.exists()` shape;\n\
+             - a guard more than {SCAN_WINDOW} lines from its rename;\n\
+             - a rename reached through an alias (`use std::fs::rename as move_entry`) or one call deep\n\
+               inside a helper;\n\
+             - anything in a different function from the guard (the window stops at a function boundary\n\
+               on purpose, to avoid reporting unrelated code);\n\
+             - anything outside `crates/*/src`, `src-tauri/src` and `sidecar/*/src`, and anything inside a\n\
+               `mod tests`.\n\
+             `clippy.toml`'s `disallowed-methods` on `std::fs::rename` is what covers the unguarded and\n\
+             aliased cases; this is a lint for one recognised-wrong shape.\n\
+             **Absence of a failure here is not evidence the pairing holds.**",
             offences.join("\n")
         );
         assert!(
-            combined_calls >= 4,
-            "only {combined_calls} call(s) to `rename_slot_refusal` found — CPE-1710 converted six sites, \
-             so the scan is matching nothing and would not catch a regression either"
+            combined_calls >= 6,
+            "only {combined_calls} call(s) to `rename_into_slot`/`rename_slot_refusal` found — CPE-1710 \
+             converted six sites, so the scan is matching nothing and would not catch a regression either"
         );
     }
 
@@ -1031,13 +1079,19 @@ mod tests {
                 if code.starts_with("//") {
                     continue; // a doc comment discussing the guards is not a call to them
                 }
-                if code.contains("rename_slot_refusal(") {
+                if code.contains("rename_slot_refusal(") || code.contains("rename_into_slot(") {
                     combined_calls += 1;
                 }
-                if code.contains("symlink_slot_refusal(") {
+                // A site whose occupancy rule is genuinely its own (an existing EMPTY directory is
+                // legitimate at `vault_crypto::promote`, for instance) may take the link half alone — but
+                // it has to say so at the site, in the same spirit as the `#[allow]` reasons. The marker
+                // is deliberately ugly so it cannot be typed by accident.
+                let link_only = lines[i.saturating_sub(12)..=i].iter().any(|l| l.contains("LINK-ONLY:"));
+                if code.contains("symlink_slot_refusal(") && !link_only {
                     offences.push(format!(
-                        "{}:{}: calls `symlink_slot_refusal` directly — use `rename_slot_refusal`, which \
-                         pairs it with the occupancy check",
+                        "{}:{}: calls `symlink_slot_refusal` directly — use `rename_into_slot` (guard + \
+                         rename) or `rename_slot_refusal`, or write `LINK-ONLY: <reason>` in the comment \
+                         above if this site's occupancy rule really is its own",
                         file.display(),
                         i + 1
                     ));

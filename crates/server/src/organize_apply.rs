@@ -90,15 +90,13 @@ fn apply_proposals(dir: &str, proposals: &[MoveProposal]) -> Vec<OpResult> {
             // CPE-1710: it also got only half the guard. `clobber_refusal` follows links, so a **dangling**
             // link at `dst` read as a free name and the rename destroyed it; `rename_slot_refusal` is the
             // pairing every `fs::rename`-destructive slot needs, as one call.
-            if let Some(e) = crate::fsutil::rename_slot_refusal(
+            match crate::fsutil::rename_into_slot(
+                &src,
                 &dst,
                 &format!("\"{}\" already exists in {}", p.name, p.target_subdir),
             ) {
-                return OpResult::err(&src, e);
-            }
-            match std::fs::rename(&src, &dst) {
                 Ok(()) => OpResult::ok(&dst),
-                Err(e) => OpResult::err(&src, e.to_string()),
+                Err(e) => OpResult::err(&src, e),
             }
         })
         .collect()

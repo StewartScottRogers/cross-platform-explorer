@@ -153,6 +153,13 @@ impl FileSystemProvider for LocalProvider {
     }
 
     fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        // CPE-1710, KNOWN GAP recorded at the site: `from`/`to` are raw paths and this is unguarded.
+        // It is unreachable today — the only construction of `LocalProvider` is `fs_route::provider_for`,
+        // called solely from that module's own tests, and `#![allow(dead_code)]` holds the file pending
+        // CPE-685. **Wiring this up to a real caller means guarding it with `fsutil::rename_into_slot`
+        // first**; a `dyn Provider` call is also invisible to `disallowed_methods`, so nothing else will
+        // remind you.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(from, to).map_err(|e| format!("{from} -> {to}: {e}"))
     }
 }

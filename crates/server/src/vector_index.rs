@@ -220,6 +220,9 @@ impl VectorIndex {
     pub fn save(&self, path: &Path) -> Result<(), VectorIndexError> {
         let tmp = path.with_extension("cpevec.tmp");
         std::fs::write(&tmp, self.to_bytes()).map_err(|e| VectorIndexError::Io(e.to_string()))?;
+        // CPE-1710: app-private index file, and this `save` has no production caller at all today —
+        // vectors are persisted inside `SemanticIndex::save`'s bytes. Atomic replace of our own file.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(&tmp, path).map_err(|e| VectorIndexError::Io(e.to_string()))?;
         Ok(())
     }

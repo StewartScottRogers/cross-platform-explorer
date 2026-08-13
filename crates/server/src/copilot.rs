@@ -227,12 +227,7 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
             // destination silently. CPE-1710: and it got only HALF the guard — `clobber_refusal` alone,
             // which follows links, so a **dangling** symlink at `dst` read as a free name and the rename
             // destroyed the link. `rename_slot_refusal` is both halves in one call.
-            if let Some(e) =
-                crate::fsutil::rename_slot_refusal(&dst, &format!("\"{new_name}\" already exists"))
-            {
-                return OpResult::err(p, e);
-            }
-            match std::fs::rename(p, &dst) {
+            match crate::fsutil::rename_into_slot(p, &dst, &format!("\"{new_name}\" already exists")) {
                 Ok(()) => OpResult::ok(&dst),
                 Err(e) => OpResult::err(p, e),
             }
@@ -266,13 +261,17 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
     // final component) then destroyed the link itself. The copy branch is guarded by the same call on
     // purpose: `fs::copy` DOES follow the final component, so it would instead materialise the link's
     // absent target — a different surprise, equally unasked-for.
+    // Refuse first, so a refusal is still reported against the DESTINATION path (the thing in the way),
+    // which is what this command has always reported and what the UI shows.
     if let Some(e) = crate::fsutil::rename_slot_refusal(d, "destination already exists") {
         return OpResult::err(d, e);
     }
     let outcome = if copy {
-        copy_recursive(s, d)
+        copy_recursive(s, d).map_err(|e| e.to_string())
     } else {
-        std::fs::rename(s, d)
+        // …and the move re-checks inside `rename_into_slot` (CPE-1710 round 3): the guard and the
+        // destructive call are one function, so nothing can be inserted between them later.
+        crate::fsutil::rename_into_slot(s, d, "destination already exists")
     };
     match outcome {
         Ok(()) => OpResult::ok(d),
@@ -394,6 +393,8 @@ mod tests {
             let src = Path::new(path);
             let name = src.file_name().ok_or_else(|| "no file name".to_string())?;
             let dst = self.holding.join(name);
+            // CPE-1710: test double for the recycle bin — moves into a holding dir this fake owns.
+            #[allow(clippy::disallowed_methods)]
             fs::rename(src, &dst).map_err(|e| e.to_string())?;
             self.trashed.lock().unwrap().push(path.to_string());
             Ok(())

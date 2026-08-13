@@ -71,6 +71,8 @@ fn capture_mutate_plan_drift_revert_round_trips_the_tree_byte_for_byte() {
     fs::write(root.join("brand_new.txt"), b"created after the checkpoint").unwrap(); // create
     fs::write(root.join("overwrite_me.txt"), b"mutated content").unwrap(); // overwrite
     fs::remove_file(root.join("delete_me.txt")).unwrap(); // delete
+    // CPE-1710: test fixture — renames a file this test created in its own scratch tree.
+    #[allow(clippy::disallowed_methods)]
     fs::rename(root.join("rename_me.txt"), root.join("renamed.txt")).unwrap(); // rename (delete+create pair)
 
     let current = scan_dir(&root.to_string_lossy()).expect("scan mutated tree");

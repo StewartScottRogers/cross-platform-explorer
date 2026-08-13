@@ -165,7 +165,14 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     }
     let md = std::fs::read_to_string(&src).map_err(|e| e.to_string())?;
     std::fs::write(&src, ticket_board::set_status(&md, status)).map_err(|e| e.to_string())?;
-    std::fs::rename(&src, &dest).map_err(|e| e.to_string())?;
+    // The refusal above runs BEFORE the status rewrite, so a refused move never leaves a ticket whose
+    // frontmatter says one column while the file sits in another. This second call re-checks immediately
+    // before the rename (CPE-1710 round 3) — guard and destructive call in one function.
+    cpe_server::fsutil::rename_into_slot(
+        &src,
+        &dest,
+        &format!("a ticket file already exists at {}", dest.display()),
+    )?;
     Ok(())
 }
 
@@ -1837,12 +1844,7 @@ fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Res
     // CPE-1710 made the pairing a single call. This site had both halves open-coded and was one of only
     // two that did; four sibling sites had just the first, so the convention was not holding. Order and
     // wording are unchanged — `rename_slot_refusal` runs occupancy first, exactly as these two lines did.
-    if let Some(e) =
-        cpe_server::fsutil::rename_slot_refusal(&target, &format!("\"{new_name}\" already exists"))
-    {
-        return Err(e);
-    }
-    fs::rename(src, &target).map_err(|e| e.to_string())?;
+    cpe_server::fsutil::rename_into_slot(src, &target, &format!("\"{new_name}\" already exists"))?;
     let target_str = target.to_string_lossy().to_string();
     let _ = cpe_server::tags::retag(ctx, &path, &target_str);
     let _ = cpe_server::snapshot_schedule::reschedule(ctx, &path, &target_str);
@@ -2435,6 +2437,12 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
         return Err("Cannot move a folder into itself".to_string());
     }
     let target = unique_target(dest_dir, file_name);
+    // CPE-1710: NOT `rename_into_slot`. `unique_target` has already *picked* a name it believes is free,
+    // so the paired guard's occupancy half would refuse the name this function just chose. The residual
+    // hazard is real and is **CPE-1715**: `unique_target`'s probe follows links, so a dangling link reads
+    // as a free name and this rename destroys it. Fixing it means teaching the name-picker to treat a link
+    // slot as occupied — a different change from a refusal, which is why it is its own ticket.
+    #[allow(clippy::disallowed_methods)]
     if fs::rename(src, &target).is_ok() {
         let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
         let _ = cpe_server::snapshot_schedule::reschedule(
@@ -3071,6 +3079,10 @@ fn run_transfer(
             }
         };
         // Same-volume move: an atomic rename, no byte streaming needed.
+        // CPE-1710: `resolve_conflict` above already applied the user's chosen policy to this name, so the
+        // paired guard would refuse the target it just authorised. Same residual hazard as `do_move_into`
+        // — a dangling link reads as a free name — tracked in **CPE-1715**.
+        #[allow(clippy::disallowed_methods)]
         if kind == TransferKind::Move && fs::rename(src, &target).is_ok() {
             report.transferred += 1;
             prog.done_bytes += sb;
@@ -3400,13 +3412,11 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             // free name and the `fs::rename` below replaced it silently. Same two guards as
             // `rename_entry_impl`, for the same two reasons — a real entry, and a dangling link.
             // CPE-1710: the two calls are now one — `rename_slot_refusal`, same order, same messages.
-            if let Some(e) = cpe_server::fsutil::rename_slot_refusal(
+            match cpe_server::fsutil::rename_into_slot(
+                src,
                 dst,
                 &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
             ) {
-                return OpResult::err(src, e);
-            }
-            match fs::rename(src, dst) {
                 Ok(()) => {
                     let _ = cpe_server::tags::retag(ctx, from, to);
                     let _ = cpe_server::snapshot_schedule::reschedule(ctx, from, to);
@@ -3543,6 +3553,14 @@ async fn metadata_write(
             .unwrap_or(0);
         let tmp = format!("{path}.{stamp}.cpe-meta-tmp");
         std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
+        // CPE-1710 / **CPE-1716 (High, open)**: this is NOT the app's own file. `path` comes straight off
+        // IPC and is the user's own media file, so this rename destroys a symlink standing there — a
+        // **live** one, not merely a dangling one, because there is no occupancy guard here either — and
+        // the edit lands on the link's former target instead of being written through it, while the
+        // command reports success. Left as-is deliberately: fixing it means deciding whether a symlinked
+        // media file should be written *through* rather than replaced, which is CPE-1716's job, not a
+        // silent change inside CPE-1710. The allow is here so the decision is visible at the site.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on a failed rename
             e.to_string()

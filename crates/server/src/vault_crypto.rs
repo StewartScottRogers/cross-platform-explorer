@@ -525,7 +525,22 @@ fn unique_suffix() -> String {
 
 /// Promote `staging` to `out_dir`. If `out_dir` already exists it must be empty (it is then removed
 /// so the rename target is free); a non-empty `out_dir` is refused rather than clobbered.
+///
+/// **CPE-1710: a LINK at `out_dir` is refused before anything else happens.** `out_dir` is the user's
+/// unlock destination, not a path this crate owns — the PR #895 round-2 audit filed it under "a file we
+/// own" and that was wrong. The emptiness probe below is `read_dir`, which **follows** the link: on a
+/// dangling one it answers `NotFound`, falls straight through, and the `fs::rename` at the bottom (which
+/// does *not* follow the final component) destroys the link itself. Exactly the `metadata_write` shape.
+/// The check has to come first, before the `remove_dir` — on Windows that call would delete a junction
+/// standing in the slot before any later check could see it.
+///
+/// `symlink_slot_refusal` alone rather than the paired `rename_slot_refusal`, because this site's
+/// occupancy rule is bespoke: an existing *empty* directory is legitimate here and is removed to free the
+/// name, which is the opposite of what the occupancy half would decide. LINK-ONLY: see above.
 fn promote(staging: &Path, out_dir: &Path) -> std::io::Result<()> {
+    if let Some(msg) = crate::fsutil::symlink_slot_refusal(out_dir) {
+        return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, msg));
+    }
     match std::fs::read_dir(out_dir) {
         Ok(mut rd) => {
             if rd.next().is_some() {
@@ -539,6 +554,10 @@ fn promote(staging: &Path, out_dir: &Path) -> std::io::Result<()> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
+    // The slot was proven link-free at the top of this function and the emptiness branch above removed
+    // any real directory occupying it, so `rename_into_slot`'s occupancy half would now refuse for the
+    // wrong reason. The guard that matters here has already run.
+    #[allow(clippy::disallowed_methods)]
     std::fs::rename(staging, out_dir)
 }
 
@@ -616,6 +635,49 @@ mod tests {
 
     fn pass(s: &str) -> SecretString {
         SecretString::from(s.to_owned())
+    }
+
+    /// CPE-1710 (round 3): `promote`'s destination is the **user's unlock directory**, not a path this
+    /// crate owns — the PR #895 round-2 audit filed it under "a file we own" and the reviewer caught it.
+    /// Its emptiness probe is `read_dir`, which **follows** the link: a dangling link answers `NotFound`,
+    /// the match falls through, and `fs::rename` (which does not follow the final component) destroys the
+    /// link. Identical shape to `metadata_write` (CPE-1716).
+    ///
+    /// Asserts on the **slot**, not on the returned `Result` — pre-fix this returned `Ok(())`.
+    #[test]
+    fn cpe_1710_promote_never_renames_over_a_dangling_link_at_the_output_directory() {
+        use std::io::Write;
+        let d = std::env::temp_dir().join(format!("cpe1710-promote-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let staging = d.join("staging");
+        std::fs::create_dir_all(staging.join("inner")).unwrap();
+        std::fs::write(staging.join("inner").join("f.txt"), b"unlocked").unwrap();
+
+        let out_dir = d.join("unlocked-here");
+        if !crate::fsutil::make_dangling_link(&out_dir) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the promote dangling-link leg: this machine could not create a link \
+                 at {}. NOTHING in this test covered the link-destruction route on this run.",
+                out_dir.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = promote(&staging, &out_dir);
+
+        assert!(
+            std::fs::symlink_metadata(&out_dir).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link at the unlock destination was DESTROYED (result was {r:?})"
+        );
+        let e = r.expect_err("and promoting onto a link must be refused");
+        assert!(
+            e.to_string().contains("is a link"),
+            "and the refusal must say what is in the way: {e}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Seal via a fast (low-work-factor) scrypt recipient — for tests that don't need the real

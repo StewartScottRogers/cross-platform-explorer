@@ -1,0 +1,21 @@
+# CPE-1710: `std::fs::rename` replaces its destination SILENTLY on both Windows and Unix, and it does not
+# follow the final component — so a link sitting at the destination is destroyed rather than written
+# through. Six sites in this repo shipped with a guard that could not see that, four of them after the PR
+# that wrote the rule down.
+#
+# So the call is disallowed and each use has to say why it is safe:
+#
+#   - a rename onto a slot the USER named  -> call `fsutil::rename_into_slot`, which guards then renames;
+#   - anything else (a tmp -> final replace of a file the app itself owns, a test fixture, a protocol
+#     server's own rename semantics) -> `#[allow(clippy::disallowed_methods)]` with a one-line reason at
+#     the site.
+#
+# The point of the second form is that the justification lives in the code, where the next reviewer reads
+# it. CPE-1710's first round kept that reasoning in a PR description instead, and it was wrong twice — it
+# called `metadata_write`'s destination "a file we own" when it is the user's own media file.
+#
+# Known gap: `disallowed_methods` resolves paths, not `dyn` dispatch, so a rename reached through a trait
+# object (`Provider::rename`) is not covered.
+disallowed-methods = [
+    { path = "std::fs::rename", reason = "replaces its destination silently and destroys a link at it — use fsutil::rename_into_slot for a user-named slot, or allow with a reason" },
+]
