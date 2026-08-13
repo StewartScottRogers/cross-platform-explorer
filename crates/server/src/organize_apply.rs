@@ -86,7 +86,11 @@ fn apply_proposals(dir: &str, proposals: &[MoveProposal]) -> Vec<OpResult> {
             // batch, so a single unreadable destination slot silently replaced a real file and the run
             // reported success for it — the checkpoint taken above is the only thing that would have got
             // it back, and only if the user noticed in time to revert.
-            if let Some(e) = crate::fsutil::clobber_refusal(
+            //
+            // CPE-1710: it also got only half the guard. `clobber_refusal` follows links, so a **dangling**
+            // link at `dst` read as a free name and the rename destroyed it; `rename_slot_refusal` is the
+            // pairing every `fs::rename`-destructive slot needs, as one call.
+            if let Some(e) = crate::fsutil::rename_slot_refusal(
                 &dst,
                 &format!("\"{}\" already exists in {}", p.name, p.target_subdir),
             ) {
@@ -340,6 +344,45 @@ mod tests {
             let r = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
             assert!(!r.ok, "the move must be reported failed, not silently succeeded: {r:?}");
         }
+    }
+
+    /// CPE-1710: the **third** site found by enumeration to carry only half the rename guard. Unlike the
+    /// test above, this needs no ACLs at all — the link's target is simply absent, which is what a
+    /// dangling link *is*. `clobber_refusal` follows the link, resolves nothing, and reads the slot as
+    /// free; `fs::rename` does not follow the final component and replaces the link.
+    ///
+    /// Runs on **all three CI legs** (Unix creates the link unconditionally; Windows falls back to a
+    /// junction when symlink privilege is absent), and asserts on the **slot**, not on the result.
+    #[test]
+    fn cpe_1710_organize_never_renames_over_a_dangling_link_in_the_destination_folder() {
+        use std::io::Write;
+        let dir = scratch("cpe1710-dangling");
+        fs::write(dir.path().join("a.png"), b"NEW PICTURE").unwrap();
+        let images = dir.path().join("Images");
+        fs::create_dir_all(&images).unwrap();
+        let link = images.join("a.png");
+        if !crate::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the organize dangling-link leg: this machine could not create a link \
+                 at {} (Windows without Developer Mode / admin, and no junction either). NOTHING in this \
+                 test covered the link-destruction route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let ctx = ctx_for(dir.path());
+        let outcome = organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the dangling link in the destination folder was DESTROYED — and auto-organize does this for \
+             every matching file in one batch"
+        );
+        let r = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
+        assert!(!r.ok, "the move must be reported failed, not silently succeeded: {r:?}");
+        assert!(r.error.contains("is a link"), "and it must say what is in the way: {}", r.error);
     }
 
     /// CPE-1705, staging **real byte loss** through the real `organize_apply` entry point: a destination

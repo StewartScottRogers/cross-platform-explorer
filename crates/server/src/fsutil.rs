@@ -205,6 +205,39 @@ pub fn classify_symlink_slot(stat: &std::io::Result<bool>, target: &Path) -> Opt
     }
 }
 
+/// **The one guard for a slot that is about to be `fs::rename`d onto** (CPE-1710): both
+/// [`clobber_refusal`] and [`symlink_slot_refusal`], in the order the two sites that got it right already
+/// used, as a single call that cannot be half-applied.
+///
+/// ## Why this exists rather than two calls at every site
+///
+/// CPE-1705 gave twelve `rename`-destructive sites [`clobber_refusal`] and gave exactly two of them
+/// [`symlink_slot_refusal`] as well — and its own doc comment (see "What this does NOT cover" above) wrote
+/// down that a `rename`-destructive site needs both. CPE-1710's reviewer then found, by enumerating rather
+/// than spot-checking, that `copilot::apply_op`, `copilot::transfer_entry`, `organize_apply` and the
+/// board's ticket move were all the exception to the rule the same PR had just written down. Four sites
+/// out of six is not a memory failure by four authors; it is a guard whose two halves are separable when
+/// the hazard is not.
+///
+/// So the pairing is now a **call, not a convention**. A future `fs::rename` site calls this and gets both
+/// checks or it calls neither; `guards_are_paired_at_every_rename_destructive_site` in this module's tests
+/// fails CI if a site reaches for one half directly.
+///
+/// ## Order is load-bearing, and it is the existing order
+///
+/// [`clobber_refusal`] runs first, so an ordinary occupied name still reports the **site's own** wording
+/// ("\"notes.txt\" already exists") rather than a link message. The link wording is reachable only for a
+/// **dangling** link, which is precisely the case [`clobber_refusal`] answers "free" for and cannot ever
+/// judge. This preserves, byte for byte, the messages `rename_entry_impl` and `move_exact_impl` already
+/// produced when they open-coded the two calls in this order.
+///
+/// Callers that must probe a slot they will *advance past* rather than refuse at (name-picking loops such
+/// as `unique_target`) still cannot use this — refusal is not their verdict — and they are tracked
+/// separately; see the test's allow-list for the current inventory.
+pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
+    clobber_refusal(target, occupied).or_else(|| symlink_slot_refusal(target))
+}
+
 /// Whether a directory entry is a symlink (without following it). Used to avoid symlink cycles in the
 /// recursive walks (CPE-609/611).
 pub fn entry_is_symlink(entry: &std::fs::DirEntry) -> bool {
@@ -564,6 +597,58 @@ pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
     }
 }
 
+/// Put a **dangling** link (a link whose target does not exist) at `link`, for the CPE-1710 tests that
+/// prove a `rename`-destructive site refuses rather than destroying one. Returns whether the slot really
+/// holds a link afterwards — i.e. whether [`std::fs::symlink_metadata`] agrees, which is the exact
+/// question [`symlink_slot_refusal`] asks, so a `true` here means the test is testing something.
+///
+/// **`false` must be treated as a loud `writeln!(std::io::stderr(), ..)` skip, never a silent pass**
+/// (Evidence Rules, `Ticketing/wiki.md`): a Windows runner without Developer Mode or elevation cannot
+/// create a symlink at all, and a test that quietly degrades into asserting nothing is the specific
+/// failure this ticket family has spent six rounds on.
+///
+/// Two constructions on Windows, in order:
+///
+/// 1. `symlink_file` to a name that does not exist. Needs `SeCreateSymbolicLinkPrivilege` (Developer Mode
+///    or elevation), which unprivileged CI runners do not have.
+/// 2. Failing that, an NTFS **junction**, which needs no privilege — but `junction::create` canonicalises
+///    its target, so the target has to exist at creation time and is then removed to leave the junction
+///    dangling. Rust reports a junction's `file_type().is_symlink()` as `true`, which is what the guard
+///    reads, so this construction stages exactly the same slot.
+///
+/// Unix has neither restriction: `symlink(2)` never resolves its target, so leg 1 always works.
+#[cfg(test)]
+pub(crate) fn make_dangling_link(link: &Path) -> bool {
+    let missing = link.with_file_name(format!(
+        "{}-target-that-does-not-exist",
+        link.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(&missing, link).is_err() {
+            // No symlink privilege — fall back to a junction, created against a real directory that is
+            // then deleted so the reparse point is left pointing at nothing.
+            if std::fs::create_dir_all(&missing).is_err() {
+                return false;
+            }
+            let made = junction::create(&missing, link).is_ok();
+            let _ = std::fs::remove_dir_all(&missing);
+            if !made {
+                return false;
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(&missing, link).is_err() {
+            return false;
+        }
+    }
+    // The premise, asserted rather than assumed: the slot holds a link, and it dangles.
+    std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+        && !matches!(link.try_exists(), Ok(true))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -703,6 +788,143 @@ mod tests {
             "must NOT claim the target exists — that is the lie CPE-1687 traced to real user confusion: {msg}"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The combined guard (CPE-1710), driven against a real filesystem for all three verdicts a
+    /// `rename`-destructive slot can have. The third — a **dangling** link — is the one
+    /// [`clobber_refusal`] alone answers "free" for, and it is the bug this ticket closes.
+    #[test]
+    fn rename_slot_refusal_covers_the_dangling_link_its_first_half_cannot_see() {
+        use std::io::Write;
+        let d = scratch("rename-slot");
+
+        let absent = d.join("nothing-here.txt");
+        assert_eq!(rename_slot_refusal(&absent, "taken"), None, "a genuinely absent slot must proceed");
+
+        let present = d.join("there.txt");
+        std::fs::write(&present, b"x").unwrap();
+        assert_eq!(
+            rename_slot_refusal(&present, "\"there.txt\" already exists").as_deref(),
+            Some("\"there.txt\" already exists"),
+            "an ordinary occupied name must still report the CALLER's wording — the occupancy check runs \
+             first and the order is part of this helper's contract"
+        );
+
+        let link = d.join("dangling.txt");
+        if !make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the dangling-link leg of rename_slot_refusal: this machine could not \
+                 create a link at {} (Windows without Developer Mode / admin, and no junction either). \
+                 NOTHING in this test covered the link-destruction route on this run.",
+                link.display()
+            );
+        } else {
+            // The premise: the first half of the guard genuinely sees nothing here. If this ever stops
+            // holding, the test below would pass for the wrong reason.
+            assert_eq!(
+                clobber_refusal(&link, "occupied"),
+                None,
+                "premise: `clobber_refusal` follows the link, finds nothing, and reads the slot as FREE — \
+                 that is why the second half exists"
+            );
+            let msg = rename_slot_refusal(&link, "occupied")
+                .expect("a dangling link in the slot must refuse — renaming onto it destroys the link");
+            assert!(msg.contains("is a link"), "the refusal must say what is in the way: {msg}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The pairing, enforced structurally rather than remembered** (CPE-1710).
+    ///
+    /// CPE-1705 wrote the rule down in a doc comment — a `rename`-destructive slot needs the link check
+    /// too — and then four of its six such sites shipped with only [`clobber_refusal`]. This scans the
+    /// crate's sources (plus the app adapter's `lib.rs`) and fails if:
+    ///
+    /// - a bare `clobber_refusal(` call sits within a few lines of an `fs::rename(`, i.e. exactly the
+    ///   half-guarded shape this ticket found four instances of; or
+    /// - [`symlink_slot_refusal`] is called anywhere outside this module, which would mean somebody
+    ///   re-separated the halves rather than calling [`rename_slot_refusal`].
+    ///
+    /// A source scan is a blunt instrument, so it also asserts its own inputs: it must have read a
+    /// plausible number of files and must actually see the combined helper being called. A guard test
+    /// that silently scanned nothing would be the same class of mistake it exists to catch.
+    #[test]
+    fn guards_are_paired_at_every_rename_destructive_site() {
+        // `crates/server` → repo root.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let mut files = Vec::new();
+        collect_rs(&root.join("crates").join("server").join("src"), &mut files);
+        let adapter = root.join("src-tauri").join("src").join("lib.rs");
+        if adapter.is_file() {
+            files.push(adapter);
+        }
+        assert!(files.len() > 20, "the scan read only {} files — it is not looking where it thinks", files.len());
+
+        let mut combined_calls = 0usize;
+        let mut offences = Vec::new();
+        for file in &files {
+            // This module defines all three helpers and tests them by name; it is the one place the halves
+            // are legitimately named.
+            if file.file_name().is_some_and(|n| n == "fsutil.rs") {
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(file) else { continue };
+            let lines: Vec<&str> = text.lines().collect();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue; // a doc comment discussing the guards is not a call to them
+                }
+                if code.contains("rename_slot_refusal(") {
+                    combined_calls += 1;
+                }
+                if code.contains("symlink_slot_refusal(") {
+                    offences.push(format!(
+                        "{}:{}: calls `symlink_slot_refusal` directly — use `rename_slot_refusal`, which \
+                         cannot be half-applied",
+                        file.display(),
+                        i + 1
+                    ));
+                }
+                if code.contains("clobber_refusal(") {
+                    // 25 lines is comfortably wider than every guard-to-`rename` distance in this repo
+                    // (the widest is 8) and narrow enough not to reach the next function.
+                    let end = (i + 25).min(lines.len());
+                    if lines[i..end].iter().any(|l| {
+                        let c = l.trim_start();
+                        !c.starts_with("//") && c.contains("fs::rename(")
+                    }) {
+                        offences.push(format!(
+                            "{}:{}: `clobber_refusal` guards an `fs::rename` — that is half the guard. It \
+                             follows links, so a DANGLING link at the destination reads as free and the \
+                             rename destroys it (CPE-1710). Use `rename_slot_refusal`.",
+                            file.display(),
+                            i + 1
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(offences.is_empty(), "half-applied rename guards:\n{}", offences.join("\n"));
+        assert!(
+            combined_calls >= 4,
+            "only {combined_calls} call(s) to `rename_slot_refusal` found — CPE-1710 converted six sites, \
+             so the scan is matching nothing and would not catch a regression either"
+        );
+    }
+
+    /// Every `.rs` under `dir`, recursively — the scan's file list.
+    fn collect_rs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_rs(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
     }
 
     /// The symlink-slot taxonomy, including the `Err` arm the PR #893 reviewer found redding **nothing**

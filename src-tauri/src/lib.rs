@@ -155,8 +155,9 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     let dest = dest_dir.join(&file_name);
     // CPE-1705: was `if dest.exists()`, whose `false` covers "not there" AND "could not tell", ahead of
     // an `fs::rename` that replaces its destination silently. A board move that landed on an unreadable
-    // slot destroyed the ticket file already sitting there.
-    if let Some(e) = cpe_server::fsutil::clobber_refusal(
+    // slot destroyed the ticket file already sitting there. CPE-1710: paired with the dangling-link check
+    // via `rename_slot_refusal`, so this site cannot carry one half of the guard without the other.
+    if let Some(e) = cpe_server::fsutil::rename_slot_refusal(
         &dest,
         &format!("a ticket file already exists at {}", dest.display()),
     ) {
@@ -1829,14 +1830,16 @@ fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Res
     // `fs::rename` below ran — and `fs::rename` replaces its destination silently on both Windows and
     // Unix. The user's existing file was destroyed with no warning and no error. Two independent guards,
     // because two independent things can be sitting at `target`:
-    if let Some(e) = cpe_server::fsutil::clobber_refusal(&target, &format!("\"{new_name}\" already exists"))
-    {
-        return Err(e);
-    }
-    // …and a DANGLING SYMLINK at `target`, which the check above genuinely cannot see: `try_exists`
+    // a real entry, and a DANGLING SYMLINK — which the occupancy check genuinely cannot see: `try_exists`
     // follows links, so it correctly answers `Ok(false)` for one, while `fs::rename` does not follow the
     // final component and destroys the link. A different bug (CPE-1461 family) at the same line.
-    if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(&target) {
+    //
+    // CPE-1710 made the pairing a single call. This site had both halves open-coded and was one of only
+    // two that did; four sibling sites had just the first, so the convention was not holding. Order and
+    // wording are unchanged — `rename_slot_refusal` runs occupancy first, exactly as these two lines did.
+    if let Some(e) =
+        cpe_server::fsutil::rename_slot_refusal(&target, &format!("\"{new_name}\" already exists"))
+    {
         return Err(e);
     }
     fs::rename(src, &target).map_err(|e| e.to_string())?;
@@ -3396,13 +3399,11 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             // left the destination's OWN check collapsed, so a `dst` whose stat was refused read as a
             // free name and the `fs::rename` below replaced it silently. Same two guards as
             // `rename_entry_impl`, for the same two reasons — a real entry, and a dangling link.
-            if let Some(e) = cpe_server::fsutil::clobber_refusal(
+            // CPE-1710: the two calls are now one — `rename_slot_refusal`, same order, same messages.
+            if let Some(e) = cpe_server::fsutil::rename_slot_refusal(
                 dst,
                 &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
             ) {
-                return OpResult::err(src, e);
-            }
-            if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(dst) {
                 return OpResult::err(src, e);
             }
             match fs::rename(src, dst) {
