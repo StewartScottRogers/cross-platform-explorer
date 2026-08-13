@@ -15206,9 +15206,11 @@ overlay / overlay rw,relatime 0 0
         // statement` error under CI's `-D warnings` on Linux and macOS — invisible from a Windows dev box).
         //
         // The reason it cannot run on Unix is the *point* of the test, so it is written down rather than
-        // waved at: `deny_stat_of`'s Windows mechanism denies **one file**, leaving its parent directory
-        // writable, which is what lets a buggy `fs::rename` replace the victim's bytes while `try_exists`
-        // on it fails. Unix has no equivalent. Its only lever is `chmod` on the *parent*, and
+        // waved at: `deny_stat_of`'s Windows mechanism denies the **target file**, plus **list-directory
+        // (`RD`) on its parent** — and `RD` is not `DC`, so the parent stays *writable*. That asymmetry is
+        // the whole trick: the parent's `RD` deny kills `fs::metadata`'s `FindFirstFileW` fallback so
+        // `try_exists` on the victim fails, while the parent's intact `FILE_DELETE_CHILD` still lets a
+        // buggy `fs::rename` replace the victim's bytes. Unix has no equivalent. Its only lever is `chmod` on the *parent*, and
         // `unique_target`'s candidates live in that same parent — so the very bits that make `stat` fail
         // with `EACCES` also deny `rename(2)`, which needs write+execute on that directory. The two calls
         // are governed by the same permission there, so no `chmod` can stage a stat failure that a rename
