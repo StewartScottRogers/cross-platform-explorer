@@ -159,3 +159,33 @@ correct will pass while the header never leaves the process.
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1681** and **CPE-1682**.
 Independent of CPE-1683 apart from the shared marker-key convention — agree that shape in whichever lands
 first and make the other's test depend on it.
+
+### The marker-key shape, settled by CPE-1683 (2026-08-13)
+
+CPE-1683 landed first and settled the shape (PR for CPE-1683): a `/`-rooted provider path like
+`/photos/2024` becomes the key `photos/2024/` (no leading slash, one trailing slash, no other content),
+via the now-`pub` `cpe_s3::provider::provider_path_to_key_prefix`. Reuse that function directly for the
+`mkdir` marker's key rather than re-deriving the shape — `crates/s3/src/provider.rs`'s
+`parse_list_bucket_result` already filters a `<Contents>` entry whose `<Key>` equals the requested prefix
+exactly, so writing the marker at exactly that key is what makes CPE-1683's own AC4 test
+(`a_zero_byte_prefix_marker_object_does_not_appear_as_a_file_entry`) meaningful for a real marker CPE-1684
+writes, not just a synthetic one the fixture injects for testing.
+
+### Correction to the `ureq`-header-drop warning above (measured by CPE-1683, 2026-08-13)
+
+The warning above was traced from `ureq` 2.12.1's source and explicitly labelled "a thing to test, not a
+finding to act on" — CPE-1683 tested it, against the exact code path `S3Provider::list` uses
+(`Agent::get(url).set(name, value).call()`), via the Evidence Rules' guard-negative-control (delete the
+guard, re-run, restore). **It does not reproduce there**: `ureq` itself already refuses a header value
+carrying a disallowed byte, loudly, via `ureq::Error::Transport("Bad Header: invalid header '...'")`,
+before any byte reaches the network — proven by a fixture request counter that stayed at `0`. The
+silent-drop mechanism traced in `unit.rs`'s write loop is real in `ureq`'s source, but evidently sits
+behind a different internal path than the outbound request-builder API (most likely the one that parses
+headers arriving *off the wire*, not the one writing them going out). **This does not mean the warning is
+moot for CPE-1684** — `stat`/`read`/`write`/`delete`/`mkdir` may build requests differently (a different
+`ureq` entry point, a streamed body, a different header-setting call) and could reach the silent-drop path
+CPE-1683's `GET`-only `list` did not. Re-run the same measurement (delete whatever guard you write, observe
+what `ureq` actually does, restore) against your own code's real send path before assuming either outcome.
+See `crates/s3/src/provider.rs`'s module doc, "The `ureq`-header-drop decision", for the full write-up and
+`guard_header_sendable` for a reusable pattern (kept even though the silent-drop case didn't reproduce, for
+a clearer, byte-naming refusal a beat sooner than `ureq`'s own message).
