@@ -2,14 +2,14 @@
 id: CPE-1682
 title: "S3 error responses must name the real cause, not a bare status code"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Backend
 tags: [needs-prereq]
 epic: CPE-1503
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## What
