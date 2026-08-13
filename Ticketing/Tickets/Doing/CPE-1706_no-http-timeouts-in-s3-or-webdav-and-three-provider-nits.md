@@ -181,3 +181,60 @@ re-confirmed green with a real `Compiling` line. Full pasted output in the PR bo
 
 Suite cost is unchanged: `cpe-s3` 117 tests in 1.18 s (was 110 in 1.30 s), `cpe-webdav` 16 in 0.63 s.
 `cargo clippy --all-targets -- -D warnings` clean in both, plus downstream `crates/vfs`.
+
+**2026-08-13, round 2** — a Reviewer (from the code) and an independent UAT (by measurement) each found
+the same blocking defect, separately. **The above was wrong about the thing that mattered most.**
+
+### What was actually broken
+
+A server that accepts, sends valid `200 OK` headers, then dribbles **one byte every 5 s** was not bounded
+at all — measured holding a `list` thread past 100 s at shipped values, in both crates. `timeout_read` is
+per-*read*, so its clock restarts on every byte and such a peer is never "stalled" at any instant.
+`MAX_LIST_WALL_CLOCK` is checked between pages, so it cannot fire while a body is in flight. Nothing
+bounded a single page's body. Worst case at the old values was ~7.7 years, not the "10 minutes" the code
+and PR body both claimed. WebDAV was the live half — it is routed through `crates/vfs` today, inside
+`spawn_blocking` on tokio's default 512-thread pool, so each attempt drained a pool thread permanently.
+
+**The false comments were the worse half of the defect.** `provider.rs` said *"an in-flight page always
+completes or fails on its own socket timeout first"* and `lib.rs` said *"the per-request bounds already
+bound the whole operation"*. Both are disproven by measurement. A wrong comment at a safety boundary is
+worse than no comment: the next reader believes the case is handled and stops checking. Both are gone.
+
+### The fix
+
+`ureq::Request::timeout` — **per request**, distinct from the agent-level `.timeout()` this ticket
+correctly declined. `DeadlineStream::fill_buf` recomputes the remaining budget on every read and the
+deadline propagates into the response body reader, so it bounds a whole exchange continuously. Applied to
+the `ListObjectsV2` GET and to WebDAV `PROPFIND`/`MKCOL`/`DELETE`/`MOVE`; deliberately **not** to the
+large-object `GET` or `PUT`, where per-read semantics are what a legitimate slow transfer needs. The
+earlier error was flattening "which request deserves which bound" into one all-or-nothing choice.
+
+**60 s, not the 120 s first tried.** A per-request deadline *replaces* `timeout_read` for that request
+(`stream.rs:433-441` is a genuine either/or), so the value must also keep a dead share failing promptly —
+120 s bought no real listing any safety and made a dead endpoint take two minutes to report.
+
+Corrected worst case for one `list`: `MAX_LIST_WALL_CLOCK + TIMEOUT_LIST_REQUEST` ≈ **12 minutes**, since
+a final page may start just under the budget and take its own full deadline. The 10-minute claim was
+wrong twice over.
+
+### Other round-2 corrections
+
+- **Item 6 was overclaimed.** An over-cap body whose truncation lands after a complete root element is
+  still well-formed and parsed as a short, *complete-looking* listing — the UAT reproduced
+  `Ok in 241 ms with 1 entries: ["decoy.txt"]`. Truncation is now detected by **length**, which document
+  shape cannot fool, and the counter-example shape is pinned by a test.
+- **The 200-page arithmetic assumed something S3 does not guarantee** (a gateway may return fewer keys
+  than `max-keys`). Doc corrected, including the case the budget would legitimately abandon.
+- **Eight guard arms reddened nothing.** Now guarded — and two of my first attempts at guarding them were
+  themselves ineffective, caught by probing rather than assumed: `timeout_connect` asserted `Some(30s)`,
+  which is *also* `ureq`'s default, so it passed with the line deleted; and the body cap's `.take()` is
+  invisible to a length check, so removing it left the over-cap tests green. Both fixed.
+- `WebdavProvider::read` gains a byte cap that **errors rather than truncating** — `download_tree` writes
+  what comes back to disk as the finished file.
+- Fixed CPE-1704's stale `is_safe_s3_leaf` doc claiming it refuses `..%2f` while a test below asserts that
+  key is accepted, and gave both fixtures a nanosecond stamp (223 stale `(pid, n)` roots had accumulated;
+  Windows pid reuse made two tests share a dirty root and fail).
+
+Final: `cpe-s3` **141 passed**, `cpe-webdav` **20**, `crates/vfs` **21**; clippy clean in all three. The
+suites now take ~60 s each, deliberately: the shipped-values dribble tests wait out the real deadline,
+because round 1 proved a mechanism through a seam and shipped a configuration that did not bound it.
