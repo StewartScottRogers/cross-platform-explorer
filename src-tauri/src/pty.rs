@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_reaps_the_child_synchronously() {
+    fn kill_reaps_the_child_synchronously_with_no_zombie_left_behind() {
         // CPE-1244: `kill()` now does its own final `wait()`, so the reap should be observable
         // *immediately* after `kill()` returns -- no polling loop needed (unlike the test above, which
         // predates this fix and tolerates a delayed reap). A long-lived command so we're sure it's still
@@ -455,26 +455,34 @@ mod tests {
         // cores 4x).
         assert!(session.try_wait().is_some(), "child was not reaped synchronously by kill()");
 
-        // CPE-1707: deliberately NOT asserting `!pid_is_alive(pid)` here anymore (the test was renamed
-        // off "...with_no_zombie_left_behind" for the same reason -- a name shouldn't promise a check
-        // the body doesn't make). That assertion is what actually flaked on Windows CI (PR #887:
-        // panicked at this test, "OS process should be gone right after kill()" -- pasted verbatim from
-        // the real job log, not reproduced by rewording). `pid_is_alive()` shells out to `tasklist`,
-        // which enumerates the OS process table -- a different, weaker guarantee than the `try_wait()`
-        // check above. Two reasons that table can still list `pid` the instant after our own `wait()`
-        // returns, neither of which is a bug in `kill()`:
-        //   1. `session.child` (this test's own handle to the process) stays open for the rest of the
-        //      test -- `kill()` doesn't close it, only `wait()`s on it -- and Windows keeps a process
-        //      object (and its enumerable PID) alive as long as *any* handle references it, regardless
-        //      of whether the process has already finished executing.
-        //   2. `tasklist` is itself a freshly spawned external process; its own startup/snapshot latency
-        //      is unbounded and widens under exactly the CPU contention CI runners see (this sprint has
-        //      had four PRs building at once for hours).
-        // Nothing in `kill()`'s contract, or in `portable-pty`'s, promises an external enumeration tool
-        // observes termination synchronously with our own `wait()`. Asserting it made the test evidence
-        // of scheduler/tool timing rather than of `kill()`'s correctness -- and per CPE-1679, the fix
-        // for that is to assert what's actually guaranteed, not to wrap the flaky check in a sleep/poll
-        // that would hide the same non-guarantee behind a delay instead of removing it.
+        // CPE-1707: `!pid_is_alive(pid)` -- checked via `tasklist`, i.e. the OS's own enumerable process
+        // table, not our own bookkeeping -- is exactly what flaked on Windows CI (PR #887: panicked at
+        // this test, "OS process should be gone right after kill()", pasted verbatim from the real job
+        // log, not reproduced by rewording). The cause wasn't a race in `kill()`: it's that `kill()`
+        // clears only `self.master`, never `self.child`, so *this test's own `session`* kept its one
+        // Win32 handle to the process open right through the old, immediate assertion. `portable-pty`
+        // 0.8.1's Windows `WinChild` wraps exactly one `Mutex<OwnedHandle>` around `CreateProcessW`'s
+        // `pi.hProcess` -- no job object, no duplicate handle anywhere in the crate -- and
+        // `filedescriptor::OwnedHandle::drop` calls `CloseHandle`. Windows keeps a process object (and
+        // its enumerable PID) alive as long as *any* handle references it, independent of whether the
+        // process has already finished executing; `tasklist` enumerates that table, not "has this
+        // process's threads finished". So as long as our own handle stayed open, `tasklist` seeing `pid`
+        // a moment longer wasn't a bug anywhere -- it was us asking an external tool to forget a PID
+        // while we ourselves still held the reason it couldn't.
+        //
+        // `close_all_kills_every_session_and_leaves_no_process_behind` (below) makes the identical
+        // `!pid_is_alive(pid)` check, synchronously, with no sleep/poll, and has never flaked -- because
+        // `PtyRegistry::close_all()` drains its sessions into a local `Vec` that is dropped, handle and
+        // all, *before* that test's assertion ever runs. Same OS guarantee, same assertion; the only
+        // difference is who's still holding the handle when the check happens. So the fix here is to put
+        // this test in that same position instead of deleting the coverage: drop our own last handle to
+        // the child first, *then* ask the OS whether it's gone. That's removing the actual cause (our own
+        // retained reference) rather than a sleep/poll papering over it, and it restores the "a raw
+        // PtySession the registry never touched still leaks nothing" guarantee CPE-1244's module doc
+        // comment promises ("terminal tabs left open never orphan their shells") for the direct,
+        // non-registry-mediated path too.
+        drop(session); // release the last handle we hold to the child (see comment above)
+        assert!(!pid_is_alive(pid), "OS process should be gone once we drop our handle");
     }
 
     // --- PtyRegistry: the id-keyed session bookkeeping that backs open/write/resize/close_pty --------
