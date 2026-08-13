@@ -465,18 +465,48 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// *refuse* or *overwrite blind* — but this site has a third option, because [`unique_target`]'s entire
 /// job is to find some free name and it can simply try the next candidate. Treating the unknown as
 /// occupied is exactly as safe (nothing is ever written to a path we could not prove empty) with no
-/// denial of service. Unix was never affected: its mechanism denies the parent directory, which fails
-/// the copy anyway.
-fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
+/// denial of service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetSlot {
+    /// Provably nothing there — safe to write.
+    Free,
+    /// Provably something there.
+    Occupied,
+    /// The stat failed for a reason other than absence. Not provably free ⇒ not free, but distinguished
+    /// from `Occupied` so [`unique_target`] can tell "this name is taken" from "I cannot see this
+    /// directory at all" and stop grinding (see `MAX_CONSECUTIVE_UNKNOWN_SLOTS`).
+    Unknown,
+}
+
+/// Classify one candidate slot from its [`Path::try_exists`] outcome.
+fn classify_copy_target(stat: std::io::Result<bool>) -> TargetSlot {
     match stat {
-        // `try_exists`'s `Ok` payload is "it is THERE", so free is its negation.
-        Ok(exists) => !exists,
+        // `try_exists`'s `Ok` payload is "it is THERE".
+        Ok(true) => TargetSlot::Occupied,
+        Ok(false) => TargetSlot::Free,
         // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
-        // Could not find out. Not provably free ⇒ not free. The caller moves to the next candidate.
-        Err(_) => false,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetSlot::Free,
+        Err(_) => TargetSlot::Unknown,
     }
 }
+
+/// Whether a candidate is *provably* free. Thin wrapper over [`classify_copy_target`] for the single-shot
+/// probe in [`resolve_conflict`], which has no candidate sequence to advance through.
+fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
+    classify_copy_target(stat) == TargetSlot::Free
+}
+
+/// How many candidate slots in a row may come back [`TargetSlot::Unknown`] before [`unique_target`]
+/// stops probing (CPE-1696).
+///
+/// Treating an unknown as occupied is what keeps a single unreadable file from aborting a copy — but if
+/// the *directory* is what cannot be read (a dead network mount, a revoked share), then **every** one of
+/// the 10,000 candidates comes back `Unknown` and the naive loop performs 10,000 stats before falling
+/// through. On the very mount where that happens each stat can block for seconds, so the fix for a hard
+/// failure would have become a hang. A run this long cannot be a real name collision — it means the
+/// directory itself is unreadable — so we stop and hand back the pathological fallback, which the
+/// caller's own `fs::copy`/`fs::rename` will then fail on quickly and honestly.
+const MAX_CONSECUTIVE_UNKNOWN_SLOTS: usize = 8;
 
 /// Pick a non-colliding name in `dir`, Explorer-style:
 /// "report.txt" -> "report - Copy.txt" -> "report - Copy (2).txt".
@@ -490,11 +520,6 @@ fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
 /// unknown is skipped like any other occupied name, so the caller still gets a usable target and the
 /// unreadable path is left untouched.
 fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
-    let candidate = dir.join(file_name);
-    if copy_target_is_free(candidate.try_exists()) {
-        return candidate;
-    }
-
     let path = Path::new(file_name);
     let stem = path
         .file_stem()
@@ -510,14 +535,23 @@ fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
         dir.join(name)
     };
 
-    let first = build(" - Copy");
-    if copy_target_is_free(first.try_exists()) {
-        return first;
-    }
-    for n in 2..10_000 {
-        let p = build(&format!(" - Copy ({n})"));
-        if copy_target_is_free(p.try_exists()) {
-            return p;
+    // n = 0 is the bare name, n = 1 is " - Copy", n >= 2 is " - Copy (n)" — the original sequence.
+    let mut unknown_run = 0usize;
+    for n in 0..10_000u32 {
+        let candidate = match n {
+            0 => dir.join(file_name),
+            1 => build(" - Copy"),
+            _ => build(&format!(" - Copy ({n})")),
+        };
+        match classify_copy_target(candidate.try_exists()) {
+            TargetSlot::Free => return candidate,
+            TargetSlot::Occupied => unknown_run = 0,
+            TargetSlot::Unknown => {
+                unknown_run += 1;
+                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_SLOTS {
+                    break; // the directory itself is unreadable — stop stat'ing it
+                }
+            }
         }
     }
     // Pathological fallback; effectively unreachable.
@@ -15064,6 +15098,22 @@ overlay / overlay rw,relatime 0 0
                 "{kind:?} must never be reported as a free name — that is the overwrite"
             );
         }
+
+        // The three-state classifier underneath. `Unknown` must stay DISTINCT from `Occupied`: both are
+        // "not free", but only a run of `Unknown`s means the directory itself is unreadable, which is
+        // what lets `unique_target` stop after `MAX_CONSECUTIVE_UNKNOWN_SLOTS` instead of performing
+        // 10,000 blocking stats against a dead mount. Collapsing them would restore that stall.
+        assert_eq!(classify_copy_target(Ok(false)), TargetSlot::Free);
+        assert_eq!(classify_copy_target(Ok(true)), TargetSlot::Occupied);
+        assert_eq!(
+            classify_copy_target(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            TargetSlot::Free
+        );
+        assert_eq!(
+            classify_copy_target(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))),
+            TargetSlot::Unknown,
+            "a refused stat is Unknown, never Occupied — the two drive different loop behaviour"
+        );
     }
 
     /// **The strongest test in this ticket: it stages REAL BYTE LOSS, not a wrong error message.**
@@ -15083,25 +15133,56 @@ overlay / overlay rw,relatime 0 0
     #[test]
     fn cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat() {
         use std::io::Write;
-        let d = scratch("cpe1696_move_denied");
-        let src_dir = d.join("src");
-        let dest_dir = d.join("dest");
-        fs::create_dir_all(&src_dir).unwrap();
-        fs::create_dir_all(&dest_dir).unwrap();
-        let src = src_dir.join("victim.txt");
-        fs::write(&src, b"MOVED SOURCE").unwrap();
-        // The colliding candidate `unique_target` probes first, holding bytes that must survive.
-        let victim = dest_dir.join("victim.txt");
-        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
 
-        // Armed before the deny so cleanup runs on every exit path, panic or not (Evidence Rules: a red
-        // run must never leave debris). Mirrors cpe_server's `Restore` pattern.
-        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
-        impl Drop for Restore<'_> {
-            fn drop(&mut self) {
-                #[cfg(windows)]
-                {
-                    let _ = self.1; // Windows denies `victim` (self.0) itself; `dest_dir` is untouched.
+        // **Windows-only, and the whole body is `#[cfg]`'d rather than early-returned** (a
+        // `#[cfg(not(windows))] { ..; return; }` block makes every following statement an `unreachable
+        // statement` error under CI's `-D warnings` on Linux and macOS — invisible from a Windows dev box).
+        //
+        // The reason it cannot run on Unix is the *point* of the test, so it is written down rather than
+        // waved at: `deny_stat_of`'s Windows mechanism denies **one file**, leaving its parent directory
+        // writable, which is what lets a buggy `fs::rename` replace the victim's bytes while `try_exists`
+        // on it fails. Unix has no equivalent. Its only lever is `chmod` on the *parent*, and
+        // `unique_target`'s candidates live in that same parent — so the very bits that make `stat` fail
+        // with `EACCES` also deny `rename(2)`, which needs write+execute on that directory. The two calls
+        // are governed by the same permission there, so no `chmod` can stage a stat failure that a rename
+        // then survives. (Confirmed the hard way: the first CI run of this test reded the Linux leg with
+        // `the move must still succeed onto a non-colliding name: "Permission denied (os error 13)"` — the
+        // legitimate control move, not the guard.)
+        //
+        // The honest case does not vanish from Unix with it:
+        // `cpe_1696_a_move_into_a_readable_folder_auto_renames_instead_of_overwriting` below drives the
+        // same `do_move_into` entry point ungated, and
+        // `cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so` pins the taxonomy everywhere.
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1696] SKIPPED the do_move_into byte-loss leg on this platform: no `chmod` can \
+                 stage it, because `stat` and `rename(2)` on a candidate are governed by the SAME \
+                 permission bits on its parent directory — the deny that makes the stat fail also makes \
+                 the rename fail, so a buggy guard cannot be caught destroying anything here. NOTHING in \
+                 this test covered CPE-1696's overwrite route on this run; the Windows leg carries that \
+                 evidence, and the ungated move/copy/taxonomy tests carry the honest cases."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1696_move_denied");
+            let src_dir = d.join("src");
+            let dest_dir = d.join("dest");
+            fs::create_dir_all(&src_dir).unwrap();
+            fs::create_dir_all(&dest_dir).unwrap();
+            let src = src_dir.join("victim.txt");
+            fs::write(&src, b"MOVED SOURCE").unwrap();
+            // The colliding candidate `unique_target` probes first, holding bytes that must survive.
+            let victim = dest_dir.join("victim.txt");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            // Armed before the deny so cleanup runs on every exit path, panic or not (Evidence Rules: a
+            // red run must never leave debris). Mirrors cpe_server's `Restore` pattern.
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
                     if let Ok(user) = std::env::var("USERNAME") {
                         let _ = std::process::Command::new("icacls")
                             .arg(self.0)
@@ -15109,86 +15190,105 @@ overlay / overlay rw,relatime 0 0
                             .arg(&user)
                             .output();
                     }
+                    let _ = fs::remove_dir_all(self.1);
                 }
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let _ = self.0; // Unix denies `dest_dir` (self.1); `victim` itself is untouched.
-                    let _ = fs::set_permissions(self.1, fs::Permissions::from_mode(0o700));
-                }
-                let _ = fs::remove_dir_all(self.2);
             }
-        }
-        let _restore = Restore(&victim, &dest_dir, &d);
+            let _restore = Restore(&victim, &d);
 
-        // Deny only READ on the victim: enough to refuse `try_exists`, but it deliberately leaves the
-        // parent's FILE_DELETE_CHILD intact so a buggy rename really can replace it.
-        #[cfg(windows)]
-        if let Ok(user) = std::env::var("USERNAME") {
-            if !user.is_empty() {
+            // Deny only READ on the victim: enough to refuse `try_exists`, while deliberately leaving the
+            // parent's FILE_DELETE_CHILD intact so a buggy rename really can replace it. Measured for the
+            // PR #889 review and written up on `cpe_server::fsutil::deny_stat_of` — denying the parent's
+            // `(DC)` too would make the rename fail for the wrong reason and the test would prove nothing.
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&victim)
+                        .arg("/deny")
+                        .arg(format!("{user}:(R)"))
+                        .output();
+                }
+            }
+
+            if victim.try_exists().is_ok() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1696] SKIPPED the do_move_into denied-candidate leg: could not deny stat of {} \
+                     on this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in \
+                     this test covered CPE-1696's overwrite route on this run; see \
+                     cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so for the taxonomy, which \
+                     does run here.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+            let landed = do_move_into(&ctx, &src, &dest_dir);
+
+            // Restore read access so the victim's bytes can be inspected — the assertion below is the
+            // point of the test and must not be defeated by the very ACL that staged it.
+            if let Ok(user) = std::env::var("USERNAME") {
                 let _ = std::process::Command::new("icacls")
                     .arg(&victim)
-                    .arg("/deny")
-                    .arg(format!("{user}:(R)"))
+                    .arg("/remove:d")
+                    .arg(&user)
                     .output();
             }
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dest_dir, fs::Permissions::from_mode(0o000));
-        }
 
-        if victim.try_exists().is_ok() {
-            let _ = writeln!(
-                std::io::stderr(),
-                "[CPE-1696] SKIPPED the do_move_into denied-candidate leg: could not deny stat of {} on \
-                 this machine (running elevated/root, or a filesystem that ignores ACLs/mode bits). \
-                 NOTHING in this test covered CPE-1696 for unique_target on this run; see \
-                 cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so for the taxonomy, which does \
-                 run here.",
-                victim.display()
+            // **The byte-level assertion.** Pre-fix this read back "MOVED SOURCE".
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a destination file whose stat we were refused must NEVER be renamed over — the \
+                 pre-CPE-1696 `!candidate.exists()` probe read the refusal as \"this name is free\" and \
+                 `fs::rename` replaced its bytes, which is exactly the silent overwrite \
+                 `unique_target`'s own doc comment forbids"
             );
-            return;
+            // And the move must still have gone somewhere sensible rather than failing outright (the PR
+            // #889 review's non-blocking item 1: an unknown is occupied, not fatal).
+            let landed = landed.expect("the move must still succeed onto a non-colliding name");
+            assert_eq!(
+                landed,
+                dest_dir.join("victim - Copy.txt"),
+                "it must auto-rename past the unprovable candidate, not abort the operation"
+            );
+            assert_eq!(fs::read(&landed).unwrap(), b"MOVED SOURCE".to_vec());
         }
+    }
+
+    /// The ungated sibling for the `#[cfg(windows)]` test above — the honest `do_move_into` case, on
+    /// **every** OS. Without it, a `unique_target` that answered "occupied" to everything (or a
+    /// `do_move_into` that stopped moving at all) would be caught only on Windows, which is one of CI's
+    /// three legs. This repo has been bitten twice by a gated assertion silently vanishing elsewhere.
+    #[test]
+    fn cpe_1696_a_move_into_a_readable_folder_auto_renames_instead_of_overwriting() {
+        let d = scratch("cpe1696_move_ok");
+        let src_dir = d.join("src");
+        let dest_dir = d.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let occupied = dest_dir.join("m.txt");
+        fs::write(&occupied, b"KEEP ME").unwrap();
 
         let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
-        let landed = do_move_into(&ctx, &src, &dest_dir);
 
-        // Restore read access so the victim's bytes can be inspected — the assertion below is the point
-        // of the test and must not be defeated by the very ACL that staged it.
-        #[cfg(windows)]
-        if let Ok(user) = std::env::var("USERNAME") {
-            let _ = std::process::Command::new("icacls")
-                .arg(&victim)
-                .arg("/remove:d")
-                .arg(&user)
-                .output();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dest_dir, fs::Permissions::from_mode(0o700));
-        }
+        // A free name is used as-is.
+        let free_src = src_dir.join("fresh.txt");
+        fs::write(&free_src, b"FRESH").unwrap();
+        assert_eq!(do_move_into(&ctx, &free_src, &dest_dir).unwrap(), dest_dir.join("fresh.txt"));
 
-        // **The byte-level assertion.** Pre-fix this read back "MOVED SOURCE".
+        // A colliding name auto-renames and leaves the occupant byte-for-byte.
+        let colliding = src_dir.join("m.txt");
+        fs::write(&colliding, b"MOVED").unwrap();
         assert_eq!(
-            fs::read(&victim).unwrap(),
-            b"VICTIM ORIGINAL".to_vec(),
-            "a destination file whose stat we were refused must NEVER be renamed over — the \
-             pre-CPE-1696 `!candidate.exists()` probe read the refusal as \"this name is free\" and \
-             `fs::rename` replaced its bytes, which is exactly the silent overwrite `unique_target`'s own \
-             doc comment forbids"
+            do_move_into(&ctx, &colliding, &dest_dir).unwrap(),
+            dest_dir.join("m - Copy.txt"),
+            "a colliding move must auto-rename, never overwrite"
         );
-        // And the move must still have gone somewhere sensible rather than failing outright (the PR #889
-        // review's point: an unknown is occupied, not fatal).
-        let landed = landed.expect("the move must still succeed onto a non-colliding name");
-        assert_eq!(
-            landed,
-            dest_dir.join("victim - Copy.txt"),
-            "it must auto-rename past the unprovable candidate, not abort the operation"
-        );
-        assert_eq!(fs::read(&landed).unwrap(), b"MOVED SOURCE".to_vec());
+        assert_eq!(fs::read(&occupied).unwrap(), b"KEEP ME".to_vec());
+        assert_eq!(fs::read(dest_dir.join("m - Copy.txt")).unwrap(), b"MOVED".to_vec());
+
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// The honest cases at the same real entry point, on every OS: a free name copies, and an occupied one
