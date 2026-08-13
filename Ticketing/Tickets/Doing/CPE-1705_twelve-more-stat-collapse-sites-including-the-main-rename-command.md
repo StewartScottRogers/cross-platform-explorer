@@ -151,6 +151,29 @@ wrong conclusion four times, each time from a correct measurement of an incomple
 cannot stage it, the null result must be scoped to the exact denies applied — target *and* parent — rather
 than stated as a property of ACLs.
 
+### Two traps in implementing the helper fix — both measured
+
+Found by the PR #893 reviewer when they actually implemented the "~6 line" change:
+
+1. **`undo_deny_stat_of` must lift the PARENT before the TARGET.** `icacls` resolves its own path argument
+   through `FindFirstFile`, so while the parent's `RD` deny stands, `icacls <target> /remove:d` **itself
+   fails** and the target's ACE is never lifted — leaving the file denied for the rest of the run. With the
+   naive ordering, **4 tests fail** at read-back with `Os { code: 5, PermissionDenied }`. With parents-first
+   ordering: `2093 passed; 0 failed; 4 ignored`.
+2. **The shared helper does not reach the tests that matter most.** `fsutil::deny_stat_of` is `pub(crate)`
+   in `cpe-server` and is **never called from `src-tauri`**. Both src-tauri ACL tests inline their own
+   `icacls` — including the one covering the **main rename command**. Fixing only the helper leaves those
+   vacuous; the parent `RD` deny has to be added at the inline sites too.
+
+Cost to expect: the extra `icacls` invocations take the suite from **17 s to 133 s**.
+
+### A second, independent construction
+
+Deny `(R)` on the **resolution target of a symlink** placed in the slot. That also yields
+`exists() = false, try_exists() = Err`, and `fs::rename` destroys the link. It exercises the **reparse**
+path rather than `fs::metadata`'s `FindFirstFileW` fallback, so it corroborates the parent-`RD` result
+independently rather than restating it. Verified through the real `organize_apply` entry point.
+
 ## The `lib.rs:1786` severity claim — corrected, and it is subtler than first filed
 
 The structural claim is confirmed: `Path::exists()` is `metadata().is_ok()` and collapses, and `fs::rename`
