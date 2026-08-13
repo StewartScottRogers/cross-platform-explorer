@@ -1574,12 +1574,22 @@ mod tests {
         });
         let base = format!("http://{addr}");
 
-        let err = call_with_deadline(
+        // Deliberately not `.expect_err(..)`: with the cap removed this call succeeds with ~10 000
+        // 900-byte-named entries, and `expect_err` would `Debug`-print all of them — a 9 MB panic message
+        // that buries its own point. The count is the whole story.
+        let err = match call_with_deadline(
             "S3Provider::list against a server returning a body over MAX_RESPONSE_BODY_BYTES",
             Duration::from_secs(60),
             move || S3Provider::connect(&cfg(&base)).list("/"),
-        )
-        .expect_err("a body cut off at the cap is an incomplete document and must not parse as a listing");
+        ) {
+            Err(e) => e,
+            Ok(entries) => panic!(
+                "an over-cap body was parsed into a {}-entry listing and returned as complete — the body \
+                 cap is what must stop this, and a partial listing sold as complete is the exact failure \
+                 this module is written against",
+                entries.len()
+            ),
+        };
         assert!(
             err.contains("bad ListObjectsV2 XML"),
             "the truncation must surface through the parser's own honest error: {err}"
