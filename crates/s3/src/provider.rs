@@ -574,6 +574,28 @@ impl FileSystemProvider for S3Provider {
         Ok(self.list_with_filtered_count(path)?.0)
     }
 
+    /// **This override is load-bearing and its absence is invisible to a normal test.** Added by the
+    /// Foreman from the PR #890 round-3 UAT.
+    ///
+    /// [`S3Provider::list_with_filtered_count`] is an *inherent* method. Rust resolves inherent methods
+    /// before trait methods, so every test that calls it on a concrete `S3Provider` gets the real one and
+    /// passes — all 122 of this crate's tests did. But `crates/vfs::connect::remote_dir_entries` takes
+    /// `&dyn FileSystemProvider`, and a trait object can only reach what the `impl` block declares. Without
+    /// this line the vtable resolves to the trait's default, which hardcodes a count of `0`.
+    ///
+    /// The consequence was that the filtered count — the entire mechanism this ticket added so a refused
+    /// key would not vanish *silently* — read `0` through the only path a user takes, no matter how many
+    /// keys were dropped. `remote_list_dir_impl`'s `if listing.filtered > 0` could never fire. The
+    /// "not silent" fix was itself silent.
+    ///
+    /// Note what this means for testing, because it is the third time this one ticket has been caught by
+    /// it: a test on the concrete type proves nothing about dispatch. `dyn_dispatch_reaches_the_real_...`
+    /// below exercises this through a trait object deliberately, and it is the only test that can fail if
+    /// this line is deleted.
+    fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
+        S3Provider::list_with_filtered_count(self, path)
+    }
+
     /// S3's own leaf-safety rule (CPE-1704): overrides the trait's default (`is_safe_name`, correct for
     /// filesystem-shaped backends) with [`is_safe_s3_leaf`], so `crates/vfs::connect::remote_dir_entries`
     /// — the one path a user's remote listing actually takes — asks the RIGHT question about an S3 leaf
@@ -1174,6 +1196,68 @@ mod tests {
         let (entries, filtered) = provider.list_with_filtered_count("/").expect("list_with_filtered_count");
         assert!(entries.is_empty());
         assert_eq!(filtered, 1, "the one unsafe key must be counted, not just dropped with no trace anywhere");
+    }
+
+    /// The test above calls a **concrete** `S3Provider`, and that is exactly why it could not catch the
+    /// bug the PR #890 round-3 UAT found: `list_with_filtered_count` is an *inherent* method, Rust
+    /// resolves inherent methods before trait methods, so a concrete call reaches the real one and passes
+    /// even when the `impl FileSystemProvider` block does not declare it at all.
+    ///
+    /// The real caller does not hold a concrete type. `crates/vfs::connect::remote_dir_entries` takes
+    /// `&dyn FileSystemProvider`, and a trait object can only reach the `impl` block — so without the
+    /// override, dispatch fell through to the trait default, which hardcodes `0`. Every filtered key was
+    /// counted as zero through the only path a user takes, and the whole "not silent" mechanism this
+    /// ticket added was inert.
+    ///
+    /// **This is the third time in one ticket that a fix was verified at a boundary the real caller does
+    /// not use** — first at the provider instead of the vfs layer, then on the concrete type instead of
+    /// through dispatch. So this test is deliberately shaped like the caller: it goes through
+    /// `&dyn FileSystemProvider` and nothing else. Delete the trait override and only this test reds.
+    #[test]
+    fn dyn_dispatch_reaches_the_real_filtered_count_not_the_trait_default() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                // Two legally-refusable keys and one ordinary file, so a wrong count is unambiguous:
+                // the trait default reports 0, the real implementation reports 2.
+                let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                            <Contents><Key>..</Key><Size>1</Size></Contents>\
+                            <Contents><Key>bad\\name</Key><Size>1</Size></Contents>\
+                            <Contents><Key>ordinary.txt</Key><Size>7</Size></Contents></ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        // The shape `remote_dir_entries` uses. Binding through the trait object is the entire point of
+        // this test — calling `provider.list_with_filtered_count(..)` directly would pass regardless.
+        let as_trait: &dyn FileSystemProvider = &provider;
+
+        let (entries, filtered) = as_trait
+            .list_with_filtered_count("/")
+            .expect("list_with_filtered_count through the trait object");
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the ordinary key may survive the guard: {entries:?}"
+        );
+        assert_eq!(
+            filtered, 2,
+            "the filtered count must survive dynamic dispatch — a 0 here means the vtable resolved to \
+             the trait's default and every refused key is invisible to the caller that matters"
+        );
+
+        // `is_safe_leaf_name` is the sibling override on the same impl block; pin it through the same
+        // dispatch so a future edit cannot drop one while keeping the other.
+        assert!(
+            as_trait.is_safe_leaf_name("colon:name.txt"),
+            "S3's own leaf rule must survive dynamic dispatch too, or remote_dir_entries falls back to \
+             the filesystem rule and a legal key vanishes again"
+        );
     }
 
     // ---------------------------------------------------------------------------------------------
