@@ -156,9 +156,55 @@ Every entry below is now traced back to where its destination path comes from.
 - **`clobber_refusal` sites that are not renames** — `folder_template` and `src-tauri` trash-restore (×2)
   precede `fs::write` or an OS restore. **`split_join` was wrongly included here**: the UAT showed
   `join_files` follows a link at `out_path` — deleting it on the failure path, and writing the user's
-  bytes *through* it on the success path. **Filed as CPE-1717.**
+  bytes *through* it on the success path. **Filed as CPE-1718.**
 - **No other `fs::rename` exists** in `src-tauri/src/` outside `lib.rs` (nine sibling files, zero hits) or
   under `sidecar/` in non-test code (the two hits are inside `catalog.rs`'s `#[cfg(test)]` module).
+
+### Round 3 — the structural guard is clippy, not a source scan
+
+The reviewer (CHANGES REQUESTED) reproduced the >25-line and alias bypasses independently before seeing
+the UAT's report, and recommended the shape that actually works. Adopted:
+
+- **`clippy.toml` with `disallowed-methods = [{ path = "std::fs::rename", … }]`** in each workspace root
+  that renames — `crates/server`, `src-tauri`, `crates/ftp`, `crates/sftp`, `crates/webdav`,
+  `sidecar/host`. (There is no root `Cargo.toml`; every one of these is an independent root.)
+- **`fsutil::rename_into_slot(src, target, occupied)`** does the pairing *and* the rename, carrying the
+  single `#[allow]` for the guarded path. All six user-named-slot sites call it.
+- **Every other `fs::rename` carries `#[allow(clippy::disallowed_methods)]` with a one-line reason at the
+  site** — 17 of them, each naming why that destination is not a user-named slot.
+
+Why this and not a tighter scan:
+
+- It catches the **unguarded** rename, which the scan is structurally blind to and which is the more
+  dangerous case.
+- It resolves **paths, not text**, so all three demonstrated bypasses stop working.
+- It rides a gate that already exists: CI runs `clippy --all-targets -- -D warnings` in both feature modes
+  for both workspaces, and `ci.yml` already enforces that every `sidecar/*` directory is clippy'd. The
+  source scan was never going to reach `sidecar/`; this does, for free.
+- The decisive one: **the out-of-class justification now lives in the code, at the site.** Round 1's lived
+  in a PR description, and it was wrong twice.
+
+**Known gap, stated rather than solved:** `disallowed_methods` cannot see a rename reached through a `dyn`
+trait object, so `Provider::rename` is not covered by it. That is written into the `clippy.toml` comment
+and at `provider.rs` itself.
+
+### Round 3 — a second wrong out-of-class entry, fixed here
+
+**`vault_crypto::promote`.** `out_dir` is the user's unlock destination, not a file this crate owns. Its
+emptiness probe is `read_dir`, which follows the link. Both legs are now guarded and tested, and the
+measurement is narrower than the report in one direction and worse in the other:
+
+- **Dangling link:** the pre-fix code does **not** destroy it — renaming a *directory* onto a
+  non-directory entry is refused by the OS first (`ENOTDIR`; "The directory name is invalid", os error
+  267, on Windows). So that leg's pre-fix bug is a confusing OS error, not data loss. Recorded honestly in
+  the test rather than claimed as destruction.
+- **Live directory link over an empty target:** `read_dir` follows it, finds the target empty, and
+  `remove_dir(out_dir)` deletes **the link**; the rename then succeeds. Measured: `result was Ok(())` with
+  the link replaced by a real directory. That is the real loss, and it is the `metadata_write` shape.
+
+`vault_manager` ×2 reached the right conclusion for the wrong stated reason — the destination is the
+user's chosen `.cpevault` path and replacing it is a documented CPE-1670 decision. The justification is
+fixed at both sites; the code is not.
 
 ### The scan is a lint for one shape — NOT a structural guarantee
 
@@ -222,8 +268,14 @@ No ACLs are needed here at all: a *dangling* link is an ordinary object, and `tr
 `Ok(false)` for one on every platform. Only **creating** the link can be refused. `fsutil::make_dangling_link`
 tries `symlink_file` first (needs Developer Mode / elevation on Windows) and falls back to an NTFS
 **junction** (no privilege — created against a real directory that is then removed), so the Windows leg
-asserts for real on an unprivileged runner too. If both fail it is a loud `writeln!(stderr)` skip that says
-nothing was covered. Unix creates the link unconditionally.
+asserts for real on an unprivileged runner too. If both fail it is a `writeln!(stderr)` skip that says
+nothing was covered — **but see the caveat below: that notice is not visible under CI's `cargo test`.**
+
+**The skip notice is invisible in CI, and this PR does not claim otherwise.** `.github/workflows/ci.yml`
+runs `cargo test` with no `--nocapture`, and libtest captures stderr for *passing* tests — and a skip is
+a pass. So on a Windows runner that could create neither a symlink nor a junction, these tests would pass,
+print nothing anyone sees, and cover nothing. That is true of CPE-1705's notices as well. Filed by the
+Foreman as **CPE-1717 (High)**; not fixed here.
 
 **Round 1's evidence for this was true but did not prove itself**, as the UAT pointed out: "verified with
 `--nocapture`, no skip notice" only establishes that *a* link was created, and this machine has Developer
@@ -244,7 +296,7 @@ feature modes (default and `--features index`); `src-tauri` clippy clean in both
 - **CPE-1715** — `unique_target` / `resolve_conflict` treat a dangling link as a free name, so a bulk move
   auto-renames *onto* it. Different fix shape (treat as occupied, pick the next name), hence its own
   ticket.
-- **CPE-1717** — `join_files` follows a link at `out_path`: the failure path `remove_file`s the user's
+- **CPE-1718** — `join_files` follows a link at `out_path`: the failure path `remove_file`s the user's
   link, and the success path writes their bytes *through* it to a path they never named. Round 1 wrongly
   classified `split_join` as safe on the strength of "it precedes `File::create`" — the `File::create` is
   what makes it worse.
