@@ -76,6 +76,42 @@ failure the module says it exists to prevent.
 Documented as "Uppercase HTTP method". `"get"`, `"Get"` and `" GET "` each sign to a different, silently
 wrong signature.
 
+### D5 — AWS China is treated as not-AWS *(added from the PR #867 review)*
+
+`AddressingStyle::Auto` decides "is this AWS?" by matching the `.amazonaws.com` registrable suffix.
+**`s3.cn-north-1.amazonaws.com.cn` is genuine AWS and fails that test**, so every China-region bucket
+silently drops to path-style. The rule's own stated question answers wrong. Reviewer's probe:
+
+```
+https://s3.us-east-1.amazonaws.com           -> VirtualHost
+https://s3.cn-north-1.amazonaws.com.cn       -> Path          <-- gap
+https://amazonaws.com.attacker.example       -> Path          (correct — not spoofable)
+```
+
+Path-style still *works* against AWS, so this is a correctness-of-intent bug rather than a breakage — but
+the code claims to answer a question it gets wrong for a whole partition. One-line fix.
+
+### D6 — `validate_bucket` allows `@` and `:` *(defence in depth, not live)*
+
+A bucket named `evil@attacker.example` under an **explicit** `with_addressing(VirtualHost)` produces the
+host `evil@attacker.example.s3.amazonaws.com`. Unreachable through `Auto` — such buckets resolve to
+path-style, where the bucket is percent-encoded — so this is not a live bug. It is the same missing-input-
+validation class as D2 and should be closed with it.
+
+### D7 — `Signer` is `pub`, derives `Debug`, and the redaction guard does not cover it
+
+Safe today: it holds a `Credentials`, whose redaction is guarded. But nothing goes red if a future refactor
+stores an owned secret on `Signer` directly. The guard should cover the type, not just the type it
+currently delegates to.
+
+### D8 — The "one encoder, cannot drift" guarantee covers the path only
+
+`RequestTarget.url` carries no query string, so the encoded path used in the URL and in the signature come
+from one construction — which is the property that stops the classic silent SigV4 failure. **There is no
+equivalent for the query.** CPE-1683 has to rebuild the on-wire query itself and can drift from
+`canonical_query`, reintroducing exactly the bug this design avoided for the path. Export a query builder
+before the request layer lands.
+
 ## Scope
 
 `crates/s3` — `object_target`, `endpoint_parts`/endpoint handling, and `sign`.
@@ -98,6 +134,12 @@ wrong signature.
       request) — and the host split no longer breaks on the embedded colon.
 - [ ] Signing without a `host` header fails with a message naming the missing header.
 - [ ] A lowercase or space-padded method either signs identically to the uppercase form or is refused.
+- [ ] An AWS China endpoint (`s3.cn-north-1.amazonaws.com.cn`) is recognised as AWS and gets virtual-host
+      addressing for a DNS-safe bucket — with `amazonaws.com.attacker.example` still correctly refused.
+- [ ] `validate_bucket` rejects `@` and `:`.
+- [ ] The secret-redaction guard covers `Signer` itself, so storing an owned secret on it turns a test red.
+- [ ] A query-string builder is exported so the on-wire query and `canonical_query` come from **one**
+      construction, the way the path already does — CPE-1683 must not have to rebuild it.
 - [ ] Each guard broken **on its own** turns a **distinct** test red, with the real output pasted in the PR,
       per the Evidence Rules in `Ticketing/wiki.md`.
 
