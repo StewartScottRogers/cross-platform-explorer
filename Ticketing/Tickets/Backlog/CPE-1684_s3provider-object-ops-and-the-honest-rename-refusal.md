@@ -109,7 +109,15 @@ Route to `map_s3_error` when there IS a body. Say in the code which rule you app
 both bodiless cases with tests — otherwise the "distinguishable" criterion passes in unit tests that
 supply a body and fails against every real server.
 
-## `ureq` will SILENTLY DROP a header whose value has any byte outside {SP, HTAB} ∪ [0x21,0x7E]
+## Header bytes outside {SP, HTAB} ∪ [0x21,0x7E] — what ureq actually does (measured; read the correction below)
+
+**Corrected 2026-08-13 by CPE-1683 — see "Correction to the ureq-header-drop warning above" in Notes,
+below, before reading this section as a settled fact.** The heading below originally asserted a silent
+drop; measured against the actual send path `S3Provider::list` uses, that specific claim did not
+reproduce. The traced `unit.rs` mechanism immediately below is still real and still worth knowing — it
+just is not what happens on the path this crate's `GET` requests take. Read this section for the
+mechanism, then the Notes correction for what was actually observed on your own request path before
+deciding anything from it.
 
 Added by the Foreman from the PR #883 (CPE-1695) review, 2026-08-13. This is a landmine sitting exactly
 where this ticket works, found by tracing the real send path rather than reading the obvious functions.
