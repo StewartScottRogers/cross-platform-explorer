@@ -3,11 +3,11 @@ id: CPE-1697
 title: A whole duplicate copy of the repo — 3,186 files — is committed under .claude/uat-1025/
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
