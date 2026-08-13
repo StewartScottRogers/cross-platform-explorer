@@ -3,11 +3,11 @@ id: CPE-1700
 title: The S3 error path says "no Code was found" when it found one and rejected it, and lets Cf-class controls through
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
