@@ -42,16 +42,38 @@
 //!   reached at all. A confident answer with the wrong cause, from the one module whose entire subject is
 //!   confident answers with wrong causes.
 //! - **The parsed `code` is shape-checked, not merely echoed** ([`is_plausible_code`]): a real S3 code is a
-//!   short token of `[A-Za-z0-9]`, so anything else — `<![CDATA[...]]>`, `"><`, an embedded `<Message>`, an
-//!   embedded comment, or simply markup that slipped through as literal text — is treated as "no usable
-//!   code was read" rather than surfaced as if it were one. `message`, which is expected to be free text,
+//!   short token of `[A-Za-z0-9._:-]` (CPE-1700 widened this from bare `[A-Za-z0-9]` — no code among the
+//!   24 the reviewer tested or the 8 gateways the UAT tested uses `- _ . :`, but a future gateway code that
+//!   does should still pass through rather than be silently dropped), so anything else —
+//!   `<![CDATA[...]]>`, `"><`, an embedded `<Message>`, an embedded comment, or simply markup that slipped
+//!   through as literal text — is treated as "no usable code was read" rather than surfaced as if it were
+//!   one. [`map_s3_error`] distinguishes *why* no usable code was read — no `<Code>` element at all, one
+//!   found but empty, or one found whose content fails this shape check — because those three point a user
+//!   at different causes (network/proxy vs. gateway response format vs. an unrecognised code character
+//!   set) and collapsing them into one message is the same "claim less than you actually observed" failure
+//!   this module exists to close everywhere else. `message`, which is expected to be free text,
 //!   is instead passed through [`sanitize_remote`]: this crate already holds *outbound* header/credential
 //!   text to "no control characters, they would split a signed line" (`validate_structural_text`,
 //!   `sigv4::reject_framing_bytes`); nothing enforced the mirror rule on text arriving *from* a hostile
 //!   endpoint that a caller will render as this app's own error text. A CR/LF/NUL there can forge a fake
-//!   second log line or a fake UI block; an ANSI escape can clear the screen; an unbounded length can
-//!   exhaust a caller that doesn't itself truncate. [`sanitize_remote`] neutralises the first two and
-//!   bounds the third.
+//!   second log line or a fake UI block; an ANSI escape can clear the screen; a bidi-override or other
+//!   Unicode "format" (Cf) character can make the rendered text lie about its own order or width; an
+//!   unbounded length can exhaust a caller that doesn't itself truncate. [`sanitize_remote`] neutralises
+//!   the first three and bounds the fourth.
+//! - **`message`'s own embedded child markup is left as display-only text, not stripped or refused**
+//!   (CPE-1700 item 4 — a decision, not an oversight). Because `message` is the raw byte span between
+//!   `<Message>` and its matching close, a body like `<Message>hi<x><y><Code>AccessDenied</Code></y></x>
+//!   </Message>` puts that nested markup into the rendered message (294 bytes in the reviewer's worst
+//!   measured case). Three options were weighed — strip child markup, refuse a `message` containing `<`,
+//!   or accept it as display-only — and the third was picked: the *authoritative* `code` this module
+//!   prints is already restricted to `is_plausible_code`'s shape and printed first, so nested markup in
+//!   `message` cannot change which cause is reported, only add noise after it is already stated;
+//!   [`sanitize_remote`]'s control-character and length bounds already close every line-splitting,
+//!   screen-clearing, and exhaustion vector; and stripping or refusing would need its own tag-boundary
+//!   scan over already-captured text — the exact kind of second, parallel parsing surface this module's
+//!   design (one recursive scan, no pre-scan) works to avoid. This is display confusion, not a wrong
+//!   verdict. If this ever needs to change, prefer teaching [`scan_elements`] itself to strip nested tags
+//!   while capturing `message`, not a second ad hoc scan afterward.
 //! - **A nested `<Code>`/`<Message>` cannot hijack the real one.** Once a `<Code>` or `<Message>` element
 //!   has been opened, [`scan_elements`] suppresses capture for everything found *inside* its content — so
 //!   `<Message>text <Code>Fake</Code> more</Message>` appearing before the real `<Code>` in document order
@@ -77,12 +99,14 @@ const MAX_ERROR_BODY_BYTES: usize = 16 * 1024;
 /// going deeper is refused at all rather than merely made expensive.
 ///
 /// **This bound is stack-bound, not a nicety.** [`scan_elements`] recurses once per level, and each call
-/// frame costs real call-stack space — measured at roughly 2.7 KiB per frame in a debug build, so depth 32
-/// costs on the order of 90 KiB: a ~2.8x margin under this repo's 256 KiB small-stack test standard (see
-/// `map_s3_error_never_stack_overflows_on_deep_nesting_on_a_256kib_stack` below, which proves the margin
-/// empirically rather than leaving it as an assertion in a comment). Raising this constant materially —
-/// say, to 256 "for a chatty gateway" — would cost on the order of 700 KiB and can overflow a small stack;
-/// widen it only alongside a fresh measurement and a re-run of that test, not as a bare number bump.
+/// frame costs real call-stack space — measured at roughly 3.05 KiB per frame in a debug build (round 2
+/// added a parameter to the recursive frame, which is why this is higher than round 1's 2.7 KiB estimate),
+/// so depth 32 costs on the order of 100 KiB: a ~2.5× margin under this repo's 256 KiB small-stack test
+/// standard (see `map_s3_error_never_stack_overflows_on_deep_nesting_on_a_256kib_stack` below, which proves
+/// the margin empirically rather than leaving it as an assertion in a comment — *that test, not this
+/// comment, is the real guard*; these numbers are illustration). Raising this constant materially — say,
+/// to 256 "for a chatty gateway" — would cost on the order of 780 KiB and can overflow a small stack; widen
+/// it only alongside a fresh measurement and a re-run of that test, not as a bare number bump.
 const MAX_ELEMENT_DEPTH: usize = 32;
 
 /// The two fields this module ever extracts from an S3 error body. `None` means "not found" — including
@@ -124,6 +148,16 @@ struct ClosedAt {
 /// [`sanitize_remote`] first: it is expected free text (S3's own messages are natural-language sentences),
 /// so it is not shape-checked like `code`, but it is still remote-controlled text about to be rendered as
 /// this app's own error output.
+///
+/// When no usable `code` was read, the "could not be read" message names *which* of three distinct things
+/// happened (CPE-1700): no `<Code>` element was found at all (points at the network or a proxy returning a
+/// non-S3 response), a `<Code>` element was found but was empty/whitespace-only (points at the gateway
+/// sending a malformed error body), or a `<Code>` element was found with non-empty content that does not
+/// have the shape of a usable code ([`is_plausible_code`]) (points at the gateway's response format —
+/// e.g. an embedded comment, CDATA, or another element hidden inside it). Collapsing those three into one
+/// "no non-empty `<Code>` element was found" message — as an earlier revision of this function did — claims
+/// less than what was actually observed in the second and third cases, which is the same failure family
+/// this module exists to close everywhere else in the parse.
 pub fn map_s3_error(status: u16, body: &[u8]) -> String {
     let capped = &body[..body.len().min(MAX_ERROR_BODY_BYTES)];
     let mut fields = ParsedFields::default();
@@ -131,7 +165,8 @@ pub fn map_s3_error(status: u16, body: &[u8]) -> String {
         return format!("s3: HTTP {status} — {reason}");
     }
 
-    let plausible_code = fields.code.as_deref().filter(|c| is_plausible_code(c));
+    let raw_code = fields.code.as_deref();
+    let plausible_code = raw_code.filter(|c| is_plausible_code(c));
 
     match plausible_code {
         Some(code) => {
@@ -152,40 +187,88 @@ pub fn map_s3_error(status: u16, body: &[u8]) -> String {
             } else {
                 String::new()
             };
+            // Three distinct arms (CPE-1700 item 1) — say precisely what was and was not found, rather
+            // than one message that is only ever true for the first arm.
+            let reason = match raw_code {
+                None => "no <Code> element was found in it".to_string(),
+                Some("") => "a <Code> element was found in it, but it was empty".to_string(),
+                Some(_) => "a <Code> element was found in it, but its content did not have the shape of \
+                            a usable S3 error code (expected 1-64 characters of letters, digits, or \
+                            `- _ . :`)"
+                    .to_string(),
+            };
             format!(
-                "s3: HTTP {status} and the response body could not be read as an S3 error (no non-empty \
-                 <Code> element was found in it{truncation_note}); refusing to guess which cause applies"
+                "s3: HTTP {status} and the response body could not be read as an S3 error ({reason}\
+                 {truncation_note}); refusing to guess which cause applies"
             )
         }
     }
 }
 
-/// Whether `code` has the shape a real S3 error code always has: a short token of `[A-Za-z0-9]`, 1-64
-/// characters — never markup, never punctuation. Every AWS-documented code (`NoSuchBucket`,
+/// Whether `code` has the shape a real S3 error code always has: a short token of `[A-Za-z0-9._:-]`, 1-64
+/// characters — never markup, never punctuation beyond the four separators every AWS/MinIO/Ceph/B2/GCS/
+/// OSS/R2 code observed so far avoids anyway (CPE-1700 widened this from bare `[A-Za-z0-9]`: no code among
+/// the reviewer's 24 or the UAT's 8 gateways uses `- _ . :`, but a future gateway code that does — e.g.
+/// `Invalid-Bucket-Name` — should still pass through rather than be silently dropped, per this module's own
+/// "unknown codes pass through verbatim" scope). Every AWS-documented code (`NoSuchBucket`,
 /// `SignatureDoesNotMatch`, ...) fits this; nothing legitimate does not. Anything else — `<![CDATA[...]]>`,
 /// `"><`, an embedded `<Message>`, an embedded comment, or a byte-cap-truncated fragment — is treated by
-/// [`map_s3_error`] as "no usable code was read" rather than echoed as if it were one.
+/// [`map_s3_error`] as "no usable code was read" rather than echoed as if it were one. Every evasion shape
+/// the reviewer found still contains `<`, `>`, `"`, or a space, none of which this widened set accepts.
 fn is_plausible_code(code: &str) -> bool {
     let len = code.chars().count();
-    (1..=64).contains(&len) && code.chars().all(|c| c.is_ascii_alphanumeric())
+    (1..=64).contains(&len)
+        && code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'))
+}
+
+/// Whether `c` is a Unicode "format" (Cf) control — a character that can change how surrounding text is
+/// laid out or rendered while never being `char::is_control()` true, so `sanitize_remote` would otherwise
+/// let it straight through. CPE-1682 already reached past `is_control()` once, for U+2028/U+2029, on
+/// exactly this reasoning ("renders as a line break but is not `is_control()`"); CPE-1700 applies the same
+/// principle to the rest of the Cf block rather than leaving it under-applied. Verified surviving the
+/// pre-CPE-1700 `sanitize_remote` unmodified: **U+202E** RIGHT-TO-LEFT OVERRIDE — the exact character the
+/// "Trojan Source" attack (the 2021 CVE-2021-42574 class) uses to make source or output text visually
+/// reorder itself and hide its real content — plus U+202C POP DIRECTIONAL FORMATTING, U+200B ZERO WIDTH
+/// SPACE, U+200F RIGHT-TO-LEFT MARK, U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM), and U+00AD SOFT HYPHEN. The
+/// remaining bidi-control and zero-width siblings in the same ranges are neutralised alongside them on the
+/// same reasoning, rather than waiting for each to be independently rediscovered surviving in the wild.
+fn is_format_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{00AD}'          // SOFT HYPHEN
+        | '\u{061C}'        // ARABIC LETTER MARK
+        | '\u{200B}'..='\u{200F}' // ZWSP, ZWNJ, ZWJ, LRM, RLM
+        | '\u{202A}'..='\u{202E}' // LRE, RLE, POP DIRECTIONAL FORMATTING, LRO, RLO (Trojan Source)
+        | '\u{2060}'..='\u{2064}' // WORD JOINER and the invisible-operator block
+        | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{FEFF}'        // ZERO WIDTH NO-BREAK SPACE / BOM
+    )
 }
 
 /// Neutralise remote-controlled text before it reaches an error string a user reads as coming from this
 /// app: every control character (`char::is_control()`, plus U+2028/U+2029 — the Unicode line/paragraph
-/// separators, which render as a line break in most UI toolkits but are not `is_control()`) becomes a
-/// space, and the result is capped at `max_chars` characters with a trailing `…` added only when
+/// separators, which render as a line break in most UI toolkits but are not `is_control()` — and the wider
+/// Unicode "format" (Cf) class [`is_format_control`] covers, such as U+202E RIGHT-TO-LEFT OVERRIDE) becomes
+/// a space, and the result is capped at `max_chars` characters with a trailing `…` added only when
 /// truncation actually happened, so a short message is never given a `…` it didn't earn.
 ///
 /// This is the inbound mirror of a standard this crate already holds itself to outbound:
 /// `validate_structural_text` (`crate::lib`) refuses control characters in fields that reach a signed
 /// header because "they would split a signed header line", and `sigv4::reject_framing_bytes` guards
 /// header *values* the same way. A hostile S3 endpoint's `<Message>` is exactly as capable of splitting a
-/// rendered error block, forging a fake second log line with a CR/LF/NUL, or clearing the screen with an
-/// ANSI escape — this closes the same failure shape on the way in, one layer up from a signed header.
+/// rendered error block, forging a fake second log line with a CR/LF/NUL, clearing the screen with an ANSI
+/// escape, or visually reordering itself with a bidi override — this closes the same failure shape on the
+/// way in, one layer up from a signed header.
 fn sanitize_remote(s: &str, max_chars: usize) -> String {
     let cleaned: String = s
         .chars()
-        .map(|c| if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') { ' ' } else { c })
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || is_format_control(c) {
+                ' '
+            } else {
+                c
+            }
+        })
         .collect();
     let total_chars = cleaned.chars().count();
     let mut truncated: String = cleaned.chars().take(max_chars).collect();
@@ -458,20 +541,46 @@ mod tests {
         }
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1700 item 1: three DISTINCT refusal arms — no <Code> at all, a <Code> found but empty, and a
+    // <Code> found whose content is not usable. Each test below pins one arm's exact wording and proves
+    // it is absent from the other two arms' messages, so the three cannot silently collapse back into one.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Arm A: no `<Code>` element anywhere in the body at all — points at the network or a proxy, not at
+    /// the gateway's response format. Covers a proxy's HTML error page, an empty body, and plain text.
+    #[test]
+    fn refusal_arm_a_names_no_code_element_found_at_all() {
+        for body in [
+            &b"<html><body><h1>502 Bad Gateway</h1></body></html>"[..],
+            &b""[..],
+            &b"not xml at all, just plain text"[..],
+        ] {
+            let msg = map_s3_error(403, body);
+            assert!(msg.contains("no <Code> element was found in it"), "{msg}");
+            assert!(!msg.contains("but it was empty"), "must not claim arm B: {msg}");
+            assert!(!msg.contains("did not have the shape"), "must not claim arm C: {msg}");
+        }
+    }
+
     /// The specific case the ticket calls out by name: a truncated read. `<Code>NoSuchBu` never reaches a
     /// closing `</Code>`, so the partial text must not be surfaced as though it had been read in full —
     /// that would be exactly the "confident answer with the wrong cause" shape this ticket exists to
-    /// close off, just relocated from "guessed a code" to "guessed the REST of a code".
+    /// close off, just relocated from "guessed a code" to "guessed the REST of a code". A missing close is
+    /// bucketed with arm A ("no <Code> element" — no complete open+close pair was ever found), not arm C,
+    /// since [`scan_elements`] never captured any text for it at all.
     #[test]
     fn a_truncated_read_is_treated_as_unparseable_not_partially_guessed() {
         let truncated = b"<Error><Code>NoSuchBu";
         let msg = map_s3_error(403, truncated);
         assert!(msg.contains("could not be read"), "{msg}");
+        assert!(msg.contains("no <Code> element was found in it"), "{msg}");
         assert!(!msg.contains("NoSuchBu"), "the truncated partial code leaked into the message: {msg}");
     }
 
     /// A `<Code>` cut off before its closing tag, but with well-formed siblings on either side, still
-    /// yields nothing for `Code` — a mismatched/absent close is not "close enough".
+    /// yields nothing for `Code` — a mismatched/absent close is not "close enough", and is bucketed with
+    /// arm A for the same reason as the truncated-read case above.
     #[test]
     fn a_field_missing_its_own_closing_tag_is_not_reported_even_with_well_formed_neighbors() {
         // `<Code>` here is immediately followed by `<Message>` with no `</Code>` in between — malformed,
@@ -479,22 +588,53 @@ mod tests {
         let body = b"<Error><Code>NoSuchKey<Message>The key was not found</Message></Error>";
         let msg = map_s3_error(404, body);
         assert!(msg.contains("could not be read"), "{msg}");
+        assert!(msg.contains("no <Code> element was found in it"), "{msg}");
         assert!(!msg.contains("NoSuchKey"), "{msg}");
     }
 
-    /// S3 finding: `<Code></Code>` and `<Code>   </Code>` are "found" in the structural sense but carry no
-    /// usable text — the message must say "no *non-empty* `<Code>`" rather than falsely implying nothing
-    /// was found at all, and must not go on to echo the sibling `<Message>` as if a code had been read.
+    /// Arm B: a `<Code>` element genuinely found (open tag through matching close tag), but its content is
+    /// empty or whitespace-only. Distinct from arm A ("no element found") and arm C ("found, unusable
+    /// content") — the message must say a `<Code>` WAS found, unlike arm A, and must not claim its content
+    /// had the wrong shape, unlike arm C, since there was no content to shape-check at all.
     #[test]
-    fn an_empty_or_whitespace_only_code_is_treated_as_not_found() {
+    fn refusal_arm_b_names_a_code_element_found_but_empty() {
         for body in [
             "<Error><Code></Code><Message>hi</Message></Error>",
             "<Error><Code>   </Code><Message>hi</Message></Error>",
         ] {
             let msg = map_s3_error(403, body.as_bytes());
             assert!(msg.contains("could not be read"), "{msg}");
-            assert!(msg.contains("non-empty"), "message must say *non-empty* <Code>, not just <Code>: {msg}");
+            assert!(
+                msg.contains("a <Code> element was found in it, but it was empty"),
+                "message must say a <Code> WAS found and was empty: {msg}"
+            );
+            assert!(!msg.contains("no <Code> element was found"), "must not claim arm A: {msg}");
+            assert!(!msg.contains("did not have the shape"), "must not claim arm C: {msg}");
             assert!(!msg.contains(": hi"), "must not echo the message next to an unusable code: {msg}");
+        }
+    }
+
+    /// Arm C: a `<Code>` element found with non-empty content that does not have the shape of a usable S3
+    /// error code (markup, punctuation outside the accepted set, or an over-length token). Distinct from
+    /// both other arms — the message must say a `<Code>` WAS found (unlike arm A) and that it was NOT
+    /// empty (unlike arm B), naming the content-shape problem instead.
+    #[test]
+    fn refusal_arm_c_names_a_code_element_found_but_content_not_usable() {
+        for bad in [
+            "<![CDATA[NoSuchBucket]]>",
+            "\"><script>alert(1)</script>",
+            "<Message>hi</Message>",
+            "<!-- comment -->",
+        ] {
+            let body = format!("<Error><Code>{bad}</Code></Error>");
+            let msg = map_s3_error(403, body.as_bytes());
+            assert!(msg.contains("could not be read"), "for {bad:?}: {msg}");
+            assert!(
+                msg.contains("a <Code> element was found in it, but its content did not have the shape"),
+                "message must say a <Code> WAS found with unusable content, for {bad:?}: {msg}"
+            );
+            assert!(!msg.contains("no <Code> element was found"), "must not claim arm A: {msg}");
+            assert!(!msg.contains("but it was empty"), "must not claim arm B: {msg}");
         }
     }
 
@@ -700,6 +840,23 @@ mod tests {
         );
     }
 
+    /// CPE-1700 item 4's recorded decision: `message`'s own nested child markup — including a fake
+    /// `<Code>` buried inside it, the ticket's own example shape — is accepted as display-only text rather
+    /// than stripped or refused. This pins the decision as a test, not just a doc comment: the nested
+    /// markup DOES appear verbatim inside the message portion of the string (display confusion, accepted),
+    /// while the authoritative code printed right after the status is unaffected by it either way (not a
+    /// wrong verdict, which is why the decision is "accept" rather than "strip" or "refuse").
+    #[test]
+    fn nested_markup_in_message_is_accepted_as_display_only_per_the_item_4_decision() {
+        let body = b"<Error><Code>AccessDenied</Code><Message>hi<x><y><Code>Fake</Code></y></x></Message></Error>";
+        let msg = map_s3_error(403, body);
+        assert!(msg.starts_with("s3: HTTP 403 AccessDenied:"), "the real code must lead, unaffected: {msg}");
+        assert!(
+            msg.contains("hi<x><y><Code>Fake</Code></y></x>"),
+            "the decision is to accept nested markup as display-only, not strip it: {msg}"
+        );
+    }
+
     // ---------------------------------------------------------------------------------------------
     // S1 (BLOCKER, security): remote text must be control-char-clean, length-bounded, and code must be
     // shape-checked rather than echoed verbatim.
@@ -723,6 +880,34 @@ mod tests {
         let truncated = sanitize_remote(&long, 512);
         assert_eq!(truncated.chars().count(), 513, "512 kept chars + one ellipsis char");
         assert!(truncated.ends_with('…'));
+    }
+
+    /// CPE-1700 item 3: U+202E RIGHT-TO-LEFT OVERRIDE — the exact character the "Trojan Source" attack
+    /// class uses to make displayed text visually reorder itself and hide its real content — must be
+    /// neutralised by `sanitize_remote` even though it is not `char::is_control()`, on the same reasoning
+    /// CPE-1682 already applied to U+2028/U+2029.
+    #[test]
+    fn sanitize_remote_neutralises_u202e_right_to_left_override_the_trojan_source_character() {
+        let hostile = "AccessDenied\u{202E}desiveR ssecca detnarg\u{202D}";
+        let cleaned = sanitize_remote(hostile, 512);
+        assert!(!cleaned.contains('\u{202E}'), "U+202E (Trojan Source RLO) survived sanitize_remote: {cleaned:?}");
+    }
+
+    /// The rest of the Cf-class set the ticket names as verified surviving the pre-CPE-1700
+    /// `sanitize_remote`: U+202C, U+200B ZWSP, U+200F RLM, U+FEFF, U+00AD.
+    #[test]
+    fn sanitize_remote_neutralises_the_rest_of_the_named_cf_class_characters() {
+        for (name, ch) in [
+            ("U+202C POP DIRECTIONAL FORMATTING", '\u{202C}'),
+            ("U+200B ZERO WIDTH SPACE", '\u{200B}'),
+            ("U+200F RIGHT-TO-LEFT MARK", '\u{200F}'),
+            ("U+FEFF ZERO WIDTH NO-BREAK SPACE", '\u{FEFF}'),
+            ("U+00AD SOFT HYPHEN", '\u{00AD}'),
+        ] {
+            let hostile = format!("hello{ch}world");
+            let cleaned = sanitize_remote(&hostile, 512);
+            assert!(!cleaned.contains(ch), "{name} survived sanitize_remote: {cleaned:?}");
+        }
     }
 
     /// The end-to-end capture: a hostile `<Message>` carrying a forged log line, an ANSI screen-clear, and
@@ -750,10 +935,20 @@ mod tests {
         assert!(msg.contains('…'), "a truncated message must show it was cut: {msg}");
     }
 
-    /// `is_plausible_code` accepts only a short `[A-Za-z0-9]` token, matching every real S3 code.
+    /// `is_plausible_code` accepts a `[A-Za-z0-9._:-]` token, 1-64 characters — CPE-1700 widened this from
+    /// bare `[A-Za-z0-9]` so a gateway extension code using `- _ . :` (e.g. `Invalid-Bucket-Name`) passes
+    /// through rather than being dropped, while every markup/evasion shape below is still rejected.
     #[test]
     fn is_plausible_code_accepts_real_codes_and_rejects_markup_shapes() {
-        for good in ["NoSuchBucket", "SignatureDoesNotMatch", "SlowDown", "A", "Code123"] {
+        for good in [
+            "NoSuchBucket",
+            "SignatureDoesNotMatch",
+            "SlowDown",
+            "A",
+            "Code123",
+            "Invalid-Bucket-Name", // CPE-1700 item 2: the ticket's own example of a widened-charset code.
+            "x.y_z:1",             // exercises all four newly accepted separators at once.
+        ] {
             assert!(is_plausible_code(good), "{good} should be plausible");
         }
         for bad in ["", "   ", "<![CDATA[NoSuchBucket]]>", "\"><script>", "Not Alnum", "a/b", &"x".repeat(65)] {
@@ -764,7 +959,8 @@ mod tests {
     /// The reviewer's specific evasion rows: a `<Code>` whose raw content is markup rather than a real
     /// code — a CDATA-wrapped value, an attribute-escape attempt, an embedded `<Message>`, an embedded
     /// comment — must all fall through to "could not be read" instead of being echoed as if they were a
-    /// genuine code.
+    /// genuine code. Still true after CPE-1700 widened the accepted charset to `[A-Za-z0-9._:-]`, since
+    /// none of these shapes are made of only that widened set.
     #[test]
     fn a_code_field_whose_content_is_markup_rather_than_a_real_code_is_treated_as_unparseable() {
         let bad_code_contents = [
@@ -777,6 +973,126 @@ mod tests {
             let body = format!("<Error><Code>{bad}</Code></Error>");
             let msg = map_s3_error(403, body.as_bytes());
             assert!(msg.contains("could not be read"), "for {bad:?}: {msg}");
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1700 item 2 (AC2): re-run the reviewer's evasion rows against the widened `[A-Za-z0-9._:-]`
+    // charset and confirm each still refuses.
+    //
+    // The independent reviewer's original round-2 review enumerated evasion payloads by row number
+    // ("rows 2, 6, 7, 21, 22") in a numbered table that was not persisted anywhere in this repo — it is
+    // not in the PR #879 review comments (checked via `gh api repos/.../pulls/879/reviews`, `.../comments`
+    // — both empty; the review was left as PR-description text, not a GitHub review object), the commit
+    // messages, or the closed CPE-1682 ticket file. What survives is the *description*: "all of them
+    // contain `<`, `>`, `"` or a space" (ticket body, item 2). Rather than skip the AC, this reconstructs
+    // one representative row per forbidden-character class the description names, plus the CDATA-wrap
+    // shape already pinned above, each as its own test per the AC's "a test per row" wording — so if the
+    // exact original rows resurface, dropping them in only adds coverage, it does not change the verdict.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Evasion row (reconstructed, `<`-class): a bare `<` inside the code content, the character that
+    /// starts every tag-injection attempt.
+    #[test]
+    fn evasion_row_containing_angle_open_still_refuses() {
+        let body = "<Error><Code>NoSuch<Injected</Code></Error>";
+        let msg = map_s3_error(403, body.as_bytes());
+        assert!(msg.contains("could not be read"), "{msg}");
+        assert!(!msg.contains("NoSuch"), "must not echo the unusable code fragment: {msg}");
+    }
+
+    /// Evasion row (reconstructed, `>`-class): a bare `>` inside the code content, closing a tag the
+    /// scanner never opened as one.
+    #[test]
+    fn evasion_row_containing_angle_close_still_refuses() {
+        let body = "<Error><Code>NoSuch>Injected</Code></Error>";
+        let msg = map_s3_error(403, body.as_bytes());
+        assert!(msg.contains("could not be read"), "{msg}");
+        assert!(!msg.contains("NoSuch"), "{msg}");
+    }
+
+    /// Evasion row (reconstructed, `"`-class): a quote, the character an attribute-escape ("`">`" style)
+    /// evasion needs to break out of a quoted context.
+    #[test]
+    fn evasion_row_containing_quote_still_refuses() {
+        let body = "<Error><Code>NoSuch\"Injected</Code></Error>";
+        let msg = map_s3_error(403, body.as_bytes());
+        assert!(msg.contains("could not be read"), "{msg}");
+        assert!(!msg.contains("NoSuch"), "{msg}");
+    }
+
+    /// Evasion row (reconstructed, space-class): a space inside the code content — real S3 codes are one
+    /// unbroken token, so a value carrying whitespace ("`Not Alnum`" among `is_plausible_code`'s own bad
+    /// examples above) is exactly what widening to punctuation must NOT also start letting through.
+    #[test]
+    fn evasion_row_containing_a_space_still_refuses() {
+        let body = "<Error><Code>NoSuch Injected</Code></Error>";
+        let msg = map_s3_error(403, body.as_bytes());
+        assert!(msg.contains("could not be read"), "{msg}");
+        assert!(!msg.contains("NoSuch"), "{msg}");
+    }
+
+    /// Evasion row (pinned, CDATA-class): a CDATA-wrapped code, combining `<`, `>`, `[`, and `]` in one
+    /// payload — the one shape from the original evasion set whose exact text is independently pinned by
+    /// `a_code_field_whose_content_is_markup_rather_than_a_real_code_is_treated_as_unparseable` above,
+    /// included again here so all five rows for this AC are grouped in one place.
+    #[test]
+    fn evasion_row_cdata_wrapped_code_still_refuses() {
+        let body = "<Error><Code><![CDATA[NoSuchBucket]]></Code></Error>";
+        let msg = map_s3_error(403, body.as_bytes());
+        assert!(msg.contains("could not be read"), "{msg}");
+        assert!(!msg.contains("NoSuchBucket"), "{msg}");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1700 regression bar: every real vendor code across the reviewer's 24-code set and the UAT's
+    // eight-gateway set must still pass through verbatim after item 2's charset widening. None of these
+    // needed the widening (all fit the original `[A-Za-z0-9]`), but this is the bar item 2 must not shrink.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The reviewer's 24-code vendor set (AWS, MinIO, Ceph/RGW, B2, GCS, OSS, R2) plus the UAT's
+    /// eight-gateway set, deduplicated — every one must still be reported verbatim, none refused.
+    #[test]
+    fn every_real_vendor_code_in_the_regression_set_still_passes_through_verbatim() {
+        let vendor_codes = [
+            // AWS S3 (a representative slice of the reviewer's AWS rows, incl. the two longest-named).
+            "NoSuchBucket",
+            "NoSuchKey",
+            "AccessDenied",
+            "InvalidAccessKeyId",
+            "SignatureDoesNotMatch",
+            "SlowDown",
+            "BucketAlreadyExists",
+            "BucketAlreadyOwnedByYou",
+            "EntityTooLarge",
+            "InvalidBucketName",
+            "InvalidRange",
+            "NoSuchUpload",
+            "PreconditionFailed",
+            "RequestTimeout",
+            "TooManyBuckets",
+            "UnresolvableGrantByEmailAddress",
+            "XAmzContentSHA256Mismatch",
+            // MinIO extension codes.
+            "XMinioAdminNoSuchUser",
+            "XMinioInvalidObjectName",
+            // Ceph RGW.
+            "InvalidBucketState",
+            "NoSuchTagSet",
+            // Backblaze B2 / Google Cloud Storage / Alibaba OSS / Cloudflare R2 gateway codes seen in
+            // the UAT's eight-gateway pass.
+            "BadRequest",
+            "InvalidArgument",
+            "AccountProblem",
+        ];
+        for code in vendor_codes {
+            let body = fixture(code, "some message");
+            let msg = map_s3_error(403, body.as_bytes());
+            assert!(
+                msg.contains(code),
+                "vendor code {code:?} must pass through verbatim, was refused instead: {msg}"
+            );
+            assert!(!msg.contains("could not be read"), "vendor code {code:?} was wrongly refused: {msg}");
         }
     }
 
@@ -794,7 +1110,7 @@ mod tests {
         assert!(!msg.contains("AccessDenied"), "a later duplicate <Code> must not override the first: {msg}");
     }
 
-    // (M3 - the empty-code guard - is `an_empty_or_whitespace_only_code_is_treated_as_not_found` above;
+    // (M3 - the empty-code guard - is `refusal_arm_b_names_a_code_element_found_but_empty` above;
     //  M5 - the byte-cap constant - is `max_error_body_bytes_is_pinned_to_16_kib_not_merely_bounded` above.)
 
     // ---------------------------------------------------------------------------------------------
