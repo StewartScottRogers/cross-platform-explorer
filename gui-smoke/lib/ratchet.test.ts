@@ -597,20 +597,28 @@ describe("evaluate — clause 7: UNEVIDENCED INTERMITTENT (CPE-1680)", () => {
     assert.equal(result.ok, true);
   });
 
-  it("the real known-failing.json's four intermittent entries clear the bar unchanged, as committed", () => {
-    // The ticket's explicit constraint: this fix must NOT force the four current entries to be rewritten
-    // dishonestly to satisfy a format. Load the REAL committed file and prove it as-is.
+  it("the real known-failing.json has zero intermittent entries (CPE-1679 drained the last four)", () => {
+    // CPE-1680's original version of this test pinned the four `.mp-media` media-flake entries (found by
+    // CPE-1677, cause unknown) and proved they cleared clause 7's evidence bar as committed. CPE-1679
+    // found and fixed the real cause (MediaPlayer's own `.mp-fallback` graceful-degrade markup was never
+    // in `waitForPreviewToSettle`'s recognised selector list — see gui-smoke/lib/samplesNav.ts) and, per
+    // the file's own `$comment` ("the default outcome is that known-failing.json contains no intermittent
+    // entries at all"), removed all four rather than leaving them listed once their case genuinely passes
+    // reliably. This test now pins the OPPOSITE fact — zero intermittent entries today — so a future
+    // worker adding one back still exercises this same "prove it against the real committed file, not a
+    // synthetic stand-in" shape once the count is non-zero again.
     const knownFailingPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../known-failing.json");
     const knownFailing = JSON.parse(fs.readFileSync(knownFailingPath, "utf-8")) as KnownFailingFile;
     const intermittentEntries = knownFailing.cases.filter((c) => c.intermittent);
     assert.equal(
       intermittentEntries.length,
-      4,
-      "expected the four documented media-flake entries (CPE-1679) — update this test if that count changes",
+      0,
+      "expected zero intermittent entries post-CPE-1679 — update this test (and its comment) if a new one is ever added",
     );
 
     // Feed every listed case as still-failing so only clause 7 (not 1/2/3, which this test isn't about)
-    // can produce a message.
+    // can produce a message. With zero intermittent entries this is vacuously true, but keeps the same
+    // "run the REAL committed file through evaluate()" shape the original test used.
     const results: CaseResult[] = knownFailing.cases.map((c) => ({ spec: c.spec, test: c.test, status: "failed" }));
     const specCount = new Set(knownFailing.cases.map((c) => c.spec)).size;
 

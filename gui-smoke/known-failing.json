@@ -15,27 +15,6 @@
     },
     {
       "spec": "samples.smoke.ts",
-      "test": "opens samples/audio/track.flac: no crash + preview renders or gracefully degrades",
-      "reason": "PROVEN INTERMITTENT, found by CPE-1677 on the first real runs of the case-granular gate and invisible before it (the whole file was exempt). This is the MEDIA family — the four samples whose settle-detection depends on `.mp-media` (MediaPreview's <audio>/<video>), the exact boundary of the flake, not a case-by-case guess. Across eight real runs each member has been seen both passing and failing on unchanged code, with a different one or two failing almost every run: flac ✖ on 31593963928 + 31598207125; mp3 ✖ on 31617196015, 31622660088-attempt2, 31630437256; ogg ✖ on 31593963928, 31617196015, 31622660088-attempt1, 31630437256; clip.mp4 ✖ on 31630437256. Note 31617196015 was a run on MAIN where the old whole-file ratchet still printed OK. Hypothesis (unverified, and CPE-1679 says explicitly not to treat it as a diagnosis): GStreamer/WebKitGTK media init under Xvfb occasionally exceeds the 20s settle window. Exempt in BOTH directions until CPE-1679 triages it. NOTE: an intermittent entry is the ONLY exemption class with no automatic drain — clause 2 (a listed case that starts passing) is skipped for it — so its owning ticket IS the drain mechanism. These four point at CPE-1679, which is OPEN, and must never be repointed at a closed ticket — do not extend this treatment to anything that is merely inconvenient.",
-      "ticket": "CPE-1679",
-      "intermittent": true
-    },
-    {
-      "spec": "samples.smoke.ts",
-      "test": "opens samples/audio/track.mp3: no crash + preview renders or gracefully degrades",
-      "reason": "PROVEN INTERMITTENT — same `.mp-media` settle flake as track.flac above; see that entry for the full evidence table across eight real runs.",
-      "ticket": "CPE-1679",
-      "intermittent": true
-    },
-    {
-      "spec": "samples.smoke.ts",
-      "test": "opens samples/audio/track.ogg: no crash + preview renders or gracefully degrades",
-      "reason": "PROVEN INTERMITTENT — same `.mp-media` settle flake as track.flac above; see that entry for the full evidence table across eight real runs.",
-      "ticket": "CPE-1679",
-      "intermittent": true
-    },
-    {
-      "spec": "samples.smoke.ts",
       "test": "opens samples/calendar/sample.ics: no crash + preview renders or gracefully degrades",
       "reason": "CPE-1507: the preview pane never settles for calendar/sample.ics on WebKitGTK/Xvfb — still \"Loading preview…\" (or nothing rendered) after 20s.",
       "ticket": "CPE-1507"
@@ -165,13 +144,6 @@
       "test": "opens samples/text/notebook.ipynb: no crash + preview renders or gracefully degrades",
       "reason": "CPE-1507: the preview pane never settles for text/notebook.ipynb on WebKitGTK/Xvfb — still \"Loading preview…\" (or nothing rendered) after 20s.",
       "ticket": "CPE-1507"
-    },
-    {
-      "spec": "samples.smoke.ts",
-      "test": "opens samples/video/clip.mp4: no crash + preview renders or gracefully degrades",
-      "reason": "PROVEN INTERMITTENT — same `.mp-media` settle flake as the audio/track.* entries above; see track.flac's entry for the full evidence table across eight real runs. This is the fourth and last member of the media family (the samples whose settle-detection depends on MediaPreview's <audio>/<video>), which is why the boundary is drawn here rather than case by case.",
-      "ticket": "CPE-1679",
-      "intermittent": true
     },
     {
       "spec": "saved-search.smoke.ts",

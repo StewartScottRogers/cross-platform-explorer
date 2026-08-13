@@ -214,14 +214,27 @@ that bar is also machine-checked (clause 7, `UNEVIDENCED INTERMITTENT`): an entr
 flakiness — only real run history can — it only closes the one hole that WAS silently open: an entry
 with an empty `reason` and empty `ticket` used to be accepted exactly like a well-evidenced one.
 
-The four **media** cases (`samples/audio/track.{flac,mp3,ogg}` + `samples/video/clip.mp4` — exactly the
-samples whose settle-detection depends on `.mp-media`, MediaPreview's `<audio>`/`<video>`) are the
-current and only users of it. CPE-1677's first live runs found a different one or two of them failing
-almost every run on unchanged code across eight real runs (`31593963928`, `31598207125`, `31602466829`,
-`31617196015`, `31621443412`, `31622660088` attempts 1+2, `31630437256`) — including one run **on `main`**
-where the old whole-file ratchet still printed `OK`. The boundary is the `.mp-media` family, not a
-case-by-case guess. Unverified hypothesis for the follow-up ticket: GStreamer/WebKitGTK media init under
-Xvfb occasionally exceeds the 20s settle window.
+**No current users (CPE-1679 drained the last four).** The four `samples/audio/track.{flac,mp3,ogg}` +
+`samples/video/clip.mp4` cases were `intermittent: true` from CPE-1677 (found by the first live runs
+of the case-granular gate) until CPE-1679 found and fixed the real cause: `waitForPreviewToSettle`'s
+selector list had no entry for `MediaPlayer.svelte`'s own graceful-fallback markup (`.mp-fallback`,
+the "Can't play this media file" UI shown on the `<audio>`/`<video>` element's `error` event). When
+GStreamer/WebKitGTK under Xvfb fails to decode one of these four files — confirmed against a real
+failure screenshot (CI run `31630437256`'s `samples-walk-fail.png`, taken by `snapFailure` at the
+instant `clip.mp4`'s case timed out, showing the pane already settled on `.mp-fallback`'s exact
+markup, not "still loading") — the app does exactly what this spec's own name allows ("no crash +
+preview renders **or gracefully degrades**"), but the settle check recognised neither `.mp-media`
+(unmounted by the `{#if errored}` branch) nor `.preview-note` (not the class MediaPlayer uses), so it
+spun for the full 20s and failed. Fixed by adding `.mp-fallback` to `PREVIEW_CONTENT_SELECTOR`
+(`gui-smoke/lib/samplesNav.ts`) — the same pattern already used for every other kind's own
+graceful-degrade markup (`aside.details` for CPE-1357). Verified with a before/after repeated-open
+stress harness against real ubuntu-latest + Xvfb + WebKitGTK (not merged — see the CPE-1679 PR body
+for the run ids and counts): genuine 20s-timeout failures were common before the fix and vanished
+completely after it, across far more repeated real attempts than the before run survived (an
+unrelated WebKitGTK/GStreamer session crash under rapid repeated same-file opens — not a settle-check
+failure — capped how many attempts the before run could log; the after run comfortably outlasted it
+with zero settle failures). All four entries are removed; if a NEW case ever needs `intermittent`,
+open a fresh ticket rather than reusing this one (see the `$comment` above).
 
 **Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
 is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
