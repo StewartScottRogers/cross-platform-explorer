@@ -1,11 +1,11 @@
 ---
 id: CPE-1705
-title: Twelve more stat-collapse sites — including the main rename command, which can silently clobber a file
+title: Eighteen more stat-collapse sites — incl. the main rename command and a snapshot-index wipe
 type: bug
 priority: High
 status: Backlog
 tags: ready
-estimate: L
+estimate: XL
 created: 2026-08-13
 closed:
 ---
@@ -14,13 +14,15 @@ closed:
 
 The **sixth** round of this bug class (CPE-1678 → 1687 → 1692 → 1696 → this), and the first where the
 sweep behind it was genuinely exhaustive: **all 341 tracked `.rs` files, nothing excluded** — every file
-under `tests/`, `examples/`, `benches/`, `src/bin/`, `build.rs`, and `sidecar/` in full, twelve patterns,
-brace-matched to separate production code from `#[cfg(test)]`. Found by the CPE-1696 worker, which
-reported rather than fixed them, following the precedent CPE-1692 set. That was the right call — but it
-means **these are unfixed on `main` right now.**
+under `tests/`, `examples/`, `benches/`, `src/bin/`, `build.rs`, and `sidecar/` in full, brace-matched to
+separate production code from `#[cfg(test)]`. Found by the CPE-1696 worker, which reported rather than
+fixed them, following the precedent CPE-1692 set — then **six more** by that PR's reviewer, running the
+same sweep independently at seventeen patterns. Eighteen sites in total, and **all of them are unfixed on
+`main` right now.**
 
-Three are at the same silent-overwrite severity as CPE-1696's priority sites. One of them is the main
-rename command.
+That the sixth round's exhaustive sweep still missed six sites — including the most dangerous one in the
+whole chain — is itself the lesson. Two people searched the same 341 files with overlapping patterns and
+got different answers. Assume this list is still incomplete.
 
 ### Class A — refuse-to-overwrite via `.exists()`, then `fs::rename`, which replaces silently
 
@@ -49,19 +51,90 @@ which **replaces the destination silently on both Windows and Unix**. A denied o
 
 - `crates/server/src/batch_media.rs:1736`
 
-## Read this before writing a Windows test — it changes what is provable
+## CORRECTED — an ACL test CAN stage real byte loss on a rename site
 
-Measured by the CPE-1696 worker and recorded on `fsutil::deny_stat_of`:
+**Read this instead of the earlier version of this section**, which said an ACL test can prove refusal but
+never byte loss. That was measured against `fs::write`/`fs::copy` and is **false for `fs::rename`** — which
+is what almost every site in this ticket does. Re-measured independently by the PR #889 reviewer,
+non-elevated, local NTFS:
 
-- The **minimal** Windows deny that makes `try_exists` fail is **`S` (SYNCHRONIZE)**. `RA`, `REA`, `RD`
-  and `RC` do nothing.
-- But `fs::write` and `fs::copy` **also request SYNCHRONIZE**. So **every deny that hides a file also
-  protects it.**
+| `icacls <t> /deny <user>:(…)` | `exists()` | `try_exists()` | `fs::write` | **`fs::rename` onto it** |
+|---|---|---|---|---|
+| `RA`, `RC` | true | `Ok(true)` | Ok | **Ok — bytes replaced** |
+| `REA`, `RD` | true | `Ok(true)` | Ok | **Ok — bytes replaced** |
+| **`S`**, `R`, `RX`, `W` | true | **Err(PermissionDenied)** | Err | **Ok — bytes replaced** |
+| `F` | true | Err(PermissionDenied) | Err | Err |
 
-Consequence: on Windows an ACL test can prove the code *refuses*, but can never demonstrate *byte loss*.
-Worse, a bare `expect_err` **passes vacuously** — the neutralised code still errors, just with
-"Access is denied. (os error 5)" coming from the write rather than from the guard. Assert on which error,
-or test the pure classifier. This is why CPE-1696's classifiers are the load-bearing tests.
+So under `S`, `R`, `RX` or `W`: **`try_exists` fails while `fs::rename` succeeds and destroys the bytes**
+(measured, `"ORIGINAL"` → `"NEWDATA"`). Only `(F)` blocks it, because only `(F)` carries `DELETE`.
+
+**What this means for you: for a `try_exists`-guarded, rename-destructive site you can write a test that
+stages actual byte loss, not merely a refusal message.** Do that — it is a strictly stronger test.
+
+Two things that remain true from the earlier version and still matter:
+
+- **No deny — not even `(F)` — refuses `Path::exists()` or `fs::metadata()`.** They open with a
+  desired-access mask of 0. So a site still on `.exists()` cannot be made to fail open via an ACL at all.
+- **A bare `expect_err` can still pass vacuously** on `write`/`copy` sites: the neutralised code still
+  errors, just from the write rather than the guard. Assert on *which* error, or test the pure classifier.
+
+## The `lib.rs:1786` severity claim — corrected, and it is subtler than first filed
+
+The structural claim is confirmed: `Path::exists()` is `metadata().is_ok()` and collapses, and `fs::rename`
+onto an existing readable file silently replaces it (measured: `Ok(())`, no warning, target's contents
+replaced). A denied stat *would* pass the guard and clobber.
+
+**But the reviewer could not construct the denied stat**, and said so rather than letting the framing stand:
+
+- **Windows: unreachable via ACLs.** Every deny including `(F)` leaves `Path::exists()` returning `true`.
+- **Unix: mitigated by a coincidence.** `target = parent.join(new_name)` and the source is in that same
+  parent, so a `chmod` that makes `stat` fail with EACCES also denies `rename(2)`, which needs write+execute
+  on that same directory.
+
+So the reachable routes are the **non-permission tail** — `EIO`, a stale handle, a dead mount, `ELOOP` —
+plus one the reviewer demonstrated end to end:
+
+> **`exists()` follows symlinks and `rename` does not.** On a dangling symlink: `exists() = false`,
+> `symlink_metadata = Ok`, and `fs::rename` onto it returns `Ok`, silently destroying the link.
+
+**Note carefully: `try_exists()` also returns `Ok(false)` there, so this ticket's remedy would NOT fix that
+route.** It is a CPE-1461-family symlink-following issue, not a stat-collapse one. Fix it, but fix it as
+what it is, and do not let a `try_exists` swap be mistaken for having closed it.
+
+Treat `lib.rs:1786` as priority — the structure is genuinely wrong and the tail is genuinely reachable —
+but do not repeat "demonstrated byte loss in the most-used operation" as though the permission model did
+not mitigate it on both platforms. Over-claiming is what produced rounds one through four of this chain.
+
+`batch_media.rs:2054` is confirmed **without reservation**: it is the `plan()` producing the `PlannedItem`s
+that `execute_plan` consumes, so now that CPE-1696 has hardened the executor, the collapsed planner will
+produce plans the executor **refuses** — a visible symptom, not merely a latent one.
+
+## Six more sites, found by the PR #889 reviewer's own sweep
+
+Its scope: all 341 tracked `.rs` files, seventeen patterns, production/test split by brace-matching. It
+reproduced CPE-1696's sweep line-for-line — and then found six sites in neither that triage nor its
+excluded list. **One is worse than anything either of us named:**
+
+- **`crates/server/src/snapshot_capture.rs:374` — `load_store`.** `if !path.is_file() { return
+  Ok(BlobStore::new()) }`. A stat failure on `index.json` reads as *"first capture ever"*. `capture()`
+  (`:142`) then loads that empty store, mutates it, and `save_store`s it back (`:167`) — **overwriting the
+  real index with one containing only this capture's blobs, erasing every other snapshot's refcounts.** The
+  next `delete_snapshot`/GC then frees blobs older snapshots still reference. Permanent cross-snapshot data
+  loss from a single transient stat, and a plausible route on a network-backed store dir — the QNAP is an
+  explicitly supported target. Note `:444` in the same file was already triaged; **`:374` is the more
+  dangerous one and was missed**, which is the "file looks fully triaged, wasn't" shape.
+- `snapshot_capture.rs:156` — `if dest.exists() { continue }` then `fs::copy` onto a blob. Benign because
+  content-addressed, but the same fail-open-into-overwrite shape.
+- `content_index.rs:320` — `load_at`; a stat failure reads as "needs build". Diagnosis severity.
+- `thumb_source.rs:107` — `if let Ok(meta) = metadata(path) { size gate }` **with no `else`**. Structurally
+  identical to the `transfer.rs` leaf CPE-1696 fixed for being the same hole; here a stat failure bypasses
+  the CPE-1447/1449 memory cap and falls into an unbounded `fs::read`. Deliberate per its comment — but
+  name the inconsistency.
+- `links.rs:98`, `:120` and `src-tauri/src/lib.rs:647` — `symlink_metadata(..).map(is_symlink).unwrap_or(false)`;
+  a denied `lstat` reads as "not a symlink".
+
+One accuracy note on a site already listed: **Class C's `batch_media.rs:1736` is a self-described "belt and
+braces" backstop behind a primary `open_no_follow`**, not a primary guard. Real, but say so.
 
 ## Scope
 
