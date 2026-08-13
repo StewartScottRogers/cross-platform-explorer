@@ -70,16 +70,20 @@
 //! is not exposed to the silent drop.
 //!
 //! **Decision: keep [`guard_header_sendable`] anyway**, downgraded from "closes a silent-corruption hole"
-//! to "fails a beat earlier, with a clearer, byte-naming message, before touching the network at all" —
-//! `ureq`'s own `Bad Header: invalid header '<full Authorization value>'` message is genuinely usable but
-//! echoes the whole header including the signature, and does not say *which byte* made it invalid. Refusing
-//! at this layer costs nothing (no new dependency, one small pure function) and is strictly friendlier to
-//! debug than waiting for `ureq` to say so. This is *not* the same decision the CPE-1684 warning asked for
-//! ("refuse loudly … because the alternative is silent" no longer applies here); it is "refuse loudly
-//! because it is cheap and clearer", which is a weaker but still positive case. **CPE-1684 should re-run
-//! this same measurement against whatever code path its own PUT/HEAD/DELETE requests use** before repeating
-//! the silent-drop framing verbatim — it may hold there, or it may not; this finding is scoped to `GET` via
-//! the builder API, not to `ureq` in general.
+//! to "fails a beat earlier, with a clearer, byte-and-offset-naming message, before touching the network at
+//! all" — `ureq`'s own `Bad Header: invalid header '<full Authorization value>'` message is genuinely
+//! usable but echoes the whole header including the signature, and does not say *which byte* made it
+//! invalid. [`guard_header_sendable`]'s own message improves on both: it names the offending byte and its
+//! offset into the value, and — an independent review of an earlier draft caught this — it must **not**
+//! echo the value itself, since for `Authorization` that value carries the request signature and this
+//! error reaches the caller (and any log) as an ordinary `Result<_, String>`. Refusing at this layer costs
+//! nothing (no new dependency, one small pure function) and is strictly friendlier to debug than waiting
+//! for `ureq` to say so. This is *not* the same decision the CPE-1684 warning asked for ("refuse loudly …
+//! because the alternative is silent" no longer applies here); it is "refuse loudly because it is cheap and
+//! clearer", which is a weaker but still positive case. **CPE-1684 should re-run this same measurement
+//! against whatever code path its own PUT/HEAD/DELETE requests use** before repeating the silent-drop
+//! framing verbatim — it may hold there, or it may not; this finding is scoped to `GET` via the builder
+//! API, not to `ureq` in general.
 
 use std::io::Read as _;
 
@@ -133,13 +137,22 @@ fn is_ureq_sendable_byte(b: u8) -> bool {
 /// module uses, `ureq` 2.12.1 already refuses this input itself (loudly, before any byte reaches the
 /// network) rather than silently dropping the header as the ticket that flagged this warned. This function
 /// is kept anyway, downgraded from "closes a silent hole" to "fails one beat sooner with a clearer, byte-
-/// naming message, for free".
+/// and-offset-naming message, for free".
+///
+/// **Never echoes `value` itself** (an independent review of an earlier draft caught this): this function
+/// is called with `&signed.authorization`, which for `Authorization` carries the request's SigV4 signature
+/// — `AWS4-HMAC-SHA256 Credential=<access key id>/…, Signature=<hex>` — and `S3Provider::list` returns
+/// `Result<_, String>`, so whatever this function returns reaches the caller and any log verbatim. The
+/// secret key itself is never in the value (SigV4 only ever puts the derived signature and the *public*
+/// access key id in `Authorization`), but there is no reason to echo either one when the byte and its
+/// offset already say everything needed to fix the input.
 fn guard_header_sendable(label: &str, value: &str) -> Result<(), String> {
-    if let Some(b) = value.bytes().find(|b| !is_ureq_sendable_byte(*b)) {
+    if let Some((offset, b)) = value.bytes().enumerate().find(|(_, b)| !is_ureq_sendable_byte(*b)) {
         return Err(format!(
-            "s3: the {label} header value contains byte {b:#04x}, which ureq (this crate's HTTP client) \
-             refuses to send — refusing here first, before the request is attempted, with the specific byte \
-             named rather than waiting for ureq's own (less specific) refusal. Value: {value:?}"
+            "s3: the {label} header value contains byte {b:#04x} at offset {offset}, which ureq (this \
+             crate's HTTP client) refuses to send — refusing here first, before the request is attempted, \
+             with the specific byte and offset named rather than waiting for ureq's own (less specific) \
+             refusal, and without echoing the header value itself."
         ));
     }
     Ok(())
@@ -472,6 +485,7 @@ impl FileSystemProvider for S3Provider {
 mod tests {
     use super::*;
     use crate::{AddressingStyle, Credentials};
+    use std::panic::{self, AssertUnwindSafe};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
@@ -887,6 +901,191 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // B1 (independent-review finding): `xml_nesting_too_deep`/`MAX_XML_NESTING_DEPTH` shipped with zero
+    // test coverage — the very guard that justified adding `xmlparser` as a dependency, ported from
+    // `crates/webdav/src/lib.rs` (CPE-1398) without porting any of its five proofs. Ported back
+    // near-verbatim, adapted from PROPFIND `<multistatus>` shape to `ListObjectsV2`'s `<ListBucketResult>`.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Wrap `inner` in a well-formed `<ListBucketResult>` envelope, mirroring `crates/webdav`'s
+    /// `multistatus_wrap`, so a case that isn't testing the envelope itself doesn't also trip on it.
+    fn list_bucket_result_wrap(inner: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">{inner}</ListBucketResult>"#
+        )
+    }
+
+    #[test]
+    fn xml_nesting_guard_rejects_deep_nesting_before_it_reaches_roxmltree() {
+        // Confirms the CPE-1398-derived stack-overflow guard actually fires here too: nesting past
+        // MAX_XML_NESTING_DEPTH is rejected by the cheap pre-scan (no parse attempted), while a shallow,
+        // realistic ListBucketResult body is not.
+        let deep = format!(
+            "<ListBucketResult>{}{}</ListBucketResult>",
+            "<a>".repeat(4000),
+            "</a>".repeat(4000)
+        );
+        assert!(xml_nesting_too_deep(&deep, MAX_XML_NESTING_DEPTH));
+        assert!(parse_list_bucket_result(&deep, "").is_err());
+
+        let shallow = list_bucket_result_wrap(
+            "<IsTruncated>false</IsTruncated><Contents><Key>a.txt</Key><Size>1</Size></Contents>",
+        );
+        assert!(!xml_nesting_too_deep(&shallow, MAX_XML_NESTING_DEPTH));
+        assert!(parse_list_bucket_result(&shallow, "").is_ok());
+    }
+
+    #[test]
+    fn xml_nesting_guard_survives_the_quote_unaware_bypass() {
+        // The CPE-1398 bypass: `<a b="/>">` is legal XML whose attribute value contains the literal bytes
+        // `/>` — a quote-UNaware byte scan lands on that embedded `>`, sees the preceding `/`, and wrongly
+        // concludes the tag is self-closing, so it never counts toward depth even though it is a real
+        // child-bearing open element. `xml_nesting_too_deep` uses the real `xmlparser::Tokenizer`
+        // (quote/comment/CDATA/PI-aware by construction), so this must be caught — under `catch_unwind`
+        // too, as a defense-in-depth check that it is a graceful `Err`, not merely "the guard function
+        // returns true in isolation".
+        let n = 2000;
+        let bypass =
+            format!("<ListBucketResult>{}{}</ListBucketResult>", "<a b=\"/>\">".repeat(n), "</a>".repeat(n));
+        assert!(
+            xml_nesting_too_deep(&bypass, MAX_XML_NESTING_DEPTH),
+            "the quote-unaware-scan bypass shape must be recognized as too deep"
+        );
+        let result = panic::catch_unwind(AssertUnwindSafe(|| parse_list_bucket_result(&bypass, "")));
+        assert!(result.is_ok(), "parse_list_bucket_result must not panic/crash on the bypass payload");
+        assert!(result.unwrap().is_err(), "parse_list_bucket_result must return Err for the bypass payload");
+    }
+
+    #[test]
+    fn xml_nesting_guard_is_not_confused_by_gt_inside_comments_cdata_or_pis() {
+        // Decoys containing a literal '>' inside constructs that don't nest (comments, CDATA, processing
+        // instructions) must neither cause a false positive on shallow real input nor mask genuinely deep
+        // real nesting.
+        let shallow = "<?xml version=\"1.0\"?><!-- a > b --><ListBucketResult>\
+             <![CDATA[ > ]]><?pi content > more?>\
+             <IsTruncated>false</IsTruncated><!-- > -->\
+             <Contents><![CDATA[>]]><Key>a.txt</Key><Size>5</Size></Contents>\
+             </ListBucketResult>"
+            .to_string();
+        assert!(!xml_nesting_too_deep(&shallow, MAX_XML_NESTING_DEPTH), "decoys must not inflate depth");
+        let page = parse_list_bucket_result(&shallow, "").expect("well-formed despite the decoys");
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.entries[0].name, "a.txt");
+        assert_eq!(page.entries[0].size, 5);
+
+        // Genuinely deep real nesting (2000 levels) with the same kinds of decoys interleaved between real
+        // tags: the decoys must NOT mask the real depth, and the call must still be a graceful Err under
+        // catch_unwind, never a crash.
+        let n = 2000;
+        let open = "<a><!-- > --><![CDATA[>]]>".repeat(n);
+        let close = "</a>".repeat(n);
+        let deep_with_decoys = format!("<?xml version=\"1.0\"?><ListBucketResult>{open}{close}</ListBucketResult>");
+        assert!(xml_nesting_too_deep(&deep_with_decoys, MAX_XML_NESTING_DEPTH), "decoys must not mask real depth");
+        let result = panic::catch_unwind(AssertUnwindSafe(|| parse_list_bucket_result(&deep_with_decoys, "")));
+        assert!(result.is_ok(), "must not panic/crash even with decoys present");
+        assert!(result.unwrap().is_err());
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // B2 (independent-review finding): MAX_LIST_PAGES and MAX_LIST_ENTRIES shipped as facts asserted in
+    // the PR body with no test evidence. Both already worked; this is transcription, not new behaviour.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Always answers `IsTruncated=true` with the same `NextContinuationToken` and `entries_per_page`
+    /// freshly-formatted `<Contents>` rows, regardless of the request — simulates a server (hostile or
+    /// merely broken) that never finishes a listing, so `S3Provider::list`'s two independent caps
+    /// (`MAX_LIST_PAGES` for a server that never advances, `MAX_LIST_ENTRIES` for one that keeps growing)
+    /// can each be forced and observed directly, without needing 200,000+ real files on disk.
+    fn spawn_endlessly_truncated_server(entries_per_page: usize) -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            let mut rows = String::new();
+            for i in 0..entries_per_page {
+                rows.push_str(&format!("<Contents><Key>f{i}.txt</Key><Size>1</Size></Contents>"));
+            }
+            let xml = format!(
+                "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                 <NextContinuationToken>next</NextContinuationToken>{rows}</ListBucketResult>"
+            );
+            for req in server.incoming_requests() {
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml.clone()).with_header(ct));
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn a_server_that_never_stops_truncating_is_capped_by_max_list_pages() {
+        // Zero new entries per page: MAX_LIST_ENTRIES can never trip, isolating MAX_LIST_PAGES.
+        let base = spawn_endlessly_truncated_server(0);
+        let provider = S3Provider::connect(&cfg(&base));
+        let err = provider
+            .list("/")
+            .expect_err("a server that answers IsTruncated=true forever must not be followed forever");
+        assert!(
+            err.contains(&format!("{MAX_LIST_PAGES} ListObjectsV2 pages")),
+            "the error must name the page cap that actually fired: {err}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_never_stops_growing_is_capped_by_max_list_entries() {
+        // 1000 entries per page (S3's own per-page max) means the entries cap is reached in
+        // MAX_LIST_ENTRIES / 1000 + 1 pages — comfortably under MAX_LIST_PAGES, so this test proves the
+        // entries cap fires first for a genuinely growing listing, not merely that SOME cap eventually does.
+        let base = spawn_endlessly_truncated_server(1000);
+        let provider = S3Provider::connect(&cfg(&base));
+        let err = provider
+            .list("/")
+            .expect_err("a server that keeps growing the listing forever must not be buffered forever");
+        assert!(
+            err.contains(&format!("{MAX_LIST_ENTRIES} entries")),
+            "the error must name the entries cap, not the page cap (entries should be hit first): {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // B3 (independent-review finding, "the most serious of the four"): `IsTruncated=true` with no
+    // `NextContinuationToken` shipped untested. Replacing the error with a silent `break` leaves every
+    // other test green while turning a hostile/broken server's malformed response into a silently
+    // truncated listing presented as complete — exactly what CPE-1683's own ticket calls worse than
+    // failing outright.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn is_truncated_true_with_no_continuation_token_is_refused_not_silently_truncated() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_thread = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                requests_thread.fetch_add(1, Ordering::Relaxed);
+                let xml = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                           <Contents><Key>f0.txt</Key><Size>1</Size></Contents></ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+
+        let provider = S3Provider::connect(&cfg(&base));
+        let err = provider.list("/").expect_err(
+            "IsTruncated=true with no NextContinuationToken must be a loud error, not a silently \
+             truncated-but-reported-complete listing",
+        );
+        assert!(err.contains("IsTruncated=true"), "{err}");
+        assert!(err.contains("NextContinuationToken"), "{err}");
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            1,
+            "must fail on the very first malformed page, not retry or silently accept what it has"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // The ureq-header-drop decision: refused loudly, before anything is sent.
     // ---------------------------------------------------------------------------------------------
 
@@ -903,6 +1102,13 @@ mod tests {
         let err = provider.list("/").expect_err("a non-ASCII access key id must be refused, not silently mangled");
         assert!(err.contains("ureq"), "{err}");
         assert!(err.contains("Authorization"), "the error must name which header, not just that something failed: {err}");
+        assert!(err.contains("byte") && err.contains("offset"), "the error must name the byte and its offset: {err}");
+        // B4 (independent-review finding on an earlier draft): the value must never be echoed, because
+        // this exact call site passes `&signed.authorization`, which for a real request carries the
+        // request's SigV4 signature and access key id.
+        assert!(!err.contains("Signature="), "the Authorization value leaked into the error: {err}");
+        assert!(!err.contains("Credential="), "the Authorization value leaked into the error: {err}");
+        assert!(!err.contains("AKIA"), "the access key id leaked into the error: {err}");
         assert_eq!(
             requests.load(Ordering::Relaxed),
             0,
