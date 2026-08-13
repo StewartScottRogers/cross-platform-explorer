@@ -138,24 +138,74 @@ jobs:
       # `working-directory: crates/<name>` step below, so a future new crate (or a deleted step) can't
       # recreate that hole silently. ubuntu-latest only (like the Typed-bindings drift guard in the
       # `backend` job) — a text check against the workflow file, not an OS-dependent build.
-      - name: Guard — every directory under crates/ is named in this workflow (CPE-1690)
+      #
+      # CPE-1699 extends the same check to sidecar/* (5 crates as of 2026-08-12: agent-board,
+      # ai-console, contract, host, repos — enumerated by `ls sidecar/` excluding sidecar/README.md,
+      # which the trailing-slash glob below already excludes since it isn't a directory). Unlike
+      # crates/*, the sidecar crates are NOT verified by a different mechanism that would make naming
+      # them here redundant: the `sidecar` job (below, same file) checks them out on the same 3-OS
+      # matrix and clippy+tests each one via its own `working-directory: sidecar/<name>` step, exactly
+      # mirroring the crates/ pattern this guard already polices — so the guard is extended, not
+      # skipped. (The `sidecar-platform` feature flag gates the *app's* opt-in build of sidecar-platform
+      # code in the `backend` job — a separate, unrelated axis from whether a sidecar/* crate's own
+      # clippy+test step is named here.)
+      #
+      # Glob-matches-nothing, made intentional (CPE-1699): the original CPE-1690 script did not set
+      # `nullglob`, so if `crates/*/` expanded to nothing (crates/ deleted, renamed, or moved), bash
+      # would leave the glob un-expanded as the literal string `crates/*/` and the `for` loop would
+      # still run ONCE with that literal — stripping the `crates/` prefix and trailing `/` turns it
+      # into the one-character name `*`, and the grep for `working-directory: crates/*$` happens to
+      # almost never match (`*` there is a regex quantifier, not a literal), so the loop fell into the
+      # same "missing" path as a real uncovered directory and reds anyway. Right outcome, wrong reason —
+      # and a naive "count the loop iterations, red if zero" fix does NOT actually detect this case,
+      # because the un-expanded literal still counts as one iteration, not zero (verified locally: see
+      # the CPE-1699 PR body). The correct fix is `shopt -s nullglob`, set explicitly below: with it, an
+      # unmatched glob truly expands to zero words, so the loop genuinely does not run, `*_count` stays
+      # 0, and the dedicated "matched no directories" message below fires deliberately instead of by
+      # regex accident.
+      - name: Guard — every directory under crates/ and sidecar/ is named in this workflow (CPE-1690, CPE-1699)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
           set -euo pipefail
+          shopt -s nullglob
           missing=0
-          for dir in crates/*/; do
-            name="${dir#crates/}"
+
+          check_named() {
+            base="$1"
+            dir="$2"
+            name="${dir#"${base}"/}"
             name="${name%/}"
-            if ! grep -q "working-directory: crates/${name}\$" .github/workflows/ci.yml; then
-              echo "::error::crates/${name} has no 'working-directory: crates/${name}' step in .github/workflows/ci.yml — every directory under crates/ must be clippy'd + tested here (CPE-1690)"
+            if ! grep -q "working-directory: ${base}/${name}\$" .github/workflows/ci.yml; then
+              echo "::error::${base}/${name} has no 'working-directory: ${base}/${name}' step in .github/workflows/ci.yml — every directory under ${base}/ must be clippy'd + tested here (CPE-1690, CPE-1699)"
               missing=1
             fi
+          }
+
+          crates_count=0
+          for dir in crates/*/; do
+            crates_count=$((crates_count + 1))
+            check_named crates "$dir"
           done
+          if [ "$crates_count" -eq 0 ]; then
+            echo "::error::crates/*/ matched no directories — crates/ is missing, empty, or renamed, so this guard cannot verify anything under it"
+            missing=1
+          fi
+
+          sidecar_count=0
+          for dir in sidecar/*/; do
+            sidecar_count=$((sidecar_count + 1))
+            check_named sidecar "$dir"
+          done
+          if [ "$sidecar_count" -eq 0 ]; then
+            echo "::error::sidecar/*/ matched no directories — sidecar/ is missing, empty, or renamed, so this guard cannot verify anything under it"
+            missing=1
+          fi
+
           if [ "$missing" != "0" ]; then
             exit 1
           fi
-          echo "every crates/* directory is named in this workflow"
+          echo "every crates/* (${crates_count}) and sidecar/* (${sidecar_count}) directory is named in this workflow"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
