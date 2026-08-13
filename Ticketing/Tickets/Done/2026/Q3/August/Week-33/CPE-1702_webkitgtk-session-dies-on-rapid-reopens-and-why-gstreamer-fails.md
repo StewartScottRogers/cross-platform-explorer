@@ -3,11 +3,11 @@ id: CPE-1702
 title: GUI-smoke session dies on rapid re-opens; and CI has no media codecs, so playback is never tested
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-13
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
