@@ -617,8 +617,15 @@ pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
 ///    reads, so this construction stages exactly the same slot.
 ///
 /// Unix has neither restriction: `symlink(2)` never resolves its target, so leg 1 always works.
-#[cfg(test)]
-pub(crate) fn make_dangling_link(link: &Path) -> bool {
+///
+/// **Why this is `pub` and not `#[cfg(test)] pub(crate)`** like its neighbour [`deny_stat_of`]: the app
+/// adapter's tests need it too. `rename_entry_impl`, `move_exact_impl` and `board_move_impl` all live in
+/// `src-tauri` and all rename onto a user-named slot, and in CPE-1710's first round they shipped **with no
+/// test each** for exactly this reason — the helper could not be reached from there, and the alternative
+/// was a third inlined copy of the construction (which is how `deny_stat_of`'s inline duplicates in
+/// `src-tauri` ended up needing the parent-`RD` fix applied separately, per CPE-1705 correction 4). One
+/// implementation, reachable from both crates, is the lesser evil.
+pub fn make_dangling_link(link: &Path) -> bool {
     let missing = link.with_file_name(format!(
         "{}-target-that-does-not-exist",
         link.file_name().unwrap_or_default().to_string_lossy()
@@ -835,42 +842,142 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// **The pairing, enforced structurally rather than remembered** (CPE-1710).
+    /// **Leg 2 of [`make_dangling_link`], exercised on its own** (CPE-1710, PR #895 UAT).
     ///
-    /// CPE-1705 wrote the rule down in a doc comment — a `rename`-destructive slot needs the link check
-    /// too — and then four of its six such sites shipped with only [`clobber_refusal`]. This scans the
-    /// crate's sources (plus the app adapter's `lib.rs`) and fails if:
+    /// On a developer machine with Developer Mode on, `symlink_file` always succeeds and the **junction**
+    /// fallback never runs — so "verified locally, no skip notice printed" proves leg 1 and says nothing
+    /// about the leg that unprivileged CI runners actually take. This drives leg 2 directly: build the
+    /// junction, delete its target, and assert the resulting slot is the same hazard — a link by
+    /// `symlink_metadata`, invisible to [`clobber_refusal`], refused by [`rename_slot_refusal`].
     ///
-    /// - a bare `clobber_refusal(` call sits within a few lines of an `fs::rename(`, i.e. exactly the
-    ///   half-guarded shape this ticket found four instances of; or
-    /// - [`symlink_slot_refusal`] is called anywhere outside this module, which would mean somebody
-    ///   re-separated the halves rather than calling [`rename_slot_refusal`].
-    ///
-    /// A source scan is a blunt instrument, so it also asserts its own inputs: it must have read a
-    /// plausible number of files and must actually see the combined helper being called. A guard test
-    /// that silently scanned nothing would be the same class of mistake it exists to catch.
+    /// Windows-only because junctions are; the Unix leg of `make_dangling_link` has no second path to
+    /// exercise (`symlink(2)` never resolves its target, so leg 1 cannot fail for the privilege reason).
     #[test]
-    fn guards_are_paired_at_every_rename_destructive_site() {
+    #[cfg(windows)]
+    fn the_junction_fallback_stages_the_same_hazard_as_a_symlink() {
+        let d = scratch("junction-leg");
+        let target = d.join("real-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        let link = d.join("slot");
+        // `junction::create` canonicalises its target, so the target must exist here and is removed
+        // afterwards — that is exactly what leaves the reparse point dangling.
+        junction::create(&target, &link).expect("creating a junction needs no privilege");
+        std::fs::remove_dir_all(&target).unwrap();
+
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "Rust must report a junction as a link — that is the property the guard reads"
+        );
+        assert_eq!(
+            clobber_refusal(&link, "occupied"),
+            None,
+            "and the occupancy half must still see nothing there — otherwise the fallback would be \
+             staging a different, milder scenario than a dangling symlink"
+        );
+        assert!(
+            rename_slot_refusal(&link, "occupied").is_some_and(|m| m.contains("is a link")),
+            "so the paired guard must refuse it"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **A lint for one specific mistake — NOT a structural guarantee** (CPE-1710, scoped down by the
+    /// PR #895 UAT).
+    ///
+    /// It catches the exact shape CPE-1710 found four instances of: a bare [`clobber_refusal`] standing in
+    /// for the whole guard immediately above an `fs::rename`. It also rejects a direct
+    /// [`symlink_slot_refusal`] call outside this module, so the halves cannot be re-separated by hand.
+    ///
+    /// # What it does NOT catch — measured, not guessed
+    ///
+    /// The UAT drove each of these through and the scan stayed green, so none of them is theoretical:
+    ///
+    /// - **A rename with NO guard at all**, and the pre-CPE-1705 `if dst.exists()` shape. The scan only
+    ///   fires on the *half*-guarded shape, so the completely unguarded one — the more dangerous of the
+    ///   two — is invisible to it. `provider.rs`'s `LocalProvider::rename` is a live example.
+    /// - **Distance.** The guard and the rename more than [`SCAN_WINDOW`] lines apart.
+    /// - **Aliasing.** `use std::fs::rename as move_entry;` — the scan matches the literal text
+    ///   `fs::rename(`.
+    /// - **Indirection.** The rename moved behind a helper function.
+    ///
+    /// **Do not describe this as making the pairing structurally impossible to get wrong.** The first
+    /// version of this comment did, which is a claim about a *class* backed by a lint for one *shape* —
+    /// and this ticket family exists because a rule was written down and then not followed. A guard that
+    /// genuinely closed the class would have to find every `fs::rename` whose destination is user-named
+    /// and require the pairing there; that is a different and much larger piece of work than this scan.
+    ///
+    /// # Scope, stated because a scan that quietly misses a directory is worse than no scan
+    ///
+    /// Every `.rs` under `crates/*/src/`, `src-tauri/src/` and `sidecar/*/src/` — the first version read
+    /// only `crates/server/src/` plus `src-tauri/src/lib.rs`, missing nine sibling files in that same
+    /// directory. Production code only: scanning stops at a file's `mod tests`, because a unit test that
+    /// asserts on `clobber_refusal` while using `fs::rename` to *stage* a scenario is not a half-guarded
+    /// site, and telling its author to switch to `rename_slot_refusal` would be wrong advice. Only this
+    /// module is exempt by name, matched on its **full path** — the first version skipped any file called
+    /// `fsutil.rs` anywhere in the tree.
+    ///
+    /// It asserts its own inputs — file count, and that it can still see the combined helper being called
+    /// — so it cannot pass by scanning nothing. That failure mode is the whole reason this ticket family
+    /// re-measured one incomplete setup four times.
+    #[test]
+    fn half_applied_rename_guards_are_rejected() {
+        let (files, offences, combined_calls) = scan_for_half_applied_guards();
+        assert!(
+            files > 60,
+            "the scan read only {files} files — it is not looking where it thinks it is"
+        );
+        assert!(
+            offences.is_empty(),
+            "half-applied rename guards:\n{}\n\nScope of this scan: crates/*/src, src-tauri/src, \
+             sidecar/*/src, production code only. It catches ONE shape (a bare `clobber_refusal` within \
+             {SCAN_WINDOW} lines of a literal `fs::rename(` in the same function). It does NOT catch an \
+             unguarded rename, an aliased `fs::rename`, or one behind a helper.",
+            offences.join("\n")
+        );
+        assert!(
+            combined_calls >= 4,
+            "only {combined_calls} call(s) to `rename_slot_refusal` found — CPE-1710 converted six sites, \
+             so the scan is matching nothing and would not catch a regression either"
+        );
+    }
+
+    /// How far below a guard the scan will look for an `fs::rename`. Every real guard-to-rename distance
+    /// in this repo is ≤ 8 lines; the window also stops dead at the next `fn`, so it cannot reach into a
+    /// neighbouring function (the UAT tripped the first version that way — a guard 8 lines above a rename
+    /// *in a different function*).
+    const SCAN_WINDOW: usize = 25;
+
+    /// The scan itself, split out so the test above reads as assertions and this reads as the mechanism.
+    /// Returns `(files scanned, offences, rename_slot_refusal call count)`.
+    fn scan_for_half_applied_guards() -> (usize, Vec<String>, usize) {
         // `crates/server` → repo root.
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let mut files = Vec::new();
-        collect_rs(&root.join("crates").join("server").join("src"), &mut files);
-        let adapter = root.join("src-tauri").join("src").join("lib.rs");
-        if adapter.is_file() {
-            files.push(adapter);
+        for group in ["crates", "sidecar"] {
+            if let Ok(entries) = std::fs::read_dir(root.join(group)) {
+                for entry in entries.flatten() {
+                    collect_rs(&entry.path().join("src"), &mut files);
+                }
+            }
         }
-        assert!(files.len() > 20, "the scan read only {} files — it is not looking where it thinks", files.len());
+        collect_rs(&root.join("src-tauri").join("src"), &mut files);
+
+        // The one legitimate home of the two halves' names, matched on the full path rather than the
+        // basename so a future `fsutil.rs` in another crate is still scanned.
+        let exempt = root.join("crates").join("server").join("src").join("fsutil.rs");
 
         let mut combined_calls = 0usize;
         let mut offences = Vec::new();
         for file in &files {
-            // This module defines all three helpers and tests them by name; it is the one place the halves
-            // are legitimately named.
-            if file.file_name().is_some_and(|n| n == "fsutil.rs") {
+            if *file == exempt {
                 continue;
             }
             let Ok(text) = std::fs::read_to_string(file) else { continue };
-            let lines: Vec<&str> = text.lines().collect();
+            let all: Vec<&str> = text.lines().collect();
+            // Production code only — everything from `mod tests` on is a test module.
+            let end_of_prod =
+                all.iter().position(|l| l.trim_start().starts_with("mod tests")).unwrap_or(all.len());
+            let lines = &all[..end_of_prod];
             for (i, line) in lines.iter().enumerate() {
                 let code = line.trim_start();
                 if code.starts_with("//") {
@@ -882,36 +989,46 @@ mod tests {
                 if code.contains("symlink_slot_refusal(") {
                     offences.push(format!(
                         "{}:{}: calls `symlink_slot_refusal` directly — use `rename_slot_refusal`, which \
-                         cannot be half-applied",
+                         pairs it with the occupancy check",
                         file.display(),
                         i + 1
                     ));
                 }
-                if code.contains("clobber_refusal(") {
-                    // 25 lines is comfortably wider than every guard-to-`rename` distance in this repo
-                    // (the widest is 8) and narrow enough not to reach the next function.
-                    let end = (i + 25).min(lines.len());
-                    if lines[i..end].iter().any(|l| {
-                        let c = l.trim_start();
-                        !c.starts_with("//") && c.contains("fs::rename(")
-                    }) {
-                        offences.push(format!(
-                            "{}:{}: `clobber_refusal` guards an `fs::rename` — that is half the guard. It \
-                             follows links, so a DANGLING link at the destination reads as free and the \
-                             rename destroys it (CPE-1710). Use `rename_slot_refusal`.",
-                            file.display(),
-                            i + 1
-                        ));
-                    }
+                if code.contains("clobber_refusal(") && renames_within_window(lines, i) {
+                    offences.push(format!(
+                        "{}:{}: `clobber_refusal` guards an `fs::rename` — that is half the guard. It \
+                         follows links, so a DANGLING link at the destination reads as free and the \
+                         rename destroys it (CPE-1710). Use `rename_slot_refusal`.",
+                        file.display(),
+                        i + 1
+                    ));
                 }
             }
         }
-        assert!(offences.is_empty(), "half-applied rename guards:\n{}", offences.join("\n"));
-        assert!(
-            combined_calls >= 4,
-            "only {combined_calls} call(s) to `rename_slot_refusal` found — CPE-1710 converted six sites, \
-             so the scan is matching nothing and would not catch a regression either"
-        );
+        (files.len(), offences, combined_calls)
+    }
+
+    /// Is there an `fs::rename(` within [`SCAN_WINDOW`] lines below `from`, **without crossing into
+    /// another function**? The function boundary is what stops the false positive: a guard near the end of
+    /// one function and a rename near the start of the next are unrelated, and the first version of this
+    /// scan reported them as a violation.
+    fn renames_within_window(lines: &[&str], from: usize) -> bool {
+        let end = (from + SCAN_WINDOW).min(lines.len());
+        for line in &lines[from + 1..end] {
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            // A new item starts: stop looking. Covers `fn`, `pub fn`, `pub(crate) async fn`, and the
+            // attributes that precede one.
+            if code.starts_with("#[") || (code.contains("fn ") && code.ends_with('{')) {
+                return false;
+            }
+            if code.contains("fs::rename(") {
+                return true;
+            }
+        }
+        false
     }
 
     /// Every `.rs` under `dir`, recursively — the scan's file list.

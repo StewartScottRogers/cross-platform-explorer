@@ -15401,6 +15401,136 @@ overlay / overlay rw,relatime 0 0
         let _ = fs::remove_dir_all(&d);
     }
 
+    // ---- CPE-1710: the three app-adapter rename sites, each proving a DANGLING LINK survives ----------
+    //
+    // These three shipped in CPE-1710's first round with **no test each**, covered only by the source
+    // scan in `fsutil` — which the PR #895 UAT then showed is bypassable three ways. A lint is not a test.
+    //
+    // They need no ACL staging: a dangling link is an ordinary object, `try_exists` answers `Ok(false)`
+    // for one on every platform, and `fs::rename` does not follow the final component. So all three run on
+    // all three CI legs; only *creating* the link can be refused, and
+    // `cpe_server::fsutil::make_dangling_link` falls back to a privilege-free NTFS junction before giving
+    // up — at which point it is a loud skip, never a silent pass.
+    //
+    // Each asserts on the **slot** (`symlink_metadata(..).is_symlink()`), never on the returned `Result`:
+    // the reviewer's original reproduction returned success while destroying the link.
+
+    /// The main rename command. `rename_entry_impl` had the pairing before CPE-1710 (open-coded) and has
+    /// it via `rename_slot_refusal` now — but nothing asserted it end to end.
+    #[test]
+    fn cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name() {
+        use std::io::Write;
+        let d = scratch("cpe1710_rename_link");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = d.join("b.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the rename_entry dangling-link leg: this machine could not create a \
+                 link at {} (no symlink privilege and no junction). NOTHING in this test covered the \
+                 link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = rename_entry_impl(&ctx, d.join("a.txt").to_string_lossy().to_string(), "b.txt".into())
+            .expect_err("renaming onto a dangling link must be refused, not silently performed");
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link was DESTROYED by the rename"
+        );
+        assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
+        assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec(), "source must not move");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The exact-destination primitive behind bulk move and undo.
+    #[test]
+    fn cpe_1710_move_exact_never_renames_over_a_dangling_link_at_the_destination() {
+        use std::io::Write;
+        let d = scratch("cpe1710_move_exact_link");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = d.join("dest.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the move_exact dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let results = move_exact_impl(
+            &ctx,
+            vec![(
+                d.join("a.txt").to_string_lossy().to_string(),
+                link.to_string_lossy().to_string(),
+            )],
+        );
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link was DESTROYED by the move"
+        );
+        assert!(!results[0].ok, "the move must be reported failed, not silently succeeded: {results:?}");
+        assert!(
+            results[0].error.contains("is a link"),
+            "and it must say what is in the way: {}",
+            results[0].error
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The Agent Board's ticket move — the site CPE-1710's enumeration turned up unreported, and the one
+    /// whose destination is a **ticket file** (this repo's own tickets are the app's dogfood data).
+    #[test]
+    fn cpe_1710_board_move_never_renames_over_a_dangling_link_at_the_destination() {
+        use std::io::Write;
+        let d = scratch("cpe1710_board_link");
+        let tickets = d.join("Ticketing").join("Tickets");
+        fs::create_dir_all(tickets.join("Backlog")).unwrap();
+        fs::create_dir_all(tickets.join("Doing")).unwrap();
+        let name = "CPE-9999_a-ticket.md";
+        fs::write(
+            tickets.join("Backlog").join(name),
+            "---\nid: CPE-9999\nstatus: Open\n---\n\nbody\n",
+        )
+        .unwrap();
+        let link = tickets.join("Doing").join(name);
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the board_move dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = board_move_impl(d.to_string_lossy().to_string(), "CPE-9999".into(), "Doing".into())
+            .expect_err("moving a ticket onto a dangling link must be refused");
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link in the destination column was DESTROYED by the board move"
+        );
+        assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
+        assert!(
+            tickets.join("Backlog").join(name).is_file(),
+            "and the ticket must still be in its original column — a refused move that moved is not a \
+             refusal"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
     // ---- CPE-1705: the MAIN RENAME COMMAND, and `move_exact`, must not read a refused stat as absent ---
     //
     // `rename_entry_impl` is the most-used mutating operation in a file explorer, and its guard was
