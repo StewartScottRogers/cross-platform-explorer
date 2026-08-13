@@ -1179,19 +1179,24 @@ mod tests {
         // only escaped `:` would collide these two onto one file and silently lose one of them.
         inputs.extend(["a:b".into(), "a%3Ab".into(), "a%253Ab".into(), "CON".into(), "%43ON".into()]);
 
+        // Collisions are checked over the WHOLE table first, in their own pass: a collision is the
+        // failure this test exists to name, and a round-trip assertion tripping on an earlier row would
+        // otherwise mask it behind a less legible message.
         let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for inp in &inputs {
             let enc = windows_safe_segment(inp).into_owned();
-            // Collision FIRST: it is the failure this test exists to name, and it must not be masked by
-            // the reversibility assertion below (which detects the same defect less legibly).
             if let Some(other) = seen.insert(enc.clone(), inp.clone()) {
-                if other != *inp {
-                    panic!(
-                        "COLLISION: the distinct remote names {other:?} and {inp:?} both map to the \
-                         local file {enc:?} — one of the two would be silently overwritten"
-                    );
-                }
+                assert_eq!(
+                    other, *inp,
+                    "COLLISION: two distinct remote names both map to the local file {enc:?} — one of \
+                     the two would be silently overwritten by the other"
+                );
             }
+        }
+        // And the inverse really is an inverse, which is what makes the absence of collisions a
+        // property of the mapping rather than of this particular table.
+        for inp in &inputs {
+            let enc = windows_safe_segment(inp).into_owned();
             assert_eq!(
                 decode_windows_safe_segment(&enc),
                 *inp,
