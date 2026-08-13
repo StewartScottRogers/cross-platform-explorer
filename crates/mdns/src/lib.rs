@@ -39,7 +39,7 @@ const TXT_NAME_KEYS: [&str; 2] = ["name", "friendly_name"];
 /// CPE-1523 table (including `_afpovertcp._tcp.local.` / `_http._tcp.local.` / `_qnap._tcp.local.`).
 fn scheme_and_default_port(service_type: &str) -> Option<(ShareProtocol, u16)> {
     match service_type {
-        "_smb._tcp.local." => Some((ShareProtocol::Smb, 445)),
+        "_smb._tcp.local." => Some((ShareProtocol::Smb, 4450)),
         "_sftp-ssh._tcp.local." => Some((ShareProtocol::Sftp, 22)),
         "_webdav._tcp.local." => Some((ShareProtocol::Webdav, 80)),
         "_webdavs._tcp.local." => Some((ShareProtocol::Davs, 443)),
