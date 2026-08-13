@@ -421,10 +421,20 @@ fn validate_endpoint_text(endpoint: &str) -> Result<(), String> {
 /// carefully in one branch is worth nothing if five branches upstream print the thing first. Note this only
 /// covers messages produced here: `S3Config`'s derived `Debug` still prints the endpoint field verbatim,
 /// which is why the field must never be allowed to hold a password in the first place.
-const USERINFO_REFUSED: &str = "s3: endpoint must not contain userinfo (`https://user:password@host`) — \
-                                the password would be signed into the request and printed by every Debug \
-                                and error line that carries the endpoint. Supply credentials via \
-                                S3Config::credentials.";
+/// The message names `@` **anywhere**, not "userinfo", because that is what the check actually does.
+/// Hoisting it to the front necessarily widened it past the authority — a gateway endpoint with `@` in
+/// its path prefix (`https://gw.example.com/s3@v1`) is now refused too. Narrowing it back to the
+/// pre-path portion would reintroduce the ordering hazard, since the path split happens after the trim
+/// and can itself be handed a malformed string, so refusing `@` anywhere is the deliberate rule — and
+/// the message has to describe the rule rather than the motivation, or an operator with a legitimate
+/// `@` in a path prefix reads an explanation about passwords that has nothing to do with their input.
+const USERINFO_REFUSED: &str = "s3: endpoint must not contain '@' anywhere — this refuses userinfo \
+                                (`https://user:password@host`), whose password would be signed into the \
+                                request and printed by every Debug and error line carrying the endpoint. \
+                                The rule is deliberately wider than userinfo so it can run before any \
+                                check that formats the endpoint into a message. Supply credentials via \
+                                S3Config::credentials; if you have a legitimate '@' in a gateway path \
+                                prefix, it is not supported.";
 
 /// The pieces of a parsed endpoint URL.
 #[derive(Debug, Clone, Copy)]
@@ -801,6 +811,23 @@ mod tests {
             let err = cfg.object_target("k").unwrap_err();
             assert!(err.contains("userinfo"), "{endpoint} was refused by the wrong check: {err}");
             assert!(!err.contains("hunter2"), "the password leaked from {endpoint}: {err}");
+        }
+
+        // The four the reviewer added after the fix, each of which previously routed through a
+        // *different* echoing branch: the trim path, the control-character path, the authority `@`
+        // check, and the shape error. They are here because catching them one at a time is what the old
+        // code was doing; the hoist catches them structurally, and this pins that difference.
+        for endpoint in [
+            "  https://user:hunter2@s3.example.com  ", // surrounding whitespace, trimmed first
+            "https://user:hun\r\nter2@s3.example.com", // CRLF inside the password
+            "https://user@s3.example.com",             // bare user, no password at all
+            "HTTPS://user:hunter2@s3.example.com",      // wrong-case scheme *and* userinfo
+        ] {
+            let err = S3Config::new(endpoint, "us-east-1", "b1", creds())
+                .object_target("k")
+                .unwrap_err();
+            assert!(err.contains("userinfo"), "{endpoint:?} was refused by the wrong check: {err}");
+            assert!(!err.contains("hunter2"), "the password leaked from {endpoint:?}: {err}");
         }
     }
 
