@@ -17,10 +17,10 @@ license = "MIT"
 # crates already in the tree adds NO new dependency family at all — PURPOSE.md's fast/small/predictable
 # tiebreaker applied literally.
 #
-# This foundation slice is pure computation (URL construction + signing), so it needs no HTTP client and
-# no XML parser yet. `ureq` (already used by cpe-webdav) and `roxmltree` (ditto) arrive with the request
-# layer in CPE-1683/CPE-1684, and `cpe-server` arrives with the `FileSystemProvider` impl — declaring
-# them here before anything uses them would just be dead weight in a crate that has to stay lean.
+# This foundation slice was pure computation (URL construction + signing), needing no HTTP client and no
+# XML parser. CPE-1683 is the first ticket to add a request layer (`S3Provider::list`, over `cpe-server`'s
+# `FileSystemProvider`), so it is also the first to pull in the deps the crate's own doc comment always
+# named for this moment — nothing here is a surprise addition.
 
 [dependencies]
 # HMAC-SHA256 for the SigV4 signing-key derivation chain and the final signature. Already in the tree:
@@ -30,3 +30,30 @@ hmac = "0.12"
 # depends on `sha2` 0.10 directly (checksums/backups), and `crates/security` behind `jwt`. Same
 # RustCrypto family and major version as both, so this resolves to the crate already being compiled.
 sha2 = "0.10"
+# The `FileSystemProvider` trait `S3Provider` implements, plus `transfer::is_safe_name` — the same
+# source-side path-traversal guard `cpe-webdav` already applies to a hostile `<d:href>`, reused here
+# against a hostile/misbehaving `<Key>`/`<Prefix>` in a ListObjectsV2 response (CPE-1683 AC5).
+cpe-server = { path = "../server" }
+# Sync HTTP client with pure-Rust TLS (rustls) — no C build tooling, builds identically on all 3 CI OSes.
+# Already a direct dependency of the sibling `cpe-webdav` crate at this exact version pin
+# (`crates/webdav/Cargo.lock`), so this adds no new dependency *family* to the tree, only a new direct
+# edge onto a crate already compiled for the shipped app.
+ureq = { version = "2", default-features = false, features = ["tls", "gzip"] }
+# Read-only XML DOM for parsing the ListObjectsV2 `<ListBucketResult>` body. Already a direct dependency
+# of `cpe-webdav` (its PROPFIND `<multistatus>` parser), same version pin.
+roxmltree = "0.20"
+# `cpe-webdav` needed this ahead of `roxmltree::Document::parse` (CPE-1398): a non-recursive streaming
+# pre-scan that caps element-nesting depth before the recursive parser ever sees the document, because a
+# hostile or merely huge nesting depth can stack-overflow the process — uncatchable, so it must be refused
+# before parsing rather than caught after. A ListObjectsV2 response comes from the same class of
+# network-controlled server a PROPFIND response does, so it gets the identical guard
+# (`xml_nesting_too_deep`, ported near verbatim from `crates/webdav/src/lib.rs`) rather than a
+# `roxmltree`-only crate skipping a defence its sibling already needed. Same version pin as `cpe-webdav`.
+xmlparser = "0.13.6"
+
+[dev-dependencies]
+# A tiny sync HTTP server for the in-process S3 test fixture (no Docker, no MinIO, no credentials; runs
+# identically on all three CI OSes) — the same technique and version `crates/webdav/src/lib.rs` uses for
+# its PROPFIND fixture. Built to be reusable: CPE-1684 (stat/read/write/delete/mkdir/rename) extends this
+# same `handle()` rather than standing up a second in-process server — see the doc comment on `handle`.
+tiny_http = "0.12"

@@ -108,3 +108,21 @@ Grep confirms there is **no** S3 or SigV4 code anywhere in the repo — the only
 yet. Resolved the brief's one open question (the crate choice) against the PURPOSE.md tiebreaker — hand-roll
 over the deps already present, adding no new dependency family. Decomposed into CPE-1681–1686; CPE-1681 and
 CPE-1686 are pickable immediately, the other four fall out behind CPE-1681.
+
+2026-08-13 (CPE-1683 worker) — **GCS claim corrected, not merely narrowed.** The 2026-08-12 note above says
+GCS's XML API "does not support ListObjectsV2 the same way", flagged by the CPE-1681 worker as unverified.
+Checked live against GCS's current published XML API reference for this ticket
+(`docs.cloud.google.com/storage/docs/xml-api/get-bucket-list` and `.../storage/docs/interoperability`,
+fetched 2026-08-13, not recalled from training data): the documented request/response shape is a
+**superset** of what `CPE-1683` sends and parses — `list-type=2`, `delimiter`, `continuation-token`,
+`start-after` are all explicitly documented parameters, and the response documents
+`IsTruncated`/`NextContinuationToken`/`CommonPrefixes`, with no caveat text on either page about a
+ListObjectsV2 incompatibility. **The specific claim in the previous note is wrong**, not merely unverified.
+What remains genuinely unverified is SigV4 signing parity end to end (no GCS account/credentials/network
+egress in this headless environment to test a live signed request) — GCS's own docs describe "a V4 signing
+process" and HMAC credentials without confirming byte-for-byte canonicalisation parity with AWS SigV4.
+**Decision for v1: GCS is treated like any other undedicated S3-compatible gateway — expected to work by
+protocol shape, not verified end to end, no GCS-specific code anywhere in `crates/s3`.** A live-conformance
+ticket against a real GCS bucket (mirroring the QNAP-NAS precedent already used for SFTP/WebDAV/FTP) is the
+natural follow-up once credentials are available; filing it is a resourcing call, not a scoping one, so it
+is not filed here. See `crates/s3/src/provider.rs`'s top doc comment for the full reasoning.
