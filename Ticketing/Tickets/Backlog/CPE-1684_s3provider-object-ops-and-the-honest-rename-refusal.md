@@ -88,6 +88,27 @@ temp directory — the technique `crates/webdav/src/lib.rs` already uses to map 
       does `mkdir` then `list` and sees a directory and no stray file.
 - [ ] `cargo test` green; `cargo clippy --all-targets -D warnings` clean.
 
+## A bodiless HEAD 404 will be your MOST COMMON case — plan for it
+
+Added by the Foreman from the CPE-1682 UAT (PR #879), 2026-08-12, because it lands squarely on this
+ticket's `stat` criterion.
+
+CPE-1682's `map_s3_error(status, body)` is honest but body-driven: with no `<Code>` element to read, it
+returns *"HTTP 404 and the response body could not be read as an S3 error … refusing to guess which cause
+applies"*. That is the correct behaviour for a parser.
+
+But **HTTP HEAD responses never carry a body.** Every existence/metadata check this ticket adds is
+HEAD-shaped, so a `stat` on a missing key produces a 404 with nothing to parse — meaning the honest
+"could not be read" message would become the *majority* user experience for the single most common
+failure in the whole provider, precisely where the AC demands "a missing key is not-found; a denied key
+reports the denial, and the two are distinguishable".
+
+So `stat` must not lean on `map_s3_error` alone. Map a **bodiless** response by status **and HTTP
+method**: a bodiless 404 from a HEAD is a genuine not-found; a bodiless 403 from a HEAD is a denial.
+Route to `map_s3_error` when there IS a body. Say in the code which rule you applied and why, and pin
+both bodiless cases with tests — otherwise the "distinguishable" criterion passes in unit tests that
+supply a body and fails against every real server.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1681** and **CPE-1682**.
