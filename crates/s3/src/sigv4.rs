@@ -366,31 +366,68 @@ fn validate_header_name(name: &str) -> Result<(), String> {
 /// and HTAB are legal inside one), so `\x0b` (VT), `\x0c` (FF) and the other controls this function lets
 /// through are a spec violation. CPE-1691 deliberately left them alone pending an investigation into
 /// *which* controls actually break *which* client, rather than a scope expansion decided in passing. This
-/// is that investigation, and the finding is: **against the one client this crate will actually ship
-/// requests through, none of them break anything.**
+/// is that investigation. **The rule stays at CR/LF/NUL** - but read the correction below before relying
+/// on any claim about what a VT or FF byte actually does downstream.
 ///
-/// That client is `ureq` 2.12.1 - pinned in `crates/webdav/Cargo.toml`, the sibling remote-backend crate
-/// this one will share an HTTP layer with once the request layer lands (CPE-1683/1684; this crate has no
-/// HTTP client of its own yet). Reading its source (not guessing): `PreludeBuilder::write_header` in
-/// `ureq-2.12.1/src/unit.rs:514` builds the request line with `write!(self.prelude, "{}: {}\r\n", name,
-/// value)` straight onto a `Vec<u8>`, and `Header::new` in `ureq-2.12.1/src/header.rs:85-87` is just
-/// `format!("{}: {}", name, value)` - there is no byte-range check on `value` anywhere in either path,
-/// or anywhere between them. A VT or FF byte is written to the wire unchanged, sitting between the `: `
-/// and the terminating `\r\n` exactly like any other legal byte - no error, no panic, no truncation. Only
-/// CR and LF do anything special there, because they *are* the bytes `\r\n` is made of, which is exactly
-/// the framing hazard this function already refuses. NUL gets no special treatment from `write!` either
-/// (Rust strings are not C strings) - confirming the NUL block above really is defence-in-depth against a
-/// downstream consumer, not this client.
+/// That client is `ureq` 2.12.1 - resolved at that exact version by `crates/webdav/Cargo.lock`
+/// (`crates/webdav/Cargo.toml` only asks for `version = "2"`), the sibling remote-backend crate this one
+/// will share an HTTP layer with once the request layer lands (CPE-1683/1684; this crate has no HTTP
+/// client of its own yet). `PreludeBuilder::write_header` in `ureq-2.12.1/src/unit.rs:514` does build the
+/// request line with `write!(self.prelude, "{}: {}\r\n", name, value)` straight onto a `Vec<u8>`, and
+/// `Header::new` in `ureq-2.12.1/src/header.rs:85-87` is just `format!("{}: {}", name, value)` - neither
+/// of those two functions checks the value's byte range.
 ///
-/// The scope of that finding: it covers the client this codebase will actually use, checked at its
-/// pinned version, and nothing else. It does not cover how real AWS S3 (or a third-party S3-compatible
-/// server) parses these bytes server-side - that would need a live network call this crate has no test
-/// fixture for and this ticket did not budget, so no claim is made about it either way. Within that scope,
-/// nothing found justifies widening: CPE-1691's premise ("S3 legitimately carries near-arbitrary bytes in
-/// some header values") still stands, and the one client that will carry them does not choke on any C0
-/// control except the three already refused. The rule stays exactly where CPE-1691 put it. Reopen this
-/// only with a live-server finding that one of these bytes actually breaks something - not a "widen it to
-/// be safe" instinct, which is the thing this comment exists to stop.
+/// ## Correction (PR #883 review): the header is DROPPED, not passed through
+///
+/// The first pass of this investigation read those two functions and concluded a VT or FF "is written to
+/// the wire unchanged - no error, no panic, no truncation". **That is wrong, because it stopped one hop
+/// short of the real send path.** The write loop at `ureq-2.12.1/src/unit.rs:467-473` never hands
+/// `write_header` a raw value; it calls `header.value()` first and skips the header entirely when that
+/// returns `None`:
+///
+/// ```text
+/// for header in &unit.headers {
+///     if let Some(v) = header.value() {
+///         prelude.write_header(header.name(), v)?;
+///     }
+/// }
+/// ```
+///
+/// `Header::value()` (`header.rs:99-109`) filters through `is_field_vchar_or_obs_fold`
+/// (`header.rs:231-237`), which permits only `{SP, HTAB} ∪ [0x21, 0x7E]`. Because the filter applies to
+/// the whole `Option<&str>`, a *single* non-conforming byte makes `value()` return `None` and the
+/// `if let Some(v)` drops **the entire header** from the outgoing request. Silently. VT (`0x0B`) and FF
+/// (`0x0C`) both fail that predicate.
+///
+/// **So does a non-breaking space** - NBSP is `0xC2 0xA0` in UTF-8 and both bytes are >= 0x80. That is the
+/// same NBSP this very ticket decided must be *preserved* through canonicalisation. The preservation is
+/// correct and necessary (S3 does not trim it either, so signing over trimmed text was a real bug), but
+/// it is not sufficient: once `ureq` is actually wired up, an NBSP-bearing header would be signed and then
+/// dropped before it reached the wire.
+///
+/// This is worse for the goal than a byte surviving would be. A dropped signed header desynchronises
+/// what-was-signed from what-was-sent, which is precisely the opaque `SignatureDoesNotMatch` this ticket
+/// exists to reduce - arriving by a different route.
+///
+/// **Therefore: an open question for CPE-1683/1684, not a closed one.** Whoever wires up the transport
+/// must decide what to do when a signed header value contains a byte `ureq` will refuse to send - refuse
+/// the request loudly at our layer, encode the value, or use a client without that filter. Do not assume
+/// the bytes reach the wire.
+///
+/// ## What the finding does and does not cover
+///
+/// It covers the client this codebase will actually use, at its resolved version, traced from
+/// `RequestBuilder::set` (`request.rs:310-312`) through `Unit::new` (`request.rs:141-148`) to the write
+/// loop above. It says nothing about how real AWS S3 or a third-party S3-compatible server parses these
+/// bytes server-side - that needs a live network call this crate has no fixture for and this ticket did
+/// not budget.
+///
+/// Nothing here justifies widening the rule, and widening would not even fix the real hazard: NBSP
+/// triggers the identical silent drop, so a VT/FF-only reject would be incomplete against it, and
+/// CPE-1691's premise ("S3 legitimately carries near-arbitrary bytes in some header values") still argues
+/// against a client-side reject. The rule stays exactly where CPE-1691 put it. Reopen it only with a
+/// live-server finding that one of these bytes actually breaks something - not a "widen it to be safe"
+/// instinct, which is the thing this comment exists to stop.
 pub(crate) fn reject_framing_bytes(kind: &str, s: &str) -> Result<(), String> {
     if let Some(ch) = s.chars().find(|c| matches!(c, '\r' | '\n' | '\0')) {
         return Err(format!(
