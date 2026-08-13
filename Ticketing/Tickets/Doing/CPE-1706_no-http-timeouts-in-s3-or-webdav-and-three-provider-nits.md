@@ -113,6 +113,60 @@ rather than fixed only in the one that happened to be under review.
 Related: **CPE-1683** (which surfaced them), **CPE-1684** / **CPE-1685** (the next consumers of this
 transport), **CPE-1398** (the WebDAV parser hardening whose crate carries the same missing timeouts).
 
+## Round-2 additions (from the PR #892 review + UAT, 2026-08-13)
+
+Both independent checks returned blocking findings, and the Reviewer reached the main one from code
+reading before it saw the UAT result -- so it has two independent confirmations.
+
+### Item 1 is NOT closed by per-read timeouts alone
+
+A server that accepts, sends valid `200 OK` headers, then dribbles **one byte every 5 s** is unbounded at
+the shipped values. Both `S3Provider::list` and `WebdavProvider` failed to return within 100 s. The
+`MAX_LIST_WALL_CLOCK` deadline is evaluated at the **top of the page loop, before `signed_get`**, so it
+cannot fire mid-body; `timeout_read` is per-read and restarts on every byte. Nothing bounds one page.
+
+Worst case against the 8 MiB body cap at one byte per 29 s is roughly **7.7 years** on one held blocking
+thread. **WebDAV is live today** (S3 is latent until CPE-1685): `crates/vfs/src/lib.rs:56` ->
+`remote_dir_entries` -> `remote_list_dir_impl` <- the `list_dir` command, on `spawn_blocking` with
+tokio's default 512-thread pool and no `max_blocking_threads` set.
+
+**The fix, verified both by source reading and measurement:** `ureq` 2.12.1's `Request::timeout(Duration)`
+is a *per-request* deadline -- `self.timeout.or(agent.config.timeout)` (`request.rs:122`) -- and
+`DeadlineStream::fill_buf` (`stream.rs:85-89`) recomputes the remaining budget on **every** read, so it
+bounds a body continuously. Applied to the listing GET only: a legitimate slow server returned `Ok` in
+9.51 s, the dribbler was cut at 30.01 s. Apply to the ListObjectsV2 GET and the PROPFIND, **not** the
+large-object GET where per-read semantics are correct.
+
+**Do not set the agent-level `.timeout()`** -- `stream.rs:433-441` is a genuine either/or, so it would
+replace `timeout_read` rather than add to it. That call was correct and independently reconfirmed.
+
+### The code currently records a FALSE safety argument
+
+- `crates/s3/src/provider.rs:685` -- "an in-flight page always completes or fails on its own socket
+  timeout first". Disproven by measurement.
+- `crates/webdav/src/lib.rs:50` -- "the per-request bounds already bound the whole operation". Disproven.
+
+Both must change with the fix. A wrong comment at a safety boundary is worse than none.
+
+### `WebdavProvider::read` has no byte cap at all
+
+`crates/webdav/src/lib.rs:192` is `read_to_end` with no `.take()` -- no equivalent of s3's
+`MAX_RESPONSE_BODY_BYTES`. Unbounded in memory as well as time, on the live provider.
+
+### Item 6's guarantee is narrower than "never"
+
+An over-cap body **can** be sold as a complete listing when the truncation lands after a well-formed root
+element followed by legal post-root whitespace: an 8392422-byte body returned `Ok` in 241 ms with one
+entry. It holds only when truncation lands mid-element. Soften the claim, or compare the read length
+against the declared `Content-Length`.
+
+### Stale doc inherited from CPE-1704, to fix here
+
+`is_safe_s3_leaf`'s doc (`provider.rs:418`) and the test-section comment (`:1274`) claim it refuses "a
+literal `..` segment (including its percent-encoded form, e.g. `..%2f`)". **It does not**, deliberately --
+a test ~80 lines below asserts `report%2ffinal.txt` and `https%3A%2F%2Fexample.com%2Findex.html` are
+accepted. Behaviour is correct; the doc was left behind. It describes a security guard, so it matters.
+
 ## Work Log
 
 **2026-08-13** — Worked on branch `cpe-1706-http-timeouts`. All six items done; nothing deferred.
