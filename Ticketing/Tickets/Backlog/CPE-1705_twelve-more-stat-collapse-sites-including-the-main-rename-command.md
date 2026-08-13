@@ -63,10 +63,25 @@ non-elevated, local NTFS:
 | `RA`, `RC` | true | `Ok(true)` | Ok | **Ok — bytes replaced** |
 | `REA`, `RD` | true | `Ok(true)` | Ok | **Ok — bytes replaced** |
 | **`S`**, `R`, `RX`, `W` | true | **Err(PermissionDenied)** | Err | **Ok — bytes replaced** |
-| `F` | true | Err(PermissionDenied) | Err | Err |
+| **`F`** | true | Err(PermissionDenied) | Err | **Ok — bytes replaced** |
+| any of the above **+ `(DC)` denied on the PARENT** | true | Err | Err | Err |
 
-So under `S`, `R`, `RX` or `W`: **`try_exists` fails while `fs::rename` succeeds and destroys the bytes**
-(measured, `"ORIGINAL"` → `"NEWDATA"`). Only `(F)` blocks it, because only `(F)` carries `DELETE`.
+So under **any** deny that refuses `try_exists`, including `(F)`: **`try_exists` fails while `fs::rename`
+succeeds and destroys the bytes** (measured, `"ORIGINAL"` → `"NEWDATA"`).
+
+**This table has been revised three times; the last revision is the one that matters for writing a test.**
+An earlier version said only `(F)` blocks the rename. It does not. Replacing a file needs `DELETE` on the
+**target** *or* `FILE_DELETE_CHILD` on its **parent**, and an ordinary scratch parent grants the latter —
+so **the protective factor is a property of the parent directory, not of the ACE you put on the target.**
+Verified as a pair: `(F)` alone → bytes replaced; `(F)` **plus** parent `(DC)` → `PermissionDenied`.
+
+For you that cuts both ways, and both matter:
+
+- **Good:** there is no deny-on-target you could accidentally pick and be silently protected by. Any of
+  them lets you stage the real byte loss.
+- **Trap:** your test must **not** also deny `(DC)` on the parent, or the rename is blocked by the parent
+  and your assertion passes for the wrong reason — a vacuous pass of exactly the kind this chain keeps
+  producing.
 
 **What this means for you: for a `try_exists`-guarded, rename-destructive site you can write a test that
 stages actual byte loss, not merely a refusal message.** Do that — it is a strictly stronger test.
@@ -135,6 +150,22 @@ excluded list. **One is worse than anything either of us named:**
 
 One accuracy note on a site already listed: **Class C's `batch_media.rs:1736` is a self-described "belt and
 braces" backstop behind a primary `open_no_follow`**, not a primary guard. Real, but say so.
+
+## Triage rule: classify by what the fail-open branch DOES, not by which method spelled it
+
+Proposed by the CPE-1696 worker after conceding `snapshot_capture.rs:374`, and it explains the miss
+exactly. Its triage read `if !path.is_file()` as belonging to the **excluded** `.is_dir()`/`.is_file()`
+type-check family — and never asked what that branch's `else` actually did. In this case it returns an
+empty store, which is an **absence claim wearing a type check's syntax**.
+
+> **A type-check whose false branch discards state is an absence claim, not a type claim.**
+
+That is why `:444` in the same file was caught and `:374` was not: the same file, the same class, sorted
+into different buckets by *spelling* rather than by *consequence*. Sort by consequence.
+
+This also means the "deliberately excluded `.is_dir()` type-check family" exclusion below is **not**
+safe to apply mechanically. Re-walk it under this rule before trusting it — any member whose false
+branch discards state, writes, or returns a default belongs in this ticket, not in the exclusion.
 
 ## Scope
 
