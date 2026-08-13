@@ -21,10 +21,26 @@ fn main() {
         }
     };
 
+    // CPE-1705: was `if root.exists()`, which folds every stat failure into `false` — so an existing
+    // sidecar crate the scaffolder could not stat read as "nothing there" and the `File::create` +
+    // `write_all` loop below overwrote a real crate's Cargo.toml, lib.rs and manifest. Dev-only CLI and
+    // low severity, but it is the same shape as the rest of this ticket, and a scaffolder silently
+    // flattening someone's in-progress sidecar is not a good afternoon.
     let root = Path::new("sidecar").join(&name);
-    if root.exists() {
-        eprintln!("error: {} already exists", root.display());
-        std::process::exit(1);
+    match root.try_exists() {
+        Ok(false) => {}
+        Ok(true) => {
+            eprintln!("error: {} already exists", root.display());
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!(
+                "error: could not check what is at {}, so nothing was written — refusing to guess \
+                 rather than risk overwriting an existing sidecar: {e}",
+                root.display()
+            );
+            std::process::exit(1);
+        }
     }
 
     for (rel, content) in files {

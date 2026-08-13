@@ -2304,6 +2304,84 @@ mod tests {
 
     // ---- CPE-1705: the PLANNER must not read a refused stat as a free output name -------------------
 
+    /// A single unreadable candidate must not be planned as a free output name.
+    ///
+    /// **This test was deleted once as "vacuous" and restored — the deletion was the error.** Under a
+    /// target-only deny it did pass against the unfixed `Path::is_file()` probe, because `fs::metadata`
+    /// falls back to `FindFirstFileW` and reads the entry out of the parent. `deny_stat_of` now also
+    /// denies `(RD)` on the parent, which kills that fallback, so `is_file()` answers `false` on a file
+    /// that is really there and the `assert_ne!` below fires exactly as it was always meant to. A test
+    /// that looks vacuous can be a test whose *construction* is incomplete — check the mechanism before
+    /// deleting the assertion.
+    #[test]
+    fn cpe_1705_plan_does_not_accept_an_output_name_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the plan() unreadable-candidate leg on this platform: the Unix deny \
+                 mechanism chmods the PARENT directory, which would make every candidate in the batch \
+                 unreadable rather than one. NOTHING in this test covered that route on this run; \
+                 `cpe_1705_plan_still_renames_past_a_readable_existing_output` carries the honest case on \
+                 every OS."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705-plan-one-denied");
+            let input = d.path().join("cat.jpg");
+            std::fs::write(&input, b"input").unwrap();
+            // **The unreadable slot has to be the SECOND candidate, not the first — measured.** `plan()`
+            // runs `classify_output_containment` on the first computed output *before* the disambiguation
+            // loop, and that CPE-1623 guard already refuses an output whose filesystem identity it cannot
+            // read. Denying the first candidate makes `plan()` return a containment refusal and never
+            // reach the loop under test, so the test would be measuring a different guard.
+            std::fs::write(d.path().join("cat-800.jpg"), b"FIRST OCCUPANT").unwrap();
+            let candidate = d.path().join("cat-800-2.jpg");
+            std::fs::write(&candidate, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                }
+            }
+            let _r = Restore(&candidate, d.path());
+
+            if !crate::fsutil::deny_stat_of(&candidate) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the plan() denied-candidate leg: could not deny stat of {} on \
+                     this machine. NOTHING in this test covered that route on this run.",
+                    candidate.display()
+                );
+                return;
+            }
+
+            let job = BatchJob::new(vec![MediaOp::Resize { max_px: 800 }]);
+            let out = plan(&job, &v(&[&input.to_string_lossy()])).unwrap();
+            assert_ne!(
+                std::path::Path::new(&out[0].output),
+                candidate,
+                "an output candidate whose stat was refused must NOT be planned as free — the executor \
+                 would then be asked to write over a file the planner never proved empty"
+            );
+            assert_eq!(
+                std::path::Path::new(&out[0].output),
+                d.path().join("cat-800-3.jpg"),
+                "it must step PAST the unreadable candidate to the next name, not abort the item — an \
+                 unknown is occupied, not fatal, at a site whose job is to find some free name"
+            );
+            crate::fsutil::undo_deny_stat_of(&candidate, d.path());
+            assert_eq!(
+                std::fs::read(&candidate).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "and the unreadable file's bytes must be untouched"
+            );
+        }
+    }
+
     /// CPE-1696 hardened `execute_plan`; this is the `plan()` that feeds it. The probe was
     /// `Path::is_file()`, which folds every stat failure into `false`, so an output candidate whose stat
     /// was refused was accepted as free.

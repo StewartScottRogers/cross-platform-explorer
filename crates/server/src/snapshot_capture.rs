@@ -788,23 +788,81 @@ mod tests {
         let _ = fs::remove_dir_all(&store);
     }
 
-    /// `fresh_manifest_id`'s guard — and specifically **the bound**, because the bound is the only part
-    /// of this fix a real filesystem can be made to distinguish.
+    /// A single unreadable candidate id must never be handed back as free — `save_manifest` would
+    /// `fs::write` straight over a real snapshot's file list.
     ///
-    /// # Why this test asserts on the bound and not on "the unreadable id is skipped"
+    /// **This test was deleted once as "vacuous" and restored; the deletion was the error.** Under a
+    /// target-only deny it did pass against the unfixed `while manifest_path(..).exists()` loop, because
+    /// `fs::metadata` falls back to `FindFirstFileW` and reads the entry out of the parent directory.
+    /// `deny_stat_of` now also denies `(RD)` on the parent, killing that fallback, so `exists()` answers
+    /// `false` on a manifest that is really there and the `assert_ne!` fires as intended.
     ///
-    /// The obvious test — deny one candidate id and assert it is not handed back — is **vacuous**, and it
-    /// was written that way first and then measured. Reverting this loop to its original
-    /// `while manifest_path(..).exists()` and re-running it recompiled and passed **green**: no deny ACE
-    /// refuses `Path::exists()` (it opens with a desired-access mask of `0`), so the *unfixed* loop also
-    /// sees `true`, also calls the slot occupied, and also advances. Old and new agree on every
-    /// single-candidate case, so no single-candidate assertion can tell them apart.
+    /// Driven through the `pick_manifest_id` seam so the candidate ids are known in advance —
+    /// `fresh_manifest_id` reads its own clock, and a test that pre-creates `<ms>` files computes a
+    /// different millisecond and stages files the walk never probes.
+    #[test]
+    fn cpe_1705_a_manifest_id_is_never_handed_out_from_an_unreadable_slot() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg on this platform: the Unix deny \
+                 mechanism is a chmod on the PARENT directory, which fails the surrounding \
+                 create_dir_all/write before this loop is reached. NOTHING in this test covered the \
+                 unreadable-slot route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let store = scratch("cpe1705-mid-one");
+            fs::create_dir_all(manifests_dir(&store)).unwrap();
+            let ms = 1_700_000_000_000u64;
+            let first = manifest_path(&store, &ms.to_string());
+            fs::write(&first, b"REAL MANIFEST").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&first, &store);
+
+            if !crate::fsutil::deny_stat_of(&first) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg: could not deny stat of {} \
+                     on this machine. NOTHING in this test covered the unreadable-slot route on this run.",
+                    first.display()
+                );
+                return;
+            }
+
+            let id = pick_manifest_id(&store, ms).expect("one unreadable slot must be skipped, not fatal");
+            assert_ne!(
+                manifest_path(&store, &id),
+                first,
+                "an id whose manifest file could not be stat'ed must NEVER be handed back as free — \
+                 save_manifest would fs::write straight over a real snapshot's file list"
+            );
+            crate::fsutil::undo_deny_stat_of(&first, &store);
+            assert_eq!(
+                fs::read(&first).unwrap(),
+                b"REAL MANIFEST".to_vec(),
+                "and the real manifest must be byte-for-byte intact"
+            );
+        }
+    }
+
+    /// `fresh_manifest_id`'s **bound** — the second half of the same fix, tested separately so
+    /// neutralising either reds exactly one test.
     ///
-    /// They diverge only past [`MAX_CONSECUTIVE_UNKNOWN_IDS`]: with that many unreadable candidates in a
-    /// row the fixed loop **refuses**, while the `.exists()` original sails past all of them and hands
-    /// back a name. That is a real, observable difference, so that is what this asserts — and it happens
-    /// to be the riskiest code in the change, since treating unknown-as-occupied without a bound would
-    /// turn a silent overwrite into an unbounded loop against a dead mount.
+    /// Treating unknown-as-occupied without a bound is what turns a silent overwrite into an unbounded
+    /// loop: with an unreadable directory *every* candidate is unknown, and against a dead mount each
+    /// stat blocks for seconds. Past [`MAX_CONSECUTIVE_UNKNOWN_IDS`] the fixed loop refuses, while the
+    /// `.exists()` original sails past all of them and hands back a guessed name.
     #[test]
     fn cpe_1705_an_unreadable_manifests_directory_refuses_instead_of_guessing_an_id() {
         use std::io::Write;
