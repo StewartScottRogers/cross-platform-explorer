@@ -75,3 +75,24 @@ of that PR's scope.
 
 Related: **CPE-1709** (the sink and its encoder), **CPE-1704** (the listing guard that stopped imposing
 filesystem rules on every backend).
+
+## Fold in while you are in this file (from the PR #894 UAT, 2026-08-13)
+
+`cpe_1709_a_security_refusal_still_reports_ok` exercises only the **traversal** branch. It is not a
+happy-path assertion -- it mixes refused and deliverable entries and pins `n == 1`, so it does
+distinguish the two categories -- but its own doc comment lists **three** security refusals (traversal,
+pre-existing symlink, uninspectable ancestor) and only one is covered.
+
+**A future change that moved `LeafProbe::PreExistingSymlink` into `undelivered` would pass this test.**
+Add the missing cases when you next touch `crates/server/src/transfer.rs`.
+
+Also worth recording there, deliberate as far as the UAT could tell but unstated: an **uninspectable
+ancestor** ends `Ok` while an **uninspectable leaf** ends `Err`. That asymmetry is defensible -- the leaf
+is the delivery target and the user genuinely did not get their file -- but it is not spelled out, and a
+permission-denied leaf `lstat` now fails the whole transfer where it used to be silent. Judged an
+improvement, not a defect; say so in the code rather than leaving it to be rediscovered.
+
+One scoped limitation of CPE-1709 to note in passing: on an **astral-plane** name (emoji, where char
+count and UTF-16 count diverge 1:2) the length explanation is **absent**, not wrong -- the message
+degrades to the raw `os error 123`. Both properties that matter still hold: it ends `Err`, and it never
+says "symlink".
