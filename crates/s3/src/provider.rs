@@ -49,16 +49,37 @@
 //! that same prefix) so it never shows up as a spurious empty file inside itself — CPE-1684's `mkdir` only
 //! needs to write that exact key shape for the two tickets to agree.
 //!
-//! # The `ureq`-header-drop decision (the warning that applies here too)
-//! `list` is the first code in this crate to send a request over `ureq`, so it is also first to hit the
-//! landmine CPE-1684's ticket documents in detail: `ureq` 2.12.1 silently drops (not errors, not panics —
-//! *omits*) any header whose value contains a byte outside `{SP, HTAB} ∪ [0x21, 0x7E]`, `Authorization`
-//! included. **Decision: refuse loudly at this crate's layer before the request is ever sent**, via
-//! [`guard_header_sendable`] — not encode the value (S3 has no such encoding convention) and not swap HTTP
-//! clients (`ureq` is already `cpe-webdav`'s dependency at this exact version; a second HTTP stack for one
-//! edge case is a worse lean-core trade than a clear refusal). See that function's doc for the full
-//! reasoning and `tests::sending_a_request_with_a_header_byte_ureq_would_drop_is_refused_before_any_bytes_leave_the_process`
-//! for the proof that the refusal fires *before* a request is sent, not merely that it returns `Err`.
+//! # The `ureq`-header-drop decision, and a correction to the CPE-1684 warning (measured, not assumed)
+//! `list` is the first code in this crate to send a request over `ureq`, so it is also first to exercise
+//! the landmine CPE-1684's ticket describes in detail: `ureq` 2.12.1's write loop (`unit.rs:467-474`)
+//! calls `Header::value()`, which filters through `is_field_vchar_or_obs_fold` and returns `None` — and
+//! the header is skipped — for a value carrying any byte outside `{SP, HTAB} ∪ [0x21, 0x7E]`.
+//!
+//! **That finding was traced from `ureq`'s source, not measured against the code path this crate actually
+//! uses. Measured here, it doesn't reproduce the way the ticket warns.** [`guard_header_sendable`] was
+//! written first, exactly as prescribed ("refuse loudly at our layer"); the negative-control probe
+//! required for this ticket's evidence (temporarily deleting the four `guard_header_sendable` calls and
+//! re-running `tests::sending_a_request_with_a_header_byte_ureq_would_drop_is_refused_before_any_bytes_leave_the_process`)
+//! showed that **`ureq`'s own `Agent::get(url).set(name, value).call()` path already refuses the same
+//! input, loudly, before any byte reaches the fixture** — `ureq::Error::Transport` with the message
+//! `Bad Header: invalid header 'Authorization: ...'`, and the fixture's request counter stayed at `0`. The
+//! silent-drop mechanism the ticket cites is real (it is right there in `unit.rs`), but it evidently sits
+//! behind a different internal path than the request-builder's `.set()`/`.call()` this module uses — most
+//! likely the one that parses headers arriving *off the wire* (an incoming response), not the one that
+//! writes headers going *out*. This module does not use that other path, so — measured, not assumed — it
+//! is not exposed to the silent drop.
+//!
+//! **Decision: keep [`guard_header_sendable`] anyway**, downgraded from "closes a silent-corruption hole"
+//! to "fails a beat earlier, with a clearer, byte-naming message, before touching the network at all" —
+//! `ureq`'s own `Bad Header: invalid header '<full Authorization value>'` message is genuinely usable but
+//! echoes the whole header including the signature, and does not say *which byte* made it invalid. Refusing
+//! at this layer costs nothing (no new dependency, one small pure function) and is strictly friendlier to
+//! debug than waiting for `ureq` to say so. This is *not* the same decision the CPE-1684 warning asked for
+//! ("refuse loudly … because the alternative is silent" no longer applies here); it is "refuse loudly
+//! because it is cheap and clearer", which is a weaker but still positive case. **CPE-1684 should re-run
+//! this same measurement against whatever code path its own PUT/HEAD/DELETE requests use** before repeating
+//! the silent-drop framing verbatim — it may hold there, or it may not; this finding is scoped to `GET` via
+//! the builder API, not to `ureq` in general.
 
 use std::io::Read as _;
 
@@ -95,24 +116,30 @@ const MAX_LIST_PAGES: usize = 1_000;
 /// (`ListBucketResult > Contents > Key`), so 64 costs nothing for legitimate responses.
 const MAX_XML_NESTING_DEPTH: usize = 64;
 
-/// True for a byte `ureq` 2.12.1 will actually put on the wire. Mirrors `ureq`'s own filter,
+/// True for a byte `ureq` 2.12.1's header-value grammar accepts. Mirrors `ureq`'s own filter,
 /// `is_field_vchar_or_obs_fold` (`header.rs:231-237`, as traced in `crate::sigv4::reject_framing_bytes`'s
 /// doc comment): only SP, HTAB, and printable ASCII `[0x21, 0x7E]`. Anything else — including every
-/// non-ASCII byte, i.e. all of UTF-8's multi-byte sequences — makes `ureq` drop the **entire** header
-/// silently rather than send it.
+/// non-ASCII byte, i.e. all of UTF-8's multi-byte sequences — is refused. See this module's top doc for
+/// where that refusal actually happens on the code path this crate uses: measured, it is `ureq` itself
+/// raising a loud `Bad Header` transport error, not the silent per-header drop CPE-1684's ticket describes
+/// for a different internal code path.
 fn is_ureq_sendable_byte(b: u8) -> bool {
     b == b' ' || b == b'\t' || (0x21..=0x7E).contains(&b)
 }
 
-/// Refuse, loudly and before any request is sent, a header value `ureq` would otherwise silently drop.
-/// See this module's top doc ("The `ureq`-header-drop decision") for why refusing is the chosen response
-/// rather than encoding the value or swapping HTTP clients.
+/// Refuse, loudly and before any request is sent, a header value carrying a byte outside `ureq`'s sendable
+/// range. See this module's top doc ("The `ureq`-header-drop decision, and a correction to the CPE-1684
+/// warning") for the full story: measured against the actual `Agent::get(url).set(..).call()` path this
+/// module uses, `ureq` 2.12.1 already refuses this input itself (loudly, before any byte reaches the
+/// network) rather than silently dropping the header as the ticket that flagged this warned. This function
+/// is kept anyway, downgraded from "closes a silent hole" to "fails one beat sooner with a clearer, byte-
+/// naming message, for free".
 fn guard_header_sendable(label: &str, value: &str) -> Result<(), String> {
     if let Some(b) = value.bytes().find(|b| !is_ureq_sendable_byte(*b)) {
         return Err(format!(
             "s3: the {label} header value contains byte {b:#04x}, which ureq (this crate's HTTP client) \
-             silently drops the WHOLE header for instead of sending it — refusing before the request is \
-             sent rather than letting a signed request go out with a desynchronised header. Value: {value:?}"
+             refuses to send — refusing here first, before the request is attempted, with the specific byte \
+             named rather than waiting for ureq's own (less specific) refusal. Value: {value:?}"
         ));
     }
     Ok(())
