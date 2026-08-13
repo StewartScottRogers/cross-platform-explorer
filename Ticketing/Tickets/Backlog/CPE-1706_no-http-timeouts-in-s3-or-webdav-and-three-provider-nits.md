@@ -12,7 +12,7 @@ closed:
 
 ## Problem
 
-Six items from the PR #888 (CPE-1683) review, rounds 1 and 2,, judged non-blocking there and deliberately not fixed in
+Six items from the PR #888 (CPE-1683) review, rounds 1 and 2, judged non-blocking there and deliberately not fixed in
 that PR. The first is the substantive one; the rest are grouped because they live in the same file.
 
 ### 1. No HTTP timeouts — wall-clock is completely unbounded *(the real one)*
@@ -106,9 +106,9 @@ is transcription — a fixture returning an over-cap body, asserting that error.
 
 ## Notes
 
-Filed by the Foreman from the PR #888 review, 2026-08-13. The reviewer explicitly marked all four
-non-blocking and recommended the timeout work be split across both crates rather than fixed only in the
-one that happened to be under review.
+Filed by the Foreman from the PR #888 review, 2026-08-13; items 5 and 6 added from its round-2 pass. The
+reviewer marked every item non-blocking, and recommended the timeout work be split across both crates
+rather than fixed only in the one that happened to be under review.
 
 Related: **CPE-1683** (which surfaced them), **CPE-1684** / **CPE-1685** (the next consumers of this
 transport), **CPE-1398** (the WebDAV parser hardening whose crate carries the same missing timeouts).
