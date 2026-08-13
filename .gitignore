@@ -37,6 +37,11 @@ updater.pw
 # Sub-agent worktrees (transient; never commit)
 .claude/worktrees/
 
+# UAT scratch directories (transient; never commit) — CPE-1697: a UAT scratch dir committed by
+# mistake produced two full duplicate copies of the repo tree (.claude/uat-1025/, .claude/uat-1025b/,
+# 3,186 files). This pattern catches the next one at `git add` time instead of a reviewer months later.
+.claude/uat-*/
+
 # Sprint raw per-agent metrics (transient/noisy; the distilled history.md IS committed)
 .claude/sprint-metrics/ledger.jsonl
 # Sprint concurrency lock (per-machine, transient; never committed)
