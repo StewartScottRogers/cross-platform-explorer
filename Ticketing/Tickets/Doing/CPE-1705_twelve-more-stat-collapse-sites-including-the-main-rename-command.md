@@ -3,7 +3,7 @@ id: CPE-1705
 title: Eighteen more stat-collapse sites — incl. the main rename command and a snapshot-index wipe
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: XL
 created: 2026-08-13
