@@ -493,7 +493,10 @@ mod tests {
         //
         // So attribute the two assertions correctly, because their names invite the wrong reading:
         //   * `try_wait().is_some()` above is the real `kill()` guard. An inert `kill()` reds it
-        //     immediately and deterministically -- confirmed independently at 1/1 and 50/50.
+        //     immediately and deterministically -- two agents measured this separately, the UAT at
+        //     1/1 and the reviewer at 50/50. It is deterministic by construction rather than by
+        //     sample size: `TerminateProcess` either fires or it does not, and `GetExitCodeProcess`
+        //     answers accordingly, so the counts corroborate the mechanism rather than establish it.
         //   * the line below is a **leak check, not a kill check**: once the session is gone, nothing
         //     of the child is left behind. That is a genuine guarantee worth pinning (it is what
         //     CPE-1244's module doc promises for the direct, non-registry path), but it is delivered
