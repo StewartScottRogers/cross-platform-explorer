@@ -3,11 +3,11 @@ id: CPE-1692
 title: Six more sites decide "not found" from a collapsed stat, so a denied path is reported as absent
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
