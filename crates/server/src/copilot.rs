@@ -223,8 +223,12 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
                 return OpResult::err(p, "cannot rename a path with no parent directory");
             };
             let dst = parent.join(new_name);
-            if dst.exists() {
-                return OpResult::err(p, format!("\"{new_name}\" already exists"));
+            // CPE-1705: was `if dst.exists()` in front of an `fs::rename`, which replaces its
+            // destination silently. See `fsutil::clobber_refusal`.
+            if let Some(e) =
+                crate::fsutil::clobber_refusal(&dst, &format!("\"{new_name}\" already exists"))
+            {
+                return OpResult::err(p, e);
             }
             match std::fs::rename(p, &dst) {
                 Ok(()) => OpResult::ok(&dst),
@@ -252,8 +256,10 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
             return OpResult::err(d, e);
         }
     }
-    if d.exists() {
-        return OpResult::err(d, "destination already exists");
+    // CPE-1705: was `if d.exists()`, guarding BOTH a silent-replacing `fs::rename` and a `copy_recursive`
+    // whose leaf `fs::copy` truncates whatever it lands on.
+    if let Some(e) = crate::fsutil::clobber_refusal(d, "destination already exists") {
+        return OpResult::err(d, e);
     }
     let outcome = if copy {
         copy_recursive(s, d)
@@ -564,6 +570,81 @@ mod tests {
         // The existing file is untouched and the source is still there.
         assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"existing");
         assert!(root.join("a.txt").exists());
+    }
+
+    /// CPE-1705, staging **real byte loss** through the real `execute_with` entry point.
+    /// `transfer_entry`'s guard was `if d.exists()`, and a `Move` op's outcome is `fs::rename`, which
+    /// replaces its destination silently. A destination the copilot could not stat therefore read as
+    /// free and the user's file was replaced — by an *AI-generated* plan the user approved on the
+    /// understanding that "destination already exists" would stop it.
+    ///
+    /// Windows-only: on Unix a `chmod` that makes `stat` fail also denies `rename(2)` on the same
+    /// directory, so the byte loss is not constructible there and the assertion would pass for the wrong
+    /// reason. `execute_refuses_to_overwrite_existing_destination` above carries the honest case on all
+    /// three CI legs.
+    #[test]
+    fn cpe_1705_execute_never_renames_over_a_destination_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the copilot execute byte-loss leg on this platform: `stat` and \
+                 `rename(2)` on a destination share one directory's permission bits on Unix. NOTHING in \
+                 this test covered CPE-1705's overwrite route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let root = scratch("cpe1705-denied");
+            fs::write(root.join("a.txt"), b"NEW CONTENT").unwrap();
+            let victim = root.join("b.txt");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let ctx = ctx_for(&root);
+            let trash = FakeTrash::new(scratch("cpe1705-hold"));
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                }
+            }
+            let _r = Restore(&victim, &root);
+
+            // `(R)` on the victim only. The root's `(DC)` is deliberately left intact — denying it too
+            // would block the rename outright and the test would prove nothing about the guard.
+            if !crate::fsutil::deny_stat_of(&victim) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the copilot denied-destination leg: could not deny stat of {} on \
+                     this machine. NOTHING in this test covered the overwrite route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let plan = FileOpPlan {
+                ops: vec![FileOp::Move {
+                    src: root_str(&root.join("a.txt")),
+                    dst: root_str(&victim),
+                }],
+            };
+            let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+
+            crate::fsutil::undo_deny_stat_of(&victim, &root);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a destination whose stat we were refused must NEVER be renamed over"
+            );
+            assert!(!out.results[0].ok, "the op must be reported failed: {:?}", out.results[0]);
+            assert!(
+                out.results[0].error.contains("could not check what is at"),
+                "must name the uncertainty rather than claim a collision: {}",
+                out.results[0].error
+            );
+        }
     }
 
     /// Create `link` pointing at directory `target` without needing admin: an NTFS **junction** on Windows

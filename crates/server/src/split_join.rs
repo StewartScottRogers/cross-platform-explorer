@@ -107,16 +107,26 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
 
+    // CPE-1705: both probes were `.exists()`. Every part path below is later opened with `File::create`,
+    // which **truncates** — so an unreadable slot here read as free and the split overwrote whatever was
+    // really at that name. Worse than a lone overwrite, because a split writes a whole numbered *series*:
+    // one unreadable directory turns into N destroyed files in one operation.
     let manifest_path = out_dir.join(format!("{original_name}{MANIFEST_SUFFIX}"));
-    if manifest_path.exists() {
-        return Err(format!("{}: already exists — remove it before re-splitting", manifest_path.display()));
+    if let Some(e) = crate::fsutil::clobber_refusal(
+        &manifest_path,
+        &format!("{}: already exists — remove it before re-splitting", manifest_path.display()),
+    ) {
+        return Err(e);
     }
     let width = part_width(part_count);
     let mut part_paths = Vec::with_capacity(part_count as usize);
     for i in 1..=part_count {
         let p = part_path(out_dir, &original_name, i, width);
-        if p.exists() {
-            return Err(format!("{}: already exists — remove it before re-splitting", p.display()));
+        if let Some(e) = crate::fsutil::clobber_refusal(
+            &p,
+            &format!("{}: already exists — remove it before re-splitting", p.display()),
+        ) {
+            return Err(e);
         }
         part_paths.push(p);
     }
@@ -311,8 +321,14 @@ pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), 
     let manifest = load_manifest(&manifest_path)?;
     validate_manifest(&manifest)?;
 
-    if out_path.exists() {
-        return Err(format!("{}: already exists — refusing to overwrite", out_path.display()));
+    // CPE-1705: was `if out_path.exists()`. `join_into` opens `out_path` with `File::create`, which
+    // truncates — and the recovery path below `remove_file`s `out_path` on ANY failure, so a collapsed
+    // guard here does not merely overwrite the victim, it can also delete it on the way out.
+    if let Some(e) = crate::fsutil::clobber_refusal(
+        out_path,
+        &format!("{}: already exists — refusing to overwrite", out_path.display()),
+    ) {
+        return Err(e);
     }
 
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
@@ -401,6 +417,101 @@ fn join_into(manifest: &SplitManifest, dir: &Path, out_path: &Path) -> Result<()
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// CPE-1705 at `join_files`: the output slot's guard was `out_path.exists()`, and `join_into` opens
+    /// `out_path` with `File::create`, which **truncates**. Worse, the recovery path `remove_file`s
+    /// `out_path` on any subsequent failure — so a collapsed guard here can delete the victim as well as
+    /// overwrite it.
+    ///
+    /// **This is a `write`-destructive site, not a `rename`-destructive one, and that changes what the
+    /// test can prove.** Measured and written up on `fsutil::deny_stat_of`: every Windows deny that
+    /// refuses `try_exists` also refuses `fs::write`/`File::create` (both request SYNCHRONIZE in their own
+    /// access mask), so the ACL that hides the file also protects it. A bare `expect_err` would therefore
+    /// pass against the **unfixed** code too — the neutralised version still errors, just from the
+    /// `File::create` rather than from the guard. So this asserts on **which** error, which is the only
+    /// non-vacuous assertion available here (Evidence Rules, `Ticketing/wiki.md`).
+    #[test]
+    fn cpe_1705_join_refuses_an_output_slot_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the join_files unreadable-output leg on this platform: the Unix deny \
+                 mechanism chmods the PARENT directory, which also refuses reading the manifest and parts \
+                 that live in it, so the run would fail before the output guard is reached. NOTHING in \
+                 this test covered the unreadable-output route on this run; \
+                 `cpe_1705_join_still_refuses_a_readable_existing_output` carries the honest case on every \
+                 OS and the fsutil taxonomy tests carry the classification."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705-join-denied");
+            let src = d.join("payload.bin");
+            std::fs::write(&src, vec![7u8; 300]).unwrap();
+            let manifest = split_file(&src, 128, &d).unwrap();
+            let manifest_file = d.join(format!("{}{MANIFEST_SUFFIX}", manifest.original_name));
+
+            let out = d.join("rebuilt.bin");
+            std::fs::write(&out, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = std::fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&out, &d);
+
+            if !crate::fsutil::deny_stat_of(&out) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the join_files denied-output leg: could not deny stat of {} on \
+                     this machine. NOTHING in this test covered that route on this run.",
+                    out.display()
+                );
+                return;
+            }
+
+            let err = join_files(&manifest_file, &out).expect_err("an unprovable output must refuse");
+            assert!(
+                err.contains("could not check what is at") && err.contains("nothing was written"),
+                "the refusal must be the GUARD's, not an incidental `File::create` failure — those are \
+                 the same red for opposite reasons, and only this string tells them apart: {err}"
+            );
+            assert!(
+                !err.contains("already exists"),
+                "and it must not claim the output exists — we could not tell: {err}"
+            );
+        }
+    }
+
+    /// The ungated sibling: the honest refusal still works, with its original wording, on every OS.
+    #[test]
+    fn cpe_1705_join_still_refuses_a_readable_existing_output() {
+        let d = scratch("cpe1705-join-ok");
+        let src = d.join("payload.bin");
+        std::fs::write(&src, vec![9u8; 300]).unwrap();
+        let manifest = split_file(&src, 128, &d).unwrap();
+        let manifest_file = d.join(format!("{}{MANIFEST_SUFFIX}", manifest.original_name));
+
+        // An ordinary, readable occupant: refused with the original message, bytes intact.
+        let occupied = d.join("taken.bin");
+        std::fs::write(&occupied, b"KEEP ME").unwrap();
+        let err = join_files(&manifest_file, &occupied).expect_err("an occupied output must refuse");
+        assert!(err.contains("already exists — refusing to overwrite"), "{err}");
+        assert_eq!(std::fs::read(&occupied).unwrap(), b"KEEP ME".to_vec());
+
+        // …and a genuinely free output still joins. A guard that refused everything would be as broken as
+        // one that overwrote.
+        let free = d.join("rebuilt.bin");
+        join_files(&manifest_file, &free).expect("a genuinely free output must still join");
+        assert_eq!(std::fs::read(&free).unwrap(), vec![9u8; 300]);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         static SEQ: AtomicU64 = AtomicU64::new(0);

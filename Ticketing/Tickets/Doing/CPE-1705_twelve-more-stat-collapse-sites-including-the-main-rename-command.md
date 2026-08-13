@@ -3,7 +3,7 @@ id: CPE-1705
 title: Eighteen more stat-collapse sites — incl. the main rename command and a snapshot-index wipe
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: XL
 created: 2026-08-13
@@ -300,6 +300,147 @@ The twelve sites above. **Deliberately excluded, do not re-open:**
       record.
 - [ ] Re-run the sweep at the same scope and state it. If it comes back clean this time, that is worth
       saying explicitly — it would be the first time in six rounds.
+
+## Work Log
+
+**2026-08-13 — branch `cpe-1705-stat-collapse-sites`.**
+
+### ROUND 2 — my headline finding was WRONG, and correction 4 is why
+
+**Retracted in full.** Everything under "the headline finding" below is false, and I am leaving it in place
+rather than deleting it because the shape of the error is the useful part.
+
+I measured correctly and generalised one step past my evidence — the exact failure `Ticketing/wiki.md`'s
+Evidence Rules were written about, committed inside a ticket whose subject is that failure, for the fourth
+time in this chain. My setup denied **only the target**. On Windows `fs::metadata` falls back from a
+refused `CreateFileW` open to `FindFirstFileW`, reading the entry out of the **parent** — which is why
+`exists()` kept answering `true`. Deny `(RD)` on the parent and the fallback dies, while `RD ≠ DC` leaves
+the rename's `FILE_DELETE_CHILD` route intact, so the stat fails *and* the rename lands.
+
+Measured, this round, through the real `rename_entry_impl` with both guards removed:
+
+```
+assertion `left == right` failed: a rename target whose stat we were refused must NEVER be renamed over
+  left: [82, 69, 78, 65, 77, 69, 68, 32, 83, 79, 85, 82, 67, 69]      // "RENAMED SOURCE" — victim destroyed
+ right: [86, 73, 67, 84, 73, 77, 32, 79, 82, 73, 71, 73, 78, 65, 76]  // "VICTIM ORIGINAL"
+```
+
+And CPE-1696's `unique_target`, reverted to `!candidate.exists()`:
+
+```
+  left: [77, 79, 86, 69, 68, 32, 83, 79, 85, 82, 67, 69]              // "MOVED SOURCE" — victim destroyed
+```
+
+**That test's original "pre-fix this read back `MOVED SOURCE`" claim was exactly, literally correct.** I
+rewrote correct documentation on already-merged code with an incorrect refutation, and deleted two
+salvageable tests as "vacuous" when it was my *construction* that was incomplete. All three are restored,
+and both restored tests are shown firing against unfixed code.
+
+What I did in round 2:
+
+1. **`fsutil::deny_stat_of` now also denies `(RD)` on the parent** — six lines, and it upgrades every ACL
+   test in the repo at once. Never `(DC)`, which would cut both delete routes and make byte-loss
+   assertions pass for the wrong reason.
+2. **`undo_deny_stat_of` lifts the PARENT's deny first, target last.** New finding, and not cosmetic:
+   `icacls <file>` cannot rewrite a file's ACL while its directory still denies list-directory. It fails
+   silently, the target keeps its deny, and the caller's `fs::read` of the victim dies with
+   `PermissionDenied` — which reads exactly like the test's own byte assertion failing. Target-first →
+   parent-first turned six red tests green.
+3. **Reverted all three doc-comment rewrites**, with the record of the wrong turn kept in place.
+4. **Fixed a real user-facing bug I had introduced and not noticed**: `symlink_slot_refusal`'s `Err` arm
+   rendered *"could not check what is at "…\final.txt" is a link"* — my bulk rename of a sibling helper's
+   wording had clipped it into nonsense. Nobody read it because the arm was *believed unreachable*. The
+   parent-`RD` construction makes it reachable, so it is now covered by a test as well as fixed. An
+   "unreachable" branch is exactly where an unread string hides.
+5. **One genuinely missed site**, inside the sweep this PR claimed: `sidecar/host/src/bin/create_sidecar.rs`
+   — `if root.exists()` guarding `File::create` + `write_all` over a whole crate tree. Dev-only CLI, low
+   severity, now fixed rather than disclosed.
+6. **Filed CPE-1711** for the ~110 `.is_dir()` re-walk, which this PR had promised and not done. (Filed
+   first as CPE-1710 and renumbered — the Foreman had taken that id for the sibling follow-up on
+   `copilot`'s missing `symlink_slot_refusal`, filed from the same review pass.)
+
+### The headline finding — RETRACTED, see round 2 above. Preserved for the record.
+
+The ticket says *"for a `try_exists`-guarded, rename-destructive site you can write a test that stages
+actual byte loss."* Measured: **true only for a site already probing with `try_exists`.** Against the
+`.exists()`/`.is_file()` code this ticket actually fixes, the ACL is invisible — the ticket's own "two
+things that remain true" note says no deny refuses `Path::exists()`, and that fact runs one step further
+than anyone carried it. Under `icacls /deny (R)`:
+
+- the **unfixed** `target.exists()` sees `true`, calls the slot occupied, and **refuses**;
+- the victim's bytes survive;
+- so every byte-level assertion passes **against the bug**.
+
+Three tests were vacuous because of this and were caught by measuring rather than reasoning:
+
+1. **`cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat` (PR #889, pre-existing).** Reverting
+   `unique_target`'s probe to `!candidate.exists()` recompiled and the test passed **green**. Its
+   "*the strongest test in this ticket: it stages REAL BYTE LOSS*" / "*pre-fix this read back
+   `MOVED SOURCE`*" claims are false. Doc comment corrected in place; assertions kept (they guard a
+   regression *within* the fixed design).
+2. **This ticket's first `batch_media::plan` test** — reverting to `Path::is_file()` passed green.
+3. **This ticket's first `fresh_manifest_id` test** — reverting to `.exists()` passed green.
+
+(2) and (3) were **rewritten** to assert on the **bound** instead, which *is* distinguishable: past
+8 consecutive unreadable candidates the fixed loop refuses while the old one walks past and returns a
+guessed name. Both now red against the true pre-fix code (outputs in the PR).
+
+What the ACL leg *can* prove at a `.exists()` site is that the refusal's **wording** changed from a
+confident false claim ("already exists") to an honest "I could not tell". That is a real improvement —
+CPE-1687 traced exactly that lie to users hunting for a file that was never gone — and it is what the
+remaining site tests assert. The genuine overwrite is reachable only via the non-permission tail (`EIO`,
+dead mount, stale handle), which no local ACL simulates, so the **pure classifier tests are the
+load-bearing evidence** and the ACL legs are corroboration. `fsutil::deny_stat_of`'s doc comment now says
+this.
+
+### Second finding: `try_exists` → unknown-as-occupied is a HANG risk, not a one-line swap
+
+Two candidate-advancing loops (`batch_media::plan`, `snapshot_capture::fresh_manifest_id`) had **no
+termination condition** other than finding a free name — safe only because the old probe answered `false`
+for an unreadable slot and so always terminated on the first candidate. Skipping unknowns without a bound
+turns an unreadable directory (where *every* candidate is unknown) into an infinite loop. Both are now
+bounded at 8 and **refuse the item** (they return `Result`, so unlike `unique_target` they need no
+pathological fallback name).
+
+### Third finding: an earlier guard fires first at `batch_media::plan`
+
+`classify_output_containment` (CPE-1623) refuses an output whose filesystem identity it cannot read, and
+it runs on the first candidate *before* the disambiguation loop. So the collapse is reachable in the loop,
+not on the first probe — the first draft of the test denied the first candidate and was measuring a
+different guard entirely.
+
+### Decisions recorded (ACs)
+
+- **Shared helper: YES.** `fsutil::{TargetSlot, classify_target_slot, clobber_refusal,
+  unknown_slot_message}` is now the single implementation; `src-tauri`'s CPE-1696 copy was deleted and
+  repointed at it. Twelve open-coded copies is how the thirteenth gets missed — five rounds proved it.
+- **`unique_target`'s unprobed fallback: left as is, deliberately.** It needs a file named exactly
+  `<name>.<our pid>`, and the dead mount that reaches it fails the subsequent write anyway. The two loops
+  fixed here return `Result` and so refuse instead — a strictly better shape, but retrofitting it onto
+  `unique_target` changes a `PathBuf`-returning signature with many callers, which is its own ticket.
+- **Dangling-symlink route: fixed as what it is.** `fsutil::symlink_slot_refusal` is a **separate**
+  function called **separately** at the rename sites, precisely so a `try_exists` swap is never mistaken
+  for having closed it. `try_exists` answers `Ok(false)` on a dangling link *correctly*; only
+  `symlink_metadata` sees it.
+
+### Sites fixed (14)
+
+`src-tauri/src/lib.rs`: `rename_entry_impl` (the main rename, + symlink guard), `move_exact_impl`
+(+ symlink guard — CPE-1692 hardened its *parent* check and left the destination's own collapsed),
+`move_ticket_impl`, `restore_from_trash_impl`, `restore_trash_items_impl`.
+`crates/server`: `copilot::apply_op` Rename + `copilot::transfer_entry`, `organize_apply::apply_proposals`,
+`folder_template::stamp_nodes`, `split_join::split_file` (×2) + `join_files`, `batch_media::plan`,
+`snapshot_capture::load_store` / `fresh_manifest_id` / the blob-copy skip.
+
+### Left undone, deliberately
+
+- `content_index::load_at` (diagnosis severity), `thumb_source` (deliberate per its own comment; a
+  memory-cap bypass, a different family), `links::link_status` / `suggest_repair` /
+  `src-tauri` drive-symlink probe / `batch_media`'s `open_no_follow` backstop — all four are
+  `symlink_metadata(..).unwrap_or(false)`, i.e. **CPE-1461 family, not stat-collapse**. Mixing them in
+  would repeat the mis-sorting this ticket's own triage rule warns about.
+- **The ~110 `.is_dir()` re-walk the triage rule overturns.** Sized up front as the ticket asked, and it
+  is a ticket of its own — not quietly narrowed. Needs its own file.
 
 ## Notes
 

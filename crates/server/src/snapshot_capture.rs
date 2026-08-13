@@ -153,7 +153,16 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
     fs::create_dir_all(&blobs_dir_path).map_err(|e| format!("{}: {e}", blobs_dir_path.display()))?;
     for blob in &plan.to_store {
         let dest = blobs_dir_path.join(&blob.hash);
-        if dest.exists() {
+        // CPE-1705: was `if dest.exists() { continue }`. The overwrite this guard's collapse permits is
+        // benign — the blob store is content-addressed, so `dest`'s name IS the hash of the bytes about
+        // to be written and re-copying writes identical content. It is fixed anyway, for two reasons
+        // worth stating rather than shrugging at: the shape is the same fail-open-into-overwrite as the
+        // dangerous sites and leaving one behind is how the next sweep mis-sorts it (this file already
+        // supplied that exact lesson — `load_store` above), and the property that makes it benign is an
+        // invariant of the *caller*, not of this line. `Unknown` re-copies rather than skipping: writing
+        // the same bytes again is harmless and strictly safer than assuming a blob we cannot see is
+        // intact, since the manifest saved below will reference it.
+        if crate::fsutil::classify_target_slot(&dest.try_exists()) == crate::fsutil::TargetSlot::Occupied {
             continue; // already on disk (e.g. left over from a prior capture of the same content)
         }
         let Some(rel) = source_for_hash.get(blob.hash.as_str()) else {
@@ -367,12 +376,95 @@ fn skip_reason_str(reason: SkipReason) -> &'static str {
     }
 }
 
+/// What [`load_store`] found at `store_dir/index.json` (CPE-1705).
+#[derive(Debug, PartialEq, Eq)]
+enum StoreIndexState {
+    /// Provably nothing there — a genuine first capture. An empty store is the right answer.
+    Fresh,
+    /// A regular file — read it.
+    Present,
+    /// Anything else. **Never silently `Fresh`**, which is the bug.
+    Refuse(String),
+}
+
+/// The pure decision behind [`load_store`], split out (mirroring [`crate::dispatch`]'s
+/// `classify_path_error` and [`crate::split_join`]'s `part_stat_error`) so the taxonomy is unit-testable
+/// on every OS and CI account.
+///
+/// `stat` is `Ok(is_file)` when the stat succeeded, or `Err(kind)` when it failed.
+///
+/// **Splitting this out is load-bearing here, not stylistic — and the reason is worth recording so the
+/// next person does not go looking for the test that "should" exist.** Unlike the rename sites in this
+/// ticket, the end-to-end damage at this site **cannot be staged from file permissions on any platform**,
+/// measured rather than assumed:
+///
+/// - The damage needs the *stat* to fail while the later `save_store` *write* succeeds.
+/// - **Unix:** making `metadata(store_dir/index.json)` fail with `EACCES` requires denying `+x` on
+///   `store_dir` — and that same denial refuses `fs::write` to a path inside it. Both halves die together.
+/// - **Windows:** no deny ACE refuses `fs::metadata` at all (it opens with a desired-access mask of `0`),
+///   so the stat cannot be made to fail in the first place.
+///
+/// A transient network stat failure on a store directory — the QNAP case that makes this real — is
+/// precisely the condition neither OS's permission model will simulate. So the classifier carries the
+/// evidence for the failure branch, and the end-to-end test drives the one bad state a real filesystem
+/// *can* hold: a non-file at `index.json`.
+fn classify_store_index(stat: Result<bool, std::io::ErrorKind>, path: &Path) -> StoreIndexState {
+    match stat {
+        Ok(true) => StoreIndexState::Present,
+        Ok(false) => StoreIndexState::Refuse(format!(
+            "{}: the snapshot store index is not a regular file. Refusing to treat this as a fresh \
+             store, which would overwrite it and orphan every existing snapshot's blobs",
+            path.display()
+        )),
+        // The ONLY answer that means "no store here yet".
+        Err(std::io::ErrorKind::NotFound) => StoreIndexState::Fresh,
+        Err(kind) => StoreIndexState::Refuse(format!(
+            "{}: could not read the snapshot store index ({kind:?}), so this capture was abandoned. \
+             Refusing to continue as if this were the first capture — doing so would rewrite the index \
+             with only this capture's blobs and permanently orphan every existing snapshot's",
+            path.display()
+        )),
+    }
+}
+
 /// Load the store index from `store_dir/index.json`. A store directory that doesn't exist yet (first
 /// capture) yields an empty store, not an error.
+///
+/// # CPE-1705 — the most destructive site in the whole stat-collapse chain
+///
+/// This was `if !path.is_file() { return Ok(BlobStore::new()) }`. `Path::is_file()` is
+/// `metadata().map(|m| m.is_file()).unwrap_or(false)`, so **a stat that merely failed read as "first
+/// capture ever"** and this returned an *empty* store. That is not a wrong error message and not even a
+/// single overwrite:
+///
+/// 1. [`capture`] loads the empty store,
+/// 2. applies this capture's plan to it, and
+/// 3. `save_store`s it back over `index.json` —
+///
+/// so the real index, holding every other snapshot's blob refcounts, is replaced by one listing only this
+/// capture's blobs. The next `delete_snapshot`/GC then frees blobs that older snapshots still reference,
+/// and **those snapshots become permanently unrestorable.** One transient stat, cross-snapshot data loss,
+/// no error anywhere. A network-backed store directory is a plausible trigger and an explicitly supported
+/// one — the QNAP target.
+///
+/// The distinction that had to be restored is precisely *absent* vs *unreadable*: the first is a genuine
+/// first capture and an empty store is right; the second must **fail**, because there is no safe thing to
+/// do with a ledger you cannot read except stop. This is also the site that motivated the ticket's triage
+/// rule — *a type-check whose false branch discards state is an absence claim, not a type claim* — which
+/// is why it survived an "exhaustive" sweep that had correctly *enumerated* it and then filed it under
+/// harmless type checks. Note the type check is kept and still enforced separately: a directory (or a
+/// device node) at `index.json` is a corrupt store, not a fresh one.
+///
+/// See [`classify_store_index`] for the decision itself, split out so it is testable without a
+/// filesystem that can be made to fail on demand — which, for *this* site, matters more than usual: see
+/// that function's note on why the end-to-end damage is not constructible from permissions.
 fn load_store(store_dir: &Path) -> Result<BlobStore, String> {
     let path = index_path(store_dir);
-    if !path.is_file() {
-        return Ok(BlobStore::new());
+    let stat = fs::metadata(&path).map(|m| m.is_file()).map_err(|e| e.kind());
+    match classify_store_index(stat, &path) {
+        StoreIndexState::Fresh => return Ok(BlobStore::new()),
+        StoreIndexState::Refuse(e) => return Err(e),
+        StoreIndexState::Present => {}
     }
     let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let persisted: PersistedIndex =
@@ -432,16 +524,62 @@ fn validate_manifest_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How many candidate manifest ids in a row may be unreadable before [`fresh_manifest_id`] gives up
+/// (CPE-1705) — see `MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS` in [`crate::batch_media`] for why treating
+/// unknown-as-occupied without a bound converts a silent overwrite into a hang.
+const MAX_CONSECUTIVE_UNKNOWN_IDS: usize = 8;
+
 /// A fresh, unique manifest id for a capture happening now: the wall-clock epoch-ms, with a `-N` suffix
 /// appended if a manifest with that id already exists (two captures inside the same millisecond) — keeps
 /// ids both roughly time-sortable and guaranteed unique.
 fn fresh_manifest_id(store_dir: &Path) -> Result<String, String> {
     let dir = manifests_dir(store_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let ms = to_epoch_ms(SystemTime::now()).unwrap_or(0);
+    pick_manifest_id(store_dir, to_epoch_ms(SystemTime::now()).unwrap_or(0))
+}
+
+/// The candidate walk behind [`fresh_manifest_id`], with the clock passed in (CPE-1705).
+///
+/// Split out purely so a test can **name the candidate ids in advance**. `fresh_manifest_id` reads
+/// `SystemTime::now()` inside itself, so a test that pre-creates `<ms>`, `<ms>-1`, … computes a *different*
+/// millisecond than the call under test does and stages files the walk never looks at — it then passes
+/// trivially, having exercised nothing. (Observed: the first version of this ticket's test reded with
+/// `must REFUSE, never hand back a guessed name: "1786642033625"` — the very first candidate, free,
+/// because every staged file was named for an earlier millisecond.)
+fn pick_manifest_id(store_dir: &Path, ms: u64) -> Result<String, String> {
+    let dir = manifests_dir(store_dir);
     let mut candidate = ms.to_string();
     let mut n = 0u32;
-    while manifest_path(store_dir, &candidate).exists() {
+    // CPE-1705: was `while manifest_path(..).exists()`, the exact `unique_target` shape. An unreadable
+    // manifests directory answered `false` on the first probe, so this handed back an id whose file
+    // `save_manifest` then `fs::write`s — truncating a real manifest and losing a whole snapshot's file
+    // list. Unknown is skipped like occupied, bounded (see `MAX_CONSECUTIVE_UNKNOWN_IDS`) so an
+    // unreadable directory refuses instead of spinning: unlike a copy target there is no fallback name
+    // worth guessing at, and a capture that cannot allocate an id has written nothing yet.
+    let mut unknown_run = 0usize;
+    loop {
+        let p = manifest_path(store_dir, &candidate);
+        let stat = p.try_exists();
+        match crate::fsutil::classify_target_slot(&stat) {
+            crate::fsutil::TargetSlot::Free => break,
+            // A real collision breaks the run: `unknown_run` counts CONSECUTIVE unknowns, because a *run*
+            // is the only evidence that the directory itself is unreadable. Without this reset, unknowns
+            // scattered among genuine same-millisecond collisions accumulate and refuse a capture that
+            // should simply have walked to the next id (PR #893 review — broken, it redded nothing).
+            crate::fsutil::TargetSlot::Occupied => unknown_run = 0,
+            crate::fsutil::TargetSlot::Unknown => {
+                unknown_run += 1;
+                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_IDS {
+                    return Err(format!(
+                        "{}: could not find a free snapshot manifest id \
+                         ({MAX_CONSECUTIVE_UNKNOWN_IDS} candidates in a row were unreadable), so nothing \
+                         was captured — refusing to guess an id rather than risk overwriting an existing \
+                         snapshot's manifest",
+                        dir.display()
+                    ));
+                }
+            }
+        }
         n += 1;
         candidate = format!("{ms}-{n}");
     }
@@ -559,6 +697,334 @@ mod tests {
         assert!(scan.contains_key("ok.txt"));
         assert!(!scan.contains_key("blocked.txt"), "unreadable file is skipped, not fatal to the scan");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1705: a stat failure on the store index is NOT "first capture ever" -----------------
+
+    /// The taxonomy, on every OS and account. The `Err(_)` row is the whole ticket: `is_file()` folded it
+    /// into `false`, `false` meant "fresh store", and a fresh store gets **written back over the real
+    /// one**, orphaning every other snapshot's blobs.
+    #[test]
+    fn cpe_1705_only_a_genuine_absence_means_a_fresh_snapshot_store() {
+        let p = Path::new("/store/index.json");
+        assert_eq!(classify_store_index(Ok(true), p), StoreIndexState::Present, "a real file is loaded");
+        assert_eq!(
+            classify_store_index(Err(std::io::ErrorKind::NotFound), p),
+            StoreIndexState::Fresh,
+            "an absent index — and ONLY an absent index — is a genuine first capture"
+        );
+        // A non-file at index.json is a corrupt store, not a fresh one: the type check is kept, and its
+        // false branch no longer discards the ledger.
+        assert!(
+            matches!(classify_store_index(Ok(false), p), StoreIndexState::Refuse(_)),
+            "a directory at index.json must refuse, not read as a fresh store"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            match classify_store_index(Err(kind), p) {
+                StoreIndexState::Refuse(msg) => {
+                    assert!(
+                        msg.contains("abandoned") && msg.contains("orphan"),
+                        "the refusal must say what was at stake: {msg}"
+                    );
+                }
+                other => panic!(
+                    "{kind:?} must REFUSE, not {other:?} — reading it as a fresh store is what rewrites \
+                     the index with only this capture's blobs"
+                ),
+            }
+        }
+    }
+
+    /// The one bad state a real filesystem can actually hold at `index.json`, driven through the real
+    /// `capture()` entry point on **every** OS: a directory sitting where the index should be.
+    ///
+    /// **Asserts on WHICH error, not merely that one occurred.** Pre-CPE-1705 this also failed — but from
+    /// `save_store`'s `fs::write`, *after* `load_store` had already decided the store was fresh and
+    /// `apply_capture` had built a replacement index from nothing. A bare `expect_err` would have passed
+    /// against the bug (Evidence Rules, `Ticketing/wiki.md`, and the exact vacuous shape the CPE-1705
+    /// ticket warns about). The distinguishing string is `load_store`'s own refusal.
+    #[test]
+    fn cpe_1705_capture_refuses_a_store_index_that_is_not_a_regular_file() {
+        let src = scratch("cpe1705-src");
+        let store = scratch("cpe1705-store");
+        fs::write(src.join("a.txt"), b"payload").unwrap();
+        // A directory where index.json belongs. `metadata()` succeeds, `is_file()` is false — the
+        // "type-check whose false branch discards state" the ticket's triage rule is named after.
+        fs::create_dir_all(index_path(&store)).unwrap();
+
+        let err = capture(
+            &src.to_string_lossy(),
+            &store.to_string_lossy(),
+            &CaptureBudget::default(),
+        )
+        .expect_err("a store index that is not a regular file must abort the capture");
+        assert!(
+            err.contains("Refusing to treat this as a fresh store"),
+            "the refusal must come from load_store's guard, not incidentally from the later write — \
+             those are the same red for opposite reasons: {err}"
+        );
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// The honest case, ungated: a store directory that genuinely does not exist yet still captures
+    /// cleanly. A guard that refused everything would make every first capture fail, and that is as
+    /// broken as the overwrite it replaced.
+    #[test]
+    fn cpe_1705_a_genuinely_absent_store_index_still_captures() {
+        let src = scratch("cpe1705-fresh-src");
+        let store = scratch("cpe1705-fresh-store");
+        fs::write(src.join("a.txt"), b"payload").unwrap();
+        // Nothing at all in the store dir — the real first-capture case.
+        assert!(!index_path(&store).exists());
+
+        let out = capture(&src.to_string_lossy(), &store.to_string_lossy(), &CaptureBudget::default())
+            .expect("a genuine first capture must still succeed");
+        assert!(out.new_blobs > 0, "the first capture must actually store the file's blob");
+        assert!(index_path(&store).is_file(), "…and write a real index");
+
+        let _ = fs::remove_dir_all(&src);
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    /// A single unreadable candidate id must never be handed back as free — `save_manifest` would
+    /// `fs::write` straight over a real snapshot's file list.
+    ///
+    /// **This test was deleted once as "vacuous" and restored; the deletion was the error.** Under a
+    /// target-only deny it did pass against the unfixed `while manifest_path(..).exists()` loop, because
+    /// `fs::metadata` falls back to `FindFirstFileW` and reads the entry out of the parent directory.
+    /// `deny_stat_of` now also denies `(RD)` on the parent, killing that fallback, so `exists()` answers
+    /// `false` on a manifest that is really there and the `assert_ne!` fires as intended.
+    ///
+    /// Driven through the `pick_manifest_id` seam so the candidate ids are known in advance —
+    /// `fresh_manifest_id` reads its own clock, and a test that pre-creates `<ms>` files computes a
+    /// different millisecond and stages files the walk never probes.
+    #[test]
+    fn cpe_1705_a_manifest_id_is_never_handed_out_from_an_unreadable_slot() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg on this platform: the Unix deny \
+                 mechanism is a chmod on the PARENT directory, which fails the surrounding \
+                 create_dir_all/write before this loop is reached. NOTHING in this test covered the \
+                 unreadable-slot route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let store = scratch("cpe1705-mid-one");
+            fs::create_dir_all(manifests_dir(&store)).unwrap();
+            let ms = 1_700_000_000_000u64;
+            let first = manifest_path(&store, &ms.to_string());
+            fs::write(&first, b"REAL MANIFEST").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&first, &store);
+
+            if !crate::fsutil::deny_stat_of(&first) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg: could not deny stat of {} \
+                     on this machine. NOTHING in this test covered the unreadable-slot route on this run.",
+                    first.display()
+                );
+                return;
+            }
+
+            let id = pick_manifest_id(&store, ms).expect("one unreadable slot must be skipped, not fatal");
+            assert_ne!(
+                manifest_path(&store, &id),
+                first,
+                "an id whose manifest file could not be stat'ed must NEVER be handed back as free — \
+                 save_manifest would fs::write straight over a real snapshot's file list"
+            );
+            crate::fsutil::undo_deny_stat_of(&first, &store);
+            assert_eq!(
+                fs::read(&first).unwrap(),
+                b"REAL MANIFEST".to_vec(),
+                "and the real manifest must be byte-for-byte intact"
+            );
+        }
+    }
+
+    /// `fresh_manifest_id`'s **bound** — the second half of the same fix, tested separately so
+    /// neutralising either reds exactly one test.
+    ///
+    /// Treating unknown-as-occupied without a bound is what turns a silent overwrite into an unbounded
+    /// loop: with an unreadable directory *every* candidate is unknown, and against a dead mount each
+    /// stat blocks for seconds. Past [`MAX_CONSECUTIVE_UNKNOWN_IDS`] the fixed loop refuses, while the
+    /// `.exists()` original sails past all of them and hands back a guessed name.
+    #[test]
+    fn cpe_1705_an_unreadable_manifests_directory_refuses_instead_of_guessing_an_id() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the fresh_manifest_id bound leg on this platform: the Unix deny \
+                 mechanism is a chmod on the PARENT directory, which fails the surrounding \
+                 create_dir_all/write before this loop is reached. NOTHING in this test covered the \
+                 unreadable-slot route on this run; the fsutil taxonomy tests cover the classification on \
+                 every OS."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let store = scratch("cpe1705-mid");
+            let dir = manifests_dir(&store);
+            fs::create_dir_all(&dir).unwrap();
+            // Occupy AND deny the first `MAX_CONSECUTIVE_UNKNOWN_IDS` candidate ids this call will walk:
+            // `<ms>`, `<ms>-1`, … Each must be a real file for the ACE to attach to.
+            // A FIXED ms, driven through the `pick_manifest_id` seam — `fresh_manifest_id` reads its own
+            // clock, so pre-created files would be named for a different millisecond and never probed.
+            let ms = 1_700_000_000_000u64;
+            let mut denied: Vec<PathBuf> = Vec::new();
+            for n in 0..MAX_CONSECUTIVE_UNKNOWN_IDS {
+                let id = if n == 0 { ms.to_string() } else { format!("{ms}-{n}") };
+                let p = manifest_path(&store, &id);
+                fs::write(&p, b"REAL MANIFEST").unwrap();
+                denied.push(p);
+            }
+
+            struct Restore<'a>(&'a [PathBuf], &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&denied, &store);
+
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the fresh_manifest_id bound leg: could not deny stat of the \
+                     candidate manifest files on this machine (running elevated, or an ACL-less \
+                     filesystem). NOTHING in this test covered the unreadable-slot route on this run."
+                );
+                return;
+            }
+
+            // Pre-fix (`while ..exists()`) this returned `Ok("<ms>-8")` — a guessed id in a directory it
+            // could not read, which `save_manifest` would then `fs::write` into.
+            let err = pick_manifest_id(&store, ms).expect_err(
+                "a run of unreadable candidate ids must REFUSE, never hand back a guessed name",
+            );
+            assert!(
+                err.contains("could not find a free snapshot manifest id") && err.contains("unreadable"),
+                "the refusal must name the uncertainty: {err}"
+            );
+
+            for p in &denied {
+                crate::fsutil::undo_deny_stat_of(p, &store);
+                assert_eq!(
+                    fs::read(p).unwrap(),
+                    b"REAL MANIFEST".to_vec(),
+                    "every real manifest must be byte-for-byte intact"
+                );
+            }
+        }
+    }
+
+    /// **The `Occupied => unknown_run = 0` reset, made load-bearing.** Interleave unreadable manifest ids
+    /// with readable ones so the *total* unknown count exceeds [`MAX_CONSECUTIVE_UNKNOWN_IDS`] while no
+    /// run of them ever does: the walk must find a free id, not refuse.
+    ///
+    /// Written because the PR #893 review broke this reset and found it redded **nothing** — the bound
+    /// test only ever presents an uninterrupted run. Without it, a store with a handful of unreadable
+    /// manifests scattered among real ones refuses every capture.
+    #[test]
+    fn cpe_1705_scattered_unreadable_manifest_ids_do_not_accumulate_into_a_refusal() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the interleaved-unknowns leg on this platform: the Unix deny mechanism \
+                 chmods the PARENT, making every candidate unreadable rather than alternating ones. \
+                 NOTHING in this test covered the unknown_run reset on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let store = scratch("cpe1705-mid-interleaved");
+            fs::create_dir_all(manifests_dir(&store)).unwrap();
+            let ms = 1_700_000_000_000u64;
+            // Ids `<ms>`, `<ms>-1` … `<ms>-19` all occupied; every other one additionally denied. That is
+            // 10 unknowns in total — more than MAX_CONSECUTIVE_UNKNOWN_IDS — but never two in a row.
+            let mut denied: Vec<PathBuf> = Vec::new();
+            for n in 0..20u32 {
+                let id = if n == 0 { ms.to_string() } else { format!("{ms}-{n}") };
+                let p = manifest_path(&store, &id);
+                fs::write(&p, b"REAL MANIFEST").unwrap();
+                if n % 2 == 1 {
+                    denied.push(p);
+                }
+            }
+
+            struct Restore<'a>(&'a [PathBuf], &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&denied, &store);
+
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the interleaved-unknowns leg: could not deny stat of the candidate \
+                     manifests on this machine. NOTHING in this test covered the unknown_run reset on this \
+                     run."
+                );
+                return;
+            }
+
+            let id = pick_manifest_id(&store, ms).expect(
+                "unknowns broken up by real collisions must NOT accumulate into a refusal — the bound \
+                 means \"this directory is unreadable\", and one with readable manifests in it is not",
+            );
+            assert_eq!(id, format!("{ms}-20"), "it must walk to the first genuinely free id");
+        }
+    }
+
+    /// The ungated sibling: the ordinary collision walk still works on every OS. A `fresh_manifest_id`
+    /// that refused whenever anything was in the way would break the two-captures-in-one-millisecond case
+    /// the `-N` suffix exists for.
+    #[test]
+    fn cpe_1705_fresh_manifest_id_still_walks_past_ordinary_collisions() {
+        let store = scratch("cpe1705-mid-ok");
+        fs::create_dir_all(manifests_dir(&store)).unwrap();
+        let ms = 1_700_000_000_000u64;
+        // Two readable manifests already sitting on the first two candidate ids.
+        fs::write(manifest_path(&store, &ms.to_string()), b"{}").unwrap();
+        fs::write(manifest_path(&store, &format!("{ms}-1")), b"{}").unwrap();
+
+        let id = pick_manifest_id(&store, ms).expect("readable collisions must still be walked past");
+        assert_eq!(id, format!("{ms}-2"), "it must walk to the first genuinely free id");
+        assert!(!manifest_path(&store, &id).exists(), "the chosen id must be genuinely free");
+        // …and the real entry point still works end to end, clock and all.
+        assert!(fresh_manifest_id(&store).is_ok());
+
+        let _ = fs::remove_dir_all(&store);
     }
 
     // ---- capture / restore round trip -----------------------------------------------------------

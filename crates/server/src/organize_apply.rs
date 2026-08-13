@@ -82,8 +82,15 @@ fn apply_proposals(dir: &str, proposals: &[MoveProposal]) -> Vec<OpResult> {
             if let Err(e) = std::fs::create_dir_all(&target_dir) {
                 return OpResult::err(&dst, e.to_string());
             }
-            if dst.exists() {
-                return OpResult::err(&src, format!("\"{}\" already exists in {}", p.name, p.target_subdir));
+            // CPE-1705: was `if dst.exists()`. Auto-organize moves every matching file in a folder in one
+            // batch, so a single unreadable destination slot silently replaced a real file and the run
+            // reported success for it — the checkpoint taken above is the only thing that would have got
+            // it back, and only if the user noticed in time to revert.
+            if let Some(e) = crate::fsutil::clobber_refusal(
+                &dst,
+                &format!("\"{}\" already exists in {}", p.name, p.target_subdir),
+            ) {
+                return OpResult::err(&src, e);
             }
             match std::fs::rename(&src, &dst) {
                 Ok(()) => OpResult::ok(&dst),
@@ -235,5 +242,178 @@ mod tests {
         assert!(pdf_result.ok);
         // The un-moved file is still where it started.
         assert!(dir.path().join("a.png").exists());
+    }
+
+    /// **A second, independent byte-loss construction** — found by the PR #893 reviewer before the
+    /// parent-`RD` mechanism was known, and kept because it exercises a *different* kernel path.
+    ///
+    /// Put a **symlink** in the destination slot and deny `(R)` on the link's **resolution target**.
+    /// `Path::exists()` follows the link, hits the denied target, and answers `false`; `try_exists()`
+    /// answers `Err`; and `fs::rename` — which does not follow the final component — destroys the link.
+    /// So the unfixed `dst.exists()` guard sails through and the destination symlink is annihilated.
+    ///
+    /// Independent of the `deny_stat_of` parent-`(RD)` construction: this one goes through the **reparse**
+    /// path rather than defeating `fs::metadata`'s `FindFirstFileW` fallback. Two mechanisms, one
+    /// conclusion — which is worth more than two runs of the same mechanism, given this chain's history of
+    /// re-measuring one incomplete setup four times.
+    #[test]
+    fn cpe_1705_organize_never_renames_over_a_destination_symlink_it_cannot_resolve() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the symlink-target byte-loss leg on this platform: the Unix deny \
+                 mechanism chmods a directory, which denies `rename(2)` along with `stat`. NOTHING in \
+                 this test covered the overwrite route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let dir = scratch("cpe1705-symlink-denied");
+            fs::write(dir.path().join("a.png"), b"NEW PICTURE").unwrap();
+            let images = dir.path().join("Images");
+            fs::create_dir_all(&images).unwrap();
+
+            // The link's resolution target lives OUTSIDE the organized tree, so denying it cannot
+            // interfere with listing or moving anything the operation touches.
+            let away = dir.path().join("away");
+            fs::create_dir_all(&away).unwrap();
+            let real = away.join("real.png");
+            fs::write(&real, b"VICTIM ORIGINAL").unwrap();
+
+            let link = images.join("a.png");
+            if std::os::windows::fs::symlink_file(&real, &link).is_err() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the symlink-target byte-loss leg: this machine does not permit \
+                     creating symlinks (Windows without Developer Mode / admin). NOTHING in this test \
+                     covered the overwrite route on this run."
+                );
+                return;
+            }
+
+            struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                }
+            }
+            let _r = Restore(&real, &away);
+
+            if !crate::fsutil::deny_stat_of(&real) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the symlink-target byte-loss leg: could not deny stat of {} on \
+                     this machine. NOTHING in this test covered the overwrite route on this run.",
+                    real.display()
+                );
+                return;
+            }
+
+            // The premise, asserted rather than assumed — this is what makes the construction bite.
+            if link.exists() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the symlink-target byte-loss leg: `exists()` on the link still \
+                     answers true, so the pre-fix guard would refuse anyway and this proves nothing."
+                );
+                return;
+            }
+
+            let ctx = ctx_for(dir.path());
+            let outcome =
+                organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
+
+            crate::fsutil::undo_deny_stat_of(&real, &away);
+
+            assert!(
+                fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+                "the destination symlink was DESTROYED — an unfixed `dst.exists()` follows the link to a \
+                 target it cannot stat, reads `false`, and `fs::rename` replaces the link itself"
+            );
+            assert_eq!(
+                fs::read(&real).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "and the link's target must be untouched"
+            );
+            let r = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
+            assert!(!r.ok, "the move must be reported failed, not silently succeeded: {r:?}");
+        }
+    }
+
+    /// CPE-1705, staging **real byte loss** through the real `organize_apply` entry point: a destination
+    /// slot whose `try_exists()` the OS refuses used to read as free, and the `fs::rename` below replaced
+    /// its bytes. Auto-organize does this for every matching file in one batch, so a single unreadable
+    /// destination folder is a batch of silent overwrites reported as successes.
+    ///
+    /// **Windows-only, whole body `#[cfg]`'d** (an early `return` in a `cfg(not)` block makes every
+    /// following statement `unreachable_statement` under CI's `-D warnings` on the Unix legs). The
+    /// mechanism cannot exist on Unix: its only lever is `chmod` on the parent directory, and `stat` and
+    /// `rename(2)` on a child are governed by the *same* bits there, so the deny that stages the stat
+    /// failure also blocks the rename and the test would pass for the wrong reason — or, as happened on
+    /// PR #889, red on its own control assertion. `organize_apply_skips_on_name_collision_without_...`
+    /// above carries the honest case on all three CI legs.
+    #[test]
+    fn cpe_1705_organize_never_renames_over_a_destination_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the organize_apply byte-loss leg on this platform: `stat` and \
+                 `rename(2)` on a destination share one directory's permission bits on Unix, so no chmod \
+                 can stage a stat failure a rename then survives. NOTHING in this test covered CPE-1705's \
+                 overwrite route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let dir = scratch("cpe1705-denied");
+            fs::write(dir.path().join("a.png"), b"NEW PICTURE").unwrap();
+            let images = dir.path().join("Images");
+            fs::create_dir_all(&images).unwrap();
+            let victim = images.join("a.png");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                }
+            }
+            let _r = Restore(&victim, &images);
+
+            // Denies `(R)` on the victim ONLY — never `(DC)` on `Images`, which would cut the rename's
+            // FILE_DELETE_CHILD route and make this assertion pass without the guard being consulted.
+            if !crate::fsutil::deny_stat_of(&victim) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the organize_apply denied-destination leg: could not deny stat of \
+                     {} on this machine. NOTHING in this test covered the overwrite route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = ctx_for(dir.path());
+            let outcome =
+                organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
+
+            crate::fsutil::undo_deny_stat_of(&victim, &images);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a destination whose stat we were refused must NEVER be renamed over"
+            );
+            let r = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
+            assert!(!r.ok, "the move must be reported failed, not silently succeeded: {r:?}");
+            assert!(
+                r.error.contains("could not check what is at") && !r.error.contains("already exists"),
+                "must name the uncertainty rather than claim a collision it did not observe: {}",
+                r.error
+            );
+        }
     }
 }

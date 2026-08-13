@@ -170,11 +170,14 @@ fn stamp_nodes(
             }
             Node::File { name, contents } => {
                 let file = dir.join(sanitize_component(&substitute(name, vars)));
-                if file.exists() {
-                    return Err(format!(
-                        "refusing to overwrite existing file: {}",
-                        file.display()
-                    ));
+                // CPE-1705: was `if file.exists()`. The function's own contract two doc-comments up is
+                // "non-destructive (refuses to overwrite an existing file)", and `Path::exists()` could
+                // not deliver it — an unreadable slot answered `false` and `fs::write` truncated it.
+                if let Some(e) = crate::fsutil::clobber_refusal(
+                    &file,
+                    &format!("refusing to overwrite existing file: {}", file.display()),
+                ) {
+                    return Err(e);
                 }
                 fs::write(&file, substitute(contents, vars))
                     .map_err(|e| format!("{}: {e}", file.display()))?;
@@ -313,6 +316,87 @@ mod tests {
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// CPE-1705 at `stamp`: the function's own contract is *"non-destructive (refuses to overwrite an
+    /// existing file)"*, and `if file.exists()` could not deliver it — a slot whose stat failed answered
+    /// `false`, the guard passed, and `fs::write` truncated whatever was really there.
+    ///
+    /// `write`-destructive, so — as at `join_files` — the ACL that hides the file also refuses the write,
+    /// and a bare `expect_err` would pass against the unfixed code. Asserts on **which** error.
+    #[test]
+    fn cpe_1705_stamp_refuses_a_file_slot_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the stamp unreadable-slot leg on this platform: the Unix deny \
+                 mechanism chmods the PARENT, which refuses `create_dir_all`/`fs::write` for the whole \
+                 template before the per-file guard is reached. NOTHING in this test covered that route \
+                 on this run; `cpe_1705_stamp_still_refuses_a_readable_existing_file` carries the honest \
+                 case on every OS."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705-stamp-denied");
+            let victim = d.join("README.md");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&victim, &d);
+
+            if !crate::fsutil::deny_stat_of(&victim) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the stamp denied-slot leg: could not deny stat of {} on this \
+                     machine. NOTHING in this test covered that route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let template = Template {
+                name: "t".to_string(),
+                nodes: vec![Node::File { name: "README.md".to_string(), contents: "NEW".to_string() }],
+            };
+            let err = stamp(&template, &d, &vars(&[]))
+                .expect_err("a file slot we cannot stat must refuse, not be written over");
+            assert!(
+                err.contains("could not check what is at") && err.contains("nothing was written"),
+                "must be the guard's refusal, not an incidental write failure: {err}"
+            );
+        }
+    }
+
+    /// The ungated sibling, on every OS: the ordinary refusal keeps its wording, and a genuinely free
+    /// slot is still stamped. A guard that refused everything would break every template.
+    #[test]
+    fn cpe_1705_stamp_still_refuses_a_readable_existing_file() {
+        let d = scratch("cpe1705-stamp-ok");
+        fs::write(d.join("README.md"), b"KEEP ME").unwrap();
+        let template = Template {
+            name: "t".to_string(),
+            nodes: vec![Node::File { name: "README.md".to_string(), contents: "NEW".to_string() }],
+        };
+        let err = stamp(&template, &d, &vars(&[])).expect_err("an occupied slot must refuse");
+        assert!(err.contains("refusing to overwrite existing file"), "{err}");
+        assert_eq!(fs::read(d.join("README.md")).unwrap(), b"KEEP ME".to_vec());
+
+        let fresh = scratch("cpe1705-stamp-fresh");
+        let created = stamp(&template, &fresh, &vars(&[])).expect("a free slot must still be stamped");
+        assert_eq!(created, vec![fresh.join("README.md")]);
+        assert_eq!(fs::read(fresh.join("README.md")).unwrap(), b"NEW".to_vec());
+
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&fresh);
     }
 
     #[test]
