@@ -16,13 +16,16 @@
 //! - **[`error::map_s3_error`]** — *what actually went wrong* when a request comes back non-2xx (CPE-1682),
 //!   turning S3's `<Error><Code>…</Code></Error>` body into a message that names the real cause instead of
 //!   a bare status code, before either provider ticket below writes a line of error handling of its own.
+//! - **[`provider::S3Provider`]** — the [`cpe_server::provider::FileSystemProvider`] impl (CPE-1683):
+//!   `list` over `ureq` + SigV4 + `ListObjectsV2`, paginated, presenting `CommonPrefixes` as virtual
+//!   directories with `has_real_dirs = false`. The remaining ops (`stat`/`read`/`write`/`delete`/`mkdir`/
+//!   `rename`) are CPE-1684; `cpe_vfs::open` routing is CPE-1685 and the frontend is CPE-1686.
 //!
-//! What is **not** here, on purpose: no HTTP client, no general-purpose XML parser (only the small,
-//! bounded scanner `error` needs for its own two fields), no `cpe_server::provider::FileSystemProvider`
-//! impl. `list` is CPE-1683, object ops are CPE-1684, `cpe_vfs::open` routing is CPE-1685 and the frontend
-//! is CPE-1686. The slice stops at the point where everything is still a pure function of its inputs —
-//! which is exactly why it can be verified in full against AWS's published test vectors with no network,
-//! no credentials, no bucket and no Docker.
+//! What is **not** here yet, on purpose: object ops beyond `list` (CPE-1684 above), and `cpe_vfs::open`
+//! wiring (CPE-1685). The addressing/signing/error halves of this crate remain pure functions of their
+//! inputs, verified against AWS's published test vectors with no network, no credentials, no bucket and
+//! no Docker; `provider` is the first module that actually talks to a server, over the in-process
+//! `tiny_http` fixture its own tests stand up (see [`provider`]'s doc comment).
 //!
 //! # The secret
 //! [`Credentials`] holds the one genuinely secret value in the config (it will arrive from the OS
@@ -31,6 +34,7 @@
 //! [`Credentials::secret`], the single deliberate way to read it back.
 
 pub mod error;
+pub mod provider;
 pub mod sigv4;
 
 use sigv4::{canonical_query, encode_path};
