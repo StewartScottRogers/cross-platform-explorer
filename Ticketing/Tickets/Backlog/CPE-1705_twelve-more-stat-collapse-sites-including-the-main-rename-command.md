@@ -102,12 +102,54 @@ be editing that comment anyway.
 **What this means for you: for a `try_exists`-guarded, rename-destructive site you can write a test that
 stages actual byte loss, not merely a refusal message.** Do that — it is a strictly stronger test.
 
-Two things that remain true from the earlier version and still matter:
-
-- **No deny — not even `(F)` — refuses `Path::exists()` or `fs::metadata()`.** They open with a
-  desired-access mask of 0. So a site still on `.exists()` cannot be made to fail open via an ACL at all.
 - **A bare `expect_err` can still pass vacuously** on `write`/`copy` sites: the neutralised code still
   errors, just from the write rather than the guard. Assert on *which* error, or test the pure classifier.
+
+## CORRECTION 4 — deny `RD` on the PARENT. `.exists()` IS reachable after all.
+
+**This supersedes the "no deny refuses `Path::exists()`" line that stood in every earlier version of this
+section.** That statement was measured four separate times — by me twice, by the PR #889 reviewer, and by
+the PR #893 worker — and every one of those measurements **denied only the target**. It is true for
+target-only denies and false in general. The PR #893 UAT found the missing step and the mechanism behind it.
+
+**Mechanism.** On Windows `std::fs::metadata` does not give up when its `CreateFileW` open returns
+`ACCESS_DENIED`. It **falls back to `FindFirstFileW`**, which reads the entry from the **parent directory**
+instead of opening the file. That fallback is the entire reason a deny on the target leaves `exists()`
+answering `true`. Deny **list-directory (`RD`) on the parent** and the fallback dies.
+
+Crucially **`RD` is not `DC`**: the rename's `FILE_DELETE_CHILD` route on the parent is untouched, so the
+rename still replaces the target. That is the combination nobody had tried — the stat fails *and* the
+destructive operation succeeds.
+
+| deny | `exists()` | `metadata()` | `try_exists()` | `rename` | unfixed `.exists()` guard clobbers? |
+|---|---|---|---|---|---|
+| `(R)` on target only | true | Ok | Err | Ok | **no** — the case we kept measuring |
+| `(F)` on target only | true | Ok | Err | Err | no |
+| `(S)` on target only | true | Ok | Err | Ok | no |
+| **`(R)` target + `(RD)` parent** | **false** | **Err** | Err | **Ok** | **YES — bytes destroyed** |
+| **`(S)` target + `(RD)` parent** | **false** | Err | Err | Ok | **YES** |
+| `(RD)` parent only | true | Ok | Ok(true) | Ok | no |
+
+`symlink_metadata` also fails under the parent-`RD` constructions, so a symlink-slot `Unknown` arm is
+reachable too — another thing an earlier round declared untestable.
+
+**Consequences, all measured:**
+
+- Real byte loss is stageable locally against an **unfixed `.exists()` guard**, driven through
+  `rename_entry_impl` (the real command, not a helper). Pre-fix the victim reads back `RENAMED SOURCE`;
+  with the fix it reads `VICTIM ORIGINAL` and the command returns *"could not check what is at … nothing
+  was written"*.
+- The claim that the genuine overwrite is reachable **only** through the non-permission tail (`EIO`, dead
+  mount, stale handle) is **false**. That tail is still real, but it is not the only route.
+- **Fix it once, in the shared helper.** `fsutil::deny_stat_of`'s Windows leg denies the target only;
+  `undo_deny_stat_of` already takes `parent` and ignores it on Windows. Adding the parent `RD` deny is
+  ~6 lines and upgrades **every** ACL test in the repo at once. Verified: full suite still
+  **2093 passed, 0 failed** with the upgrade in place.
+
+**Do not write "byte loss is not stageable via ACLs" into any doc comment again.** It has now been the
+wrong conclusion four times, each time from a correct measurement of an incomplete setup. If a future round
+cannot stage it, the null result must be scoped to the exact denies applied — target *and* parent — rather
+than stated as a property of ACLs.
 
 ## The `lib.rs:1786` severity claim — corrected, and it is subtler than first filed
 
