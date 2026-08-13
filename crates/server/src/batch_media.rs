@@ -2306,14 +2306,27 @@ mod tests {
 
     /// CPE-1696 hardened `execute_plan`; this is the `plan()` that feeds it. The probe was
     /// `Path::is_file()`, which folds every stat failure into `false`, so an output candidate whose stat
-    /// was refused was accepted as free. The consequence here is *visible*, not latent: the hardened
-    /// executor refuses an output it cannot prove free, so the plan built on the false premise fails at
-    /// write time and the user gets a refusal about a name they never chose.
+    /// was refused was accepted as free.
+    ///
+    /// # Why this asserts on the BOUND, having measured that the obvious assertion is vacuous
+    ///
+    /// The first version of this test denied one candidate and asserted the planner did not choose it.
+    /// That passes against the **unfixed** code, measured: reverting this loop to `Path::is_file()` and
+    /// re-running it recompiled and went green. `fs::metadata` — which `is_file()` is — opens with a
+    /// desired-access mask of `0` and **no deny ACE refuses it**, so the old probe answers `true` for a
+    /// denied file, calls it occupied, and advances exactly as the new one does. At a site whose only
+    /// observable is *which name was chosen*, old and new are indistinguishable on any single candidate.
+    ///
+    /// They diverge past [`MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS`]: the fixed loop counts consecutive
+    /// unknowns and **refuses the item**; the old one keeps walking and returns a name. So that is what
+    /// this asserts. It is also the assertion worth having, because the bound is the genuinely new and
+    /// genuinely risky code — without it, treating unknown-as-occupied turns this loop, which previously
+    /// always terminated on its first candidate, into a non-terminating one against an unreadable folder.
     ///
     /// Windows-only real-syscall leg (`deny_stat_of` denies the target itself there; the Unix mechanism
     /// denies the parent, which would break reading the inputs too).
     #[test]
-    fn cpe_1705_plan_does_not_accept_an_output_name_it_cannot_stat() {
+    fn cpe_1705_plan_refuses_an_output_folder_it_cannot_read_instead_of_looping() {
         use std::io::Write;
         #[cfg(not(windows))]
         {
@@ -2331,51 +2344,57 @@ mod tests {
             let d = scratch("cpe1705-plan-denied");
             let input = d.path().join("cat.jpg");
             std::fs::write(&input, b"input").unwrap();
-            // **The unreadable slot has to be the SECOND candidate, not the first — measured, and it
-            // changes what this test is.** `plan()` runs `classify_output_containment` on the first
-            // computed output *before* the disambiguation loop, and that CPE-1623 guard already refuses
-            // an output whose filesystem identity it cannot read. Denying the first candidate therefore
-            // makes `plan()` return a containment refusal and never reach the loop under test — the
-            // first draft of this test did exactly that and asserted nothing about CPE-1705. Occupying
-            // the first candidate with a readable file lets containment pass, the loop advance, and the
-            // *second* candidate be the one whose stat is refused. That is also the honest reachability
-            // statement for this site: the collapse is reachable in the loop, not on the first probe.
+            // **The first candidate must stay READABLE — measured, and it changes the staging.** `plan()`
+            // runs `classify_output_containment` on the first computed output *before* this loop, and
+            // that CPE-1623 guard already refuses an output whose filesystem identity it cannot read.
+            // Denying the first candidate makes `plan()` return a containment refusal and never reach the
+            // loop under test, so the test would be asserting about a different guard entirely.
             std::fs::write(d.path().join("cat-800.jpg"), b"FIRST OCCUPANT").unwrap();
-            let candidate = d.path().join("cat-800-2.jpg");
-            std::fs::write(&candidate, b"VICTIM ORIGINAL").unwrap();
 
-            struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+            // Then deny a run of MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS candidates: `-2`, `-3`, … Each has
+            // to be a real file for the ACE to attach to.
+            let mut denied: Vec<std::path::PathBuf> = Vec::new();
+            for n in 2..(2 + MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS) {
+                let p = d.path().join(format!("cat-800-{n}.jpg"));
+                std::fs::write(&p, b"VICTIM ORIGINAL").unwrap();
+                denied.push(p);
+            }
+
+            struct Restore<'a>(&'a [std::path::PathBuf], &'a std::path::Path);
             impl Drop for Restore<'_> {
                 fn drop(&mut self) {
-                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
                 }
             }
-            let _r = Restore(&candidate, d.path());
+            let _r = Restore(&denied, d.path());
 
-            if !crate::fsutil::deny_stat_of(&candidate) {
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "[CPE-1705] SKIPPED the plan() denied-candidate leg: could not deny stat of {} on \
-                     this machine. NOTHING in this test covered that route on this run.",
-                    candidate.display()
+                    "[CPE-1705] SKIPPED the plan() unreadable-folder leg: could not deny stat of the \
+                     candidate outputs on this machine. NOTHING in this test covered that route on this \
+                     run."
                 );
                 return;
             }
 
             let job = BatchJob::new(vec![MediaOp::Resize { max_px: 800 }]);
-            let out = plan(&job, &v(&[&input.to_string_lossy()])).unwrap();
-            assert_ne!(
-                std::path::Path::new(&out[0].output),
-                candidate,
-                "an output candidate whose stat was refused must NOT be planned as free — the executor \
-                 would then be asked to write over a file the planner never proved empty"
+            // Pre-fix (`Path::is_file()`) this returned Ok with output `cat-800-10.jpg` — a name in a
+            // folder the planner could not read, handed to an executor that will refuse it.
+            let err = plan(&job, &v(&[&input.to_string_lossy()])).expect_err(
+                "a run of unreadable output candidates must refuse the item, not keep walking",
             );
-            assert_eq!(
-                std::path::Path::new(&out[0].output),
-                d.path().join("cat-800-3.jpg"),
-                "it must step PAST the unreadable candidate to the next name, not abort the item — an \
-                 unknown is occupied, not fatal, at a site whose job is to find some free name"
+            assert!(
+                err.contains("could not be read") && err.contains("refusal to guess"),
+                "the refusal must name the uncertainty: {err}"
             );
+
+            for p in &denied {
+                crate::fsutil::undo_deny_stat_of(p, d.path());
+                assert_eq!(std::fs::read(p).unwrap(), b"VICTIM ORIGINAL".to_vec(), "nothing may be touched");
+            }
         }
     }
 

@@ -535,7 +535,19 @@ const MAX_CONSECUTIVE_UNKNOWN_IDS: usize = 8;
 fn fresh_manifest_id(store_dir: &Path) -> Result<String, String> {
     let dir = manifests_dir(store_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    let ms = to_epoch_ms(SystemTime::now()).unwrap_or(0);
+    pick_manifest_id(store_dir, to_epoch_ms(SystemTime::now()).unwrap_or(0))
+}
+
+/// The candidate walk behind [`fresh_manifest_id`], with the clock passed in (CPE-1705).
+///
+/// Split out purely so a test can **name the candidate ids in advance**. `fresh_manifest_id` reads
+/// `SystemTime::now()` inside itself, so a test that pre-creates `<ms>`, `<ms>-1`, … computes a *different*
+/// millisecond than the call under test does and stages files the walk never looks at — it then passes
+/// trivially, having exercised nothing. (Observed: the first version of this ticket's test reded with
+/// `must REFUSE, never hand back a guessed name: "1786642033625"` — the very first candidate, free,
+/// because every staged file was named for an earlier millisecond.)
+fn pick_manifest_id(store_dir: &Path, ms: u64) -> Result<String, String> {
+    let dir = manifests_dir(store_dir);
     let mut candidate = ms.to_string();
     let mut n = 0u32;
     // CPE-1705: was `while manifest_path(..).exists()`, the exact `unique_target` shape. An unreadable
@@ -555,7 +567,7 @@ fn fresh_manifest_id(store_dir: &Path) -> Result<String, String> {
                 unknown_run += 1;
                 if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_IDS {
                     return Err(format!(
-                        "{}: could not check what is at a snapshot manifest id is free \
+                        "{}: could not find a free snapshot manifest id \
                          ({MAX_CONSECUTIVE_UNKNOWN_IDS} candidates in a row were unreadable), so nothing \
                          was captured — refusing to guess an id rather than risk overwriting an existing \
                          snapshot's manifest",
@@ -776,18 +788,31 @@ mod tests {
         let _ = fs::remove_dir_all(&store);
     }
 
-    /// `fresh_manifest_id`'s own guard, broken out from the store-index one above so neutralising either
-    /// reds exactly one test. Windows-only for the real-syscall leg: `deny_stat_of` refuses `try_exists`
-    /// there by denying the target itself, whereas Unix's mechanism denies the whole parent directory —
-    /// which would make `create_dir_all`/`fs::write` fail first and prove nothing about this loop.
+    /// `fresh_manifest_id`'s guard — and specifically **the bound**, because the bound is the only part
+    /// of this fix a real filesystem can be made to distinguish.
+    ///
+    /// # Why this test asserts on the bound and not on "the unreadable id is skipped"
+    ///
+    /// The obvious test — deny one candidate id and assert it is not handed back — is **vacuous**, and it
+    /// was written that way first and then measured. Reverting this loop to its original
+    /// `while manifest_path(..).exists()` and re-running it recompiled and passed **green**: no deny ACE
+    /// refuses `Path::exists()` (it opens with a desired-access mask of `0`), so the *unfixed* loop also
+    /// sees `true`, also calls the slot occupied, and also advances. Old and new agree on every
+    /// single-candidate case, so no single-candidate assertion can tell them apart.
+    ///
+    /// They diverge only past [`MAX_CONSECUTIVE_UNKNOWN_IDS`]: with that many unreadable candidates in a
+    /// row the fixed loop **refuses**, while the `.exists()` original sails past all of them and hands
+    /// back a name. That is a real, observable difference, so that is what this asserts — and it happens
+    /// to be the riskiest code in the change, since treating unknown-as-occupied without a bound would
+    /// turn a silent overwrite into an unbounded loop against a dead mount.
     #[test]
-    fn cpe_1705_a_manifest_id_is_never_handed_out_from_an_unreadable_slot() {
+    fn cpe_1705_an_unreadable_manifests_directory_refuses_instead_of_guessing_an_id() {
         use std::io::Write;
         #[cfg(not(windows))]
         {
             let _ = writeln!(
                 std::io::stderr(),
-                "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg on this platform: the Unix deny \
+                "[CPE-1705] SKIPPED the fresh_manifest_id bound leg on this platform: the Unix deny \
                  mechanism is a chmod on the PARENT directory, which fails the surrounding \
                  create_dir_all/write before this loop is reached. NOTHING in this test covered the \
                  unreadable-slot route on this run; the fsutil taxonomy tests cover the classification on \
@@ -799,44 +824,80 @@ mod tests {
             let store = scratch("cpe1705-mid");
             let dir = manifests_dir(&store);
             fs::create_dir_all(&dir).unwrap();
-            // Occupy the id this call will compute first, then make that file unreadable.
-            let ms = to_epoch_ms(SystemTime::now()).unwrap_or(0);
-            let first = manifest_path(&store, &ms.to_string());
-            fs::write(&first, b"REAL MANIFEST").unwrap();
+            // Occupy AND deny the first `MAX_CONSECUTIVE_UNKNOWN_IDS` candidate ids this call will walk:
+            // `<ms>`, `<ms>-1`, … Each must be a real file for the ACE to attach to.
+            // A FIXED ms, driven through the `pick_manifest_id` seam — `fresh_manifest_id` reads its own
+            // clock, so pre-created files would be named for a different millisecond and never probed.
+            let ms = 1_700_000_000_000u64;
+            let mut denied: Vec<PathBuf> = Vec::new();
+            for n in 0..MAX_CONSECUTIVE_UNKNOWN_IDS {
+                let id = if n == 0 { ms.to_string() } else { format!("{ms}-{n}") };
+                let p = manifest_path(&store, &id);
+                fs::write(&p, b"REAL MANIFEST").unwrap();
+                denied.push(p);
+            }
 
-            struct Restore<'a>(&'a Path, &'a Path);
+            struct Restore<'a>(&'a [PathBuf], &'a Path);
             impl Drop for Restore<'_> {
                 fn drop(&mut self) {
-                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
                     let _ = fs::remove_dir_all(self.1);
                 }
             }
-            let _r = Restore(&first, &store);
+            let _r = Restore(&denied, &store);
 
-            if !crate::fsutil::deny_stat_of(&first) {
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "[CPE-1705] SKIPPED the fresh_manifest_id denied-slot leg: could not deny stat of {} \
-                     on this machine. NOTHING in this test covered the unreadable-slot route on this run.",
-                    first.display()
+                    "[CPE-1705] SKIPPED the fresh_manifest_id bound leg: could not deny stat of the \
+                     candidate manifest files on this machine (running elevated, or an ACL-less \
+                     filesystem). NOTHING in this test covered the unreadable-slot route on this run."
                 );
                 return;
             }
 
-            let id = fresh_manifest_id(&store).expect("an unreadable slot must be skipped, not fatal");
-            assert_ne!(
-                manifest_path(&store, &id),
-                first,
-                "an id whose manifest file could not be stat'ed must NEVER be handed back as free — \
-                 save_manifest would fs::write straight over a real snapshot's file list"
+            // Pre-fix (`while ..exists()`) this returned `Ok("<ms>-8")` — a guessed id in a directory it
+            // could not read, which `save_manifest` would then `fs::write` into.
+            let err = pick_manifest_id(&store, ms).expect_err(
+                "a run of unreadable candidate ids must REFUSE, never hand back a guessed name",
             );
-            crate::fsutil::undo_deny_stat_of(&first, &store);
-            assert_eq!(
-                fs::read(&first).unwrap(),
-                b"REAL MANIFEST".to_vec(),
-                "and the real manifest must be byte-for-byte intact"
+            assert!(
+                err.contains("could not find a free snapshot manifest id") && err.contains("unreadable"),
+                "the refusal must name the uncertainty: {err}"
             );
+
+            for p in &denied {
+                crate::fsutil::undo_deny_stat_of(p, &store);
+                assert_eq!(
+                    fs::read(p).unwrap(),
+                    b"REAL MANIFEST".to_vec(),
+                    "every real manifest must be byte-for-byte intact"
+                );
+            }
         }
+    }
+
+    /// The ungated sibling: the ordinary collision walk still works on every OS. A `fresh_manifest_id`
+    /// that refused whenever anything was in the way would break the two-captures-in-one-millisecond case
+    /// the `-N` suffix exists for.
+    #[test]
+    fn cpe_1705_fresh_manifest_id_still_walks_past_ordinary_collisions() {
+        let store = scratch("cpe1705-mid-ok");
+        fs::create_dir_all(manifests_dir(&store)).unwrap();
+        let ms = 1_700_000_000_000u64;
+        // Two readable manifests already sitting on the first two candidate ids.
+        fs::write(manifest_path(&store, &ms.to_string()), b"{}").unwrap();
+        fs::write(manifest_path(&store, &format!("{ms}-1")), b"{}").unwrap();
+
+        let id = pick_manifest_id(&store, ms).expect("readable collisions must still be walked past");
+        assert_eq!(id, format!("{ms}-2"), "it must walk to the first genuinely free id");
+        assert!(!manifest_path(&store, &id).exists(), "the chosen id must be genuinely free");
+        // …and the real entry point still works end to end, clock and all.
+        assert!(fresh_manifest_id(&store).is_ok());
+
+        let _ = fs::remove_dir_all(&store);
     }
 
     // ---- capture / restore round trip -----------------------------------------------------------
