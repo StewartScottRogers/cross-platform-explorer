@@ -437,9 +437,77 @@ mod tests {
 
         session.kill().unwrap();
 
-        // No sleep/poll: kill()'s own follow-up wait() must have already reaped it.
+        // No sleep/poll: `try_wait()` must report the child as no longer running immediately after
+        // `kill()` returns. `try_wait()` itself is trustworthy here -- it replays `portable-pty`'s
+        // Windows `Child::try_wait()`, backed by `GetExitCodeProcess`, so `Some` means the OS has really
+        // recorded an exit code, not just that we think it should have. But don't read this assertion's
+        // strictness as proof that `kill()`'s explicit follow-up `self.child.wait()` (the CPE-1244 fix,
+        // which closes a reap gap in `portable-pty`'s *Unix* `ChildKiller` escalation path) is what makes
+        // it pass: a CPE-1707 probe that disabled that follow-up `wait()` still passed 100/100 runs here,
+        // because `TerminateProcess` against a simple console child resolves fast enough that
+        // `GetExitCodeProcess` already shows the exit by the time this line runs, with or without the
+        // explicit reap. So on Windows this assertion is strong, reliable evidence against the crudest
+        // failure mode -- `kill()` failing to actually deliver the kill at all, which would leave the
+        // child running and this line red, every time -- not evidence that the reap step specifically is
+        // exercised. Never observed to flake either way -- not in CI history, and not across 940+ manual
+        // loop iterations run for CPE-1707 (150 sequential baseline, 150 sequential + 320 parallel under
+        // a 32-thread CPU load, and 320 parallel under 128 threads oversubscribing this dev box's 32
+        // cores 4x).
         assert!(session.try_wait().is_some(), "child was not reaped synchronously by kill()");
-        assert!(!pid_is_alive(pid), "OS process should be gone right after kill()");
+
+        // CPE-1707: `!pid_is_alive(pid)` -- checked via `tasklist`, i.e. the OS's own enumerable process
+        // table, not our own bookkeeping -- is exactly what flaked on Windows CI (PR #887: panicked at
+        // this test, "OS process should be gone right after kill()", pasted verbatim from the real job
+        // log, not reproduced by rewording). The cause wasn't a race in `kill()`: it's that `kill()`
+        // clears only `self.master`, never `self.child`, so *this test's own `session`* kept its one
+        // Win32 handle to the process open right through the old, immediate assertion. `portable-pty`
+        // 0.8.1's Windows `WinChild` wraps exactly one `Mutex<OwnedHandle>` around `CreateProcessW`'s
+        // `pi.hProcess` -- no job object, no duplicate handle anywhere in the crate -- and
+        // `filedescriptor::OwnedHandle::drop` calls `CloseHandle`. Windows keeps a process object (and
+        // its enumerable PID) alive as long as *any* handle references it, independent of whether the
+        // process has already finished executing; `tasklist` enumerates that table, not "has this
+        // process's threads finished". So as long as our own handle stayed open, `tasklist` seeing `pid`
+        // a moment longer wasn't a bug anywhere -- it was us asking an external tool to forget a PID
+        // while we ourselves still held the reason it couldn't.
+        //
+        // `close_all_kills_every_session_and_leaves_no_process_behind` (below) makes the identical
+        // `!pid_is_alive(pid)` check, synchronously, with no sleep/poll, and has never flaked -- because
+        // `PtyRegistry::close_all()` drains its sessions into a local `Vec` that is dropped, handle and
+        // all, *before* that test's assertion ever runs. Same OS guarantee, same assertion; the only
+        // difference is who's still holding the handle when the check happens. So the fix here is to put
+        // this test in that same position instead of deleting the coverage: drop our own last handle to
+        // the child first, *then* ask the OS whether it's gone. That's removing the actual cause (our own
+        // retained reference) rather than a sleep/poll papering over it, and it restores the "a raw
+        // PtySession the registry never touched still leaks nothing" guarantee CPE-1244's module doc
+        // comment promises ("terminal tabs left open never orphan their shells") for the direct,
+        // non-registry-mediated path too.
+        //
+        // CPE-1707, round 4 -- READ THIS BEFORE TREATING THE LINE BELOW AS A `kill()` GUARD. Dropping
+        // the session drops `self.master` too, and closing the ConPTY is *by itself* enough to
+        // terminate the child on Windows, whether or not `kill()` did anything. Measured by the
+        // CPE-1707 UAT with a deliberately-inert `kill()` (no signal sent, `try_wait()` stubbed to lie
+        // "exited", `Drop` guard disabled): the assertion below still passed **0/90** runs -- 30 idle
+        // and 60 under a 48-thread load -- while the pre-fix shape (check with the handle still open)
+        // caught the same sabotage 20/20. A separate probe confirmed the mechanism directly: dropping
+        // only `master`, with no `kill()`/`wait()` call at all, left `pid 43892 alive = false`.
+        //
+        // So attribute the two assertions correctly, because their names invite the wrong reading:
+        //   * `try_wait().is_some()` above is the real `kill()` guard. An inert `kill()` reds it
+        //     immediately and deterministically -- two agents measured this separately, the UAT at
+        //     1/1 and the reviewer at 50/50. It is deterministic by construction rather than by
+        //     sample size: `TerminateProcess` either fires or it does not, and `GetExitCodeProcess`
+        //     answers accordingly, so the counts corroborate the mechanism rather than establish it.
+        //   * the line below is a **leak check, not a kill check**: once the session is gone, nothing
+        //     of the child is left behind. That is a genuine guarantee worth pinning (it is what
+        //     CPE-1244's module doc promises for the direct, non-registry path), but it is delivered
+        //     by teardown, not by `kill()`, and it cannot fail while `kill()` alone is broken.
+        //
+        // Restructuring to isolate `kill()`'s own effect on the PID would mean releasing the child
+        // handle without releasing `master` -- production API surgery to serve one test -- and it
+        // would buy nothing, because `try_wait()` already covers that failure deterministically.
+        // Deliberately left as-is with the attribution written down instead.
+        drop(session); // release the last handle we hold to the child (see comment above)
+        assert!(!pid_is_alive(pid), "OS process should be gone once we drop our handle");
     }
 
     // --- PtyRegistry: the id-keyed session bookkeeping that backs open/write/resize/close_pty --------
