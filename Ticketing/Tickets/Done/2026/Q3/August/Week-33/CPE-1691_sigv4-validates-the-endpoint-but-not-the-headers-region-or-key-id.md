@@ -3,11 +3,11 @@ id: CPE-1691
 title: cpe-s3 validates the endpoint and the bucket, then signs whatever you put in a header, a region, or a key id
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
