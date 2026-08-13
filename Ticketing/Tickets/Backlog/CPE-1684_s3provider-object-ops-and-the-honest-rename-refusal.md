@@ -154,6 +154,46 @@ Decide, and write the decision down:
 Do **not** assume the bytes reach the wire. A test that signs a header and asserts the signature is
 correct will pass while the header never leaves the process.
 
+## SETTLED (from source, PR #888 review): ureq is LOUD on every send path — the only exposure is middleware
+
+This warning has now been through three revisions. Read this section and ignore the framing above it; the
+traced `unit.rs` mechanism is real code but **unreachable** for headers you set on a `Request`.
+
+**Outbound is validated unconditionally, before any socket work.** `Request::do_call`
+(`ureq-2.12.1/src/request.rs:114-117`) opens with:
+
+```rust
+for h in &self.headers { h.validate()?; }
+```
+
+`Header::validate` (`header.rs:139-149`) calls `valid_value()` = `value.iter().all(is_field_vchar_or_obs_fold)`
+— **the identical byte predicate** as `Header::value()`'s filter. A non-conforming byte therefore produces
+`ErrorKind::BadHeader` → `Error::Transport("Bad Header: invalid header '<line>'")` **before** anything is
+written. Loud, not silent.
+
+**This covers you completely, by construction rather than by luck.** All six send methods — `call`, `send`,
+`send_bytes`, `send_string`, `send_json`, `send_form` (`request.rs:78, 192, 215, 243, 265, 294`) — funnel
+through `do_call`. Your PUT / HEAD / DELETE will be loud too. **You do not need to re-run the measurement.**
+
+**The `unit.rs:466-474` silent skip sits downstream of that gate**, so its `None` branch cannot fire for
+anything validation already rejected. The original trace was accurate about the code and wrong about its
+reachability — the reviewer read the write loop without checking the gate above it.
+
+### The one genuine exception, and it is the thing to actually watch
+
+`do_call` validates at line 115 and runs the **middleware chain at ~line 163 — after**. A header injected by
+middleware calling `request.set()` is **never re-validated**, so for that header the silent skip is live.
+`crates/s3` registers no middleware today, so it is not exposed. **If you add any, that is where this bites.**
+
+### Incoming response headers are the genuinely silent path
+
+Not `unit.rs`: `response.rs:587` does `if let Ok(header) = line.into_header()` and skips a malformed line
+outright, and `Header::value()` returning `None` makes `resp.header("x")` read as **absent**. If you branch
+on a response header being present, a malformed one is indistinguishable from a missing one.
+
+Scope: `http_interop` / `http_crate` are feature-gated (`lib.rs:446-452`) and off under this crate's
+`default-features = false, features = ["tls","gzip"]`, so they were not audited.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1681** and **CPE-1682**.
