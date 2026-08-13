@@ -181,9 +181,7 @@ fn resolve_manifest_path(first_part_or_manifest: &Path) -> Result<PathBuf, Strin
         if stem.is_empty() {
             return Err(format!("{file_name}: not a valid split manifest name"));
         }
-        if !first_part_or_manifest.is_file() {
-            return Err(format!("{}: manifest not found", first_part_or_manifest.display()));
-        }
+        manifest_must_be_a_file(first_part_or_manifest, None)?;
         return Ok(first_part_or_manifest.to_path_buf());
     }
 
@@ -205,10 +203,48 @@ fn resolve_manifest_path(first_part_or_manifest: &Path) -> Result<PathBuf, Strin
     }
     let dir = first_part_or_manifest.parent().unwrap_or_else(|| Path::new("."));
     let manifest_path = dir.join(format!("{stem}{MANIFEST_SUFFIX}"));
-    if !manifest_path.is_file() {
-        return Err(format!("{}: manifest not found for part {file_name}", manifest_path.display()));
-    }
+    manifest_must_be_a_file(&manifest_path, Some(file_name))?;
     Ok(manifest_path)
+}
+
+/// The manifest equivalent of [`part_stat_error`], and it exists for the same reason.
+///
+/// These two call sites used `!Path::is_file()`, which is `metadata().map(..).unwrap_or(false)` — it folds
+/// **every** stat failure into `false`, so a manifest that is sitting in the folder but cannot be stat'ed
+/// (permission denied, a dead mount, a link that will not resolve) was reported as *"manifest not found"*.
+/// Exactly the bug this ticket is named after, one call earlier: `resolve_manifest_path` runs before any
+/// part is touched, so `join_files` could answer "not found" about a file the user can see before it ever
+/// reached the fixed line.
+///
+/// Found by the PR #869 reviewer, who also established the sharper point — a `map_err(|_| ..)` sweep cannot
+/// find this, and neither can a search for the *word* "missing", because the spelling here is a negated
+/// `is_file()` producing "not found". `Path::try_exists()` is the std API that returns `io::Result` instead
+/// of collapsing; `metadata()` is used here because the type matters too (a directory named like a manifest
+/// is not a manifest, and saying so is more useful than "not found").
+fn manifest_must_be_a_file(path: &Path, for_part: Option<&str>) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => Ok(()),
+        Ok(_) => Err(manifest_stat_error(path, for_part, None)),
+        Err(e) => Err(manifest_stat_error(path, for_part, Some(&e))),
+    }
+}
+
+/// The pure classification [`manifest_must_be_a_file`] delegates to — split out for the same reason
+/// [`part_stat_error`] is: the taxonomy is then testable on every OS and account without depending on
+/// permission bits, which are privilege- and filesystem-dependent.
+///
+/// `None` means the `stat` succeeded and the entry simply is not a file.
+fn manifest_stat_error(path: &Path, for_part: Option<&str>, e: Option<&std::io::Error>) -> String {
+    let suffix = for_part.map(|f| format!(" for part {f}")).unwrap_or_default();
+    match e {
+        None => format!("{}: not a file, so not a split manifest{suffix}", path.display()),
+        Some(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            format!("{}: manifest not found{suffix}", path.display())
+        }
+        // Not provably absent, and we could not stat it. Say so, in the same shape `part_stat_error`
+        // uses, so a manifest and a part failing the same way read the same way to a user.
+        Some(e) => format!("manifest ({}): {e}{suffix}", path.display()),
+    }
 }
 
 fn load_manifest(path: &Path) -> Result<SplitManifest, String> {
@@ -265,9 +301,11 @@ fn validate_manifest(m: &SplitManifest) -> Result<(), String> {
 
 /// Rejoin the parts referenced by `first_part_or_manifest` (the manifest itself, or any one numbered
 /// part) into `out_path`, streamed through a bounded 1 MiB buffer with the reconstructed SHA-256 computed
-/// in the same pass. Errors — never panics — on a missing part, a part whose size doesn't match the
-/// manifest, or a checksum mismatch after reconstruction (in which case the partial `out_path` is removed
-/// rather than left behind looking like a good file). Refuses to overwrite a pre-existing `out_path`.
+/// in the same pass. Errors — never panics — on a missing part, a part that is present but cannot be
+/// stat'ed (the OS's own cause is reported, *not* "missing" — CPE-1687, see `part_stat_error`), a part
+/// whose size doesn't match the manifest, or a checksum mismatch after reconstruction (in which case the
+/// partial `out_path` is removed rather than left behind looking like a good file). Refuses to overwrite
+/// a pre-existing `out_path`.
 pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), String> {
     let manifest_path = resolve_manifest_path(first_part_or_manifest)?;
     let manifest = load_manifest(&manifest_path)?;
@@ -290,6 +328,28 @@ pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), 
     }
 }
 
+/// Turn a failed `stat` of part `i` into the message the user reads (CPE-1687).
+///
+/// "The part is not there" and "the part is there and I could not stat it" are **different answers**.
+/// Only [`std::io::ErrorKind::NotFound`] is genuine absence; permission denied, a dead network mount, a
+/// transient I/O error and a link that will not resolve all mean *we do not know*, and answering any of
+/// them with "missing" sends the user hunting for a file that is sitting in the folder in front of them.
+/// The non-absent case therefore reports the OS's own words in exactly the shape the `File::open` and
+/// `read` calls further down [`join_into`] already use, so one part failing at `stat` and the same part
+/// failing at `open` read the same way.
+///
+/// Pure, and taking the `io::Error` rather than doing the `stat` itself, so the taxonomy is testable on
+/// every OS and CI account without depending on permission bits — the same reason
+/// `dispatch::classify_path_error` is split out from its caller. (The end-to-end test in this module
+/// still constructs a real unstattable part; this makes the *classification* deterministic.)
+fn part_stat_error(i: u64, p: &Path, e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        format!("part {i} missing: {}", p.display())
+    } else {
+        format!("part {i} ({}): {e}", p.display())
+    }
+}
+
 /// The streamed concatenate-and-verify body of [`join_files`], factored out so every failure path shares
 /// one cleanup point (see caller).
 fn join_into(manifest: &SplitManifest, dir: &Path, out_path: &Path) -> Result<(), String> {
@@ -306,7 +366,7 @@ fn join_into(manifest: &SplitManifest, dir: &Path, out_path: &Path) -> Result<()
         } else {
             manifest.part_size
         };
-        let part_meta = std::fs::metadata(&p).map_err(|_| format!("part {i} missing: {}", p.display()))?;
+        let part_meta = std::fs::metadata(&p).map_err(|e| part_stat_error(i, &p, &e))?;
         if part_meta.len() != expected_len {
             return Err(format!(
                 "part {i} is the wrong size: expected {expected_len} bytes, found {} ({})",
@@ -420,10 +480,285 @@ mod tests {
 
         let out = d.join("out.bin");
         let err = join_files(&d.join("a.bin.001"), &out).unwrap_err();
-        assert!(err.contains("missing"), "should name the missing part: {err}");
+        // CPE-1687 made "missing" conditional on `ErrorKind::NotFound`; a part that really was deleted
+        // must still get it, and still name *which* part. This is the half of the taxonomy that was
+        // already right, pinned so the fix can't be "achieved" by dropping the word altogether.
+        assert!(err.contains("part 2 missing"), "should name the missing part: {err}");
         assert!(!out.exists(), "no output should be left behind on failure");
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Try to make `p` a directory entry that exists but cannot be `stat`ed, and report which mechanism
+    /// worked (`None` = this machine can't produce the condition).
+    ///
+    /// Two mechanisms, tried in order, because the obvious one does not actually work:
+    ///
+    /// 1. **Permission denial** (`icacls /deny` on Windows, `chmod` on Unix) — the mechanism CPE-1687's
+    ///    acceptance criteria name, and the one that fixed the sibling ticket CPE-1678. It cannot work
+    ///    here, and the reason is worth writing down rather than rediscovering: on Unix, `stat()` on a
+    ///    *file* needs no permission on the file at all (only `+x` on the parent directories), so
+    ///    `chmod 000` leaves `fs::metadata` succeeding; and on Windows `fs::metadata` opens with a
+    ///    desired-access mask of 0, which a per-file deny ACE does not refuse. Denying the *parent*
+    ///    directory would work on both, but the manifest lives in that same directory and `join_files`
+    ///    reads it before it ever reaches a part — the run would fail earlier, above the code under test.
+    ///    Attempted anyway (and probed, never assumed) so the claim stays true if a future OS changes it.
+    /// 2. **A symlink loop** — `a.bin.002 -> a.bin.002`. The entry is listed in the folder, so this is
+    ///    exactly the user-visible complaint ("it is right there"), `symlink_metadata` sees it, and
+    ///    `fs::metadata` fails resolving it with `FilesystemLoop`/ELOOP (Unix) or ERROR_CANT_RESOLVE_
+    ///    FILENAME (Windows) — a non-`NotFound` stat failure, which is the whole point. Needs no
+    ///    privilege on Unix; needs Developer Mode or elevation on Windows.
+    ///
+    /// The result is *probed*, never assumed: the caller runs only if the entry is genuinely present
+    /// (`symlink_metadata` Ok) **and** `stat` genuinely fails for a reason that is not absence. Anything
+    /// else is a machine that cannot host this test, which is not evidence of a bug — so the caller
+    /// skips, loudly.
+    fn make_unstattable(p: &Path) -> Option<&'static str> {
+        fn denied_and_present(p: &Path) -> bool {
+            std::fs::symlink_metadata(p).is_ok()
+                && std::fs::metadata(p).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+        }
+
+        // 1. Permission denial, on the real file the split just produced.
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(p)
+                        .arg("/deny")
+                        .arg(format!("{user}:(RA,RD)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o000));
+        }
+        if denied_and_present(p) {
+            return Some("permission denial");
+        }
+
+        // 2. Symlink loop, replacing the part file with a link to itself.
+        undo_unstattable(p);
+        if std::fs::remove_file(p).is_err() {
+            return None;
+        }
+        #[cfg(windows)]
+        let linked = std::os::windows::fs::symlink_file(p, p).is_ok();
+        #[cfg(unix)]
+        let linked = std::os::unix::fs::symlink(p, p).is_ok();
+        if linked && denied_and_present(p) {
+            return Some("symlink loop");
+        }
+        None
+    }
+
+    /// Undo whatever [`make_unstattable`] managed to do, so the scratch dir can be removed. Safe to call
+    /// when nothing was done.
+    fn undo_unstattable(p: &Path) {
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                let _ =
+                    std::process::Command::new("icacls").arg(p).arg("/remove:d").arg(&user).output();
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+
+    /// The same bug, one call earlier, found by the PR #869 reviewer: `resolve_manifest_path` used
+    /// `!Path::is_file()`, which collapses every stat failure to `false`, so a manifest sitting in the
+    /// folder but unstattable came back "manifest not found". It runs *before* any part is touched, so
+    /// `join_files` could give the wrong answer without ever reaching the line this ticket fixed.
+    ///
+    /// Deliberately pure: the classification is tested here on every OS and account, without depending on
+    /// permission bits. Same split as `part_stat_error`.
+    ///
+    /// The end-to-end test below makes a **part** unstattable, not a manifest — it does not exercise this
+    /// guard, and an earlier version of this comment implied it did. The wiring from `join_files` into
+    /// `manifest_must_be_a_file` is covered instead by
+    /// `join_files_reports_an_absent_manifest_and_a_directory_in_its_place_differently`.
+    #[test]
+    fn a_manifest_that_cannot_be_stat_ed_is_not_reported_as_not_found() {
+        let p = Path::new("some/dir/a.bin.split-manifest.json");
+
+        // Genuine absence — the one case that may say "not found". Must not regress.
+        let absent =
+            manifest_stat_error(p, None, Some(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert!(absent.contains("manifest not found"), "genuine absence must still say so: {absent}");
+
+        // Every other stat failure is an unknown, not an absence. `!Path::is_file()` folded all of these
+        // into the same `false` and produced "manifest not found" for each.
+        // `ErrorKind::FilesystemLoop` — the kind a self-referential symlink actually produces, and the
+        // one the end-to-end test below constructs for real — is still unstable to *name*, so it cannot
+        // be listed here. `Other` stands in for it: the code branches on `NotFound` and nothing else, so
+        // every non-`NotFound` kind takes the identical path.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let e = std::io::Error::new(kind, "the OS said so");
+            let msg = manifest_stat_error(p, None, Some(&e));
+            assert!(!msg.contains("not found"), "a {kind:?} stat failure must not claim absence: {msg}");
+            assert!(msg.contains("the OS said so"), "it must name the real cause: {msg}");
+        }
+
+        // A successful stat of something that is not a file is a *type* answer, not an absence.
+        let wrong_type = manifest_stat_error(p, None, None);
+        assert!(!wrong_type.contains("not found"), "a directory is not an absence: {wrong_type}");
+        assert!(wrong_type.contains("not a file"), "{wrong_type}");
+
+        // The part-name suffix survives on the numbered-part path, so the message still says which part
+        // sent us looking for this manifest.
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.");
+        let with_part = manifest_stat_error(p, Some("a.bin.002"), Some(&e));
+        assert!(with_part.contains("for part a.bin.002"), "{with_part}");
+
+        // And a manifest failing at stat reads the same way a part failing at stat does — the point of
+        // the fix is that the user gets one consistent story, not two vocabularies for one problem.
+        let part = part_stat_error(2, p, &e);
+        assert!(!part.contains("missing"), "{part}");
+        assert!(part.contains("Access is denied.") && with_part.contains("Access is denied."));
+    }
+
+    /// The classifier above is pure, so it proves the *taxonomy* and nothing about the wiring. The PR #869
+    /// reviewer's point: swap the `Err(NotFound)` and `Ok(_)` arms in `manifest_must_be_a_file` and the
+    /// pure test still passes, because it never calls it. This drives the real `join_files` at both, which
+    /// is what pins which arm each condition actually reaches.
+    ///
+    /// Needs no unstattable entry and therefore no privileges — the two conditions it covers (nothing
+    /// there, and a directory wearing a manifest's name) are constructible on every OS and CI account, so
+    /// unlike the part test it can never skip.
+    #[test]
+    fn join_files_reports_an_absent_manifest_and_a_directory_in_its_place_differently() {
+        let d = scratch("manifest-wiring");
+        let out = d.join("out.bin");
+
+        // 1. Genuinely absent manifest — must still say "not found". The honest case.
+        let absent = join_files(&d.join("a.bin.001"), &out).unwrap_err();
+        assert!(absent.contains("manifest not found"), "a real absence must say so: {absent}");
+        assert!(absent.contains("for part a.bin.001"), "and which part sent us looking: {absent}");
+
+        // 2. A *directory* wearing the manifest's name. `!Path::is_file()` reported this as "not found"
+        //    too, which sent the user looking for a file that is right there — as a folder.
+        let manifest_dir = d.join(format!("b.bin{MANIFEST_SUFFIX}"));
+        std::fs::create_dir_all(&manifest_dir).unwrap();
+        let wrong_type = join_files(&d.join("b.bin.001"), &out).unwrap_err();
+        assert!(
+            !wrong_type.contains("not found"),
+            "a directory in the manifest's place is not an absence: {wrong_type}"
+        );
+        assert!(wrong_type.contains("not a file"), "it must say what is actually wrong: {wrong_type}");
+
+        // Same, reached by naming the manifest directly rather than a numbered part — the other call site.
+        let direct = join_files(&manifest_dir, &out).unwrap_err();
+        assert!(!direct.contains("not found"), "{direct}");
+        assert!(direct.contains("not a file"), "{direct}");
+
+        assert!(!out.exists(), "no output should be left behind on failure");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_present_but_unstattable_part_names_the_cause_instead_of_calling_itself_missing() {
+        // CPE-1687, end to end through the real `join_files` — the entry point the Tauri command calls —
+        // because the message is what reaches the user and the internal helper's return type isn't.
+        // Before the fix every `stat` failure came back "part 2 missing: <path>" about a part sitting
+        // right there in the folder.
+        let d = scratch("unstattable");
+        let src = d.join("a.bin");
+        std::fs::write(&src, pattern(2500)).unwrap();
+        split_file(&src, 1000, &d).unwrap(); // 3 parts: .001 .002 .003
+        let part2 = part_path(&d, "a.bin", 2, 3);
+        let out = d.join("out.bin");
+
+        // Armed BEFORE the assertions, not after: a failing assertion unwinds, and a plain cleanup call
+        // after the asserts never runs on exactly the path that leaves debris. This repo mandates a red
+        // run per guard, so that would be one permanently-odd file per developer per red run — the
+        // reviewer of PR #865 found three real orphans from precisely this mistake (CPE-1678).
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                undo_unstattable(self.0);
+                let _ = std::fs::remove_file(self.0);
+                let _ = std::fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&part2, &d);
+
+        let Some(mechanism) = make_unstattable(&part2) else {
+            // A machine that cannot produce an unstattable-but-present entry (no symlink privilege on
+            // Windows, an ACL-less filesystem, running as root) is a real and benign condition, so this
+            // skips rather than fails. But it SAYS SO, because this is the only test that covers
+            // CPE-1687 end to end — a silent skip would leave the suite green while guarding nothing,
+            // which is the same "confident answer standing in for an unknown" the fix itself is about
+            // (CPE-1680). CI's 3-OS matrix means the real run happens somewhere even if one leg skips.
+            //
+            // `writeln!(std::io::stderr(), ..)` and NOT `eprintln!` — load-bearing, do not "simplify".
+            // libtest captures stdout/stderr per test and replays it only for FAILING tests; a skip is a
+            // pass, so an `eprintln!` here is swallowed and reaches nobody. The capture works by
+            // intercepting the `print!`/`eprint!` macros, so writing to the process's stderr handle goes
+            // around it. CI runs plain `cargo test` with no `--nocapture`, which is the only case that
+            // matters. CPE-1678 shipped this wrong once by verifying under `--nocapture` and
+            // generalising; this notice was verified under plain `cargo test`.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1687] SKIPPED the unstattable-part leg: could not make {} present-but-unstattable \
+                 on this machine (no symlink privilege, an ACL-less filesystem, or running elevated). \
+                 The remaining assertions do NOT cover CPE-1687 end to end.",
+                part2.display()
+            );
+            return;
+        };
+
+        let err = join_files(&d.join("a.bin.001"), &out).unwrap_err();
+        assert!(
+            !err.contains("missing"),
+            "a stat failure ({mechanism}) must not be reported as absence — the part is right there: {err}"
+        );
+        assert!(err.contains("part 2"), "the message must still say which part failed: {err}");
+        assert!(
+            err.contains(&part2.display().to_string()),
+            "the message must still name the part's path: {err}"
+        );
+        assert!(!out.exists(), "no output should be left behind on failure");
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    #[test]
+    fn part_stat_error_says_missing_only_for_a_genuine_absence() {
+        // The deterministic half of the CPE-1687 guard: it runs on every OS and CI account, where the
+        // end-to-end test above depends on a condition some machines cannot construct. Same reasoning as
+        // `dispatch::classify_path_error`'s unit tests — permission bits are platform- and
+        // privilege-dependent, the taxonomy is not.
+        let p = Path::new("parts").join("a.bin.002");
+
+        let absent = part_stat_error(2, &p, &std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert!(absent.contains("part 2 missing"), "a genuine absence is still 'missing': {absent}");
+
+        // Every other stat outcome means "we do not know", and must name the OS's own cause instead.
+        // `Other` stands in for the kinds Rust does not classify — a dead network mount typically
+        // arrives as a raw OS error with no dedicated `ErrorKind`.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let e = std::io::Error::from(kind);
+            let msg = part_stat_error(2, &p, &e);
+            assert!(!msg.contains("missing"), "{kind:?} must not be reported as absence: {msg}");
+            assert!(msg.contains("part 2"), "{kind:?} must still say which part: {msg}");
+            assert!(msg.contains(&e.to_string()), "{kind:?} must name the OS's own cause: {msg}");
+        }
     }
 
     #[test]
