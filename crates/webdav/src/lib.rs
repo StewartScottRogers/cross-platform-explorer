@@ -94,6 +94,16 @@ const MAX_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// holding a `list` thread indefinitely. See [`WebdavProvider::request_bounded`] and
 /// [`TIMEOUT_METADATA_REQUEST`]. `read`/`write` still take the per-read bound only, on purpose.
 ///
+/// **State the residual rather than only the mechanism (CPE-1706 UAT).** The consequence of that last
+/// sentence is that `read` remains **time-unbounded against a dribbling server**: measured still running
+/// past 150 s at shipped values. Only its *memory* is capped, by `read_cap` at 2 GiB, so the true bound is
+/// 2 GiB × the per-read interval — one held `spawn_blocking` thread for a very long time. This is a
+/// deliberate trade, not an oversight: an end-to-end deadline on `read` would kill a legitimate
+/// multi-minute download of a large file for the crime of being slow, and unlike `list` — which the app
+/// issues automatically on navigation — `read` requires a user to ask for a download. The exposure is
+/// therefore one thread per user action rather than one per navigation. Recorded here because this whole
+/// ticket exists to fix a comment that named a mechanism and let a reader infer a bound it did not have.
+///
 /// Unlike `cpe-s3`, this crate needs no *listing*-level wall-clock budget: `list` is a single `PROPFIND`
 /// with `Depth: 1` and no pagination loop, so there is no page count to multiply — the per-request bound
 /// bounds the whole operation. (`cpe-s3`'s `list` follows up to 1000 `ListObjectsV2` pages, which is why

@@ -56,15 +56,16 @@
 //!   adding to it (`ureq` `agent.rs:476-477`: "takes precedence over `.timeout_read()`"), so setting it
 //!   would trade a good bound for a worse one. And it would not even solve the problem it looks like it
 //!   solves, because it is per **request** while the risk here is per **listing** — see the next point.
-//! - **[`TIMEOUT_LIST_REQUEST`] (120 s)** bounds one `ListObjectsV2` request **end to end, body read
+//! - **[`TIMEOUT_LIST_REQUEST`] (60 s)** bounds one `ListObjectsV2` request **end to end, body read
 //!   included** — via `ureq::Request::timeout`, which is per *request* and so can be applied to this call
 //!   site without touching the large-object `GET` that wants per-read semantics. This is the knob that
 //!   closes the dribble: valid headers followed by one byte every 29 s defeats a per-read timeout
 //!   completely, and a between-pages check cannot fire while that body is in flight.
 //! - **[`MAX_LIST_WALL_CLOCK`] (10 min)** bounds the compound case the per-request deadline cannot see:
-//!   how many more pages get started. 1000 pages × 120 s each would be 33 hours; this stops it.
+//!   how many more pages get started. 1000 pages × 60 s each would be 16.7 hours; this stops it.
 //!
-//! **The honest worst case for one `list` is `MAX_LIST_WALL_CLOCK + TIMEOUT_LIST_REQUEST` ≈ 12 minutes**,
+//! **The honest worst case for one `list` is `MAX_LIST_WALL_CLOCK + TIMEOUT_LIST_REQUEST` = 660 s ≈ 11
+//! minutes**,
 //! because a final page may begin just under the budget and then consume its own full deadline. An
 //! earlier version of this module claimed 10 minutes *while permitting an unbounded single page* — the
 //! claim was wrong in the direction that matters, and the pairing above is what makes the number real.
@@ -1420,7 +1421,11 @@ mod tests {
     // CPE-1704: `is_safe_s3_leaf` is a SIBLING of `cpe_server::transfer::is_safe_name`, not a call into
     // it — S3 has no drive letters and no alternate data streams, so `:` must be accepted, while every
     // check that is actually about escaping the listed prefix (embedded/leading separator, a literal `..`
-    // segment including its percent-encoded form, a control byte) must still hold. Each shape below is its
+    // segment, a control byte) must still hold. Note the guard reads **raw bytes only** and deliberately
+    // does NOT decode percent-escapes: `..%2f` is a legal key that cannot escape, and
+    // `keys_that_only_look_like_traversal_once_percent_decoded_are_kept` below asserts exactly that. An
+    // earlier version of this comment claimed the percent-encoded form was refused; it never was after
+    // CPE-1704, and a comment that overstates a security guard is worse than none. Each shape below is its
     // own test, not folded into one big loop, so disabling any single rule inside `is_safe_s3_leaf` turns
     // a distinct, nameable assertion red — the Evidence Rules requirement this ticket calls out explicitly.
     // ---------------------------------------------------------------------------------------------
