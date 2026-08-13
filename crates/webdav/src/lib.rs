@@ -10,6 +10,118 @@
 use base64::Engine as _;
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
 use std::io::Read as _;
+use std::time::Duration;
+
+/// How long a single socket read may make **no progress at all** before the request is abandoned
+/// (CPE-1706 item 1). Until that ticket this crate built `AgentBuilder::new().redirects(0)` and nothing
+/// else, and **`ureq` 2.x defaults `timeout_read`, `timeout_write` and the overall `timeout` all to
+/// `None`** — `AgentBuilder::timeout_read`'s own doc says it plainly: *"requests may block forever on reads
+/// by default"*. Since `WebdavProvider` runs on `spawn_blocking` threads, one unresponsive share could hold
+/// a pool thread with nothing able to reclaim it.
+///
+/// This is a **stall** bound, not a transfer budget: the clock restarts on every byte that arrives, so a
+/// large `read` over a genuinely poor link is never cut off for being slow, only for having stopped. 30 s
+/// is a wide margin over the time-to-first-byte of any real share — a NAS that has sent nothing for half a
+/// minute is not slow, it is gone — and matches the value `cpe-s3` chose for the same knob, so the two
+/// HTTP backends behave alike.
+const TIMEOUT_READ: Duration = Duration::from_secs(30);
+
+/// The write-side twin of [`TIMEOUT_READ`]: how long one socket write may block with the peer's receive
+/// window shut. Same value, same reasoning. It bounds a stalled `PUT`, not a slow one.
+const TIMEOUT_WRITE: Duration = Duration::from_secs(30);
+
+/// Pinned explicitly rather than inherited: `ureq` 2.12.1 already defaults `timeout_connect` to 30 s
+/// (`agent.rs:256`), so connect was the one phase that was never unbounded. Setting it to the same value
+/// changes nothing today and stops a future `ureq` default change from silently unbounding it.
+const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
+
+/// End-to-end deadline for one **metadata** exchange — `PROPFIND`, `MKCOL`, `DELETE`, `MOVE` — applied
+/// per call site by [`WebdavProvider::request_bounded`] (CPE-1706 round 2). See that method for why a
+/// per-request bound is the only one of the three knobs that closes a dribbling server, and why it is
+/// deliberately *not* applied to `read`/`write`.
+///
+/// # This value has to do two jobs, because `ureq` makes it an either/or
+/// A per-request deadline **replaces** [`TIMEOUT_READ`] for that request (`ureq` `stream.rs:433-436`
+/// takes the deadline branch *instead of* `config.timeout_read`), so for a `PROPFIND` this is now the
+/// *only* bound. It must both exceed the slowest legitimate metadata exchange **and** stay short enough
+/// that a dead share still fails promptly — the accept-then-silence case that [`TIMEOUT_READ`] used to
+/// catch in 30 s is now this constant's job too.
+///
+/// **60 s.** A `PROPFIND` body is already memory-bounded at 10 MiB by `ureq`'s own `into_string` limit
+/// (`response.rs:33` — a loud error, not a truncation), and a realistic `Depth: 1` listing is well under
+/// a megabyte, which is seconds even on a punishing link. 60 s doubles the old dead-share wait rather
+/// than quadrupling it; 120 s was tried first and rejected for buying no real listing any safety while
+/// making a dead share take two minutes to report. Matches `cpe-s3`'s `TIMEOUT_LIST_REQUEST` so the two
+/// HTTP backends behave alike.
+const TIMEOUT_METADATA_REQUEST: Duration = Duration::from_secs(60);
+
+/// Upper bound on how many bytes [`WebdavProvider::read`] will buffer for one file (CPE-1706 round 2).
+///
+/// `read` materialises a whole remote file into a `Vec<u8>` — that is the [`FileSystemProvider::read`]
+/// contract, shared with `cpe-sftp` and `cpe-ftp` — and until now it did so with a bare `read_to_end`,
+/// **uncapped**, driven directly by server-controlled data. A hostile or broken share could stream until
+/// the process died of allocation failure.
+///
+/// **An over-cap read is a loud `Err`, never a truncated `Vec` returned as if it were the file.** That
+/// distinction is the whole design: silently handing back a partial file would be far worse than
+/// refusing, because the caller writes it to disk as the complete download (`cpe_server::transfer`'s
+/// `download_tree` is the real consumer). Refusing is recoverable; a silently truncated file is data loss
+/// that looks like success.
+///
+/// **2 GiB**, chosen as a memory backstop rather than a file-size policy. No legitimate use of this app
+/// reads a 2 GiB file *into RAM* successfully anyway — at that size the whole-file-in-a-`Vec` contract is
+/// itself the problem — so this refuses the pathological case without narrowing what actually works
+/// today. Note `cpe-ftp`'s module doc already names the real fix ("a whole-file cap is a broader,
+/// pre-existing trait-level question"): streaming `read` into a sink belongs at the trait, across all
+/// four remote backends, and is **not** in this ticket's scope. This is the backstop until then.
+const MAX_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// Build the `ureq::Agent` every request in this crate goes through — the single place the transport's
+/// bounds are set, so `connect` and any test-injected variant cannot drift apart (only the two `Duration`s
+/// differ between them).
+///
+/// **The AGENT-level `ureq` `.timeout()` is deliberately not set.** It would cap every request regardless
+/// of progress, killing a legitimate multi-minute `GET` of a large file over a bad connection — a real
+/// user, not a hypothetical — and it *replaces* the per-read bound rather than adding to it (`ureq`
+/// `agent.rs:476-477`: "takes precedence over `.timeout_read()`"), so it would trade a good bound for a
+/// worse one.
+///
+/// **That reasoning was right about the agent and wrong to stop there (CPE-1706 round 2).** Declining the
+/// agent-level knob is not the same as declining an end-to-end bound everywhere: `ureq::Request::timeout`
+/// is *per request*, so it can be applied to the small metadata exchanges and withheld from the large
+/// transfers. Without it these per-read bounds left a real hole — a server that sends valid `200 OK`
+/// headers and then dribbles one byte every 29 s restarts the per-read clock forever and was measured
+/// holding a `list` thread indefinitely. See [`WebdavProvider::request_bounded`] and
+/// [`TIMEOUT_METADATA_REQUEST`]. `read`/`write` still take the per-read bound only, on purpose.
+///
+/// **State the residual rather than only the mechanism (CPE-1706 UAT).** The consequence of that last
+/// sentence is that `read` remains **time-unbounded against a dribbling server**: measured still running
+/// past 150 s at shipped values. Only its *memory* is capped, by `read_cap` at 2 GiB, so the true bound is
+/// 2 GiB × the per-read interval — one held `spawn_blocking` thread for a very long time. This is a
+/// deliberate trade, not an oversight: an end-to-end deadline on `read` would kill a legitimate
+/// multi-minute download of a large file for the crime of being slow, and unlike `list` — which the app
+/// issues automatically on navigation — `read` requires a user to ask for a download. The exposure is
+/// therefore one thread per user action rather than one per navigation. Recorded here because this whole
+/// ticket exists to fix a comment that named a mechanism and let a reader infer a bound it did not have.
+///
+/// Unlike `cpe-s3`, this crate needs no *listing*-level wall-clock budget: `list` is a single `PROPFIND`
+/// with `Depth: 1` and no pagination loop, so there is no page count to multiply — the per-request bound
+/// bounds the whole operation. (`cpe-s3`'s `list` follows up to 1000 `ListObjectsV2` pages, which is why
+/// it carries `MAX_LIST_WALL_CLOCK` on top of these.)
+///
+/// `redirects(0)` is the pre-existing CPE-1461 policy, kept — see [`WebdavProvider::connect`].
+/// `timeout_connect` is a parameter rather than a direct read of [`TIMEOUT_CONNECT`] for a testing
+/// reason (CPE-1706 round 2): `ureq`'s own default for that knob is *also* 30 s, so asserting the built
+/// agent has `timeout_connect: Some(30s)` passes identically whether the line is wired or deleted. Taking
+/// it as a parameter lets the guard test pass a value nothing else would produce.
+fn build_agent(timeout_read: Duration, timeout_write: Duration, timeout_connect: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(timeout_connect)
+        .timeout_read(timeout_read)
+        .timeout_write(timeout_write)
+        .build()
+}
 
 /// How to reach a WebDAV share.
 #[derive(Debug, Clone)]
@@ -37,6 +149,14 @@ pub struct WebdavProvider {
     agent: ureq::Agent,
     base_url: String,
     auth_header: Option<String>,
+    /// End-to-end deadline for one metadata exchange — [`TIMEOUT_METADATA_REQUEST`] in production. A
+    /// field so the dribble guard can be observed firing in a second instead of a minute, and it must be
+    /// overridable *separately* from the agent's `timeout_read`, because setting a per-request deadline
+    /// replaces that read timeout rather than layering on it.
+    metadata_deadline: Duration,
+    /// Per-file byte cap for `read` — [`MAX_READ_BYTES`] in production, a field so the refusal can be
+    /// exercised on kilobytes instead of gigabytes.
+    read_cap: u64,
 }
 
 /// The PROPFIND body requesting the properties we need (resource type + content length + name).
@@ -48,7 +168,25 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 impl WebdavProvider {
     /// Build a provider for `config`. Does not perform a request (WebDAV is stateless HTTP); the first
     /// `list`/`read`/… issues a request and surfaces auth/connection errors then.
+    /// This is the constructor production uses, and the only place the shipped timeout values are chosen
+    /// — see [`TIMEOUT_READ`] and [`build_agent`].
     pub fn connect(config: &WebdavConfig) -> Self {
+        Self::connect_with_timeouts(config, TIMEOUT_READ, TIMEOUT_WRITE)
+    }
+
+    /// [`WebdavProvider::connect`] with the transport's stall bounds supplied by the caller instead of
+    /// taken from [`TIMEOUT_READ`]/[`TIMEOUT_WRITE`].
+    ///
+    /// Public because a caller on a pathologically slow share has a legitimate reason to widen them, but
+    /// its first use is this crate's own tests: a stalling-server test that had to wait out the shipped
+    /// 30 s would cost 30 s of CI wall clock on three OSes, so the test injects a short bound and drives
+    /// the *same* [`build_agent`] path production drives — only the `Duration`s differ. The shipped values
+    /// themselves are pinned separately by `tests::the_shipped_timeout_values_are_finite_and_sane`.
+    pub fn connect_with_timeouts(
+        config: &WebdavConfig,
+        timeout_read: Duration,
+        timeout_write: Duration,
+    ) -> Self {
         let auth_header = config.user.as_deref().map(|u| {
             let pass = config.password.as_deref().unwrap_or("");
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{pass}"));
@@ -58,8 +196,29 @@ impl WebdavProvider {
         // redirects, so a future change (or a hostile server today) could bounce a request via a `3xx`
         // toward `file://` or an attacker-controlled host — an SSRF/exfiltration foothold. Refusing to
         // auto-follow surfaces the `3xx` as an error instead; a WebDAV share never needs redirects.
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
-        WebdavProvider { agent, base_url: config.base_url.clone(), auth_header }
+        let agent = build_agent(timeout_read, timeout_write, TIMEOUT_CONNECT);
+        WebdavProvider {
+            agent,
+            base_url: config.base_url.clone(),
+            auth_header,
+            metadata_deadline: TIMEOUT_METADATA_REQUEST,
+            read_cap: MAX_READ_BYTES,
+        }
+    }
+
+    /// Override the per-request metadata deadline ([`TIMEOUT_METADATA_REQUEST`] by default). Production
+    /// never calls this; it exists so the dribble guard can be observed firing in a second instead of a
+    /// minute.
+    pub fn with_metadata_deadline(mut self, deadline: Duration) -> Self {
+        self.metadata_deadline = deadline;
+        self
+    }
+
+    /// Override the per-file read cap ([`MAX_READ_BYTES`] by default). Production never calls this; it
+    /// exists so the refusal can be observed on a few kilobytes instead of two gigabytes.
+    pub fn with_read_cap(mut self, cap: u64) -> Self {
+        self.read_cap = cap;
+        self
     }
 
     /// The absolute URL for a provider path (`/`-rooted). Each segment is percent-encoded (CPE-1659
@@ -79,6 +238,21 @@ impl WebdavProvider {
         }
         req
     }
+
+    /// [`WebdavProvider::request`] plus an end-to-end [`TIMEOUT_METADATA_REQUEST`] deadline, for the
+    /// **small, fixed-size** exchanges: `PROPFIND` (list/stat), `MKCOL`, `DELETE`, `MOVE`.
+    ///
+    /// This is the CPE-1706 round-2 fix and the distinction is the entire point: [`TIMEOUT_READ`] is
+    /// per-read, so its clock restarts on every byte and a server that sends valid headers then dribbles
+    /// **one byte every 29 s** is never cut off. `ureq::Request::timeout` (`request.rs:60`) is per
+    /// *request* — `DeadlineStream::fill_buf` recomputes the remaining budget on every read
+    /// (`stream.rs:85-89`), and the deadline propagates into the response body reader — so it bounds the
+    /// whole exchange. Because it is set per call site rather than on the agent, `read`'s `GET` and
+    /// `write`'s `PUT` keep the per-read semantics they actually want: those carry user file data of
+    /// unbounded size, where "slow but progressing" is a legitimate transfer, not an attack.
+    fn request_bounded(&self, method: &str, path: &str) -> ureq::Request {
+        self.request(method, path).timeout(self.metadata_deadline)
+    }
 }
 
 /// Map a `ureq` failure (transport error or non-2xx status) into a legible message.
@@ -92,7 +266,7 @@ fn http_err(path: &str, e: ureq::Error) -> String {
 impl FileSystemProvider for WebdavProvider {
     fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
         let body = self
-            .request("PROPFIND", path)
+            .request_bounded("PROPFIND", path)
             .set("Depth", "1")
             .set("Content-Type", "application/xml")
             .send_string(PROPFIND_BODY)
@@ -105,7 +279,7 @@ impl FileSystemProvider for WebdavProvider {
 
     fn stat(&self, path: &str) -> Result<ProviderEntry, String> {
         let body = self
-            .request("PROPFIND", path)
+            .request_bounded("PROPFIND", path)
             .set("Depth", "0")
             .set("Content-Type", "application/xml")
             .send_string(PROPFIND_BODY)
@@ -119,10 +293,28 @@ impl FileSystemProvider for WebdavProvider {
         Ok(entry)
     }
 
+    /// Deliberately uses the *unbounded-per-request* [`WebdavProvider::request`]: a large file over a poor
+    /// link is a legitimate multi-minute transfer, and an end-to-end deadline would kill it for being slow
+    /// rather than for being stalled. [`TIMEOUT_READ`] is the right bound here — it fires when the server
+    /// stops sending, not when the file is big. Memory is bounded separately by [`MAX_READ_BYTES`].
     fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         let resp = self.request("GET", path).call().map_err(|e| http_err(path, e))?;
         let mut buf = Vec::new();
-        resp.into_reader().read_to_end(&mut buf).map_err(|e| format!("{path}: {e}"))?;
+        // Read one byte MORE than the cap, so that hitting the cap is distinguishable from a file that is
+        // exactly cap-sized — then refuse loudly. Never return the truncated prefix: `download_tree`
+        // writes whatever comes back to disk as the finished file, so a silent truncation here is data
+        // loss wearing a success. See MAX_READ_BYTES.
+        resp.into_reader()
+            .take(self.read_cap + 1)
+            .read_to_end(&mut buf)
+            .map_err(|e| format!("{path}: {e}"))?;
+        if buf.len() as u64 > self.read_cap {
+            return Err(format!(
+                "{path}: the server sent more than the {}-byte read cap without finishing — refusing \
+                 rather than returning a truncated file as if it were complete",
+                self.read_cap
+            ));
+        }
         Ok(buf)
     }
 
@@ -132,12 +324,12 @@ impl FileSystemProvider for WebdavProvider {
     }
 
     fn mkdir(&mut self, path: &str) -> Result<(), String> {
-        self.request("MKCOL", path).call().map_err(|e| http_err(path, e))?;
+        self.request_bounded("MKCOL", path).call().map_err(|e| http_err(path, e))?;
         Ok(())
     }
 
     fn delete(&mut self, path: &str) -> Result<(), String> {
-        let resp = self.request("DELETE", path).call().map_err(|e| http_err(path, e))?;
+        let resp = self.request_bounded("DELETE", path).call().map_err(|e| http_err(path, e))?;
         // CPE-1659 found this against a real Apache server: `.call()` only turns a >=400 status into
         // an `Err` (see `ureq::Request::call`), so a 3xx response comes back as `Ok`. Apache's
         // `mod_dir` `DirectorySlash` behaviour redirects (301) a request for a collection that's
@@ -157,7 +349,7 @@ impl FileSystemProvider for WebdavProvider {
         // run URLs.
         if (300..400).contains(&resp.status()) && !path.ends_with('/') {
             let with_slash = format!("{}/", path.trim_end_matches('/'));
-            let retry = self.request("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
+            let retry = self.request_bounded("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
             // CPE-1673 follow-up: the retry is subject to the exact same `.call()`-only-errors-on->=400
             // behaviour as the first attempt above, so a server that ALSO redirects the trailing-slash
             // form would otherwise fall through to `Ok(())` here having deleted nothing — the identical
@@ -176,7 +368,7 @@ impl FileSystemProvider for WebdavProvider {
     fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
         // WebDAV MOVE: the target is the absolute URL of `to` in the Destination header.
         let dest = self.url_for(to);
-        self.request("MOVE", from)
+        self.request_bounded("MOVE", from)
             .set("Destination", &dest)
             .set("Overwrite", "T")
             .call()
@@ -453,7 +645,18 @@ mod tests {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root: PathBuf = std::env::temp_dir().join(format!("cpe-webdav-{}-{}", std::process::id(), n));
+        // `(pid, n)` alone is NOT unique across runs: these directories are never cleaned up, and Windows
+        // reuses process ids freely, so a later run can land on a previous run's root and inherit its
+        // files. That bit during CPE-1706 — `lists_stats_and_reads_over_webdav` saw a `renamed.txt` left
+        // by `rename_moves_a_file_over_webdav` from an earlier process with the same pid (223 stale roots
+        // were sitting in the temp dir at the time). A nanosecond stamp makes reuse collide only if two
+        // roots are created in the same nanosecond by the same pid with the same counter.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root: PathBuf =
+            std::env::temp_dir().join(format!("cpe-webdav-{}-{}-{}", std::process::id(), n, stamp));
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("readme.txt"), FILE_BODY).unwrap();
         std::fs::write(root.join("sub").join("nested.txt"), b"deep").unwrap();
@@ -463,6 +666,310 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 1: wall-clock is bounded — and the test proving it cannot itself hang CI.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Run `f` on a spawned thread and fail the test if it has not returned within `deadline`.
+    ///
+    /// **libtest has no per-test timeout**, so a test whose subject is "this call cannot block forever"
+    /// regresses into a *hang*, not a red: with the bound gone there is nothing left to end the call and
+    /// `cargo test` would sit there until the CI job's own limit killed it. This converts that into a
+    /// deterministic red naming what happened. (Ported from `crates/s3`'s `provider.rs`, CPE-1706 item 5.)
+    fn call_with_deadline<T: Send + 'static>(
+        what: &str,
+        deadline: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(deadline) {
+            Ok(value) => value,
+            Err(_) => panic!(
+                "{what} did not return within {deadline:?}. The bound that was supposed to stop it is \
+                 gone, so this call would have run forever — libtest has no per-test timeout, so without \
+                 this deadline the CI job would have hung until its own limit rather than reporting a \
+                 failure."
+            ),
+        }
+    }
+
+    /// A server that completes the TCP accept and then **never sends a byte**, holding every connection
+    /// open forever. Holding the accepted streams in a `Vec` is what makes it a stall rather than a reset:
+    /// dropping them would close the socket and the client would get a prompt EOF, proving nothing.
+    fn spawn_a_server_that_accepts_and_never_answers() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A server that completes the accept, sends a **valid `200 OK` header block**, then emits its body
+    /// **one byte at a time with `gap` between bytes, forever** (CPE-1706 round 2). A per-read timeout's
+    /// clock restarts on every byte, so this peer never trips one — it is not stalled at any instant,
+    /// only useless in aggregate. Only an end-to-end per-request deadline sees it.
+    fn spawn_a_server_that_dribbles_one_byte_at_a_time(gap: Duration) -> String {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                std::thread::spawn(move || {
+                    let head = "HTTP/1.1 207 Multi-Status\r\nContent-Type: application/xml\r\n\
+                                Content-Length: 8388608\r\n\r\n";
+                    if s.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    let _ = s.flush();
+                    let body = b"<d:multistatus xmlns:d=\"DAV:\"></d:multistatus>";
+                    let mut i = 0usize;
+                    loop {
+                        std::thread::sleep(gap);
+                        if s.write_all(&[body[i % body.len()]]).is_err() || s.flush().is_err() {
+                            return;
+                        }
+                        i += 1;
+                    }
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// **The round-2 blocking finding, pinned at the SHIPPED values, on the live path.** WebDAV is routed
+    /// through `crates/vfs` today (`cpe_vfs::open` → `remote_dir_entries` → the `list_dir` Tauri command,
+    /// inside `spawn_blocking`), and tokio's default 512-thread blocking pool is not configured smaller —
+    /// so before this fix each attempt against a dribbling share drained one pool thread permanently.
+    /// This runs the real [`WebdavProvider::connect`], no injected `Duration`, and requires `list` to
+    /// come back. It costs [`TIMEOUT_METADATA_REQUEST`] of wall clock per CI job on purpose: the previous
+    /// round proved the mechanism through a seam and shipped values that did not bound this.
+    #[test]
+    fn a_server_that_dribbles_one_byte_at_a_time_is_cut_off_at_the_shipped_values() {
+        let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_secs(5));
+        let started = std::time::Instant::now();
+        let err = call_with_deadline(
+            "WebdavProvider::list (SHIPPED values) against a server dribbling one byte every 5 s",
+            Duration::from_secs(150),
+            move || WebdavProvider::connect(&WebdavConfig::new(&base)).list("/"),
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(err.starts_with("/:"), "the error must name the path that dribbled: {err}");
+        assert!(
+            elapsed >= TIMEOUT_METADATA_REQUEST,
+            "returning BEFORE the deadline means something else ended this, so it is not evidence about \
+             the deadline: {elapsed:?}"
+        );
+        assert!(
+            elapsed < TIMEOUT_METADATA_REQUEST + Duration::from_secs(30),
+            "the request deadline must be what ended it, but it took {elapsed:?}"
+        );
+    }
+
+    /// The fast twin of the shipped-values test above, through the same `request_bounded` →
+    /// `.timeout(..)` path with a short deadline injected, so the guard can be broken and observed in a
+    /// second during iteration.
+    #[test]
+    fn a_dribbling_server_is_cut_off_by_the_per_request_deadline() {
+        let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_millis(50));
+        let started = std::time::Instant::now();
+        let err = call_with_deadline(
+            "WebdavProvider::list against a dribbling server under a 500 ms metadata deadline",
+            Duration::from_secs(30),
+            move || {
+                WebdavProvider::connect(&WebdavConfig::new(&base))
+                    .with_metadata_deadline(Duration::from_millis(500))
+                    .list("/")
+            },
+        )
+        .unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(err.starts_with("/:"), "{err}");
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the 500 ms metadata deadline must be what ended it, but it took {elapsed:?}"
+        );
+    }
+
+    /// Every knob [`build_agent`] sets, asserted on the **real production agent** (CPE-1706 round 2).
+    /// `timeout_write` and `timeout_connect` shipped in round 1 with no guard — deleting either left all
+    /// 16 tests passing. `timeout_write` is close to untestable end-to-end (a `PROPFIND` body is a few
+    /// hundred bytes and always fits the socket buffer), and `timeout_connect`'s stated rationale was to
+    /// pin the value against a future `ureq` default change, which a deleted line defeats invisibly.
+    /// `ureq::Agent` derives `Debug` over its `AgentConfig` — the same surface `ureq`'s own
+    /// `agent_config_debug` test uses — so this inspects the built agent rather than the constants.
+    #[test]
+    fn build_agent_wires_every_timeout_knob_and_deliberately_leaves_the_agent_level_one_unset() {
+        // Distinctive values nothing else would produce. ureq DEFAULTS timeout_connect to 30 s, so
+        // asserting `Some(30s)` would pass with the line deleted.
+        let agent = format!("{:?}", build_agent(Duration::from_secs(11), Duration::from_secs(12), Duration::from_secs(13)));
+        assert!(agent.contains("timeout_read: Some(11s)"), "timeout_read is not wired: {agent}");
+        assert!(agent.contains("timeout_write: Some(12s)"), "timeout_write is not wired: {agent}");
+        assert!(
+            agent.contains("timeout_connect: Some(13s)"),
+            "timeout_connect is not wired — ureq's own default is 30s, so a `Some(30s)` here would mean              the line was DELETED and the default was showing through: {agent}"
+        );
+        assert!(
+            agent.contains("timeout: None"),
+            "the AGENT-level overall timeout must stay unset — it takes precedence over timeout_read \
+             (ureq agent.rs:476-477) and would cap a legitimate multi-minute GET of a large file by wall \
+             clock regardless of progress. Metadata requests get a per-REQUEST deadline instead: {agent}"
+        );
+        assert!(agent.contains("redirects: 0"), "the CPE-1461 no-redirect policy is not wired: {agent}");
+    }
+
+    /// `read` deliberately keeps per-read semantics (a big file over a poor link is a legitimate slow
+    /// transfer), so its protection is a **byte** cap, not a time one — and the cap must refuse rather
+    /// than hand back a truncated prefix, because `download_tree` writes whatever comes back to disk as
+    /// the finished file. This drives the real `read` against a server that streams past the cap.
+    #[test]
+    fn a_read_that_runs_past_the_byte_cap_is_refused_rather_than_truncated() {
+        // An ordinary file must round-trip untouched through the real read path — the cap must not be
+        // something a normal download can feel.
+        let base = spawn_webdav_server();
+        let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+        assert_eq!(
+            provider.read("/readme.txt").unwrap(),
+            FILE_BODY,
+            "the cap must not disturb an ordinary read"
+        );
+
+        // And the refusal itself, driven for real: a server that declares a huge Content-Length and
+        // streams forever. `read` must come back with an Err naming the cap, never an Ok holding the
+        // prefix — `download_tree` writes whatever comes back to disk as the finished file, so a silent
+        // truncation here is data loss wearing a success. Uses a 4 KiB cap injected through the same
+        // field production fills from MAX_READ_BYTES.
+        let endless = spawn_a_server_that_streams_forever();
+        let capped = WebdavProvider::connect(&WebdavConfig::new(&endless)).with_read_cap(4096);
+        let result = call_with_deadline(
+            "WebdavProvider::read against a server that never stops sending",
+            Duration::from_secs(30),
+            move || capped.read("/big.bin"),
+        );
+        match result {
+            Err(e) => assert!(
+                e.contains("read cap"),
+                "the error must name the cap so the cause is diagnosable: {e}"
+            ),
+            Ok(bytes) => panic!(
+                "an endless stream came back as a {}-byte file — a truncated prefix returned as the \
+                 complete download is data loss that looks like success",
+                bytes.len()
+            ),
+        }
+    }
+
+    /// Sends a valid `200 OK` with a huge declared length and then streams bytes as fast as the client
+    /// will take them, forever — the shape a byte cap exists for. Distinct from the dribbler above: this
+    /// one is not slow, it is simply endless, so no time-based bound would ever stop it.
+    fn spawn_a_server_that_streams_forever() -> String {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                std::thread::spawn(move || {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Length: 1099511627776\r\n\r\n";
+                    if s.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    let chunk = [b'x'; 4096];
+                    while s.write_all(&chunk).is_ok() {}
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The per-read socket bound, driven through the production request path: `connect_with_timeouts` and
+    /// `connect` differ only in where the two `Duration`s come from — both build the agent via
+    /// `build_agent`, and the call then goes through the same `request()` → `send_string()` production
+    /// uses. A short bound is injected because waiting out the shipped 30 s would cost 30 s of wall clock
+    /// in every CI job on three OSes; the shipped values are pinned by
+    /// [`the_shipped_timeout_values_are_finite_and_sane`].
+    ///
+    /// Checked on `list` **and** `read`, because they take different `ureq` paths — `send_string` +
+    /// `into_string` for the PROPFIND, `call` + `into_reader` for the GET — and it is the GET path where an
+    /// unbounded read would hurt most (a large download from a share that dies mid-transfer).
+    ///
+    /// The error *text* is not asserted beyond the path prefix `http_err` adds: a socket read timeout
+    /// surfaces through `std::io` differently per platform (`WouldBlock` — "Resource temporarily
+    /// unavailable" — on Unix, `TimedOut` on Windows) and this repo runs a 3-OS CI matrix. What is asserted
+    /// is the behaviour under test, identical everywhere: it **returned, with an error, quickly**.
+    #[test]
+    fn a_server_that_accepts_the_connection_and_then_never_answers_is_cut_off_by_the_read_timeout() {
+        for op in ["list", "read"] {
+            let base = spawn_a_server_that_accepts_and_never_answers();
+            let short = Duration::from_millis(300);
+            let started = std::time::Instant::now();
+            let err = call_with_deadline(
+                &format!("WebdavProvider::{op} against a server that accepts and never answers"),
+                Duration::from_secs(30),
+                move || {
+                    // The metadata deadline is shortened alongside the read timeout because a
+                    // per-request deadline REPLACES `timeout_read` for that request (`ureq`
+                    // `stream.rs:433-436`); left at the shipped 60 s this test would be measuring the
+                    // deadline, not the read timeout it claims to measure.
+                    let p = WebdavProvider::connect_with_timeouts(&WebdavConfig::new(&base), short, short)
+                        .with_metadata_deadline(short);
+                    match op {
+                        "list" => p.list("/readme.txt").map(|_| ()),
+                        _ => p.read("/readme.txt").map(|_| ()),
+                    }
+                },
+            )
+            .unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(
+                err.starts_with("/readme.txt:"),
+                "the error must name the path that stalled, so a user knows what to blame: {err}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "the 300 ms read timeout — not some other accident — must be what ended {op}, but it took \
+                 {elapsed:?}"
+            );
+        }
+    }
+
+    /// The companion to the test above: that one proves the *mechanism* through the production builder
+    /// with an injected `Duration`, this pins the *values* `connect` actually installs, which it
+    /// deliberately does not wait out. Together they cover "`WebdavProvider::connect` produces an agent
+    /// whose reads and writes are bounded by a finite, sane timeout": remove `.timeout_read(..)` from
+    /// `build_agent` and the first reds; make `TIMEOUT_READ` useless and this one does.
+    #[test]
+    fn the_shipped_timeout_values_are_finite_and_sane() {
+        for (name, value) in [
+            ("TIMEOUT_READ", TIMEOUT_READ),
+            ("TIMEOUT_WRITE", TIMEOUT_WRITE),
+            ("TIMEOUT_CONNECT", TIMEOUT_CONNECT),
+            ("TIMEOUT_METADATA_REQUEST", TIMEOUT_METADATA_REQUEST),
+        ] {
+            assert!(
+                value >= Duration::from_secs(5),
+                "{name} = {value:?} is short enough to cut off a legitimately slow share's \
+                 time-to-first-byte — this knob bounds a stall, not a transfer"
+            );
+            assert!(
+                value <= Duration::from_secs(120),
+                "{name} = {value:?} is long enough that a dead peer still holds a spawn_blocking thread \
+                 for minutes, which is what CPE-1706 exists to stop"
+            );
+        }
     }
 
     #[test]

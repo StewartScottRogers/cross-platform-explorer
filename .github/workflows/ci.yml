@@ -417,9 +417,13 @@ jobs:
         # the SigV4 signer are hand-rolled over `hmac`/`sha2`, which are already in the tree, so this adds
         # no new dependency family (and no tokio/hyper/aws-lc tree).
         #
-        # This slice is pure computation — endpoint addressing + signing, verified against AWS's published
-        # SigV4 test vectors — so there is nothing to run against and no fixture server: it runs
-        # identically on all three OSes with no network, no credentials and no Docker.
+        # Needs no network, credentials, Docker or services, so it runs identically on all three OSes.
+        # That used to be because the slice was pure computation (endpoint addressing + signing against
+        # AWS's published SigV4 test vectors) with "nothing to run against and no fixture server" — no
+        # longer true as of CPE-1683, which added `S3Provider::list` and, with it, an in-process `tiny_http`
+        # fixture bound to `127.0.0.1:0` (plus, from CPE-1706, a bare `TcpListener` that accepts and stalls,
+        # to prove the HTTP read timeout fires). The conclusion is unchanged and the reason is now: every
+        # server these tests talk to is spawned inside the test process on loopback.
         working-directory: crates/s3
         run: |
           cargo clippy --all-targets -- -D warnings
