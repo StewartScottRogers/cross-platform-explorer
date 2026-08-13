@@ -47,6 +47,28 @@ answer, which is the failure mode this crew keeps writing tickets about.
 - `mkdir` → the conventional zero-byte object whose key ends in `/`. CPE-1683 must not then show it as a
   file; if that ordering slips, the two tickets need to agree on the marker's exact shape.
 
+## Test this first: the HTTP client may rewrite the path you signed (added 2026-08-12)
+
+Flagged by the PR #868 reviewer, and **explicitly labelled by them as unverified** — they were offline and
+could not check `ureq`'s behaviour, so treat this as a thing to test, not a finding to act on.
+
+S3 must **not** normalise dot segments: key `a/../b.txt` is a real, distinct key, and `crates/s3` correctly
+signs the canonical path `/a/../b.txt`. But `ureq` 2 — the client this epic plans to use — is believed to
+resolve dot segments while parsing the URL. If it does, it would put `/b.txt` on the wire while the
+signature covers `/a/../b.txt`, and the server answers `SignatureDoesNotMatch` with nothing in the message
+to say why.
+
+`crates/s3`'s "one construction, so the URL and the signature cannot disagree" guarantee **ends at the crate
+boundary**. This is the first ticket that crosses it.
+
+So, before building the object operations: send a request whose key contains `..`, `//`, and a percent-
+encoded `%2F`, and check what actually goes on the wire against what was signed. If the client rewrites the
+path, that decides the client — or requires bypassing its URL parsing — and it is much cheaper to know now
+than to debug as an unexplained 403 later. **State what you measured**, per the Evidence Rules in
+`Ticketing/wiki.md`; this note is a hypothesis and should be replaced by a measurement.
+
+Related: **CPE-1689**, which established that leading slashes and dot segments are preserved on purpose.
+
 ## Verify (headless)
 
 The same in-process `tiny_http` fixture CPE-1683 stands up, extended to serve HEAD/GET/PUT/DELETE against a
