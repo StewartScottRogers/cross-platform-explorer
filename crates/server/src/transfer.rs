@@ -8,6 +8,7 @@
 //! promptly.
 
 use crate::provider::FileSystemProvider;
+use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -62,6 +63,172 @@ pub fn is_safe_name(name: &str) -> bool {
     matches!((comps.next(), comps.next()), (Some(Component::Normal(_)), None))
 }
 
+/// Characters a Windows path cannot carry in a leaf name (CPE-1709). `/` and `\` are absent on purpose —
+/// [`guarded_join`] has already split the path on both, so they can never appear inside a segment.
+///
+/// Measured behaviour of each, written through the real sink (`download_tree` → `guarded_join` →
+/// `fs::write`) on Windows 11 Pro 26200, NTFS:
+/// - `:` — **the reported bug.** The write *succeeds* and the bytes go into an NTFS alternate data
+///   stream: `colon:name.txt` leaves a **0-byte** file named `colon` plus a hidden stream
+///   `colon:name.txt:$DATA` holding the content (`dir /r` shows both). Silent total loss to the user.
+/// - `< > " | ? *` and control characters `U+0000`–`U+001F` — `CreateFileW` refuses them outright (os
+///   error 123). The entry was already skipped before this fix, but only *accidentally* and with a
+///   misleading notice: the CPE-1696 leaf `symlink_metadata` probe was the call that failed, so the
+///   transfer reported "could not be inspected for a pre-existing symlink". Encoding them turns a
+///   wrongly-diagnosed skip into a correct download.
+const WINDOWS_UNSAFE_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
+
+/// The DOS device names Windows still reserves in every directory (CPE-1709), matched
+/// case-insensitively against the name's stem — Windows reserves `CON.txt` exactly as it reserves `CON`.
+///
+/// Measured on Windows 11 Pro 26200 (scoped claim — this is version-dependent, which is precisely why
+/// the fix does not rely on it): with the download root canonicalized to a `\\?\` verbatim path, as
+/// [`download_tree`] does, every one of these was *created* as a real 5-byte file. Reading them back by
+/// ordinary Win32 name (`cmd /c type`) then returned the real contents for `CON`, `PRN`, `AUX`,
+/// `CON.txt`, `nul.txt` and `COM1`–`COM9` / `LPT1`–`LPT9` — but **`NUL` returned nothing at all**: the
+/// name still resolves to the null device, so a user-visible 5-byte file reads as empty in every
+/// application. That is the same silent-loss shape as the colon, reached by a different mechanism.
+///
+/// `NUL` was the only one that lost data *on this build*, but device-name resolution has moved between
+/// Windows releases and is not a property we control, so all of them are escaped rather than only the
+/// one that happened to misbehave here.
+const WINDOWS_DEVICE_NAMES: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Percent-escape one character as `%XX` (upper-case hex). Only ever called for ASCII.
+fn push_escaped(out: &mut String, c: char) {
+    out.push('%');
+    let b = c as u32;
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    out.push(HEX[((b >> 4) & 0xF) as usize] as char);
+    out.push(HEX[(b & 0xF) as usize] as char);
+}
+
+/// True at `i` if `chars[i..]` begins a `%HH` escape sequence.
+fn is_escape_at(chars: &[char], i: usize) -> bool {
+    chars[i] == '%'
+        && i + 2 < chars.len()
+        && chars[i + 1].is_ascii_hexdigit()
+        && chars[i + 2].is_ascii_hexdigit()
+}
+
+/// Rewrite one path segment into a name a **Windows** filesystem can actually hold and an ordinary
+/// Windows application can actually open (CPE-1709). Pure and platform-independent so the whole rule is
+/// unit-testable on all three CI OSes; [`local_safe_segment`] decides *when* to apply it.
+///
+/// Four passes, in order:
+/// 1. A `%` that is followed by two hex digits becomes `%25`. This is the escape-the-escape step, and it
+///    is the entire reason the mapping is safe (see the injectivity note below). A `%` **not** followed
+///    by two hex digits is left alone, so ordinary names like `50% off.txt` are untouched.
+/// 2. Every [`WINDOWS_UNSAFE_CHARS`] character and every control character becomes `%XX`.
+/// 3. A trailing run of `.` or space becomes `%2E` / `%20`. Measured: with a verbatim root such a file
+///    *is* created — `download_tree` reported `Ok(1)` and `read_dir` showed `trailingdot.` at 5 bytes —
+///    but nothing can open it by name afterwards, because every non-verbatim Win32 path strips the
+///    trailing run first (`cmd /c type` → "The system cannot find the file specified", Rust's
+///    `fs::read` → os error 2). Full bytes on disk, unreachable: the colon bug's twin.
+/// 4. If the resulting stem (up to the first `.`) is a [`WINDOWS_DEVICE_NAMES`] entry, its first
+///    character is escaped — `CON` → `%43ON`, `COM1.txt` → `%43OM1.txt`.
+///
+/// **Two distinct names can never collide onto one local file**, which is the property that stops this
+/// fix from replacing a silent-loss bug with a different silent-loss bug. The mapping is *injective*
+/// because [`decode_windows_safe_segment`] inverts it exactly: the output never contains a `%HH`
+/// sequence that did not come from an escape this function emitted. Pass 1 removes every pre-existing
+/// one, and no new one can form afterwards, since an escape a later pass emits starts with `%` (never a
+/// hex digit) and a literal `%` that survived pass 1 provably has no two hex digits after it in the
+/// output. `decode(encode(x)) == x` for every `x` therefore forces `encode(x) == encode(y) → x == y`.
+/// `transfer_windows_name_mapping_is_injective` asserts both halves on a table that includes the
+/// adversarial `%`-bearing cases.
+///
+/// (Two remote names that differ only in **case** — `A.txt` and `a.txt` — still land on one file on a
+/// case-insensitive NTFS volume. That is a pre-existing property of the platform, unchanged by and
+/// independent of this mapping, which is case-preserving; it is recorded here rather than fixed, since
+/// no leaf-name rewriting can address it.)
+pub fn windows_safe_segment(name: &str) -> Cow<'_, str> {
+    let needs = name.chars().any(|c| WINDOWS_UNSAFE_CHARS.contains(&c) || c.is_control() || c == '%')
+        || name.ends_with('.')
+        || name.ends_with(' ')
+        || is_windows_device_name(name);
+    if !needs {
+        return Cow::Borrowed(name);
+    }
+
+    let chars: Vec<char> = name.chars().collect();
+    // Index at which the trailing `.`/space run starts (pass 3).
+    let keep = chars.len() - chars.iter().rev().take_while(|c| **c == '.' || **c == ' ').count();
+
+    let mut out = String::with_capacity(name.len() + 8);
+    for (i, &c) in chars.iter().enumerate() {
+        if is_escape_at(&chars, i) {
+            out.push_str("%25"); // pass 1
+        } else if WINDOWS_UNSAFE_CHARS.contains(&c) || c.is_control() || i >= keep {
+            push_escaped(&mut out, c); // passes 2 + 3
+        } else {
+            out.push(c);
+        }
+    }
+
+    // Pass 4, evaluated on the ALREADY-encoded name so an escape this function just emitted can never be
+    // re-flagged: a literal `%43ON` encodes to `%2543ON`, whose stem is not a device name.
+    if is_windows_device_name(&out) {
+        let mut first = out.chars();
+        let c = first.next().expect("a device name is never empty");
+        let mut escaped = String::with_capacity(out.len() + 2);
+        push_escaped(&mut escaped, c);
+        escaped.push_str(first.as_str());
+        out = escaped;
+    }
+    Cow::Owned(out)
+}
+
+/// Whether `name`'s stem (up to the first `.`) is a reserved DOS device name, case-insensitively.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or("");
+    WINDOWS_DEVICE_NAMES.iter().any(|d| d.eq_ignore_ascii_case(stem))
+}
+
+/// The exact inverse of [`windows_safe_segment`] — recovers the remote name from the local one
+/// (CPE-1709). Shipped, not test-only: it is what makes the mapping *demonstrably* reversible rather
+/// than merely claimed to be, and it is the proof obligation behind the injectivity argument, so it must
+/// live next to the encoder and be exercised by the same table.
+pub fn decode_windows_safe_segment(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let mut out = String::with_capacity(name.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if is_escape_at(&chars, i) {
+            let hi = chars[i + 1].to_digit(16).unwrap_or(0);
+            let lo = chars[i + 2].to_digit(16).unwrap_or(0);
+            if let Some(c) = char::from_u32(hi * 16 + lo) {
+                out.push(c);
+            }
+            i += 3;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Apply the local platform's leaf-name rule to one segment (CPE-1709). On Windows that is
+/// [`windows_safe_segment`]; everywhere else the name is passed through untouched, because `:`, `*`,
+/// `?`, a trailing dot and `CON` are all perfectly ordinary bytes in a Unix filename and rewriting them
+/// would mangle legitimate names for no reason. This is why the sink — not any provider guard — is the
+/// right place for the rule: the rule belongs to the local filesystem, and every provider that can
+/// legally produce such a name arrives here.
+///
+/// `cfg!` rather than `#[cfg]` deliberately: both arms compile on every OS, so the encoder is never
+/// dead code on Unix and its tests run on all three CI legs.
+pub fn local_safe_segment(name: &str) -> Cow<'_, str> {
+    if cfg!(windows) {
+        windows_safe_segment(name)
+    } else {
+        Cow::Borrowed(name)
+    }
+}
+
 /// Join an untrusted, provider-supplied relative path `rel` onto `base`, guaranteeing the result stays
 /// inside `base` (CPE-1461, sink-side defense). The path is rebuilt segment-by-segment — splitting on
 /// BOTH `/` and `\` so a Windows-style separator is neutralized on every OS — keeping only plain `Normal`
@@ -80,9 +247,21 @@ pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
         if seg == ".." {
             return None; // parent-dir escape
         }
+        // CPE-1709: rewrite the segment into something the LOCAL filesystem can actually hold before it
+        // is checked or pushed. Without this a `:` sailed through as a `Normal` component and
+        // `fs::write` diverted the bytes into an NTFS alternate data stream, leaving the user a 0-byte
+        // file. Applied here, at the sink, because the rule belongs to the local platform, not to any
+        // one provider — and after the `..` check above, which stays on the raw segment.
+        //
+        // Containment is unaffected: the transform only ever replaces a character with its own `%XX`
+        // escape, never introduces a `/`, `\` or `..`, and the `Normal`-component check below still
+        // gates what is pushed. It can only *widen* what is accepted — a segment like `C:` that used to
+        // reject the whole entry (Windows parses it as a drive prefix) now becomes the ordinary
+        // contained directory name `C%3A`.
+        let seg = local_safe_segment(seg);
         // Each surviving segment must itself be a single normal component (rejects `C:` / rooted segments
         // on the platforms where they parse as prefixes/roots).
-        let mut comps = Path::new(seg).components();
+        let mut comps = Path::new(seg.as_ref()).components();
         match (comps.next(), comps.next()) {
             (Some(Component::Normal(s)), None) => {
                 out.push(s);
@@ -916,6 +1095,256 @@ mod tests {
             "a path that exists is its own deepest existing ancestor"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1709: a name the LOCAL filesystem cannot hold must not silently lose the file's contents.
+    //
+    // The bug: `guarded_join` had no `:` rule. It never needed one while every remote listing was
+    // pre-filtered by `is_safe_name` (which refuses `:`); CPE-1704 correctly relaxed that for S3, where
+    // `:` is an ordinary legal key byte, and removed the accidental protection the sink was leaning on.
+    // `fs::write("…/colon:name.txt", b"…")` then returned `Ok(())` while diverting the bytes into an
+    // NTFS alternate data stream, leaving the user a 0-byte file named `colon`.
+    //
+    // Every test below therefore asserts on **the file the user would open**, never on the `Result` of
+    // the write — the write was already returning success when the data was being lost.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The enumerated table: `(remote leaf, expected local leaf on Windows, expected local leaf
+    /// elsewhere)`. The expectations are written out as literals rather than computed, so a bug in the
+    /// encoder cannot make the test agree with it.
+    ///
+    /// Measured behaviour of each remote leaf **before** the fix, through the real sink on Windows 11
+    /// Pro 26200 / NTFS — they do not group, which is why each is listed rather than reasoned about:
+    /// `:` wrote a 0-byte file + a hidden stream; `< > " | ? *` and controls were refused by
+    /// `CreateFileW` (os error 123) and skipped under a misleading symlink-inspection notice; a trailing
+    /// dot/space produced a full-size file that no Win32 path can reopen; `NUL` produced a full-size
+    /// file that reads back empty; the other device names happened to behave on this build.
+    const CPE_1709_NAMES: &[(&str, &str, &str)] = &[
+        ("normal.txt", "normal.txt", "normal.txt"),
+        ("colon:name.txt", "colon%3Aname.txt", "colon:name.txt"),
+        ("file:$DATA", "file%3A$DATA", "file:$DATA"),
+        ("less<name.txt", "less%3Cname.txt", "less<name.txt"),
+        ("greater>name.txt", "greater%3Ename.txt", "greater>name.txt"),
+        ("quote\"name.txt", "quote%22name.txt", "quote\"name.txt"),
+        ("pipe|name.txt", "pipe%7Cname.txt", "pipe|name.txt"),
+        ("question?name.txt", "question%3Fname.txt", "question?name.txt"),
+        ("star*name.txt", "star%2Aname.txt", "star*name.txt"),
+        ("ctrl\u{1}name.txt", "ctrl%01name.txt", "ctrl\u{1}name.txt"),
+        ("trailingdot.", "trailingdot%2E", "trailingdot."),
+        ("trailingspace ", "trailingspace%20", "trailingspace "),
+        ("CON", "%43ON", "CON"),
+        ("CON.txt", "%43ON.txt", "CON.txt"),
+        ("nul.txt", "%6Eul.txt", "nul.txt"),
+        ("NUL", "%4EUL", "NUL"),
+        ("PRN", "%50RN", "PRN"),
+        ("AUX", "%41UX", "AUX"),
+        ("COM1", "%43OM1", "COM1"),
+        ("LPT9", "%4CPT9", "LPT9"),
+        // Left alone: a `%` that does NOT begin an escape is an ordinary character.
+        ("50% off.txt", "50% off.txt", "50% off.txt"),
+        // Escaped: a `%` that DOES begin an escape, which is what keeps the mapping injective.
+        ("literal%3Aname", "literal%253Aname", "literal%3Aname"),
+    ];
+
+    /// The local leaf `CPE_1709_NAMES` expects on the OS the test is running on.
+    fn expected_local<'a>(row: &(&'a str, &'a str, &'a str)) -> &'a str {
+        if cfg!(windows) {
+            row.1
+        } else {
+            row.2
+        }
+    }
+
+    #[test]
+    fn cpe_1709_every_enumerated_windows_hostile_name_maps_to_its_literal_expectation() {
+        for row in CPE_1709_NAMES {
+            assert_eq!(
+                windows_safe_segment(row.0).as_ref(),
+                row.1,
+                "windows_safe_segment({:?}) — the enumerated Windows rule",
+                row.0
+            );
+        }
+    }
+
+    /// The property that stops this fix from replacing one silent-loss bug with another: **no two
+    /// distinct remote names can land on the same local file.** Proved by exhibiting the inverse —
+    /// `decode(encode(x)) == x` forces injectivity — and by checking the outputs really are all
+    /// distinct, including the adversarial pairs where one input is the *encoding* of another.
+    #[test]
+    fn cpe_1709_windows_name_mapping_is_injective() {
+        let mut inputs: Vec<String> = CPE_1709_NAMES.iter().map(|r| r.0.to_string()).collect();
+        // Adversarial pairs: a raw name and the exact text its encoding produces. A naive scheme that
+        // only escaped `:` would collide these two onto one file and silently lose one of them.
+        inputs.extend(["a:b".into(), "a%3Ab".into(), "a%253Ab".into(), "CON".into(), "%43ON".into()]);
+
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        for inp in &inputs {
+            let enc = windows_safe_segment(inp).into_owned();
+            assert_eq!(
+                decode_windows_safe_segment(&enc),
+                *inp,
+                "decode(encode({inp:?})) must return the original exactly — reversibility is what \
+                 makes the mapping injective"
+            );
+            if let Some(other) = seen.insert(enc.clone(), inp.clone()) {
+                if other != *inp {
+                    panic!("COLLISION: {other:?} and {inp:?} both map to the local name {enc:?} — two \
+                            distinct remote keys would overwrite one local file");
+                }
+            }
+        }
+    }
+
+    /// Over-rejection guard: an ordinary name must come out byte-identical, on every OS.
+    #[test]
+    fn cpe_1709_ordinary_names_are_left_untouched() {
+        for good in ["readme.txt", "my file (1).txt", "résumé.pdf", ".hidden", "50% off.txt", "a.b.c"] {
+            assert_eq!(windows_safe_segment(good).as_ref(), good, "{good:?} needs no rewriting");
+            assert_eq!(local_safe_segment(good).as_ref(), good);
+        }
+    }
+
+    /// **The headline test, ungated so all three CI legs assert something real.** Downloads a key
+    /// containing `:` through the REAL sink and reads the bytes back from the path the user would open —
+    /// `colon%3Aname.txt` on Windows, `colon:name.txt` (where `:` is an ordinary byte) elsewhere.
+    ///
+    /// Before the fix this failed on Windows with a 0-byte file named `colon`; the `download_tree`
+    /// return value was `Ok(1)` both before and after, which is exactly why nothing is asserted about it.
+    #[test]
+    fn cpe_1709_download_tree_delivers_the_bytes_of_a_colon_bearing_key() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-colon-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let provider = HostileNames { names: vec!["colon:name.txt".into()] };
+        let cancel = AtomicBool::new(false);
+        download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+
+        let expected = if cfg!(windows) { "colon%3Aname.txt" } else { "colon:name.txt" };
+        assert_eq!(
+            std::fs::read(out.join(expected)).unwrap_or_else(|e| panic!("{expected}: {e}")),
+            b"pwn",
+            "the FILE THE USER OPENS must hold the full contents"
+        );
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// The Windows-only half: prove the alternate-data-stream outcome is gone. `:` is the only character
+    /// with this behaviour and it has no analogue on Unix, so the assertion cannot be made there — the
+    /// ungated sibling above covers the Linux and macOS legs.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1709_windows_leaves_no_zero_byte_stub_and_no_alternate_data_stream() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-ads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let provider = HostileNames { names: vec!["colon:name.txt".into()] };
+        let cancel = AtomicBool::new(false);
+        download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+
+        let entries: Vec<(String, u64)> = std::fs::read_dir(&out)
+            .unwrap()
+            .flatten()
+            .map(|e| (e.file_name().to_string_lossy().into_owned(), e.metadata().map(|m| m.len()).unwrap_or(0)))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![("colon%3Aname.txt".to_string(), 3u64)],
+            "the download root must hold exactly the one full-size file — the bug left a 0-byte \
+             \"colon\" here with the bytes hidden in a colon:name.txt:$DATA stream"
+        );
+        assert!(!out.join("colon").exists(), "the 0-byte alternate-data-stream stub is back");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn cpe_1709_windows_leaves_no_zero_byte_stub_and_no_alternate_data_stream() {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stderr(),
+            "SKIP cpe_1709_windows_leaves_no_zero_byte_stub_and_no_alternate_data_stream: NTFS \
+             alternate data streams do not exist on {}; the ungated sibling \
+             cpe_1709_download_tree_delivers_the_bytes_of_a_colon_bearing_key asserts the real \
+             behaviour on this platform",
+            std::env::consts::OS
+        );
+    }
+
+    /// Every enumerated name, end to end through the real sink: the bytes must be readable back from the
+    /// local name this platform is supposed to produce, and the transfer must report exactly as many
+    /// files as landed. This is the test that would have caught the trailing-dot and `NUL` variants,
+    /// which lose data by mechanisms entirely unlike the colon's.
+    #[test]
+    fn cpe_1709_every_enumerated_name_arrives_intact_through_download_tree() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-all-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let provider =
+            HostileNames { names: CPE_1709_NAMES.iter().map(|r| r.0.to_string()).collect() };
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+        assert_eq!(n, CPE_1709_NAMES.len(), "every enumerated name must be written, none skipped");
+
+        for row in CPE_1709_NAMES {
+            let leaf = expected_local(row);
+            assert_eq!(
+                std::fs::read(out.join(leaf)).unwrap_or_else(|e| panic!("{:?} -> {leaf:?}: {e}", row.0)),
+                b"pwn",
+                "remote {:?} must be readable at {leaf:?} with its full contents",
+                row.0
+            );
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// **PR #890's traversal measurements, re-run (CPE-1709 acceptance criterion).** The sink now
+    /// rewrites `:` instead of letting `CreateFileW` refuse it, so the containment property is asserted
+    /// directly rather than resting on the OS happening to reject a name — a strictly stronger
+    /// guarantee. Nothing may land outside the download root.
+    #[test]
+    fn cpe_1709_traversal_property_is_unchanged_by_the_name_rewriting() {
+        let base = std::env::temp_dir().join(format!("cpe-1709-trav-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let parent = base.parent().unwrap().to_path_buf();
+        let sentinel = parent.join("cpe-1709-PWNED-marker.txt");
+        let _ = std::fs::remove_file(&sentinel);
+
+        // PR #890's two inputs, plus the full CPE-1461 battery and concrete single-level escapes.
+        let mut names: Vec<String> = vec!["..::$DATA".into(), "..:stream".into()];
+        names.extend(TRAVERSAL_INPUTS.iter().map(|s| s.to_string()));
+        names.push("../cpe-1709-PWNED-marker.txt".into());
+        names.push(r"..\cpe-1709-PWNED-marker.txt".into());
+
+        // The join is either refused outright or lexically contained — never an escape.
+        for n in &names {
+            if let Some(p) = guarded_join(&base, n) {
+                assert!(p.starts_with(&base), "guarded_join({n:?}) escaped the base: {p:?}");
+            }
+        }
+        assert!(guarded_join(&base, "..").is_none(), "a bare `..` is still refused");
+        assert!(guarded_join(&base, "../x").is_none(), "a `..` segment still refuses the whole entry");
+
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&HostileNames { names }, "", &base, &cancel)
+            .expect("a hostile transfer must skip, not fail");
+        assert!(!sentinel.exists(), "path traversal escaped the download root: {sentinel:?}");
+
+        let mut stack = vec![base.clone()];
+        let mut written = 0usize;
+        while let Some(d) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&d) else { continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                assert!(p.starts_with(&base), "a written path escaped the root: {p:?}");
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    written += 1;
+                }
+            }
+        }
+        assert_eq!(written, n, "the reported count must match what actually landed under the root");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&sentinel);
     }
 
     /// And the guard still lets a legitimate nested download through — `download_tree`'s happy path is
