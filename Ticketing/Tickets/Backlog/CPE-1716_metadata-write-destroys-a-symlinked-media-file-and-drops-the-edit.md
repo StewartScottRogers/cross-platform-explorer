@@ -88,3 +88,32 @@ priority rather than riding along with a refusal-guard ticket.
 Related: **CPE-1710** (which enumerated the renames and misclassified this one), **CPE-1715** (the
 name-picking probes with a related dangling-link blind spot), **CPE-1705** (the stat-collapse family this
 belongs to).
+
+## Three more sites in the same class (PR #895 review, 2026-08-13)
+
+The reviewer audited all twelve out-of-class entries independently. **Eight are sound**; four are
+mis-stated, and one of those is live:
+
+- **`vault_crypto::promote` — same shape as this ticket, and live.** `out_dir` is the user's unlock
+  destination, not "a file we own". `promote` probes occupancy with `read_dir(out_dir)`, which **follows**
+  the link: on a dangling link it returns `NotFound`, falls through, and `fs::rename(staging, out_dir)`
+  destroys it. Fix it here, with this one.
+- **`vault_manager` ×2 — right conclusion, wrong stated reason.** The destination is the user's chosen
+  `.cpevault` path. The code *deliberately* replaces a symlink there, with a rationale and a
+  VAULT-SECURITY.md §5 reference. Leaving it alone is correct; "a file we own" is not why. Fix the
+  justification, not the code.
+- **`crates/server/src/provider.rs:156` (`LocalProvider::rename`)** — unguarded, and in neither of PR
+  #895's lists. Currently `#![allow(dead_code)]` pending CPE-685, so **not user-reachable today** — but it
+  must get the pairing before any command routes through providers.
+
+Verified sound, for the record, so nobody re-audits them: `audit_journal`, `checkpoint_store`,
+`metrics_journal`, `replay_baseline` (all `file.with_extension(".tmp")` → app-data journal); `known_hosts`
+(documented contract that callers never point it at the user's real `~/.ssh/known_hosts`); `index`,
+`semantic_index`, `vector_index` (destinations from `index_service::volume_path` /
+`content_index::index_path`, both app-managed).
+
+**Also related, different primitive:** `sidecar/agent-board::move_card` (`board.rs:395`) has no
+destination guard at all — `fs::write(&dest, ..)` then `remove_file(&src)`. It is the twin of the
+`board_move_impl` PR #895 fixes, and the "both board implementations change in lockstep" rule says it
+should move with it. `fs::write` **follows** a link and writes *through* it, so the failure differs from a
+rename, but it is the same slot and the same user-visible operation.
