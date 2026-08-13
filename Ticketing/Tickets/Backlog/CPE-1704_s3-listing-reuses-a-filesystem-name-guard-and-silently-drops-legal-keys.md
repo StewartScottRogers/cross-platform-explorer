@@ -54,9 +54,64 @@ blocked.
 Shipping a file explorer that silently hides files in a connected bucket is not an acceptable first
 impression of S3 support.
 
+## THE GUARD IS AT TWO LAYERS — fixing only the provider does nothing
+
+Found by the PR #890 reviewer, 2026-08-13, after a first attempt fixed `S3Provider::list` alone and
+achieved nothing observable. **The Foreman's brief caused this** by scoping the work to `crates/s3`.
+
+`crates/vfs/src/connect.rs:244` `remote_dir_entries` re-filters **every** `ProviderEntry` through
+`cpe_server::transfer::is_safe_name` before it becomes a `DirEntry`. That is the only path a user's remote
+listing takes (`src-tauri/src/lib.rs:7697` `remote_list_dir_impl` → `remote_dir_entries`), and it is
+exactly what **CPE-1685** will route `s3` through. Measured:
+
+```
+| "colon:name.txt" | S3 guard ACCEPT | vfs is_safe_name REFUSE |
+| "x:y"            | S3 guard ACCEPT | vfs is_safe_name REFUSE |
+| "..evil.txt"     | S3 guard ACCEPT | vfs is_safe_name REFUSE |
+```
+
+So relaxing the provider's guard alone leaves the file just as invisible. **The fix must reach
+`remote_dir_entries`** — a `ProviderCapabilities` flag or a per-provider leaf predicate — so it asks the
+provider which rules apply instead of imposing filesystem rules on every backend.
+
+`crates/server`'s `is_safe_name` still must **not** be loosened: SFTP and WebDAV need the `:` rule.
+
+## Do NOT add a percent-decode pass
+
+The first attempt added one to catch `..%2f`. It refused **nine** classes of legal key, including two that
+are common in real buckets:
+
+| leaf | what it is |
+|---|---|
+| `report%2ffinal.txt` | literal text — the ticket's own bug, reintroduced |
+| `https%3A%2F%2Fexample.com%2Findex.html` | URL-keyed archive object |
+| `city=A%2FB` | Hive/Athena/Glue partition value — the tooling encodes `/` as `%2F` |
+| `%2e%2e`, `%2e`, `%00`, `%0a`, `%5cfoo` | literal escape text |
+
+**And it protects nothing.** `sigv4::encode_query_component` escapes `%`, so a leaf reaches the wire as
+inert literal text (measured: `..%2f` → `prefix=photos%2F..%252f%2F`). S3 prefix matching is byte-literal
+and does not normalise `..`. And `ListObjectsV2` returns raw key text unless `encoding-type=url` is
+requested, which this crate never requests — so percent-decoding a `<Key>` is a **category error**. A
+decode-once guard does not even stop a double-decoding consumer: `%252e%252e%252f` sails through.
+
+## A synthetic "N keys hidden" row is not the answer either
+
+The first attempt appended one. The reviewer judged it **worse than the silent drop**:
+
+- **Spoofable.** A real object can be named exactly like the marker (measured: accepted, emitted as a
+  normal 7-byte file). Because the genuine marker contains a `/` and is itself refused by `is_safe_name`,
+  **the only such row a user could ever see is an attacker-planted one.**
+- **Dishonest.** `is_dir: false, size: 0` — it claims to be a zero-byte file.
+- **Delete reports success.** S3 `DELETE` of a missing key returns **204**, so deleting it would say it
+  worked and it would still be there on refresh.
+- Off-by-one in item counts, included in select-all, and it slips past `MAX_LIST_ENTRIES`.
+
+Since the fix has to reach `crates/vfs` anyway, carrying a filtered-count on a real field — or returning an
+error when a listing is entirely filtered — is available and honest. Pick deliberately and record why.
+
 ## Scope
 
-`crates/s3/src/provider.rs`, and a new S3-appropriate name check. **Do not loosen `crates/server`'s
+`crates/s3/src/provider.rs`, **and `crates/vfs/src/connect.rs`'s `remote_dir_entries`** (see above — fixing only the provider is a no-op). **Do not loosen `crates/server`'s
 `is_safe_name`** — it guards local paths, SFTP and WebDAV, where the `:` rule is correct and load-bearing.
 This needs a sibling that encodes S3's rules, not a weakening of the shared one.
 
