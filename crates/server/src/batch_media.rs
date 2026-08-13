@@ -2082,43 +2082,53 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                 // go than a fallback name: the planner returns `Result` per item, so it refuses to plan
                 // an output in a directory it cannot see, and nothing is written at all.
                 //
-                // **`unknown_run` counts CONSECUTIVE unknowns, and both resets below are load-bearing**
-                // (PR #893 review, which found them redding nothing when broken). The bound means "the
-                // folder itself is unreadable"; a *run* is the only evidence of that. Without the resets,
-                // unknowns scattered among real collisions accumulate across the whole walk and eventually
-                // refuse a batch that was merely landing in a busy directory with one unreadable file in
-                // it — turning a rare hang-guard into a routine false refusal.
+                // **`unknown_run` counts CONSECUTIVE unknowns, and the reset below is load-bearing.** The
+                // bound means "the folder itself is unreadable"; a *run* is the only evidence of that.
+                // Without the reset, unknowns scattered among real collisions accumulate across the whole
+                // walk and eventually refuse a batch that was merely landing in a busy directory with one
+                // unreadable file in it — a rare hang-guard turned into a routine false refusal.
+                //
+                // **There is exactly ONE reset, deliberately.** The first version had two — one for an
+                // in-batch `used` collision, one for an on-disk `Occupied` — and the PR #893 review found
+                // that breaking the `used` one redded nothing, because reaching it needs an in-batch
+                // collision *interleaved between* unknowns, which no reasonable test constructs. Rather
+                // than write a baroque test for a second copy of one decision, the two collision cases now
+                // fold into a single `Taken` arm that the ordinary interleaved test does exercise. An arm
+                // no test can reach is a liability whether or not it is correct today.
                 let mut unknown_run = 0usize;
                 loop {
-                    let free = if used.contains(&out_key) {
-                        unknown_run = 0; // a real in-batch collision breaks the run
-                        false
+                    enum Slot {
+                        Free,
+                        Taken,
+                        Unknown,
+                    }
+                    let slot = if used.contains(&out_key) {
+                        Slot::Taken // already claimed by this batch
                     } else {
                         match crate::fsutil::classify_target_slot(
                             &std::path::Path::new(&output).try_exists(),
                         ) {
-                            crate::fsutil::TargetSlot::Free => true,
-                            crate::fsutil::TargetSlot::Occupied => {
-                                unknown_run = 0; // a real on-disk collision breaks the run
-                                false
-                            }
-                            crate::fsutil::TargetSlot::Unknown => {
-                                unknown_run += 1;
-                                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS {
-                                    return Err(format!(
-                                        "refusing to plan an output for \"{input}\": the output folder \
-                                         \"{dir}\" could not be read — {MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS} \
-                                         candidate names in a row could not be checked, so no name can be \
-                                         shown to be free. Nothing was planned or written; this is a \
-                                         refusal to guess, not a detected collision"
-                                    ));
-                                }
-                                false
-                            }
+                            crate::fsutil::TargetSlot::Free => Slot::Free,
+                            crate::fsutil::TargetSlot::Occupied => Slot::Taken, // a real file on disk
+                            crate::fsutil::TargetSlot::Unknown => Slot::Unknown,
                         }
                     };
-                    if free {
-                        break;
+                    match slot {
+                        Slot::Free => break,
+                        // The single reset: any *proven* collision, from either source, breaks the run.
+                        Slot::Taken => unknown_run = 0,
+                        Slot::Unknown => {
+                            unknown_run += 1;
+                            if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS {
+                                return Err(format!(
+                                    "refusing to plan an output for \"{input}\": the output folder \
+                                     \"{dir}\" could not be read — {MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS} \
+                                     candidate names in a row could not be checked, so no name can be \
+                                     shown to be free. Nothing was planned or written; this is a \
+                                     refusal to guess, not a detected collision"
+                                ));
+                            }
+                        }
                     }
                     out_stem = format!("{base}-{n}");
                     output = join(&dir, &out_stem, &ext);
