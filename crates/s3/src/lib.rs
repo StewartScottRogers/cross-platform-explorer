@@ -273,9 +273,9 @@ impl S3Config {
     fn target_for(&self, raw_path: &str) -> Result<RequestTarget, String> {
         let parts = self.endpoint_parts()?;
         validate_bucket(&self.bucket)?;
-        if self.region.trim().is_empty() {
-            return Err("s3: region must not be empty (it is part of the SigV4 credential scope)".into());
-        }
+        // The same check `sigv4::Signer::new`/`for_service` apply to a region — see that function's doc
+        // for why this used to be the *only* one of the two public region paths that was guarded (CPE-1691).
+        sigv4::validate_region(&self.region)?;
 
         let (host, path_prefix) = match self.resolved_addressing() {
             AddressingStyle::Path => (
@@ -383,6 +383,36 @@ fn split_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
     }
 }
 
+/// Reject text containing a byte that cannot legally appear in a URL, a `Host` header, or a SigV4
+/// credential-scope element: any control character or whitespace (each could split a signed header line
+/// or a hostname), and `?`, `#`, `\` (each would open a new URL component the caller did not intend).
+///
+/// **One validation standard, reused rather than reinvented (CPE-1691).** This is the character-class
+/// check every piece of caller-supplied *structured* text must pass before it reaches the canonical
+/// request or the `Authorization` header — as opposed to a free-form header **value**, which S3 lets
+/// carry near-arbitrary bytes and which [`sigv4::reject_framing_bytes`] guards with a narrower rule
+/// instead (framing bytes only, not an alphabet restriction). [`validate_endpoint_text`] and
+/// [`validate_bucket`] both call this directly; [`sigv4::validate_region`] and the access-key-id check in
+/// [`sigv4::Signer::new`] call it as `crate::validate_structural_text`. Before this ticket, `validate_bucket`
+/// had its own, weaker byte-class check (`u8::is_ascii_whitespace`, which misses `\0`, `\x0b`, `\x7f` and
+/// non-ASCII) — exactly the "two validators of different strictness on the same kind of input" drift this
+/// function exists to close off.
+///
+/// `kind` names the field in the error message (`"endpoint"`, `"bucket name"`, `"region"`, ...); the check
+/// itself never varies.
+fn validate_structural_text(kind: &str, s: &str) -> Result<(), String> {
+    if let Some(ch) = s.chars().find(|c| c.is_control() || c.is_whitespace()) {
+        return Err(format!(
+            "s3: {kind} must not contain control characters or whitespace (they would split a signed \
+             header), got {ch:?} in {s:?}"
+        ));
+    }
+    if let Some(ch) = s.chars().find(|c| matches!(c, '?' | '#' | '\\')) {
+        return Err(format!("s3: {kind} must not contain a query, fragment or backslash, got {ch:?} in {s:?}"));
+    }
+    Ok(())
+}
+
 /// Reject an endpoint containing a byte that cannot legally appear in a URL that becomes a `Host` header
 /// and a request path.
 ///
@@ -396,18 +426,7 @@ fn validate_endpoint_text(endpoint: &str) -> Result<(), String> {
     if endpoint.contains('@') {
         return Err(USERINFO_REFUSED.into());
     }
-    if let Some(ch) = endpoint.chars().find(|c| c.is_control() || c.is_whitespace()) {
-        return Err(format!(
-            "s3: endpoint must not contain control characters or whitespace (they would split the signed \
-             Host header), got {ch:?} in {endpoint:?}"
-        ));
-    }
-    if let Some(ch) = endpoint.chars().find(|c| matches!(c, '?' | '#' | '\\')) {
-        return Err(format!(
-            "s3: endpoint must not contain a query, fragment or backslash, got {ch:?} in {endpoint:?}"
-        ));
-    }
-    Ok(())
+    validate_structural_text("endpoint", endpoint)
 }
 
 /// The refusal for an endpoint carrying userinfo. A single constant, deliberately **not** formatted with
@@ -480,9 +499,12 @@ fn is_dns_compatible_bucket(bucket: &str) -> bool {
 /// Reject a bucket name that cannot appear in a URL at all. Not full S3 bucket-name validation — the
 /// server is the authority on that, and a client-side rule that is stricter than the server's silently
 /// locks users out of buckets that really exist. This only refuses names that would *change the shape*
-/// of the request (a `/` would inject a path segment; whitespace or a `?`/`#` would break the URL).
+/// of the request (a `/` would inject a path segment; whitespace or a `?`/`#` would break the URL) — the
+/// same standard [`validate_endpoint_text`] applies, via the shared [`validate_structural_text`], so the
+/// two cannot drift back into different strictness (CPE-1691; see that function's doc for what used to
+/// slip through here: `\0`, `\x0b`, `\x7f`, non-ASCII).
 ///
-/// `@` and `:` are refused for the same reason, added at CPE-1689: under an **explicit**
+/// `@` and `:` are refused on top of the shared standard, added at CPE-1689: under an **explicit**
 /// [`AddressingStyle::VirtualHost`] the bucket is pasted in front of the endpoint authority, so
 /// `evil@attacker.example` would build the host `evil@attacker.example.s3.amazonaws.com` — userinfo
 /// smuggled in through the other end of the same URL that [`validate_endpoint_text`] guards. It is
@@ -492,10 +514,8 @@ fn validate_bucket(bucket: &str) -> Result<(), String> {
     if bucket.is_empty() {
         return Err("s3: bucket must not be empty".into());
     }
-    if bucket
-        .bytes()
-        .any(|b| matches!(b, b'/' | b'?' | b'#' | b'\\' | b'@' | b':') || b.is_ascii_whitespace())
-    {
+    validate_structural_text("bucket name", bucket)?;
+    if bucket.bytes().any(|b| matches!(b, b'/' | b'@' | b':')) {
         return Err(format!("s3: bucket name must not contain a path or URL separator, got {bucket:?}"));
     }
     Ok(())
@@ -599,6 +619,7 @@ mod tests {
         let sign = |key: &str| {
             let t = aws.object_target(key).unwrap();
             Signer::new(&aws.credentials, &aws.region)
+                .unwrap()
                 .sign(&SigningInput {
                     method: "GET",
                     encoded_path: &t.encoded_path,
@@ -927,6 +948,81 @@ mod tests {
         }
     }
 
+    /// The class item 3 of CPE-1691 documented as still open after CPE-1689: `\0`, `\x0b`, `\x7f` and
+    /// non-ASCII all used to pass `validate_bucket`'s own `is_ascii_whitespace`-based check while
+    /// `validate_endpoint_text` already refused every one of them (`\r`/`\n` happened to be caught only
+    /// because they are ASCII whitespace). This pins `validate_bucket` to the **same** standard so the two
+    /// cannot drift apart again: every byte `validate_endpoint_text` refuses in an otherwise-bare hostname
+    /// (no `@`, `?`, `#`, `\` of its own — those are exercised elsewhere) must also refuse a bucket, driven
+    /// through the public `object_target` under an explicit `VirtualHost` style so the bucket text reaches
+    /// a real signed request the same way item 3's exploit did.
+    #[test]
+    fn validate_bucket_refuses_every_byte_validate_endpoint_text_refuses() {
+        let bad_bytes = ['\0', '\u{0b}', '\u{7f}', '\u{85}', '\r', '\n', '\t', ' '];
+        for ch in bad_bytes {
+            let bucket = format!("a{ch}b");
+            let endpoint = format!("https://s3.{ch}example.com");
+
+            let endpoint_err = S3Config::new(&endpoint, "us-east-1", "my-bucket", creds())
+                .object_target("k")
+                .unwrap_err();
+            assert!(
+                endpoint_err.contains("control characters or whitespace"),
+                "validate_endpoint_text no longer refuses {:?} (U+{:04X}) — the shared standard moved \
+                 without this test noticing: {endpoint_err}",
+                ch,
+                ch as u32
+            );
+
+            let bucket_err = S3Config::new("https://s3.amazonaws.com", "us-east-1", &bucket, creds())
+                .with_addressing(AddressingStyle::VirtualHost)
+                .object_target("k")
+                .unwrap_err();
+            assert!(
+                bucket_err.contains("control characters or whitespace"),
+                "validate_bucket accepted {:?} (U+{:04X}) that validate_endpoint_text refuses — the two \
+                 validators have drifted apart again: {bucket_err}",
+                ch,
+                ch as u32
+            );
+        }
+    }
+
+    /// The other half of the drift pin: `validate_bucket`'s own extra restrictions (`/`, `@`, `:`, added
+    /// at CPE-1689 for reasons `validate_endpoint_text` does not share — see that function's doc) are
+    /// still refused after routing the shared bytes through `validate_structural_text`.
+    #[test]
+    fn validate_bucket_still_refuses_its_own_extra_bytes_after_the_shared_refactor() {
+        for bad in ["a/b", "evil@attacker.example", "host:9000"] {
+            let cfg = S3Config::new("https://s3.amazonaws.com", "us-east-1", bad, creds())
+                .with_addressing(AddressingStyle::VirtualHost);
+            let err = cfg.object_target("k").unwrap_err();
+            assert!(err.contains("path or URL separator"), "for {bad:?}: {err}");
+        }
+    }
+
+    /// AC2's other public path: `S3Config::target_for` (via `object_target`/`bucket_target`) refuses an
+    /// empty or control-character region the same way `Signer::new` does — see the sibling test in
+    /// `sigv4.rs`, `signer_new_and_for_service_refuse_an_empty_or_control_character_region_the_same_way`.
+    /// Before CPE-1691 `target_for` was the *only* one of the two that checked anything, so this is the
+    /// test that closes the second door.
+    #[test]
+    fn a_control_character_or_empty_region_is_refused_through_target_for_too() {
+        let bad_region = S3Config::new("https://s3.example.com", "us-east-1\r\nX-Injected: 1", "b1", creds());
+        let err = bad_region.object_target("k").unwrap_err();
+        assert!(err.contains("control characters or whitespace"), "{err}");
+
+        let empty_region = S3Config::new("https://s3.example.com", "", "b1", creds());
+        assert!(empty_region.object_target("k").unwrap_err().contains("region must not be empty"));
+
+        // A normal region still works.
+        assert!(
+            S3Config::new("https://s3.example.com", "us-east-1", "b1", creds())
+                .object_target("k")
+                .is_ok()
+        );
+    }
+
     /// The secret must not appear in any `Debug` output — not on `Credentials`, not on the `S3Config`
     /// that contains it, and not on the `Signer` that borrows it.
     ///
@@ -938,7 +1034,7 @@ mod tests {
     #[test]
     fn debug_output_never_contains_the_secret() {
         let cfg = S3Config::aws("us-east-1", "my-bucket", creds());
-        let signer = Signer::new(&cfg.credentials, &cfg.region);
+        let signer = Signer::new(&cfg.credentials, &cfg.region).unwrap();
         let rendered = [
             format!("{cfg:?}"),
             format!("{cfg:#?}"),
@@ -968,6 +1064,7 @@ mod tests {
 
         let url = target.url_with_query(&query);
         let signed = Signer::new(&cfg.credentials, &cfg.region)
+            .unwrap()
             .sign(&SigningInput {
                 method: "GET",
                 encoded_path: &target.encoded_path,
@@ -1010,7 +1107,7 @@ mod tests {
         assert_eq!(target.host, "examplebucket.s3.amazonaws.com");
         assert_eq!(target.url, "https://examplebucket.s3.amazonaws.com/test.txt");
 
-        let signer = Signer::new(&cfg.credentials, &cfg.region);
+        let signer = Signer::new(&cfg.credentials, &cfg.region).unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -1047,7 +1144,7 @@ mod tests {
         let sign_with = |style: AddressingStyle| {
             let cfg = base.clone().with_addressing(style);
             let t = cfg.object_target("test.txt").unwrap();
-            let signer = Signer::new(&cfg.credentials, &cfg.region);
+            let signer = Signer::new(&cfg.credentials, &cfg.region).unwrap();
             let signed = signer
                 .sign(&SigningInput {
                     method: "GET",
