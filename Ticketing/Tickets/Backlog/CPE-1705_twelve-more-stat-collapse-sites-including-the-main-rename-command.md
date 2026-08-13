@@ -64,7 +64,8 @@ non-elevated, local NTFS:
 | `REA`, `RD` | true | `Ok(true)` | Ok | **Ok — bytes replaced** |
 | **`S`**, `R`, `RX`, `W` | true | **Err(PermissionDenied)** | Err | **Ok — bytes replaced** |
 | **`F`** | true | Err(PermissionDenied) | Err | **Ok — bytes replaced** |
-| any of the above **+ `(DC)` denied on the PARENT** | true | Err | Err | Err |
+| **`F`** + `(DC)` denied on the PARENT | true | Err | Err | Err |
+| `S`/`R`/`RX`/`W` + `(DC)` on the parent | true | Err | Err | **Ok — still destroyed** |
 
 So under **any** deny that refuses `try_exists`, including `(F)`: **`try_exists` fails while `fs::rename`
 succeeds and destroys the bytes** (measured, `"ORIGINAL"` → `"NEWDATA"`).
@@ -79,9 +80,24 @@ For you that cuts both ways, and both matter:
 
 - **Good:** there is no deny-on-target you could accidentally pick and be silently protected by. Any of
   them lets you stage the real byte loss.
-- **Trap:** your test must **not** also deny `(DC)` on the parent, or the rename is blocked by the parent
-  and your assertion passes for the wrong reason — a vacuous pass of exactly the kind this chain keeps
-  producing.
+- **Trap:** if you stage it with `(F)`, do **not** also deny `(DC)` on the parent — that cuts both routes,
+  the rename is blocked, and your assertion passes for the wrong reason. A vacuous pass of exactly the kind
+  this chain keeps producing.
+
+**Use `(R)`, not `(F)`.** Measured across three different parent directories, `(R)` destroys the bytes in
+every one; `(F)` is parent-dependent. Replacing a file needs `DELETE` on the target **or**
+`FILE_DELETE_CHILD` on the parent, and only `(F)` denies the target's own `DELETE` — so `(F)` is the one
+spec where the parent's ACL can rescue the victim and make your test lie.
+
+**A cautionary note on how this table was arrived at.** It went through three revisions across two
+reviewers and the Foreman. The version that said "only `(F)` blocks the rename" was an artifact of one
+drive's inherited ACL — the same ACE gave opposite answers in two directories on the same machine. The
+reviewer found that by **varying the parent**, which nobody had thought to vary, and reported it against
+its own earlier finding. If you re-measure anything here, vary the directory too.
+
+`crates/server/src/fsutil.rs`'s doc comment currently carries the second-to-last version of this table and
+says "any of the above + parent `(DC)`". **Correct it to the row above as part of this ticket** — you will
+be editing that comment anyway.
 
 **What this means for you: for a `try_exists`-guarded, rename-destructive site you can write a test that
 stages actual byte loss, not merely a refusal message.** Do that — it is a strictly stronger test.
@@ -151,21 +167,39 @@ excluded list. **One is worse than anything either of us named:**
 One accuracy note on a site already listed: **Class C's `batch_media.rs:1736` is a self-described "belt and
 braces" backstop behind a primary `open_no_follow`**, not a primary guard. Real, but say so.
 
-## Triage rule: classify by what the fail-open branch DOES, not by which method spelled it
+## Triage rule: enumerate by syntax, classify by consequence
 
-Proposed by the CPE-1696 worker after conceding `snapshot_capture.rs:374`, and it explains the miss
-exactly. Its triage read `if !path.is_file()` as belonging to the **excluded** `.is_dir()`/`.is_file()`
-type-check family — and never asked what that branch's `else` actually did. In this case it returns an
-empty store, which is an **absence claim wearing a type check's syntax**.
+Proposed by the CPE-1696 worker after conceding `snapshot_capture.rs:374`, sharpened by that PR's reviewer,
+who tested it against its own independent sweep data before endorsing it.
+
+**Step 1 — enumerate by syntax. Step 2 — classify by consequence.** And when this chain misses something,
+say which step failed, because they need opposite fixes.
 
 > **A type-check whose false branch discards state is an absence claim, not a type claim.**
 
-That is why `:444` in the same file was caught and `:374` was not: the same file, the same class, sorted
-into different buckets by *spelling* rather than by *consequence*. Sort by consequence.
+**The enumeration was not the problem this time.** The worker's production `is_file()` count was 25, which
+matched the reviewer's independent sweep **exactly** — so `snapshot_capture.rs:374` **was found, and then
+mis-filed** into the excluded type-check family because nobody asked what its `else` branch did. It returns
+an empty store, which is an absence claim wearing a type check's syntax.
 
-This also means the "deliberately excluded `.is_dir()` type-check family" exclusion below is **not**
-safe to apply mechanically. Re-walk it under this rule before trusting it — any member whose false
-branch discards state, writes, or returns a default belongs in this ticket, not in the exclusion.
+That distinction matters more than it looks: *"widen the search again"* has been the reflex for four rounds
+running, and it is **the wrong lesson this time.** The search was right; the sorting was wrong.
+
+The reviewer validated the rule both ways against its own data. It fires on `snapshot_capture.rs:374` (false
+branch discards the blob-store ledger), `content_index.rs:320` (discards the index) and `batch_media.rs:2054`
+(accepts the name as free). It correctly stays **silent** on the genuinely-excluded family — `duplicates.rs:73`,
+`checksum.rs:54`, `compare.rs:52` and the rest all read `meta.is_file()` off a `metadata()` that already
+succeeded, so there is no failed stat and no fail-open branch to classify.
+
+### What this rule costs — size it up front
+
+**Applying it means the ~110 production `.is_dir()` hits can no longer be excluded wholesale.** CPE-1692
+made a documented decision to skip that family *by syntax*, and this rule is precisely what overturns it.
+Each one now needs its fail-open branch read.
+
+Budget for that at the start rather than discovering it mid-ticket — that discovery is how this becomes a
+seventh round. If the re-walk is too large for one ticket, split it deliberately and say so; do not quietly
+narrow the scope and report the remainder clean.
 
 ## Scope
 
@@ -192,6 +226,13 @@ The twelve sites above. **Deliberately excluded, do not re-open:**
 - [ ] Tests drive the real entry points, not the helpers.
 - [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per
       the Evidence Rules in `Ticketing/wiki.md`. Watch for the vacuous `expect_err` described above.
+- [ ] **`unique_target`'s unprobed fallback.** After CPE-1696 bounded the unknown-run at 8, the fallback
+      `dir.join(format!("{file_name}.{pid}"))` is returned **unprobed** and handed straight to
+      `fs::copy`/`fs::rename`. It was always unprobed, but it used to sit behind 10,000 real collisions and
+      now sits behind 8 unreadable stats — far more reachable. The residual risk is small (it needs a file
+      named exactly `<name>.<our pid>`, and the dead mount that triggers it usually fails the write anyway),
+      but it is the one path in that function that still writes to a name nothing proved empty. Decide and
+      record.
 - [ ] Re-run the sweep at the same scope and state it. If it comes back clean this time, that is worth
       saying explicitly — it would be the first time in six rounds.
 
