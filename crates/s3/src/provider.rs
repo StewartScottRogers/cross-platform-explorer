@@ -1059,6 +1059,26 @@ mod tests {
         assert!(!is_safe_s3_leaf(".."), "UAT set: a key that is exactly '..'");
     }
 
+    /// The PR #890 reviewer neutralised all six arms of [`is_safe_s3_leaf`] one at a time. Four turned a
+    /// distinct test red; these two turned **nothing** red, so they failed Evidence Rule 1 and are pinned
+    /// here.
+    ///
+    /// They were genuinely dead when the only caller was `parse_list_bucket_result`, which `continue`s on
+    /// an empty leaf before ever asking the guard. CPE-1704 changed that: `is_safe_leaf_name` is now a
+    /// public trait method that `crates/vfs::connect::remote_dir_entries` calls on **every** name, so both
+    /// arms are live on that path. An accepted `""` or `"."` there would build a `child_uri` pointing at
+    /// the directory being listed — a row that navigates to itself.
+    ///
+    /// Each arm was disabled on its own (`!leaf.is_empty()` → `true`, then `leaf != "."` → `true`) and
+    /// each reds this test alone. Note the arms live in one `&&` chain in `is_safe_s3_leaf`, **not** in
+    /// `parse_list_bucket_result`'s separate `if leaf.is_empty() { continue }` — disabling the latter
+    /// changes nothing here, which is exactly why these two arms looked covered and were not.
+    #[test]
+    fn is_safe_s3_leaf_rejects_the_two_arms_that_no_other_test_covers() {
+        assert!(!is_safe_s3_leaf(""), "an empty leaf must never be addressable");
+        assert!(!is_safe_s3_leaf("."), "a leaf that is exactly '.' resolves to the listed directory itself");
+    }
+
     #[test]
     fn is_safe_s3_leaf_rejects_a_leading_slash() {
         assert!(!is_safe_s3_leaf("/etc/passwd"), "UAT set: a leading '/'");
