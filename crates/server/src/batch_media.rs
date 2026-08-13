@@ -1927,14 +1927,27 @@ pub(crate) fn open_existing_no_follow(path: &std::path::Path) -> std::io::Result
 /// changed the directory portion of the joined output pays for the (still O(1)-amortized) `path_key`
 /// resolution that confirms it.
 ///
+/// How many candidate output names in a row may come back [`crate::fsutil::TargetSlot::Unknown`] before
+/// [`plan`] gives up on the item (CPE-1705).
+///
+/// Mirrors `unique_target`'s `MAX_CONSECUTIVE_UNKNOWN_SLOTS` in `src-tauri`, and exists for the same
+/// reason: once an unknown slot is treated as occupied, an unreadable output *directory* makes **every**
+/// candidate unknown, and an unbounded search then never terminates. On the dead mount where that happens
+/// each stat can block for seconds, so an unbounded loop is not merely slow, it is a hang. A run this long
+/// cannot be a real name collision — it means the folder itself cannot be read.
+const MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS: usize = 8;
+
 /// **Real-filesystem non-destructive guarantee (CPE-1623):** the collision-avoidance disambiguation below
 /// used to only ever check against this batch's OWN inputs/outputs (`used`) — a computed name that
 /// happened to already exist as some unrelated file never selected into the batch would silently
 /// overwrite it, even in the supposedly-safe default mode. It now also treats a real existing file at the
 /// candidate output as occupied, exactly like a collision with `used`, and renames past it the same way —
-/// a single `Path::is_file()` stat per item (not a `canonicalize`), so the common "the first candidate
+/// a single `Path::try_exists()` stat per item (not a `canonicalize`), so the common "the first candidate
 /// name is free" case costs one cheap syscall, not a regression to the per-item cost this module's own
-/// CPE-1613 fix eliminated.
+/// CPE-1613 fix eliminated. **CPE-1705** replaced that probe's original `Path::is_file()` with the shared
+/// three-state [`crate::fsutil::classify_target_slot`]: a stat that merely *failed* is no longer read as
+/// "this name is free", and a run of [`MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS`] unreadable candidates
+/// refuses the item rather than looping.
 pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, String> {
     let mut parent_cache = ParentCache::new();
     // Computed once per input (not re-derived per collision check below) and reused by index — avoids
@@ -2048,10 +2061,58 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                 let base = out_stem.clone();
                 let mut n = 2;
                 // CPE-1623: also treat a REAL existing file at the candidate output as occupied, not just
-                // a collision with this batch's own `used` set — see the fn doc. `Path::is_file()` is a
-                // single stat, not a `canonicalize`, so this doesn't reintroduce the O(n²) cost CPE-1613
-                // fixed.
-                while used.contains(&out_key) || std::path::Path::new(&output).is_file() {
+                // a collision with this batch's own `used` set — see the fn doc. A single `try_exists`
+                // stat, not a `canonicalize`, so this doesn't reintroduce the O(n²) cost CPE-1613 fixed.
+                //
+                // CPE-1705: this was `Path::is_file()`, which folds every stat failure into `false` and
+                // so handed an unreadable candidate back as a free output name. This is the **planner**
+                // feeding the executor CPE-1696 hardened, which means the collapse is not latent here:
+                // the executor now refuses an output it cannot prove free, so a plan built on the false
+                // premise fails at execution instead of at planning — the user gets a refusal about a
+                // name they never chose. An unknown slot is skipped exactly like an occupied one; the
+                // loop's job is to find *some* free name and it can simply try the next.
+                //
+                // **The bound is not optional here, and it is why this is not a one-line swap.** This
+                // loop had no termination condition other than finding a free name, which was safe only
+                // because the old `is_file()` answered `false` for an unreadable slot and so *always*
+                // terminated on the first candidate. Skipping unknowns without a bound turns an
+                // unreadable output directory — where EVERY candidate is `Unknown` — from a silent
+                // overwrite into an infinite loop, i.e. trades data loss for a hang. `unique_target` hit
+                // exactly this in CPE-1696 and bounded its run at 8. This site has somewhere better to
+                // go than a fallback name: the planner returns `Result` per item, so it refuses to plan
+                // an output in a directory it cannot see, and nothing is written at all.
+                let mut unknown_run = 0usize;
+                loop {
+                    let free = if used.contains(&out_key) {
+                        unknown_run = 0;
+                        false
+                    } else {
+                        match crate::fsutil::classify_target_slot(
+                            &std::path::Path::new(&output).try_exists(),
+                        ) {
+                            crate::fsutil::TargetSlot::Free => true,
+                            crate::fsutil::TargetSlot::Occupied => {
+                                unknown_run = 0;
+                                false
+                            }
+                            crate::fsutil::TargetSlot::Unknown => {
+                                unknown_run += 1;
+                                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS {
+                                    return Err(format!(
+                                        "refusing to plan an output for \"{input}\": the output folder \
+                                         \"{dir}\" could not be read — {MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS} \
+                                         candidate names in a row could not be checked, so no name can be \
+                                         shown to be free. Nothing was planned or written; this is a \
+                                         refusal to guess, not a detected collision"
+                                    ));
+                                }
+                                false
+                            }
+                        }
+                    };
+                    if free {
+                        break;
+                    }
                     out_stem = format!("{base}-{n}");
                     output = join(&dir, &out_stem, &ext);
                     out_key = path_key(&output, &mut parent_cache);

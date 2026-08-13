@@ -153,7 +153,16 @@ pub fn capture(root: &str, store_dir: &str, budget: &CaptureBudget) -> Result<Ca
     fs::create_dir_all(&blobs_dir_path).map_err(|e| format!("{}: {e}", blobs_dir_path.display()))?;
     for blob in &plan.to_store {
         let dest = blobs_dir_path.join(&blob.hash);
-        if dest.exists() {
+        // CPE-1705: was `if dest.exists() { continue }`. The overwrite this guard's collapse permits is
+        // benign — the blob store is content-addressed, so `dest`'s name IS the hash of the bytes about
+        // to be written and re-copying writes identical content. It is fixed anyway, for two reasons
+        // worth stating rather than shrugging at: the shape is the same fail-open-into-overwrite as the
+        // dangerous sites and leaving one behind is how the next sweep mis-sorts it (this file already
+        // supplied that exact lesson — `load_store` above), and the property that makes it benign is an
+        // invariant of the *caller*, not of this line. `Unknown` re-copies rather than skipping: writing
+        // the same bytes again is harmless and strictly safer than assuming a blob we cannot see is
+        // intact, since the manifest saved below will reference it.
+        if crate::fsutil::classify_target_slot(&dest.try_exists()) == crate::fsutil::TargetSlot::Occupied {
             continue; // already on disk (e.g. left over from a prior capture of the same content)
         }
         let Some(rel) = source_for_hash.get(blob.hash.as_str()) else {
@@ -369,10 +378,53 @@ fn skip_reason_str(reason: SkipReason) -> &'static str {
 
 /// Load the store index from `store_dir/index.json`. A store directory that doesn't exist yet (first
 /// capture) yields an empty store, not an error.
+///
+/// # CPE-1705 — the most destructive site in the whole stat-collapse chain
+///
+/// This was `if !path.is_file() { return Ok(BlobStore::new()) }`. `Path::is_file()` is
+/// `metadata().map(|m| m.is_file()).unwrap_or(false)`, so **a stat that merely failed read as "first
+/// capture ever"** and this returned an *empty* store. That is not a wrong error message and not even a
+/// single overwrite:
+///
+/// 1. [`capture`] loads the empty store,
+/// 2. applies this capture's plan to it, and
+/// 3. `save_store`s it back over `index.json` —
+///
+/// so the real index, holding every other snapshot's blob refcounts, is replaced by one listing only this
+/// capture's blobs. The next `delete_snapshot`/GC then frees blobs that older snapshots still reference,
+/// and **those snapshots become permanently unrestorable.** One transient stat, cross-snapshot data loss,
+/// no error anywhere. A network-backed store directory is a plausible trigger and an explicitly supported
+/// one — the QNAP target.
+///
+/// The distinction that had to be restored is precisely *absent* vs *unreadable*: the first is a genuine
+/// first capture and an empty store is right; the second must **fail**, because there is no safe thing to
+/// do with a ledger you cannot read except stop. This is also the site that motivated the ticket's triage
+/// rule — *a type-check whose false branch discards state is an absence claim, not a type claim* — which
+/// is why it survived an "exhaustive" sweep that had correctly *enumerated* it and then filed it under
+/// harmless type checks. Note the type check is kept and still enforced separately: a directory (or a
+/// device node) at `index.json` is a corrupt store, not a fresh one.
 fn load_store(store_dir: &Path) -> Result<BlobStore, String> {
     let path = index_path(store_dir);
-    if !path.is_file() {
-        return Ok(BlobStore::new());
+    match fs::metadata(&path) {
+        // Present and a regular file — load it below.
+        Ok(m) if m.is_file() => {}
+        Ok(_) => {
+            return Err(format!(
+                "{}: the snapshot store index is not a regular file. Refusing to treat this as a fresh \
+                 store, which would overwrite it and orphan every existing snapshot's blobs",
+                path.display()
+            ))
+        }
+        // The ONLY answer that means "no store here yet".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BlobStore::new()),
+        Err(e) => {
+            return Err(format!(
+                "{}: could not read the snapshot store index, so this capture was abandoned: {e}. \
+                 Refusing to continue as if this were the first capture — doing so would rewrite the \
+                 index with only this capture's blobs and permanently orphan every existing snapshot's",
+                path.display()
+            ))
+        }
     }
     let data = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let persisted: PersistedIndex =
@@ -432,6 +484,11 @@ fn validate_manifest_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// How many candidate manifest ids in a row may be unreadable before [`fresh_manifest_id`] gives up
+/// (CPE-1705) — see `MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS` in [`crate::batch_media`] for why treating
+/// unknown-as-occupied without a bound converts a silent overwrite into a hang.
+const MAX_CONSECUTIVE_UNKNOWN_IDS: usize = 8;
+
 /// A fresh, unique manifest id for a capture happening now: the wall-clock epoch-ms, with a `-N` suffix
 /// appended if a manifest with that id already exists (two captures inside the same millisecond) — keeps
 /// ids both roughly time-sortable and guaranteed unique.
@@ -441,7 +498,32 @@ fn fresh_manifest_id(store_dir: &Path) -> Result<String, String> {
     let ms = to_epoch_ms(SystemTime::now()).unwrap_or(0);
     let mut candidate = ms.to_string();
     let mut n = 0u32;
-    while manifest_path(store_dir, &candidate).exists() {
+    // CPE-1705: was `while manifest_path(..).exists()`, the exact `unique_target` shape. An unreadable
+    // manifests directory answered `false` on the first probe, so this handed back an id whose file
+    // `save_manifest` then `fs::write`s — truncating a real manifest and losing a whole snapshot's file
+    // list. Unknown is skipped like occupied, bounded (see `MAX_CONSECUTIVE_UNKNOWN_IDS`) so an
+    // unreadable directory refuses instead of spinning: unlike a copy target there is no fallback name
+    // worth guessing at, and a capture that cannot allocate an id has written nothing yet.
+    let mut unknown_run = 0usize;
+    loop {
+        let p = manifest_path(store_dir, &candidate);
+        let stat = p.try_exists();
+        match crate::fsutil::classify_target_slot(&stat) {
+            crate::fsutil::TargetSlot::Free => break,
+            crate::fsutil::TargetSlot::Occupied => unknown_run = 0,
+            crate::fsutil::TargetSlot::Unknown => {
+                unknown_run += 1;
+                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_IDS {
+                    return Err(format!(
+                        "{}: could not check whether a snapshot manifest id is free \
+                         ({MAX_CONSECUTIVE_UNKNOWN_IDS} candidates in a row were unreadable), so nothing \
+                         was captured — refusing to guess an id rather than risk overwriting an existing \
+                         snapshot's manifest",
+                        dir.display()
+                    ));
+                }
+            }
+        }
         n += 1;
         candidate = format!("{ms}-{n}");
     }

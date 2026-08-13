@@ -170,11 +170,14 @@ fn stamp_nodes(
             }
             Node::File { name, contents } => {
                 let file = dir.join(sanitize_component(&substitute(name, vars)));
-                if file.exists() {
-                    return Err(format!(
-                        "refusing to overwrite existing file: {}",
-                        file.display()
-                    ));
+                // CPE-1705: was `if file.exists()`. The function's own contract two doc-comments up is
+                // "non-destructive (refuses to overwrite an existing file)", and `Path::exists()` could
+                // not deliver it — an unreadable slot answered `false` and `fs::write` truncated it.
+                if let Some(e) = crate::fsutil::clobber_refusal(
+                    &file,
+                    &format!("refusing to overwrite existing file: {}", file.display()),
+                ) {
+                    return Err(e);
                 }
                 fs::write(&file, substitute(contents, vars))
                     .map_err(|e| format!("{}: {e}", file.display()))?;

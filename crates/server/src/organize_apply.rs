@@ -82,8 +82,15 @@ fn apply_proposals(dir: &str, proposals: &[MoveProposal]) -> Vec<OpResult> {
             if let Err(e) = std::fs::create_dir_all(&target_dir) {
                 return OpResult::err(&dst, e.to_string());
             }
-            if dst.exists() {
-                return OpResult::err(&src, format!("\"{}\" already exists in {}", p.name, p.target_subdir));
+            // CPE-1705: was `if dst.exists()`. Auto-organize moves every matching file in a folder in one
+            // batch, so a single unreadable destination slot silently replaced a real file and the run
+            // reported success for it — the checkpoint taken above is the only thing that would have got
+            // it back, and only if the user noticed in time to revert.
+            if let Some(e) = crate::fsutil::clobber_refusal(
+                &dst,
+                &format!("\"{}\" already exists in {}", p.name, p.target_subdir),
+            ) {
+                return OpResult::err(&src, e);
             }
             match std::fs::rename(&src, &dst) {
                 Ok(()) => OpResult::ok(&dst),

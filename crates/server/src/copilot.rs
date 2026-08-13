@@ -223,8 +223,12 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
                 return OpResult::err(p, "cannot rename a path with no parent directory");
             };
             let dst = parent.join(new_name);
-            if dst.exists() {
-                return OpResult::err(p, format!("\"{new_name}\" already exists"));
+            // CPE-1705: was `if dst.exists()` in front of an `fs::rename`, which replaces its
+            // destination silently. See `fsutil::clobber_refusal`.
+            if let Some(e) =
+                crate::fsutil::clobber_refusal(&dst, &format!("\"{new_name}\" already exists"))
+            {
+                return OpResult::err(p, e);
             }
             match std::fs::rename(p, &dst) {
                 Ok(()) => OpResult::ok(&dst),
@@ -252,8 +256,10 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
             return OpResult::err(d, e);
         }
     }
-    if d.exists() {
-        return OpResult::err(d, "destination already exists");
+    // CPE-1705: was `if d.exists()`, guarding BOTH a silent-replacing `fs::rename` and a `copy_recursive`
+    // whose leaf `fs::copy` truncates whatever it lands on.
+    if let Some(e) = crate::fsutil::clobber_refusal(d, "destination already exists") {
+        return OpResult::err(d, e);
     }
     let outcome = if copy {
         copy_recursive(s, d)

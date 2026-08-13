@@ -153,8 +153,14 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     let dest_dir = tickets.join(folder);
     std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join(&file_name);
-    if dest.exists() {
-        return Err(format!("a ticket file already exists at {}", dest.display()));
+    // CPE-1705: was `if dest.exists()`, whose `false` covers "not there" AND "could not tell", ahead of
+    // an `fs::rename` that replaces its destination silently. A board move that landed on an unreadable
+    // slot destroyed the ticket file already sitting there.
+    if let Some(e) = cpe_server::fsutil::clobber_refusal(
+        &dest,
+        &format!("a ticket file already exists at {}", dest.display()),
+    ) {
+        return Err(e);
     }
     let md = std::fs::read_to_string(&src).map_err(|e| e.to_string())?;
     std::fs::write(&src, ticket_board::set_status(&md, status)).map_err(|e| e.to_string())?;
@@ -466,28 +472,19 @@ fn same_path(a: &Path, b: &Path) -> bool {
 /// job is to find some free name and it can simply try the next candidate. Treating the unknown as
 /// occupied is exactly as safe (nothing is ever written to a path we could not prove empty) with no
 /// denial of service.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TargetSlot {
-    /// Provably nothing there — safe to write.
-    Free,
-    /// Provably something there.
-    Occupied,
-    /// The stat failed for a reason other than absence. Not provably free ⇒ not free, but distinguished
-    /// from `Occupied` so [`unique_target`] can tell "this name is taken" from "I cannot see this
-    /// directory at all" and stop grinding (see `MAX_CONSECUTIVE_UNKNOWN_SLOTS`).
-    Unknown,
-}
+///
+/// **CPE-1705 — this enum and its classifier no longer live here.** They were the first copy of what
+/// turned out to be an eighteen-site decision, so they moved to `cpe_server::fsutil` alongside
+/// `clobber_refusal`, and this module now uses the shared one. There is exactly one implementation of
+/// "is this slot free?" in the codebase; the AC that asked for it put the reason plainly — *twelve copies
+/// of the same check is how the thirteenth gets missed*, and five rounds of this bug had already proved
+/// it empirically.
+use cpe_server::fsutil::{classify_target_slot, TargetSlot};
 
-/// Classify one candidate slot from its [`Path::try_exists`] outcome.
+/// Classify one candidate slot from its [`Path::try_exists`] outcome. Thin local alias kept so this
+/// module's call sites and their CPE-1696 doc references read unchanged.
 fn classify_copy_target(stat: std::io::Result<bool>) -> TargetSlot {
-    match stat {
-        // `try_exists`'s `Ok` payload is "it is THERE".
-        Ok(true) => TargetSlot::Occupied,
-        Ok(false) => TargetSlot::Free,
-        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetSlot::Free,
-        Err(_) => TargetSlot::Unknown,
-    }
+    classify_target_slot(&stat)
 }
 
 /// Whether a candidate is *provably* free. Thin wrapper over [`classify_copy_target`] for the single-shot
@@ -1825,8 +1822,21 @@ fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Res
     if target == src {
         return Ok(path.clone()); // no-op rename
     }
-    if target.exists() {
-        return Err(format!("\"{new_name}\" already exists"));
+    // CPE-1705 — the highest-traffic instance of the stat-collapse class. This was
+    // `if target.exists() { Err("already exists") }`, and `Path::exists()` is `metadata().is_ok()`: a
+    // stat that FAILS for any reason other than absence also answers `false`, so the guard passed and
+    // `fs::rename` below ran — and `fs::rename` replaces its destination silently on both Windows and
+    // Unix. The user's existing file was destroyed with no warning and no error. Two independent guards,
+    // because two independent things can be sitting at `target`:
+    if let Some(e) = cpe_server::fsutil::clobber_refusal(&target, &format!("\"{new_name}\" already exists"))
+    {
+        return Err(e);
+    }
+    // …and a DANGLING SYMLINK at `target`, which the check above genuinely cannot see: `try_exists`
+    // follows links, so it correctly answers `Ok(false)` for one, while `fs::rename` does not follow the
+    // final component and destroys the link. A different bug (CPE-1461 family) at the same line.
+    if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(&target) {
+        return Err(e);
     }
     fs::rename(src, &target).map_err(|e| e.to_string())?;
     let target_str = target.to_string_lossy().to_string();
@@ -1908,11 +1918,16 @@ fn restore_from_trash_impl(paths: Vec<String>) -> Vec<OpResult> {
 
         // Never clobber: if something now occupies the original path, refuse
         // rather than overwrite it to satisfy an undo.
-        if target.exists() {
-            results.push(OpResult::err(
-                target,
-                "Something already exists at the original location",
-            ));
+        //
+        // CPE-1705: the comment said "never clobber" and `Path::exists()` did not deliver it — every
+        // stat failure answered `false`, so an unreadable original location was handed to `restore_all`
+        // as free. What the OS trash then does to whatever is really there is out of our hands, which is
+        // exactly why this check has to be the one that is sure.
+        if let Some(e) = cpe_server::fsutil::clobber_refusal(
+            target,
+            "Something already exists at the original location",
+        ) {
+            results.push(OpResult::err(target, e));
             continue;
         }
 
@@ -2140,9 +2155,12 @@ fn restore_trash_items_impl(ids: Vec<String>) -> Vec<OpResult> {
             let target = item.original_path();
 
             // Never clobber: if something now occupies the original path, refuse rather than
-            // overwrite it — same rule as `restore_from_trash_impl`.
-            if target.exists() {
-                return OpResult::err(&target, "Something already exists at the original location");
+            // overwrite it — same rule as `restore_from_trash_impl`, and the same CPE-1705 collapse.
+            if let Some(e) = cpe_server::fsutil::clobber_refusal(
+                &target,
+                "Something already exists at the original location",
+            ) {
+                return OpResult::err(&target, e);
             }
 
             match restore_all([item.clone()]) {
@@ -3358,14 +3376,18 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             {
                 return OpResult::err(src, e);
             }
-            if dst.exists() {
-                return OpResult::err(
-                    src,
-                    format!(
-                        "\"{}\" already exists",
-                        dst.file_name().unwrap_or_default().to_string_lossy()
-                    ),
-                );
+            // CPE-1705: was `if dst.exists()`. CPE-1692 hardened the destination *parent* check two
+            // statements down but left the destination's OWN check collapsed, so a `dst` whose stat was
+            // refused read as a free name and the `fs::rename` below replaced it silently. Same two
+            // guards as `rename_entry_impl`, for the same two reasons.
+            if let Some(e) = cpe_server::fsutil::clobber_refusal(
+                dst,
+                &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
+            ) {
+                return OpResult::err(src, e);
+            }
+            if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(dst) {
+                return OpResult::err(src, e);
             }
             if let Some(parent) = dst.parent() {
                 if let Some(e) = dest_parent_stat_error(parent.try_exists()) {

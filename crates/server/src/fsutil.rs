@@ -41,6 +41,148 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     (year, m, d)
 }
 
+/// Three-state answer to *"is this path free for me to write?"* — the shared vocabulary behind every
+/// refuse-to-clobber guard in the codebase (CPE-1705).
+///
+/// The whole bug class this fixes (CPE-1678 → 1687 → 1692 → 1696 → 1705) is a **two**-state answer to a
+/// **three**-state question. [`Path::exists`] is `metadata().is_ok()`: it folds "provably absent" and "I
+/// could not tell" into the same `false`, and a guard written as `if target.exists() { refuse }` therefore
+/// *proceeds* on "I could not tell". At a site whose next statement is [`std::fs::rename`] that is not a
+/// wrong error message — `fs::rename` **replaces the destination silently on both Windows and Unix**, so
+/// the file that was there is destroyed with no warning and no error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetSlot {
+    /// Provably nothing there — safe to write.
+    Free,
+    /// Provably something there.
+    Occupied,
+    /// The stat failed for a reason other than absence (permission denied along the resolved path, a
+    /// dead network mount, `EIO`, a link that will not resolve). Not provably free ⇒ **not free**, but
+    /// kept distinct from [`TargetSlot::Occupied`] so a caller can tell "this name is taken" from "I
+    /// cannot see this directory at all" and word its refusal — or, like `unique_target`, advance to the
+    /// next candidate — accordingly.
+    Unknown,
+}
+
+/// Classify one target slot from a [`Path::try_exists`] outcome.
+///
+/// Pure, and taking the *outcome* rather than doing the stat, so the taxonomy is unit-testable on every
+/// OS and CI account — the same reason [`crate::dispatch`]'s `classify_path_error` and
+/// [`crate::split_join`]'s `part_stat_error` are split out from their callers. Permission bits are
+/// platform- and privilege-dependent (inert as root; on Windows no deny ACE refuses `Path::exists()` at
+/// all), so an ACL-based test alone would leave this taxonomy unverified on some machines.
+///
+/// [`Path::try_exists`], not [`Path::exists`], is the required probe: it returns `io::Result<bool>` and so
+/// still *carries* the distinction this enum preserves.
+pub fn classify_target_slot(stat: &std::io::Result<bool>) -> TargetSlot {
+    match stat {
+        // `try_exists`'s `Ok` payload is "it is THERE".
+        Ok(true) => TargetSlot::Occupied,
+        Ok(false) => TargetSlot::Free,
+        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetSlot::Free,
+        Err(_) => TargetSlot::Unknown,
+    }
+}
+
+/// **The one refuse-to-clobber guard.** Probe `target` and return the refusal message, or `None` meaning
+/// *proceed* (CPE-1705).
+///
+/// ## Why this is one helper and not eighteen open-coded guards
+///
+/// CPE-1705's acceptance criteria asked the question outright — *"consider whether `fs::rename`'s
+/// silent-replace semantics warrant a shared helper rather than twelve independent guards; twelve copies
+/// of the same check is how the thirteenth gets missed"* — and the five preceding rounds answered it
+/// empirically. CPE-1678, 1687, 1692 and 1696 each fixed a *subset* of the same open-coded shape and each
+/// left more behind, because the shape is only recognisable by reading every site. There is now exactly
+/// one implementation of the decision, so the next site that needs it is a call rather than a
+/// re-derivation, and a `grep` for `.exists()` next to a `rename` is a review-able invariant instead of a
+/// recurring sweep.
+///
+/// `occupied` supplies the **site's own** wording for the provably-occupied case, because that message is
+/// part of each command's contract and is what the UI shows on an ordinary name collision. Only the
+/// unknown case is worded here, and it is worded uniformly on purpose: every site's answer to "I could not
+/// tell" should read the same way, and none of them had one before.
+///
+/// ## What this does NOT cover
+///
+/// - **Symlink-following.** [`Path::try_exists`] follows symlinks and [`std::fs::rename`] does not, so on
+///   a *dangling* symlink `try_exists` answers `Ok(false)` — genuinely, correctly "nothing resolves
+///   there" — and the rename then destroys the link. That is a CPE-1461-family symlink-following issue,
+///   not a stat collapse, and **this helper does not close it.** A site that must not clobber a dangling
+///   link needs a [`std::fs::symlink_metadata`] check as well. Recorded here so a `clobber_refusal` call
+///   is never mistaken for having fixed it.
+/// - **TOCTOU.** Nothing between this probe and the write is atomic. Where the platform offers an atomic
+///   alternative (`create_new`, `open_no_follow`) that remains strictly better and this is not a
+///   substitute for it.
+pub fn clobber_refusal(target: &Path, occupied: &str) -> Option<String> {
+    let stat = target.try_exists();
+    match classify_target_slot(&stat) {
+        TargetSlot::Free => None,
+        TargetSlot::Occupied => Some(occupied.to_string()),
+        TargetSlot::Unknown => Some(unknown_slot_message(target, &stat)),
+    }
+}
+
+/// The wording for [`TargetSlot::Unknown`], split out so the sites that cannot use [`clobber_refusal`]
+/// wholesale (because they probe a slot they will then *advance past* rather than refuse at) still phrase
+/// the unknown identically.
+///
+/// Says three things the pre-CPE-1705 message said none of: which path could not be read, what the OS
+/// actually said, and that the refusal is a refusal *to guess* rather than a claim about the file. The
+/// last matters most — the user is being told the operation did not happen, and the wrong reading ("it
+/// says the file is there, but I can see it isn't") is exactly what sent people looking for a file that
+/// was never gone in CPE-1687.
+pub fn unknown_slot_message(target: &Path, stat: &std::io::Result<bool>) -> String {
+    let cause = match stat {
+        Err(e) => e.to_string(),
+        // Unreachable via `classify_target_slot`; kept total rather than panicking in a guard.
+        Ok(_) => "the check did not complete".to_string(),
+    };
+    format!(
+        "could not check whether \"{}\" already exists, so nothing was written — refusing to guess \
+         rather than risk overwriting it: {cause}",
+        target.display()
+    )
+}
+
+/// A **second and different** guard for the same rename sites: refuse when `target`'s name is occupied by
+/// a **symlink**, including a dangling one (CPE-1705, CPE-1461 family).
+///
+/// [`clobber_refusal`] cannot see this and no amount of stat-collapse fixing will make it: [`Path::exists`]
+/// **and** [`Path::try_exists`] both *follow* symlinks, so on a dangling link both answer "nothing there"
+/// — `try_exists` returns `Ok(false)`, which is not a collapsed failure but a genuinely, correctly
+/// negative answer to the question it was asked. [`std::fs::rename`], meanwhile, does **not** follow the
+/// final component, so it renames straight over the link and the link is destroyed. Measured end to end by
+/// the CPE-1705 predecessor's reviewer: `exists() = false`, `symlink_metadata = Ok`, `fs::rename` → `Ok`.
+///
+/// **It is recorded here, and kept a separate function called separately at each site, precisely so that a
+/// `try_exists` swap is never mistaken for having closed this route.** The two failures look identical
+/// from the user's chair (a file vanished) and have nothing in common underneath. Round six of the
+/// stat-collapse chain existed partly because a fix for one shape was reported as covering another.
+///
+/// Failure policy matches [`classify_target_slot`]: `NotFound` is the only answer that means free. Note
+/// that on Windows an `lstat` opens with a desired-access mask of `0` and is therefore **not** refusable by
+/// a deny ACE, so the `Unknown` arm here is not reachable through this repo's ACL test mechanism — its
+/// coverage comes from the pure classifier plus the real-dangling-link test, not from `deny_stat_of`.
+pub fn symlink_slot_refusal(target: &Path) -> Option<String> {
+    match std::fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_symlink() => Some(format!(
+            "\"{}\" is a link, and renaming onto a link destroys it — the link is removed and its target \
+             is left orphaned. Nothing was changed; remove the link first if that is what you meant",
+            target.display()
+        )),
+        // Not a link: either free, or occupied by a real entry `clobber_refusal` already judged.
+        Ok(_) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(format!(
+            "could not check whether \"{}\" is a link, so nothing was changed — refusing to guess rather \
+             than risk destroying one: {e}",
+            target.display()
+        )),
+    }
+}
+
 /// Whether a directory entry is a symlink (without following it). Used to avoid symlink cycles in the
 /// recursive walks (CPE-609/611).
 pub fn entry_is_symlink(entry: &std::fs::DirEntry) -> bool {
@@ -232,10 +374,10 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///
 /// **Platform-asymmetric on purpose**, because the two OSes need different targets for the SAME
 /// observable effect on `target.try_exists()`:
-/// - **Windows**: deny **Full Control directly on `target` itself** (`icacls target /deny user:(F)`).
+/// - **Windows**: deny **read directly on `target` itself** (`icacls target /deny user:(R)`).
 ///   Measured live (three cases, non-elevated, local NTFS): denying `RX` on `target`'s PARENT (the
 ///   mechanism [`deny_dir_traversal`] uses) leaves `try_exists()` on a child `Ok(true)` — no effect.
-///   Denying `F` directly on the target itself makes `fs::metadata(target)` stay `Ok` (unaffected,
+///   Denying `R` directly on the target itself makes `fs::metadata(target)` stay `Ok` (unaffected,
 ///   confirming `deny_dir_traversal`'s doc comment) while `target.try_exists()` becomes
 ///   `Err(PermissionDenied)` — `try_exists` resolves to `std::fs::exists`, an attributes-query syscall
 ///   distinct from `fs::metadata`'s `CreateFileW` open, and an attributes query IS refused by a deny ACE
@@ -254,18 +396,30 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///
 /// | deny ACE on the target | `try_exists()` | `fs::write` / `fs::copy` | `fs::rename` **onto** it |
 /// |---|---|---|---|
-/// | `S`, `R`, `RX`, `W`, `F` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **`Ok` — bytes replaced** |
-/// | any of the above, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | `Err(PermissionDenied)` |
+/// | `S`, `R`, `RX`, `W` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **`Ok` — bytes replaced** |
+/// | `F` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **parent-dependent** — see below |
+/// | `S`/`R`/`RX`/`W`, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | **`Ok` — still destroyed** |
+/// | `F`, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | `Err(PermissionDenied)` |
 ///
 /// `fs::write`/`fs::copy` request SYNCHRONIZE in their own `CreateFileW` access mask, so every deny that
 /// refuses `try_exists` also refuses them. **`fs::rename` is the exception, and it is the important one:**
 /// replacing an existing file needs `DELETE` on the target *or* `FILE_DELETE_CHILD` on its parent
 /// directory, and a normal scratch parent grants the latter — so the rename destroys the bytes straight
-/// through the deny (measured: `"ORIGINAL"` → `"NEWDATA"`). Note this is a property of the **parent**, not
-/// of the ACE: `(F)` on the target does *not* protect it, and only additionally denying `(DC)` on the
-/// parent does. An earlier revision of this comment claimed "every deny that refuses `try_exists` also
-/// refuses the subsequent write" and concluded that observable byte loss could never be constructed. That
-/// is true for `write`/`copy` and **false for `rename`**.
+/// through the deny (measured: `"ORIGINAL"` → `"NEWDATA"`). An earlier revision of this comment claimed
+/// "every deny that refuses `try_exists` also refuses the subsequent write" and concluded that observable
+/// byte loss could never be constructed. That is true for `write`/`copy` and **false for `rename`**.
+///
+/// **This table has now been revised three times, and the `(F)` row is why.** The revision that said "any
+/// of the above, plus `(DC)` on the parent, blocks the rename" was generalised from `(F)` alone. It does
+/// not hold: `(F)` is the *only* spec that denies the target's own `DELETE`, so `(F)` is the only one the
+/// parent's ACL can rescue the victim from — and whether it does is a property of **the parent directory**,
+/// not of the ACE. The same `(F)` gave opposite answers in two directories on one machine, which is how the
+/// wrong generalisation survived two reviews. **Which is why [`deny_stat_of`] denies `(R)`, not `(F)`:**
+/// `(R)` destroyed the bytes in every one of three different parent directories tested, and it refuses
+/// `try_exists` just as `(F)` does. **Do not "improve" it back to `(F)`, and do not additionally deny
+/// `(DC)` on the parent when staging a byte-loss test** — that cuts both delete routes, the rename fails
+/// for the wrong reason, and the assertion passes vacuously. If you re-measure any of this, vary the
+/// parent directory too; nobody thought to, for three revisions.
 ///
 /// Consequences for testing a guard in this class:
 /// - At a **`write`/`copy`-destructive** site, this helper proves the guard *refuses* but cannot stage
@@ -298,7 +452,11 @@ pub(crate) fn deny_stat_of(target: &Path) -> bool {
                 let _ = std::process::Command::new("icacls")
                     .arg(target)
                     .arg("/deny")
-                    .arg(format!("{user}:(F)"))
+                    // `(R)`, deliberately, NOT `(F)` — see the table above. Both refuse `try_exists`,
+                    // but only `(F)` denies the target's own `DELETE`, which lets a parent directory
+                    // that withholds `FILE_DELETE_CHILD` block a `fs::rename` that this helper's
+                    // callers need to go THROUGH in order to observe the byte loss they assert on.
+                    .arg(format!("{user}:(R)"))
                     .output();
             }
         }
@@ -411,6 +569,66 @@ mod tests {
         // Target doesn't exist → allow (see the precondition: it cannot be destroyed, and the caller's
         // own remove reports it). This is sound ONLY for a remove target.
         assert!(contained_under(&root.join("never-existed.txt"), &root).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The taxonomy CPE-1705 turns on, pinned as a taxonomy: three inputs, three distinct answers. Pure,
+    /// so it runs identically on all three CI OSes and under any account — the coverage an ACL-based test
+    /// cannot give (permission bits are inert as root, and on Windows no deny ACE refuses `Path::exists()`
+    /// at all).
+    #[test]
+    fn classify_target_slot_separates_absent_from_unreadable() {
+        assert_eq!(classify_target_slot(&Ok(false)), TargetSlot::Free, "absent is free");
+        assert_eq!(classify_target_slot(&Ok(true)), TargetSlot::Occupied, "present is occupied");
+        // `try_exists` normally folds this into `Ok(false)`; an explicit NotFound must agree with it.
+        assert_eq!(
+            classify_target_slot(&Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            TargetSlot::Free,
+            "an explicit NotFound is a genuine absence"
+        );
+        // Every other failure is "I could not tell" — NEVER "it isn't there". This is the whole bug.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::InvalidInput,
+        ] {
+            assert_eq!(
+                classify_target_slot(&Err(std::io::Error::new(kind, "nope"))),
+                TargetSlot::Unknown,
+                "{kind:?} means we could not tell, which must never read as free"
+            );
+        }
+    }
+
+    /// The guard itself, driven against a real filesystem for the two answers a real filesystem can give
+    /// cheaply, plus the wording contract for the third.
+    #[test]
+    fn clobber_refusal_proceeds_only_on_a_proven_absence() {
+        let d = scratch("clobber");
+        let absent = d.join("nothing-here.txt");
+        assert_eq!(clobber_refusal(&absent, "taken"), None, "a genuinely absent target must proceed");
+
+        let present = d.join("there.txt");
+        std::fs::write(&present, b"x").unwrap();
+        assert_eq!(
+            clobber_refusal(&present, "\"there.txt\" already exists").as_deref(),
+            Some("\"there.txt\" already exists"),
+            "an occupied target must refuse with the CALLER's wording, not this helper's"
+        );
+
+        // The unknown wording must name the path, quote the OS's own cause, and say nothing was written.
+        let msg = unknown_slot_message(
+            &absent,
+            &Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.")),
+        );
+        assert!(msg.contains("nothing-here.txt"), "must name the path it could not read: {msg}");
+        assert!(msg.contains("Access is denied."), "must quote the OS's own cause: {msg}");
+        assert!(msg.contains("nothing was written"), "must say the operation did not happen: {msg}");
+        assert!(
+            !msg.contains("already exists"),
+            "must NOT claim the target exists — that is the lie CPE-1687 traced to real user confusion: {msg}"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 

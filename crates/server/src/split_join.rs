@@ -107,16 +107,26 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
 
     std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
 
+    // CPE-1705: both probes were `.exists()`. Every part path below is later opened with `File::create`,
+    // which **truncates** — so an unreadable slot here read as free and the split overwrote whatever was
+    // really at that name. Worse than a lone overwrite, because a split writes a whole numbered *series*:
+    // one unreadable directory turns into N destroyed files in one operation.
     let manifest_path = out_dir.join(format!("{original_name}{MANIFEST_SUFFIX}"));
-    if manifest_path.exists() {
-        return Err(format!("{}: already exists — remove it before re-splitting", manifest_path.display()));
+    if let Some(e) = crate::fsutil::clobber_refusal(
+        &manifest_path,
+        &format!("{}: already exists — remove it before re-splitting", manifest_path.display()),
+    ) {
+        return Err(e);
     }
     let width = part_width(part_count);
     let mut part_paths = Vec::with_capacity(part_count as usize);
     for i in 1..=part_count {
         let p = part_path(out_dir, &original_name, i, width);
-        if p.exists() {
-            return Err(format!("{}: already exists — remove it before re-splitting", p.display()));
+        if let Some(e) = crate::fsutil::clobber_refusal(
+            &p,
+            &format!("{}: already exists — remove it before re-splitting", p.display()),
+        ) {
+            return Err(e);
         }
         part_paths.push(p);
     }
@@ -311,8 +321,14 @@ pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), 
     let manifest = load_manifest(&manifest_path)?;
     validate_manifest(&manifest)?;
 
-    if out_path.exists() {
-        return Err(format!("{}: already exists — refusing to overwrite", out_path.display()));
+    // CPE-1705: was `if out_path.exists()`. `join_into` opens `out_path` with `File::create`, which
+    // truncates — and the recovery path below `remove_file`s `out_path` on ANY failure, so a collapsed
+    // guard here does not merely overwrite the victim, it can also delete it on the way out.
+    if let Some(e) = crate::fsutil::clobber_refusal(
+        out_path,
+        &format!("{}: already exists — refusing to overwrite", out_path.display()),
+    ) {
+        return Err(e);
     }
 
     let dir = manifest_path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
