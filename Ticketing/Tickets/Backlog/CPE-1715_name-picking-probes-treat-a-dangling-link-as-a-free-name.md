@@ -1,5 +1,5 @@
 ---
-id: CPE-1713
+id: CPE-1715
 title: unique_target and resolve_conflict treat a dangling link as a free name, so a move renames onto it
 type: bug
 priority: Medium
@@ -9,6 +9,11 @@ estimate: S
 created: 2026-08-13
 closed:
 ---
+
+Related: **CPE-1710** — the sibling half of this hazard, already fixed. It closed the sites that
+**refuse** at an occupied slot; this one covers the sites that **pick a different name** instead, and the
+fix shape differs for that reason: refusing is wrong here, because the caller's whole job is to keep going
+with another name, so a link slot has to read as *occupied* rather than as a *refusal*.
 
 ## Problem
 

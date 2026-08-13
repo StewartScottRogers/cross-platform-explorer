@@ -155,7 +155,7 @@ no skip notice printed, so the links were really created.
 `crates/server` for **both** CI feature modes (default and `--features index`); `src-tauri` clippy clean in
 both modes (default and `--features sidecar-platform`) and `cargo test` green.
 
-### Follow-up filed — CPE-1713
+### Follow-up filed — CPE-1715
 
 The `unique_target` / `resolve_conflict` name-picking probes treat a dangling link as a free name, so a
 bulk move auto-renames *onto* the link and destroys it. Same hazard, different shape (the fix is "treat a
