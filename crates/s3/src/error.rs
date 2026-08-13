@@ -281,6 +281,10 @@ fn is_format_control(c: char) -> bool {
         | '\u{206A}'..='\u{206F}' // deprecated symmetric-swapping / shaping / digit-shape format chars
         | '\u{FEFF}'        // ZERO WIDTH NO-BREAK SPACE / BOM
         | '\u{E0001}'       // LANGUAGE TAG (Unicode Tags block — CPE-1703, ASCII-smuggling vector)
+        // U+E0002-U+E001F and U+E0000 are deliberately NOT matched, and that is a real boundary rather
+        // than an approximation: those codepoints are unassigned/reserved in Unicode, so nothing can be
+        // encoded in them. Said explicitly because the character-by-character probing that found the
+        // original hole will find this gap too, and it should read as intentional (PR #886 UAT).
         | '\u{E0020}'..='\u{E007F}' // TAG SPACE..CANCEL TAG (Unicode Tags block — CPE-1703)
     )
 }
@@ -993,6 +997,54 @@ mod tests {
             let hostile = format!("hello{ch}world");
             let cleaned = sanitize_remote(&hostile, 512);
             assert!(!cleaned.contains(ch), "{name} survived sanitize_remote: {cleaned:?}");
+        }
+    }
+
+    /// The characters immediately OUTSIDE every range this function matches must survive. Added by the
+    /// Foreman from the PR #886 review, which demonstrated the gap the hard way: widening
+    /// `U+206A..=U+206F` by one codepoint to swallow U+2070 SUPERSCRIPT ZERO — an ordinary printable
+    /// character — left the entire 91-test suite green. The shipped boundaries were verified correct at
+    /// every edge, so that was a latent coverage gap rather than a live bug: nothing would have caught a
+    /// *future* off-by-one.
+    ///
+    /// This is the asymmetry that makes the test worth having. Under-covering leaves an invisible-character
+    /// hole; over-covering **mangles a legitimate non-English error message**, which is both worse and far
+    /// more visible to a user. A range list needs its outer edges pinned in the negative direction, not
+    /// only its members pinned in the positive one.
+    #[test]
+    fn characters_immediately_outside_every_matched_range_are_left_alone() {
+        for (name, ch) in [
+            // Adjacent to U+206A..=U+206F — the one the review's own mutation swallowed.
+            ("U+2070 SUPERSCRIPT ZERO", '\u{2070}'),
+            ("U+2071 SUPERSCRIPT LATIN SMALL LETTER I", '\u{2071}'),
+            // Adjacent to the Tags block, both sides, plus its internal unassigned gap.
+            ("U+E0000 (below the Tags block)", '\u{E0000}'),
+            ("U+E001F (unassigned gap below TAG SPACE)", '\u{E001F}'),
+            ("U+E0080 (above CANCEL TAG)", '\u{E0080}'),
+            // Adjacent to the single-codepoint arms.
+            ("U+00AC NOT SIGN", '\u{00AC}'),
+            ("U+00AE REGISTERED SIGN", '\u{00AE}'),
+            ("U+FEFE (below the BOM)", '\u{FEFE}'),
+            ("U+061B ARABIC SEMICOLON", '\u{061B}'),
+            ("U+061D (above U+061C ARABIC LETTER MARK)", '\u{061D}'),
+            // Adjacent to U+200B..=U+200F, U+2060..=U+2064 and U+2066..=U+2069.
+            ("U+200A HAIR SPACE", '\u{200A}'),
+            ("U+2010 HYPHEN", '\u{2010}'),
+            ("U+205F MEDIUM MATHEMATICAL SPACE", '\u{205F}'),
+            ("U+2065 (unassigned, between the invisible-operator and isolate blocks)", '\u{2065}'),
+            // Adjacent to U+202A..=U+202E.
+            ("U+202F NARROW NO-BREAK SPACE", '\u{202F}'),
+        ] {
+            assert!(
+                !is_format_control(ch),
+                "{name} is not a format control and must not be stripped"
+            );
+            let text = format!("before{ch}after");
+            assert_eq!(
+                sanitize_remote(&text, 512),
+                text,
+                "{name} must pass through sanitize_remote byte-for-byte"
+            );
         }
     }
 
