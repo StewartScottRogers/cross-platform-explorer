@@ -236,7 +236,9 @@ many attempts the before run could log; the after run comfortably outlasted it w
 failures). All four entries are removed; if a NEW case ever needs `intermittent`, open a fresh ticket
 rather than reusing this one (see the `$comment` above).
 
-**The "session death" above is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702).** CPE-1679's
+### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
+
+CPE-1679's
 throwaway stress harness (scratch-only, `specs/zzz-cpe1679-stress.smoke.ts` on the never-merged
 `cpe-1679-stress-experiment`/`cpe-1679-stress-after` branches) died mid-loop with `A sessionId is
 required for this command` on all three of its real CI runs (`31672811976`, `31671831127` before the
@@ -271,7 +273,9 @@ fresh session inside its own 90s budget, or add a real per-spec `mochaOpts` over
 scratch file. Whichever you pick, a "SESSION-DEAD" tally entry means you hit this ceiling, not that
 GStreamer leaked — don't go looking for a leak that was ruled out here.
 
-**Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
+### Why case granularity (CPE-1677)
+
+The original ratchet exempted whole spec files. `samples.smoke.ts`
 is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
 nothing: the CPE-1639 worker deliberately broke the font-preview case inside that file, ran the real
 job, and the baseline run and the broken run printed the **byte-identical** verdict — `38 passed, 3

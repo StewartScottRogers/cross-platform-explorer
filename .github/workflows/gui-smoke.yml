@@ -217,15 +217,6 @@ jobs:
       # sessions (the Tauri docs' "Linux Graphics Issues" page lists this as the last-resort fix for
       # silent crashes under Xvfb). Best-effort — not verified live yet (see PR description).
       WEBKIT_DISABLE_COMPOSITING_MODE: "1"
-      # CPE-1702: installing gstreamer1.0-plugins-{good,bad,ugly}/-libav below (for real MP3/AAC/H.264
-      # decode) pulled in `bubblewrap` as a new transitive dependency — the sandboxing tool WebKitGTK
-      # uses to run its GStreamer plugin-scanner helper in an isolated namespace. A real CI run with
-      # just the plugin packages installed still showed EVERY media fixture (including the three real,
-      # previously-working ones) hitting `.mp-fallback`, which points at that helper failing to launch
-      # under GitHub Actions' restricted unprivileged-namespace support rather than the codecs
-      # themselves being absent — a known class of WebKitGTK-under-CI failure. Disabling the sandbox
-      # for this ephemeral, network-isolated CI job (never production) is the standard workaround.
-      WEBKIT_DISABLE_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -249,15 +240,30 @@ jobs:
       # `-good`/`-bad`/`-ugly`/`-libav` — the packages that actually provide MP3, AAC and H.264
       # decoders. Without them, `samples/audio/track.{mp3,flac,ogg}` + `samples/video/clip.mp4` (all
       # real, valid, ffmpeg-encoded media — confirmed in the CPE-1679 UAT, not stubs) can never
-      # decode here, so this job only ever exercised MediaPlayer.svelte's graceful-degrade path
-      # (`.mp-fallback`) and never real playback (`.mp-media`) — the thing a user does most (open an
-      # MP3 and hear it) had zero CI coverage. Installing the plugin packages below makes those four
-      # `samples.smoke.ts` cases decode for real; `samples/audio/corrupt.mp3` (added alongside this
-      # change, see samples/README.md) is a deliberately undecodable fixture so the graceful-degrade
-      # path this job used to be the ONLY exercise of doesn't silently lose its coverage — it's picked
-      # up automatically by `samples.smoke.ts`'s data-first walk of `samples/`, same as every other
-      # fixture. Cost: a few more packages on every GUI-smoke run (apt already has them cached from
-      # the Ubuntu archive; no meaningfully different install time in practice).
+      # decode here, so this job only ever exercises MediaPlayer.svelte's graceful-degrade path
+      # (`.mp-fallback`) and never real playback (`.mp-media`).
+      #
+      # CPE-1702 TRIED installing the four plugin packages here, on two separate real CI runs (once
+      # alone, once combined with `WEBKIT_DISABLE_SANDBOX=1` after the first attempt suggested
+      # WebKitGTK's sandboxed GStreamer plugin-scanner might be failing to launch under GitHub Actions'
+      # restricted namespaces). Both runs installed the packages successfully (`Unpacking`/`Setting up`
+      # for all four, confirmed in the job logs) and both still showed EVERY media fixture — including
+      # the three real, previously-working audio files and the real video — rendering `.mp-fallback`,
+      # not `.mp-media` (checked against the actual rendered DOM in each run's raw log, not just the
+      # green ratchet: `class="mp...` never matched anything but `mp-fallback`/`mp-fallback-msg`/
+      # `mp-open-ext`). Best remaining hypothesis, NOT confirmed: apt's own "Suggested packages" output
+      # lists `pipewire`/`pulseaudio`/`gstreamer1.0-alsa` as available but not installed on this
+      # runner, so GStreamer's `autoaudiosink` may have nothing to attach to even with every decoder
+      # present — video's failure too suggests the same class of sink problem, not a missing-codec one.
+      # Confirming that would need GStreamer/WebKitGTK's own diagnostic output piped to CI stdout
+      # first (it isn't currently), which is materially more work than this ticket's decision scope.
+      # Decision: leave the codec packages OUT — real decode is not achieved here, so paying the apt
+      # cost buys nothing. `samples/audio/corrupt.mp3` (see samples/README.md) still ships as a
+      # permanent, environment-independent regression pin for the graceful-fallback UI, and
+      # `samples.smoke.ts` now asserts ALL FIVE media fixtures land on `.mp-fallback` specifically (not
+      # just "settled somehow") — so the day this runner's audio/video pipeline starts working for
+      # real, that assertion breaks loudly instead of staying silently green, and this comment is the
+      # place to come update it.
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -267,11 +273,7 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
-            xvfb \
-            gstreamer1.0-plugins-good \
-            gstreamer1.0-plugins-bad \
-            gstreamer1.0-plugins-ugly \
-            gstreamer1.0-libav
+            xvfb
 
       - name: Setup Node
         uses: actions/setup-node@v4
