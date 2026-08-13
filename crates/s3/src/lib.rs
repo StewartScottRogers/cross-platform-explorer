@@ -761,13 +761,20 @@ mod tests {
         let err = cfg.object_target("k").unwrap_err();
         assert!(err.contains("control characters or whitespace"), "{err}");
 
-        // Nothing was produced at all, so there is no target to build a URL from or to sign.
-        assert!(cfg.bucket_target().is_err());
+        // Nothing was produced at all, so there is no target to build a URL from or to sign — and the
+        // *same* named refusal fires for `bucket_target` too, not just any error (UAT Q-1: a bare
+        // `is_err()` here would not have distinguished this from, say, the unrelated port check once
+        // catching a CRLF endpoint for the wrong reason).
+        let bucket_err = cfg.bucket_target().unwrap_err();
+        assert!(bucket_err.contains("control characters or whitespace"), "{bucket_err}");
         // The refusal is the only thing that comes back, and it carries no raw CR/LF of its own — the
         // echoed endpoint is `Debug`-escaped, so even the error string cannot split a line.
         assert!(!err.contains('\r') && !err.contains('\n'), "the error itself carries a raw CR/LF: {err:?}");
 
-        // A bare tab, a vertical tab, a NUL and an interior space are refused by the same rule.
+        // A bare tab, a vertical tab, a NUL and an interior space are refused by the same rule. Asserted
+        // on the message, not `is_err()` (UAT Q-1): the ticket's own motivating case was a CRLF endpoint
+        // once caught by the unrelated port-parsing check, where `is_err()` alone would have looked like
+        // this exact guard working when it was a different one entirely.
         for bad in [
             "https://s3.example\tcom",
             "https://s3.example\u{0b}com",
@@ -776,7 +783,8 @@ mod tests {
             "https://s3.example\u{85}com",
         ] {
             let cfg = S3Config::new(bad, "us-east-1", "my-bucket", creds());
-            assert!(cfg.object_target("k").is_err(), "accepted control/whitespace endpoint {bad:?}");
+            let err = cfg.object_target("k").unwrap_err();
+            assert!(err.contains("control characters or whitespace"), "for {bad:?}: {err}");
         }
 
         // Surrounding whitespace is still trimmed rather than refused — that was always allowed and is
@@ -999,6 +1007,19 @@ mod tests {
             let err = cfg.object_target("k").unwrap_err();
             assert!(err.contains("path or URL separator"), "for {bad:?}: {err}");
         }
+    }
+
+    /// The other sub-check inside `validate_structural_text` — `?`/`#`/`\` — was pinned on the endpoint
+    /// side (`an_endpoint_with_a_query_fragment_or_backslash_is_refused`) but had no bucket-side test, so
+    /// disabling it there would have gone unnoticed (found by the independent UAT on this PR, CPE-1691).
+    /// Explicit `VirtualHost` so the bucket text reaches a real signed request rather than being
+    /// short-circuited to path-style by `Auto` (a bucket with `?` in it is never DNS-compatible).
+    #[test]
+    fn validate_bucket_refuses_a_query_character_the_same_way_the_endpoint_does() {
+        let cfg = S3Config::new("https://s3.amazonaws.com", "us-east-1", "a?b", creds())
+            .with_addressing(AddressingStyle::VirtualHost);
+        let err = cfg.object_target("k").unwrap_err();
+        assert!(err.contains("query, fragment or backslash"), "{err}");
     }
 
     /// AC2's other public path: `S3Config::target_for` (via `object_target`/`bucket_target`) refuses an
