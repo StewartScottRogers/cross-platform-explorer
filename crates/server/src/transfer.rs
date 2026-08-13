@@ -1182,18 +1182,22 @@ mod tests {
         let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         for inp in &inputs {
             let enc = windows_safe_segment(inp).into_owned();
+            // Collision FIRST: it is the failure this test exists to name, and it must not be masked by
+            // the reversibility assertion below (which detects the same defect less legibly).
+            if let Some(other) = seen.insert(enc.clone(), inp.clone()) {
+                if other != *inp {
+                    panic!(
+                        "COLLISION: the distinct remote names {other:?} and {inp:?} both map to the \
+                         local file {enc:?} — one of the two would be silently overwritten"
+                    );
+                }
+            }
             assert_eq!(
                 decode_windows_safe_segment(&enc),
                 *inp,
                 "decode(encode({inp:?})) must return the original exactly — reversibility is what \
                  makes the mapping injective"
             );
-            if let Some(other) = seen.insert(enc.clone(), inp.clone()) {
-                if other != *inp {
-                    panic!("COLLISION: {other:?} and {inp:?} both map to the local name {enc:?} — two \
-                            distinct remote keys would overwrite one local file");
-                }
-            }
         }
     }
 
