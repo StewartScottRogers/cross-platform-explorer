@@ -160,9 +160,10 @@ const MAX_XML_NESTING_DEPTH: usize = 64;
 /// spending its whole [`MAX_RESPONSE_BODY_BYTES`] budget on one ~8 MiB "filename" that then flows straight
 /// into the UI as an entry name. Measured against the *leaf* (the part after the requested prefix), not the
 /// whole key: the leaf is what becomes a displayed name, and it is always ≤ the key, so a 1024-byte leaf
-/// bound admits every key a real bucket can hold. Dropped exactly like any other unsafe name — silently
-/// skipped, never rendered — because a listing that quietly omits one absurd entry is better than one that
-/// fails wholesale over a single bad row.
+/// bound admits every key a real bucket can hold. Enforced as one more arm of [`is_safe_s3_leaf`], so an
+/// over-long key is dropped by exactly the path any other unsafe name takes — which, post-CPE-1704, means
+/// it is *counted* into `filtered_count` and surfaced rather than silently vanishing, and means the bound
+/// also applies through `S3Provider`'s `is_safe_leaf_name` override in `crates/vfs`.
 const MAX_KEY_LEAF_BYTES: usize = 1024;
 
 /// How long a single socket read may make **no progress at all** before the request is abandoned
@@ -309,9 +310,89 @@ fn leaf_under_prefix<'a>(key: &'a str, key_prefix: &str) -> Option<&'a str> {
     key.strip_prefix(key_prefix)
 }
 
+/// True if `leaf` — the part of an S3 key after the requested `key_prefix` (see [`leaf_under_prefix`]) —
+/// is safe for [`S3Provider::list`] to surface as a [`ProviderEntry`]'s `name`.
+///
+/// This is a SIBLING of `cpe_server::transfer::is_safe_name` (CPE-1704), not a call into it. `is_safe_name`
+/// is the traversal guard for local paths, SFTP and WebDAV (CPE-1461), where it correctly refuses any leaf
+/// containing `:` — a Windows drive-letter/NTFS alternate-data-stream hazard — and any leaf *starting with*
+/// `..` (an ADS trick: `..::$DATA`). Neither rule means anything in an S3 keyspace: there are no drive
+/// letters, no alternate data streams, and `:` is a completely ordinary key byte. Reusing that guard here
+/// was CPE-1704's bug — a legal key like `colon:name.txt` vanished from every listing with no error, no
+/// warning, nothing.
+///
+/// What this function checks is only what is actually about a leaf escaping the listed prefix once it is
+/// round-tripped back through [`provider_path_to_key_prefix`] into a later `list`/`stat`/`read` call's
+/// `path`: an embedded or leading path separator (`/` or `\`), a leaf that is exactly `..` or `.`, or a
+/// control byte (NUL, a raw newline/CR, …) that could corrupt a rendered listing or a log line.
+///
+/// # CPE-1704 round 2: no percent-decoding here, on purpose
+///
+/// An earlier version of this function additionally percent-decoded the leaf once and re-checked the
+/// decoded form, on the theory that `..%2f` — no raw `/` byte, but decodes to `../` — could reach some
+/// downstream consumer that itself percent-decodes a display name. **That theory was checked and found
+/// false**, and the check reintroduced this ticket's own bug: S3 key bytes are never implicitly
+/// percent-decoded anywhere in this crate or its callers — [`provider_path_to_key_prefix`] and
+/// [`leaf_under_prefix`] are both plain byte/string operations, `crates/vfs` passes `path` straight
+/// through, and nothing in `src/`/`src-tauri/` decodes an entry's `name` — and CPE-1684 documents the same
+/// design intent explicitly ("S3 must **not** normalise dot segments: key `a/../b.txt` is a real, distinct
+/// key"). A percent-decode pass could not tell *"a key whose bytes happen to look like an encoded slash"*
+/// from *"a key that legitimately contains the four characters `%2f`"* — because both are just text, and
+/// S3 never treats one differently from the other. Refusing on the decoded shape therefore hid a real,
+/// harmless key (`report%2ffinal.txt`) exactly like the `:` bug this ticket exists to fix, for a threat
+/// that cannot occur on any path this leaf actually travels. If a *future* consumer is added that does
+/// decode an entry name (a URL builder, a proxy), the guard belongs at that decode site, where the actual
+/// risk lives — not here, where it can only cost legal keys.
+///
+/// A leaf this refuses is a real S3 key that will not appear in the listing as itself; see
+/// [`S3Provider::list_with_filtered_count`]'s doc for how that is surfaced instead of silently dropped.
+///
+/// # CPE-1704 round 3: this is now also `S3Provider`'s [`FileSystemProvider::is_safe_leaf_name`] override
+///
+/// `crates/vfs::connect::remote_dir_entries` — the ONE code path a user's remote listing actually takes —
+/// used to re-filter every provider's entries through the hardcoded `cpe_server::transfer::is_safe_name`,
+/// regardless of which backend produced them. That silently re-dropped `colon:name.txt` a second time,
+/// downstream of this function, even after this function had correctly let it through — the ticket's
+/// opening bug, surviving one layer further out. `is_safe_leaf_name` is now a
+/// [`cpe_server::provider::FileSystemProvider`] trait method (default: `is_safe_name`, unchanged for
+/// local/SFTP/WebDAV/FTP) that a provider overrides to state its own rule; `S3Provider` overrides it to
+/// call this function, so `remote_dir_entries` asks the right question instead of assuming one answer
+/// fits every backend.
+/// # CPE-1706 item 3: the length bound belongs here, not at the call sites
+///
+/// [`MAX_KEY_LEAF_BYTES`] is checked as one more arm of this same function rather than as a separate
+/// `if` in [`parse_list_bucket_result`], for two reasons. First, the ticket's own wording — "drop
+/// over-long keys **the way any other unsafe name is dropped**" — and post-CPE-1704 that way includes
+/// being *counted* into `filtered_count` rather than silently vanishing, which a separate `continue`
+/// would not have been. Second, this function is also `S3Provider`'s
+/// [`cpe_server::provider::FileSystemProvider::is_safe_leaf_name`] override, so putting the bound here
+/// makes `crates/vfs::connect::remote_dir_entries` apply it too, on the one code path a user's remote
+/// listing actually takes; a check sitting in the parser would have been invisible from there.
+///
+/// Note this is the *one* arm that is a length bound rather than a byte-class rule, and it is set at real
+/// S3's own documented key limit — so unlike a shape rule it can never refuse a key a conforming server
+/// could produce. See [`MAX_KEY_LEAF_BYTES`].
+fn is_safe_s3_leaf(leaf: &str) -> bool {
+    !leaf.is_empty()
+        && leaf.len() <= MAX_KEY_LEAF_BYTES
+        && leaf != ".."
+        && leaf != "."
+        && !leaf.contains('/')
+        && !leaf.contains('\\')
+        && !leaf.chars().any(|c| c.is_control())
+}
+
 /// One page of a `ListObjectsV2` response, parsed.
 struct ListPage {
     entries: Vec<ProviderEntry>,
+    /// How many `<Contents>`/`<CommonPrefixes>` entries on this page were dropped by [`is_safe_s3_leaf`]
+    /// (CPE-1704) — NOT counting entries dropped for being outside the requested prefix (a different,
+    /// server-misbehaviour case; see [`parse_list_bucket_result`]'s doc).
+    /// [`S3Provider::list_with_filtered_count`] sums this across every page and returns it as a real,
+    /// honest `usize` alongside the entries — never a synthetic row mixed into the `Vec` itself (CPE-1704
+    /// round 3: an earlier version of this fix did exactly that, and it turned out to be worse than the
+    /// silent drop it replaced — see that method's doc).
+    filtered_count: usize,
     is_truncated: bool,
     next_token: Option<String>,
 }
@@ -325,12 +406,20 @@ struct ListPage {
 ///   dropped (a server returning outside its own advertised prefix — CPE-1683 AC5).
 /// - A `<Contents>` entry whose key equals `key_prefix` exactly is the directory's own zero-byte marker
 ///   object (CPE-1683 AC4) and is dropped — it is the directory being listed, not a file inside it.
-/// - A leaf longer than [`MAX_KEY_LEAF_BYTES`] is dropped (CPE-1706 item 3): real S3 caps a key at 1024
-///   bytes, so anything past that came from a server inventing names, and these names reach the UI.
 /// - The remaining leaf name (the part after `key_prefix`, with a `CommonPrefixes` leaf's trailing `/`
-///   also stripped) must pass [`cpe_server::transfer::is_safe_name`] — the same guard SFTP/WebDAV apply to
-///   an attacker-controlled remote name, so a key carrying `../`, an embedded `/`, or a leading `/` cannot
-///   produce an entry that escapes the listed prefix once rendered locally.
+///   also stripped) must pass [`is_safe_s3_leaf`] — an S3-appropriate SIBLING of
+///   `cpe_server::transfer::is_safe_name` (CPE-1704), not that function itself: `is_safe_name` is the
+///   traversal guard for local paths, SFTP and WebDAV, where a `:` is a Windows drive-letter/NTFS
+///   alternate-data-stream hazard and is correctly refused; S3 has no such concept and `:` is a completely
+///   legal key byte, so reusing that guard here was silently dropping every legal `colon:name.txt`-shaped
+///   key from a listing with no error, no warning, nothing (CPE-1704). [`is_safe_s3_leaf`] keeps every
+///   check that is actually about a leaf escaping the listed prefix once round-tripped back through
+///   [`provider_path_to_key_prefix`] into a later request — an embedded or leading path separator, a
+///   literal `..` segment (including its percent-encoded form, e.g. `..%2f`), a control byte — and drops
+///   the filesystem-only rules (`:`, and "starts_with('..')" ADS hardening) that don't apply to a keyspace
+///   with no drive letters and no alternate data streams.
+/// - A leaf this guard genuinely must refuse is counted in `ListPage::filtered_count` rather than silently
+///   vanishing (CPE-1704 — see [`S3Provider::list`]'s doc for what happens to that count).
 fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, String> {
     if xml_nesting_too_deep(xml, MAX_XML_NESTING_DEPTH) {
         return Err("s3: ListObjectsV2 response XML nesting too deep".to_string());
@@ -362,6 +451,7 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         .filter(|t| !t.is_empty());
 
     let mut entries = Vec::new();
+    let mut filtered_count = 0usize;
 
     for content in root.children().filter(|n| n.tag_name().name() == "Contents") {
         let Some(key) = content.children().find(|n| n.tag_name().name() == "Key").and_then(|n| n.text())
@@ -372,11 +462,13 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         if leaf.is_empty() {
             continue; // the directory's own zero-byte marker object, not a file inside it (AC4)
         }
-        if leaf.len() > MAX_KEY_LEAF_BYTES {
-            continue; // CPE-1706 item 3: longer than S3's own 1024-byte key limit — dropped as unsafe
-        }
-        if !cpe_server::transfer::is_safe_name(leaf) {
-            continue; // AC5: a hostile/malformed key must not escape the listed prefix
+        if !is_safe_s3_leaf(leaf) {
+            // AC5/CPE-1704: a hostile/malformed key must not escape the listed prefix. Counted, not
+            // silently dropped — see ListPage::filtered_count and S3Provider::list. CPE-1706 item 3's
+            // length cap lives inside `is_safe_s3_leaf` rather than here, so an over-long key is dropped
+            // — and counted — by exactly the same path as any other unsafe name.
+            filtered_count += 1;
+            continue;
         }
         let size = content
             .children()
@@ -397,16 +489,16 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         if leaf.is_empty() {
             continue;
         }
-        if leaf.len() > MAX_KEY_LEAF_BYTES {
-            continue; // CPE-1706 item 3, the directory-entry mirror of the Contents check above
-        }
-        if !cpe_server::transfer::is_safe_name(leaf) {
-            continue; // AC5, the directory-entry mirror of the Contents check above
+        if !is_safe_s3_leaf(leaf) {
+            // AC5, the directory-entry mirror of the Contents check above; also counted. The CPE-1706
+            // item 3 length cap is inside `is_safe_s3_leaf`, so it mirrors here for free.
+            filtered_count += 1;
+            continue;
         }
         entries.push(ProviderEntry { name: leaf.to_string(), is_dir: true, size: 0 });
     }
 
-    Ok(ListPage { entries, is_truncated, next_token })
+    Ok(ListPage { entries, filtered_count, is_truncated, next_token })
 }
 
 /// An S3-compatible bucket presented as a synchronous [`FileSystemProvider`].
@@ -530,15 +622,51 @@ impl S3Provider {
     }
 }
 
-impl FileSystemProvider for S3Provider {
+impl S3Provider {
     /// `ListObjectsV2` with `delimiter=/`, paginated to completion via `continuation-token`
-    /// (CPE-1683 AC2). See this module's top doc for the marker-filtering and traversal guards
+    /// (CPE-1683 AC2), reporting how many entries were filtered by [`is_safe_s3_leaf`] alongside the
+    /// entries themselves. See this module's top doc for the marker-filtering and traversal guards
     /// [`parse_list_bucket_result`] applies to every entry before it is returned.
-    fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+    ///
+    /// # CPE-1704: a key [`is_safe_s3_leaf`] refuses is reported, not dropped silently
+    ///
+    /// **Round 1** of this fix returned `Result<Vec<ProviderEntry>, String>` unchanged and simply dropped
+    /// refused leaves, silently — the ticket's own bug, just narrowed. **Round 2** appended a synthetic,
+    /// non-`is_dir` `ProviderEntry` to the `Vec` naming the count. Review found that worse than the drop
+    /// it replaced: a REAL object can be named exactly the marker's own text (nothing stops it — it is
+    /// just a string), so the only "N filtered" row a user could ever trust-see was, in fact, the one an
+    /// attacker planted; the marker's `is_dir: false, size: 0` claimed to be a real zero-byte file; an S3
+    /// `DELETE` of a nonexistent key returns `204`, so "deleting" the marker would silently report success
+    /// while the real files stayed hidden; and it landed in `out` after the [`MAX_LIST_ENTRIES`] check, so
+    /// it could push a listing one over the cap unaccounted-for. A fabricated row is not "not silent" — it
+    /// is a second bug wearing the first one's fix as a costume.
+    ///
+    /// **This version (round 3)** returns the count as a real, honest `usize` field, never mixed into the
+    /// entries themselves — nothing can spoof it, because nothing a server sends ever reaches this field;
+    /// it is computed here, in this process, from what this function itself dropped.
+    /// [`FileSystemProvider::list`] (the trait's required method, still returning plain
+    /// `Vec<ProviderEntry>` for every provider that doesn't need more) is now a thin wrapper over this
+    /// method that discards the count, kept only so existing/other callers of the trait's `list` don't
+    /// need to change. `crates/vfs::connect::remote_dir_entries` is the one caller that actually reads the
+    /// count today (CPE-1704 round 3, see that function's doc); this crate's own `stat`/`read`/`delete`
+    /// are still CPE-1684 stubs, but whoever wires them up must not accept the marker text — there is none
+    /// any more — or ANY provider-supplied name as a literal key without going through the same
+    /// [`is_safe_s3_leaf`] check `list` already applies, since a filtered leaf was never a real, addressable
+    /// key to begin with.
+    ///
+    /// Recorded decision on `a/../b.txt` (CPE-1704's second named case): the deeper leaf (literally `..`
+    /// once the `a/` prefix is stripped) is still, correctly, refused — it cannot be surfaced as itself
+    /// without misrepresenting the virtual-directory structure. It is **not reachable** under an escaped
+    /// display name in this ticket: `ProviderEntry` carries only a display `name`, no separate "real key" a
+    /// later `stat`/`read` could resolve back from an escaped form, and inventing that round-trip is
+    /// CPE-1684's (stat/read/write) concern. It is **visibly explained**: the directory's `filtered_count`
+    /// is non-zero instead of the listing reading as an ordinary, indistinguishable-from-real empty folder.
+    pub fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
         let key_prefix = provider_path_to_key_prefix(path);
         let target = self.config.bucket_target()?;
 
         let mut out = Vec::new();
+        let mut filtered_total = 0usize;
         let mut continuation: Option<String> = None;
         let mut pages = 0usize;
         let started = Instant::now();
@@ -590,6 +718,7 @@ impl FileSystemProvider for S3Provider {
             let text = std::str::from_utf8(&body)
                 .map_err(|e| format!("s3: list {path:?}: response body was not valid UTF-8: {e}"))?;
             let page = parse_list_bucket_result(text, &key_prefix)?;
+            filtered_total += page.filtered_count;
 
             for entry in page.entries {
                 out.push(entry);
@@ -612,7 +741,46 @@ impl FileSystemProvider for S3Provider {
             })?);
         }
 
-        Ok(out)
+        Ok((out, filtered_total))
+    }
+}
+
+impl FileSystemProvider for S3Provider {
+    /// The trait's required entry point: [`S3Provider::list_with_filtered_count`] with the count
+    /// discarded. See that method's doc for the full CPE-1704 history and for the caller
+    /// (`crates/vfs::connect::remote_dir_entries`) that uses the count instead of this.
+    fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+        Ok(self.list_with_filtered_count(path)?.0)
+    }
+
+    /// **This override is load-bearing and its absence is invisible to a normal test.** Added by the
+    /// Foreman from the PR #890 round-3 UAT.
+    ///
+    /// [`S3Provider::list_with_filtered_count`] is an *inherent* method. Rust resolves inherent methods
+    /// before trait methods, so every test that calls it on a concrete `S3Provider` gets the real one and
+    /// passes — all 122 of this crate's tests did. But `crates/vfs::connect::remote_dir_entries` takes
+    /// `&dyn FileSystemProvider`, and a trait object can only reach what the `impl` block declares. Without
+    /// this line the vtable resolves to the trait's default, which hardcodes a count of `0`.
+    ///
+    /// The consequence was that the filtered count — the entire mechanism this ticket added so a refused
+    /// key would not vanish *silently* — read `0` through the only path a user takes, no matter how many
+    /// keys were dropped. `remote_list_dir_impl`'s `if listing.filtered > 0` could never fire. The
+    /// "not silent" fix was itself silent.
+    ///
+    /// Note what this means for testing, because it is the third time this one ticket has been caught by
+    /// it: a test on the concrete type proves nothing about dispatch. `dyn_dispatch_reaches_the_real_...`
+    /// below exercises this through a trait object deliberately, and it is the only test that can fail if
+    /// this line is deleted.
+    fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
+        S3Provider::list_with_filtered_count(self, path)
+    }
+
+    /// S3's own leaf-safety rule (CPE-1704): overrides the trait's default (`is_safe_name`, correct for
+    /// filesystem-shaped backends) with [`is_safe_s3_leaf`], so `crates/vfs::connect::remote_dir_entries`
+    /// — the one path a user's remote listing actually takes — asks the RIGHT question about an S3 leaf
+    /// instead of assuming every backend means the same thing by "safe". See [`is_safe_s3_leaf`]'s doc.
+    fn is_safe_leaf_name(&self, name: &str) -> bool {
+        is_safe_s3_leaf(name)
     }
 
     fn stat(&self, _path: &str) -> Result<ProviderEntry, String> {
@@ -1100,6 +1268,254 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // CPE-1704: `is_safe_s3_leaf` is a SIBLING of `cpe_server::transfer::is_safe_name`, not a call into
+    // it — S3 has no drive letters and no alternate data streams, so `:` must be accepted, while every
+    // check that is actually about escaping the listed prefix (embedded/leading separator, a literal `..`
+    // segment including its percent-encoded form, a control byte) must still hold. Each shape below is its
+    // own test, not folded into one big loop, so disabling any single rule inside `is_safe_s3_leaf` turns
+    // a distinct, nameable assertion red — the Evidence Rules requirement this ticket calls out explicitly.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn is_safe_s3_leaf_accepts_a_colon_s3_has_no_ads_concept() {
+        // CPE-1704 AC1: the bug this ticket exists to fix. `:` is a Windows drive-letter/NTFS
+        // alternate-data-stream hazard for `cpe_server::transfer::is_safe_name` (local/SFTP/WebDAV) and is
+        // correctly refused there; it is a completely ordinary byte in an S3 key.
+        assert!(is_safe_s3_leaf("colon:name.txt"), "S3 has no drive letters/ADS; ':' is an ordinary key byte");
+        assert!(is_safe_s3_leaf("x:y"), "the shared guard's bare-drive-letter rejection doesn't apply to S3");
+        assert!(
+            is_safe_s3_leaf("..evil.txt"),
+            "the shared guard's starts_with('..') ADS hardening is filesystem-only, not an S3 rule"
+        );
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_rejects_exactly_dot_dot() {
+        assert!(!is_safe_s3_leaf(".."), "UAT set: a key that is exactly '..'");
+    }
+
+    /// The PR #890 reviewer neutralised all six arms of [`is_safe_s3_leaf`] one at a time. Four turned a
+    /// distinct test red; these two turned **nothing** red, so they failed Evidence Rule 1 and are pinned
+    /// here.
+    ///
+    /// They were genuinely dead when the only caller was `parse_list_bucket_result`, which `continue`s on
+    /// an empty leaf before ever asking the guard. CPE-1704 changed that: `is_safe_leaf_name` is now a
+    /// public trait method that `crates/vfs::connect::remote_dir_entries` calls on **every** name, so both
+    /// arms are live on that path. An accepted `""` or `"."` there would build a `child_uri` pointing at
+    /// the directory being listed — a row that navigates to itself.
+    ///
+    /// Each arm was disabled on its own (`!leaf.is_empty()` → `true`, then `leaf != "."` → `true`) and
+    /// each reds this test alone. Note the arms live in one `&&` chain in `is_safe_s3_leaf`, **not** in
+    /// `parse_list_bucket_result`'s separate `if leaf.is_empty() { continue }` — disabling the latter
+    /// changes nothing here, which is exactly why these two arms looked covered and were not.
+    #[test]
+    fn is_safe_s3_leaf_rejects_the_two_arms_that_no_other_test_covers() {
+        assert!(!is_safe_s3_leaf(""), "an empty leaf must never be addressable");
+        assert!(!is_safe_s3_leaf("."), "a leaf that is exactly '.' resolves to the listed directory itself");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_rejects_a_leading_slash() {
+        assert!(!is_safe_s3_leaf("/etc/passwd"), "UAT set: a leading '/'");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_rejects_a_backslash_key() {
+        assert!(!is_safe_s3_leaf(r"a\b"), "UAT set: a backslash key");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_rejects_an_embedded_nul() {
+        assert!(!is_safe_s3_leaf("a\0b"), "UAT set: an embedded NUL");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_rejects_an_embedded_newline() {
+        assert!(!is_safe_s3_leaf("a\nb"), "UAT set: an embedded newline");
+        assert!(!is_safe_s3_leaf("a\rb"), "an embedded CR is a control byte too, not just LF");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_never_decodes_percent_escapes_literal_percent_text_is_always_visible() {
+        // CPE-1704 round 3: a round-2 version of this guard percent-decoded the leaf once and refused it
+        // if the DECODED form looked like a traversal shape (`..%2f` -> `../`). That was checked against
+        // every place a key/entry name actually travels in this codebase — `provider_path_to_key_prefix`
+        // and `leaf_under_prefix` are plain string operations, `crates/vfs` passes `path` straight through
+        // with no decode step, nothing in `src/` or `src-tauri/` decodes an entry's `name`, and CPE-1684
+        // states the identical design intent explicitly ("S3 must NOT normalise dot segments: key
+        // `a/../b.txt` is a real, distinct key") — and found to protect nothing on any real path, while
+        // refusing nine classes of ordinary, common real-world keys. `report%2ffinal.txt` is literal text:
+        // no raw `/` byte, and nothing ever turns it into one. Refusing it repeated this ticket's own bug.
+        for leaf in [
+            "report%2ffinal.txt",
+            "report%2Ffinal.txt",
+            "https%3A%2F%2Fexample.com%2Findex.html", // a URL-keyed archive object
+            "city=A%2FB",                             // a Hive/Athena/Glue partition value
+            "%2e%2e",
+            "%2e",
+            "%00",
+            "%0a",
+            "%5cfoo",
+            "..%2f",
+            "..%2F",
+            "%252e%252e%252f", // double-encoded — inert either way; there is no decode pass at all now
+        ] {
+            assert!(is_safe_s3_leaf(leaf), "{leaf:?} is literal text with no raw dangerous byte — must be visible");
+        }
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_still_rejects_a_literal_raw_slash_next_to_percent_encoded_text() {
+        // `%2e%2e/` has a REAL trailing '/' byte — refused for that raw byte alone, nothing to do with any
+        // decoding (there is none). Kept separate from the no-decode test above to make the two mechanisms
+        // clearly independent: one raw-byte scan, full stop.
+        assert!(!is_safe_s3_leaf("%2e%2e/"), "a literal trailing '/' is unsafe on its own, decode or not");
+    }
+
+    #[test]
+    fn is_safe_s3_leaf_does_not_reject_an_ordinary_percent_sign() {
+        // A bare '%' — including one that isn't part of any valid escape — must not be refused on its own.
+        assert!(is_safe_s3_leaf("50% off.txt"));
+        assert!(is_safe_s3_leaf("100%.txt"));
+        assert!(is_safe_s3_leaf("100% not a valid escape.txt"));
+    }
+
+    #[test]
+    fn a_page_with_an_unsafe_key_reports_the_filtered_count_not_just_dropping_it() {
+        let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                    <Contents><Key>photos/cat.jpg</Key><Size>4</Size></Contents>\
+                    <Contents><Key>photos/..</Key><Size>1</Size></Contents>\
+                    <CommonPrefixes><Prefix>photos/../../etc/</Prefix></CommonPrefixes>\
+                    </ListBucketResult>";
+        let page = parse_list_bucket_result(xml, "photos/").unwrap();
+        assert_eq!(page.entries.len(), 1, "the one safe entry must still come through: {:?}", page.entries);
+        assert_eq!(page.entries[0].name, "cat.jpg");
+        assert_eq!(page.filtered_count, 2, "both the unsafe Contents entry and the unsafe CommonPrefixes entry must be counted");
+    }
+
+    #[test]
+    fn a_key_containing_a_colon_reaches_the_caller_end_to_end() {
+        // Built directly against the XML (not the std::fs-backed fixture used elsewhere in this file)
+        // because ':' is an illegal filename character on Windows NTFS — a real on-disk fixture could never
+        // represent this exact key on every CI OS, but ListObjectsV2's wire protocol has no such
+        // restriction, and this is exactly the shape CPE-1704 fixes.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                            <Contents><Key>colon:name.txt</Key><Size>4</Size></Contents></ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let entries = provider.list("/").expect("list");
+        assert_eq!(entries.len(), 1, "the colon key must reach the caller end to end: {entries:?}");
+        assert_eq!(entries[0].name, "colon:name.txt");
+        assert!(provider.is_safe_leaf_name("colon:name.txt"), "the trait override must agree with list()");
+    }
+
+    #[test]
+    fn list_with_filtered_count_reports_a_filtered_entry_instead_of_a_silent_phantom_empty_folder() {
+        // A bucket can legally contain an object whose key is literally ".." — S3 has no directory-
+        // traversal semantics on the wire, so the guard correctly refuses to surface it as itself. CPE-1704
+        // round 2 tried making this "not silent" by injecting a synthetic ProviderEntry into the returned
+        // Vec; review found that WORSE than the silent drop (spoofable by a same-named real object,
+        // dishonest is_dir/size fields, a DELETE of it would report success per S3's 204-on-missing-key
+        // semantics, and it landed after the MAX_LIST_ENTRIES check). Round 3: `list()` — the trait's
+        // required method — stays a plain, honest `Vec<ProviderEntry>` with nothing fabricated in it (the
+        // "a/../b.txt" case DOES still look like an empty folder through `list()` alone); the count is a
+        // real `usize`, returned only by `list_with_filtered_count`, that cannot be spoofed by anything a
+        // server sends because it is computed here, from what this function itself dropped.
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                            <Contents><Key>..</Key><Size>1</Size></Contents></ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        // The plain trait method: nothing fabricated, the unsafe key is simply absent.
+        let plain = provider.list("/").expect("list");
+        assert!(plain.is_empty(), "list() must stay a plain, honest Vec with nothing invented in it: {plain:?}");
+
+        // The richer method the real caller (crates/vfs) uses: the same empty Vec, plus an honest count.
+        let (entries, filtered) = provider.list_with_filtered_count("/").expect("list_with_filtered_count");
+        assert!(entries.is_empty());
+        assert_eq!(filtered, 1, "the one unsafe key must be counted, not just dropped with no trace anywhere");
+    }
+
+    /// The test above calls a **concrete** `S3Provider`, and that is exactly why it could not catch the
+    /// bug the PR #890 round-3 UAT found: `list_with_filtered_count` is an *inherent* method, Rust
+    /// resolves inherent methods before trait methods, so a concrete call reaches the real one and passes
+    /// even when the `impl FileSystemProvider` block does not declare it at all.
+    ///
+    /// The real caller does not hold a concrete type. `crates/vfs::connect::remote_dir_entries` takes
+    /// `&dyn FileSystemProvider`, and a trait object can only reach the `impl` block — so without the
+    /// override, dispatch fell through to the trait default, which hardcodes `0`. Every filtered key was
+    /// counted as zero through the only path a user takes, and the whole "not silent" mechanism this
+    /// ticket added was inert.
+    ///
+    /// **This is the third time in one ticket that a fix was verified at a boundary the real caller does
+    /// not use** — first at the provider instead of the vfs layer, then on the concrete type instead of
+    /// through dispatch. So this test is deliberately shaped like the caller: it goes through
+    /// `&dyn FileSystemProvider` and nothing else. Delete the trait override and only this test reds.
+    #[test]
+    fn dyn_dispatch_reaches_the_real_filtered_count_not_the_trait_default() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                // Two legally-refusable keys and one ordinary file, so a wrong count is unambiguous:
+                // the trait default reports 0, the real implementation reports 2.
+                let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                            <Contents><Key>..</Key><Size>1</Size></Contents>\
+                            <Contents><Key>bad\\name</Key><Size>1</Size></Contents>\
+                            <Contents><Key>ordinary.txt</Key><Size>7</Size></Contents></ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        // The shape `remote_dir_entries` uses. Binding through the trait object is the entire point of
+        // this test — calling `provider.list_with_filtered_count(..)` directly would pass regardless.
+        let as_trait: &dyn FileSystemProvider = &provider;
+
+        let (entries, filtered) = as_trait
+            .list_with_filtered_count("/")
+            .expect("list_with_filtered_count through the trait object");
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "only the ordinary key may survive the guard: {entries:?}"
+        );
+        assert_eq!(
+            filtered, 2,
+            "the filtered count must survive dynamic dispatch — a 0 here means the vtable resolved to \
+             the trait's default and every refused key is invisible to the caller that matters"
+        );
+
+        // `is_safe_leaf_name` is the sibling override on the same impl block; pin it through the same
+        // dispatch so a future edit cannot drop one while keeping the other.
+        assert!(
+            as_trait.is_safe_leaf_name("colon:name.txt"),
+            "S3's own leaf rule must survive dynamic dispatch too, or remote_dir_entries falls back to \
+             the filesystem rule and a legal key vanishes again"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // AC6: non-2xx responses go through the shared CPE-1682 error path, not an ad-hoc string.
     // ---------------------------------------------------------------------------------------------
 
@@ -1541,6 +1957,60 @@ mod tests {
             vec![at_cap.as_str()],
             "exactly the at-the-cap key must survive: the over-cap <Key> and the over-cap \
              <CommonPrefixes> leaf are both dropped, and a key at real S3's own 1024-byte limit is not"
+        );
+        // "the way any other unsafe name is dropped" — which, since CPE-1704, means counted rather than
+        // silently vanished. Putting the bound inside `is_safe_s3_leaf` is what buys this; a separate
+        // `continue` in the parser would have dropped these two without ever telling anyone.
+        assert_eq!(
+            page.filtered_count, 2,
+            "both over-cap entries must be COUNTED as filtered, not silently dropped"
+        );
+    }
+
+    /// The length bound is the one arm of [`is_safe_s3_leaf`] CPE-1706 added, and this pins it at that
+    /// function — the same place `S3Provider`'s `is_safe_leaf_name` override points, so `crates/vfs`'s
+    /// `remote_dir_entries` applies it on the one path a user's real listing takes.
+    ///
+    /// **The boundary is checked on both sides on purpose.** An off-by-one here would silently drop a
+    /// legal 1024-byte key — the exact class of bug CPE-1704 existed to fix (a legal key vanishing from a
+    /// listing with no error, no warning, nothing), reintroduced by the ticket that was meant to harden
+    /// the same function. `<= MAX_KEY_LEAF_BYTES` and `< MAX_KEY_LEAF_BYTES` differ only at the one input
+    /// real S3 can actually produce at the limit, so a test that only checked "way over is refused" would
+    /// pass under either.
+    #[test]
+    fn is_safe_s3_leaf_refuses_exactly_one_byte_past_the_key_limit_and_no_sooner() {
+        assert!(
+            is_safe_s3_leaf(&"a".repeat(MAX_KEY_LEAF_BYTES - 1)),
+            "one byte under real S3's key limit is obviously legal"
+        );
+        assert!(
+            is_safe_s3_leaf(&"a".repeat(MAX_KEY_LEAF_BYTES)),
+            "a key at EXACTLY real S3's own 1024-byte limit is legal and must survive — refusing it is \
+             the CPE-1704 bug (a legal key vanishing silently) reintroduced by an off-by-one"
+        );
+        assert!(
+            !is_safe_s3_leaf(&"a".repeat(MAX_KEY_LEAF_BYTES + 1)),
+            "one byte past the limit is not a key any conforming server can produce"
+        );
+    }
+
+    /// The length arm is reachable through `&dyn FileSystemProvider`, not just through the free function.
+    /// `crates/vfs::connect::remote_dir_entries` asks the provider through the vtable, so an arm that only
+    /// worked on the concrete type would be invisible on the one path a user's real listing takes — the
+    /// same "correct at a boundary production does not go through" trap CPE-1704 round 3 was about.
+    #[test]
+    fn the_key_length_bound_is_reachable_through_dynamic_dispatch_not_only_the_free_function() {
+        let (base, _root, _requests) = spawn_s3_fixture();
+        let provider = S3Provider::connect(&cfg(&base));
+        let as_trait: &dyn FileSystemProvider = &provider;
+        assert!(
+            as_trait.is_safe_leaf_name(&"a".repeat(MAX_KEY_LEAF_BYTES)),
+            "a key at the limit must survive dynamic dispatch too"
+        );
+        assert!(
+            !as_trait.is_safe_leaf_name(&"a".repeat(MAX_KEY_LEAF_BYTES + 1)),
+            "the length bound must survive dynamic dispatch — a `true` here means remote_dir_entries \
+             never applies it and an 8 MiB 'filename' reaches the UI"
         );
     }
 

@@ -22,9 +22,23 @@
 //! # Security
 //! Host-key verification is the SFTP provider's own TOFU: a **changed** or **revoked** key is refused at
 //! connect with a distinct message that propagates out of [`connected_provider`] (never a silent connect).
-//! Provider-supplied entry names are re-filtered through [`cpe_server::transfer::is_safe_name`] before they
-//! become a navigable child URI, inheriting the CPE-1461/1462 source-side traversal defense even if a
-//! hostile server hands back a `../escape` name.
+//! Provider-supplied entry names are re-filtered through **the provider's own**
+//! [`FileSystemProvider::is_safe_leaf_name`] before they become a navigable child URI, inheriting the
+//! CPE-1461/1462 source-side traversal defense even if a hostile server hands back a `../escape` name.
+//!
+//! **CPE-1704 (round 3):** this used to hardcode `cpe_server::transfer::is_safe_name` for every backend
+//! regardless of which one produced the entry — correct for local/SFTP/WebDAV/FTP (filesystem-shaped
+//! paths, where `:` is a genuine Windows drive-letter/ADS hazard), but silently wrong for a backend whose
+//! keyspace has different rules (S3: no drive letters, no ADS, `:` is an ordinary key byte). This is the
+//! ONE code path a user's remote directory listing actually takes
+//! ([`remote_dir_entries`] ← `remote_list_dir_impl` ← the `list_dir` Tauri command), so hardcoding the
+//! wrong guard here silently re-dropped a legal S3 key even after `cpe-s3`'s own listing had correctly let
+//! it through — CPE-1704's opening bug, surviving one layer further out than its first fix reached.
+//! [`remote_dir_entries`] now asks `provider.is_safe_leaf_name(name)` — the provider's own answer — and
+//! also asks `provider.list_with_filtered_count` instead of `list` so a leaf a backend's OWN listing pass
+//! had to drop internally (S3's embedded-`/`/literal-`..` case) is counted too, not just what this
+//! function itself drops. See [`RemoteListing`] for why that count is a real field, never mixed into the
+//! entry `Vec`.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -238,20 +252,46 @@ fn dir_entry_from_provider(uri: &str, loc: &Location, e: ProviderEntry) -> DirEn
     }
 }
 
+/// The result of listing a remote directory (CPE-1704): the entries safe to show, plus how many were not,
+/// as a real `usize` — never a synthetic row mixed into `entries`. An earlier round of CPE-1704 tried
+/// exactly that (a fake `⚠ N filtered` `ProviderEntry`) and review found it worse than the silent drop it
+/// replaced: a REAL object can be named the marker's own text (nothing stops it), so the only such row a
+/// user could ever see was, in fact, indistinguishable from one an attacker planted; the fake entry's
+/// `is_dir`/`size` fields were dishonest; and deleting it would silently "succeed" (S3 `DELETE` of a
+/// nonexistent key returns `204`). `filtered` here can't be spoofed by anything a server sends, because it
+/// is computed in this process, from what this function (and the provider's own listing pass) dropped —
+/// never from data that arrived over the wire.
+pub struct RemoteListing {
+    pub entries: Vec<DirEntry>,
+    pub filtered: usize,
+}
+
 /// List the immediate children of the remote directory `uri` as [`DirEntry`] rows. Provider-supplied names
-/// that aren't a safe single path segment ([`cpe_server::transfer::is_safe_name`]) are dropped, inheriting
-/// the CPE-1461 source-side traversal defense so a hostile server can't inject a `..`/separator name.
+/// that aren't safe by **the provider's own rule** ([`FileSystemProvider::is_safe_leaf_name`] — defaults to
+/// [`cpe_server::transfer::is_safe_name`], overridden by a backend whose keyspace has different rules, e.g.
+/// `cpe-s3`) are dropped, inheriting the CPE-1461 source-side traversal defense so a hostile server can't
+/// inject a `..`/separator name — while a backend like S3 that legitimately allows `:` is no longer
+/// re-refused by the wrong, hardcoded guard (CPE-1704).
+///
+/// Uses [`FileSystemProvider::list_with_filtered_count`] rather than `list` so a leaf the PROVIDER's own
+/// listing pass already had to drop internally (S3's embedded-`/`/literal-`..` case, dropped before an
+/// entry could even be constructed) is folded into [`RemoteListing::filtered`] too, not just what this
+/// function's own `is_safe_leaf_name` pass drops.
 pub fn remote_dir_entries(
     provider: &dyn FileSystemProvider,
     uri: &str,
-) -> Result<Vec<DirEntry>, String> {
+) -> Result<RemoteListing, String> {
     let loc = location::parse(uri);
-    let entries = provider.list(&loc.path)?;
-    Ok(entries
-        .into_iter()
-        .filter(|e| cpe_server::transfer::is_safe_name(&e.name))
-        .map(|e| dir_entry_from_provider(uri, &loc, e))
-        .collect())
+    let (raw_entries, mut filtered) = provider.list_with_filtered_count(&loc.path)?;
+    let mut entries = Vec::with_capacity(raw_entries.len());
+    for e in raw_entries {
+        if provider.is_safe_leaf_name(&e.name) {
+            entries.push(dir_entry_from_provider(uri, &loc, e));
+        } else {
+            filtered += 1;
+        }
+    }
+    Ok(RemoteListing { entries, filtered })
 }
 
 /// Stat the remote path `uri` into a single [`DirEntry`].
@@ -422,7 +462,9 @@ mod tests {
 
         // list → maps to DirEntry rows with navigable child URIs; the hostile-looking hidden file is kept
         // (it's a safe name), directories sort in.
-        let rows = remote_dir_entries(&**provider.lock().unwrap(), uri()).unwrap();
+        let listing = remote_dir_entries(&**provider.lock().unwrap(), uri()).unwrap();
+        assert_eq!(listing.filtered, 0, "nothing unsafe in this fixture — the count must stay honest at 0");
+        let rows = listing.entries;
         let mut names: Vec<_> = rows.iter().map(|r| r.name.clone()).collect();
         names.sort();
         assert_eq!(names, vec![".hidden", "readme.txt", "sub"]);
@@ -524,9 +566,65 @@ mod tests {
             fn delete(&mut self, _p: &str) -> Result<(), String> { unreachable!() }
             fn rename(&mut self, _f: &str, _t: &str) -> Result<(), String> { unreachable!() }
         }
-        let rows = remote_dir_entries(&Hostile, uri()).unwrap();
-        let names: Vec<_> = rows.iter().map(|r| r.name.clone()).collect();
+        let listing = remote_dir_entries(&Hostile, uri()).unwrap();
+        let names: Vec<_> = listing.entries.iter().map(|r| r.name.clone()).collect();
         assert_eq!(names, vec!["ok.txt"], "only the safe leaf survives");
+        assert_eq!(listing.filtered, 2, "the two unsafe entries must be counted, not just dropped with no trace");
+    }
+
+    /// CPE-1704 (round 3), Evidence Rule 2 — proven through the REAL channel, not the provider boundary.
+    /// A minimal test double standing in for `cpe-s3`'s `S3Provider` (this crate does not, and per
+    /// CPE-1685 should not yet, depend on `cpe-s3` — that wiring is a separate, still-blocked ticket): it
+    /// overrides `is_safe_leaf_name` exactly the way `S3Provider` does, to prove `remote_dir_entries` asks
+    /// the PROVIDER'S own rule rather than the hardcoded filesystem guard that silently re-dropped
+    /// `colon:name.txt` in an earlier round of this fix.
+    #[test]
+    fn remote_dir_entries_keeps_a_colon_name_when_the_provider_says_its_own_rule_allows_it() {
+        struct ColonFriendly;
+        impl FileSystemProvider for ColonFriendly {
+            fn list(&self, _p: &str) -> Result<Vec<ProviderEntry>, String> {
+                Ok(vec![
+                    ProviderEntry { name: "colon:name.txt".into(), is_dir: false, size: 4 },
+                    ProviderEntry { name: "x:y".into(), is_dir: false, size: 1 },
+                    ProviderEntry { name: "..evil.txt".into(), is_dir: false, size: 1 },
+                    // Still genuinely unsafe under ANY provider's rule — must still be dropped, proving
+                    // the override narrows the rule rather than disabling filtering outright.
+                    ProviderEntry { name: "../escape".into(), is_dir: false, size: 1 },
+                ])
+            }
+            fn stat(&self, _p: &str) -> Result<ProviderEntry, String> { unreachable!() }
+            fn read(&self, _p: &str) -> Result<Vec<u8>, String> { unreachable!() }
+            fn write(&mut self, _p: &str, _d: &[u8]) -> Result<(), String> { unreachable!() }
+            fn mkdir(&mut self, _p: &str) -> Result<(), String> { unreachable!() }
+            fn delete(&mut self, _p: &str) -> Result<(), String> { unreachable!() }
+            fn rename(&mut self, _f: &str, _t: &str) -> Result<(), String> { unreachable!() }
+            fn is_safe_leaf_name(&self, name: &str) -> bool {
+                // The same shape `cpe-s3::provider::is_safe_s3_leaf` uses: no drive-letter/ADS rule, but
+                // still no embedded/leading separator and no literal ".."/"." segment.
+                !name.is_empty()
+                    && name != ".."
+                    && name != "."
+                    && !name.contains('/')
+                    && !name.contains('\\')
+                    && !name.chars().any(|c| c.is_control())
+            }
+        }
+
+        // First, prove the OLD behaviour really would have dropped these — the regression this test exists
+        // to catch. If this assertion ever fails, the shared default silently changed underneath this test.
+        assert!(!cpe_server::transfer::is_safe_name("colon:name.txt"));
+        assert!(!cpe_server::transfer::is_safe_name("x:y"));
+        assert!(!cpe_server::transfer::is_safe_name("..evil.txt"));
+
+        let listing = remote_dir_entries(&ColonFriendly, uri()).unwrap();
+        let mut names: Vec<_> = listing.entries.iter().map(|r| r.name.clone()).collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["..evil.txt".to_string(), "colon:name.txt".to_string(), "x:y".to_string()],
+            "every colon/ADS-hardening shape this provider's own rule accepts must reach a real DirEntry"
+        );
+        assert_eq!(listing.filtered, 1, "the one genuinely unsafe '../escape' entry must still be counted");
     }
 
     #[test]
