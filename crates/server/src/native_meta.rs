@@ -388,6 +388,16 @@ mod tests {
     /// just the pure classifier — a classifier test alone cannot see a wiring regression that stops
     /// calling it. `read_on_a_missing_path_is_an_io_error` above already covers `read`; this adds
     /// `write`/`remove` and asserts the message content, not just the error variant.
+    ///
+    /// **Windows-only, and the `#[cfg]` is load-bearing (F9).** The `"no such path"` wording is
+    /// `present_stat_error`'s contract, and `present_stat_error` lives in the `#[cfg(windows)] mod imp`.
+    /// The `#[cfg(not(windows))]` `imp` has no `require_present` at all — `write` goes straight to
+    /// `xattr::set`, so a missing path yields ENOENT rendered as `"No such file or directory (os error
+    /// 2)"`, which does not contain this literal. Ungated, this test reds the Linux and macOS legs of
+    /// CI's 3-OS matrix. Its sibling `read_on_a_missing_path_is_an_io_error` is deliberately ungated
+    /// because it asserts only the error *variant*, which is portable; asserting message *content* is
+    /// not. See the `#[cfg(not(windows))]` counterpart below, which keeps the honest case covered there.
+    #[cfg(windows)]
     #[test]
     fn write_and_remove_on_a_genuinely_missing_path_say_no_such_path_at_the_real_entry_points() {
         let dir = scratch("honest");
@@ -401,6 +411,29 @@ mod tests {
         match remove(&nope, &name) {
             Err(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "remove: {msg}"),
             other => panic!("remove on a real absence must be an Io(\"no such path\") error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The non-Windows half of F7's honest-case coverage. The xattr `imp` has no `require_present`, so
+    /// there is no `"no such path"` wording to assert — but the entry points must still *fail* on a real
+    /// absence rather than succeed, and a wiring regression that made them succeed would go unnoticed
+    /// with no test here at all. Asserts the error variant only, which is portable across Linux and
+    /// macOS; see the `#[cfg(windows)]` counterpart above for why the message text is not.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_and_remove_on_a_genuinely_missing_path_are_io_errors_at_the_real_entry_points() {
+        let dir = scratch("honest-unix");
+        let nope = dir.join("truly-missing.txt");
+        let name = cpe_name("tags");
+
+        match write(&nope, &name, b"x") {
+            Err(MetaError::Io(_)) => {}
+            other => panic!("write on a real absence must be an Io error, got {other:?}"),
+        }
+        match remove(&nope, &name) {
+            Err(MetaError::Io(_)) => {}
+            other => panic!("remove on a real absence must be an Io error, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
