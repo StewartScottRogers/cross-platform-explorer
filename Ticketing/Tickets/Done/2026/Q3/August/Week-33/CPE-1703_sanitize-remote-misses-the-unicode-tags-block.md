@@ -3,11 +3,11 @@ id: CPE-1703
 title: sanitize_remote misses the Unicode Tags block, the ASCII-smuggling vector for hidden agent instructions
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-13
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
