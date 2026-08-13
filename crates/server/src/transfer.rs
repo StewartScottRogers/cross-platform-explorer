@@ -92,12 +92,40 @@ const WINDOWS_UNSAFE_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 /// `NUL` was the only one that lost data *on this build*, but device-name resolution has moved between
 /// Windows releases and is not a property we control, so all of them are escaped rather than only the
 /// one that happened to misbehave here.
+/// The list is every name Microsoft documents as reserved in "Naming Files, Paths, and Namespaces",
+/// including the superscript `COM¹`/`LPT²` forms and `CONIN$`/`CONOUT$` (CPE-1709 round 2, F5). Those
+/// were missing from the first cut. **Scoped measurement:** on Windows 11 Pro 26200 the superscript
+/// forms and `CONIN$`/`CONOUT$` all downloaded and read back correctly, so none of them loses data
+/// *here* — but the whole reason every name is escaped rather than only `NUL` (the one that misbehaved
+/// on this build) is that device resolution has moved between Windows releases and is not ours to
+/// depend on. That argument covers these identically, so leaving them out was inconsistent.
 const WINDOWS_DEVICE_NAMES: &[&str] = &[
-    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
-    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    "CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$", //
+    "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "COM¹", "COM²",
+    "COM³", //
+    "LPT0", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", "LPT¹", "LPT²",
+    "LPT³",
 ];
 
-/// Percent-escape one character as `%XX` (upper-case hex). Only ever called for ASCII.
+/// The longest single path component every filesystem this app targets accepts. **Measured** (PR #894
+/// round-2 UAT, Windows 11 Pro 26200 / NTFS): a 255-character component writes `Ok`, a 256-character one
+/// fails with os error 123. Linux (ext4) and macOS (APFS) impose the same 255 limit, in bytes.
+///
+/// This is used **only to explain** a failure the OS has already reported — never to pre-reject a name.
+/// Pre-rejecting would mean guessing at a limit whose unit differs per platform (UTF-16 code units on
+/// Windows, bytes elsewhere) and would risk refusing a name the filesystem would actually have taken,
+/// which is its own new bug. The OS makes the decision; this constant only turns "os error 123" into a
+/// sentence naming the real cause.
+pub const MAX_LOCAL_COMPONENT: usize = 255;
+
+/// Windows' classic `MAX_PATH`. A path at or past this length is still *created* by
+/// [`download_tree`] — its root is canonicalized to a `\\?\` verbatim path, which exempts it — but
+/// applications that call the ordinary Win32 API without long-path support cannot open it afterwards
+/// (CPE-1709 round 2, F4). Surfaced as a notice, never a failure: the file really is delivered and
+/// really is readable by long-path-aware software, so calling it a failure would be its own wrong answer.
+pub const MAX_WINDOWS_PATH: usize = 260;
+
+/// Percent-escape one character as `%XX` (upper-case hex). Only ever called for code points ≤ `U+00FF`.
 fn push_escaped(out: &mut String, c: char) {
     out.push('%');
     let b = c as u32;
@@ -106,12 +134,42 @@ fn push_escaped(out: &mut String, c: char) {
     out.push(HEX[(b & 0xF) as usize] as char);
 }
 
-/// True at `i` if `chars[i..]` begins a `%HH` escape sequence.
-fn is_escape_at(chars: &[char], i: usize) -> bool {
-    chars[i] == '%'
-        && i + 2 < chars.len()
-        && chars[i + 1].is_ascii_hexdigit()
-        && chars[i + 2].is_ascii_hexdigit()
+/// Whether `code` is a value [`windows_safe_segment`] can actually emit as a `%XX` escape (CPE-1709
+/// round 2, F2).
+///
+/// The first cut escaped **every** `%HH`, which silently rewrote legal remote keys the encoder could
+/// never have produced. `%2f` is the clearest case: `guarded_join` splits the path on `/` and `\`
+/// *before* the transform runs, so nothing in this codebase can emit `%2F` — yet `report%2ffinal.txt`
+/// came out as `report%252ffinal.txt`, and `city=A%2FB` (an ordinary Hive/Athena partition value) as
+/// `city=A%252FB`. Both are perfectly storable local names, so that was a gratuitous rename of a key
+/// that already worked — and, combined with the name-length ceiling, it turned working downloads into
+/// lost ones.
+///
+/// Narrowing to the emittable set keeps injectivity intact. The proof only ever needed "the output
+/// contains no `%HH` sequence that did not come from an escape this function emitted", and both the
+/// encoder and [`decode_windows_safe_segment`] now read that phrase the same, narrower way.
+fn is_encoder_emitted_code(code: u32) -> bool {
+    let Some(c) = char::from_u32(code) else { return false };
+    // Pass 2 (unholdable characters + control characters), pass 3 (the trailing `.`/space run), and the
+    // escape character itself, which pass 1 emits as `%25`.
+    if c.is_control() || WINDOWS_UNSAFE_CHARS.contains(&c) || c == '.' || c == ' ' || c == '%' {
+        return true;
+    }
+    // Pass 4 escapes the FIRST character of a reserved device name, in whichever case it arrived.
+    WINDOWS_DEVICE_NAMES.iter().filter_map(|d| d.chars().next()).any(|first| first.eq_ignore_ascii_case(&c))
+}
+
+/// The code point `chars[i..]` carries if it begins a `%HH` escape **this encoder could have emitted**.
+/// `None` for anything else, including a well-formed `%HH` whose code is outside that set — those are
+/// ordinary characters and are left exactly as they are.
+fn escape_code_at(chars: &[char], i: usize) -> Option<u32> {
+    if chars[i] != '%' || i + 2 >= chars.len() {
+        return None;
+    }
+    let hi = chars[i + 1].to_digit(16)?;
+    let lo = chars[i + 2].to_digit(16)?;
+    let code = hi * 16 + lo;
+    is_encoder_emitted_code(code).then_some(code)
 }
 
 /// Rewrite one path segment into a name a **Windows** filesystem can actually hold and an ordinary
@@ -119,9 +177,10 @@ fn is_escape_at(chars: &[char], i: usize) -> bool {
 /// unit-testable on all three CI OSes; [`local_safe_segment`] decides *when* to apply it.
 ///
 /// Four passes, in order:
-/// 1. A `%` that is followed by two hex digits becomes `%25`. This is the escape-the-escape step, and it
-///    is the entire reason the mapping is safe (see the injectivity note below). A `%` **not** followed
-///    by two hex digits is left alone, so ordinary names like `50% off.txt` are untouched.
+/// 1. A `%` beginning an escape **this encoder could itself have emitted** ([`escape_code_at`]) becomes
+///    `%25`. This is the escape-the-escape step, and it is the entire reason the mapping is safe (see the
+///    injectivity note below). Every other `%` is left alone, so `50% off.txt`, `report%2ffinal.txt` and
+///    `city=A%2FB` all pass through untouched.
 /// 2. Every [`WINDOWS_UNSAFE_CHARS`] character and every control character becomes `%XX`.
 /// 3. A trailing run of `.` or space becomes `%2E` / `%20`. Measured: with a verbatim root such a file
 ///    *is* created — `download_tree` reported `Ok(1)` and `read_dir` showed `trailingdot.` at 5 bytes —
@@ -133,19 +192,28 @@ fn is_escape_at(chars: &[char], i: usize) -> bool {
 ///
 /// **Two distinct names can never collide onto one local file**, which is the property that stops this
 /// fix from replacing a silent-loss bug with a different silent-loss bug. The mapping is *injective*
-/// because [`decode_windows_safe_segment`] inverts it exactly: the output never contains a `%HH`
-/// sequence that did not come from an escape this function emitted. Pass 1 removes every pre-existing
-/// one, and no new one can form afterwards, since an escape a later pass emits starts with `%` (never a
-/// hex digit) and a literal `%` that survived pass 1 provably has no two hex digits after it in the
-/// output. `decode(encode(x)) == x` for every `x` therefore forces `encode(x) == encode(y) → x == y`.
-/// `transfer_windows_name_mapping_is_injective` asserts both halves on a table that includes the
-/// adversarial `%`-bearing cases.
+/// because [`decode_windows_safe_segment`] inverts it exactly: the output never contains an
+/// encoder-emittable `%HH` sequence that did not come from an escape this function emitted. Pass 1
+/// removes every pre-existing one, and no new one can form afterwards, since an escape a later pass
+/// emits starts with `%` (never a hex digit) and a literal `%` that survived pass 1 provably has no
+/// *emittable* hex pair after it in the output. `decode(encode(x)) == x` for every `x` therefore forces
+/// `encode(x) == encode(y) → x == y`. `cpe_1709_windows_name_mapping_is_injective` asserts both halves;
+/// the round-2 UAT additionally brute-forced 66,429 adversarial names for **0 collisions and 0
+/// round-trip breaks**.
 ///
 /// (Two remote names that differ only in **case** — `A.txt` and `a.txt` — still land on one file on a
 /// case-insensitive NTFS volume. That is a pre-existing property of the platform, unchanged by and
 /// independent of this mapping, which is case-preserving; it is recorded here rather than fixed, since
-/// no leaf-name rewriting can address it.)
+/// no leaf-name rewriting can address it. Confirmed by the same round-2 brute force, which searched
+/// specifically for a pair whose *case-folded* inputs differ but whose case-folded encodings match and
+/// found none — so this mapping introduces no case collision of its own.)
+///
+/// This rewrites the **name**, and cannot rewrite away a name that is simply too *long*: encoding grows
+/// a name by up to 3× per escaped character, and a component past [`MAX_LOCAL_COMPONENT`] is refused by
+/// the filesystem. [`download_tree`] treats that as a reported delivery failure — see F1 there.
 pub fn windows_safe_segment(name: &str) -> Cow<'_, str> {
+    // Cheap pre-scan. `%` is deliberately over-broad here (most `%` names are NOT rewritten any more);
+    // it only costs an allocation that then returns an identical string, never a wrong answer.
     let needs = name.chars().any(|c| WINDOWS_UNSAFE_CHARS.contains(&c) || c.is_control() || c == '%')
         || name.ends_with('.')
         || name.ends_with(' ')
@@ -160,7 +228,7 @@ pub fn windows_safe_segment(name: &str) -> Cow<'_, str> {
 
     let mut out = String::with_capacity(name.len() + 8);
     for (i, &c) in chars.iter().enumerate() {
-        if is_escape_at(&chars, i) {
+        if escape_code_at(&chars, i).is_some() {
             out.push_str("%25"); // pass 1
         } else if WINDOWS_UNSAFE_CHARS.contains(&c) || c.is_control() || i >= keep {
             push_escaped(&mut out, c); // passes 2 + 3
@@ -189,18 +257,35 @@ fn is_windows_device_name(name: &str) -> bool {
 }
 
 /// The exact inverse of [`windows_safe_segment`] — recovers the remote name from the local one
-/// (CPE-1709). Shipped, not test-only: it is what makes the mapping *demonstrably* reversible rather
-/// than merely claimed to be, and it is the proof obligation behind the injectivity argument, so it must
-/// live next to the encoder and be exercised by the same table.
+/// (CPE-1709). Decodes exactly the escapes the encoder can emit ([`escape_code_at`]) and leaves every
+/// other `%HH` alone, so `report%2ffinal.txt` decodes to itself.
+///
+/// Shipped, not test-only: it is what makes the mapping *demonstrably* reversible rather than merely
+/// claimed to be, and it is the proof obligation behind the injectivity argument, so it must live next
+/// to the encoder and be exercised by the same table.
+///
+/// **It is deliberately NOT wired into [`upload_tree`]** (CPE-1709 round 2, F6), which means a
+/// download-then-upload round trip does **not** restore the original remote name: an object downloaded
+/// as `colon:name.txt` → `colon%3Aname.txt` uploads back as the key `colon%3Aname.txt`. That asymmetry
+/// is a choice, recorded here rather than left to be discovered:
+///
+/// - Encoding is **compelled**. The local filesystem cannot hold the original name, so the transform is
+///   forced and provably necessary at the moment it happens.
+/// - Decoding would be a **guess about provenance**. `report%3Afinal.txt` is a perfectly storable local
+///   name that a user may simply have typed, and we do not track which local files came from a
+///   download. Decoding on upload would silently rename such a file's remote key to `report:final.txt`
+///   — an unrequested rename with no forcing function behind it and no way to opt out, which is exactly
+///   the class of surprise this ticket exists to remove.
+///
+/// So the asymmetry is the conservative direction: a re-upload preserves the bytes and the name you can
+/// actually see on disk. The user-facing note is in `src/docs/31-network.md`.
 pub fn decode_windows_safe_segment(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
     let mut out = String::with_capacity(name.len());
     let mut i = 0;
     while i < chars.len() {
-        if is_escape_at(&chars, i) {
-            let hi = chars[i + 1].to_digit(16).unwrap_or(0);
-            let lo = chars[i + 2].to_digit(16).unwrap_or(0);
-            if let Some(c) = char::from_u32(hi * 16 + lo) {
+        if let Some(code) = escape_code_at(&chars, i) {
+            if let Some(c) = char::from_u32(code) {
                 out.push(c);
             }
             i += 3;
@@ -382,6 +467,43 @@ fn classify_leaf_probe(lstat: Result<bool, std::io::ErrorKind>) -> LeafProbe {
     }
 }
 
+/// The length of `path` as an ordinary Win32 application would spell it — without the `\\?\` verbatim
+/// prefix that [`download_tree`]'s canonicalized root carries on Windows. That prefix is what exempts
+/// our own writes from `MAX_PATH`; it is not part of the path anything else will use, so counting it
+/// would overstate the length by four and misjudge the [`MAX_WINDOWS_PATH`] notice.
+fn win32_visible_len(path: &Path) -> usize {
+    let s = path.to_string_lossy();
+    s.strip_prefix(r"\\?\").unwrap_or(&s).chars().count()
+}
+
+/// Explain, in the user's terms, why an entry could not be written — naming the **real** cause rather
+/// than whichever syscall happened to fail first (CPE-1709 round 2, F1).
+///
+/// The failure this exists for: an encoded name past [`MAX_LOCAL_COMPONENT`] is refused by
+/// `CreateFileW` with os error 123, and the call that hit it first was the CPE-1696 leaf
+/// `symlink_metadata` probe — so the transfer announced *"could not be inspected for a pre-existing
+/// symlink"* about a name that has nothing to do with symlinks and everything to do with length. A
+/// confident wrong answer is worse than an honest one (CPE-1673/1678), so the length is measured and
+/// stated when it is the plausible cause. The OS still makes the decision; this only describes it.
+fn describe_undeliverable(remote: &str, local: &Path, cause: &str) -> String {
+    let leaf_len =
+        local.file_name().map(|n| n.to_string_lossy().chars().count()).unwrap_or_default();
+    let mut why = format!("{remote}: could not be written to {} ({cause})", local.display());
+    if leaf_len > MAX_LOCAL_COMPONENT {
+        why.push_str(&format!(
+            " — the local name it needs is {leaf_len} characters once encoded for this filesystem, \
+             past the {MAX_LOCAL_COMPONENT}-character limit for a single path component"
+        ));
+    } else if win32_visible_len(local) > MAX_WINDOWS_PATH {
+        why.push_str(&format!(
+            " — the full local path is {} characters, past the {MAX_WINDOWS_PATH}-character \
+             MAX_PATH limit",
+            win32_visible_len(local)
+        ));
+    }
+    why
+}
+
 /// Join a directory + child name. An empty `dir` (the provider root) yields the bare name — so a
 /// remote root of `/` produces `/name` while a `FakeProvider`/relative root of `` produces `name`.
 fn join(dir: &str, name: &str) -> String {
@@ -458,6 +580,17 @@ pub fn walk(
 ///   follow it. A file whose leaf path is itself a pre-existing symlink is skipped (never followed on
 ///   write). Both are defenses against a symlink planted by some other channel — the remote can't create
 ///   one, but defense-in-depth is the point.
+///
+/// **Delivery is reported honestly (CPE-1709).** Two different things can stop an entry being written,
+/// and they end differently:
+/// - A **security refusal** — a traversal name, a pre-existing symlink, an uninspectable ancestor — is
+///   skipped with a notice and the transfer still ends `Ok`, because not writing it is the correct
+///   outcome.
+/// - A **delivery failure** — an entry we intended to write that the local filesystem refused (an
+///   encoded name past [`MAX_LOCAL_COMPONENT`] being the reachable case) — makes the transfer end
+///   `Err`, naming how many were lost and why. Everything deliverable is still delivered first. This
+///   used to be a silent skip that returned `Ok`, which meant a batch could report success while
+///   quietly dropping files.
 pub fn download_tree(
     provider: &dyn FileSystemProvider,
     remote_root: &str,
@@ -473,6 +606,10 @@ pub fn download_tree(
     let mut files = 0usize;
     // A callback can't use `?`; capture the first hard I/O error and stop doing work once it's set.
     let mut hard_err: Option<String> = None;
+    // CPE-1709 (F1): entries we INTENDED to deliver and could not. Distinct from the security refusals
+    // below (traversal names, pre-existing symlinks), where not writing IS the correct outcome and `Ok`
+    // is honest. These are files the user asked for and did not get, so the transfer must not end `Ok`.
+    let mut undelivered: Vec<String> = Vec::new();
 
     walk(provider, remote_root, cancel, |entry| {
         if hard_err.is_some() {
@@ -535,18 +672,37 @@ pub fn download_tree(
                     return;
                 }
                 LeafProbe::Uninspectable => {
+                    // CPE-1709 (F1): this arm used to `return` silently, so a file the local filesystem
+                    // refused — an over-long encoded name being the reachable case — left
+                    // `download_tree` reporting `Ok(n)` for a tree it had NOT delivered. That is this
+                    // ticket's own bug one layer up: the transfer says it worked and the file is not
+                    // there. Record it, and describe it accurately rather than blaming a symlink probe.
                     let cause = leaf.err().map(|e| e.to_string()).unwrap_or_default();
-                    eprintln!(
-                        "transfer: skipped entry whose local path could not be inspected for a \
-                         pre-existing symlink ({cause}): {}",
-                        entry.path
-                    );
+                    let why = describe_undeliverable(&entry.path, &local, &cause);
+                    eprintln!("transfer: FAILED to deliver {why}");
+                    undelivered.push(why);
                     return;
                 }
             }
             match provider.read(&entry.path) {
                 Ok(data) => match std::fs::write(&local, data) {
-                    Ok(()) => files += 1,
+                    Ok(()) => {
+                        files += 1;
+                        // CPE-1709 (F4): the file IS delivered — the verbatim root exempts our own write
+                        // from MAX_PATH — but an application without long-path support cannot open it
+                        // afterwards. Encoding grows a name by up to 3x, so this transfer makes a
+                        // pre-existing hazard materially likelier. A notice, not a failure: calling a
+                        // delivered, long-path-readable file a failure would be its own wrong answer.
+                        if cfg!(windows) && win32_visible_len(&local) > MAX_WINDOWS_PATH {
+                            eprintln!(
+                                "transfer: delivered {} at a {}-character path, past Windows' \
+                                 {MAX_WINDOWS_PATH}-character MAX_PATH — applications without \
+                                 long-path support will not be able to open it",
+                                entry.path,
+                                win32_visible_len(&local)
+                            );
+                        }
+                    }
                     Err(e) => hard_err = Some(format!("{}: {e}", local.display())),
                 },
                 Err(e) => hard_err = Some(e),
@@ -556,6 +712,21 @@ pub fn download_tree(
 
     if let Some(e) = hard_err {
         return Err(e);
+    }
+    // CPE-1709 (F1): never report success for a tree we did not fully deliver. In a batch the old
+    // silent skip vanished completely — three keys in, `Ok(2)`, two files out — which is precisely the
+    // "the transfer said it worked and the file is not there" failure this ticket exists to eliminate.
+    // Everything deliverable IS still delivered first (the walk runs to completion, matching the
+    // skip-on-error ethos); only the final verdict changes, and it names what was lost.
+    if !undelivered.is_empty() {
+        const SHOWN: usize = 5;
+        let more = undelivered.len().saturating_sub(SHOWN);
+        return Err(format!(
+            "transfer: delivered {files} file(s), but {} could not be written to this filesystem: {}{}",
+            undelivered.len(),
+            undelivered.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; "),
+            if more > 0 { format!(" (+{more} more)") } else { String::new() }
+        ));
     }
     Ok(files)
 }
@@ -1143,8 +1314,33 @@ mod tests {
         ("LPT9", "%4CPT9", "LPT9"),
         // Left alone: a `%` that does NOT begin an escape is an ordinary character.
         ("50% off.txt", "50% off.txt", "50% off.txt"),
-        // Escaped: a `%` that DOES begin an escape, which is what keeps the mapping injective.
+        // Escaped: a `%` that DOES begin an escape THIS ENCODER CAN EMIT — what keeps it injective.
         ("literal%3Aname", "literal%253Aname", "literal%3Aname"),
+        // Left alone (CPE-1709 R2, F2): `%2f` is a well-formed escape the encoder can NEVER emit,
+        // because `guarded_join` splits on `/` and `\` before the transform runs. Escaping it renamed
+        // legal, working S3 keys for nothing.
+        ("report%2ffinal.txt", "report%2ffinal.txt", "report%2ffinal.txt"),
+        ("city=A%2FB", "city=A%2FB", "city=A%2FB"),
+        ("hash%5Cvalue", "hash%5Cvalue", "hash%5Cvalue"),
+        ("pct%FFtail", "pct%FFtail", "pct%FFtail"),
+        // ...and the round-2 device-name additions (F5).
+        ("COM¹", "%43OM¹", "COM¹"),
+        ("CONIN$", "%43ONIN$", "CONIN$"),
+    ];
+
+    /// Names that must survive a download **byte-identical**, because the local filesystem can hold
+    /// them perfectly well. Round 2 (F2) found the encoder was rewriting the `%2f` family, which both
+    /// renamed working keys and — by growing them — pushed some past the length ceiling into total loss.
+    const CPE_1709_MUST_NOT_REWRITE: &[&str] = &[
+        "50% off.txt",
+        "report%2ffinal.txt",
+        "city=A%2FB",
+        "hash%5Cvalue",
+        "pct%FFtail",
+        "100%.txt",
+        "a%zzb.txt",
+        "ordinary.txt",
+        "2026-08-13-report.json",
     ];
 
     /// The local leaf `CPE_1709_NAMES` expects on the OS the test is running on.
@@ -1213,6 +1409,135 @@ mod tests {
             assert_eq!(windows_safe_segment(good).as_ref(), good, "{good:?} needs no rewriting");
             assert_eq!(local_safe_segment(good).as_ref(), good);
         }
+    }
+
+    /// **CPE-1709 round 2, F2.** A `%HH` the encoder can never emit is an ordinary character sequence
+    /// and must survive untouched. `%2f` is the case that mattered: `guarded_join` splits on `/` and
+    /// `\` *before* the transform runs, so nothing in this codebase can produce `%2F` — yet the first
+    /// cut rewrote `report%2ffinal.txt` to `report%252ffinal.txt`, renaming a legal, already-working
+    /// S3 key (and `city=A%2FB`, an ordinary Hive/Athena partition value).
+    #[test]
+    fn cpe_1709_a_percent_escape_the_encoder_cannot_emit_is_left_alone() {
+        for name in CPE_1709_MUST_NOT_REWRITE {
+            assert_eq!(
+                windows_safe_segment(name).as_ref(),
+                *name,
+                "{name:?} contains no character this filesystem refuses, so it must not be rewritten"
+            );
+        }
+        // The complement, so this test cannot pass by the encoder simply doing nothing: a `%HH` the
+        // encoder CAN emit is still escaped, which is what keeps the mapping injective.
+        assert_eq!(windows_safe_segment("literal%3Aname").as_ref(), "literal%253Aname");
+        assert_eq!(windows_safe_segment("dev%43ON").as_ref(), "dev%2543ON");
+    }
+
+    /// The same names, end to end through the real sink: they must land under their **original** names
+    /// and be readable there. This is the half that proves the rewriting regression was real data loss
+    /// and not just cosmetic — a renamed file is a file the user cannot find.
+    #[test]
+    fn cpe_1709_names_needing_no_rewrite_arrive_under_their_original_names() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-norewrite-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let provider =
+            HostileNames { names: CPE_1709_MUST_NOT_REWRITE.iter().map(|s| s.to_string()).collect() };
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&provider, "", &out, &cancel).expect("all of these are storable names");
+        assert_eq!(n, CPE_1709_MUST_NOT_REWRITE.len());
+        for name in CPE_1709_MUST_NOT_REWRITE {
+            assert_eq!(
+                std::fs::read(out.join(name)).unwrap_or_else(|e| panic!("{name:?}: {e}")),
+                b"pwn",
+                "{name:?} must land under its own name, unrewritten"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A remote name long enough that its **encoded** form exceeds `MAX_LOCAL_COMPONENT`. Built from the
+    /// ticket's own motivating example — an ISO-8601 S3 key — so the test exercises the shape that
+    /// actually reaches this code rather than an artificial one. Each `:` costs two extra characters.
+    fn overlong_iso_key() -> String {
+        let stamp = "2026-08-13T10:00:00Z"; // 2 colons -> +4 characters once encoded
+        let padding = "x".repeat(MAX_LOCAL_COMPONENT - stamp.len() + 2);
+        format!("{stamp}{padding}.json")
+    }
+
+    /// **CPE-1709 round 2, F1 — the blocker.** A file whose encoded local name the filesystem refuses
+    /// must be a **reported failure**, never `Ok`. The old code skipped it silently, so a transfer
+    /// announced success for a tree it had not delivered — this ticket's own bug, one layer up.
+    ///
+    /// Ungated: the 255-character component limit is not a Windows peculiarity (ext4 and APFS impose the
+    /// same limit in bytes), so all three CI legs exercise the reporting path. The *reason* differs per
+    /// platform; the contract — never `Ok` for an undelivered tree — does not.
+    #[test]
+    fn cpe_1709_a_name_the_filesystem_refuses_is_a_reported_failure_not_a_silent_skip() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-toolong-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let key = overlong_iso_key();
+        let provider = HostileNames { names: vec![key.clone()] };
+        let cancel = AtomicBool::new(false);
+
+        let err = download_tree(&provider, "", &out, &cancel)
+            .expect_err("an undelivered file must NOT be reported as success");
+        assert!(
+            err.contains("could not be written"),
+            "the error must say the file was not written; got: {err}"
+        );
+        assert!(
+            err.contains(&MAX_LOCAL_COMPONENT.to_string()),
+            "the error must name the real cause (the component-length limit), not blame a symlink \
+             probe; got: {err}"
+        );
+        assert!(
+            !err.contains("symlink"),
+            "the old message blamed a pre-existing-symlink probe for a length problem; got: {err}"
+        );
+        // And the file the user would open genuinely is not there — the failure is real, not cosmetic.
+        assert!(std::fs::read_dir(&out).unwrap().flatten().next().is_none(), "nothing should have landed");
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// The batch shape, which is how this actually hides: two deliverable keys and one that cannot be
+    /// written. The two must still arrive — the walk runs to completion — but the transfer as a whole
+    /// must **not** report success, because it did not deliver everything it was asked for.
+    #[test]
+    fn cpe_1709_a_batch_containing_one_undeliverable_file_does_not_report_success() {
+        let out = std::env::temp_dir().join(format!("cpe-1709-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let provider = HostileNames {
+            names: vec!["first.txt".into(), overlong_iso_key(), "second.txt".into()],
+        };
+        let cancel = AtomicBool::new(false);
+
+        let err = download_tree(&provider, "", &out, &cancel)
+            .expect_err("2-of-3 delivered is not success — the old code returned Ok(2) here");
+        assert!(err.contains("delivered 2 file(s)"), "the verdict must say what DID land; got: {err}");
+        assert!(err.contains("but 1 could not"), "and how many did not; got: {err}");
+        // The deliverable siblings are still delivered — a bad name must not abort the whole transfer.
+        for good in ["first.txt", "second.txt"] {
+            assert_eq!(
+                std::fs::read(out.join(good)).unwrap_or_else(|e| panic!("{good}: {e}")),
+                b"pwn",
+                "{good} must still arrive despite an undeliverable sibling"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A security refusal is **not** a delivery failure: not writing a traversal name or a pre-existing
+    /// symlink is the correct outcome, so those must still end `Ok`. Without this the F1 change would
+    /// quietly turn every hostile-name transfer into an error and mask real problems behind noise.
+    #[test]
+    fn cpe_1709_a_security_refusal_still_reports_ok() {
+        let base = std::env::temp_dir().join(format!("cpe-1709-refusal-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let names = vec!["../escape.txt".into(), r"..\escape.txt".into(), "legit.txt".into()];
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&HostileNames { names }, "", &base, &cancel)
+            .expect("refusing a traversal name is correct behaviour, not a delivery failure");
+        assert_eq!(n, 1, "only the legitimate entry is delivered");
+        assert_eq!(std::fs::read(base.join("legit.txt")).unwrap(), b"pwn");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// **The headline test, ungated so all three CI legs assert something real.** Downloads a key
