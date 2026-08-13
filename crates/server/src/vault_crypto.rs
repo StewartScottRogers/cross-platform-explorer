@@ -643,7 +643,16 @@ mod tests {
     /// the match falls through, and `fs::rename` (which does not follow the final component) destroys the
     /// link. Identical shape to `metadata_write` (CPE-1716).
     ///
-    /// Asserts on the **slot**, not on the returned `Result` — pre-fix this returned `Ok(())`.
+    /// **Measured, and narrower than the report:** with a *dangling* link in the slot, the pre-fix code
+    /// does not actually destroy it — the rename fails first, because renaming a **directory** onto an
+    /// existing non-directory entry is refused by the OS (`ENOTDIR` on Unix; "The directory name is
+    /// invalid", os error 267, on Windows — measured on this branch by deleting the guard). So the pre-fix
+    /// bug here is a *confusing OS error* rather than data loss, and this test pins the honest refusal.
+    /// The **live**-link leg below is where the destruction is real. Both are worth having: a guard that
+    /// only fires for the case that happens to also be caught by the kernel is one platform quirk away
+    /// from mattering.
+    ///
+    /// Asserts on the **slot** before the `Result`, as every CPE-1710 test does.
     #[test]
     fn cpe_1710_promote_never_renames_over_a_dangling_link_at_the_output_directory() {
         use std::io::Write;
@@ -671,6 +680,63 @@ mod tests {
         assert!(
             std::fs::symlink_metadata(&out_dir).is_ok_and(|m| m.file_type().is_symlink()),
             "the user's link at the unlock destination was DESTROYED (result was {r:?})"
+        );
+        let e = r.expect_err("and promoting onto a link must be refused");
+        assert!(
+            e.to_string().contains("is a link"),
+            // Pre-fix this said "The directory name is invalid. (os error 267)" — the kernel refusing the
+            // rename for its own reasons, which is not the same as this code having decided anything.
+            "and the refusal must say what is in the way: {e}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The leg where the loss is real.** A *live* directory link pointing at an empty directory: the
+    /// pre-fix `read_dir(out_dir)` follows it, finds the target empty, and calls `remove_dir(out_dir)` —
+    /// which on Windows deletes the **link**, not the target — after which the rename succeeds and the
+    /// user's link is gone, replaced by a real directory. Measured on this branch by deleting the guard.
+    ///
+    /// On Unix `remove_dir` on a symlink fails with `ENOTDIR`, so there the pre-fix outcome is an error
+    /// rather than a loss; both platforms assert the same thing here (the link survives and the refusal
+    /// names it), which is the behaviour the fix guarantees on both rather than by platform accident.
+    ///
+    /// A **junction** on Windows (no privilege needed) and a symlink on Unix, so both legs assert for
+    /// real; only a machine that can create neither skips, and it says so.
+    #[test]
+    fn cpe_1710_promote_never_replaces_a_live_directory_link_at_the_output_directory() {
+        use std::io::Write;
+        let d = std::env::temp_dir().join(format!("cpe1710-promote-live-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let staging = d.join("staging");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(staging.join("f.txt"), b"unlocked").unwrap();
+
+        // The link's target is a real, EMPTY directory — the case that walks straight into `remove_dir`.
+        let target = d.join("real-empty-dir");
+        std::fs::create_dir_all(&target).unwrap();
+        let out_dir = d.join("unlocked-here");
+        #[cfg(windows)]
+        let made = junction::create(&target, &out_dir).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&target, &out_dir).is_ok();
+        if !made {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the promote live-link leg: this machine could not create a directory \
+                 link at {}. NOTHING in this test covered the link-replacement route on this run.",
+                out_dir.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = promote(&staging, &out_dir);
+
+        assert!(
+            std::fs::symlink_metadata(&out_dir).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's directory link was REPLACED by a real directory — `read_dir` followed it, found \
+             the target empty, and `remove_dir` deleted the LINK (result was {r:?})"
         );
         let e = r.expect_err("and promoting onto a link must be refused");
         assert!(
