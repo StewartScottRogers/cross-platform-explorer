@@ -3,11 +3,11 @@ id: CPE-1679
 title: The four media-preview GUI-smoke cases flip on unchanged code, and did so invisibly until case-level ratcheting exposed them
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
