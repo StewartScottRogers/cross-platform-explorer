@@ -792,4 +792,34 @@ describe("evaluate — a non-boolean 'intermittent' value is never treated as in
     assert.deepEqual(result.intermittentListings, []);
     assert.ok(result.messages.some((m) => m.includes("RATCHET") && m.includes(target)));
   });
+
+  // Reviewer (attempt 3, its "mutation G"): the two tests above both use a malformed value with
+  // GENUINELY GOOD evidence (a long reason + a real-looking ticket), so if clause 7's own
+  // `entry.intermittent !== true` were reverted to plain truthiness (`!entry.intermittent`), that
+  // evidence would still clear the bar and neither test would notice — clause 7's tightening is
+  // unpinned. This test isolates clause 7 alone with a malformed truthy value that has ZERO evidence:
+  // under the real `=== true` check it's an ordinary plain (still-failing) entry, so clause 7 never even
+  // looks at its evidence and the run is green. Reverting clause 7's check alone (leaving clause 2/3's
+  // `=== true` untouched) makes the loop enter the evidence check, find nothing, and red the run — a
+  // distinct failure from mutation F (clause 2/3), which this fixture cannot trip either way.
+  it("clause 7 alone: a non-boolean truthy 'intermittent' value with ZERO evidence must not silently skip the bar", () => {
+    const bogusTarget = "some case with a malformed intermittent value and zero evidence";
+    const malformed = {
+      spec: SAMPLES,
+      test: bogusTarget,
+      reason: "",
+      ticket: "",
+      intermittent: "false", // malformed: truthy STRING, not the boolean `false` — and no evidence at all
+    } as unknown as KnownFailingCase;
+    const knownFailing: KnownFailingFile = { cases: [malformed] };
+    const results: CaseResult[] = [{ spec: SAMPLES, test: bogusTarget, status: "failed" }];
+
+    const result = evaluate({ results, knownFailing, expectedSpecCount: 1 });
+
+    // Real behavior: "false" !== true, so this is an ordinary plain entry that's still failing — green,
+    // and clause 7 never runs its evidence check against this entry at all.
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.intermittentListings, []);
+    assert.deepEqual(result.unevidencedIntermittent, []);
+  });
 });
