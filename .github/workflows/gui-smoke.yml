@@ -236,6 +236,19 @@ jobs:
       # AFTER a display exists — wrapping the whole `npm test` invocation in `xvfb-run` below, rather
       # than just the app, sets `DISPLAY` before tauri-driver's own child process ever spawns, which
       # sidesteps the known "Failed to initialize gtk backend" ordering trap).
+      # CPE-1702: `libwebkit2gtk-4.1-dev` alone pulls in `gstreamer1.0-plugins-base` but not
+      # `-good`/`-bad`/`-ugly`/`-libav` — the packages that actually provide MP3, AAC and H.264
+      # decoders. Without them, `samples/audio/track.{mp3,flac,ogg}` + `samples/video/clip.mp4` (all
+      # real, valid, ffmpeg-encoded media — confirmed in the CPE-1679 UAT, not stubs) can never
+      # decode here, so this job only ever exercised MediaPlayer.svelte's graceful-degrade path
+      # (`.mp-fallback`) and never real playback (`.mp-media`) — the thing a user does most (open an
+      # MP3 and hear it) had zero CI coverage. Installing the plugin packages below makes those four
+      # `samples.smoke.ts` cases decode for real; `samples/audio/corrupt.mp3` (added alongside this
+      # change, see samples/README.md) is a deliberately undecodable fixture so the graceful-degrade
+      # path this job used to be the ONLY exercise of doesn't silently lose its coverage — it's picked
+      # up automatically by `samples.smoke.ts`'s data-first walk of `samples/`, same as every other
+      # fixture. Cost: a few more packages on every GUI-smoke run (apt already has them cached from
+      # the Ubuntu archive; no meaningfully different install time in practice).
       - name: Install Linux system dependencies
         run: |
           sudo apt-get update
@@ -245,7 +258,11 @@ jobs:
             librsvg2-dev \
             patchelf \
             webkit2gtk-driver \
-            xvfb
+            xvfb \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-plugins-ugly \
+            gstreamer1.0-libav
 
       - name: Setup Node
         uses: actions/setup-node@v4

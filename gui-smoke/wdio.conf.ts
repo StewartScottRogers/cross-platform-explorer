@@ -1020,6 +1020,17 @@ export const config: WebdriverIO.Config = {
     // CPE-1481: already generous (90s per `it`, well under the 35-min job cap raised by this same
     // ticket) — one slow/hung test fails on its own instead of eating the whole job's budget.
     // Checked, not duplicated: this was already the value here before CPE-1481, no change needed.
+    //
+    // CPE-1702: if you're writing a long-running loop inside a single `it()` (e.g. a stress harness
+    // that repeats openSampleFile/waitForPreviewToSettle many times), do NOT reach for `this.timeout()`
+    // inside the test body to extend past this 90s ceiling — it is not reliably honoured by
+    // @wdio/mocha-framework (see webdriverio/webdriverio#1794) and this repo has real CI evidence of
+    // it failing to take effect: CPE-1679's throwaway stress harness called `this.timeout(2_060_000)`
+    // and still died at wall-clock ~90.000s on all three of its real runs, every time WDIO's own
+    // mocha-timeout teardown (`deleteSession()`) firing mid-loop, not a WebKitGTK/GStreamer leak. Full
+    // writeup: this file's README, "The 'session death' above is `mochaOpts.timeout`, not a
+    // WebKitGTK/GStreamer leak (CPE-1702)". Keep any single stress `it()` well under 90s, or split it
+    // across multiple `it()`s so each gets a fresh 90s budget.
     timeout: 90_000,
   },
 

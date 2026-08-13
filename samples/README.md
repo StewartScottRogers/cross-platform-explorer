@@ -132,6 +132,31 @@ zero-page `/Pages` tree — exactly `malformed.pdf`'s shape — is rejected BEFO
 PDF viewer, falling back to the metadata pane instead. So this fixture now doubles as CPE-1357's
 regression pin: opening it must keep degrading gracefully (never crash) for as long as that fix stands.
 
+## `audio/corrupt.mp3` — deliberately-undecodable media fixture (CPE-1702)
+
+Same pattern as `documents/malformed.pdf` above: a hand-authored, deliberately broken fixture, not
+produced by `gen_samples.py`. Until CPE-1702, `.github/workflows/gui-smoke.yml`'s Linux leg installed
+only `libwebkit2gtk-4.1-dev`, which pulls in `gstreamer1.0-plugins-base` but not the `-good`/`-bad`/
+`-ugly`/`-libav` packages that actually decode MP3/AAC/H.264 — so `audio/track.{mp3,flac,ogg}` and
+`video/clip.mp4` (all genuine, valid, ffmpeg-encoded media, not stubs) could never decode in CI and
+`gui-smoke`'s only exercise of `MediaPlayer.svelte`'s graceful-fallback UI (`.mp-fallback`) was those
+four real files failing for a codec-availability reason that had nothing to do with the fallback path
+itself. CPE-1702 installs the missing plugin packages so those four cases test **real playback**
+instead — closing that gap, but opening a different one: with every real fixture now decodable,
+nothing left in `samples/` would ever legitimately reach `.mp-fallback`, so a regression that broke
+the fallback UI outright could land undetected.
+
+`audio/corrupt.mp3` closes it: ASCII text with an `.mp3` extension and **no MPEG frame sync bytes
+anywhere in it**, so `categoryOf()` (`src/lib/filetypes.ts`) still routes it to the audio preview kind
+(matched purely by extension, same as every real audio file — there is no server-side
+validate-before-embed gate for media the way `pdf_validity` gates PDFs), but no real decoder — with or
+without the extra GStreamer plugins — can ever make sense of the bytes. `gui-smoke/specs/
+samples.smoke.ts` discovers it automatically (its walk reads the real `samples/` tree at spec-load
+time, same as every other fixture — no harness code change needed) and asserts the same "no crash +
+preview renders or gracefully degrades" contract as every other sample; for this one, "gracefully
+degrades" (`.mp-fallback`) is the only outcome that can ever legitimately pass, which is exactly what
+keeps that UI's coverage alive now that the four real media files no longer exercise it.
+
 ## Sample-coverage ratchet (CPE-1358)
 
 Every supported preview **kind** (`src/lib/preview/provider.ts`) has at least one valid sample below, so
@@ -144,7 +169,7 @@ opening any format the app claims to support has real fixture coverage:
 | `raw-image`      | `raw/sunset.cr2`                                       |
 | `dicom`          | `medical/ct-scan.dcm`                                  |
 | `heic`           | `images/iphone-photo.heic`                             |
-| `audio`          | `audio/track.mp3`, `audio/track.flac`, `audio/track.ogg` |
+| `audio`          | `audio/track.mp3`, `audio/track.flac`, `audio/track.ogg` (real decode), `audio/corrupt.mp3` (CPE-1702 graceful-degrade trigger) |
 | `video`          | `video/clip.mp4`                                        |
 | `pdf`            | `documents/doc.pdf` (valid), `documents/malformed.pdf` (CPE-1357 regression trigger) |
 | `json`           | `text/data.json`                                        |
