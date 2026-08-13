@@ -87,6 +87,12 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 ///
 /// `date` is the `YYYYMMDD` day, **not** the full timestamp; passing the timestamp yields a key that
 /// derives cleanly and then fails to verify anywhere, which is the hardest kind of bug to see.
+///
+/// `region` and `service` are taken as given - this function has no `Result` to fail into, and cannot:
+/// the output is a fixed-size HMAC digest, not a string an injected byte could restructure, so there is
+/// nothing here for a bad `region`/`service` to corrupt. It is `pub` only for the published AWS test
+/// vectors that pin this stage directly; every real caller reaches it through [`Signer`], which validates
+/// both (CPE-1691) before this is ever called.
 pub fn signing_key(secret: &str, date: &str, region: &str, service: &str) -> [u8; 32] {
     let k_date = hmac_sha256(format!("AWS4{secret}").as_bytes(), date.as_bytes());
     let k_region = hmac_sha256(&k_date, region.as_bytes());
@@ -238,6 +244,122 @@ pub struct SignedRequest {
     pub authorization: String,
 }
 
+/// Reject `,` and `/` on top of [`crate::validate_structural_text`], for the fields that are woven
+/// directly into the `Authorization` header's `Credential=` parameter or the SigV4 credential scope
+/// string (`{date}/{region}/{service}/aws4_request`): `region`, `service`, and `access_key_id`.
+///
+/// **Deliberately NOT folded into the shared `validate_structural_text` standard** (CPE-1691, UAT
+/// SEC-4): an endpoint legitimately carries `/` as a path separator, so widening the shared check would
+/// refuse every endpoint with a path prefix. This layers the extra restriction on top instead, the same
+/// way [`crate::validate_bucket`] layers its own extra `/`/`@`/`:` refusal on top of the shared standard —
+/// one more instance of "the shared check plus this field's own reason", not a competing standard.
+///
+/// Both bytes are live, not theoretical: `access_key_id = "AKIA,Signature=deadbeef"` produces
+/// `Authorization: ...Credential=AKIA,Signature=deadbeef/20130524/..., SignedHeaders=...` - a forged
+/// `Signature=` parameter ahead of the real one, because `,` is what separates `Authorization`
+/// parameters. `region = "us-east-1/s3/aws4_request"` restructures the credential-scope string itself,
+/// because `/` is what separates its elements.
+fn validate_credential_scope_element(kind: &str, s: &str) -> Result<(), String> {
+    crate::validate_structural_text(kind, s)?;
+    if let Some(ch) = s.chars().find(|c| matches!(c, ',' | '/')) {
+        return Err(format!(
+            "s3: {kind} must not contain ',' or '/' (they would restructure the credential scope or forge \
+             an Authorization parameter), got {ch:?} in {s:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate a SigV4 region: not empty, and none of the bytes [`validate_credential_scope_element`]
+/// refuses.
+///
+/// The region becomes part of the credential scope, which is embedded verbatim in the signed
+/// `Authorization` header (`Credential={key}/{date}/{region}/{service}/aws4_request`) - a control
+/// character there is the identical request-splitting shape CPE-1689 closed at the endpoint, and a `/`
+/// there restructures the scope string itself, just reached through a different field
+/// (`region "us-east-1\r\nX-Injected: 1"` used to sign cleanly; so did `"us-east-1/s3/aws4_request"`).
+///
+/// **Called from both public paths that take a region** - [`crate::S3Config::object_target`] /
+/// [`crate::S3Config::bucket_target`] (via their shared `target_for`) and [`Signer::new`] /
+/// [`Signer::for_service`] - which is the point: before CPE-1691, `target_for` rejected an empty region
+/// and `Signer::new(&creds, "")` signed happily. A validation enforced on one entry point and skipped on
+/// another is barely a validation.
+pub(crate) fn validate_region(region: &str) -> Result<(), String> {
+    if region.trim().is_empty() {
+        return Err("s3: region must not be empty (it is part of the SigV4 credential scope)".into());
+    }
+    validate_credential_scope_element("region", region)
+}
+
+/// A header name must be an RFC 7230 `token` - the grammar HTTP itself defines for one. Unlike a value
+/// (see [`reject_framing_bytes`]) a name is structured, not free-form, so framing bytes are not the only
+/// unsafe alphabet: `;` would forge an extra entry in `SignedHeaders` (`"x-evil;host"` satisfied
+/// `signed_headers.split(';').any(|n| n == "host")` with **no real `host` header present at all** -
+/// CPE-1691's UAT SEC-1, a full bypass of the CPE-1689 host-presence guard), `,` would forge an extra
+/// `Authorization` parameter the same way [`validate_credential_scope_element`] refuses it for
+/// `access_key_id`, and `:` or a space would make the canonical header line's name/value boundary
+/// ambiguous (`"x evil:injected"` -> canonical line `x evil:injected:1`).
+///
+/// The allowed set is exactly [RFC 7230 §3.2.6](https://www.rfc-editor.org/rfc/rfc7230#section-3.2.6)'s
+/// `tchar`: ASCII alphanumerics plus `` !#$%&'*+-.^_`|~ ``. Nothing outside that set can appear in a real
+/// HTTP header name, so refusing everything else costs no legitimate header.
+fn validate_header_name(name: &str) -> Result<(), String> {
+    let n = name.trim(); // `canonical_headers` trims before lowercasing - validate what it will use.
+    if n.is_empty()
+        || !n.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(
+                    b,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+    {
+        return Err(format!(
+            "s3: header name must be an RFC 7230 token (no ':', ';', ',', space or control), got {name:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// Reject a header **value** containing a byte that would let it escape its own line in the signed
+/// header block or the `Authorization` header: CR, LF or NUL.
+///
+/// This is NOT the check for a header **name** - see [`validate_header_name`], a full RFC 7230 token
+/// check. A name is structured (only a fixed alphabet is ever legal), but a value is not: S3 header
+/// values are not restricted to that alphabet, so this rule is deliberately narrow, and stays narrow for
+/// a real reason rather than a convenient one. The motivating case - `x-amz-copy-source` built from an S3
+/// object key - does not actually carry a raw CR/LF in practice: AWS requires that header's value to be
+/// URI-encoded, so a key's CR/LF bytes reach it as `%0D%0A`, never raw (this crate's own
+/// [`crate::S3Config::object_target`] URI-encodes every key byte the same way, via [`encode_path`]).
+/// The check below is therefore defence-in-depth against a future caller that signs an unencoded value,
+/// not a guard against a request this crate can build today - but the *rule* is still the right one: what
+/// a value must never do is change the *shape* of the request by escaping its own line. CR and LF do
+/// that directly, and a raw NUL is refused alongside them because C-string-based HTTP tooling downstream
+/// can silently truncate a header at one - the same "byte changes what the server actually sees" failure
+/// in a different disguise.
+pub(crate) fn reject_framing_bytes(kind: &str, s: &str) -> Result<(), String> {
+    if let Some(ch) = s.chars().find(|c| matches!(c, '\r' | '\n' | '\0')) {
+        return Err(format!(
+            "s3: {kind} must not contain a CR, LF or NUL (it would let the value escape its line in the \
+             signed request), got {ch:?} in {s:?}"
+        ));
+    }
+    Ok(())
+}
+
 /// Signs requests for one `(credentials, region, service)` triple.
 ///
 /// Holds a borrowed [`Credentials`] so the secret is never copied into a second place that could outlive
@@ -250,30 +372,86 @@ pub struct Signer<'a> {
 }
 
 impl<'a> Signer<'a> {
-    /// A signer for the `s3` service - what every request in this crate uses.
-    pub fn new(credentials: &'a Credentials, region: &'a str) -> Self {
-        Signer { credentials, region, service: "s3" }
+    /// A signer for the `s3` service - what every request in this crate uses. Delegates to
+    /// [`Signer::for_service`] with `service: "s3"` rather than duplicating its validation, so there is
+    /// exactly one place that decides what a valid `(region, service, access_key_id)` triple looks like.
+    pub fn new(credentials: &'a Credentials, region: &'a str) -> Result<Self, String> {
+        Self::for_service(credentials, region, "s3")
     }
 
     /// A signer for some other service name. Only the published AWS test vectors need this (they are
     /// stated against `service` and `iam` as well as `s3`), but it costs one field and keeps the vector
     /// tests honest - they exercise the same code path production does, rather than a test-only copy.
-    pub fn for_service(credentials: &'a Credentials, region: &'a str, service: &'a str) -> Self {
-        Signer { credentials, region, service }
+    ///
+    /// Validates `region`, `service`, and `credentials.access_key_id` - all three are woven into either
+    /// the credential scope or the `Authorization` header's `Credential=` field, so a control character,
+    /// `,` or `/` in any one of them can inject or restructure (CPE-1691, UAT SEC-2/SEC-4: an unvalidated
+    /// `service` let `Signer::for_service(&c, "us-east-1", "s3\r\nX-Injected: 1")` land raw in the
+    /// credential scope, and `,`/`/` in `region`/`access_key_id` were not refused by the plain structural
+    /// check at all).
+    pub fn for_service(credentials: &'a Credentials, region: &'a str, service: &'a str) -> Result<Self, String> {
+        validate_region(region)?;
+        validate_credential_scope_element("access key id", &credentials.access_key_id)?;
+        validate_credential_scope_element("service name", service)?;
+        Ok(Signer { credentials, region, service })
     }
 
     /// Sign `input`, returning every stage.
     ///
-    /// Fails on a malformed `amz_date`, a method that is not an uppercase HTTP token, or a header list
-    /// with no `host` in it. Each of those three would otherwise produce a signature that derives
-    /// cleanly and can only fail at the server as an opaque `SignatureDoesNotMatch` - the failure mode
-    /// this module exists to keep out of the user's hands. No error ever echoes the secret (nothing in
-    /// this module formats it into a string other than the HMAC input).
+    /// Fails on a malformed `amz_date`, a method that is not an uppercase HTTP token, a header name that
+    /// is not an RFC 7230 token ([`validate_header_name`]), a header value carrying a CR/LF/NUL
+    /// ([`reject_framing_bytes`]), a header list with no `host` in it (or more than one), or a `host`
+    /// value that is empty or whitespace-only. Each of those would otherwise produce a signature that
+    /// derives cleanly and can only fail at the server as an opaque `SignatureDoesNotMatch` - the failure
+    /// mode this module exists to keep out of the user's hands. No error ever echoes the secret (nothing
+    /// in this module formats it into a string other than the HMAC input).
     pub fn sign(&self, input: &SigningInput<'_>) -> Result<SignedRequest, String> {
         validate_method(input.method)?;
         let date = short_date(input.amz_date)?;
+
+        // Validate every header up front, and check `host`'s value on each RAW, pre-merge occurrence
+        // rather than on the merged/collapsed text `canonical_headers` produces below (CPE-1691, UAT
+        // SEC-3): `[("host", ""), ("host", "")]` merges to `host:,`, which is non-empty even though
+        // neither supplied value was usable, so a check on the merged line missed it. A second `host`
+        // header is refused outright rather than merged - `[("host","good"),("host","evil")]` merging to
+        // `host:good,evil` is the same "signs cleanly, fails opaquely at the server" shape D3 exists to
+        // prevent, one level up from the empty-value case.
+        let mut host_count = 0u32;
+        for (name, value) in input.headers {
+            validate_header_name(name)?;
+            reject_framing_bytes("header value", value)?;
+            if name.trim().eq_ignore_ascii_case("host") {
+                host_count += 1;
+                if host_count > 1 {
+                    return Err(format!(
+                        "s3: only one \"host\" header may be signed - got a second value {value:?}"
+                    ));
+                }
+                if normalize_header_value(value).is_empty() {
+                    return Err(format!(
+                        "s3: the \"host\" header value must not be empty or whitespace-only - S3 will \
+                         reject a signature for a request with no usable Host, got {value:?}"
+                    ));
+                }
+            }
+        }
+
         let (header_block, signed_headers) = canonical_headers(input.headers);
-        if !signed_headers.split(';').any(|n| n == "host") {
+        // Counting exact pre-merge `host` names above is deliberately redundant with
+        // `validate_header_name`, and must NOT be "simplified" back to scanning the merged
+        // `signed_headers` list (`signed_headers.split(';').any(|n| n == "host")`). That older form was
+        // the SEC-1 bypass: a name of `x-evil;host` put the substring `host` into the list and satisfied
+        // the check with no `host` header present at all. No test can distinguish the two forms today -
+        // `validate_header_name` refuses every name that could contain a `;`, so no legal input reaches
+        // the difference - which is exactly why this note exists instead of a test (CPE-1691, reviewer
+        // NB-1). The `debug_assert` is the tripwire: an empty element in the list would mean a name
+        // slipped past the token check. (An empty `signed_headers` is the no-headers-at-all case,
+        // refused just below by `host_count`.)
+        debug_assert!(
+            signed_headers.is_empty() || signed_headers.split(';').all(|n| !n.is_empty()),
+            "validate_header_name should have refused an empty header name, got [{signed_headers}]"
+        );
+        if host_count == 0 {
             return Err(format!(
                 "s3: the headers to sign must include \"host\" - SigV4 covers it and S3 rejects a \
                  signature that does not; got [{signed_headers}]"
@@ -431,7 +609,7 @@ mod tests {
     #[test]
     fn get_vanilla_vector_matches_at_every_stage() {
         let creds = suite_credentials();
-        let signer = Signer::for_service(&creds, "us-east-1", "service");
+        let signer = Signer::for_service(&creds, "us-east-1", "service").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -487,7 +665,7 @@ mod tests {
     #[test]
     fn query_parameters_are_sorted_into_canonical_order() {
         let creds = suite_credentials();
-        let signer = Signer::for_service(&creds, "us-east-1", "service");
+        let signer = Signer::for_service(&creds, "us-east-1", "service").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -529,7 +707,7 @@ mod tests {
     #[test]
     fn s3_get_object_vector_matches_at_every_stage() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -590,7 +768,7 @@ mod tests {
         );
 
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "PUT",
@@ -624,7 +802,7 @@ mod tests {
     #[test]
     fn s3_list_objects_vector_matches() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -689,7 +867,7 @@ mod tests {
     #[test]
     fn s3_canonical_uri_is_not_path_normalized() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let sign_path = |p: &str| {
             signer
                 .sign(&SigningInput {
@@ -712,7 +890,7 @@ mod tests {
     #[test]
     fn headers_are_lowercased_trimmed_sorted_and_merged() {
         let creds = suite_credentials();
-        let signer = Signer::for_service(&creds, "us-east-1", "service");
+        let signer = Signer::for_service(&creds, "us-east-1", "service").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -752,7 +930,7 @@ mod tests {
     #[test]
     fn header_value_whitespace_collapses_inside_a_quoted_string_too() {
         let creds = suite_credentials();
-        let signer = Signer::for_service(&creds, "us-east-1", "service");
+        let signer = Signer::for_service(&creds, "us-east-1", "service").unwrap();
         let signed = signer
             .sign(&SigningInput {
                 method: "GET",
@@ -798,7 +976,7 @@ mod tests {
     #[test]
     fn signing_without_a_host_header_is_refused_by_name() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let sign_with = |headers: &[(&str, &str)]| {
             signer.sign(&SigningInput {
                 method: "GET",
@@ -830,7 +1008,7 @@ mod tests {
     #[test]
     fn a_method_that_is_not_an_uppercase_token_is_refused() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let sign_method = |method: &str| {
             signer.sign(&SigningInput {
                 method,
@@ -861,6 +1039,308 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------------------------
+    // What `sign`/`Signer::new`/`Signer::for_service` refuse (CPE-1691). Found by the independent UAT
+    // on PR #868 (CPE-1689): endpoint validation closed the request-splitting shape at one door and left
+    // the header/region/access-key-id doors open. Every case here is driven through the public API - the
+    // header cases through `sign()`, the region cases through both public paths that take one.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The one that matters most: a header **value** carrying CR/LF used to sign cleanly and put a
+    /// second, attacker-chosen line into the canonical request - `x-amz-copy-source` built from an S3
+    /// key (which legally contains CR/LF) into `X-Amz-Acl: public-read` standing on its own line. Refused
+    /// now, and the assertion checks the *message* (not `is_err()`): CPE-1691 was filed partly because a
+    /// CRLF **endpoint** was once caught by the unrelated port check, so a bare `is_err()` here would be
+    /// exactly that false comfort again.
+    #[test]
+    fn a_header_value_containing_cr_or_lf_is_refused_and_the_canonical_request_keeps_its_line_count() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
+        let sign_with_copy_source = |value: &str| {
+            signer.sign(&SigningInput {
+                method: "PUT",
+                encoded_path: "/dest.txt",
+                query: &[],
+                headers: &[("host", "h.example"), ("x-amz-copy-source", value)],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+        };
+
+        // The exact shape from the ticket: a copy-source key smuggling a bogus header onto its own line.
+        let err = sign_with_copy_source("/bucket/dir/evil\r\nX-Amz-Acl: public-read").unwrap_err();
+        assert!(
+            err.contains("CR, LF or NUL"),
+            "the message must name the framing-byte rule, not just fail: {err}"
+        );
+        // The bad value is echoed in the message (it is not a secret - only `secret_access_key` is, and
+        // this crate never formats that one into anything) because seeing exactly what was rejected is
+        // the whole point of a message a caller might paste into a bug report.
+        assert!(err.contains("public-read"), "{err}");
+
+        // Bare LF and a raw NUL are refused the same way - each also escapes or truncates the value's
+        // own line, just via a different byte.
+        for bad in ["/bucket/dir\nX-Injected: 1", "/bucket/dir\0evil"] {
+            let err = sign_with_copy_source(bad).unwrap_err();
+            assert!(err.contains("CR, LF or NUL"), "for {bad:?}: {err}");
+        }
+
+        // A legitimate copy-source key needing none of those bytes signs to exactly the eight canonical
+        // request lines two signed headers produce (method, path, query, 2 header lines, blank,
+        // signed-header list, payload hash) - proving the refused cases above were rejected outright
+        // rather than merely losing a byte or two. Before CPE-1691 the malicious value above would have
+        // produced a *nine*-line canonical request, per the ticket.
+        let clean = sign_with_copy_source("/bucket/dir/evil").unwrap();
+        assert_eq!(
+            clean.canonical_request.lines().count(),
+            8,
+            "a clean two-header request has 8 canonical-request lines; got:\n{}",
+            clean.canonical_request
+        );
+    }
+
+    /// A header **name** is structured, not free-form - it must be an RFC 7230 token - so it is *not*
+    /// covered by [`reject_framing_bytes`]'s narrow "CR/LF/NUL only" rule for values; see
+    /// [`validate_header_name`]. Each case here is its **own** `#[test]` per the independent UAT on this
+    /// PR: previously the name check shared a test with the value check, so disabling just the name check
+    /// did not go red on its own — a change that reds the wrong test (or none) proves nothing about which
+    /// guard is load-bearing.
+    ///
+    /// `"x-evil;host"` is the important one: it is the exact SEC-1 finding from that UAT. Before this
+    /// fix, a header list with **no real `host` header at all** — just this one malicious name — still
+    /// satisfied `signed_headers.split(';').any(|n| n == "host")`, because the injected `;host` became a
+    /// second entry in the merged `SignedHeaders` list. That fully bypassed the CPE-1689 host-presence
+    /// guard and signed a request with zero actual `Host` coverage. The assertion below checks for the
+    /// RFC-7230-token message, not merely `is_err()`, specifically so a regression that swaps this check
+    /// for something else that happens to also reject `;` (but not close the bypass) cannot pass silently.
+    #[test]
+    fn a_header_name_that_is_not_an_rfc7230_token_is_refused_and_cannot_forge_the_host_check() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
+
+        // The SEC-1 bypass, reproduced exactly: no "host" header anywhere in the list, only a name that
+        // satisfied the OLD `signed_headers.split(';').any(|n| n == "host")` check.
+        let err = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[("x-evil;host", "1")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+            .unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+        assert!(
+            !err.contains("must include \"host\""),
+            "the request must be refused for the name being invalid, not merely re-discovered as \
+             hostless by a later check: {err}"
+        );
+
+        // The rest signed alongside a real `host` header, so a name-only refusal is what is being pinned
+        // rather than the separate (and already-covered) missing-host case.
+        let sign_with_name = |name: &str| {
+            signer.sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[("host", "h.example"), (name, "1")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+        };
+
+        // A forged `Authorization` parameter ahead of the real `Signature=`.
+        let err = sign_with_name("x, Signature=deadbeef").unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+
+        // An ambiguous name/value boundary on the canonical header line.
+        let err = sign_with_name("x evil:injected").unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+
+        // CR/LF in a name is refused by this check too (it is not an RFC 7230 tchar either), even though
+        // the narrower value-only `reject_framing_bytes` rule does not apply to names at all.
+        let err = sign_with_name("x-evil\r\nX-Injected").unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+
+        // An empty name is not a token either. Without the `is_empty()` clause this signs to a canonical
+        // line of `:v` with `SignedHeaders=";host"` - a name that is not there at all (reviewer NB-2).
+        let err = sign_with_name("").unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+
+        // A real header name — including one with the token punctuation RFC 7230 actually allows — still
+        // signs.
+        assert!(sign_with_name("x-amz-meta-foo").is_ok());
+        assert!(sign_with_name("x!y#z").is_ok());
+    }
+
+    /// `region "us-east-1\r\nX-Injected: 1"` used to land raw in the `Authorization` header's credential
+    /// scope (`Credential=AKIA…/20130524/us-east-1\r\nX-Injected: 1/s3/aws4_request`). Proven on **both**
+    /// public paths that take a region, per the ticket: this test is `Signer::new`'s; the sibling test in
+    /// `lib.rs` (`a_control_character_or_empty_region_is_refused_through_target_for_too`) is
+    /// `S3Config::target_for`'s. Before CPE-1691 only one of the two checked anything at all.
+    #[test]
+    fn signer_new_and_for_service_refuse_an_empty_or_control_character_region_the_same_way() {
+        let creds = s3_doc_credentials();
+
+        let err = Signer::new(&creds, "us-east-1\r\nX-Injected: 1").unwrap_err();
+        assert!(err.contains("control characters or whitespace"), "{err}");
+
+        // The exact regression named in the ticket: this used to succeed and scope to "us-east-1//..".
+        let err = Signer::new(&creds, "").unwrap_err();
+        assert!(err.contains("region must not be empty"), "{err}");
+
+        // `for_service` is not a second unguarded door.
+        let err = Signer::for_service(&creds, "us-east-1\r\nX-Injected: 1", "s3").unwrap_err();
+        assert!(err.contains("control characters or whitespace"), "{err}");
+        let err = Signer::for_service(&creds, "", "s3").unwrap_err();
+        assert!(err.contains("region must not be empty"), "{err}");
+
+        // A normal region still works on both constructors.
+        assert!(Signer::new(&creds, "us-east-1").is_ok());
+        assert!(Signer::for_service(&creds, "us-east-1", "s3").is_ok());
+    }
+
+    /// SEC-2 from the independent reviewer on this PR: `service` lands in `credential_scope` and verbatim
+    /// in `Authorization` exactly like `region` does, but was left completely unvalidated.
+    /// `Signer::for_service(&c, "us-east-1", "s3\r\nX-Injected: 1")` used to yield
+    /// `scope = "20130524/us-east-1/s3\r\nX-Injected: 1/aws4_request"`. `Signer::new` is covered too,
+    /// because it now delegates to `for_service("s3")` rather than duplicating the check.
+    #[test]
+    fn for_service_refuses_a_control_character_service_name() {
+        let creds = s3_doc_credentials();
+        let err = Signer::for_service(&creds, "us-east-1", "s3\r\nX-Injected: 1").unwrap_err();
+        assert!(err.contains("service name"), "{err}");
+        assert!(err.contains("control characters or whitespace"), "{err}");
+
+        // A normal service name still works, on both constructors.
+        assert!(Signer::for_service(&creds, "us-east-1", "s3").is_ok());
+        assert!(Signer::new(&creds, "us-east-1").is_ok());
+    }
+
+    /// SEC-4 from the independent reviewer: `,` terminates an `Authorization` parameter and `/` separates
+    /// credential-scope elements, and the plain `validate_structural_text` standard refuses neither (an
+    /// endpoint legitimately carries `/`, so the shared check cannot). `validate_credential_scope_element`
+    /// layers both refusals on top for the three fields actually woven into `Authorization`/the credential
+    /// scope: `access_key_id`, `region`, and `service`. Three distinct live payloads, one per field:
+    #[test]
+    fn credential_scope_elements_refuse_a_comma_or_slash_that_would_restructure_the_authorization_header() {
+        let good_creds = s3_doc_credentials();
+
+        // `,` in `access_key_id` forges an extra `Authorization` parameter ahead of the real `Signature=`.
+        let bad_key_id = Credentials::new(
+            "AKIA,Signature=deadbeef",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        );
+        let err = Signer::new(&bad_key_id, "us-east-1").unwrap_err();
+        assert!(err.contains("access key id"), "{err}");
+        assert!(err.contains("must not contain ',' or '/'"), "{err}");
+
+        // `/` in `region` restructures the credential-scope string itself.
+        let err = Signer::new(&good_creds, "us-east-1/s3/aws4_request").unwrap_err();
+        assert!(err.contains("region"), "{err}");
+        assert!(err.contains("must not contain ',' or '/'"), "{err}");
+
+        // The analogous shape for `service`: both bytes, in the field SEC-2 added validation for.
+        let err = Signer::for_service(&good_creds, "us-east-1", "s3,Signature=deadbeef").unwrap_err();
+        assert!(err.contains("service name"), "{err}");
+        assert!(err.contains("must not contain ',' or '/'"), "{err}");
+        let err = Signer::for_service(&good_creds, "us-east-1", "s3/extra").unwrap_err();
+        assert!(err.contains("service name"), "{err}");
+        assert!(err.contains("must not contain ',' or '/'"), "{err}");
+    }
+
+    /// `access_key_id` reaches the `Authorization` header's `Credential=` field unescaped
+    /// (`Credential={access_key_id}/{credential_scope}, ...`), so a CR/LF there would inject a second
+    /// header line into the response the caller's HTTP client eventually parses back. Refused at
+    /// `Signer::new`/`for_service`, where credentials and region are bound together, so no signature can
+    /// ever be produced from a poisoned key id.
+    #[test]
+    fn an_access_key_id_containing_cr_or_lf_cannot_inject_into_the_authorization_header() {
+        let bad_creds = Credentials::new(
+            "AKIA\r\nX-Injected: 1",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        );
+        let err = Signer::new(&bad_creds, "us-east-1").unwrap_err();
+        assert!(err.contains("access key id"), "{err}");
+        assert!(err.contains("control characters or whitespace"), "{err}");
+
+        let err = Signer::for_service(&bad_creds, "us-east-1", "s3").unwrap_err();
+        assert!(err.contains("access key id"), "{err}");
+
+        // A well-formed access key id still signs, and the id itself is safe to appear (it is not
+        // secret - see `debug_output_never_contains_the_secret` in lib.rs for the part that is).
+        let good_creds = s3_doc_credentials();
+        let signer = Signer::new(&good_creds, "us-east-1").unwrap();
+        let signed = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[("host", "examplebucket.s3.amazonaws.com")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+            .unwrap();
+        assert!(signed.authorization.starts_with("AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
+    }
+
+    /// D3: presence of a header *named* `host` proved nothing about whether its *value* was usable.
+    /// `("host", "")` and `("host", "   ")` used to sign cleanly - `SignedHeaders=host` with an empty
+    /// `host:` line - and fail only at the server. The error names the actual problem.
+    ///
+    /// `[("host", ""), ("host", "")]` is the UAT's SEC-3 finding: the original guard inspected the
+    /// **merged, post-`canonical_headers`** line, where two empty values merge to `host:,` — non-empty,
+    /// so the guard missed it. This check now runs on each raw, pre-merge occurrence instead (see the
+    /// loop in `sign()`), so this exact pair is refused too.
+    #[test]
+    fn an_empty_or_whitespace_only_host_value_is_refused_by_name() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
+        let sign_with_headers = |headers: &[(&str, &str)]| signer.sign(&SigningInput {
+            method: "GET",
+            encoded_path: "/",
+            query: &[],
+            headers,
+            payload_hash: EMPTY_PAYLOAD_SHA256,
+            amz_date: "20130524T000000Z",
+        });
+        let sign_with_host = |host: &str| sign_with_headers(&[("host", host)]);
+
+        let err = sign_with_host("").unwrap_err();
+        assert!(err.contains("empty or whitespace-only"), "{err}");
+        let err = sign_with_host("   ").unwrap_err();
+        assert!(err.contains("empty or whitespace-only"), "{err}");
+
+        // SEC-3: two empty `host` values, which used to merge to a non-empty `host:,` line.
+        let err = sign_with_headers(&[("host", ""), ("host", "")]).unwrap_err();
+        assert!(err.contains("empty or whitespace-only"), "{err}");
+
+        // A real host still signs.
+        assert!(sign_with_host("examplebucket.s3.amazonaws.com").is_ok());
+    }
+
+    /// The other half of SEC-3, called out as recommended by the reviewer: two **different** `host`
+    /// values used to merge into `host:good.example,evil.example` — spec-correct per SigV4's header-merge
+    /// rule, but exactly the "signs cleanly, fails opaquely at the server" shape D3 exists to prevent, one
+    /// level up from the empty-value case. A second `host` header is refused outright instead.
+    #[test]
+    fn a_second_host_header_is_refused_outright_rather_than_merged() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
+        let err = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[("host", "good.example"), ("host", "evil.example")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+            .unwrap_err();
+        assert!(err.contains("only one \"host\" header"), "{err}");
+    }
+
+    // ---------------------------------------------------------------------------------------------
     // x-amz-date handling.
     // ---------------------------------------------------------------------------------------------
 
@@ -882,7 +1362,7 @@ mod tests {
     #[test]
     fn malformed_amz_date_is_rejected_without_leaking_the_secret() {
         let creds = s3_doc_credentials();
-        let signer = Signer::new(&creds, "us-east-1");
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
         let err = signer
             .sign(&SigningInput {
                 method: "GET",
