@@ -236,6 +236,93 @@ The twelve sites above. **Deliberately excluded, do not re-open:**
 - [ ] Re-run the sweep at the same scope and state it. If it comes back clean this time, that is worth
       saying explicitly — it would be the first time in six rounds.
 
+## Work Log
+
+**2026-08-13 — branch `cpe-1705-stat-collapse-sites`.**
+
+### The headline finding: the ACL byte-loss construction does NOT catch this bug class
+
+The ticket says *"for a `try_exists`-guarded, rename-destructive site you can write a test that stages
+actual byte loss."* Measured: **true only for a site already probing with `try_exists`.** Against the
+`.exists()`/`.is_file()` code this ticket actually fixes, the ACL is invisible — the ticket's own "two
+things that remain true" note says no deny refuses `Path::exists()`, and that fact runs one step further
+than anyone carried it. Under `icacls /deny (R)`:
+
+- the **unfixed** `target.exists()` sees `true`, calls the slot occupied, and **refuses**;
+- the victim's bytes survive;
+- so every byte-level assertion passes **against the bug**.
+
+Three tests were vacuous because of this and were caught by measuring rather than reasoning:
+
+1. **`cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat` (PR #889, pre-existing).** Reverting
+   `unique_target`'s probe to `!candidate.exists()` recompiled and the test passed **green**. Its
+   "*the strongest test in this ticket: it stages REAL BYTE LOSS*" / "*pre-fix this read back
+   `MOVED SOURCE`*" claims are false. Doc comment corrected in place; assertions kept (they guard a
+   regression *within* the fixed design).
+2. **This ticket's first `batch_media::plan` test** — reverting to `Path::is_file()` passed green.
+3. **This ticket's first `fresh_manifest_id` test** — reverting to `.exists()` passed green.
+
+(2) and (3) were **rewritten** to assert on the **bound** instead, which *is* distinguishable: past
+8 consecutive unreadable candidates the fixed loop refuses while the old one walks past and returns a
+guessed name. Both now red against the true pre-fix code (outputs in the PR).
+
+What the ACL leg *can* prove at a `.exists()` site is that the refusal's **wording** changed from a
+confident false claim ("already exists") to an honest "I could not tell". That is a real improvement —
+CPE-1687 traced exactly that lie to users hunting for a file that was never gone — and it is what the
+remaining site tests assert. The genuine overwrite is reachable only via the non-permission tail (`EIO`,
+dead mount, stale handle), which no local ACL simulates, so the **pure classifier tests are the
+load-bearing evidence** and the ACL legs are corroboration. `fsutil::deny_stat_of`'s doc comment now says
+this.
+
+### Second finding: `try_exists` → unknown-as-occupied is a HANG risk, not a one-line swap
+
+Two candidate-advancing loops (`batch_media::plan`, `snapshot_capture::fresh_manifest_id`) had **no
+termination condition** other than finding a free name — safe only because the old probe answered `false`
+for an unreadable slot and so always terminated on the first candidate. Skipping unknowns without a bound
+turns an unreadable directory (where *every* candidate is unknown) into an infinite loop. Both are now
+bounded at 8 and **refuse the item** (they return `Result`, so unlike `unique_target` they need no
+pathological fallback name).
+
+### Third finding: an earlier guard fires first at `batch_media::plan`
+
+`classify_output_containment` (CPE-1623) refuses an output whose filesystem identity it cannot read, and
+it runs on the first candidate *before* the disambiguation loop. So the collapse is reachable in the loop,
+not on the first probe — the first draft of the test denied the first candidate and was measuring a
+different guard entirely.
+
+### Decisions recorded (ACs)
+
+- **Shared helper: YES.** `fsutil::{TargetSlot, classify_target_slot, clobber_refusal,
+  unknown_slot_message}` is now the single implementation; `src-tauri`'s CPE-1696 copy was deleted and
+  repointed at it. Twelve open-coded copies is how the thirteenth gets missed — five rounds proved it.
+- **`unique_target`'s unprobed fallback: left as is, deliberately.** It needs a file named exactly
+  `<name>.<our pid>`, and the dead mount that reaches it fails the subsequent write anyway. The two loops
+  fixed here return `Result` and so refuse instead — a strictly better shape, but retrofitting it onto
+  `unique_target` changes a `PathBuf`-returning signature with many callers, which is its own ticket.
+- **Dangling-symlink route: fixed as what it is.** `fsutil::symlink_slot_refusal` is a **separate**
+  function called **separately** at the rename sites, precisely so a `try_exists` swap is never mistaken
+  for having closed it. `try_exists` answers `Ok(false)` on a dangling link *correctly*; only
+  `symlink_metadata` sees it.
+
+### Sites fixed (14)
+
+`src-tauri/src/lib.rs`: `rename_entry_impl` (the main rename, + symlink guard), `move_exact_impl`
+(+ symlink guard — CPE-1692 hardened its *parent* check and left the destination's own collapsed),
+`move_ticket_impl`, `restore_from_trash_impl`, `restore_trash_items_impl`.
+`crates/server`: `copilot::apply_op` Rename + `copilot::transfer_entry`, `organize_apply::apply_proposals`,
+`folder_template::stamp_nodes`, `split_join::split_file` (×2) + `join_files`, `batch_media::plan`,
+`snapshot_capture::load_store` / `fresh_manifest_id` / the blob-copy skip.
+
+### Left undone, deliberately
+
+- `content_index::load_at` (diagnosis severity), `thumb_source` (deliberate per its own comment; a
+  memory-cap bypass, a different family), `links::link_status` / `suggest_repair` /
+  `src-tauri` drive-symlink probe / `batch_media`'s `open_no_follow` backstop — all four are
+  `symlink_metadata(..).unwrap_or(false)`, i.e. **CPE-1461 family, not stat-collapse**. Mixing them in
+  would repeat the mis-sorting this ticket's own triage rule warns about.
+- **The ~110 `.is_dir()` re-walk the triage rule overturns.** Sized up front as the ticket asked, and it
+  is a ticket of its own — not quietly narrowed. Needs its own file.
+
 ## Notes
 
 Filed by the Foreman from the PR #889 (CPE-1696) sweep, 2026-08-13. The worker flagged it unprompted:
