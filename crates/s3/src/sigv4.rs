@@ -437,6 +437,20 @@ impl<'a> Signer<'a> {
         }
 
         let (header_block, signed_headers) = canonical_headers(input.headers);
+        // Counting exact pre-merge `host` names above is deliberately redundant with
+        // `validate_header_name`, and must NOT be "simplified" back to scanning the merged
+        // `signed_headers` list (`signed_headers.split(';').any(|n| n == "host")`). That older form was
+        // the SEC-1 bypass: a name of `x-evil;host` put the substring `host` into the list and satisfied
+        // the check with no `host` header present at all. No test can distinguish the two forms today -
+        // `validate_header_name` refuses every name that could contain a `;`, so no legal input reaches
+        // the difference - which is exactly why this note exists instead of a test (CPE-1691, reviewer
+        // NB-1). The `debug_assert` is the tripwire: an empty element in the list would mean a name
+        // slipped past the token check. (An empty `signed_headers` is the no-headers-at-all case,
+        // refused just below by `host_count`.)
+        debug_assert!(
+            signed_headers.is_empty() || signed_headers.split(';').all(|n| !n.is_empty()),
+            "validate_header_name should have refused an empty header name, got [{signed_headers}]"
+        );
         if host_count == 0 {
             return Err(format!(
                 "s3: the headers to sign must include \"host\" - SigV4 covers it and S3 rejects a \
@@ -1146,6 +1160,11 @@ mod tests {
         // CR/LF in a name is refused by this check too (it is not an RFC 7230 tchar either), even though
         // the narrower value-only `reject_framing_bytes` rule does not apply to names at all.
         let err = sign_with_name("x-evil\r\nX-Injected").unwrap_err();
+        assert!(err.contains("RFC 7230 token"), "{err}");
+
+        // An empty name is not a token either. Without the `is_empty()` clause this signs to a canonical
+        // line of `:v` with `SignedHeaders=";host"` - a name that is not there at all (reviewer NB-2).
+        let err = sign_with_name("").unwrap_err();
         assert!(err.contains("RFC 7230 token"), "{err}");
 
         // A real header name — including one with the token punctuation RFC 7230 actually allows — still
