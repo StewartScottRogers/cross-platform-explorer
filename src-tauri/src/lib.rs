@@ -465,7 +465,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
 ///
 /// **An unknown counts as occupied, deliberately — it does not abort the operation (PR #889 review).**
 /// The first cut of this fix returned `Err` on an unknown, which was a behaviour regression on Windows:
-/// the probe moved from `Path::exists()` (which no deny ACE can refuse) to `try_exists()` (which one
+/// the probe moved from `Path::exists()` (which no deny ACE on the target *alone* can refuse — a parent
+/// `(RD)` deny is needed too, see `cpe_server::fsutil::deny_stat_of`) to `try_exists()` (which one
 /// can), so a destination holding an unreadable `f.txt` went from "auto-rename to `f - Copy.txt` and
 /// succeed" to "fail the whole copy". Refusing is the right instinct at a site whose only options are
 /// *refuse* or *overwrite blind* — but this site has a third option, because [`unique_target`]'s entire

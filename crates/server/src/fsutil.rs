@@ -69,8 +69,9 @@ pub enum TargetSlot {
 /// Pure, and taking the *outcome* rather than doing the stat, so the taxonomy is unit-testable on every
 /// OS and CI account — the same reason [`crate::dispatch`]'s `classify_path_error` and
 /// [`crate::split_join`]'s `part_stat_error` are split out from their callers. Permission bits are
-/// platform- and privilege-dependent (inert as root; on Windows no deny ACE refuses `Path::exists()` at
-/// all), so an ACL-based test alone would leave this taxonomy unverified on some machines.
+/// platform- and privilege-dependent (inert as root; on Windows no deny ACE **on the target alone**
+/// refuses `Path::exists()`, because `fs::metadata` falls back to a parent-directory read — see
+/// [`deny_stat_of`]), so an ACL-based test alone would leave this taxonomy unverified on some machines.
 ///
 /// [`Path::try_exists`], not [`Path::exists`], is the required probe: it returns `io::Result<bool>` and so
 /// still *carries* the distinction this enum preserves.
@@ -165,19 +166,29 @@ pub fn unknown_slot_message(target: &Path, stat: &std::io::Result<bool>) -> Stri
 /// from the user's chair (a file vanished) and have nothing in common underneath. Round six of the
 /// stat-collapse chain existed partly because a fix for one shape was reported as covering another.
 ///
-/// Failure policy matches [`classify_target_slot`]: `NotFound` is the only answer that means free. Note
-/// that on Windows an `lstat` opens with a desired-access mask of `0` and is therefore **not** refusable by
-/// a deny ACE, so the `Unknown` arm here is not reachable through this repo's ACL test mechanism — its
-/// coverage comes from the pure classifier plus the real-dangling-link test, not from `deny_stat_of`.
+/// Failure policy matches [`classify_target_slot`]: `NotFound` is the only answer that means free.
+///
+/// The decision is split into the pure [`classify_symlink_slot`] for exactly the reason
+/// [`classify_target_slot`] is split out of [`clobber_refusal`] — **and round 2 of CPE-1705 proved the
+/// point the hard way.** While this function did its `symlink_metadata` inline, its non-`NotFound` `Err`
+/// arm could not be unit-tested at all, was believed unreachable, and quietly accumulated a garbled
+/// message that nobody had read. Doing the stat inline is what made an arm unreadable *and* unread.
 pub fn symlink_slot_refusal(target: &Path) -> Option<String> {
-    match std::fs::symlink_metadata(target) {
-        Ok(m) if m.file_type().is_symlink() => Some(format!(
+    classify_symlink_slot(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
+}
+
+/// The pure decision behind [`symlink_slot_refusal`]. `stat` is the `symlink_metadata` outcome reduced to
+/// "is it a link?", so every arm — including the one no ACL was thought able to reach — is unit-testable
+/// on every OS and CI account.
+pub fn classify_symlink_slot(stat: &std::io::Result<bool>, target: &Path) -> Option<String> {
+    match stat {
+        Ok(true) => Some(format!(
             "\"{}\" is a link, and renaming onto a link destroys it — the link is removed and its target \
              is left orphaned. Nothing was changed; remove the link first if that is what you meant",
             target.display()
         )),
         // Not a link: either free, or occupied by a real entry `clobber_refusal` already judged.
-        Ok(_) => None,
+        Ok(false) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         // CPE-1705 round 2 — a real user-facing bug, fixed. A bulk rename of the *other* helper's wording
         // clipped this string into "could not check what is at "…\final.txt" is a link, so nothing was
@@ -633,8 +644,8 @@ mod tests {
 
     /// The taxonomy CPE-1705 turns on, pinned as a taxonomy: three inputs, three distinct answers. Pure,
     /// so it runs identically on all three CI OSes and under any account — the coverage an ACL-based test
-    /// cannot give (permission bits are inert as root, and on Windows no deny ACE refuses `Path::exists()`
-    /// at all).
+    /// cannot give (permission bits are inert as root, and on Windows no deny ACE **on the target alone**
+    /// refuses `Path::exists()` — a parent `(RD)` deny is also required, see `deny_stat_of`).
     #[test]
     fn classify_target_slot_separates_absent_from_unreadable() {
         assert_eq!(classify_target_slot(&Ok(false)), TargetSlot::Free, "absent is free");
@@ -689,6 +700,41 @@ mod tests {
             "must NOT claim the target exists — that is the lie CPE-1687 traced to real user confusion: {msg}"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The symlink-slot taxonomy, including the `Err` arm the PR #893 reviewer found redding **nothing**
+    /// when broken — because the stat was inline and no unit test could reach it. Splitting
+    /// `classify_symlink_slot` out is what makes this assertable; the arm had silently accumulated a
+    /// garbled message in the meantime.
+    #[test]
+    fn classify_symlink_slot_separates_a_link_from_an_unreadable_slot() {
+        let p = Path::new("/tmp/final.txt");
+        assert!(
+            classify_symlink_slot(&Ok(true), p).is_some_and(|m| m.contains("is a link")),
+            "a link in the slot must refuse — renaming onto it destroys it"
+        );
+        assert_eq!(classify_symlink_slot(&Ok(false), p), None, "a real entry is clobber_refusal's job");
+        assert_eq!(
+            classify_symlink_slot(&Err(std::io::Error::from(std::io::ErrorKind::NotFound)), p),
+            None,
+            "a genuine absence is free"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            let msg = classify_symlink_slot(&Err(std::io::Error::new(kind, "Access is denied.")), p)
+                .unwrap_or_else(|| panic!("{kind:?} must refuse — an lstat we could not do is not a 'no'"));
+            // The grammar regression this arm shipped with, pinned so it cannot come back: the message
+            // must read "could not check WHETHER … IS A LINK", never "could not check what is at … is a
+            // link", which a bulk rename of a sibling helper's wording once produced.
+            assert!(
+                msg.contains("could not check whether") && msg.contains("is a link"),
+                "the unknown-link refusal must be grammatical and say what it could not determine: {msg}"
+            );
+            assert!(!msg.contains("what is at"), "the clipped wording must never return: {msg}");
+        }
     }
 
     #[test]

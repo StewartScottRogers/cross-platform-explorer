@@ -562,6 +562,10 @@ fn pick_manifest_id(store_dir: &Path, ms: u64) -> Result<String, String> {
         let stat = p.try_exists();
         match crate::fsutil::classify_target_slot(&stat) {
             crate::fsutil::TargetSlot::Free => break,
+            // A real collision breaks the run: `unknown_run` counts CONSECUTIVE unknowns, because a *run*
+            // is the only evidence that the directory itself is unreadable. Without this reset, unknowns
+            // scattered among genuine same-millisecond collisions accumulate and refuse a capture that
+            // should simply have walked to the next id (PR #893 review — broken, it redded nothing).
             crate::fsutil::TargetSlot::Occupied => unknown_run = 0,
             crate::fsutil::TargetSlot::Unknown => {
                 unknown_run += 1;
@@ -934,6 +938,71 @@ mod tests {
                     "every real manifest must be byte-for-byte intact"
                 );
             }
+        }
+    }
+
+    /// **The `Occupied => unknown_run = 0` reset, made load-bearing.** Interleave unreadable manifest ids
+    /// with readable ones so the *total* unknown count exceeds [`MAX_CONSECUTIVE_UNKNOWN_IDS`] while no
+    /// run of them ever does: the walk must find a free id, not refuse.
+    ///
+    /// Written because the PR #893 review broke this reset and found it redded **nothing** — the bound
+    /// test only ever presents an uninterrupted run. Without it, a store with a handful of unreadable
+    /// manifests scattered among real ones refuses every capture.
+    #[test]
+    fn cpe_1705_scattered_unreadable_manifest_ids_do_not_accumulate_into_a_refusal() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the interleaved-unknowns leg on this platform: the Unix deny mechanism \
+                 chmods the PARENT, making every candidate unreadable rather than alternating ones. \
+                 NOTHING in this test covered the unknown_run reset on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let store = scratch("cpe1705-mid-interleaved");
+            fs::create_dir_all(manifests_dir(&store)).unwrap();
+            let ms = 1_700_000_000_000u64;
+            // Ids `<ms>`, `<ms>-1` … `<ms>-19` all occupied; every other one additionally denied. That is
+            // 10 unknowns in total — more than MAX_CONSECUTIVE_UNKNOWN_IDS — but never two in a row.
+            let mut denied: Vec<PathBuf> = Vec::new();
+            for n in 0..20u32 {
+                let id = if n == 0 { ms.to_string() } else { format!("{ms}-{n}") };
+                let p = manifest_path(&store, &id);
+                fs::write(&p, b"REAL MANIFEST").unwrap();
+                if n % 2 == 1 {
+                    denied.push(p);
+                }
+            }
+
+            struct Restore<'a>(&'a [PathBuf], &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _r = Restore(&denied, &store);
+
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the interleaved-unknowns leg: could not deny stat of the candidate \
+                     manifests on this machine. NOTHING in this test covered the unknown_run reset on this \
+                     run."
+                );
+                return;
+            }
+
+            let id = pick_manifest_id(&store, ms).expect(
+                "unknowns broken up by real collisions must NOT accumulate into a refusal — the bound \
+                 means \"this directory is unreadable\", and one with readable manifests in it is not",
+            );
+            assert_eq!(id, format!("{ms}-20"), "it must walk to the first genuinely free id");
         }
     }
 

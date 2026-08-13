@@ -2081,10 +2081,17 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                 // exactly this in CPE-1696 and bounded its run at 8. This site has somewhere better to
                 // go than a fallback name: the planner returns `Result` per item, so it refuses to plan
                 // an output in a directory it cannot see, and nothing is written at all.
+                //
+                // **`unknown_run` counts CONSECUTIVE unknowns, and both resets below are load-bearing**
+                // (PR #893 review, which found them redding nothing when broken). The bound means "the
+                // folder itself is unreadable"; a *run* is the only evidence of that. Without the resets,
+                // unknowns scattered among real collisions accumulate across the whole walk and eventually
+                // refuse a batch that was merely landing in a busy directory with one unreadable file in
+                // it — turning a rare hang-guard into a routine false refusal.
                 let mut unknown_run = 0usize;
                 loop {
                     let free = if used.contains(&out_key) {
-                        unknown_run = 0;
+                        unknown_run = 0; // a real in-batch collision breaks the run
                         false
                     } else {
                         match crate::fsutil::classify_target_slot(
@@ -2092,7 +2099,7 @@ pub fn plan(job: &BatchJob, inputs: &[String]) -> Result<Vec<PlannedItem>, Strin
                         ) {
                             crate::fsutil::TargetSlot::Free => true,
                             crate::fsutil::TargetSlot::Occupied => {
-                                unknown_run = 0;
+                                unknown_run = 0; // a real on-disk collision breaks the run
                                 false
                             }
                             crate::fsutil::TargetSlot::Unknown => {
@@ -2473,6 +2480,79 @@ mod tests {
                 crate::fsutil::undo_deny_stat_of(p, d.path());
                 assert_eq!(std::fs::read(p).unwrap(), b"VICTIM ORIGINAL".to_vec(), "nothing may be touched");
             }
+        }
+    }
+
+    /// **`unknown_run` must count CONSECUTIVE unknowns.** Interleave unreadable candidates with ordinary
+    /// readable collisions so that the *total* number of unknowns exceeds
+    /// [`MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS`] but no run of them ever does: the planner must walk
+    /// through and return a name, not refuse.
+    ///
+    /// Written because the PR #893 review broke the two `unknown_run = 0` resets individually and found
+    /// **neither redded anything** — the bound tests only ever presented an uninterrupted run. Without the
+    /// resets this is a real user-visible misbehaviour: a batch landing in a busy folder that happens to
+    /// contain a few unreadable files gets refused outright, with a message blaming the whole folder.
+    #[test]
+    fn cpe_1705_scattered_unreadable_candidates_do_not_accumulate_into_a_refusal() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the interleaved-unknowns leg on this platform: the Unix deny mechanism \
+                 chmods the PARENT, making every candidate unreadable rather than alternating ones. \
+                 NOTHING in this test covered the unknown_run reset on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705-plan-interleaved");
+            let input = d.path().join("cat.jpg");
+            std::fs::write(&input, b"input").unwrap();
+            // First candidate readable-occupied so the CPE-1623 containment check passes (see the
+            // sibling test), then alternate occupied / denied for well past the bound's worth of
+            // unknowns. 2..22 gives 10 denied candidates — more than MAX_CONSECUTIVE_UNKNOWN_OUTPUT_SLOTS
+            // in total, but never two in a row.
+            std::fs::write(d.path().join("cat-800.jpg"), b"OCCUPIED").unwrap();
+            let mut denied: Vec<std::path::PathBuf> = Vec::new();
+            for n in 2..22u32 {
+                let p = d.path().join(format!("cat-800-{n}.jpg"));
+                std::fs::write(&p, b"OCCUPIED").unwrap();
+                if n % 2 == 0 {
+                    denied.push(p);
+                }
+            }
+
+            struct Restore<'a>(&'a [std::path::PathBuf], &'a std::path::Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    for p in self.0 {
+                        crate::fsutil::undo_deny_stat_of(p, self.1);
+                    }
+                }
+            }
+            let _r = Restore(&denied, d.path());
+
+            if !denied.iter().all(|p| crate::fsutil::deny_stat_of(p)) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the interleaved-unknowns leg: could not deny stat of the candidate \
+                     outputs on this machine. NOTHING in this test covered the unknown_run reset on this \
+                     run."
+                );
+                return;
+            }
+
+            let job = BatchJob::new(vec![MediaOp::Resize { max_px: 800 }]);
+            let out = plan(&job, &v(&[&input.to_string_lossy()])).expect(
+                "unknowns broken up by real collisions must NOT accumulate into a refusal — the bound \
+                 means \"this folder is unreadable\", and a folder with readable files in it is not",
+            );
+            assert_eq!(
+                std::path::Path::new(&out[0].output),
+                d.path().join("cat-800-22.jpg"),
+                "it must walk past every occupied and unreadable candidate to the first free name"
+            );
         }
     }
 
