@@ -3376,10 +3376,25 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             {
                 return OpResult::err(src, e);
             }
-            // CPE-1705: was `if dst.exists()`. CPE-1692 hardened the destination *parent* check two
-            // statements down but left the destination's OWN check collapsed, so a `dst` whose stat was
-            // refused read as a free name and the `fs::rename` below replaced it silently. Same two
-            // guards as `rename_entry_impl`, for the same two reasons.
+            // **The parent check comes FIRST, and the order is load-bearing (CPE-1705).** When the
+            // destination *folder* is what cannot be stat'ed, so is everything named inside it — on Unix
+            // a directory without `+x` refuses a stat of every child — so both guards fire and whichever
+            // runs first decides the message. Naming the folder is strictly more useful than naming a
+            // file inside a folder we cannot see, and CPE-1692's classifier is the one that names the
+            // folder. Putting the destination-slot guard first silently demoted it: CI's Unix legs reded
+            // with `the classifier's own wrapper text must be present …`, which is that test doing
+            // exactly its job. The Windows leg stayed green, because there a deny on the parent does not
+            // refuse a child's `try_exists` at all — a reminder that guard ORDER is only observable on
+            // one of the three legs.
+            if let Some(parent) = dst.parent() {
+                if let Some(e) = dest_parent_stat_error(parent.try_exists()) {
+                    return OpResult::err(src, e);
+                }
+            }
+            // CPE-1705: was `if dst.exists()`. CPE-1692 hardened the destination *parent* check above but
+            // left the destination's OWN check collapsed, so a `dst` whose stat was refused read as a
+            // free name and the `fs::rename` below replaced it silently. Same two guards as
+            // `rename_entry_impl`, for the same two reasons — a real entry, and a dangling link.
             if let Some(e) = cpe_server::fsutil::clobber_refusal(
                 dst,
                 &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
@@ -3388,11 +3403,6 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             }
             if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(dst) {
                 return OpResult::err(src, e);
-            }
-            if let Some(parent) = dst.parent() {
-                if let Some(e) = dest_parent_stat_error(parent.try_exists()) {
-                    return OpResult::err(src, e);
-                }
             }
             match fs::rename(src, dst) {
                 Ok(()) => {
