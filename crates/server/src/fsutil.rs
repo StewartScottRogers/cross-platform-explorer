@@ -941,6 +941,54 @@ mod tests {
         );
     }
 
+    /// **The cry-wolf fix, asserted rather than claimed** (PR #895 UAT). The first version of the scan
+    /// reported a guard sitting 8 lines above an `fs::rename` **in a different function** — a purely
+    /// textual window with no idea where a function ends. A lint that tells an author to change correct
+    /// code is worse than no lint: it teaches people to ignore it.
+    #[test]
+    fn the_scan_window_stops_at_a_function_boundary() {
+        let same_fn = ["if let Some(e) = clobber_refusal(&d, \"x\") {", "return;", "}", "fs::rename(a, b);"];
+        assert!(
+            renames_within_window(&same_fn, 0),
+            "a rename below the guard in the SAME function is the shape this lint is for"
+        );
+
+        let next_fn = [
+            "if let Some(e) = clobber_refusal(&d, \"x\") {",
+            "return;",
+            "}",
+            "}",
+            "fn something_else(a: &Path, b: &Path) -> std::io::Result<()> {",
+            "fs::rename(a, b)",
+        ];
+        assert!(
+            !renames_within_window(&next_fn, 0),
+            "a rename in the NEXT function has nothing to do with this guard — reporting it is the false \
+             positive the UAT hit"
+        );
+
+        let attributed = [
+            "if let Some(e) = clobber_refusal(&d, \"x\") {",
+            "}",
+            "#[test]",
+            "fn t() {",
+            "fs::rename(a, b).unwrap();",
+        ];
+        assert!(!renames_within_window(&attributed, 0), "an attribute also starts a new item");
+
+        let far = {
+            let mut v = vec!["clobber_refusal(&d, \"x\");"];
+            v.extend(std::iter::repeat_n("let _ = 1;", SCAN_WINDOW + 2));
+            v.push("fs::rename(a, b);");
+            v
+        };
+        assert!(
+            !renames_within_window(&far, 0),
+            "and beyond the window it is missed — a KNOWN hole, asserted so the doc comment above cannot \
+             quietly stop being true"
+        );
+    }
+
     /// How far below a guard the scan will look for an `fs::rename`. Every real guard-to-rename distance
     /// in this repo is ≤ 8 lines; the window also stops dead at the next `fn`, so it cannot reach into a
     /// neighbouring function (the UAT tripped the first version that way — a guard 8 lines above a rename

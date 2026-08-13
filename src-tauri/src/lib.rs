@@ -15436,13 +15436,15 @@ overlay / overlay rw,relatime 0 0
             return;
         }
 
-        let e = rename_entry_impl(&ctx, d.join("a.txt").to_string_lossy().to_string(), "b.txt".into())
-            .expect_err("renaming onto a dangling link must be refused, not silently performed");
+        let r = rename_entry_impl(&ctx, d.join("a.txt").to_string_lossy().to_string(), "b.txt".into());
 
+        // The slot first, deliberately: an `expect_err` here would red on the RESULT, and the whole point
+        // of this bug is that the result looked fine while the link was gone.
         assert!(
             fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
-            "the user's link was DESTROYED by the rename"
+            "the user's link was DESTROYED by the rename (result was {r:?})"
         );
+        let e = r.expect_err("and the rename must be refused, not silently performed");
         assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec(), "source must not move");
         let _ = fs::remove_dir_all(&d);
@@ -15515,13 +15517,14 @@ overlay / overlay rw,relatime 0 0
             return;
         }
 
-        let e = board_move_impl(d.to_string_lossy().to_string(), "CPE-9999".into(), "Doing".into())
-            .expect_err("moving a ticket onto a dangling link must be refused");
+        let r = board_move_impl(d.to_string_lossy().to_string(), "CPE-9999".into(), "Doing".into());
 
+        // The slot first — see the note in the rename test above.
         assert!(
             fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
-            "the link in the destination column was DESTROYED by the board move"
+            "the link in the destination column was DESTROYED by the board move (result was {r:?})"
         );
+        let e = r.expect_err("and the move must be refused, not silently performed");
         assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
         assert!(
             tickets.join("Backlog").join(name).is_file(),
