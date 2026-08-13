@@ -117,12 +117,14 @@ This needs a sibling that encodes S3's rules, not a weakening of the shared one.
 
 ## Acceptance criteria
 
-- [ ] A key containing `:` appears in the listing. A test pins it, naming S3's key rules as the reason so
-      nobody "re-hardens" it later.
+- [ ] A key containing `:` appears **through `remote_dir_entries`**, not merely out of `S3Provider::list`.
+      That distinction is the whole ticket — the first attempt satisfied the provider boundary and changed
+      nothing a user could see. Pin it with a test that goes through the real path, per Evidence Rule 2.
 - [ ] The security property is **unchanged**: no key can produce an entry that escapes the listed prefix.
       Re-run PR #888's own traversal test (`a_content_key_with_a_traversal_segment_or_embedded_slash_is_dropped`)
-      plus the UAT's set — `..%2f`, `%2e%2e/`, a key that is exactly `..`, a leading `/`, a backslash key,
-      an embedded NUL, an embedded newline. **Breaking the guard must still turn a distinct test red.**
+      plus the UAT's set — `%2e%2e/`, a key that is exactly `..`, a leading `/`, a backslash key, an
+      embedded NUL, an embedded newline. **Breaking the guard must still turn a distinct test red.**
+      Note `..%2f` is now expected to be **accepted** — it is a legal key and cannot escape (see above).
 - [ ] Decide what happens to a key the guard genuinely must refuse, and make it **not silent**. Options:
       surface it under a visibly-escaped display name, or report that N entries were filtered. Either is
       acceptable; dropping it invisibly is not. Record the choice.
@@ -130,6 +132,9 @@ This needs a sibling that encodes S3's rules, not a weakening of the shared one.
       and it has to be *reachable* or *visibly explained* — a phantom empty folder is neither.
 - [ ] `crates/server`'s `is_safe_name` is untouched, or if it is touched, SFTP and WebDAV are re-verified
       against their own traversal tests.
+- [ ] **No dead arm.** The reviewer's mutation showed the first attempt's raw-bytes check was provably
+      unreachable — deleting it left all 121 tests green — because the decode pass subsumed it. Whatever
+      guard ships, confirm each arm is independently reachable and independently red-able.
 - [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per the
       Evidence Rules in `Ticketing/wiki.md`.
 
