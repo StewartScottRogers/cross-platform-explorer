@@ -7617,7 +7617,10 @@ async fn connections_remove(name: String) -> Result<Vec<cpe_server::connections:
 // come from the OS keychain via the same `KeyringBackend`/`SecretAccess` seam the vault + connection-secret
 // commands use; host keys use TOFU — a CHANGED/REVOKED key is refused loudly by the SFTP provider, and that
 // distinct error propagates out here (never a silent connect). Provider-supplied names are re-filtered
-// through `is_safe_name` inside `remote_dir_entries`, inheriting the CPE-1461/1462 traversal defense.
+// through the connected provider's OWN `is_safe_leaf_name` rule inside `remote_dir_entries` (CPE-1704 —
+// defaults to `is_safe_name`, inheriting the CPE-1461/1462 traversal defense, but a backend with a
+// different keyspace, e.g. S3, can state a different rule instead of the guard being hardcoded for every
+// backend alike).
 
 /// The process-wide pool of live remote providers, keyed by connection name — open once, reuse across ops.
 #[cfg(any(windows, target_os = "macos", target_os = "linux"))]
@@ -7685,6 +7688,14 @@ fn invalidate_remote(uri: &str) {
 }
 
 /// Collect-to-vec remote directory listing — the remote arm of `list_dir`.
+///
+/// CPE-1704: `remote_dir_entries` now also reports how many entries it filtered as an unsafe name, as a
+/// real `RemoteListing::filtered` count (never a fabricated row mixed into the entries — see that type's
+/// doc for why). The Tauri command surface (`list_dir`'s `Result<Vec<DirEntry>, String>`) is left
+/// unchanged here deliberately: threading the count into the frontend-visible contract means extending a
+/// `specta`-typed response and the TS side that consumes it — a genuinely separate, larger change, not one
+/// to fold into this fix under time pressure. For now the count is logged (never silently dropped on the
+/// floor), and a follow-up ticket should carry it into the UI (a status-bar note, e.g.).
 fn remote_list_dir_impl(uri: String) -> Result<Vec<DirEntry>, String> {
     let provider = remote_provider_for(&uri)?;
     let guard = match provider.lock() {
@@ -7694,7 +7705,16 @@ fn remote_list_dir_impl(uri: String) -> Result<Vec<DirEntry>, String> {
             return Err("remote provider is unavailable (session dropped); retry".to_string());
         }
     };
-    cpe_vfs::connect::remote_dir_entries(&**guard, &uri)
+    let listing = cpe_vfs::connect::remote_dir_entries(&**guard, &uri)?;
+    if listing.filtered > 0 {
+        eprintln!(
+            "cpe: remote listing of {uri:?} hid {} entr{} with an unsafe name shape (CPE-1704) — not yet \
+             surfaced in the UI, see remote_list_dir_impl's doc",
+            listing.filtered,
+            if listing.filtered == 1 { "y" } else { "ies" }
+        );
+    }
+    Ok(listing.entries)
 }
 
 /// Streaming remote directory listing — the remote arm of `list_dir_stream`. Reuses the SAME cancel

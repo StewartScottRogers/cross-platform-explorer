@@ -70,6 +70,35 @@ pub trait FileSystemProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities::default()
     }
+
+    /// Whether `name` — a leaf a `list`/`stat` implementation is about to surface — is safe to become a
+    /// navigable child path (CPE-1704). Defaults to [`crate::transfer::is_safe_name`], the traversal guard
+    /// correct for every backend whose paths are filesystem-shaped (local, SFTP, WebDAV, FTP): a `:` is a
+    /// Windows drive-letter/NTFS alternate-data-stream hazard there, and refusing it is right.
+    ///
+    /// A backend whose keyspace has genuinely different rules overrides this rather than `is_safe_name`
+    /// itself changing for everyone — added because `crates/vfs::connect::remote_dir_entries` (the actual
+    /// callers' one path to a remote listing) used to hardcode `is_safe_name` for every backend regardless
+    /// of what produced the entry, which silently re-refused a perfectly legal S3 key like
+    /// `colon:name.txt` even after `cpe-s3`'s own guard had correctly let it through — see `cpe-s3`'s
+    /// `is_safe_s3_leaf` for the first (and, as of CPE-1704, only) override.
+    fn is_safe_leaf_name(&self, name: &str) -> bool {
+        crate::transfer::is_safe_name(name)
+    }
+
+    /// Same contract as [`FileSystemProvider::list`], but also reports how many entries this backend's own
+    /// listing pass filtered out internally, before an entry could even be constructed (CPE-1704) — a leaf
+    /// shape not this method's caller's job to catch. Default: delegate to `list` and report `0` filtered,
+    /// correct for every provider (today: local, SFTP, WebDAV, FTP) whose `list` does no such internal
+    /// drop — for those, a caller's own [`FileSystemProvider::is_safe_leaf_name`] filter pass is the only
+    /// guard in play, and counting what THAT drops is the caller's job, not this method's. `cpe-s3`
+    /// overrides this because its `list` must drop a leaf shape (an embedded `/`, a literal `..`) before an
+    /// entry can be built at all, to keep its virtual-directory structure meaningful — see `cpe-s3`'s
+    /// `S3Provider::list_with_filtered_count` for the full history of why this is a real returned count and
+    /// never a synthetic entry mixed into the `Vec`.
+    fn list_with_filtered_count(&self, path: &str) -> Result<(Vec<ProviderEntry>, usize), String> {
+        Ok((self.list(path)?, 0))
+    }
 }
 
 /// The local disk, over `std::fs`. A thin wrapper so the existing behaviour (skip-unreadable, etc.) can be
@@ -370,6 +399,74 @@ mod tests {
         assert!(full.supports_write && full.supports_rename && full.random_read && full.supports_watch && full.has_real_dirs);
         assert_eq!(LocalProvider.capabilities(), full);
         assert_eq!(FakeProvider::new().capabilities(), full);
+    }
+
+    #[test]
+    fn is_safe_leaf_name_defaults_to_is_safe_name_for_every_existing_provider() {
+        // CPE-1704: local and fake providers don't override is_safe_leaf_name, so it must agree exactly
+        // with the shared cpe_server::transfer::is_safe_name for both providers, on both a safe and an
+        // unsafe shape (the ':' case is the one CPE-1704 is about: correctly REFUSED here, since these two
+        // providers ARE filesystem-shaped and the ADS hazard is real for them).
+        assert!(LocalProvider.is_safe_leaf_name("readme.txt"));
+        assert!(!LocalProvider.is_safe_leaf_name("x:y"), "':' is a real ADS/drive hazard for a local path");
+        assert!(!LocalProvider.is_safe_leaf_name(".."));
+        assert!(FakeProvider::new().is_safe_leaf_name("readme.txt"));
+        assert!(!FakeProvider::new().is_safe_leaf_name("x:y"));
+    }
+
+    #[test]
+    fn list_with_filtered_count_defaults_to_delegating_to_list_and_reporting_zero() {
+        // CPE-1704: a provider that doesn't override list_with_filtered_count (every provider except S3,
+        // as of this ticket) must get exactly what list() returns, plus a filtered count of 0 — proving the
+        // default is a real delegation, not a stub that silently returns nothing.
+        let mut fp = FakeProvider::new();
+        fp.write("a.txt", b"hi").unwrap();
+        fp.write("b.txt", b"yo").unwrap();
+        let (entries, filtered) = fp.list_with_filtered_count("").unwrap();
+        let mut names: Vec<_> = entries.into_iter().map(|e| e.name).collect();
+        names.sort();
+        assert_eq!(names, vec!["a.txt".to_string(), "b.txt".to_string()]);
+        assert_eq!(filtered, 0);
+    }
+
+    /// A minimal provider that overrides both new CPE-1704 hooks, proving they are genuinely
+    /// per-provider — not hardcoded — the same shape `S3Provider` uses in `cpe-s3`.
+    struct ColonFriendlyProvider;
+    impl FileSystemProvider for ColonFriendlyProvider {
+        fn list(&self, _path: &str) -> Result<Vec<ProviderEntry>, String> {
+            Ok(vec![ProviderEntry { name: "colon:name.txt".into(), is_dir: false, size: 4 }])
+        }
+        fn stat(&self, _path: &str) -> Result<ProviderEntry, String> {
+            unreachable!()
+        }
+        fn read(&self, _path: &str) -> Result<Vec<u8>, String> {
+            unreachable!()
+        }
+        fn write(&mut self, _path: &str, _data: &[u8]) -> Result<(), String> {
+            unreachable!()
+        }
+        fn mkdir(&mut self, _path: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn delete(&mut self, _path: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn rename(&mut self, _from: &str, _to: &str) -> Result<(), String> {
+            unreachable!()
+        }
+        fn is_safe_leaf_name(&self, name: &str) -> bool {
+            !name.contains('/') && !name.contains('\\') && name != ".." && name != "."
+        }
+    }
+
+    #[test]
+    fn a_provider_can_override_is_safe_leaf_name_to_accept_a_colon() {
+        // The exact override shape cpe-s3's S3Provider uses: proves the trait method is genuinely
+        // overridable per-provider, not merely present with one hardcoded answer.
+        let p = ColonFriendlyProvider;
+        assert!(p.is_safe_leaf_name("colon:name.txt"), "this provider's own rule accepts ':'");
+        assert!(!crate::transfer::is_safe_name("colon:name.txt"), "the SHARED default still refuses it");
+        assert!(!p.is_safe_leaf_name(".."), "a real traversal shape is still refused by this override too");
     }
 
     #[test]
