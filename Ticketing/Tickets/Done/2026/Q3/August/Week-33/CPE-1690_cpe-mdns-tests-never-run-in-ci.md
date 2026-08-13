@@ -3,11 +3,11 @@ id: CPE-1690
 title: cpe-mdns's 17 tests have never run in CI, and its test code has never been linted
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem

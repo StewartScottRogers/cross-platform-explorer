@@ -3,11 +3,11 @@ id: CPE-1688
 title: The network form's scheme-switch auth coercion is correct but unguarded — two humans checked it, nothing will
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
