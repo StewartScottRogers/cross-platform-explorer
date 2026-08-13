@@ -3,11 +3,11 @@ id: CPE-1689
 title: cpe-s3 collapses four distinct object keys onto one URL, and lets anything at all into the signed Host header
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
