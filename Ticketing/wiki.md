@@ -48,6 +48,24 @@ Sequential. To find the next ID: scan all folders for `CPE-*.md`, read the highe
 **Sprints use a separate sequence:** `SPR-NN` (zero-padded two digits — `SPR-01`, `SPR-02`). Scan
 `Ticketing/**/SPR-*.md` for the highest NN, add 1. Sprints never take a `CPE` id.
 
+### Allocating an ID while other work is in flight
+
+"Scan for the highest, add 1" is only correct against a tree nobody else is writing to. During a sprint —
+or any time several agents or both surfaces are active — **each worker scans its own branch and they all
+pick the same number.** This happened twice in one day (2026-08-13), both times because a ticket was filed
+on `main` while a worker was filing one on a branch.
+
+Rules that prevent it:
+
+1. **`git pull` immediately before allocating**, and allocate against `main`, not your branch. A number is
+   only reserved once it is on `main`.
+2. **Push the new ticket file promptly** — a ticket sitting unpushed on a branch has not reserved anything.
+3. **If you are coordinating workers, say which numbers you have taken** when you take them. A worker
+   cannot see your unpushed or just-pushed file.
+4. **On a collision, the copy already on `main` keeps the number.** The other renumbers — and must then
+   grep the whole repo for references: the PR body, work logs, `Related:` lines, and code comments. A stale
+   reference now pointing at a *different* ticket is worse than no reference at all.
+
 ## File Naming
 
 `CPE-NNN_short-kebab-title.md` — the filename never changes when a ticket moves folders.
