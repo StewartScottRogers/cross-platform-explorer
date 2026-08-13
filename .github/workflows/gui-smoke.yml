@@ -217,6 +217,15 @@ jobs:
       # sessions (the Tauri docs' "Linux Graphics Issues" page lists this as the last-resort fix for
       # silent crashes under Xvfb). Best-effort — not verified live yet (see PR description).
       WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+      # CPE-1702: installing gstreamer1.0-plugins-{good,bad,ugly}/-libav below (for real MP3/AAC/H.264
+      # decode) pulled in `bubblewrap` as a new transitive dependency — the sandboxing tool WebKitGTK
+      # uses to run its GStreamer plugin-scanner helper in an isolated namespace. A real CI run with
+      # just the plugin packages installed still showed EVERY media fixture (including the three real,
+      # previously-working ones) hitting `.mp-fallback`, which points at that helper failing to launch
+      # under GitHub Actions' restricted unprivileged-namespace support rather than the codecs
+      # themselves being absent — a known class of WebKitGTK-under-CI failure. Disabling the sandbox
+      # for this ephemeral, network-isolated CI job (never production) is the standard workaround.
+      WEBKIT_DISABLE_SANDBOX: "1"
     steps:
       - uses: actions/checkout@v4
 
