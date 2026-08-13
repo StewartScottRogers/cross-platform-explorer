@@ -160,10 +160,19 @@ pub fn canonical_query(query: &[(&str, &str)]) -> String {
 /// The published `get-header-value-trim` vector signs `"a   b   c"` (quotes included) and its canonical
 /// request carries `"a b c"` - collapsed **inside** the quotes. The claim was deleted at CPE-1689
 /// because it invited a future "fix" that would break a passing vector.
+///
+/// The trim is SP (0x20) and HTAB (0x09) **only** - not `str::trim()`, which strips every Unicode
+/// whitespace character (NBSP U+00A0, the Unicode space separators, line/paragraph separators, ...).
+/// SigV4's canonicalisation rule trims only space and tab before the collapse; a header value with a
+/// leading NBSP is not SP, so S3 does not trim it, and it must survive here too. A signer that trimmed it
+/// anyway would canonicalise a different string than the server does for a byte the caller never asked to
+/// have removed - the client and S3 sign two different requests, and the caller gets an opaque
+/// `SignatureDoesNotMatch` with nothing pointing at the whitespace (CPE-1695).
 fn normalize_header_value(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
+    let trimmed = v.trim_matches(|c| c == ' ' || c == '\t');
+    let mut out = String::with_capacity(trimmed.len());
     let mut in_space = false;
-    for ch in v.trim().chars() {
+    for ch in trimmed.chars() {
         if ch == ' ' || ch == '\t' {
             in_space = true;
             continue;
@@ -350,6 +359,75 @@ fn validate_header_name(name: &str) -> Result<(), String> {
 /// that directly, and a raw NUL is refused alongside them because C-string-based HTTP tooling downstream
 /// can silently truncate a header at one - the same "byte changes what the server actually sees" failure
 /// in a different disguise.
+///
+/// # CPE-1695: the rest of the C0 range (VT, FF, and friends) was investigated, not widened
+///
+/// RFC 7230's `field-content` grammar excludes the whole C0 control range from a header value (only SP
+/// and HTAB are legal inside one), so `\x0b` (VT), `\x0c` (FF) and the other controls this function lets
+/// through are a spec violation. CPE-1691 deliberately left them alone pending an investigation into
+/// *which* controls actually break *which* client, rather than a scope expansion decided in passing. This
+/// is that investigation. **The rule stays at CR/LF/NUL** - but read the correction below before relying
+/// on any claim about what a VT or FF byte actually does downstream.
+///
+/// That client is `ureq` 2.12.1 - resolved at that exact version by `crates/webdav/Cargo.lock`
+/// (`crates/webdav/Cargo.toml` only asks for `version = "2"`), the sibling remote-backend crate this one
+/// will share an HTTP layer with once the request layer lands (CPE-1683/1684; this crate has no HTTP
+/// client of its own yet). `PreludeBuilder::write_header` in `ureq-2.12.1/src/unit.rs:514` does build the
+/// request line with `write!(self.prelude, "{}: {}\r\n", name, value)` straight onto a `Vec<u8>`, and
+/// `Header::new` in `ureq-2.12.1/src/header.rs:85-87` is just `format!("{}: {}", name, value)` - neither
+/// of those two functions checks the value's byte range.
+///
+/// ## Correction (PR #883 review): the header is DROPPED, not passed through
+///
+/// The first pass of this investigation read those two functions and concluded a VT or FF "is written to
+/// the wire unchanged - no error, no panic, no truncation". **That is wrong, because it stopped one hop
+/// short of the real send path.** The write loop at `ureq-2.12.1/src/unit.rs:467-473` never hands
+/// `write_header` a raw value; it calls `header.value()` first and skips the header entirely when that
+/// returns `None`:
+///
+/// ```text
+/// for header in &unit.headers {
+///     if let Some(v) = header.value() {
+///         prelude.write_header(header.name(), v)?;
+///     }
+/// }
+/// ```
+///
+/// `Header::value()` (`header.rs:99-109`) filters through `is_field_vchar_or_obs_fold`
+/// (`header.rs:231-237`), which permits only `{SP, HTAB} ∪ [0x21, 0x7E]`. Because the filter applies to
+/// the whole `Option<&str>`, a *single* non-conforming byte makes `value()` return `None` and the
+/// `if let Some(v)` drops **the entire header** from the outgoing request. Silently. VT (`0x0B`) and FF
+/// (`0x0C`) both fail that predicate.
+///
+/// **So does a non-breaking space** - NBSP is `0xC2 0xA0` in UTF-8 and both bytes are >= 0x80. That is the
+/// same NBSP this very ticket decided must be *preserved* through canonicalisation. The preservation is
+/// correct and necessary (S3 does not trim it either, so signing over trimmed text was a real bug), but
+/// it is not sufficient: once `ureq` is actually wired up, an NBSP-bearing header would be signed and then
+/// dropped before it reached the wire.
+///
+/// This is worse for the goal than a byte surviving would be. A dropped signed header desynchronises
+/// what-was-signed from what-was-sent, which is precisely the opaque `SignatureDoesNotMatch` this ticket
+/// exists to reduce - arriving by a different route.
+///
+/// **Therefore: an open question for CPE-1683/1684, not a closed one.** Whoever wires up the transport
+/// must decide what to do when a signed header value contains a byte `ureq` will refuse to send - refuse
+/// the request loudly at our layer, encode the value, or use a client without that filter. Do not assume
+/// the bytes reach the wire.
+///
+/// ## What the finding does and does not cover
+///
+/// It covers the client this codebase will actually use, at its resolved version, traced from
+/// `RequestBuilder::set` (`request.rs:310-312`) through `Unit::new` (`request.rs:141-148`) to the write
+/// loop above. It says nothing about how real AWS S3 or a third-party S3-compatible server parses these
+/// bytes server-side - that needs a live network call this crate has no fixture for and this ticket did
+/// not budget.
+///
+/// Nothing here justifies widening the rule, and widening would not even fix the real hazard: NBSP
+/// triggers the identical silent drop, so a VT/FF-only reject would be incomplete against it, and
+/// CPE-1691's premise ("S3 legitimately carries near-arbitrary bytes in some header values") still argues
+/// against a client-side reject. The rule stays exactly where CPE-1691 put it. Reopen it only with a
+/// live-server finding that one of these bytes actually breaks something - not a "widen it to be safe"
+/// instinct, which is the thing this comment exists to stop.
 pub(crate) fn reject_framing_bytes(kind: &str, s: &str) -> Result<(), String> {
     if let Some(ch) = s.chars().find(|c| matches!(c, '\r' | '\n' | '\0')) {
         return Err(format!(
@@ -962,6 +1040,70 @@ mod tests {
                 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
             ),
             "get-header-value-trim.creq"
+        );
+    }
+
+    /// CPE-1695: `normalize_header_value` trims SP and HTAB only, not `str::trim()`'s full Unicode
+    /// whitespace set. A leading/trailing NBSP (U+00A0) is not SP, so it must survive - if it were
+    /// stripped, the client would canonicalise a different value than S3 does, and the two signatures
+    /// would silently diverge.
+    #[test]
+    fn normalize_header_value_trims_sp_and_htab_only_not_unicode_whitespace() {
+        // The unit under test, directly, before it disappears into a signature.
+        assert_eq!(normalize_header_value("\u{a0}value\u{a0}"), "\u{a0}value\u{a0}");
+        assert_eq!(normalize_header_value("  value  "), "value");
+        assert_eq!(normalize_header_value("\tvalue\t"), "value");
+        // Sequential-space collapsing is unaffected by switching the trim.
+        assert_eq!(normalize_header_value("  a   b   c  "), "a b c");
+
+        // End to end: the NBSP reaches the canonical request rather than being silently stripped there.
+        let creds = suite_credentials();
+        let signer = Signer::for_service(&creds, "us-east-1", "service").unwrap();
+        let signed = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[
+                    ("Host", "example.amazonaws.com"),
+                    ("X-Amz-Date", "20150830T123600Z"),
+                    ("My-Header1", "\u{a0}value"),
+                ],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20150830T123600Z",
+            })
+            .unwrap();
+        assert!(
+            signed.canonical_request.contains("my-header1:\u{a0}value\n"),
+            "the leading NBSP must survive normalisation, got:\n{}",
+            signed.canonical_request
+        );
+    }
+
+    /// CPE-1695: the documented decision on the rest of the C0 range (see the doc comment on
+    /// [`reject_framing_bytes`]) is to leave VT/FF/friends unrefused, because the client this crate will
+    /// actually ship requests through (`ureq`) does not choke on them - only CR/LF/NUL do anything special
+    /// to that client's request-line assembly. This pins that decision as passing behaviour, so a future
+    /// change either direction (a stray widening, or an accidental narrowing that starts refusing these)
+    /// shows up here rather than only in the doc comment.
+    #[test]
+    fn vertical_tab_and_form_feed_are_not_refused_in_a_header_value() {
+        let creds = s3_doc_credentials();
+        let signer = Signer::new(&creds, "us-east-1").unwrap();
+        let signed = signer
+            .sign(&SigningInput {
+                method: "GET",
+                encoded_path: "/",
+                query: &[],
+                headers: &[("host", "h.example"), ("x-amz-meta-note", "a\x0bb\x0cc")],
+                payload_hash: EMPTY_PAYLOAD_SHA256,
+                amz_date: "20130524T000000Z",
+            })
+            .unwrap();
+        assert!(
+            signed.canonical_request.contains("x-amz-meta-note:a\x0bb\x0cc\n"),
+            "VT/FF must survive both validation and normalisation unchanged, got:\n{}",
+            signed.canonical_request
         );
     }
 
