@@ -15138,12 +15138,32 @@ overlay / overlay rw,relatime 0 0
         );
     }
 
-    /// **The strongest test in this ticket: it stages REAL BYTE LOSS, not a wrong error message.**
-    ///
     /// Drives the real `do_move_into` entry point at a destination holding a file whose `try_exists()`
-    /// the OS refuses. Pre-CPE-1696, `unique_target` handed that refused candidate back as a *free* name
-    /// and `do_move_into`'s `fs::rename` replaced its bytes. Post-fix it is treated as occupied, so the
-    /// move lands on `victim - Copy.txt` and the original survives byte-for-byte.
+    /// the OS refuses. Post-fix that candidate is treated as occupied, so the move lands on
+    /// `victim - Copy.txt` and the original survives byte-for-byte.
+    ///
+    /// # CORRECTION (CPE-1705, measured) — this test does NOT stage byte loss against the original bug
+    ///
+    /// This doc comment used to open *"the strongest test in this ticket: it stages REAL BYTE LOSS, not a
+    /// wrong error message"* and claim *"pre-fix this read back `MOVED SOURCE`"*. **Both are false, and
+    /// the measurement is one command:** revert `unique_target`'s probe to its pre-CPE-1696
+    /// `!candidate.exists()` shape and this test still passes, green, on a real recompile.
+    ///
+    /// The reason is the one fact the ACL table on `cpe_server::fsutil::deny_stat_of` states and this test
+    /// then reasoned past: **no deny ACE refuses `Path::exists()`** — it opens with a desired-access mask
+    /// of `0`. So under the very `(R)` deny this test sets up, the *unfixed* `!candidate.exists()` sees
+    /// `true`, calls the candidate occupied, auto-renames to `victim - Copy.txt`, and leaves the victim
+    /// byte-for-byte intact — satisfying every assertion below for entirely the wrong reason.
+    ///
+    /// What this test really pins is narrower and still worth keeping: given a `try_exists`-based probe,
+    /// an `Err` outcome is treated as occupied rather than free. It guards a regression *within* the fixed
+    /// design; it never covered the `.exists()` original. Byte loss at these sites is reachable only
+    /// through the non-permission tail — `EIO`, a dead mount, a stale handle — which no local ACL can
+    /// simulate, which is exactly why every site also has a pure classifier whose unit test can inject any
+    /// `io::ErrorKind`. **Those pure tests, not this one, are the load-bearing evidence.**
+    ///
+    /// Left in place rather than deleted, with the claim corrected: the assertions are real, only the
+    /// advertisement was wrong. See CPE-1705's PR for the full measurement.
     ///
     /// **Why `do_move_into` (rename) and not `do_copy_into` (copy).** Measured for the PR #889 review
     /// and written up on `cpe_server::fsutil::deny_stat_of`: on Windows a deny ACE that refuses
@@ -15321,11 +15341,33 @@ overlay / overlay rw,relatime 0 0
     // `false`, the guard passed, and `fs::rename` — which replaces its destination silently on both
     // Windows and Unix — destroyed whatever was really at that name. No warning, no error, no undo.
 
-    /// **The strongest test in this ticket: real byte loss at the main rename command.**
-    ///
     /// Drives `rename_entry_impl`, the exact function behind the `rename_entry` Tauri command, at a
-    /// destination name holding a file whose `try_exists()` the OS refuses. Pre-CPE-1705 the guard read
-    /// that refusal as "the name is free" and the rename replaced the victim's bytes.
+    /// destination name holding a file whose `try_exists()` the OS refuses.
+    ///
+    /// # What this proves, and what it deliberately does NOT (measured for CPE-1705)
+    ///
+    /// **It is not a byte-loss demonstration against the original bug, and saying so would repeat the
+    /// exact over-claim that produced rounds one through five of this chain.** Under the `(R)` deny staged
+    /// below, the pre-fix `target.exists()` returns **`true`** — no deny ACE refuses `Path::exists()`,
+    /// which opens with a desired-access mask of `0`. So the unfixed guard *also* refuses, with
+    /// `"final.txt" already exists`, and the victim's bytes survive. Measured, not reasoned: reverting
+    /// this site to `if target.exists()` reds this test on the **message** assertion below —
+    ///
+    /// ```text
+    /// panicked at src\lib.rs:15442:13:
+    /// the refusal must name the uncertainty, not guess: "final.txt" already exists
+    /// ```
+    ///
+    /// — and never reaches the byte assertion. That red is real and specific to this guard, which is what
+    /// makes the test evidence; but the thing it proves is that the command now **tells the truth about
+    /// what it does not know** rather than asserting a collision it never observed (CPE-1687's lesson,
+    /// which traced real users hunting for a file that was never gone). The byte assertion is kept as a
+    /// regression guard for a future probe change, not as proof about `.exists()`.
+    ///
+    /// The genuine overwrite at this site is reachable only through the **non-permission tail** — `EIO`, a
+    /// dead network mount, a stale handle, `ELOOP` — which no local ACL can simulate on either platform.
+    /// The pure `fsutil::classify_target_slot` tests, which inject those `ErrorKind`s directly and run on
+    /// all three CI legs, carry that evidence.
     ///
     /// **Windows-only, and the whole body is `#[cfg]`'d rather than early-returned** — a
     /// `#[cfg(not(windows))] { ..; return; }` makes every following statement an `unreachable_statement`

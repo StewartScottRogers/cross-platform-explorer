@@ -430,11 +430,26 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///   byte loss — the ACL that hides the file also protects it. Assert on the guard's own message: a bare
 ///   `expect_err` passes vacuously, because neutralised code still errors, just with "Access is denied.
 ///   (os error 5)" from the write.
-/// - At a **`rename`-destructive** site (`unique_target` → `do_move_into`, `move_exact`, and the twelve
-///   sites CPE-1705 covers), a byte-level assertion **is** available and is strictly stronger — see
-///   `cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat` in `src-tauri`. Prefer it. Do not deny
-///   `(DC)` on the parent when staging one, or the rename fails for the wrong reason and the test proves
-///   nothing.
+/// - At a **`rename`-destructive** site (`unique_target` → `do_move_into`, `move_exact`, `rename_entry`,
+///   and the rest of CPE-1705's sites), a byte-level assertion is available *given a `try_exists`-based
+///   probe*, and is worth keeping as a regression guard. Do not deny `(DC)` on the parent when staging
+///   one, or the rename fails for the wrong reason and the test proves nothing.
+///
+///   **CORRECTED (CPE-1705, measured): a byte-level assertion here does NOT catch the original
+///   `.exists()` bug, and an earlier revision of this comment said it did.** The row above is the reason,
+///   read one step further than it was: **no deny refuses `Path::exists()`**, so the *unfixed*
+///   `.exists()`-based guard sees `true`, refuses (wrongly worded, but refuses), and the victim survives.
+///   Every assertion in such a test then passes against the bug. This was verified the only way that
+///   settles it — reverting `unique_target`'s probe to `!candidate.exists()` and re-running
+///   `cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat`, which recompiled and passed **green**.
+///   That test's "pre-fix this read back `MOVED SOURCE`" claim is false; its doc comment now says so.
+///
+///   So at a `.exists()` site the ACL can only prove the guard's **wording** changed from a confident
+///   false claim to an honest "I could not tell" — assert on the message. The overwrite itself is
+///   reachable only via the non-permission tail (`EIO`, dead mount, stale handle), which no local ACL
+///   simulates, and which is precisely why every site in this family also carries a **pure classifier**
+///   whose unit test injects any `io::ErrorKind` on all three CI legs. Those pure tests are the
+///   load-bearing evidence; the ACL legs are corroboration.
 ///
 /// Either way the unguarded overwrite is also real for stat failures the ACL model cannot stage at all — a
 /// dead network mount, `EIO`, a transient resolve failure — which is why every CPE-1696 site additionally
