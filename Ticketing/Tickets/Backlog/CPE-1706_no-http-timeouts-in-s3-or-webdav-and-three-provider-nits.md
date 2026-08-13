@@ -1,6 +1,6 @@
 ---
 id: CPE-1706
-title: Neither the S3 nor the WebDAV HTTP agent sets a timeout, so a slowloris holds a thread indefinitely
+title: S3/WebDAV have no HTTP timeouts, one test can hang CI forever, and the body cap is untested
 type: bug
 priority: Medium
 status: Backlog
@@ -12,7 +12,7 @@ closed:
 
 ## Problem
 
-Four items from the PR #888 (CPE-1683) review, judged non-blocking there and deliberately not fixed in
+Six items from the PR #888 (CPE-1683) review, rounds 1 and 2,, judged non-blocking there and deliberately not fixed in
 that PR. The first is the substantive one; the rest are grouped because they live in the same file.
 
 ### 1. No HTTP timeouts — wall-clock is completely unbounded *(the real one)*
@@ -58,6 +58,30 @@ against and no fixture server."* CPE-1683 added a `tiny_http` fixture binding `1
 *conclusion* is still right — it needs no network, services or Docker — but the stated reason is wrong.
 Say the fixture is in-process on loopback.
 
+### 5. A test whose regression mode is a six-hour CI timeout
+
+`provider.rs`, `a_server_that_never_stops_truncating_is_capped_by_max_list_pages`. It is the one test in
+the crate whose failure mode is an **unbounded hang** rather than a red: against a zero-growth
+endlessly-truncating server, `MAX_LIST_ENTRIES` can never trip, so removing the page cap loops forever
+making loopback requests. **libtest has no per-test timeout**, so CI would run to the job limit.
+
+The green path is fast and deterministic (1001 sequential loopback round trips; whole suite 1.18 s), so
+there is no flake risk today — this is purely about what happens the day someone breaks it.
+
+Prescribed, ~10 lines: run `provider.list("/")` on a spawned thread and `recv_timeout` a channel, asserting
+completion within ~60 s. That turns a six-hour timeout into a deterministic red with a message saying what
+happened. **This is the only test with that property** — `MAX_LIST_ENTRIES` and the truncation guard both
+red cleanly in ~10 s, and the depth guard's break crashes fast and loud — so it is one test, not a pattern.
+
+### 6. `MAX_RESPONSE_BODY_BYTES` is the last uncovered runtime defence
+
+Removing the 8 MiB body cap leaves all 105 tests passing. It is the fifth of the crate's five runtime
+defences and the only one with no test; the other four were covered in PR #888's round 2.
+
+The behaviour is already verified correct at runtime: an over-cap body surfaces as the honest parse error
+`Err("the root node was opened but never closed")`, **never a partial listing sold as complete**. So this
+is transcription — a fixture returning an over-cap body, asserting that error.
+
 ## Scope
 
 `crates/s3/src/provider.rs`, `crates/webdav/src/lib.rs` (item 1 only), `.github/workflows/ci.yml`.
@@ -74,6 +98,9 @@ Say the fixture is in-process on loopback.
       `<IsTruncated>` inside `<Contents>` is not mistaken for the page's own.
 - [ ] Item 3: a key longer than the cap is dropped like any other unsafe name, pinned by a test.
 - [ ] Item 4: the `ci.yml` comment states the real reason.
+- [ ] Item 5: the page-cap test cannot hang. Prove it — break the page cap and show the test produce a
+      **red within its timeout** rather than running away.
+- [ ] Item 6: an over-cap body is pinned to the honest parse error, and breaking the cap reds it.
 - [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per
       the Evidence Rules in `Ticketing/wiki.md`.
 
