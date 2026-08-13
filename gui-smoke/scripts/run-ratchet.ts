@@ -9,6 +9,14 @@
 // collapsed a whole spec file to one pass/fail bit, which made every case inside an already-listed spec
 // file unguarded — see `lib/ratchet.ts`'s header for the evidence.
 //
+// CPE-1680: the "pure lib module + thin CLI wrapper" split above wasn't actually honoured by the
+// reduction itself — `toCaseStatus` (the raw-wdio-state-to-CaseStatus mapping) and the chunk-walking that
+// used it lived entirely in THIS file, so `test:unit`'s `lib/**/*.test.ts` glob never collected a test
+// for it; a reviewer mutation on `toCaseStatus`'s fallback (`"unknown"` -> `"skipped"`) left the whole
+// suite green. That reduction now lives in `lib/ratchet.ts#reduceResultChunks`/`#toCaseStatus` as pure
+// functions of already-parsed data; this file's job is now only finding the files, reading them, and
+// `JSON.parse`ing them — genuinely thin.
+//
 // Every path is overridable via env var so this can be pointed at a synthetic/saved report for local
 // testing without a real tauri-driver run (see gui-smoke/README.md "Reading a CI run" / "Testing the
 // ratchet locally"):
@@ -17,44 +25,26 @@
 //   GUI_SMOKE_SPECS_DIR      — dir to glob *.smoke.ts in for expectedSpecCount (default "./specs")
 import fs from "node:fs";
 import path from "node:path";
-import { caseKey, evaluate, type CaseResult, type CaseStatus, type KnownFailingFile } from "../lib/ratchet.js";
+import {
+  caseKey,
+  evaluate,
+  reduceResultChunks,
+  type CaseResult,
+  type KnownFailingFile,
+  type RawResultChunk,
+} from "../lib/ratchet.js";
 
 const RESULTS_DIR = process.env.GUI_SMOKE_RESULTS_DIR ?? path.resolve(process.cwd(), ".results");
 const KNOWN_FAILING_PATH = process.env.GUI_SMOKE_KNOWN_FAILING ?? path.resolve(process.cwd(), "known-failing.json");
 const SPECS_DIR = process.env.GUI_SMOKE_SPECS_DIR ?? path.resolve(process.cwd(), "specs");
 
-/** Minimal shape this script reads out of one `@wdio/json-reporter` output file — a subset of the
- *  reporter's own `ResultSet` type (`specs: string[]`, `suites[].tests[]`, `suites[].hooks[]`). wdio
- *  spawns one worker per spec file here (no spec grouping in `wdio.conf.ts`), so `specs` is normally
- *  length 1; a longer array is still handled defensively by attributing the chunk's suites to every spec
- *  path it lists (the finest granularity the reporter's schema offers without grouping). */
-interface RawResultChunk {
-  specs: string[];
-  suites?: {
-    name?: string;
-    tests?: { name?: string; state?: string }[];
-    hooks?: { title?: string; state?: string; error?: unknown }[];
-  }[];
-}
-
-/** The reporter's `state` strings, narrowed to what the ratchet reasons about. Anything unrecognised is
- *  treated as `skipped` — neither a pass (can't retire an exemption) nor a failure (can't red the job),
- *  but still proof the title exists. */
-function toCaseStatus(state: string | undefined): CaseStatus {
-  if (state === "passed" || state === "failed" || state === "skipped" || state === "pending") return state;
-  return "skipped";
-}
-
-/** Reads every `*.json` file in `resultsDir` (one per spec-file worker) and reduces each into one
- *  `CaseResult` per test case, keyed by the spec file's basename + the `it()` title — the same key
- *  `known-failing.json` uses. Throws with a clear message if the directory is missing (never silently
- *  treats "no directory" as "zero results, fine" — that would defeat the incomplete-run guard).
- *
- *  A FAILING HOOK (`before`/`beforeEach`/`after`/`afterEach`) becomes a synthetic case named
- *  `<hook> "<title>"`, because a hook that throws usually means its suite's cases never ran at all: the
- *  cases would simply be absent, and "absent" must not read as green. The synthetic case is unlisted by
- *  construction, so it reds the job as a NEW GUI REGRESSION — and the listed cases it prevented from
- *  running additionally trip the STALE EXEMPTION clause. Both are the honest verdict for a dead suite. */
+/** Reads every `*.json` file in `resultsDir` (one per spec-file worker) off disk, `JSON.parse`s each into
+ *  a `RawResultChunk`, and hands the parsed chunks to `lib/ratchet.ts#reduceResultChunks` for the actual
+ *  reduction into `CaseResult[]` (CPE-1680: that reduction — including `toCaseStatus`'s
+ *  unknown-state-to-`"unknown"` mapping, finding #1's fix — used to live entirely in this file, where
+ *  `test:unit`'s `lib/**\/*.test.ts` glob could never collect a test for it). Throws with a clear message
+ *  if the directory is missing (never silently treats "no directory" as "zero results, fine" — that
+ *  would defeat the incomplete-run guard). */
 function loadCaseResults(resultsDir: string): CaseResult[] {
   if (!fs.existsSync(resultsDir)) {
     throw new Error(
@@ -65,43 +55,19 @@ function loadCaseResults(resultsDir: string): CaseResult[] {
   }
 
   const files = fs.readdirSync(resultsDir).filter((f) => f.endsWith(".json"));
-  // Keyed so the defensive multi-spec path above can't double-count a case; a failure anywhere wins.
-  const byKey = new Map<string, CaseResult>();
-
-  const record = (spec: string, test: string, status: CaseStatus): void => {
-    const key = caseKey(spec, test);
-    const existing = byKey.get(key);
-    if (!existing) byKey.set(key, { spec, test, status });
-    else if (status === "failed") existing.status = "failed";
-  };
-
+  const chunks: RawResultChunk[] = [];
   for (const file of files) {
     const raw = fs.readFileSync(path.join(resultsDir, file), "utf-8");
-    let chunk: RawResultChunk;
     try {
-      chunk = JSON.parse(raw) as RawResultChunk;
+      chunks.push(JSON.parse(raw) as RawResultChunk);
     } catch (err) {
       throw new Error(
         `[gui-smoke ratchet] failed to parse ${file} as JSON: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
-
-    for (const specPath of chunk.specs ?? []) {
-      const spec = path.basename(specPath);
-      for (const suite of chunk.suites ?? []) {
-        for (const test of suite.tests ?? []) {
-          if (!test.name) continue;
-          record(spec, test.name, toCaseStatus(test.state));
-        }
-        for (const hook of suite.hooks ?? []) {
-          if (!hook.error) continue;
-          record(spec, `<hook> "${hook.title ?? "unnamed hook"}"`, "failed");
-        }
-      }
-    }
   }
 
-  return [...byKey.values()];
+  return reduceResultChunks(chunks);
 }
 
 function loadKnownFailing(knownFailingPath: string): KnownFailingFile {
@@ -137,13 +103,23 @@ function main(): void {
 
   const passedCount = results.filter((r) => r.status === "passed").length;
   const failedCount = results.filter((r) => r.status === "failed").length;
-  const otherCount = results.length - passedCount - failedCount;
+  const unknownCount = results.filter((r) => r.status === "unknown").length;
+  const otherCount = results.length - passedCount - failedCount - unknownCount;
   // eslint-disable-next-line no-console
   console.log(
     `[gui-smoke ratchet] ${verdict.reportedSpecCount}/${expectedSpecCount} spec file(s) reported, ` +
-      `${results.length} case(s) — ${passedCount} passed, ${failedCount} failed, ${otherCount} skipped/pending; ` +
-      `${knownFailing.cases.length} known-failing case(s) listed.`,
+      `${results.length} case(s) — ${passedCount} passed, ${failedCount} failed, ${otherCount} skipped/pending, ` +
+      `${unknownCount} unrecognised state; ${knownFailing.cases.length} known-failing case(s) listed.`,
   );
+
+  // CPE-1680: an unrecognised wdio state must never go quiet. Print it exactly like the failing-case
+  // block below — loud AND red (verdict.ok already covers red; this covers loud) — every run it occurs,
+  // not just when it happens to be the reason the job failed.
+  if (verdict.unknownStates.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[gui-smoke ratchet] UNRECOGNISED-state case(s) observed this run (${verdict.unknownStates.length}):`);
+    for (const key of verdict.unknownStates) console.log(`[gui-smoke ratchet]   ? ${key}`);
+  }
 
   // Always print the per-case failing set, green or red. This is the log line CPE-1677 was filed over:
   // the OLD ratchet printed a spec-level tally that was byte-identical on a clean run and on a run with
@@ -190,6 +166,8 @@ function main(): void {
       `${verdict.fixedButStillListed.length} now-passing entr${verdict.fixedButStillListed.length === 1 ? "y" : "ies"}, ` +
       `${verdict.unmatchedListings.length} stale entr${verdict.unmatchedListings.length === 1 ? "y" : "ies"} matching no test, ` +
       `${verdict.duplicateListings.length} duplicate entr${verdict.duplicateListings.length === 1 ? "y" : "ies"}, ` +
+      `${verdict.unknownStates.length} unrecognised-state case(s), ` +
+      `${verdict.unevidencedIntermittent.length} unevidenced intermittent entr${verdict.unevidencedIntermittent.length === 1 ? "y" : "ies"}, ` +
       `incomplete=${verdict.incomplete}.`,
   );
   process.exit(1);

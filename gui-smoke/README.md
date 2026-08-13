@@ -179,11 +179,27 @@ committed, named list — and the unit of exemption is **one test case**, not a 
      case.)
   5. **`DUPLICATE EXEMPTION`** — the same `spec` + `test` is listed twice. List hygiene: with a
      duplicate present, "delete its entry" in clauses 2/3 would leave the case exempt anyway.
+  6. **`UNRECOGNISED TEST STATE`** (CPE-1680) — a case reported a wdio `state` this ratchet has never
+     seen. This reduces to its own `"unknown"` outcome, **never** to `"skipped"` — a skipped case is
+     exempt from every clause above, so folding an unknown state into it would let a state this ratchet
+     doesn't understand (a new wdio version, a new runner mode, a state produced by a crash path)
+     silently pass as "safe to ignore". `"unknown"` reds the run unconditionally instead, whether or not
+     the case happens to be listed.
+  7. **`UNEVIDENCED INTERMITTENT`** (CPE-1680) — an `"intermittent": true` entry whose `reason`/`ticket`
+     don't clear a minimum evidence bar (a non-trivial `reason`, a real-looking `ticket`). This can't
+     prove a case is actually flaky — only real run history can — so it doesn't try to; it refuses only
+     the structurally checkable failure mode an internal audit found: an entry with an **empty** `reason`
+     and **empty** `ticket`, which would silence a permanently-broken case forever with nothing
+     distinguishing it from the real thing.
 
-  A `skipped`/`pending` case is neither: it can't red the job and can't retire an exemption, but it does
-  prove the title still exists. A **failing hook** becomes a synthetic case named `<hook> "<title>"`,
-  which is unlisted by construction and therefore red — a `before` hook that throws usually means its
-  suite's cases never reported at all, and "absent" must never read as green.
+  A `skipped`/`pending`/`unknown` case is none of the above by itself: none can red the job (clause 1)
+  or retire an exemption (clause 2), but each does prove the title still exists (clause 3) — `unknown` is
+  additionally its own always-red outcome (clause 6). A **failing hook** becomes a synthetic case named
+  `<hook> "<title>"`, which is unlisted by construction and therefore red — a `before` hook that throws
+  usually means its suite's cases never reported at all, and "absent" must never read as green. When a
+  case fails and isn't listed, the `NEW GUI REGRESSION` message includes a ready-to-paste
+  `known-failing.json` entry built with `JSON.stringify` (not string concatenation), so a title
+  containing a double quote — as wdio's own hook titles do — still round-trips as valid JSON.
 
 **`"intermittent": true` — the one escape hatch, and how not to abuse it.** Case granularity turns a
 genuinely flaky case into a coin-flip gate: clause 1 reds the runs where it fails, clause 2 reds the runs
@@ -192,7 +208,11 @@ where it passes, and the job is red either way regardless of the change under te
 and `npm run ratchet` prints every intermittent entry **with its observed status on every run**, so it
 stays visible and drainable instead of becoming a quiet permanent hole. The bar is evidence, not
 annoyance: the entry's `reason` must cite the real runs where the same case both passed and failed on
-unchanged code. A case that fails *every* run is a plain entry, not an intermittent one.
+unchanged code. A case that fails *every* run is a plain entry, not an intermittent one. Since CPE-1680
+that bar is also machine-checked (clause 7, `UNEVIDENCED INTERMITTENT`): an entry needs a non-trivial
+`reason` and a real-looking `ticket`, or the ratchet refuses it outright. The check can't verify actual
+flakiness — only real run history can — it only closes the one hole that WAS silently open: an entry
+with an empty `reason` and empty `ticket` used to be accepted exactly like a well-evidenced one.
 
 The four **media** cases (`samples/audio/track.{flac,mp3,ogg}` + `samples/video/clip.mp4` — exactly the
 samples whose settle-detection depends on `.mp-media`, MediaPreview's `<audio>`/`<video>`) are the
