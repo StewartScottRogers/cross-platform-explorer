@@ -328,15 +328,10 @@ impl S3Config {
             Some(i) => (&rest[..i], rest[i..].trim_end_matches('/')),
             None => (rest, ""),
         };
-        if authority.contains('@') {
-            // Deliberately does **not** echo the endpoint: the whole point of refusing userinfo is that
-            // the password must not reach a signed request, a `Debug` line, or — here — an error string
-            // that will be shown to the user and pasted into a bug report.
-            return Err("s3: endpoint must not contain userinfo (`https://user:password@host`) — the \
-                        password would be signed into the request and printed by every Debug and error \
-                        line that carries the endpoint. Supply credentials via S3Config::credentials."
-                .into());
-        }
+        // Userinfo was already refused by `validate_endpoint_text`, which runs before any error path
+        // that could format the endpoint. This is a belt-and-braces net for a future caller that reaches
+        // this function by another route; it is unreachable through `endpoint_parts` today.
+        debug_assert!(!authority.contains('@'), "userinfo must be refused before the endpoint is parsed");
         let (host, port) = split_host_port(authority).ok_or_else(|| self.endpoint_shape_error())?;
         if host.is_empty() {
             return Err(self.endpoint_shape_error());
@@ -396,6 +391,11 @@ fn split_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
 /// one — it splits the signed `Host` header into two header lines. Surrounding whitespace is trimmed by
 /// the caller before this runs, so only interior whitespace reaches here.
 fn validate_endpoint_text(endpoint: &str) -> Result<(), String> {
+    // The userinfo check runs FIRST, before anything below can format the endpoint into a message.
+    // That ordering is the whole protection and is not stylistic — see the long note at the return.
+    if endpoint.contains('@') {
+        return Err(USERINFO_REFUSED.into());
+    }
     if let Some(ch) = endpoint.chars().find(|c| c.is_control() || c.is_whitespace()) {
         return Err(format!(
             "s3: endpoint must not contain control characters or whitespace (they would split the signed \
@@ -409,6 +409,22 @@ fn validate_endpoint_text(endpoint: &str) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The refusal for an endpoint carrying userinfo. A single constant, deliberately **not** formatted with
+/// the endpoint, because the whole point of refusing userinfo is that the password must not reach a signed
+/// request, a `Debug` line, or — here — an error string a user will paste into a bug report.
+///
+/// **This check must run before every other endpoint check.** The PR #868 reviewer found the original
+/// placement — after `validate_endpoint_text` and after the scheme strip — leaked the password in **six of
+/// seven** realistic shapes, because those earlier paths echo `{endpoint:?}` and `#`, `?`, `\` and spaces
+/// are ordinary password characters (a wrong scheme, the commonest paste error, leaked it too). Refusing
+/// carefully in one branch is worth nothing if five branches upstream print the thing first. Note this only
+/// covers messages produced here: `S3Config`'s derived `Debug` still prints the endpoint field verbatim,
+/// which is why the field must never be allowed to hold a password in the first place.
+const USERINFO_REFUSED: &str = "s3: endpoint must not contain userinfo (`https://user:password@host`) — \
+                                the password would be signed into the request and printed by every Debug \
+                                and error line that carries the endpoint. Supply credentials via \
+                                S3Config::credentials.";
 
 /// The pieces of a parsed endpoint URL.
 #[derive(Debug, Clone, Copy)]
@@ -762,6 +778,30 @@ mod tests {
             .object_target("k")
             .unwrap_err()
             .contains("userinfo"));
+
+        // The one above is the shape that happened to be checked. The password is only safe if EVERY
+        // shape is refused by the userinfo branch rather than by some earlier check that formats the
+        // endpoint into its message — which is what the PR #868 reviewer found, in six of these seven.
+        // `#`, `?`, `\` and space are ordinary password characters, and a wrong scheme is the commonest
+        // paste error of the lot; each one used to reach a path that echoed `{endpoint:?}` verbatim.
+        //
+        // Asserting on "userinfo" and not merely on `is_err()` is the point: every one of these is an
+        // error either way, so `is_err()` would have passed against the leaking version. The assertion
+        // has to name WHICH refusal fired.
+        for endpoint in [
+            "https://user:hunter2@s3.example.com",
+            "s3://user:hunter2@s3.example.com",      // wrong scheme — the shape-error path
+            "https://user:hun#ter2@s3.example.com",  // '#' — the query/fragment path
+            "https://user:hun?ter2@s3.example.com",  // '?' — same path
+            "https://user:hun\\ter2@s3.example.com", // '\' — same path
+            "https://user:hun ter2@s3.example.com",  // space — the control/whitespace path
+            "https://user:hunter2/x@s3.example.com", // non-numeric port path
+        ] {
+            let cfg = S3Config::new(endpoint, "us-east-1", "b1", creds());
+            let err = cfg.object_target("k").unwrap_err();
+            assert!(err.contains("userinfo"), "{endpoint} was refused by the wrong check: {err}");
+            assert!(!err.contains("hunter2"), "the password leaked from {endpoint}: {err}");
+        }
     }
 
     /// The authority is split at its **first** colon, so a port is a port and everything else is
