@@ -107,11 +107,34 @@ mod imp {
         }
     }
 
-    pub fn write(path: &Path, name: &str, value: &[u8]) -> Result<(), MetaError> {
-        // Never conjure the base file into existence by writing a stream to a missing path.
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
+    /// Turn a `try_exists()` outcome for `path` into the `require_present` error, or `None` meaning
+    /// "proceed" (CPE-1692). Split out, mirroring `disk_usage::dir_size_stat_error`, so the
+    /// `NotFound`-vs-everything-else split is unit-testable without touching a real filesystem
+    /// (permission bits are platform- and privilege-dependent, so a real ACL-based test alone would
+    /// leave this taxonomy unverified on some machines/CI accounts; this stays deterministic).
+    ///
+    /// Only a genuine `NotFound` says "no such path"; any other stat failure (permission denied, a dead
+    /// network mount, …) names the OS's real cause instead — [`Path::exists`] used to swallow every
+    /// `stat` failure into the same `false`, reporting "we don't know" as "it isn't there".
+    pub(super) fn present_stat_error(path: &Path, stat: std::io::Result<bool>) -> Option<MetaError> {
+        match stat {
+            Ok(true) => None,
+            Ok(false) => Some(MetaError::Io(format!("no such path: {}", path.display()))),
+            Err(e) => Some(MetaError::Io(format!("{}: {e}", path.display()))),
         }
+    }
+
+    /// Guard shared by `write`/`read`/`remove`: never conjure the base file into existence, or open a
+    /// stream on it, when it isn't confirmed present.
+    fn require_present(path: &Path) -> Result<(), MetaError> {
+        match present_stat_error(path, path.try_exists()) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub fn write(path: &Path, name: &str, value: &[u8]) -> Result<(), MetaError> {
+        require_present(path)?;
         let mut f = OpenOptions::new()
             .write(true)
             .create(true)
@@ -122,9 +145,7 @@ mod imp {
     }
 
     pub fn read(path: &Path, name: &str) -> Result<Option<Vec<u8>>, MetaError> {
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
-        }
+        require_present(path)?;
         match File::open(stream_path(path, name)) {
             Ok(mut f) => {
                 let mut buf = Vec::new();
@@ -141,9 +162,7 @@ mod imp {
     }
 
     pub fn remove(path: &Path, name: &str) -> Result<(), MetaError> {
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
-        }
+        require_present(path)?;
         match std::fs::remove_file(stream_path(path, name)) {
             Ok(()) => Ok(()),
             Err(e) => match e.raw_os_error() {
@@ -264,6 +283,85 @@ mod tests {
         let nope = dir.join("nope.txt");
         assert!(matches!(read(&nope, &cpe_name("tags")), Err(MetaError::Io(_))));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account with Windows toolchain
+    /// components, no privilege needed) — same role as `dispatch::classify_path_error`'s and
+    /// `disk_usage::dir_size_stat_error`'s own unit tests. Windows-only because `present_stat_error` only
+    /// exists inside `imp`'s `#[cfg(windows)]` block.
+    #[cfg(windows)]
+    #[test]
+    fn present_stat_error_says_no_such_path_only_for_a_genuine_absence() {
+        let p = Path::new(r"C:\some\file.txt");
+        assert!(imp::present_stat_error(p, Ok(true)).is_none(), "an existing path proceeds, no error");
+        match imp::present_stat_error(p, Ok(false)) {
+            Some(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "{msg}"),
+            other => panic!("expected an absence Io error, got {other:?}"),
+        }
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            let e = std::io::Error::new(kind, "Access is denied.");
+            match imp::present_stat_error(p, Err(e)) {
+                Some(MetaError::Io(msg)) => {
+                    assert!(!msg.contains("no such path"), "{kind:?} must not be reported as absence: {msg}");
+                    assert!(msg.contains("Access is denied."), "{kind:?} must name the OS's own cause: {msg}");
+                }
+                other => panic!("{kind:?}: expected an Io error naming the real cause, got {other:?}"),
+            }
+        }
+    }
+
+    /// The end-to-end half, driving the real `write`/`read`/`remove` entry points rather than the pure
+    /// classifier above. Constructed with a PARENT-directory traversal deny — the mechanism CPE-1687's
+    /// brief names (a per-file deny ACE does not block `stat`, on either OS; see
+    /// `fsutil::deny_dir_traversal`'s doc comment). MAY SKIP here: measured live that Windows's default
+    /// "bypass traverse checking" privilege defeats a parent-directory deny for path resolution, so this
+    /// leg's real coverage depends on the account/policy — the deterministic test above is what pins the
+    /// taxonomy unconditionally.
+    #[cfg(windows)]
+    #[test]
+    fn windows_ads_ops_report_the_real_cause_for_a_permission_denied_path_not_missing() {
+        let dir = scratch("denied");
+        let denied_dir = dir.join("denied");
+        std::fs::create_dir_all(&denied_dir).unwrap();
+        let inside = denied_dir.join("inside.txt");
+        std::fs::write(&inside, b"base").unwrap();
+
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_dir_traversal(self.0);
+                let _ = std::fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&denied_dir, &dir);
+
+        if !crate::fsutil::deny_dir_traversal(&denied_dir, &inside) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED native_meta permission-denied leg: could not deny traversal on {} on \
+                 this machine (elevated/admin, or a filesystem ignoring ACLs). The remaining assertions \
+                 do NOT cover CPE-1692 for native_meta.",
+                denied_dir.display()
+            );
+            return;
+        }
+
+        let name = cpe_name("tags");
+        let write_err = write(&inside, &name, b"x").unwrap_err();
+        let read_err = read(&inside, &name).unwrap_err();
+        let remove_err = remove(&inside, &name).unwrap_err();
+        for (label, err) in [("write", write_err), ("read", read_err), ("remove", remove_err)] {
+            match err {
+                MetaError::Io(msg) => assert!(
+                    !msg.contains("no such path"),
+                    "{label}: a permission-denied stat must not be reported as absence — the file is \
+                     right there: {msg}"
+                ),
+                other => panic!("{label}: expected an Io error naming the real cause, got {other:?}"),
+            }
+        }
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     #[test]

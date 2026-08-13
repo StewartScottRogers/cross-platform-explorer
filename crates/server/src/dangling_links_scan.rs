@@ -69,6 +69,26 @@ fn normalize(path: &Path) -> PathBuf {
     result
 }
 
+/// Whether a symlink's resolved-target `stat` outcome means `target_exists` (CPE-1692). Split out,
+/// mirroring `dispatch::classify_path_error`, so the `NotFound`-vs-everything-else split is
+/// unit-testable without touching a real filesystem (permission bits are platform- and
+/// privilege-dependent — inert as root, or defeated by Windows's default "bypass traverse checking"
+/// privilege — so an ACL-based test alone would leave this taxonomy unverified on some machines).
+///
+/// `.is_ok()` used to fold every non-`NotFound` stat failure (permission denied on a directory along the
+/// resolved path, a dead network mount, ELOOP itself) into `target_exists = false`, which
+/// [`scan_dangling`] reports as [`crate::dangling_links::DanglingReason::Missing`] — a confident "gone"
+/// for a target that was never actually confirmed absent. Only a genuine `NotFound` means the target is
+/// actually gone; every other stat failure leaves `target_exists = true` so the link is NOT flagged
+/// (mirrors [`crate::links::link_status`]: "unknown" is not "confirmed missing"). A link that really IS a
+/// cycle among the walked symlinks is still caught — `scan_dangling`'s own chain-walk over the supplied
+/// `LinkEntry`s classifies that, taking precedence over `target_exists` regardless of its value, so ELOOP
+/// folding to `true` here costs nothing for the self/loop case (see `scan_dangling`'s doc comment and its
+/// `cyclic_precedence_over_false_target_exists` test).
+fn target_exists_from_stat(stat_err_kind: Option<std::io::ErrorKind>) -> bool {
+    stat_err_kind != Some(std::io::ErrorKind::NotFound)
+}
+
 /// Walk `root` collecting symlinks (skip-unreadable, never descending into a symlinked directory —
 /// same discipline as [`crate::folder_similarity_scan`] / `list_dir`), classify the whole set with
 /// [`scan_dangling`], then hand the flagged links to `flush` in batches of up to
@@ -124,8 +144,10 @@ pub fn walk_dangling_links(
                         normalize(&parent.join(&raw_target))
                     };
                     // metadata() follows symlinks; a self/loop chain fails at the OS level (ELOOP)
-                    // rather than hanging, so this is safe even for a cyclic target.
-                    let target_exists = std::fs::metadata(&resolved).is_ok();
+                    // rather than hanging, so this is safe even for a cyclic target. See
+                    // `target_exists_from_stat`'s doc comment for the CPE-1692 taxonomy.
+                    let target_exists =
+                        target_exists_from_stat(std::fs::metadata(&resolved).err().map(|e| e.kind()));
                     links.push(LinkEntry {
                         path: path.to_string_lossy().into_owned(),
                         target: resolved.to_string_lossy().into_owned(),
@@ -270,6 +292,72 @@ mod tests {
         assert!(r.links.is_empty(), "a healthy symlink must not be reported");
         assert!(!r.truncated);
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account, no privilege needed) —
+    /// same role as `dispatch::classify_path_error`'s own unit tests. Proves the taxonomy the wiring
+    /// depends on; unlike the end-to-end test below it never skips.
+    #[test]
+    fn target_exists_from_stat_says_missing_only_for_a_genuine_absence() {
+        assert!(!target_exists_from_stat(Some(std::io::ErrorKind::NotFound)), "a genuine absence");
+        assert!(target_exists_from_stat(None), "no stat error at all (target exists)");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            assert!(target_exists_from_stat(Some(kind)), "{kind:?} must not be reported as absence");
+        }
+    }
+
+    /// The end-to-end half, driving the real `find_dangling_links` entry point rather than the pure
+    /// classifier above. Constructed with a PARENT-directory traversal deny on the directory the target
+    /// lives in — the mechanism CPE-1687's brief names (a per-file deny ACE does not block `stat`, on
+    /// either OS; see `fsutil::deny_dir_traversal`'s doc comment). Unix-only like the walk's other
+    /// symlink tests (symlink creation here is unconditional, unlike `links.rs`'s gated match), so a
+    /// runtime probe still covers the case where the account running the suite can't set the deny (e.g.
+    /// root, where permission bits are inert) — that leg gets its own loud skip notice per the Evidence
+    /// Rules. Real coverage on Windows would need a different mechanism (measured live: Windows's
+    /// default "bypass traverse checking" privilege defeats a parent-directory deny) — out of scope here
+    /// since the walk's symlink tests are Unix-only already; the deterministic test above is what pins
+    /// the taxonomy on every OS.
+    #[cfg(unix)]
+    #[test]
+    fn walk_dangling_links_does_not_flag_a_permission_denied_target_as_missing() {
+        use std::os::unix::fs::symlink;
+
+        let d = scratch("denied-target");
+        let denied_dir = d.join("denied");
+        fs::create_dir_all(&denied_dir).unwrap();
+        let real_target = denied_dir.join("real.txt");
+        fs::write(&real_target, "data").unwrap();
+        let link = d.join("l");
+        symlink(&real_target, &link).unwrap();
+
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_dir_traversal(self.0);
+                let _ = fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&denied_dir, &d);
+
+        if !crate::fsutil::deny_dir_traversal(&denied_dir, &real_target) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED walk_dangling_links permission-denied leg: could not deny traversal \
+                 on {} on this machine (e.g. running as root, where permission bits are inert). The \
+                 remaining assertions do NOT cover CPE-1692 for dangling_links_scan.",
+                denied_dir.display()
+            );
+            return;
+        }
+
+        let r = find_dangling_links(&d, &[]).unwrap();
+        assert!(
+            r.links.is_empty(),
+            "a permission-denied target must not be confidently reported as dangling: {:?}",
+            r.links
+        );
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     #[cfg(unix)]

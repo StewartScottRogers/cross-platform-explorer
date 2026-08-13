@@ -67,6 +67,22 @@ fn classify_path_error(stat_err_kind: Option<std::io::ErrorKind>, err: String) -
     }
 }
 
+// CPE-1692 decide-and-log: the crate also has ~20 sites of the shape `if !root_path.is_dir() { Err("…
+// not a folder") }` (checksum.rs, compare.rs, content_index.rs, content_search.rs,
+// document_similarity.rs, dangling_links_scan.rs's own root check, duplicates.rs, disk_usage.rs's other
+// two sites, folder_similarity_scan.rs, folder_template.rs, folder_stats.rs, image_similarity.rs,
+// index.rs, links.rs's `create_junction`, name_search.rs, snapshot_capture.rs, vault_manager.rs, …).
+// Those collapse through the identical `false`-swallows-every-`stat`-failure mechanism this ticket
+// fixes, so a permission-denied root gets the same "not a folder" a genuinely-wrong-type root does —
+// which is a real inaccuracy, but a materially SMALLER lie than this ticket's sites: it doesn't claim
+// the path is *absent* (the specific "we don't know" -> "it isn't there" failure `classify_path_error`
+// exists to prevent), only that its *type* is wrong, and the batch operation it gates still refuses to
+// proceed either way. Left unfixed here deliberately, not overlooked: retrofitting `metadata()` +
+// classification onto ~20 sites each with its own message contract is a second ticket's worth of sweep
+// and per-site test work, and mixing it into this one is exactly how CPE-1678/1687's sweeps under-covered
+// their own conclusions (Ticketing/wiki.md Evidence Rules) — bundling scope in has repeatedly cost more
+// coverage than it bought. Recommend a follow-up ticket scoped to that family alone.
+
 /// The method registry. Look up by name; the missing case is a structural `NotFound` (you can't
 /// accidentally dispatch to nothing).
 #[derive(Default)]

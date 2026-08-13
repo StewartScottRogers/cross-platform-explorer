@@ -60,9 +60,25 @@ pub struct LinkStatus {
     pub broken: bool,
 }
 
+/// Whether a symlink's resolved-target `stat` outcome should be reported `broken` (CPE-1692). Split out,
+/// mirroring `dispatch::classify_path_error`, so the `NotFound`-vs-everything-else split is
+/// unit-testable without touching a real filesystem (permission bits are platform- and
+/// privilege-dependent — inert as root, or defeated by Windows's default "bypass traverse checking"
+/// privilege — so an ACL-based test alone would leave this taxonomy unverified on some machines).
+///
+/// Only a genuine `NotFound` means the target is actually gone; any other stat failure (permission
+/// denied on a directory along the resolved path, a dead network mount, …) means we don't know, and
+/// `broken` must not claim otherwise — this flag's one production consumer, `RepairLinkDialog`'s
+/// pre-delete TOCTOU recheck, only proceeds with the destructive delete when `broken` is true, so
+/// treating "unknown" as "not confirmed broken" is the safe default (never destroys a link on an
+/// uncertain read), not merely the honest one.
+fn target_stat_is_broken(stat_err_kind: Option<std::io::ErrorKind>) -> bool {
+    stat_err_kind == Some(std::io::ErrorKind::NotFound)
+}
+
 /// Inspect `path`: is it a symlink, what does it point at, and is its target missing (broken)? Never fails
 /// — an unreadable/absent path reports as a non-symlink. `broken` follows the link via `metadata()` and is
-/// true only when that resolution fails for a symlink.
+/// true only when that resolution genuinely confirms the target is gone.
 pub fn link_status(path: &str) -> LinkStatus {
     let p = std::path::Path::new(path);
     let is_symlink = std::fs::symlink_metadata(p)
@@ -72,7 +88,8 @@ pub fn link_status(path: &str) -> LinkStatus {
         return LinkStatus::default();
     }
     let target = std::fs::read_link(p).ok().map(|t| t.to_string_lossy().into_owned());
-    let broken = std::fs::metadata(p).is_err(); // metadata follows the link; err ⇒ target gone
+    // metadata() follows the link.
+    let broken = target_stat_is_broken(std::fs::metadata(p).err().map(|e| e.kind()));
     LinkStatus { is_symlink: true, target, broken }
 }
 
@@ -192,6 +209,81 @@ mod tests {
             Err(_) => { /* unprivileged Windows — skip (symlink creation gated) */ }
         }
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account, no privilege needed) —
+    /// same role as `dispatch::classify_path_error`'s own unit tests. Proves the taxonomy the wiring
+    /// below (and the end-to-end test after it) depends on.
+    #[test]
+    fn target_stat_is_broken_only_for_a_genuine_absence() {
+        assert!(target_stat_is_broken(Some(std::io::ErrorKind::NotFound)));
+        assert!(!target_stat_is_broken(None), "no stat error at all (target exists) is not broken");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            assert!(!target_stat_is_broken(Some(kind)), "{kind:?} must not be reported as broken");
+        }
+    }
+
+    /// The end-to-end half, driving the real `link_status` entry point rather than the pure classifier
+    /// above. Constructed with a PARENT-directory traversal deny on the directory the target lives in —
+    /// the mechanism CPE-1687's brief names (a per-file deny ACE does not block `stat`, on either OS;
+    /// see `fsutil::deny_dir_traversal`'s doc comment). Two independent conditions must both be
+    /// constructible on this machine (symlink creation, then the deny), so both get their own loud,
+    /// non-silent skip notice — a bare "skip" here would be exactly the kind of under-covered sweep this
+    /// ticket exists to close a fourth time. MAY SKIP on Windows even with symlink privilege: measured
+    /// live that Windows's default "bypass traverse checking" privilege defeats a parent-directory deny
+    /// for path resolution — the deterministic test above is what pins the taxonomy unconditionally.
+    #[test]
+    fn link_status_does_not_report_broken_for_a_permission_denied_target_not_missing() {
+        use std::path::Path;
+
+        let d = scratch();
+        let denied_dir = d.join("denied");
+        fs::create_dir_all(&denied_dir).unwrap();
+        let real_target = denied_dir.join("real.txt");
+        fs::write(&real_target, b"data").unwrap();
+        let link = d.join("l.txt");
+
+        if create_symlink(&real_target.to_string_lossy(), &link.to_string_lossy()).is_err() {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED link_status permission-denied leg: symlink creation is not permitted \
+                 on this machine (unprivileged Windows). The remaining assertions do NOT cover CPE-1692 \
+                 for links::link_status."
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_dir_traversal(self.0);
+                let _ = fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&denied_dir, &d);
+
+        if !crate::fsutil::deny_dir_traversal(&denied_dir, &real_target) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED link_status permission-denied leg: could not deny traversal on {} on \
+                 this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for links::link_status.",
+                denied_dir.display()
+            );
+            return;
+        }
+
+        let status = link_status(&link.to_string_lossy());
+        assert!(status.is_symlink);
+        assert!(
+            !status.broken,
+            "a permission-denied target must not be confidently reported as broken — it's right there, \
+             just unreadable through its parent"
+        );
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     #[test]

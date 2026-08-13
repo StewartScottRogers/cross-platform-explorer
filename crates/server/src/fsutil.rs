@@ -156,6 +156,61 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Test-only mechanism shared by every CPE-1692 guard in this crate: deny traversal on `dir` itself so
+/// a `stat` of anything reached *through* it fails with a genuine (non-`NotFound`) error — the mechanism
+/// CPE-1687 established works, where a **per-file** deny ACE does not (see
+/// `crate::split_join::tests::make_unstattable`'s doc comment for the measurement this generalises: on
+/// Unix `stat()` needs no permission on the target itself, only `+x` on each ancestor directory; on
+/// Windows `fs::metadata` opens with a desired-access mask of `0`, which a per-file deny ACE does not
+/// refuse). Denying the directory that sits **between** the caller and the thing being stat'd blocks
+/// resolution at the OS level on both platforms.
+///
+/// `probe` must be a path that requires traversing `dir` to resolve (a child of `dir` for a
+/// file-under-directory check, or a child of a child for a directory-itself check — see each call
+/// site). Returns whether the deny demonstrably took effect, checked by actually stat'ing `probe` and
+/// requiring a non-`NotFound` error: `false` means this machine can't construct the condition (running
+/// elevated, an ACL-less filesystem, non-admin without the rights to set a deny ACE, …), which callers
+/// MUST treat as a loud, `writeln!(std::io::stderr(), ..)` skip — never a silent pass (Evidence Rules,
+/// `Ticketing/wiki.md`).
+#[cfg(test)]
+pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                let _ = std::process::Command::new("icacls")
+                    .arg(dir)
+                    .arg("/deny")
+                    .arg(format!("{user}:(RX)"))
+                    .output();
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000));
+    }
+    std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+}
+
+/// Undo whatever [`deny_dir_traversal`] did to `dir`, so a scratch tree containing it can be removed.
+/// Safe to call even when the deny never took effect.
+#[cfg(test)]
+pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
+    #[cfg(windows)]
+    {
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls").arg(dir).arg("/remove:d").arg(&user).output();
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

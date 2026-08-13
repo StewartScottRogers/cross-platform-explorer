@@ -3247,6 +3247,24 @@ async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<
         .await.unwrap()
 }
 
+/// Turn a `try_exists()` outcome for the destination's parent folder into the `move_exact` error, or
+/// `None` meaning "proceed" (CPE-1692). Split out, mirroring `cpe_server::disk_usage::dir_size_stat_error`,
+/// so the `NotFound`-vs-everything-else split is unit-testable without touching a real filesystem
+/// (permission bits are platform- and privilege-dependent — inert as root, or defeated by Windows's
+/// default "bypass traverse checking" privilege — so an ACL-based test alone would leave this taxonomy
+/// unverified on some machines).
+///
+/// Only a genuine `NotFound` means the folder is actually gone; any other stat failure (permission
+/// denied along the resolved path, a dead network mount, …) names the real cause instead of claiming
+/// absence — `Path::exists()` used to swallow every `stat` failure into the same `false`.
+fn dest_parent_stat_error(stat: std::io::Result<bool>) -> Option<String> {
+    match stat {
+        Ok(true) => None,
+        Ok(false) => Some("The original folder no longer exists".to_string()),
+        Err(e) => Some(format!("Could not confirm the destination folder still exists: {e}")),
+    }
+}
+
 /// `ctx` re-keys any tag-store entries under each successfully-moved `from` to its `to` (CPE-1222) —
 /// including undo's move-back, which previously never migrated tags at all — and likewise re-keys any
 /// scheduled-snapshot catalog entry under `from` (CPE-1225).
@@ -3271,8 +3289,8 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
                 );
             }
             if let Some(parent) = dst.parent() {
-                if !parent.exists() {
-                    return OpResult::err(src, "The original folder no longer exists");
+                if let Some(e) = dest_parent_stat_error(parent.try_exists()) {
+                    return OpResult::err(src, e);
                 }
             }
             match fs::rename(src, dst) {
@@ -15797,6 +15815,108 @@ overlay / overlay rw,relatime 0 0
         assert!(!results[0].ok, "undo must not clobber an existing file");
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"keep");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account, no privilege needed) —
+    /// same role as `cpe_server::dispatch::classify_path_error`'s own unit tests. Proves the taxonomy
+    /// the wiring below depends on.
+    #[test]
+    fn dest_parent_stat_error_says_gone_only_for_a_genuine_absence() {
+        assert!(dest_parent_stat_error(Ok(false)).unwrap().contains("no longer exists"));
+        assert!(dest_parent_stat_error(Ok(true)).is_none(), "an existing folder proceeds, no error");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            let e = std::io::Error::new(kind, "Access is denied.");
+            let msg = dest_parent_stat_error(Err(e)).unwrap();
+            assert!(!msg.contains("no longer exists"), "{kind:?} must not be reported as absence: {msg}");
+            assert!(msg.contains("Access is denied."), "{kind:?} must name the OS's own cause: {msg}");
+        }
+    }
+
+    /// The end-to-end half, driving the real `move_exact_impl` entry point rather than the pure
+    /// classifier above. The check under test stats `dst.parent()` **itself** (not a child inside it),
+    /// so the PARENT-directory traversal deny must land on parent's own PARENT (its grandparent) —
+    /// denying `real_parent` itself would not block resolving `real_parent`, only things reached
+    /// *through* it (see `fsutil::deny_dir_traversal`'s doc comment for the general mechanism). MAY SKIP
+    /// on Windows: measured live that Windows's default "bypass traverse checking" privilege defeats a
+    /// parent-directory deny for path resolution, so this leg only runs for real on Unix (non-root) —
+    /// the deterministic test above is what pins the taxonomy on every OS/account.
+    #[test]
+    fn move_exact_reports_the_real_cause_when_the_destination_folder_cannot_be_confirmed() {
+        let d = scratch("move_exact_denied");
+        let ctx = HeadlessCtx::new(&d);
+        let gp = d.join("gp");
+        let real_parent = gp.join("real_parent");
+        fs::create_dir_all(&real_parent).unwrap();
+        fs::write(d.join("source.txt"), b"x").unwrap();
+
+        // Armed before the deny so cleanup runs on every exit path — mirrors split_join.rs's `Restore`
+        // pattern (Evidence Rules: a red run must never leave debris).
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                {
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o700));
+                }
+                let _ = fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&gp, &d);
+
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&gp)
+                        .arg("/deny")
+                        .arg(format!("{user}:(RX)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&gp, fs::Permissions::from_mode(0o000));
+        }
+
+        let denied =
+            fs::metadata(&real_parent).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+        if !denied {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED move_exact permission-denied leg: could not deny traversal on {} on \
+                 this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for move_exact_impl.",
+                gp.display()
+            );
+            return;
+        }
+
+        let results = move_exact_impl(&ctx, vec![(
+            d.join("source.txt").to_string_lossy().to_string(),
+            real_parent.join("target.txt").to_string_lossy().to_string(),
+        )]);
+        assert!(!results[0].ok, "the destination folder could not be confirmed, so this must not succeed");
+        assert!(
+            !results[0].error.contains("no longer exists"),
+            "a permission-denied folder must not be reported as gone — it's right there: {}",
+            results[0].error
+        );
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     // CPE-1222: undo (`moveExact`) previously never migrated tags at all — a rename/move + undo

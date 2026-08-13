@@ -33,14 +33,33 @@ pub fn dir_size_walk(p: &Path) -> u64 {
     file_total + subdirs.par_iter().map(|d| dir_size_walk(d)).sum::<u64>()
 }
 
+/// Turn a `try_exists()` outcome for `path` into the `dir_size` error message, or `None` meaning
+/// "proceed" (CPE-1692). Split out, mirroring `split_join::part_stat_error`, so the
+/// `NotFound`-vs-everything-else split is unit-testable without touching a real filesystem (permission
+/// bits are platform- and privilege-dependent — e.g. inert when the test process runs as root, or when
+/// Windows's default "bypass traverse checking" privilege defeats a parent-directory deny — so a
+/// `chmod`/`icacls`-based test alone would leave this taxonomy unverified on some machines; this stays
+/// deterministic on every OS and CI account).
+///
+/// Only a genuine `NotFound` says "not found"; any other stat failure (permission denied, a dead network
+/// mount, …) names the real cause instead — [`Path::exists`] used to swallow every `stat` failure into
+/// the same `false`, reporting "we don't know" as "it isn't there".
+fn dir_size_stat_error(path: &str, stat: std::io::Result<bool>) -> Option<String> {
+    match stat {
+        Ok(true) => None,
+        Ok(false) => Some(format!("{path}: not found")),
+        Err(e) => Some(format!("{path}: {e}")),
+    }
+}
+
 /// Total recursive size of the tree at `path` (a file's own length if `path` is a file). A missing path
 /// is an `Err`.
 pub fn dir_size(path: &str) -> Result<u64, String> {
     let p = Path::new(path);
-    if !p.exists() {
-        return Err(format!("{path}: not found"));
+    match dir_size_stat_error(path, p.try_exists()) {
+        Some(e) => Err(e),
+        None => Ok(dir_size_walk(p)),
     }
-    Ok(dir_size_walk(p))
 }
 
 /// One direct child of a folder with its recursive size, for the treemap + drill-down (CPE-749). A
@@ -170,8 +189,71 @@ mod tests {
         fs::write(d.join("a.bin"), vec![0u8; 100]).unwrap();
         fs::write(d.join("sub/b.bin"), vec![0u8; 50]).unwrap();
         assert_eq!(dir_size(&d.to_string_lossy()).unwrap(), 150);
-        assert!(dir_size(&d.join("missing").to_string_lossy()).is_err());
+        // A genuinely missing path must still say so — the honest case must not regress (CPE-1692).
+        let err = dir_size(&d.join("missing").to_string_lossy()).unwrap_err();
+        assert!(err.contains("not found"), "a genuine absence must still say so: {err}");
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account, no privilege needed) —
+    /// same role as `dispatch::classify_path_error`'s and `split_join::part_stat_error`'s own unit
+    /// tests. Proves the taxonomy the wiring below depends on.
+    #[test]
+    fn dir_size_stat_error_says_not_found_only_for_a_genuine_absence() {
+        assert!(dir_size_stat_error("x", Ok(false)).unwrap().contains("not found"));
+        assert!(dir_size_stat_error("x", Ok(true)).is_none(), "an existing path proceeds, no error");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            let e = std::io::Error::new(kind, "Access is denied.");
+            let msg = dir_size_stat_error("x", Err(e)).unwrap();
+            assert!(!msg.contains("not found"), "{kind:?} must not be reported as absence: {msg}");
+            assert!(msg.contains("Access is denied."), "{kind:?} must name the OS's own cause: {msg}");
+        }
+    }
+
+    /// The end-to-end half, driving the real `dir_size` entry point rather than the pure classifier
+    /// above (same split as `split_join`'s CPE-1687 guard). Constructed with a PARENT-directory
+    /// traversal deny (the mechanism CPE-1687's brief names — a per-file/per-dir deny on the target
+    /// itself does not block `stat`, on either OS; see `fsutil::deny_dir_traversal`'s doc comment). MAY
+    /// SKIP on Windows: measured live that Windows's default "bypass traverse checking" privilege
+    /// defeats a parent-directory deny for path resolution, so this leg only runs for real on Unix
+    /// (non-root) — the deterministic test above is what pins the taxonomy on every OS/account.
+    #[test]
+    fn dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing() {
+        let d = scratch("denied");
+        let denied_dir = d.join("denied");
+        fs::create_dir_all(&denied_dir).unwrap();
+        let inside = denied_dir.join("inside.txt");
+        fs::write(&inside, b"secret").unwrap();
+
+        // Armed before the deny so cleanup runs on every exit path (skip, assert failure, or success) —
+        // mirrors split_join.rs's `Restore` pattern (Evidence Rules: a red run must never leave debris).
+        struct Restore<'a>(&'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_dir_traversal(self.0);
+                let _ = fs::remove_dir_all(self.1);
+            }
+        }
+        let _restore = Restore(&denied_dir, &d);
+
+        if !crate::fsutil::deny_dir_traversal(&denied_dir, &inside) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED dir_size permission-denied leg: could not deny traversal on {} on \
+                 this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for disk_usage::dir_size.",
+                denied_dir.display()
+            );
+            return;
+        }
+
+        let err = dir_size(&inside.to_string_lossy()).unwrap_err();
+        assert!(
+            !err.contains("not found"),
+            "a permission-denied stat must not be reported as absence — the file is right there: {err}"
+        );
+        // `_restore` cleans up on the way out, panic or not.
     }
 
     /// Create a directory symlink; returns false on unprivileged Windows so the test can skip.
