@@ -1,6 +1,6 @@
 ---
 id: CPE-1702
-title: The GUI-smoke session dies after rapid repeated file opens, and nobody knows why GStreamer's decode fails under Xvfb
+title: GUI-smoke session dies on rapid re-opens; and CI has no media codecs, so playback is never tested
 type: task
 priority: Low
 status: Backlog
@@ -36,22 +36,37 @@ hard way.
 Likely a WebKitGTK/GStreamer resource leak or handle exhaustion across repeated media-element mounts. Not
 root-caused.
 
-### 2. Nobody knows why GStreamer's decode fails under Xvfb in the first place
+### 2. ANSWERED — CI's runner image has no MP3/AAC/H.264 decoder
 
-CPE-1679 established that when decode fails, `MediaPlayer.svelte` correctly renders its graceful fallback,
-and that the harness's failure to recognise that state was the bug. It deliberately did **not** investigate
-*why* the decode fails intermittently — missing or slow codec plugin initialisation, resource contention,
-something else.
+The CPE-1679 **UAT** settled this while reviewing PR #881, so this half of the ticket is now a decision,
+not an investigation.
 
-That question has a user-facing edge, which is why it is worth a ticket rather than a shrug: **if the decode
-failure is not purely a CI-container artefact, real Linux users occasionally see "Can't play this media file"
-for files that should play.** The four fixtures are `track.flac`, `track.mp3`, `track.ogg`, `clip.mp4` —
-ordinary formats a user expects to work.
+The four fixtures are genuine, valid, standard-codec media — not stubs:
+
+- `file(1)`: FLAC 16-bit/44.1 kHz, MPEG-ADTS layer III with ID3v2.3, Ogg/Vorbis, ISO Base Media MP4.
+- `ffprobe` parses full stream metadata cleanly; codecs are FLAC, Vorbis, and H.264 + AAC.
+- A full `ffmpeg -i … -f null -` decode of all four completed with **zero decode errors**.
+- Git history (`703404e3`, CPE-1361 *"make every samples/ fixture real & substantial"*) shows these were
+  deliberately rebuilt from tiny stubs into real ffmpeg-encoded media.
+
+And the gap is in the workflow, not the app: `.github/workflows/gui-smoke.yml` installs only
+`libwebkit2gtk-4.1-dev` for the Xvfb leg. That pulls in `gstreamer1.0-plugins-base` but **not**
+`-good` / `-bad` / `-ugly` / `-libav` — precisely the packages providing the MP3, AAC and H.264 decoders.
+
+So the fallback firing in CI is a **codec-availability artefact of the runner image, not an app defect**,
+and there is no user-facing bug hiding here. That closes the worry that motivated this half of the ticket.
+
+**What is left is a choice**, and it is worth making deliberately rather than by default. Today CI exercises
+the *graceful-degrade* path for all four media cases and never the *playback* path — so the thing a real
+user does most (open an MP3 and hear it) has no CI coverage at all. Installing the plugin packages would
+make those four cases test real decode instead.
+
+Note the cost honestly: it adds apt install time to every GUI-smoke run, and it would mean the
+graceful-degrade path then loses its only regular exercise. Testing both would need a deliberate split.
 
 ## Scope
 
-`gui-smoke/` harness for item 1. For item 2, investigation first — the deliverable is an answer, and a
-follow-up ticket if the answer implicates the app rather than the CI container.
+`gui-smoke/` harness for item 1; `.github/workflows/gui-smoke.yml` for item 2.
 
 ## Acceptance criteria
 
@@ -59,13 +74,14 @@ follow-up ticket if the answer implicates the app rather than the CI container.
       Then either fix it or document the ceiling (e.g. "re-open at most N times per session; start a fresh
       session beyond that") somewhere a future stress harness author will actually find — the harness
       README or a comment on the helper itself, not just a ticket.
-- [ ] **Item 2**: answer whether the decode failure is a CI-container artefact (no codec plugins installed
-      in the runner image) or something that also affects a normally-configured Linux desktop. State the
-      evidence and the scope of the check.
-- [ ] If item 2 turns out to affect real users, **file a separate ticket for the user-facing bug** rather
-      than fixing it here — the two have different risk profiles and different reviewers.
-- [ ] Per the Evidence Rules in `Ticketing/wiki.md`: state the exact scope of every negative result. "The
-      decode works" is only ever "it works on the configuration I tested — here it is."
+- [ ] **Item 2 is a decision, not an investigation** — the cause is known (see above). Decide whether to
+      install `gstreamer1.0-plugins-{good,bad,ugly}` / `-libav` on the GUI-smoke Linux leg so the four
+      media cases exercise real playback, or to leave CI testing the graceful-degrade path. Record the
+      reasoning either way.
+- [ ] If you install them: the four cases will then assert real playback, so confirm they still pass, and
+      say what now covers the graceful-degrade path — it must not silently lose its only coverage. A
+      deliberately-corrupt fixture is the obvious candidate.
+- [ ] Per the Evidence Rules in `Ticketing/wiki.md`: state the exact scope of every negative result.
 
 ## Notes
 
