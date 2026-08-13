@@ -129,16 +129,48 @@ tells you nothing has been lost by simply giving you the whole file:
 
 The rewriting is plain percent-encoding: `%` followed by the character's hex code, so you can always read
 the original name straight off the new one. It only touches characters Windows genuinely refuses —
-`< > : " | ? *`, control characters, a trailing dot or space, and the reserved device names. An ordinary
-name is left exactly as it is, including one containing a `%` (`50% off.txt` stays `50% off.txt`).
+`< > : " | ? *`, control characters, a trailing dot or space, and the reserved device names. Ordinary
+names are left exactly as they are. Two different remote names can never be rewritten onto the same local
+file — that would silently destroy one of them, which is the same bug wearing a different hat. On Linux
+and macOS none of this applies and names are written through untouched.
 
-Two different remote names can never be rewritten onto the same local file — that would silently destroy
-one of them, which is the same bug wearing a different hat. On Linux and macOS none of this applies and
-names are written through untouched.
+### What happens to a `%` in a name
 
-*(One thing no renaming can fix: Windows filenames are case-insensitive, so two objects that differ only
-in case — `Report.txt` and `report.txt` — are still one file once they land. That is the platform, not
-the app.)*
+Almost nothing. A `%` is only ever rewritten when it would otherwise be **ambiguous** — that is, when it
+already looks exactly like one of the app's own escapes and would decode back into a different name:
+
+| Remote name | On your Windows disk | Why |
+|---|---|---|
+| `50% off.txt` | `50% off.txt` | untouched |
+| `100%.txt` | `100%.txt` | untouched |
+| `report%2ffinal.txt` | `report%2ffinal.txt` | untouched — `%2f` is not an escape this app produces |
+| `city=A%2FB` | `city=A%2FB` | untouched — a normal Hive/Athena partition value |
+| `literal%3Aname` | `literal%253Aname` | rewritten — `%3A` *is* an escape this app produces, so it must be distinguished from a real `:` |
+
+### Two limits worth knowing about
+
+**A name that is too long is reported, not skipped.** Encoding makes a name longer — up to three
+characters where there was one — and no filename may exceed **255 characters**. If encoding pushes a name
+past that, the file cannot be written at all. When that happens the transfer **tells you**: everything it
+*could* deliver still arrives, and it then reports how many files it could not write and why. It never
+claims success for a download that silently left files behind.
+
+**A very long *path* can still be awkward on Windows.** Windows' classic limit is 260 characters for a
+whole path. Files past that are written correctly and this app can read them, but older applications
+without long-path support may not be able to open them. The transfer prints a notice when it happens.
+Downloading into a shorter folder avoids it.
+
+### Two things this rewriting does *not* do
+
+*Uploading does not undo it.* If you download `colon:name.txt` (arriving as `colon%3Aname.txt`) and later
+upload that file back, it goes up under the name you can see — `colon%3Aname.txt` — not the original. The
+app deliberately does not guess that a `%3A` in one of your local filenames was "meant" to be a colon,
+because plenty of local files legitimately contain `%3A` and silently renaming them on upload would be a
+worse surprise than the one it fixed.
+
+*It cannot fix case.* Windows filenames are case-insensitive, so two objects that differ only in case —
+`Report.txt` and `report.txt` — are still one file once they land. That is the platform, not the app, and
+no renaming scheme can work around it.
 
 ## The row menu
 

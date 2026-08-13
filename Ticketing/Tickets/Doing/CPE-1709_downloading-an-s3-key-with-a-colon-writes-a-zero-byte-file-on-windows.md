@@ -139,6 +139,46 @@ resting on `CreateFileW` happening to refuse a name.
 User-facing docs updated: `src/docs/31-network.md` gains "Downloaded names Windows can't hold", with the
 mapping table and the case-insensitivity caveat. No new app `Section`, so `sectionDocs.ts` is unchanged.
 
+**2026-08-13 — round 2 (PR #894 review).** The injectivity construction and containment survived a
+66,429-name brute force with 0 collisions and 0 round-trip breaks, and the reviewer's own case-fold
+sweep confirmed the mapping introduces no case collision — so the "case-insensitivity is pre-existing
+and independent" claim is now measured rather than asserted. Two blockers, both of which reintroduced
+this ticket's own bug class at the edges of the fix:
+
+- **F1 — an over-long encoded name was silently lost and reported as success.** Encoding grows a name by
+  up to 3×, the component ceiling is 255 (measured: 255 writes, 256 gives os error 123), and the failure
+  landed on the CPE-1696 leaf `symlink_metadata` probe — which `return`ed silently. So a batch of three
+  keys returned `Ok(2)` and produced two files, under a stderr line blaming a *symlink* probe for a
+  *length* problem. That is verbatim the message the round-1 PR body claimed was gone; it had not gone,
+  it had moved. Fixed by splitting **security refusals** (traversal names, pre-existing symlinks — not
+  writing them is correct, still `Ok`) from **delivery failures** (we meant to write it and the
+  filesystem refused — now `Err`, naming how many were lost and why). Everything deliverable is still
+  delivered first. The message now states the real cause and the measured limit; `MAX_LOCAL_COMPONENT`
+  only *explains* a failure the OS already reported, never pre-rejects, because its unit differs per
+  platform and guessing would risk refusing a name that would have worked.
+- **F2 — pass 1 escaped every `%HH`, including sequences the encoder can never emit.** `%2f` is the
+  clearest: `guarded_join` splits on `/` and `\` *before* the transform, so `%2F` is unproducible — yet
+  `report%2ffinal.txt` became `report%252ffinal.txt` and `city=A%2FB` (a normal Hive/Athena partition
+  value) became `city=A%252FB`. Combined with F1 this destroyed data on keys that previously worked: a
+  provably-writable 254-char name grew to 256 and stopped landing. Narrowed to the emittable set only.
+  Injectivity is untouched — the proof only ever needed "no `%HH` in the output that this encoder did
+  not emit", and encoder and decoder now read that phrase the same, narrower way.
+
+Also: **F5** completed the device list (the superscript `COM¹`/`LPT²` forms, `CONIN$`/`CONOUT$`, and
+`COM0`/`LPT0`) — the same "device resolution moves between Windows releases" argument that justified
+escaping all 22 covers these identically, so omitting them was inconsistent. **F4** (encoding can push a
+*path* past MAX_PATH even when the component fits) is disclosed as a surfaced notice and in the docs,
+deliberately not a failure: the file really is delivered and really is readable by long-path-aware
+software, so calling it a failure would be its own wrong answer. **F6** records why
+`decode_windows_safe_segment` is *not* wired into `upload_tree` — encoding is compelled by the
+filesystem, decoding would be a guess about provenance that silently renames a local file the user may
+simply have typed. **F3** rewrote the docs section, which had claimed outright that any `%`-bearing name
+is untouched.
+
+Three round-2 guards broken individually, each red with real output, each restored and recompiled.
+
+Not fixed here, filed separately by the Foreman: `is_control()` is Cc-only, so `U+202E` passes through.
+
 ## Notes
 
 Filed by the Foreman from the PR #890 review, 2026-08-13, on the reviewer's own recommendation to gate it
