@@ -257,6 +257,14 @@ nothing about which guard is load-bearing. Paste the **actual** red output — t
 not a description of it — into the PR body. "The test passes" says nothing until you have seen it fail
 for the right reason.
 
+**Restore with `git checkout --`, not by copying a backup over the file.** `Copy-Item` (and `cp -p`, and
+most editor "revert") preserve the source's timestamp, and `cargo` decides whether to rebuild by comparing
+timestamps. Restoring a backup whose timestamp is *older* than the broken build leaves the broken binary in
+place, so the suite reports the state you just undid. This bites in **both** directions — a false red after
+the restore, or a false green if you restore before capturing the break — which makes it worse than an
+ordinary flake: the mandated "restore and confirm green" step is exactly the one it corrupts. If you must
+restore by copy, touch the file first, and check the run actually printed `Compiling` before you trust it.
+
 ### 2. Verify through the channel that will carry the message
 
 Prove a thing works **the way it will actually be used**, not the way that shows it most easily. A
