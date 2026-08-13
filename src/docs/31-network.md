@@ -108,6 +108,38 @@ reports an unsupported protocol.
   continuation tokens to completion before showing you anything, so a prefix holding hundreds of
   thousands of objects has a limit rather than an unbounded wait.
 
+## Downloaded names Windows can't hold
+
+A remote name is not always a name your local filesystem can store. `:` is an ordinary, legal byte in an
+S3 key — ISO-8601 timestamps like `2026-08-13T10:00:00Z.json` are everywhere — and it is perfectly legal
+on Linux and macOS too. On **Windows** it is not: NTFS reads `a:b` as "file `a`, alternate data stream
+`b`", so writing that name straight to disk used to leave you a **0-byte file called `a`** with the real
+contents tucked away in a stream nothing shows you. The download reported success. That is the worst
+possible outcome — a file you can see but cannot read, with nothing prompting you to go looking.
+
+So when downloading to a **Windows** disk, the app rewrites the parts of a name Windows can't hold, and
+tells you nothing has been lost by simply giving you the whole file:
+
+| What the remote calls it | What lands on your Windows disk |
+|---|---|
+| `colon:name.txt` | `colon%3Aname.txt` |
+| `report<draft>.txt` | `report%3Cdraft%3E.txt` |
+| `notes.` *(trailing dot)* | `notes%2E` |
+| `CON`, `NUL`, `COM1`… *(reserved device names)* | `%43ON`, `%4EUL`, `%43OM1`… |
+
+The rewriting is plain percent-encoding: `%` followed by the character's hex code, so you can always read
+the original name straight off the new one. It only touches characters Windows genuinely refuses —
+`< > : " | ? *`, control characters, a trailing dot or space, and the reserved device names. An ordinary
+name is left exactly as it is, including one containing a `%` (`50% off.txt` stays `50% off.txt`).
+
+Two different remote names can never be rewritten onto the same local file — that would silently destroy
+one of them, which is the same bug wearing a different hat. On Linux and macOS none of this applies and
+names are written through untouched.
+
+*(One thing no renaming can fix: Windows filenames are case-insensitive, so two objects that differ only
+in case — `Report.txt` and `report.txt` — are still one file once they land. That is the platform, not
+the app.)*
+
 ## The row menu
 
 Right-click a saved connection for:
