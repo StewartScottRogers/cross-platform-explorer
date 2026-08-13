@@ -32,6 +32,39 @@
 //! once credentials are available; this ticket does not file it, since that is a resourcing decision, not
 //! a scoping one.
 //!
+//! # Why these timeout values (CPE-1706 item 1) — what is protected, and what is tolerated
+//! Until CPE-1706 this crate (and its sibling `cpe-webdav`) built `AgentBuilder::new().redirects(0)` and
+//! nothing else. **`ureq` 2.x defaults `timeout_read`, `timeout_write` and the overall `timeout` all to
+//! `None`** — the doc comments on `AgentBuilder::timeout_read`/`timeout_write` say it outright: *"requests
+//! may block forever on reads by default"*. Every other bound in the listing path was real and verified
+//! (an 8 MiB body cap, [`MAX_LIST_PAGES`], [`MAX_LIST_ENTRIES`], a nesting-depth guard): bytes and memory
+//! were bounded, **time was not**. That matters here specifically because `list` runs on a
+//! `spawn_blocking` thread, so a handful of slow peers can occupy the blocking pool with nothing to
+//! reclaim them.
+//!
+//! Three knobs, and they are not interchangeable:
+//!
+//! - **[`TIMEOUT_READ`] / [`TIMEOUT_WRITE`] (30 s each)** are *per read/write*, not per request. The clock
+//!   restarts on every byte, so this bounds a **stall** and never a slow-but-progressing transfer. That is
+//!   exactly the property a large listing over a poor link needs: it may take as long as it takes,
+//!   provided it keeps moving. 30 s is a wide margin over the time-to-first-byte of any real gateway
+//!   (AWS's own SDKs default the same knob to 30–60 s), which is the number that actually has to be
+//!   survivable — a server that has sent nothing for half a minute is not "slow", it is gone.
+//! - **`ureq`'s overall `.timeout()` is deliberately NOT set.** It caps a whole request regardless of
+//!   progress, so on the read path it would kill a legitimate multi-minute download of a large object over
+//!   a bad connection — a real user, not a hypothetical. It also *replaces* the per-read bound rather than
+//!   adding to it (`ureq` `agent.rs:476-477`: "takes precedence over `.timeout_read()`"), so setting it
+//!   would trade a good bound for a worse one. And it would not even solve the problem it looks like it
+//!   solves, because it is per **request** while the risk here is per **listing** — see the next point.
+//! - **[`MAX_LIST_WALL_CLOCK`] (10 min)** is therefore the one that bounds the compound case: 1000 pages
+//!   each stalling 30 s is ~8 hours of held thread, and no per-request knob can see that. A deadline over
+//!   the whole `list` call can. What it tolerates, knowingly: a hostile endpoint can still hold one
+//!   blocking thread for ten minutes. Bounded and survivable beats unbounded and unfalsifiable.
+//!
+//! `cpe-webdav` gets [`TIMEOUT_READ`]/[`TIMEOUT_WRITE`]'s equivalents for the same reasons but **no**
+//! listing deadline — its `list` is a single `PROPFIND`, with no pagination loop to multiply anything, so
+//! per-request bounds already bound it. See that crate's `connect` for the note.
+//!
 //! # The in-process fixture: built to be reused, not rebuilt
 //! [`tests::handle`] maps the handful of S3 verbs onto `std::fs` under a temp-directory root — the same
 //! technique `crates/webdav/src/lib.rs` uses for its PROPFIND fixture. It already answers GET (object read
@@ -86,6 +119,7 @@
 //! API, not to `ureq` in general.
 
 use std::io::Read as _;
+use std::time::{Duration, Instant};
 
 use cpe_server::provider::{FileSystemProvider, ProviderCapabilities, ProviderEntry};
 
@@ -119,6 +153,70 @@ const MAX_LIST_PAGES: usize = 1_000;
 /// measurements this margin is set against; a real `ListBucketResult` nests at most 3 levels
 /// (`ListBucketResult > Contents > Key`), so 64 costs nothing for legitimate responses.
 const MAX_XML_NESTING_DEPTH: usize = 64;
+
+/// Upper bound on how long the leaf name of a single `<Key>`/`<Prefix>` may be before the entry is dropped
+/// (CPE-1706 item 3). **Real S3 caps an object key at 1024 bytes** — the protocol's own answer — so this
+/// costs nothing for any key a conforming server can produce, while stopping a hostile endpoint from
+/// spending its whole [`MAX_RESPONSE_BODY_BYTES`] budget on one ~8 MiB "filename" that then flows straight
+/// into the UI as an entry name. Measured against the *leaf* (the part after the requested prefix), not the
+/// whole key: the leaf is what becomes a displayed name, and it is always ≤ the key, so a 1024-byte leaf
+/// bound admits every key a real bucket can hold. Dropped exactly like any other unsafe name — silently
+/// skipped, never rendered — because a listing that quietly omits one absurd entry is better than one that
+/// fails wholesale over a single bad row.
+const MAX_KEY_LEAF_BYTES: usize = 1024;
+
+/// How long a single socket read may make **no progress at all** before the request is abandoned
+/// (CPE-1706 item 1). See this module's top doc, "Why these timeout values", for the full reasoning:
+/// briefly, this is a *stall* detector, not a transfer budget — the clock restarts on every byte that
+/// arrives, so it never penalises a slow-but-progressing link, and 30 s is a wide margin over the
+/// time-to-first-byte of any real S3-compatible gateway (AWS's own SDKs use 30–60 s for the same knob).
+const TIMEOUT_READ: Duration = Duration::from_secs(30);
+
+/// The write-side twin of [`TIMEOUT_READ`]: how long one socket write may block with the peer's receive
+/// window shut before the request is abandoned. Same value for the same reason; a `GET` request's bytes
+/// are tiny, so this only ever fires against a peer that has stopped reading entirely.
+const TIMEOUT_WRITE: Duration = Duration::from_secs(30);
+
+/// Pinned explicitly rather than inherited: `ureq` 2.12.1 already defaults `timeout_connect` to 30 s
+/// (`agent.rs:256`), so connect was the *one* phase that was never unbounded. Setting it to the same value
+/// here changes nothing today and stops a future `ureq` default change from silently unbounding it.
+const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
+
+/// Wall-clock budget for **one whole `list` call**, across every page it follows (CPE-1706 item 1).
+///
+/// This is the bound [`TIMEOUT_READ`] cannot provide, and the reason it exists is arithmetic:
+/// `timeout_read` is *per read*, so a server that emits one byte every 29 s never trips it, and
+/// [`MAX_LIST_PAGES`] then multiplies that — 1000 pages × a 30 s stall each is ~8 hours of a held
+/// `spawn_blocking` thread, which is not meaningfully better than unbounded. `ureq`'s own overall
+/// `.timeout()` does not fix this either: it is **per request**, so the page loop multiplies it just the
+/// same, and it *takes precedence over* `timeout_read`/`timeout_write` (`ureq` `agent.rs:476-477`) rather
+/// than adding to them — choosing it means giving up the per-read stall bound, not gaining a second bound.
+/// A deadline over the whole listing is the only knob whose units match the risk.
+///
+/// **10 minutes, chosen against the legitimate worst case, not the median.** A listing cannot legitimately
+/// exceed [`MAX_LIST_ENTRIES`] (200 000) entries, which at `max-keys=1000` is 200 pages, not 1000. A user
+/// on a genuinely poor link taking a punishing 2 s per page still finishes those 200 pages in ~400 s, well
+/// inside this. The hostile case it does cut off is the compound one above: ~8 hours becomes 10 minutes.
+/// What this deliberately tolerates: a hostile server may still hold one blocking thread for 10 minutes.
+/// That is the price of not breaking the real user on the bad link, and it is bounded, which is the point.
+const MAX_LIST_WALL_CLOCK: Duration = Duration::from_secs(600);
+
+/// Build the `ureq::Agent` every request in this crate goes through — the single place the transport's
+/// bounds are set, so `connect` and any test-injected variant cannot drift apart (only the two `Duration`s
+/// differ between them). See [`TIMEOUT_READ`] and [`MAX_LIST_WALL_CLOCK`] for why these knobs and not
+/// `ureq`'s overall `.timeout()`.
+///
+/// `redirects(0)` is the pre-existing CPE-1461 policy, kept: a SigV4 signature is computed for one exact
+/// host and path, so following a server-supplied `3xx` would replay it against a target it was never
+/// signed for.
+fn build_agent(timeout_read: Duration, timeout_write: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(TIMEOUT_CONNECT)
+        .timeout_read(timeout_read)
+        .timeout_write(timeout_write)
+        .build()
+}
 
 /// True for a byte `ureq` 2.12.1's header-value grammar accepts. Mirrors `ureq`'s own filter,
 /// `is_field_vchar_or_obs_fold` (`header.rs:231-237`, as traced in `crate::sigv4::reject_framing_bytes`'s
@@ -227,6 +325,8 @@ struct ListPage {
 ///   dropped (a server returning outside its own advertised prefix — CPE-1683 AC5).
 /// - A `<Contents>` entry whose key equals `key_prefix` exactly is the directory's own zero-byte marker
 ///   object (CPE-1683 AC4) and is dropped — it is the directory being listed, not a file inside it.
+/// - A leaf longer than [`MAX_KEY_LEAF_BYTES`] is dropped (CPE-1706 item 3): real S3 caps a key at 1024
+///   bytes, so anything past that came from a server inventing names, and these names reach the UI.
 /// - The remaining leaf name (the part after `key_prefix`, with a `CommonPrefixes` leaf's trailing `/`
 ///   also stripped) must pass [`cpe_server::transfer::is_safe_name`] — the same guard SFTP/WebDAV apply to
 ///   an attacker-controlled remote name, so a key carrying `../`, an embedded `/`, or a leading `/` cannot
@@ -237,14 +337,25 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
     }
     let doc = roxmltree::Document::parse(xml).map_err(|e| format!("s3: bad ListObjectsV2 XML: {e}"))?;
 
-    let is_truncated = doc
-        .descendants()
+    // CPE-1706 item 2: every field below is read from its *own* level of the document — the page-level
+    // ones from `<ListBucketResult>`'s direct children, a `<Key>`/`<Size>`/`<Prefix>` from its own
+    // container's. The previous whole-document `descendants()` search made an `<IsTruncated>` or
+    // `<NextContinuationToken>` buried inside a `<Contents>` element eligible to be taken for the page's
+    // own whenever the real top-level one was absent — the server controls every byte of both, so it could
+    // choose where they appeared. Not exploitable given the caps, but it contradicted this module's own
+    // stated principle (never assume a network-controlled response honours its own protocol), and
+    // `children()` is both tighter and cheaper. `children()` yields text nodes too; their `tag_name()` is
+    // empty, so the name comparisons below simply never match them.
+    let root = doc.root_element();
+
+    let is_truncated = root
+        .children()
         .find(|n| n.tag_name().name() == "IsTruncated")
         .and_then(|n| n.text())
         .map(|t| t.trim().eq_ignore_ascii_case("true"))
         .unwrap_or(false);
-    let next_token = doc
-        .descendants()
+    let next_token = root
+        .children()
         .find(|n| n.tag_name().name() == "NextContinuationToken")
         .and_then(|n| n.text())
         .map(|t| t.trim().to_string())
@@ -252,8 +363,8 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
 
     let mut entries = Vec::new();
 
-    for content in doc.descendants().filter(|n| n.tag_name().name() == "Contents") {
-        let Some(key) = content.descendants().find(|n| n.tag_name().name() == "Key").and_then(|n| n.text())
+    for content in root.children().filter(|n| n.tag_name().name() == "Contents") {
+        let Some(key) = content.children().find(|n| n.tag_name().name() == "Key").and_then(|n| n.text())
         else {
             continue;
         };
@@ -261,11 +372,14 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         if leaf.is_empty() {
             continue; // the directory's own zero-byte marker object, not a file inside it (AC4)
         }
+        if leaf.len() > MAX_KEY_LEAF_BYTES {
+            continue; // CPE-1706 item 3: longer than S3's own 1024-byte key limit — dropped as unsafe
+        }
         if !cpe_server::transfer::is_safe_name(leaf) {
             continue; // AC5: a hostile/malformed key must not escape the listed prefix
         }
         let size = content
-            .descendants()
+            .children()
             .find(|n| n.tag_name().name() == "Size")
             .and_then(|n| n.text())
             .and_then(|t| t.trim().parse::<u64>().ok())
@@ -273,9 +387,8 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         entries.push(ProviderEntry { name: leaf.to_string(), is_dir: false, size });
     }
 
-    for cp in doc.descendants().filter(|n| n.tag_name().name() == "CommonPrefixes") {
-        let Some(prefix_text) =
-            cp.descendants().find(|n| n.tag_name().name() == "Prefix").and_then(|n| n.text())
+    for cp in root.children().filter(|n| n.tag_name().name() == "CommonPrefixes") {
+        let Some(prefix_text) = cp.children().find(|n| n.tag_name().name() == "Prefix").and_then(|n| n.text())
         else {
             continue;
         };
@@ -283,6 +396,9 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         let leaf = leaf.trim_end_matches('/');
         if leaf.is_empty() {
             continue;
+        }
+        if leaf.len() > MAX_KEY_LEAF_BYTES {
+            continue; // CPE-1706 item 3, the directory-entry mirror of the Contents check above
         }
         if !cpe_server::transfer::is_safe_name(leaf) {
             continue; // AC5, the directory-entry mirror of the Contents check above
@@ -303,14 +419,49 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
 pub struct S3Provider {
     config: S3Config,
     agent: ureq::Agent,
+    /// Wall-clock budget for one whole `list` call — [`MAX_LIST_WALL_CLOCK`] in production. A field
+    /// rather than a bare constant read so the guard can be exercised in a second rather than ten
+    /// minutes; `connect` is the only thing production calls, and it always installs the constant.
+    list_deadline: Duration,
 }
 
 impl S3Provider {
     /// Build a provider for `config`. Does not perform a request; the first `list` (and, once CPE-1684
     /// lands, `stat`/`read`/…) issues one and surfaces addressing/auth/connection errors then.
+    ///
+    /// This is the constructor production uses, and it is the *only* place the shipped timeout values are
+    /// chosen — see this module's top doc, "Why these timeout values".
     pub fn connect(config: &S3Config) -> Self {
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
-        S3Provider { config: config.clone(), agent }
+        Self::connect_with_timeouts(config, TIMEOUT_READ, TIMEOUT_WRITE)
+    }
+
+    /// [`S3Provider::connect`] with the transport's stall bounds supplied by the caller instead of taken
+    /// from [`TIMEOUT_READ`]/[`TIMEOUT_WRITE`].
+    ///
+    /// Public because a caller on a pathologically slow link has a legitimate reason to widen them, but
+    /// its first use is this crate's own tests: a stalling-server test that had to wait out the shipped
+    /// 30 s would cost 30 s of CI wall clock on three OSes, so the test injects a short bound and drives
+    /// the *same* [`build_agent`] path production drives — only the `Duration`s differ. The shipped values
+    /// themselves are pinned separately by
+    /// `tests::the_shipped_timeout_values_are_finite_and_within_sane_bounds`.
+    pub fn connect_with_timeouts(
+        config: &S3Config,
+        timeout_read: Duration,
+        timeout_write: Duration,
+    ) -> Self {
+        S3Provider {
+            config: config.clone(),
+            agent: build_agent(timeout_read, timeout_write),
+            list_deadline: MAX_LIST_WALL_CLOCK,
+        }
+    }
+
+    /// Override the per-`list` wall-clock budget ([`MAX_LIST_WALL_CLOCK`] by default). Same rationale as
+    /// [`S3Provider::connect_with_timeouts`]: production never calls this, and the guard it exposes would
+    /// otherwise take ten minutes to observe firing.
+    pub fn with_list_deadline(mut self, deadline: Duration) -> Self {
+        self.list_deadline = deadline;
+        self
     }
 
     /// Sign and send one `GET` against `target` with `query`, returning `(status, body)` for the caller to
@@ -390,6 +541,7 @@ impl FileSystemProvider for S3Provider {
         let mut out = Vec::new();
         let mut continuation: Option<String> = None;
         let mut pages = 0usize;
+        let started = Instant::now();
         loop {
             pages += 1;
             if pages > MAX_LIST_PAGES {
@@ -397,6 +549,22 @@ impl FileSystemProvider for S3Provider {
                     "s3: list {path:?} exceeded {MAX_LIST_PAGES} ListObjectsV2 pages without finishing \
                      (the server kept answering IsTruncated=true) — refusing to keep following a possibly \
                      hostile or misbehaving server forever"
+                ));
+            }
+            // The wall-clock bound the per-read socket timeout cannot give (CPE-1706 item 1): a server
+            // that dribbles one byte per 29 s never trips `timeout_read`, and the page cap then multiplies
+            // that stall by up to 1000. Checked between pages rather than mid-request, so an in-flight
+            // page always completes or fails on its own socket timeout first — this bounds how many more
+            // pages will be started, which is the compounding this is here to stop. See
+            // `MAX_LIST_WALL_CLOCK`.
+            let elapsed = started.elapsed();
+            if elapsed > self.list_deadline {
+                return Err(format!(
+                    "s3: list {path:?} gave up after {elapsed:.1?} (budget {:.1?}) with the server still \
+                     answering IsTruncated=true on page {pages} — a listing that has not finished inside \
+                     its wall-clock budget is abandoned rather than allowed to hold this thread \
+                     indefinitely",
+                    self.list_deadline
                 ));
             }
 
@@ -692,6 +860,62 @@ mod tests {
     /// sent, which `S3Provider::list` always sets to 1000).
     fn spawn_s3_fixture() -> (String, PathBuf, Arc<AtomicUsize>) {
         spawn_s3_fixture_with_page_cap(None)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 5: no test in this crate may be able to hang the CI job.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Run `f` on a spawned thread and fail the test if it has not returned within `deadline`.
+    ///
+    /// **libtest has no per-test timeout.** Every other guard in this module reds in seconds when broken
+    /// — a wrong count, a missing error, a fast crash — but the ones whose *whole purpose* is to stop an
+    /// unbounded wait (the [`MAX_LIST_PAGES`] loop against a zero-growth endlessly-truncating server, and
+    /// the [`TIMEOUT_READ`]/[`MAX_LIST_WALL_CLOCK`] bounds) regress into a **hang**, not a red: with the
+    /// bound gone there is nothing left to end the call, so `cargo test` would sit there until the CI job's
+    /// own six-hour limit killed it, reporting a timeout instead of a defect. Routing those calls through
+    /// this helper converts that into a deterministic red naming what happened.
+    ///
+    /// The spawned thread is deliberately not joined on the failure path: it is, by construction, stuck in
+    /// the very call that failed to return, and the panic here fails the test process anyway.
+    fn call_with_deadline<T: Send + 'static>(
+        what: &str,
+        deadline: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(deadline) {
+            Ok(value) => value,
+            Err(_) => panic!(
+                "{what} did not return within {deadline:?}. The bound that was supposed to stop it is \
+                 gone, so this call would have run forever — libtest has no per-test timeout, so without \
+                 this deadline the CI job would have hung until its own limit rather than reporting a \
+                 failure."
+            ),
+        }
+    }
+
+    /// A server that completes the TCP accept and then **never sends a byte**, holding every connection
+    /// open forever — the shape that used to hold a `spawn_blocking` thread indefinitely, because `ureq`
+    /// 2.x defaults `timeout_read` to `None` (CPE-1706 item 1). Holding the accepted streams in a `Vec` is
+    /// what makes it a stall rather than a reset: dropping them would close the socket and the client would
+    /// get a prompt EOF, proving nothing.
+    fn spawn_a_server_that_accepts_and_never_answers() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{addr}")
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -997,6 +1221,14 @@ mod tests {
     /// (`MAX_LIST_PAGES` for a server that never advances, `MAX_LIST_ENTRIES` for one that keeps growing)
     /// can each be forced and observed directly, without needing 200,000+ real files on disk.
     fn spawn_endlessly_truncated_server(entries_per_page: usize) -> String {
+        spawn_endlessly_truncated_server_with_delay(entries_per_page, Duration::ZERO)
+    }
+
+    /// [`spawn_endlessly_truncated_server`] plus a fixed think-time before each response — a server that is
+    /// answering correctly and *making progress*, just slowly, which is the only shape that can outrun a
+    /// wall-clock budget without ever tripping a per-read socket timeout (CPE-1706 item 1). Used by
+    /// [`a_listing_that_outruns_its_wall_clock_budget_is_abandoned`].
+    fn spawn_endlessly_truncated_server_with_delay(entries_per_page: usize, delay: Duration) -> String {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         std::thread::spawn(move || {
@@ -1009,6 +1241,9 @@ mod tests {
                  <NextContinuationToken>next</NextContinuationToken>{rows}</ListBucketResult>"
             );
             for req in server.incoming_requests() {
+                if !delay.is_zero() {
+                    std::thread::sleep(delay);
+                }
                 let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
                 let _ = req.respond(tiny_http::Response::from_string(xml.clone()).with_header(ct));
             }
@@ -1019,11 +1254,20 @@ mod tests {
     #[test]
     fn a_server_that_never_stops_truncating_is_capped_by_max_list_pages() {
         // Zero new entries per page: MAX_LIST_ENTRIES can never trip, isolating MAX_LIST_PAGES.
+        //
+        // CPE-1706 item 5: this is the one test in the crate whose regression mode is an unbounded hang
+        // rather than a red — against a zero-growth server MAX_LIST_ENTRIES can never fire, so with the
+        // page cap gone the loop makes loopback requests forever and libtest, having no per-test timeout,
+        // would let the CI job run to its own limit. `call_with_deadline` turns that into a red. 60 s is
+        // ~235× the green path's measured cost (1001 sequential loopback round trips, ~255 ms), so it can
+        // only fire on a genuine runaway, not on a loaded CI machine.
         let base = spawn_endlessly_truncated_server(0);
-        let provider = S3Provider::connect(&cfg(&base));
-        let err = provider
-            .list("/")
-            .expect_err("a server that answers IsTruncated=true forever must not be followed forever");
+        let err = call_with_deadline(
+            "S3Provider::list against a server that answers IsTruncated=true forever",
+            Duration::from_secs(60),
+            move || S3Provider::connect(&cfg(&base)).list("/"),
+        )
+        .expect_err("a server that answers IsTruncated=true forever must not be followed forever");
         assert!(
             err.contains(&format!("{MAX_LIST_PAGES} ListObjectsV2 pages")),
             "the error must name the page cap that actually fired: {err}"
@@ -1114,6 +1358,235 @@ mod tests {
             0,
             "the guard must fire BEFORE any request reaches the fixture — a live server saw a request \
              despite the refusal"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 1: wall-clock is bounded. Three separate bounds, three separate proofs.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The per-read socket bound, driven through the production request path: `connect_with_timeouts` and
+    /// `connect` differ only in where the two `Duration`s come from — both build the agent via
+    /// [`build_agent`], and the call then goes through the same `list` → `signed_get` → `req.call()` that
+    /// production uses. A short bound is injected because waiting out the shipped 30 s would cost 30 s of
+    /// wall clock in every CI job on three OSes; the shipped values are pinned separately by
+    /// [`the_shipped_timeout_values_are_finite_and_within_sane_bounds`].
+    ///
+    /// The error text itself is not asserted beyond the URL prefix: a socket read timeout surfaces through
+    /// `std::io` differently per platform (`WouldBlock` — "Resource temporarily unavailable" — on Unix,
+    /// `TimedOut` on Windows), and this repo runs a 3-OS CI matrix. What is asserted is the part that is
+    /// the actual behaviour under test and is identical everywhere: it **returned, with an error, quickly**
+    /// instead of blocking forever.
+    #[test]
+    fn a_server_that_accepts_the_connection_and_then_never_answers_is_cut_off_by_the_read_timeout() {
+        let base = spawn_a_server_that_accepts_and_never_answers();
+        let short = Duration::from_millis(300);
+        let started = Instant::now();
+        let err = call_with_deadline(
+            "S3Provider::list against a server that accepts the connection and never answers",
+            Duration::from_secs(30),
+            move || S3Provider::connect_with_timeouts(&cfg(&base), short, short).list("/"),
+        )
+        .expect_err("a connection that is accepted and then stalled must surface as an error, not hang");
+        let elapsed = started.elapsed();
+        assert!(
+            err.starts_with("s3: http://127.0.0.1"),
+            "the error must name the endpoint that stalled, so a user knows which one to blame: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "the 300 ms read timeout — not some other accident — must be what ended the call, but it took \
+             {elapsed:?}"
+        );
+    }
+
+    /// [`a_server_that_accepts_the_connection_and_then_never_answers_is_cut_off_by_the_read_timeout`]
+    /// proves the *mechanism* through the production builder with an injected `Duration`. This pins the
+    /// *values* `connect` actually installs, which that test deliberately does not wait out. Together they
+    /// cover the claim "`S3Provider::connect` produces an agent whose reads and writes are bounded by a
+    /// finite, sane timeout": remove `.timeout_read(..)` from `build_agent` and the first test reds;
+    /// change `TIMEOUT_READ` to something useless and this one does.
+    #[test]
+    fn the_shipped_timeout_values_are_finite_and_within_sane_bounds() {
+        for (name, value) in
+            [("TIMEOUT_READ", TIMEOUT_READ), ("TIMEOUT_WRITE", TIMEOUT_WRITE), ("TIMEOUT_CONNECT", TIMEOUT_CONNECT)]
+        {
+            assert!(
+                value >= Duration::from_secs(5),
+                "{name} = {value:?} is short enough to cut off a legitimately slow gateway's \
+                 time-to-first-byte — this knob bounds a stall, not a transfer"
+            );
+            assert!(
+                value <= Duration::from_secs(120),
+                "{name} = {value:?} is long enough that a dead peer still holds a spawn_blocking thread \
+                 for minutes, which is what CPE-1706 exists to stop"
+            );
+        }
+
+        // The listing budget must clear the legitimate worst case by a real margin, and this is the
+        // arithmetic MAX_LIST_WALL_CLOCK's doc comment claims: a listing cannot legitimately exceed
+        // MAX_LIST_ENTRIES, which at max-keys=1000 is 200 pages, and 2 s per page is already a punishing
+        // link. If someone tightens the budget below that, this fails and names the number it broke.
+        let legitimate_worst_case = Duration::from_secs(2) * (MAX_LIST_ENTRIES / 1000) as u32;
+        assert!(
+            MAX_LIST_WALL_CLOCK >= legitimate_worst_case,
+            "MAX_LIST_WALL_CLOCK = {MAX_LIST_WALL_CLOCK:?} would abandon a legitimate maximum-size listing \
+             ({} pages at a poor-link 2 s each = {legitimate_worst_case:?})",
+            MAX_LIST_ENTRIES / 1000
+        );
+        assert!(
+            MAX_LIST_WALL_CLOCK <= Duration::from_secs(3600),
+            "MAX_LIST_WALL_CLOCK = {MAX_LIST_WALL_CLOCK:?} is not a bound anyone would notice"
+        );
+    }
+
+    /// The bound no per-request timeout can provide. The server here is neither hostile nor stalled — it
+    /// answers every request correctly and promptly enough that no socket read ever times out — it simply
+    /// never says it is finished. That is precisely the case `timeout_read` cannot see and the page cap
+    /// bounds only in *page count*, not in time: 1000 pages × a 30 s stall each is hours.
+    ///
+    /// Deterministic in the safe direction: a slower machine only makes `elapsed` cross the budget sooner
+    /// in page terms, never later, because the fixture's 60 ms think-time is a floor. The test asserts the
+    /// wall-clock message fired and, explicitly, that the **page cap did not** — otherwise a passing
+    /// assertion here would prove nothing new.
+    #[test]
+    fn a_listing_that_outruns_its_wall_clock_budget_is_abandoned() {
+        let base = spawn_endlessly_truncated_server_with_delay(0, Duration::from_millis(60));
+        let err = call_with_deadline(
+            "S3Provider::list against a correct-but-endless server, under a 100 ms listing budget",
+            Duration::from_secs(120),
+            move || {
+                S3Provider::connect(&cfg(&base))
+                    .with_list_deadline(Duration::from_millis(100))
+                    .list("/")
+            },
+        )
+        .expect_err("a listing that outruns its wall-clock budget must be abandoned, not followed forever");
+        assert!(err.contains("gave up after"), "the error must say the budget is what ended it: {err}");
+        assert!(err.contains("budget"), "the error must name the budget it exceeded: {err}");
+        assert!(
+            !err.contains("ListObjectsV2 pages"),
+            "the page cap fired, not the wall-clock budget — this test proves nothing about the budget: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 2: every field is read from its own level, not found anywhere in the document.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn an_is_truncated_nested_inside_contents_is_not_mistaken_for_the_pages_own() {
+        // No page-level <IsTruncated> at all — the only ones in the document are buried inside a
+        // <Contents>, where a whole-document `descendants()` search would happily find them. Both are
+        // server-controlled, so this is the server choosing where its own page-level answer appears.
+        let xml = "<ListBucketResult>\
+                     <Contents><Key>a.txt</Key><Size>1</Size>\
+                       <IsTruncated>true</IsTruncated>\
+                       <NextContinuationToken>server-chosen</NextContinuationToken>\
+                     </Contents>\
+                   </ListBucketResult>";
+        let page = parse_list_bucket_result(xml, "").unwrap();
+        assert_eq!(page.entries.len(), 1, "the entry itself must still parse: {:?}", page.entries);
+        assert!(
+            !page.is_truncated,
+            "an <IsTruncated> nested inside <Contents> was taken for the page's own — the page level said \
+             nothing, so the answer must be `false`"
+        );
+        assert_eq!(
+            page.next_token, None,
+            "a <NextContinuationToken> nested inside <Contents> was taken for the page's own"
+        );
+
+        // Positive control: the page's own fields, at their own level, are still read.
+        let real = "<ListBucketResult><IsTruncated>true</IsTruncated>\
+                    <NextContinuationToken>page-level</NextContinuationToken></ListBucketResult>";
+        let page = parse_list_bucket_result(real, "").unwrap();
+        assert!(page.is_truncated);
+        assert_eq!(page.next_token.as_deref(), Some("page-level"));
+    }
+
+    #[test]
+    fn a_key_nested_below_contents_own_level_is_not_taken_for_the_entrys_key() {
+        // `<Meta>` comes first in document order, so a `descendants()` search rooted at `<Contents>` finds
+        // `decoy.txt` before the entry's real `<Key>`. Only the direct child is the entry's own key.
+        let xml = "<ListBucketResult><IsTruncated>false</IsTruncated>\
+                     <Contents><Meta><Key>decoy.txt</Key><Size>999</Size></Meta>\
+                       <Key>real.txt</Key><Size>7</Size></Contents>\
+                   </ListBucketResult>";
+        let page = parse_list_bucket_result(xml, "").unwrap();
+        assert_eq!(page.entries.len(), 1, "{:?}", page.entries);
+        assert_eq!(page.entries[0].name, "real.txt", "a nested <Key> was taken for the entry's own");
+        assert_eq!(page.entries[0].size, 7, "a nested <Size> was taken for the entry's own");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 3: a key longer than S3's own key limit is dropped like any other unsafe name.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_key_leaf_longer_than_s3s_own_key_limit_is_dropped_like_any_other_unsafe_name() {
+        let over = "a".repeat(MAX_KEY_LEAF_BYTES + 1);
+        let at_cap = "b".repeat(MAX_KEY_LEAF_BYTES);
+        let xml = format!(
+            "<ListBucketResult><IsTruncated>false</IsTruncated>\
+             <Contents><Key>photos/{over}</Key><Size>1</Size></Contents>\
+             <Contents><Key>photos/{at_cap}</Key><Size>1</Size></Contents>\
+             <CommonPrefixes><Prefix>photos/{over}/</Prefix></CommonPrefixes>\
+             </ListBucketResult>"
+        );
+        let page = parse_list_bucket_result(&xml, "photos/").unwrap();
+        let names: Vec<&str> = page.entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![at_cap.as_str()],
+            "exactly the at-the-cap key must survive: the over-cap <Key> and the over-cap \
+             <CommonPrefixes> leaf are both dropped, and a key at real S3's own 1024-byte limit is not"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 6: MAX_RESPONSE_BODY_BYTES, the last of the five runtime defences with no test.
+    // ---------------------------------------------------------------------------------------------
+
+    /// An over-cap body must surface as an honest parse error — **never a partial listing sold as
+    /// complete**, which is the failure this whole module is written against. The keys are large but each
+    /// stays under [`MAX_KEY_LEAF_BYTES`], and the entry count stays far under [`MAX_LIST_ENTRIES`], so
+    /// with the body cap removed the document parses cleanly and the call returns `Ok` — making the break
+    /// unambiguous (a red `expect_err`, not a different cap's error text).
+    #[test]
+    fn a_response_body_over_the_cap_is_refused_as_a_parse_error_not_sold_as_a_complete_listing() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            let mut xml = String::from("<ListBucketResult><IsTruncated>false</IsTruncated>");
+            let mut i = 0usize;
+            while xml.len() < MAX_RESPONSE_BODY_BYTES + 1024 * 1024 {
+                let name = format!("{i:08}-{}", "k".repeat(900));
+                xml.push_str(&format!("<Contents><Key>{name}</Key><Size>1</Size></Contents>"));
+                i += 1;
+            }
+            xml.push_str("</ListBucketResult>");
+            assert!(i < MAX_LIST_ENTRIES, "the fixture must stay under the entries cap to isolate the body cap");
+            for req in server.incoming_requests() {
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(xml.clone()).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+
+        let err = call_with_deadline(
+            "S3Provider::list against a server returning a body over MAX_RESPONSE_BODY_BYTES",
+            Duration::from_secs(60),
+            move || S3Provider::connect(&cfg(&base)).list("/"),
+        )
+        .expect_err("a body cut off at the cap is an incomplete document and must not parse as a listing");
+        assert!(
+            err.contains("bad ListObjectsV2 XML"),
+            "the truncation must surface through the parser's own honest error: {err}"
+        );
+        assert!(
+            err.contains("the root node was opened but never closed"),
+            "the error must say the document was cut off, not something vaguer: {err}"
         );
     }
 

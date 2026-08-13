@@ -3,7 +3,7 @@ id: CPE-1706
 title: S3/WebDAV have no HTTP timeouts, one test can hang CI forever, and the body cap is untested
 type: bug
 priority: Medium
-status: Backlog
+status: In Progress
 tags: ready
 estimate: S
 created: 2026-08-13
