@@ -132,6 +132,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # CPE-1690 guard: crates/mdns was the only directory under crates/ this job didn't name, so its
+      # 17 tests silently never ran and its test code was silently never linted — a hole invisible from
+      # a green CI badge. Read THIS file back and fail if any `crates/*` directory has no matching
+      # `working-directory: crates/<name>` step below, so a future new crate (or a deleted step) can't
+      # recreate that hole silently. ubuntu-latest only (like the Typed-bindings drift guard in the
+      # `backend` job) — a text check against the workflow file, not an OS-dependent build.
+      - name: Guard — every directory under crates/ is named in this workflow (CPE-1690)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=0
+          for dir in crates/*/; do
+            name="${dir#crates/}"
+            name="${name%/}"
+            if ! grep -q "working-directory: crates/${name}\$" .github/workflows/ci.yml; then
+              echo "::error::crates/${name} has no 'working-directory: crates/${name}' step in .github/workflows/ci.yml — every directory under crates/ must be clippy'd + tested here (CPE-1690)"
+              missing=1
+            fi
+          done
+          if [ "$missing" != "0" ]; then
+            exit 1
+          fi
+          echo "every crates/* directory is named in this workflow"
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -228,6 +253,7 @@ jobs:
             ./crates/security -> target
             ./crates/server -> target
             ./crates/net -> target
+            ./crates/mdns -> target
             ./crates/sftp -> target
             ./crates/webdav -> target
             ./crates/ftp -> target
@@ -272,6 +298,28 @@ jobs:
         # The headless network transport loop (Client(Rust) proxy + reference Server,
         # CPE-825): composes contract + server + security into a loopback client/server.
         working-directory: crates/net
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+
+      - name: mdns — clippy + test
+        # The mDNS/DNS-SD LAN discovery crate (CPE-1523, epic CPE-1517): the cross-platform
+        # complement to the Windows-native WNet discovery in src-tauri. CPE-1690: this crate was a
+        # `path` dep of src-tauri (so its LIBRARY compiled on all three OSes via the `backend` job)
+        # but was the only directory under crates/ never named in THIS job, so its 17 unit tests never
+        # ran and its `#[cfg(test)]` code was never linted — "built but not verified", not "never
+        # compiled". No optional features (see crates/mdns/Cargo.toml), so — unlike security/server/
+        # ftp/vfs above — there is only one build to lint + test here.
+        #
+        # Portability: `discover_never_panics_and_returns_promptly_with_a_short_timeout` is the one
+        # test that touches the network (calls the real `mdns_sd::ServiceDaemon`, which opens a
+        # multicast UDP socket). It is deliberately NOT gated/skipped — `discover()`'s own contract is
+        # to degrade to an empty Vec on any daemon/socket error rather than fail, so the test asserts
+        # exactly that "never panics, returns by the 200ms deadline" contract and makes no assumption
+        # about a real network or multicast interface being present; a locked-down/offline CI sandbox
+        # is precisely the case it exists to cover. Confirmed passing on Windows locally (CPE-1690);
+        # this step is what puts it in front of Linux + macOS for the first time.
+        working-directory: crates/mdns
         run: |
           cargo clippy --all-targets -- -D warnings
           cargo test
