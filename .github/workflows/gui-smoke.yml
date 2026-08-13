@@ -141,6 +141,25 @@ jobs:
         working-directory: gui-smoke
         run: npm run typecheck
 
+      # CPE-1694: the ratchet's own unit tests (gui-smoke/lib/*.test.ts — 71 cases, including every
+      # guard CPE-1680/CPE-1698 added) previously ran ONLY when a developer chose to run them locally;
+      # nothing in CI ever executed them. Cheap and fast (well under a second) — placed before the ~15/45
+      # minute real wdio run on both legs so a broken unit test fails in seconds, not after the full
+      # suite. This leg is off the push/PR hot path (see the job `if:` above) and non-blocking
+      # (`continue-on-error: true`), so this step's result here only feeds the manual/nightly Windows
+      # canary — see gui-smoke-linux's identically-named step below for the leg that actually gates PRs.
+      #
+      # `package.json`'s `test:unit` script was narrowed from `lib/**/*.test.ts` to `lib/*.test.ts` as
+      # part of this ticket: the double-star glob relies on bash's `globstar` shell option, which is OFF
+      # by default — a real run on gui-smoke-linux's `bash -e {0}` step shell (and `npm`'s own `sh -c`
+      # wrapper around the script itself, which doesn't support globstar at all) failed with "Could not
+      # find '.../lib/**/*.test.ts'" every time, regardless of whether the tests themselves passed. Since
+      # every test file sits flat directly under `lib/` (no nested subdirectories), a single `*` is both
+      # correct today and portable across every POSIX shell without needing any shell option.
+      - name: Run gui-smoke unit tests
+        working-directory: gui-smoke
+        run: npm run test:unit
+
       - name: Run GUI smoke suite
         working-directory: gui-smoke
         run: npm test
@@ -261,6 +280,27 @@ jobs:
       - name: Type-check gui-smoke
         working-directory: gui-smoke
         run: npm run typecheck
+
+      # CPE-1694: the ratchet's own unit tests (gui-smoke/lib/*.test.ts — 71 cases, including every
+      # guard CPE-1680/CPE-1698 added) previously ran ONLY when a developer chose to run them locally;
+      # nothing in CI ever executed them. `test:unit`'s glob covers every test file in this repo —
+      # CPE-1680 moved the ratchet's reduction logic (`toCaseStatus`, `reduceResultChunks`) from
+      # `scripts/run-ratchet.ts` into `lib/ratchet.ts`, and no `.test.ts` file lives under
+      # `gui-smoke/scripts/`, so it needed no WIDENING. It DID need narrowing, found while proving this
+      # step gates on real CI (see the PR's Evidence section): `package.json`'s original
+      # `lib/**/*.test.ts` relies on bash's `globstar` option, which is off by default on this job's
+      # `bash -e {0}` step shell AND on `npm`'s own `sh -c` script wrapper (which doesn't support
+      # globstar at all) — a real run failed with "Could not find '.../lib/**/*.test.ts'" unconditionally,
+      # before ever reaching a single test. Narrowed to `lib/*.test.ts`, which every POSIX shell expands
+      # correctly with no special option (every test file sits flat directly under `lib/`, so a
+      # single-level glob is also the semantically correct one, not just the portable one). THIS is the
+      # leg that gates: it runs on every `push`/`pull_request` (this job carries no `if:` skip, unlike the
+      # Windows leg above) and has no `continue-on-error`, so a failing unit test reds the PR the same way
+      # the ratchet step below does. Placed before the ~45-minute real wdio run so a broken unit test
+      # fails in seconds instead of after the full suite.
+      - name: Run gui-smoke unit tests
+        working-directory: gui-smoke
+        run: npm run test:unit
 
       # `xvfb-run` wraps the whole test command in a fake X display so tauri-driver -> WebKitWebDriver
       # -> the app's GTK/WebKitGTK webview can all initialize headlessly (see the system-deps comment

@@ -242,10 +242,17 @@ export function reduceResultChunks(chunks: RawResultChunk[]): CaseResult[] {
 /** `path.basename`, without importing Node's `path` module — the one file-shaped string this otherwise
  *  I/O-free module needs to slice, and a two-line reimplementation is cheaper than explaining why a
  *  "pure, no I/O" module imports `node:path`. Handles both `/`- and `\`-separated inputs, since the
- *  reporter's `specs[]` entries are absolute paths written by whatever OS the suite ran on. */
+ *  reporter's `specs[]` entries are absolute paths written by whatever OS the suite ran on.
+ *
+ *  CPE-1698: splitting on the separator regex leaves an empty trailing element when `specPath` ends in
+ *  one or more separators (`"…/case-c.smoke.ts/".split(/[/\\]/)` ends in `""`), so simply taking the
+ *  last element and falling back to the whole path on falsy would return the ENTIRE input instead of a
+ *  basename — the opposite of what `path.basename`/`path.win32.basename` do (they strip the trailing
+ *  separator and still return `"case-c.smoke.ts"`). Filtering out empty segments before taking the last
+ *  one matches that real behaviour. */
 function specBasename(specPath: string): string {
-  const parts = specPath.split(/[/\\]/);
-  return parts[parts.length - 1] || specPath;
+  const parts = specPath.split(/[/\\]/).filter((part) => part.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1]! : specPath;
 }
 
 /** Minimum length (after trimming) a `reason` must clear for an `intermittent: true` entry to pass
