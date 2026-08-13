@@ -10,6 +10,55 @@
 use base64::Engine as _;
 use cpe_server::provider::{FileSystemProvider, ProviderEntry};
 use std::io::Read as _;
+use std::time::Duration;
+
+/// How long a single socket read may make **no progress at all** before the request is abandoned
+/// (CPE-1706 item 1). Until that ticket this crate built `AgentBuilder::new().redirects(0)` and nothing
+/// else, and **`ureq` 2.x defaults `timeout_read`, `timeout_write` and the overall `timeout` all to
+/// `None`** — `AgentBuilder::timeout_read`'s own doc says it plainly: *"requests may block forever on reads
+/// by default"*. Since `WebdavProvider` runs on `spawn_blocking` threads, one unresponsive share could hold
+/// a pool thread with nothing able to reclaim it.
+///
+/// This is a **stall** bound, not a transfer budget: the clock restarts on every byte that arrives, so a
+/// large `read` over a genuinely poor link is never cut off for being slow, only for having stopped. 30 s
+/// is a wide margin over the time-to-first-byte of any real share — a NAS that has sent nothing for half a
+/// minute is not slow, it is gone — and matches the value `cpe-s3` chose for the same knob, so the two
+/// HTTP backends behave alike.
+const TIMEOUT_READ: Duration = Duration::from_secs(30);
+
+/// The write-side twin of [`TIMEOUT_READ`]: how long one socket write may block with the peer's receive
+/// window shut. Same value, same reasoning. It bounds a stalled `PUT`, not a slow one.
+const TIMEOUT_WRITE: Duration = Duration::from_secs(30);
+
+/// Pinned explicitly rather than inherited: `ureq` 2.12.1 already defaults `timeout_connect` to 30 s
+/// (`agent.rs:256`), so connect was the one phase that was never unbounded. Setting it to the same value
+/// changes nothing today and stops a future `ureq` default change from silently unbounding it.
+const TIMEOUT_CONNECT: Duration = Duration::from_secs(30);
+
+/// Build the `ureq::Agent` every request in this crate goes through — the single place the transport's
+/// bounds are set, so `connect` and any test-injected variant cannot drift apart (only the two `Duration`s
+/// differ between them).
+///
+/// **`ureq`'s overall `.timeout()` is deliberately not set.** It caps a whole request regardless of
+/// progress, so it would kill a legitimate multi-minute `GET` of a large file over a bad connection — a
+/// real user, not a hypothetical — and it *replaces* the per-read bound rather than adding to it (`ureq`
+/// `agent.rs:476-477`: "takes precedence over `.timeout_read()`"), so setting it would trade a good bound
+/// for a worse one.
+///
+/// Unlike `cpe-s3`, this crate needs no *listing*-level wall-clock budget: `list` is a single `PROPFIND`
+/// with `Depth: 1` and no pagination loop, so there is no page count for a per-request stall to be
+/// multiplied by — the per-request bounds already bound the whole operation. (`cpe-s3`'s `list` follows up
+/// to 1000 `ListObjectsV2` pages, which is why it carries `MAX_LIST_WALL_CLOCK` on top of these.)
+///
+/// `redirects(0)` is the pre-existing CPE-1461 policy, kept — see [`WebdavProvider::connect`].
+fn build_agent(timeout_read: Duration, timeout_write: Duration) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .redirects(0)
+        .timeout_connect(TIMEOUT_CONNECT)
+        .timeout_read(timeout_read)
+        .timeout_write(timeout_write)
+        .build()
+}
 
 /// How to reach a WebDAV share.
 #[derive(Debug, Clone)]
@@ -48,7 +97,25 @@ const PROPFIND_BODY: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 impl WebdavProvider {
     /// Build a provider for `config`. Does not perform a request (WebDAV is stateless HTTP); the first
     /// `list`/`read`/… issues a request and surfaces auth/connection errors then.
+    /// This is the constructor production uses, and the only place the shipped timeout values are chosen
+    /// — see [`TIMEOUT_READ`] and [`build_agent`].
     pub fn connect(config: &WebdavConfig) -> Self {
+        Self::connect_with_timeouts(config, TIMEOUT_READ, TIMEOUT_WRITE)
+    }
+
+    /// [`WebdavProvider::connect`] with the transport's stall bounds supplied by the caller instead of
+    /// taken from [`TIMEOUT_READ`]/[`TIMEOUT_WRITE`].
+    ///
+    /// Public because a caller on a pathologically slow share has a legitimate reason to widen them, but
+    /// its first use is this crate's own tests: a stalling-server test that had to wait out the shipped
+    /// 30 s would cost 30 s of CI wall clock on three OSes, so the test injects a short bound and drives
+    /// the *same* [`build_agent`] path production drives — only the `Duration`s differ. The shipped values
+    /// themselves are pinned separately by `tests::the_shipped_timeout_values_are_finite_and_sane`.
+    pub fn connect_with_timeouts(
+        config: &WebdavConfig,
+        timeout_read: Duration,
+        timeout_write: Duration,
+    ) -> Self {
         let auth_header = config.user.as_deref().map(|u| {
             let pass = config.password.as_deref().unwrap_or("");
             let token = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{pass}"));
@@ -58,7 +125,7 @@ impl WebdavProvider {
         // redirects, so a future change (or a hostile server today) could bounce a request via a `3xx`
         // toward `file://` or an attacker-controlled host — an SSRF/exfiltration foothold. Refusing to
         // auto-follow surfaces the `3xx` as an error instead; a WebDAV share never needs redirects.
-        let agent = ureq::AgentBuilder::new().redirects(0).build();
+        let agent = build_agent(timeout_read, timeout_write);
         WebdavProvider { agent, base_url: config.base_url.clone(), auth_header }
     }
 
@@ -463,6 +530,123 @@ mod tests {
             }
         });
         format!("http://{addr}")
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1706 item 1: wall-clock is bounded — and the test proving it cannot itself hang CI.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Run `f` on a spawned thread and fail the test if it has not returned within `deadline`.
+    ///
+    /// **libtest has no per-test timeout**, so a test whose subject is "this call cannot block forever"
+    /// regresses into a *hang*, not a red: with the bound gone there is nothing left to end the call and
+    /// `cargo test` would sit there until the CI job's own limit killed it. This converts that into a
+    /// deterministic red naming what happened. (Ported from `crates/s3`'s `provider.rs`, CPE-1706 item 5.)
+    fn call_with_deadline<T: Send + 'static>(
+        what: &str,
+        deadline: Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(deadline) {
+            Ok(value) => value,
+            Err(_) => panic!(
+                "{what} did not return within {deadline:?}. The bound that was supposed to stop it is \
+                 gone, so this call would have run forever — libtest has no per-test timeout, so without \
+                 this deadline the CI job would have hung until its own limit rather than reporting a \
+                 failure."
+            ),
+        }
+    }
+
+    /// A server that completes the TCP accept and then **never sends a byte**, holding every connection
+    /// open forever. Holding the accepted streams in a `Vec` is what makes it a stall rather than a reset:
+    /// dropping them would close the socket and the client would get a prompt EOF, proving nothing.
+    fn spawn_a_server_that_accepts_and_never_answers() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                match stream {
+                    Ok(s) => held.push(s),
+                    Err(_) => break,
+                }
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The per-read socket bound, driven through the production request path: `connect_with_timeouts` and
+    /// `connect` differ only in where the two `Duration`s come from — both build the agent via
+    /// `build_agent`, and the call then goes through the same `request()` → `send_string()` production
+    /// uses. A short bound is injected because waiting out the shipped 30 s would cost 30 s of wall clock
+    /// in every CI job on three OSes; the shipped values are pinned by
+    /// [`the_shipped_timeout_values_are_finite_and_sane`].
+    ///
+    /// Checked on `list` **and** `read`, because they take different `ureq` paths — `send_string` +
+    /// `into_string` for the PROPFIND, `call` + `into_reader` for the GET — and it is the GET path where an
+    /// unbounded read would hurt most (a large download from a share that dies mid-transfer).
+    ///
+    /// The error *text* is not asserted beyond the path prefix `http_err` adds: a socket read timeout
+    /// surfaces through `std::io` differently per platform (`WouldBlock` — "Resource temporarily
+    /// unavailable" — on Unix, `TimedOut` on Windows) and this repo runs a 3-OS CI matrix. What is asserted
+    /// is the behaviour under test, identical everywhere: it **returned, with an error, quickly**.
+    #[test]
+    fn a_server_that_accepts_the_connection_and_then_never_answers_is_cut_off_by_the_read_timeout() {
+        for op in ["list", "read"] {
+            let base = spawn_a_server_that_accepts_and_never_answers();
+            let short = Duration::from_millis(300);
+            let started = std::time::Instant::now();
+            let err = call_with_deadline(
+                &format!("WebdavProvider::{op} against a server that accepts and never answers"),
+                Duration::from_secs(30),
+                move || {
+                    let p = WebdavProvider::connect_with_timeouts(&WebdavConfig::new(&base), short, short);
+                    match op {
+                        "list" => p.list("/readme.txt").map(|_| ()),
+                        _ => p.read("/readme.txt").map(|_| ()),
+                    }
+                },
+            )
+            .unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(
+                err.starts_with("/readme.txt:"),
+                "the error must name the path that stalled, so a user knows what to blame: {err}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(10),
+                "the 300 ms read timeout — not some other accident — must be what ended {op}, but it took \
+                 {elapsed:?}"
+            );
+        }
+    }
+
+    /// The companion to the test above: that one proves the *mechanism* through the production builder
+    /// with an injected `Duration`, this pins the *values* `connect` actually installs, which it
+    /// deliberately does not wait out. Together they cover "`WebdavProvider::connect` produces an agent
+    /// whose reads and writes are bounded by a finite, sane timeout": remove `.timeout_read(..)` from
+    /// `build_agent` and the first reds; make `TIMEOUT_READ` useless and this one does.
+    #[test]
+    fn the_shipped_timeout_values_are_finite_and_sane() {
+        for (name, value) in
+            [("TIMEOUT_READ", TIMEOUT_READ), ("TIMEOUT_WRITE", TIMEOUT_WRITE), ("TIMEOUT_CONNECT", TIMEOUT_CONNECT)]
+        {
+            assert!(
+                value >= Duration::from_secs(5),
+                "{name} = {value:?} is short enough to cut off a legitimately slow share's \
+                 time-to-first-byte — this knob bounds a stall, not a transfer"
+            );
+            assert!(
+                value <= Duration::from_secs(120),
+                "{name} = {value:?} is long enough that a dead peer still holds a spawn_blocking thread \
+                 for minutes, which is what CPE-1706 exists to stop"
+            );
+        }
     }
 
     #[test]
