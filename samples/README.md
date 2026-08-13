@@ -132,6 +132,46 @@ zero-page `/Pages` tree — exactly `malformed.pdf`'s shape — is rejected BEFO
 PDF viewer, falling back to the metadata pane instead. So this fixture now doubles as CPE-1357's
 regression pin: opening it must keep degrading gracefully (never crash) for as long as that fix stands.
 
+## `audio/corrupt.mp3` — deliberately-undecodable media fixture (CPE-1702)
+
+Same pattern as `documents/malformed.pdf` above: a hand-authored, deliberately broken fixture, not
+produced by `gen_samples.py`. `.github/workflows/gui-smoke.yml`'s Linux leg installs only
+`libwebkit2gtk-4.1-dev`, which pulls in `gstreamer1.0-plugins-base` but not the `-good`/`-bad`/
+`-ugly`/`-libav` packages that actually decode MP3/AAC/H.264 — so `audio/track.{mp3,flac,ogg}` and
+`video/clip.mp4` (all genuine, valid, ffmpeg-encoded media, not stubs) can never decode in CI, and
+`gui-smoke`'s only exercise of `MediaPlayer.svelte`'s graceful-fallback UI (`.mp-fallback`) is those
+four real files failing for a codec-availability reason that has nothing to do with the fallback path
+itself.
+
+**CPE-1702 tried closing that gap and it didn't work.** Installing the missing plugin packages was
+tested on two separate real CI runs (once alone, once combined with `WEBKIT_DISABLE_SANDBOX=1` after
+the first attempt suggested WebKitGTK's sandboxed GStreamer plugin-scanner might be the blocker).
+Both runs installed the packages successfully but **every media fixture still rendered
+`.mp-fallback`, never `.mp-media`** — checked against the actual rendered DOM in each run's raw job
+log (`class="mp...` never matched anything but `mp-fallback`/`mp-fallback-msg`/`mp-open-ext`, in
+either run), not just the green ratchet. The leading unconfirmed hypothesis: apt's own "Suggested
+packages" output lists `pipewire`/`pulseaudio`/`gstreamer1.0-alsa` as available but not installed on
+this runner, so GStreamer's `autoaudiosink` may have nothing to attach to regardless of which decoder
+plugins are present — video failing too points at the same class of sink problem, not a
+missing-codec one. Confirming that needs GStreamer/WebKitGTK's own diagnostic output piped to CI
+stdout first (it isn't today), which is materially more work than this ticket's decision scope.
+**Decision: leave the codec packages out.** Paying apt-install cost for packages that don't change
+CI's observed behaviour has no upside.
+
+`audio/corrupt.mp3` is what keeps the graceful-fallback UI's coverage a **deliberate** regression pin
+rather than an accident of this runner's current codec gaps: ASCII text with an `.mp3` extension and
+**no MPEG frame sync bytes anywhere in it**, so `categoryOf()` (`src/lib/filetypes.ts`) still routes
+it to the audio preview kind (matched purely by extension, same as every real audio file — there is
+no server-side validate-before-embed gate for media the way `pdf_validity` gates PDFs), but no real
+decoder, on this runner or any future one, can ever make sense of the bytes. `gui-smoke/specs/
+samples.smoke.ts` discovers it automatically (its walk reads the real `samples/` tree at spec-load
+time, same as every other fixture — no harness code change needed). Since the real fixtures currently
+land on `.mp-fallback` too (for the environment reason above, not by design), the walk's per-file
+assertion is no longer generic for these five: `samples.smoke.ts` explicitly asserts all five —
+`audio/{corrupt.mp3,track.flac,track.mp3,track.ogg}` and `video/clip.mp4` — land on `.mp-fallback`
+specifically (see its `EXPECT_FALLBACK` set), so the day this runner's audio/video pipeline starts
+decoding for real, that assertion breaks loudly instead of the gap silently reopening unnoticed.
+
 ## Sample-coverage ratchet (CPE-1358)
 
 Every supported preview **kind** (`src/lib/preview/provider.ts`) has at least one valid sample below, so
@@ -144,7 +184,7 @@ opening any format the app claims to support has real fixture coverage:
 | `raw-image`      | `raw/sunset.cr2`                                       |
 | `dicom`          | `medical/ct-scan.dcm`                                  |
 | `heic`           | `images/iphone-photo.heic`                             |
-| `audio`          | `audio/track.mp3`, `audio/track.flac`, `audio/track.ogg` |
+| `audio`          | `audio/track.mp3`, `audio/track.flac`, `audio/track.ogg`, `audio/corrupt.mp3` (CPE-1702 — a deliberate, permanent graceful-degrade trigger; all four currently land on `.mp-fallback` in gui-smoke CI, see "`audio/corrupt.mp3`" above) |
 | `video`          | `video/clip.mp4`                                        |
 | `pdf`            | `documents/doc.pdf` (valid), `documents/malformed.pdf` (CPE-1357 regression trigger) |
 | `json`           | `text/data.json`                                        |

@@ -73,6 +73,27 @@ function listSampleFiles(dir: string): string[] {
 const ALL_SAMPLES = listSampleFiles(REAL_SAMPLES_DIR);
 const WALK_FILES = ALL_SAMPLES.filter((f) => f !== MALFORMED_PDF_REL);
 
+/** CPE-1702: the generic per-file assertion below accepts EITHER `.mp-media` (real playback) OR
+ *  `.mp-fallback` (graceful degrade) — deliberately, since most kinds only ever have one legitimate
+ *  terminal state and the walk is data-driven across all of them. That genericity hid a real gap for
+ *  these five: two real CI attempts (plain `gstreamer1.0-plugins-{good,bad,ugly}`/`-libav` install,
+ *  then the same plus `WEBKIT_DISABLE_SANDBOX=1`) both installed the codec packages successfully but
+ *  STILL rendered `.mp-fallback` for every one of them — checked against the actual rendered DOM in
+ *  each run's raw job log, not just the ratchet's pass/fail (see `.github/workflows/gui-smoke.yml`'s
+ *  "Install Linux system dependencies" comment for the full writeup and the audio-sink hypothesis).
+ *  So today, in THIS runner, `.mp-fallback` is the only truthful terminal state for every one of
+ *  these — including the three real, valid audio files and the real video, not just the deliberately
+ *  undecodable `audio/corrupt.mp3`. Asserting that specifically (rather than accepting either) means
+ *  the day this runner's audio/video pipeline starts actually decoding, THIS assertion breaks loudly
+ *  instead of staying silently green — that break is the signal to come update it, not a regression. */
+const EXPECT_FALLBACK: ReadonlySet<string> = new Set([
+  "audio/corrupt.mp3",
+  "audio/track.flac",
+  "audio/track.mp3",
+  "audio/track.ogg",
+  "video/clip.mp4",
+]);
+
 // Navigation (`navigateTo`), row lookup (`findRowContaining`), settle-detection
 // (`waitForPreviewToSettle`, + the `CONTENT_SELECTOR`/`LOADING_TEXT` it's built from), and the crash
 // guard (`assertAppStillAlive`) all now live in `../lib/samplesNav.js` (CPE-1629), shared with
@@ -126,6 +147,20 @@ describe("CPE-1358 — headless GUI smoke: every samples/ file opens without cra
   for (const relPath of WALK_FILES) {
     it(`opens samples/${relPath}: no crash + preview renders or gracefully degrades`, async function () {
       await openAndVerify(samplesRootAbs, relPath);
+
+      // CPE-1702: the five media fixtures get a SPECIFIC check on top of the generic one above — see
+      // EXPECT_FALLBACK's doc comment. This is the assertion that catches the day this runner's
+      // audio/video decode starts working for real: it will fail here first, not stay silently green.
+      if (EXPECT_FALLBACK.has(relPath)) {
+        const fallbackCount = await browser.$$(".mp-fallback").length;
+        expect(
+          fallbackCount,
+          `expected samples/${relPath} to land on MediaPlayer's graceful-fallback UI (.mp-fallback) — ` +
+            `if this fails, this runner's audio/video pipeline may have started decoding for real; see ` +
+            `gui-smoke.yml's "Install Linux system dependencies" comment (CPE-1702) before re-enabling ` +
+            `the codec packages`,
+        ).to.be.greaterThan(0);
+      }
 
       // A couple of representative frames for the Visual Critic gallery (CPE-1148) — not one per file
       // (25+ near-identical screenshots would be noise); the newly-added coverage fixtures + the fixed

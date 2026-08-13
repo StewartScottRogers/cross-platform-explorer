@@ -231,12 +231,51 @@ graceful-degrade markup (`aside.details` for CPE-1357). Verified with a before/a
 stress harness against real ubuntu-latest + Xvfb + WebKitGTK (not merged — see the CPE-1679 PR body
 for the run ids and counts): genuine 20s-timeout failures were common before the fix and vanished
 completely after it, across far more repeated real attempts than the before run survived (an
-unrelated WebKitGTK/GStreamer session crash under rapid repeated same-file opens — not a settle-check
-failure — capped how many attempts the before run could log; the after run comfortably outlasted it
-with zero settle failures). All four entries are removed; if a NEW case ever needs `intermittent`,
-open a fresh ticket rather than reusing this one (see the `$comment` above).
+apparent session death under rapid repeated same-file opens — not a settle-check failure — capped how
+many attempts the before run could log; the after run comfortably outlasted it with zero settle
+failures). All four entries are removed; if a NEW case ever needs `intermittent`, open a fresh ticket
+rather than reusing this one (see the `$comment` above).
 
-**Why case granularity (CPE-1677).** The original ratchet exempted whole spec files. `samples.smoke.ts`
+### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
+
+CPE-1679's
+throwaway stress harness (scratch-only, `specs/zzz-cpe1679-stress.smoke.ts` on the never-merged
+`cpe-1679-stress-experiment`/`cpe-1679-stress-after` branches) died mid-loop with `A sessionId is
+required for this command` on all three of its real CI runs (`31672811976`, `31671831127` before the
+fix; `31673687870` after). CPE-1702 pulled the raw job logs (`gh api
+repos/:owner/:repo/actions/jobs/<id>/logs` — the "spec"-reporter view `gh run view --log` shows is
+pre-truncated and hides this) and found the death lands at **wall-clock ~90.000s in all three runs**
+("`1 failing (1m 30s)`" in the mocha reporter, every time) regardless of how many attempts had
+completed — 5 before the fix (each failing attempt burned the full 20s settle-timeout), 46 after (each
+passing attempt took ~1.85s) — which is the smoking gun: a real WebKitGTK/GStreamer resource leak would
+scale with attempt COUNT, not hold wall-clock time fixed across a 9x difference in attempts. No
+GStreamer/GLib `CRITICAL`/`WARNING`, no `EMFILE`/"Too many open files", no core dump or segfault
+appears anywhere in any of the three raw logs — the app process itself never crashes.
+
+What actually happens: this file's `it()` calls `this.timeout(ITERATIONS * FILES.length * 25_000 +
+60_000)` (≈34 minutes for 20×4 attempts) to give its long loop room, but `wdio.conf.ts`'s
+`mochaOpts.timeout: 90_000` — deliberately generous **for the real suite**, which opens each file
+once (CPE-1481) — fires anyway: an in-test `this.timeout()` override is not reliably honoured by
+`@wdio/mocha-framework` (a long-documented framework limitation, not unique to this repo — see
+webdriverio/webdriverio#1794 and the wdio-mocha-framework issue tracker). When the 90s Runnable
+timeout fires, WDIO's worker tears the WebDriver session down immediately (`COMMAND deleteSession()`
+appears in the log the instant the `Timeout` error is thrown) — but the stress loop's own `for`
+await-chain has no cancellation awareness and is still mid-flight, so its very next command
+legitimately finds the session gone and throws exactly the "sessionId" error being chased. It is a
+self-inflicted teardown race, not exhaustion of any OS/GStreamer/WebKitGTK resource.
+
+**The ceiling for a future stress harness:** do not rely on `this.timeout()` inside the test body to
+extend past `wdio.conf.ts`'s 90s default — it will not reliably take effect. Either keep a single
+stress `it()` under ~85 wall-clock seconds (budget per-attempt time accordingly — at CPE-1679's
+post-fix ~1.85s/attempt that's ~45 safe attempts per session, far fewer if any attempt can still hit
+the 20s settle-timeout path), or split the loop across multiple `it()`s/files so each one starts a
+fresh session inside its own 90s budget, or add a real per-spec `mochaOpts` override for that one
+scratch file. Whichever you pick, a "SESSION-DEAD" tally entry means you hit this ceiling, not that
+GStreamer leaked — don't go looking for a leak that was ruled out here.
+
+### Why case granularity (CPE-1677)
+
+The original ratchet exempted whole spec files. `samples.smoke.ts`
 is listed for 22 of its 46 cases (the CPE-1507 preview-settle tail), which meant the other 24 guarded
 nothing: the CPE-1639 worker deliberately broke the font-preview case inside that file, ran the real
 job, and the baseline run and the broken run printed the **byte-identical** verdict — `38 passed, 3
