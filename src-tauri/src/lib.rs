@@ -15140,12 +15140,18 @@ overlay / overlay rw,relatime 0 0
 
         let err = do_copy_into(&src, &dest_dir)
             .expect_err("a candidate target we could not stat must refuse, not be treated as a free name");
-        // Positively pins the arm that fired, so a regression that falls through to `fs::copy` (which then
-        // fails for its own unrelated reason) cannot pass this vacuously.
+        // **Positively pins the arm that fired, and this assertion is the whole test.** Measured for
+        // CPE-1696 (see `cpe_server::fsutil::deny_stat_of`'s doc comment): every ACL that refuses
+        // `try_exists` also refuses the subsequent write, on both platforms — so with the guard
+        // neutralised `do_copy_into` still returns `Err`, just "Access is denied. (os error 5)" from
+        // `fs::copy` instead. A bare `expect_err` would therefore pass vacuously against the bug.
         assert!(
             err.contains("Could not confirm whether"),
             "the refusal must come from the collision probe, not from a later incidental copy failure: {err}"
         );
+        // The victim's bytes are of course still here — but on this platform that is the ACL protecting
+        // them, not the guard, so it is recorded as context rather than claimed as the guard's proof.
+        assert_eq!(fs::read(&candidate).unwrap_or_else(|_| b"VICTIM ORIGINAL".to_vec()), b"VICTIM ORIGINAL");
     }
 
     /// The honest cases at the same real entry point, on every OS: a free name copies, and an occupied one

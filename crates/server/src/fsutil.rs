@@ -245,6 +245,21 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///   from `metadata()` there. `target` itself keeps its own permission bits untouched (irrelevant on
 ///   Unix per CPE-1687's own finding: `stat()` needs no permission on the file itself).
 ///
+/// **What this helper can and cannot prove, measured for CPE-1696 (non-elevated, local NTFS).** The
+/// minimal Windows deny that makes `try_exists()` fail is `S` (SYNCHRONIZE) — `icacls t /deny u:(S)`,
+/// `(R)`, `(RX)` and `(F)` all work; `(RA)`, `(REA)`, `(RD)` and `(RC)` do **not** (they leave
+/// `try_exists()` at `Ok(true)`). But Rust's `fs::write`/`fs::copy` request SYNCHRONIZE in their own
+/// `CreateFileW` access mask too, so **every** deny that refuses `try_exists` also refuses the subsequent
+/// write. Consequence for tests of an overwrite-refusal guard: on Windows this helper can prove the guard
+/// *refuses*, and can prove the refusal came from the guard rather than from an incidental later failure
+/// (assert on the guard's own message — a bare `expect_err` passes vacuously, because the neutralised
+/// code still errors, just with "Access is denied. (os error 5)" from the write). It cannot construct
+/// observable byte loss, because the ACL that hides the file also protects it. The unguarded overwrite is
+/// still real for stat failures the ACL model can't stage — a dead network mount, `EIO`, a transient
+/// resolve failure — which is exactly why every CPE-1696 site also has a pure classifier whose unit test
+/// can inject any `io::ErrorKind`. Unix is the same story for a different reason: the mechanism there is
+/// `chmod 0o000` on the parent, which refuses the write as well.
+///
 /// `target` is the exact path the code under test calls `.try_exists()` on. Returns whether the deny
 /// demonstrably took effect, checked by calling `target.try_exists()` and requiring `Err`: `false` means
 /// this machine can't construct the condition (running elevated, an ACL-less filesystem, non-admin
