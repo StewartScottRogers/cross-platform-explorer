@@ -114,16 +114,21 @@ supply a body and fails against every real server.
 Added by the Foreman from the PR #883 (CPE-1695) review, 2026-08-13. This is a landmine sitting exactly
 where this ticket works, found by tracing the real send path rather than reading the obvious functions.
 
-`ureq`'s write loop (`ureq-2.12.1/src/unit.rs:467-473`) does **not** pass a raw value to
+`ureq`'s write loop (`ureq-2.12.1/src/unit.rs:467-474`) does **not** pass a raw value to
 `write_header`. It calls `header.value()` first and skips the header entirely when that returns `None`:
 
 ```rust
 for header in &unit.headers {
     if let Some(v) = header.value() {
+        // (the real source branches here on is_header_sensitive -> write_sensitive_header;
+        //  both arms sit inside this same `if let Some(v)` gate, so both are skipped alike)
         prelude.write_header(header.name(), v)?;
     }
 }
 ```
+
+Note the gate applies to **sensitive** headers too — `Authorization` included. A signed `Authorization`
+header carrying a non-conforming byte is dropped by the identical mechanism.
 
 `Header::value()` (`header.rs:99-109`) filters through `is_field_vchar_or_obs_fold`
 (`header.rs:231-237`), which permits only `{SP, HTAB} ∪ [0x21, 0x7E]`. The filter applies to the whole
