@@ -3,11 +3,11 @@ id: CPE-1698
 title: specBasename returns the entire path when the spec path ends in a separator
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem

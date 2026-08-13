@@ -3,11 +3,11 @@ id: CPE-1694
 title: The gui-smoke suite's 59 unit tests have never gated CI — only typecheck and the real wdio run do
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
