@@ -2079,7 +2079,11 @@ mod tests {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),
-                "[CPE-1696] SKIPPED the execute_plan denied-output leg on this platform: no Unix stat-deny                  exists that leaves the input's own directory readable, and `classify_output_containment`                  requires input and output to share a directory. NOTHING in this test covered CPE-1696 on                  this run; the taxonomy and the standalone-function legs cover it on every platform."
+                "[CPE-1696] SKIPPED the execute_plan denied-output leg on this platform: no Unix \
+                 stat-deny exists that leaves the input's own directory readable, and \
+                 `classify_output_containment` requires input and output to share a directory. NOTHING \
+                 in this test covered CPE-1696 on this run; the taxonomy and the standalone-function \
+                 legs cover it on every platform."
             );
         }
         #[cfg(windows)]
@@ -2107,7 +2111,9 @@ mod tests {
             if !crate::fsutil::deny_stat_of(&output) {
                 let _ = writeln!(
                     std::io::stderr(),
-                    "[CPE-1696] SKIPPED the execute_plan denied-output leg: could not deny stat of {} on                      this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in this                      test covered CPE-1696 on this run.",
+                    "[CPE-1696] SKIPPED the execute_plan denied-output leg: could not deny stat of {} \
+                     on this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in \
+                     this test covered CPE-1696 on this run.",
                     output.display()
                 );
                 return;

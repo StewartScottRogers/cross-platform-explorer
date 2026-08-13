@@ -114,10 +114,16 @@ pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
 ///
 /// (Mitigation note, recorded per the ticket: a path you cannot `lstat` you very probably cannot traverse
 /// either, so in practice the subsequent `create_dir_all` would fail anyway and no escape would occur.
-/// That is a *probable* consequence of one OS's permission model, not an invariant — the two checks are
-/// separate syscalls with separate access requirements, and on Windows in particular the ACL that refuses
-/// an attributes query is not the ACL that refuses a directory create. A guard whose correctness rests on
-/// a different call happening to fail later is not a guard, so it is closed here rather than argued about.)
+/// That is a *probable* consequence of one OS's permission model, not an invariant. `symlink_metadata`
+/// and `create_dir_all` are separate syscalls whose access requirements are independent, so the outcome
+/// of one cannot be inferred from the other — and not every `lstat` failure is a permission failure at
+/// all: a dead network mount, an `EIO`, or a transient resolve failure produces the same fail-open with
+/// no permission model behind it to save us. (The tempting stronger claim — that Windows *breaks* the
+/// coincidence, because the ACL refusing an attributes query is not the one refusing a directory create —
+/// does not hold here: a Windows deny ACE cannot refuse `symlink_metadata` at all, since it opens with a
+/// desired-access mask of `0`, so on Windows the ACL precondition is simply unreachable and there is no
+/// coincidence there to break.) A guard whose correctness rests on a different call happening to fail
+/// later is not a guard, so it is closed here rather than argued about.)
 fn existing_ancestor(path: &Path) -> Result<Option<PathBuf>, String> {
     let mut cur = Some(path);
     while let Some(p) = cur {
@@ -160,6 +166,40 @@ fn classify_ancestor_probe(lstat: Result<(), std::io::ErrorKind>) -> AncestorPro
         Ok(()) => AncestorProbe::Here,
         Err(std::io::ErrorKind::NotFound) => AncestorProbe::KeepClimbing,
         Err(_) => AncestorProbe::Uninspectable,
+    }
+}
+
+/// What the leaf-level `lstat` in [`download_tree`] means for the CPE-1461 leaf-symlink guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeafProbe {
+    /// Nothing there, or a real non-symlink node — safe to create.
+    SafeToWrite,
+    /// A pre-existing symlink. Writing through it could land outside the download root; skip the entry.
+    PreExistingSymlink,
+    /// The `lstat` failed for a reason other than absence, so we cannot say the leaf is not a symlink
+    /// (CPE-1696).
+    Uninspectable,
+}
+
+/// The pure classifier behind [`download_tree`]'s leaf-symlink check — the second half of the same
+/// CPE-1461 guard [`classify_ancestor_probe`] serves, and split out for the same reason, which here is
+/// not merely convenient but **necessary**: this taxonomy is not reachable through an ACL on either CI
+/// platform, so a permission-based test could not cover it anywhere. On Windows a deny ACE cannot refuse
+/// `symlink_metadata` at all (it opens with a desired-access mask of `0` — PR #874's measurement); on
+/// Unix the only lever is `chmod 0o000` on the parent, which equally refuses the `create_dir_all` /
+/// `fs::write` that follow, so the entry never reaches this check. A pure classifier is the only shape
+/// that can be driven red at all.
+///
+/// `lstat` is `Ok(is_symlink)`, or the `ErrorKind` of the failure. The bug (PR #889 review, R2) was that
+/// the pre-CPE-1696 code read `if let Ok(md) = symlink_metadata(..)` with **no `else`**: every failure —
+/// permission-denied, a dead mount, `EIO` — fell straight through to `fs::write`, skipping the guard
+/// entirely. Only a genuine `NotFound` means "no leaf here, safe to create".
+fn classify_leaf_probe(lstat: Result<bool, std::io::ErrorKind>) -> LeafProbe {
+    match lstat {
+        Ok(true) => LeafProbe::PreExistingSymlink,
+        Ok(false) => LeafProbe::SafeToWrite,
+        Err(std::io::ErrorKind::NotFound) => LeafProbe::SafeToWrite,
+        Err(_) => LeafProbe::Uninspectable,
     }
 }
 
@@ -308,17 +348,18 @@ pub fn download_tree(
             // that failed for a reason other than absence skipped the symlink check entirely and fell
             // through to `fs::write` — the same fail-open as `existing_ancestor`'s, in the same guard. Only
             // a genuine `NotFound` means "no leaf there, safe to create".
-            match std::fs::symlink_metadata(&local) {
-                Ok(md) if md.file_type().is_symlink() => {
+            let leaf = std::fs::symlink_metadata(&local).map(|md| md.file_type().is_symlink());
+            match classify_leaf_probe(leaf.as_ref().copied().map_err(|e| e.kind())) {
+                LeafProbe::SafeToWrite => {}
+                LeafProbe::PreExistingSymlink => {
                     eprintln!("transfer: skipped entry whose local path is a pre-existing symlink: {}", entry.path);
                     return;
                 }
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => {
+                LeafProbe::Uninspectable => {
+                    let cause = leaf.err().map(|e| e.to_string()).unwrap_or_default();
                     eprintln!(
                         "transfer: skipped entry whose local path could not be inspected for a \
-                         pre-existing symlink ({e}): {}",
+                         pre-existing symlink ({cause}): {}",
                         entry.path
                     );
                     return;
@@ -814,6 +855,45 @@ mod tests {
                 AncestorProbe::Uninspectable,
                 "{kind:?} must stop the walk, not be mistaken for an empty level — stepping over it is \
                  what leaves a symlink at that level unverified"
+            );
+        }
+    }
+
+    /// **The leaf half of the same CPE-1461 guard (PR #889 review, R2).** The pre-CPE-1696 code was
+    /// `if let Ok(md) = symlink_metadata(&local)` with no `else`, so any non-`NotFound` `lstat` failure
+    /// skipped the symlink check outright and fell through to `fs::write`. The first cut of this fix
+    /// shipped the correction with **no test at all** — reverting it alone left the whole crate green,
+    /// which is precisely the hole this ticket exists to close. See `classify_leaf_probe`'s doc comment
+    /// for why an ACL cannot reach this taxonomy on either CI platform, making the pure classifier the
+    /// only shape that can be driven red.
+    #[test]
+    fn cpe_1696_a_leaf_that_cannot_be_lstatted_is_never_assumed_not_to_be_a_symlink() {
+        assert_eq!(
+            classify_leaf_probe(Ok(true)),
+            LeafProbe::PreExistingSymlink,
+            "a real symlink is still refused — the CPE-1461 behaviour this guard exists for"
+        );
+        assert_eq!(
+            classify_leaf_probe(Ok(false)),
+            LeafProbe::SafeToWrite,
+            "a real non-symlink leaf is still writable"
+        );
+        assert_eq!(
+            classify_leaf_probe(Err(std::io::ErrorKind::NotFound)),
+            LeafProbe::SafeToWrite,
+            "a genuine absence is the ONLY failure that means safe-to-create"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotADirectory,
+        ] {
+            assert_eq!(
+                classify_leaf_probe(Err(kind)),
+                LeafProbe::Uninspectable,
+                "{kind:?} must skip the entry, not be mistaken for \"no leaf here\" — falling through \
+                 writes straight through a symlink that may point outside the download root"
             );
         }
     }

@@ -446,28 +446,35 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// Whether a candidate copy target is genuinely free (CPE-1696) — the pure classifier behind every
+/// Whether a candidate copy target is **provably** free (CPE-1696) — the pure classifier behind every
 /// collision probe in [`unique_target`] and [`resolve_conflict`], split out (mirroring
 /// `cpe_server::dispatch::classify_path_error` and `dest_parent_stat_error` below) so the
 /// `NotFound`-vs-everything-else taxonomy is unit-testable without a real filesystem: permission bits are
 /// platform- and privilege-dependent — inert as root, and on Windows `Path::exists()` is not refused by a
 /// deny ACE at all — so an ACL-based test alone would leave this taxonomy unverified on some machines.
 ///
-/// `stat` is the outcome of [`Path::try_exists`], which returns `io::Result<bool>` instead of folding every
-/// failure into `false` the way [`Path::exists`] does. `Ok(true)` = occupied, `Ok(false)` = free, and an
-/// `Err` is **refused** rather than guessed: these probes exist solely to answer "is it safe to write
-/// here?", and the caller's only two options are to refuse or to overwrite blind.
-fn copy_target_is_free(candidate: &Path, stat: std::io::Result<bool>) -> Result<bool, String> {
+/// `stat` is the outcome of [`Path::try_exists`], which returns `io::Result<bool>` instead of folding
+/// every failure into `false` the way [`Path::exists`] does. `Ok(false)` (or an explicit `NotFound`) is
+/// the **only** answer that means free.
+///
+/// **An unknown counts as occupied, deliberately — it does not abort the operation (PR #889 review).**
+/// The first cut of this fix returned `Err` on an unknown, which was a behaviour regression on Windows:
+/// the probe moved from `Path::exists()` (which no deny ACE can refuse) to `try_exists()` (which one
+/// can), so a destination holding an unreadable `f.txt` went from "auto-rename to `f - Copy.txt` and
+/// succeed" to "fail the whole copy". Refusing is the right instinct at a site whose only options are
+/// *refuse* or *overwrite blind* — but this site has a third option, because [`unique_target`]'s entire
+/// job is to find some free name and it can simply try the next candidate. Treating the unknown as
+/// occupied is exactly as safe (nothing is ever written to a path we could not prove empty) with no
+/// denial of service. Unix was never affected: its mechanism denies the parent directory, which fails
+/// the copy anyway.
+fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
     match stat {
         // `try_exists`'s `Ok` payload is "it is THERE", so free is its negation.
-        Ok(exists) => Ok(!exists),
+        Ok(exists) => !exists,
         // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
-        Err(e) => Err(format!(
-            "Could not confirm whether \"{}\" already exists, so it was not written — refusing rather \
-             than risk overwriting it: {e}",
-            candidate.display()
-        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        // Could not find out. Not provably free ⇒ not free. The caller moves to the next candidate.
+        Err(_) => false,
     }
 }
 
@@ -475,16 +482,17 @@ fn copy_target_is_free(candidate: &Path, stat: std::io::Result<bool>) -> Result<
 /// "report.txt" -> "report - Copy.txt" -> "report - Copy (2).txt".
 /// We never overwrite an existing file — silent overwrite is data loss.
 ///
-/// **Fallible since CPE-1696.** All three collision probes here were `!candidate.exists()`, and
-/// `Path::exists()` collapses every `stat` failure into `false` — so a candidate whose stat was refused
-/// (permission denied along the resolved path, a dead network mount) was returned as a *free* name and the
-/// caller's `fs::copy` / `copy_dir_all` overwrote it. That contradicted this function's own contract two
-/// lines up. An unknown now returns `Err`: the copy is refused with the real cause named, which is
-/// recoverable, instead of destroying bytes, which is not.
-fn unique_target(dir: &Path, file_name: &str) -> Result<PathBuf, String> {
+/// **CPE-1696.** All three collision probes here were `!candidate.exists()`, and `Path::exists()`
+/// collapses every `stat` failure into `false` — so a candidate whose stat was refused (permission denied
+/// along the resolved path, a dead network mount) was returned as a *free* name and the caller's
+/// `fs::copy` / `copy_dir_all` / `fs::rename` wrote over it. That contradicted this function's own
+/// contract two lines up. A candidate is now only free when [`copy_target_is_free`] can prove it; an
+/// unknown is skipped like any other occupied name, so the caller still gets a usable target and the
+/// unreadable path is left untouched.
+fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
     let candidate = dir.join(file_name);
-    if copy_target_is_free(&candidate, candidate.try_exists())? {
-        return Ok(candidate);
+    if copy_target_is_free(candidate.try_exists()) {
+        return candidate;
     }
 
     let path = Path::new(file_name);
@@ -503,17 +511,17 @@ fn unique_target(dir: &Path, file_name: &str) -> Result<PathBuf, String> {
     };
 
     let first = build(" - Copy");
-    if copy_target_is_free(&first, first.try_exists())? {
-        return Ok(first);
+    if copy_target_is_free(first.try_exists()) {
+        return first;
     }
     for n in 2..10_000 {
         let p = build(&format!(" - Copy ({n})"));
-        if copy_target_is_free(&p, p.try_exists())? {
-            return Ok(p);
+        if copy_target_is_free(p.try_exists()) {
+            return p;
         }
     }
     // Pathological fallback; effectively unreachable.
-    Ok(dir.join(format!("{file_name}.{}", std::process::id())))
+    dir.join(format!("{file_name}.{}", std::process::id()))
 }
 
 /// Recursively copy a directory tree.
@@ -2347,7 +2355,7 @@ fn do_copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
     if src.is_dir() && is_self_or_descendant(src, dest_dir) {
         return Err("Cannot copy a folder into itself".to_string());
     }
-    let target = unique_target(dest_dir, file_name)?;
+    let target = unique_target(dest_dir, file_name);
     let result = if src.is_dir() {
         copy_dir_all(src, &target)
     } else {
@@ -2370,7 +2378,7 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
     if src.is_dir() && is_self_or_descendant(src, dest_dir) {
         return Err("Cannot move a folder into itself".to_string());
     }
-    let target = unique_target(dest_dir, file_name)?;
+    let target = unique_target(dest_dir, file_name);
     if fs::rename(src, &target).is_ok() {
         let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
         let _ = cpe_server::snapshot_schedule::reschedule(
@@ -2750,8 +2758,10 @@ fn resolve_conflict(
 ) -> Result<Option<PathBuf>, String> {
     // CPE-1696: this was `if !base_target.exists()`, the same collapse `unique_target` carried — a stat
     // failure returned the target as free and every policy arm below was skipped, so the caller wrote
-    // straight onto a path it could not prove was empty. `copy_target_is_free` refuses an unknown.
-    if copy_target_is_free(base_target, base_target.try_exists())? {
+    // straight onto a path it could not prove was empty. An unknown now counts as occupied, which routes
+    // it into the policy arms rather than past them: `Skip` skips it, `Keepboth` picks a different name
+    // via `unique_target`, and `Overwrite` is the one case the user explicitly asked for.
+    if copy_target_is_free(base_target.try_exists()) {
         return Ok(Some(base_target.to_path_buf()));
     }
     match policy {
@@ -2759,7 +2769,7 @@ fn resolve_conflict(
         ConflictPolicy::Keepboth => {
             let dir = base_target.parent().unwrap_or_else(|| Path::new("."));
             let name = base_target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-            Ok(Some(unique_target(dir, name)?))
+            Ok(Some(unique_target(dir, name)))
         }
         ConflictPolicy::Overwrite => {
             // CONTAINMENT (PR #855 audit): overwriting the destination directory itself is never a
@@ -15007,13 +15017,13 @@ overlay / overlay rw,relatime 0 0
     #[test]
     fn unique_target_appends_copy_suffixes_instead_of_overwriting() {
         let d = scratch("unique");
-        assert_eq!(unique_target(&d, "x.txt").unwrap(), d.join("x.txt"));
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x.txt"));
 
         fs::write(d.join("x.txt"), b"1").unwrap();
-        assert_eq!(unique_target(&d, "x.txt").unwrap(), d.join("x - Copy.txt"));
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x - Copy.txt"));
 
         fs::write(d.join("x - Copy.txt"), b"2").unwrap();
-        assert_eq!(unique_target(&d, "x.txt").unwrap(), d.join("x - Copy (2).txt"));
+        assert_eq!(unique_target(&d, "x.txt"), d.join("x - Copy (2).txt"));
 
         let _ = fs::remove_dir_all(&d);
     }
@@ -15022,7 +15032,7 @@ overlay / overlay rw,relatime 0 0
     fn unique_target_handles_extensionless_names() {
         let d = scratch("unique_noext");
         fs::write(d.join("README"), b"1").unwrap();
-        assert_eq!(unique_target(&d, "README").unwrap(), d.join("README - Copy"));
+        assert_eq!(unique_target(&d, "README"), d.join("README - Copy"));
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -15031,19 +15041,17 @@ overlay / overlay rw,relatime 0 0
     // All three of `unique_target`'s collision probes, plus `resolve_conflict`'s own, were
     // `!candidate.exists()`. `Path::exists()` folds EVERY stat failure into `false`, i.e. into "this name
     // is free" — so a candidate the process could not stat was handed back as a copy target and the
-    // caller's `fs::copy` / `copy_dir_all` wrote over it. That directly contradicted the function's own
-    // doc comment: "We never overwrite an existing file — silent overwrite is data loss."
+    // caller's `fs::copy` / `copy_dir_all` / `fs::rename` wrote over it. That directly contradicted the
+    // function's own doc comment: "We never overwrite an existing file — silent overwrite is data loss."
 
     /// The deterministic half (runs on every OS and account, no privilege needed) — same role as
     /// `cpe_server::dispatch::classify_path_error`'s own unit tests.
     #[test]
     fn cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so() {
-        let p = Path::new("/tmp/cpe1696/candidate.txt");
-        assert_eq!(copy_target_is_free(p, Ok(false)), Ok(true), "an absent name is free");
-        assert_eq!(copy_target_is_free(p, Ok(true)), Ok(false), "an occupied name is not free");
-        assert_eq!(
-            copy_target_is_free(p, Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
-            Ok(true),
+        assert!(copy_target_is_free(Ok(false)), "an absent name is free");
+        assert!(!copy_target_is_free(Ok(true)), "an occupied name is not free");
+        assert!(
+            copy_target_is_free(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
             "an explicit NotFound is a genuine absence"
         );
         for kind in [
@@ -15051,35 +15059,40 @@ overlay / overlay rw,relatime 0 0
             std::io::ErrorKind::Other,
             std::io::ErrorKind::TimedOut,
         ] {
-            let err = copy_target_is_free(p, Err(std::io::Error::new(kind, "Access is denied.")))
-                .expect_err("a stat failure must never be reported as a free name — that is the overwrite");
             assert!(
-                err.contains("Could not confirm whether") && err.contains("Access is denied."),
-                "{kind:?} must refuse and name the OS's own cause: {err}"
+                !copy_target_is_free(Err(std::io::Error::new(kind, "Access is denied."))),
+                "{kind:?} must never be reported as a free name — that is the overwrite"
             );
         }
     }
 
-    /// The end-to-end half, driving the real `do_copy_into` entry point (the single source of truth behind
-    /// the bulk copy command and the watch executor) with a **real, denied** candidate path.
+    /// **The strongest test in this ticket: it stages REAL BYTE LOSS, not a wrong error message.**
     ///
-    /// Runs for real on **both** platforms: `fsutil::deny_stat_of`'s mechanism is inlined here (src-tauri
-    /// doesn't depend on `cpe_server::fsutil`'s crate-private test helpers), and this site probes with
-    /// `Path::try_exists`, which a Windows deny ACE on the target DOES refuse — unlike `fs::metadata`
-    /// (PR #874's measurement). On Unix the deny is `chmod 0o000` on the destination directory, which is
-    /// not the source's directory, so the source stays readable.
+    /// Drives the real `do_move_into` entry point at a destination holding a file whose `try_exists()`
+    /// the OS refuses. Pre-CPE-1696, `unique_target` handed that refused candidate back as a *free* name
+    /// and `do_move_into`'s `fs::rename` replaced its bytes. Post-fix it is treated as occupied, so the
+    /// move lands on `victim - Copy.txt` and the original survives byte-for-byte.
+    ///
+    /// **Why `do_move_into` (rename) and not `do_copy_into` (copy).** Measured for the PR #889 review
+    /// and written up on `cpe_server::fsutil::deny_stat_of`: on Windows a deny ACE that refuses
+    /// `try_exists` also refuses `fs::write`/`fs::copy` (both request SYNCHRONIZE), so a *copy* test can
+    /// only ever assert on a message — the ACL protects the victim, not the guard. `fs::rename` is the
+    /// exception: replacing a file needs `DELETE` on the target **or** `FILE_DELETE_CHILD` on its parent,
+    /// and a normal scratch parent grants the latter, so the rename destroys the bytes right through the
+    /// deny. That makes a byte-level assertion possible here and nowhere else in this ticket.
     #[test]
-    fn cpe_1696_a_copy_whose_target_cannot_be_stat_d_is_refused_and_the_source_survives() {
-        let d = scratch("cpe1696_copy_denied");
+    fn cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat() {
+        use std::io::Write;
+        let d = scratch("cpe1696_move_denied");
         let src_dir = d.join("src");
         let dest_dir = d.join("dest");
         fs::create_dir_all(&src_dir).unwrap();
         fs::create_dir_all(&dest_dir).unwrap();
-        let src = src_dir.join("f.txt");
-        fs::write(&src, b"SOURCE").unwrap();
+        let src = src_dir.join("victim.txt");
+        fs::write(&src, b"MOVED SOURCE").unwrap();
         // The colliding candidate `unique_target` probes first, holding bytes that must survive.
-        let candidate = dest_dir.join("f.txt");
-        fs::write(&candidate, b"VICTIM ORIGINAL").unwrap();
+        let victim = dest_dir.join("victim.txt");
+        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
 
         // Armed before the deny so cleanup runs on every exit path, panic or not (Evidence Rules: a red
         // run must never leave debris). Mirrors cpe_server's `Restore` pattern.
@@ -15088,7 +15101,7 @@ overlay / overlay rw,relatime 0 0
             fn drop(&mut self) {
                 #[cfg(windows)]
                 {
-                    let _ = self.1; // Windows denies `candidate` (self.0) itself; `dest_dir` is untouched.
+                    let _ = self.1; // Windows denies `victim` (self.0) itself; `dest_dir` is untouched.
                     if let Ok(user) = std::env::var("USERNAME") {
                         let _ = std::process::Command::new("icacls")
                             .arg(self.0)
@@ -15100,21 +15113,23 @@ overlay / overlay rw,relatime 0 0
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = self.0; // Unix denies `dest_dir` (self.1); `candidate` itself is untouched.
+                    let _ = self.0; // Unix denies `dest_dir` (self.1); `victim` itself is untouched.
                     let _ = fs::set_permissions(self.1, fs::Permissions::from_mode(0o700));
                 }
                 let _ = fs::remove_dir_all(self.2);
             }
         }
-        let _restore = Restore(&candidate, &dest_dir, &d);
+        let _restore = Restore(&victim, &dest_dir, &d);
 
+        // Deny only READ on the victim: enough to refuse `try_exists`, but it deliberately leaves the
+        // parent's FILE_DELETE_CHILD intact so a buggy rename really can replace it.
         #[cfg(windows)]
         if let Ok(user) = std::env::var("USERNAME") {
             if !user.is_empty() {
                 let _ = std::process::Command::new("icacls")
-                    .arg(&candidate)
+                    .arg(&victim)
                     .arg("/deny")
-                    .arg(format!("{user}:(F)"))
+                    .arg(format!("{user}:(R)"))
                     .output();
             }
         }
@@ -15124,34 +15139,56 @@ overlay / overlay rw,relatime 0 0
             let _ = fs::set_permissions(&dest_dir, fs::Permissions::from_mode(0o000));
         }
 
-        if candidate.try_exists().is_ok() {
-            use std::io::Write;
+        if victim.try_exists().is_ok() {
             let _ = writeln!(
                 std::io::stderr(),
-                "[CPE-1696] SKIPPED the do_copy_into denied-candidate leg: could not deny stat of {} on \
-                 this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). NOTHING in this \
-                 test covered CPE-1696 for unique_target on this run; see \
+                "[CPE-1696] SKIPPED the do_move_into denied-candidate leg: could not deny stat of {} on \
+                 this machine (running elevated/root, or a filesystem that ignores ACLs/mode bits). \
+                 NOTHING in this test covered CPE-1696 for unique_target on this run; see \
                  cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so for the taxonomy, which does \
                  run here.",
-                candidate.display()
+                victim.display()
             );
             return;
         }
 
-        let err = do_copy_into(&src, &dest_dir)
-            .expect_err("a candidate target we could not stat must refuse, not be treated as a free name");
-        // **Positively pins the arm that fired, and this assertion is the whole test.** Measured for
-        // CPE-1696 (see `cpe_server::fsutil::deny_stat_of`'s doc comment): every ACL that refuses
-        // `try_exists` also refuses the subsequent write, on both platforms — so with the guard
-        // neutralised `do_copy_into` still returns `Err`, just "Access is denied. (os error 5)" from
-        // `fs::copy` instead. A bare `expect_err` would therefore pass vacuously against the bug.
-        assert!(
-            err.contains("Could not confirm whether"),
-            "the refusal must come from the collision probe, not from a later incidental copy failure: {err}"
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+        let landed = do_move_into(&ctx, &src, &dest_dir);
+
+        // Restore read access so the victim's bytes can be inspected — the assertion below is the point
+        // of the test and must not be defeated by the very ACL that staged it.
+        #[cfg(windows)]
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls")
+                .arg(&victim)
+                .arg("/remove:d")
+                .arg(&user)
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dest_dir, fs::Permissions::from_mode(0o700));
+        }
+
+        // **The byte-level assertion.** Pre-fix this read back "MOVED SOURCE".
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "a destination file whose stat we were refused must NEVER be renamed over — the \
+             pre-CPE-1696 `!candidate.exists()` probe read the refusal as \"this name is free\" and \
+             `fs::rename` replaced its bytes, which is exactly the silent overwrite `unique_target`'s own \
+             doc comment forbids"
         );
-        // The victim's bytes are of course still here — but on this platform that is the ACL protecting
-        // them, not the guard, so it is recorded as context rather than claimed as the guard's proof.
-        assert_eq!(fs::read(&candidate).unwrap_or_else(|_| b"VICTIM ORIGINAL".to_vec()), b"VICTIM ORIGINAL");
+        // And the move must still have gone somewhere sensible rather than failing outright (the PR #889
+        // review's point: an unknown is occupied, not fatal).
+        let landed = landed.expect("the move must still succeed onto a non-colliding name");
+        assert_eq!(
+            landed,
+            dest_dir.join("victim - Copy.txt"),
+            "it must auto-rename past the unprovable candidate, not abort the operation"
+        );
+        assert_eq!(fs::read(&landed).unwrap(), b"MOVED SOURCE".to_vec());
     }
 
     /// The honest cases at the same real entry point, on every OS: a free name copies, and an occupied one

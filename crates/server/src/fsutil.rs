@@ -245,20 +245,44 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///   from `metadata()` there. `target` itself keeps its own permission bits untouched (irrelevant on
 ///   Unix per CPE-1687's own finding: `stat()` needs no permission on the file itself).
 ///
-/// **What this helper can and cannot prove, measured for CPE-1696 (non-elevated, local NTFS).** The
-/// minimal Windows deny that makes `try_exists()` fail is `S` (SYNCHRONIZE) — `icacls t /deny u:(S)`,
-/// `(R)`, `(RX)` and `(F)` all work; `(RA)`, `(REA)`, `(RD)` and `(RC)` do **not** (they leave
-/// `try_exists()` at `Ok(true)`). But Rust's `fs::write`/`fs::copy` request SYNCHRONIZE in their own
-/// `CreateFileW` access mask too, so **every** deny that refuses `try_exists` also refuses the subsequent
-/// write. Consequence for tests of an overwrite-refusal guard: on Windows this helper can prove the guard
-/// *refuses*, and can prove the refusal came from the guard rather than from an incidental later failure
-/// (assert on the guard's own message — a bare `expect_err` passes vacuously, because the neutralised
-/// code still errors, just with "Access is denied. (os error 5)" from the write). It cannot construct
-/// observable byte loss, because the ACL that hides the file also protects it. The unguarded overwrite is
-/// still real for stat failures the ACL model can't stage — a dead network mount, `EIO`, a transient
-/// resolve failure — which is exactly why every CPE-1696 site also has a pure classifier whose unit test
-/// can inject any `io::ErrorKind`. Unix is the same story for a different reason: the mechanism there is
-/// `chmod 0o000` on the parent, which refuses the write as well.
+/// **What this helper can and cannot prove — measured for CPE-1696, corrected and extended in the PR
+/// #889 review (non-elevated, local NTFS).** The minimal Windows deny that makes `try_exists()` fail is
+/// `S` (SYNCHRONIZE); `(R)`, `(RX)`, `(W)` and `(F)` all work too, while `(RA)`, `(REA)`, `(RD)` and
+/// `(RC)` do **not** (they leave `try_exists()` at `Ok(true)`). No deny — not even `(F)` — refuses
+/// `Path::exists()` or `fs::metadata`. What the deny does to the *write* that follows depends entirely on
+/// which write:
+///
+/// | deny ACE on the target | `try_exists()` | `fs::write` / `fs::copy` | `fs::rename` **onto** it |
+/// |---|---|---|---|
+/// | `S`, `R`, `RX`, `W`, `F` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **`Ok` — bytes replaced** |
+/// | any of the above, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | `Err(PermissionDenied)` |
+///
+/// `fs::write`/`fs::copy` request SYNCHRONIZE in their own `CreateFileW` access mask, so every deny that
+/// refuses `try_exists` also refuses them. **`fs::rename` is the exception, and it is the important one:**
+/// replacing an existing file needs `DELETE` on the target *or* `FILE_DELETE_CHILD` on its parent
+/// directory, and a normal scratch parent grants the latter — so the rename destroys the bytes straight
+/// through the deny (measured: `"ORIGINAL"` → `"NEWDATA"`). Note this is a property of the **parent**, not
+/// of the ACE: `(F)` on the target does *not* protect it, and only additionally denying `(DC)` on the
+/// parent does. An earlier revision of this comment claimed "every deny that refuses `try_exists` also
+/// refuses the subsequent write" and concluded that observable byte loss could never be constructed. That
+/// is true for `write`/`copy` and **false for `rename`**.
+///
+/// Consequences for testing a guard in this class:
+/// - At a **`write`/`copy`-destructive** site, this helper proves the guard *refuses* but cannot stage
+///   byte loss — the ACL that hides the file also protects it. Assert on the guard's own message: a bare
+///   `expect_err` passes vacuously, because neutralised code still errors, just with "Access is denied.
+///   (os error 5)" from the write.
+/// - At a **`rename`-destructive** site (`unique_target` → `do_move_into`, `move_exact`, and the twelve
+///   sites CPE-1705 covers), a byte-level assertion **is** available and is strictly stronger — see
+///   `cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat` in `src-tauri`. Prefer it. Do not deny
+///   `(DC)` on the parent when staging one, or the rename fails for the wrong reason and the test proves
+///   nothing.
+///
+/// Either way the unguarded overwrite is also real for stat failures the ACL model cannot stage at all — a
+/// dead network mount, `EIO`, a transient resolve failure — which is why every CPE-1696 site additionally
+/// has a pure classifier whose unit test can inject any `io::ErrorKind`. Unix constrains this differently:
+/// its mechanism denies the *parent* (`chmod 0o000`), which refuses the rename along with everything else,
+/// so the byte-loss construction above is Windows-only.
 ///
 /// `target` is the exact path the code under test calls `.try_exists()` on. Returns whether the deny
 /// demonstrably took effect, checked by calling `target.try_exists()` and requiring `Err`: `false` means
