@@ -3,11 +3,11 @@ id: CPE-1699
 title: The new CI crate-coverage guard checks crates/* but not sidecar/*, so a new sidecar can still go unwired
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
