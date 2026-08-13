@@ -87,19 +87,81 @@ pub fn plan_from_events(events: &[WatchEvent]) -> Vec<IndexMutation> {
 /// until a manual rebuild. A lexicographic sort gives this ordering for free: an ancestor path is a prefix
 /// of its descendants and so always sorts first (on both `/` and `\` separators).
 ///
-/// `stat(path)` reports the path's current state: `Some(is_dir)` if it exists (→ `Created`), `None` if it's
-/// gone (→ `Removed`). Removes are order-independent (`apply_remove` tombstones the whole subtree), so they
-/// ride along in the same sorted pass.
-pub fn resolve_touched(touched: &[String], stat: impl Fn(&str) -> Option<bool>) -> Vec<WatchEvent> {
+/// `stat(path)` reports the path's current state as a [`TouchedState`]: `Exists` (→ `Created`), `Gone`
+/// (→ `Removed`), or `Unknown` (→ **no event at all**, see below). Removes are order-independent
+/// (`apply_remove` tombstones the whole subtree), so they ride along in the same sorted pass.
+///
+/// **The `Unknown` case matters (CPE-1696).** `stat` used to be `impl Fn(&str) -> Option<bool>` and the
+/// app adapter fed it `path.exists().then(|| path.is_dir())`, which folds *every* `stat` failure into
+/// `None` — so a transient permission-denied / dead-mount / I/O-error stat during a debounce window read
+/// as "the file is gone" and produced an [`IndexMutation::Remove`], **tombstoning a file that still
+/// exists**. It then silently drops out of every search result until something re-indexes the volume: an
+/// invisible failure, discovered only by a search that comes back short. An `Unknown` therefore yields no
+/// event: leaving the existing index entry exactly as it was is always recoverable (the next real event
+/// for that path re-resolves it), whereas tombstoning on a guess is not.
+pub fn resolve_touched(touched: &[String], stat: impl Fn(&str) -> TouchedState) -> Vec<WatchEvent> {
     let mut paths: Vec<&str> = touched.iter().map(String::as_str).collect();
     paths.sort_unstable();
     paths
         .into_iter()
-        .map(|p| match stat(p) {
-            Some(is_dir) => WatchEvent::Created { path: p.to_string(), is_dir },
-            None => WatchEvent::Removed { path: p.to_string() },
+        .filter_map(|p| match stat(p) {
+            TouchedState::Exists { is_dir } => Some(WatchEvent::Created { path: p.to_string(), is_dir }),
+            TouchedState::Gone => Some(WatchEvent::Removed { path: p.to_string() }),
+            // We do not know. Emit nothing rather than a Remove that would tombstone a live file.
+            TouchedState::Unknown => None,
         })
         .collect()
+}
+
+/// What a flush-time re-stat found at a touched path (CPE-1696) — three states, not two, because
+/// "I could not find out" is not the same answer as "it is gone" and only one of them may tombstone an
+/// index entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TouchedState {
+    /// The path is there. `is_dir` distinguishes a directory from a file.
+    Exists { is_dir: bool },
+    /// The path genuinely does not exist — a real `NotFound`.
+    Gone,
+    /// The `stat` failed for a reason other than absence (permission denied along the resolved path, a
+    /// dead network mount, an I/O error). [`resolve_touched`] emits no event for this.
+    Unknown,
+}
+
+/// The pure classifier behind [`stat_touched`], split out (mirroring `crate::dispatch::classify_path_error`
+/// and `crate::disk_usage::dir_size_stat_error`) so the `NotFound`-vs-everything-else taxonomy is
+/// unit-testable without touching a real filesystem: permission bits are platform- and
+/// privilege-dependent — inert as root, and on Windows `Path::exists()` is not refused by a deny ACE at
+/// all — so an ACL-based test alone would leave this taxonomy unverified on some machines.
+///
+/// `exists` is the outcome of [`Path::try_exists`], which returns `io::Result<bool>` rather than folding
+/// every failure into `false`; `metadata` is consulted only once `exists` has said the path is there, to
+/// learn whether it is a directory.
+pub fn classify_touched(
+    exists: std::io::Result<bool>,
+    metadata: impl FnOnce() -> std::io::Result<std::fs::Metadata>,
+) -> TouchedState {
+    match exists {
+        Ok(false) => TouchedState::Gone,
+        Ok(true) => match metadata() {
+            Ok(m) => TouchedState::Exists { is_dir: m.is_dir() },
+            // Vanished between the two calls — a genuine absence, and the same answer the old
+            // `exists()`-then-`is_dir()` pair would have produced for it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => TouchedState::Gone,
+            Err(_) => TouchedState::Unknown,
+        },
+        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TouchedState::Gone,
+        Err(_) => TouchedState::Unknown,
+    }
+}
+
+/// Re-stat one touched path for [`resolve_touched`]. The app adapter's flush uses this instead of rolling
+/// its own `path.exists().then(|| path.is_dir())` closure, so the classification lives here — in the
+/// Tauri-free crate, next to the invariant it protects and where it is testable — rather than in
+/// `src-tauri` (CPE-1696).
+pub fn stat_touched(path: &str) -> TouchedState {
+    let p = std::path::Path::new(path);
+    classify_touched(p.try_exists(), || std::fs::metadata(p))
 }
 
 #[cfg(test)]
@@ -348,9 +410,9 @@ mod tests {
             "root/gone.txt".to_string(),
         ];
         let events = resolve_touched(&touched, |p| match p {
-            "root/gone.txt" => None,      // removed
-            "root/dir" => Some(true),     // a directory
-            _ => Some(false),             // a file
+            "root/gone.txt" => TouchedState::Gone,
+            "root/dir" => TouchedState::Exists { is_dir: true },
+            _ => TouchedState::Exists { is_dir: false },
         });
         let created: Vec<&str> = events
             .iter()
@@ -393,10 +455,7 @@ mod tests {
 
         // Feed the re-stat set with the CHILD before the PARENT (the order the old HashSet could hand us).
         let touched = vec![child.clone(), newdir.clone()];
-        let events = resolve_touched(&touched, |p| {
-            let path = Path::new(p);
-            path.exists().then(|| path.is_dir())
-        });
+        let events = resolve_touched(&touched, stat_touched);
         let mutations = plan_from_events(&events);
         assert!(svc.apply_mutations(&idxdir, 8, &mutations).unwrap());
 
@@ -406,5 +465,182 @@ mod tests {
         );
         let _ = fs::remove_dir_all(&tree);
         let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    // ---- CPE-1696: a transient stat failure must not tombstone a live file -------------------------
+    //
+    // The flush-time re-stat closure was `path.exists().then(|| path.is_dir())`, whose `None` means
+    // `Removed` — and `Path::exists()` folds EVERY stat failure into `false`. So one permission-denied /
+    // dead-mount / EIO blip during a debounce window emitted an `IndexMutation::Remove` for a file that
+    // was still sitting right there, and it silently vanished from every search result until the volume
+    // was re-indexed. This is the ticket's "the one with teeth": invisible to the user until a search
+    // comes back short.
+
+    /// The deterministic half — runs on every OS and account, no privilege needed. Pins the taxonomy the
+    /// wiring below depends on: only a genuine absence is `Gone`, every other stat failure is `Unknown`.
+    #[test]
+    fn cpe_1696_only_a_genuine_absence_reads_as_gone() {
+        let never_called = || panic!("metadata must not be consulted when try_exists already answered");
+        assert_eq!(classify_touched(Ok(false), never_called), TouchedState::Gone);
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert_eq!(
+                classify_touched(Err(std::io::Error::new(kind, "Access is denied.")), never_called),
+                TouchedState::Unknown,
+                "{kind:?} must never read as gone — that is what tombstones a live file"
+            );
+            assert_eq!(
+                classify_touched(Ok(true), || Err(std::io::Error::new(kind, "Access is denied."))),
+                TouchedState::Unknown,
+                "{kind:?} on the type probe must not read as gone either"
+            );
+        }
+        assert_eq!(
+            classify_touched(Err(std::io::Error::from(std::io::ErrorKind::NotFound)), never_called),
+            TouchedState::Gone,
+            "an explicit NotFound is a genuine absence"
+        );
+        assert_eq!(
+            classify_touched(Ok(true), || Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            TouchedState::Gone,
+            "a vanish between the two calls is a genuine absence"
+        );
+    }
+
+    /// `Unknown` must produce **no event at all**, where `Gone` produces a `Removed`. The `Gone` half is
+    /// the control: without it, a `resolve_touched` that emitted nothing for *everything* would pass.
+    #[test]
+    fn cpe_1696_an_unknown_stat_emits_no_event_while_a_real_absence_still_removes() {
+        let touched = vec!["root/live.rs".to_string()];
+        assert!(
+            resolve_touched(&touched, |_| TouchedState::Unknown).is_empty(),
+            "an unresolvable stat must emit no event — never a Remove"
+        );
+        assert_eq!(
+            resolve_touched(&touched, |_| TouchedState::Gone),
+            vec![WatchEvent::Removed { path: "root/live.rs".into() }],
+            "control: a genuine absence must STILL produce the Removed it always did"
+        );
+    }
+
+    /// **The acceptance criterion that matters most**, driven end-to-end through the real
+    /// `IndexService::apply_mutations` on a real on-disk index: a transient stat failure during a debounce
+    /// window leaves the index entry intact and the file still searchable, whereas a genuine absence
+    /// really does remove it. Both halves in one test so the negative can't pass vacuously — if
+    /// `resolve_touched` dropped every event, the `Gone` half would fail.
+    #[test]
+    fn cpe_1696_a_transient_stat_failure_leaves_the_index_entry_searchable() {
+        let tree = scratch("cpe1696-tree");
+        sample_tree(&tree);
+        let idxdir = scratch("cpe1696-idx");
+        let svc = IndexService::new();
+        svc.build_root(&tree.to_string_lossy(), 9, &idxdir, &AtomicBool::new(false), |_| {})
+            .unwrap();
+        let live = abs(&tree, &["src", "report.rs"]);
+        assert!(
+            names(&svc.search_all(&idxdir, "report.rs", 10)).contains(&"report.rs".to_string()),
+            "sanity: the file is indexed to begin with"
+        );
+
+        // A debounce window whose re-stat of a file that is STILL ON DISK fails for a reason other than
+        // absence (permission denied, dead mount, EIO). Pre-CPE-1696 this arrived as `None` → `Removed`.
+        let touched = vec![live.clone()];
+        let events = resolve_touched(&touched, |_| TouchedState::Unknown);
+        let mutations = plan_from_events(&events);
+        assert!(mutations.is_empty(), "no mutation may be planned from a stat we could not perform");
+        // `apply_mutations` returns false for an empty batch; the point is that nothing was applied.
+        let _ = svc.apply_mutations(&idxdir, 9, &mutations);
+        assert!(
+            names(&svc.search_all(&idxdir, "report.rs", 10)).contains(&"report.rs".to_string()),
+            "a file that still exists must still be searchable after a transient stat failure — \
+             tombstoning it here is invisible until a search comes back short"
+        );
+        assert!(
+            std::path::Path::new(&live).exists(),
+            "sanity: the file really was still on disk throughout"
+        );
+
+        // Control: a GENUINE absence must still tombstone, or the fix would just be a disabled watcher.
+        fs::remove_file(&live).unwrap();
+        let events = resolve_touched(&touched, stat_touched);
+        let mutations = plan_from_events(&events);
+        assert_eq!(
+            mutations,
+            vec![IndexMutation::Remove { path: live.clone() }],
+            "a genuinely deleted file must still plan a Remove"
+        );
+        assert!(svc.apply_mutations(&idxdir, 9, &mutations).unwrap());
+        assert!(
+            !names(&svc.search_all(&idxdir, "report.rs", 10)).contains(&"report.rs".to_string()),
+            "and it must actually leave the index"
+        );
+
+        let _ = fs::remove_dir_all(&tree);
+        let _ = fs::remove_dir_all(&idxdir);
+    }
+
+    /// The real-syscall leg for `stat_touched` itself: a path whose stat the OS genuinely refuses must
+    /// classify as `Unknown`, not `Gone`. Uses `fsutil::deny_stat_of`, whose mechanism is
+    /// platform-asymmetric on purpose (Windows: a deny ACE directly on the target, which refuses
+    /// `try_exists`'s attributes query; Unix: `chmod 0o000` on the parent, which is what POSIX `stat()`
+    /// needs `+x` for) — it works for real on **both**, which is exactly why `stat_touched` probes with
+    /// `try_exists` rather than `fs::metadata` (a deny ACE does not refuse `fs::metadata` on Windows at
+    /// all — PR #874's measurement).
+    #[test]
+    fn cpe_1696_stat_touched_calls_a_denied_path_unknown_not_gone() {
+        use std::io::Write;
+        let d = scratch("cpe1696-denied");
+        let holder = d.join("holder");
+        fs::create_dir_all(&holder).unwrap();
+        let live = holder.join("still_here.rs");
+        fs::write(&live, b"x").unwrap();
+
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                let _ = fs::remove_dir_all(self.2);
+            }
+        }
+        let _restore = Restore(&live, &holder, &d);
+
+        if !crate::fsutil::deny_stat_of(&live) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1696] SKIPPED stat_touched denied-path leg: could not deny stat of {} on this \
+                 machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The index-tombstoning \
+                 guard is NOT covered against a real syscall on this run — only against the synthesised \
+                 taxonomy in cpe_1696_only_a_genuine_absence_reads_as_gone.",
+                live.display()
+            );
+            return;
+        }
+
+        assert_eq!(
+            stat_touched(&live.to_string_lossy()),
+            TouchedState::Unknown,
+            "a file that is demonstrably still on disk, whose stat the OS refused, must not be reported \
+             as gone — reporting it gone is what tombstones it out of the search index"
+        );
+    }
+
+    /// The honest case for `stat_touched` against real syscalls, on every OS: a real file, a real
+    /// directory, and a genuinely missing path each classify correctly. Guards against a `stat_touched`
+    /// that just answers `Unknown` to everything (which would make the test above pass while quietly
+    /// switching the watcher off).
+    #[test]
+    fn cpe_1696_stat_touched_still_reports_real_files_dirs_and_absences() {
+        let d = scratch("cpe1696-honest");
+        let f = d.join("a.rs");
+        fs::write(&f, b"x").unwrap();
+        let sub = d.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        assert_eq!(stat_touched(&f.to_string_lossy()), TouchedState::Exists { is_dir: false });
+        assert_eq!(stat_touched(&sub.to_string_lossy()), TouchedState::Exists { is_dir: true });
+        assert_eq!(stat_touched(&d.join("nope.rs").to_string_lossy()), TouchedState::Gone);
+        let _ = fs::remove_dir_all(&d);
     }
 }

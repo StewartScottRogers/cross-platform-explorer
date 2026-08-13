@@ -446,15 +446,80 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// Whether a candidate copy target is **provably** free (CPE-1696) — the pure classifier behind every
+/// collision probe in [`unique_target`] and [`resolve_conflict`], split out (mirroring
+/// `cpe_server::dispatch::classify_path_error` and `dest_parent_stat_error` below) so the
+/// `NotFound`-vs-everything-else taxonomy is unit-testable without a real filesystem: permission bits are
+/// platform- and privilege-dependent — inert as root, and on Windows `Path::exists()` is not refused by a
+/// deny ACE at all — so an ACL-based test alone would leave this taxonomy unverified on some machines.
+///
+/// `stat` is the outcome of [`Path::try_exists`], which returns `io::Result<bool>` instead of folding
+/// every failure into `false` the way [`Path::exists`] does. `Ok(false)` (or an explicit `NotFound`) is
+/// the **only** answer that means free.
+///
+/// **An unknown counts as occupied, deliberately — it does not abort the operation (PR #889 review).**
+/// The first cut of this fix returned `Err` on an unknown, which was a behaviour regression on Windows:
+/// the probe moved from `Path::exists()` (which no deny ACE can refuse) to `try_exists()` (which one
+/// can), so a destination holding an unreadable `f.txt` went from "auto-rename to `f - Copy.txt` and
+/// succeed" to "fail the whole copy". Refusing is the right instinct at a site whose only options are
+/// *refuse* or *overwrite blind* — but this site has a third option, because [`unique_target`]'s entire
+/// job is to find some free name and it can simply try the next candidate. Treating the unknown as
+/// occupied is exactly as safe (nothing is ever written to a path we could not prove empty) with no
+/// denial of service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetSlot {
+    /// Provably nothing there — safe to write.
+    Free,
+    /// Provably something there.
+    Occupied,
+    /// The stat failed for a reason other than absence. Not provably free ⇒ not free, but distinguished
+    /// from `Occupied` so [`unique_target`] can tell "this name is taken" from "I cannot see this
+    /// directory at all" and stop grinding (see `MAX_CONSECUTIVE_UNKNOWN_SLOTS`).
+    Unknown,
+}
+
+/// Classify one candidate slot from its [`Path::try_exists`] outcome.
+fn classify_copy_target(stat: std::io::Result<bool>) -> TargetSlot {
+    match stat {
+        // `try_exists`'s `Ok` payload is "it is THERE".
+        Ok(true) => TargetSlot::Occupied,
+        Ok(false) => TargetSlot::Free,
+        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => TargetSlot::Free,
+        Err(_) => TargetSlot::Unknown,
+    }
+}
+
+/// Whether a candidate is *provably* free. Thin wrapper over [`classify_copy_target`] for the single-shot
+/// probe in [`resolve_conflict`], which has no candidate sequence to advance through.
+fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
+    classify_copy_target(stat) == TargetSlot::Free
+}
+
+/// How many candidate slots in a row may come back [`TargetSlot::Unknown`] before [`unique_target`]
+/// stops probing (CPE-1696).
+///
+/// Treating an unknown as occupied is what keeps a single unreadable file from aborting a copy — but if
+/// the *directory* is what cannot be read (a dead network mount, a revoked share), then **every** one of
+/// the 10,000 candidates comes back `Unknown` and the naive loop performs 10,000 stats before falling
+/// through. On the very mount where that happens each stat can block for seconds, so the fix for a hard
+/// failure would have become a hang. A run this long cannot be a real name collision — it means the
+/// directory itself is unreadable — so we stop and hand back the pathological fallback, which the
+/// caller's own `fs::copy`/`fs::rename` will then fail on quickly and honestly.
+const MAX_CONSECUTIVE_UNKNOWN_SLOTS: usize = 8;
+
 /// Pick a non-colliding name in `dir`, Explorer-style:
 /// "report.txt" -> "report - Copy.txt" -> "report - Copy (2).txt".
 /// We never overwrite an existing file — silent overwrite is data loss.
+///
+/// **CPE-1696.** All three collision probes here were `!candidate.exists()`, and `Path::exists()`
+/// collapses every `stat` failure into `false` — so a candidate whose stat was refused (permission denied
+/// along the resolved path, a dead network mount) was returned as a *free* name and the caller's
+/// `fs::copy` / `copy_dir_all` / `fs::rename` wrote over it. That contradicted this function's own
+/// contract two lines up. A candidate is now only free when [`copy_target_is_free`] can prove it; an
+/// unknown is skipped like any other occupied name, so the caller still gets a usable target and the
+/// unreadable path is left untouched.
 fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
-    let candidate = dir.join(file_name);
-    if !candidate.exists() {
-        return candidate;
-    }
-
     let path = Path::new(file_name);
     let stem = path
         .file_stem()
@@ -470,14 +535,23 @@ fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
         dir.join(name)
     };
 
-    let first = build(" - Copy");
-    if !first.exists() {
-        return first;
-    }
-    for n in 2..10_000 {
-        let p = build(&format!(" - Copy ({n})"));
-        if !p.exists() {
-            return p;
+    // n = 0 is the bare name, n = 1 is " - Copy", n >= 2 is " - Copy (n)" — the original sequence.
+    let mut unknown_run = 0usize;
+    for n in 0..10_000u32 {
+        let candidate = match n {
+            0 => dir.join(file_name),
+            1 => build(" - Copy"),
+            _ => build(&format!(" - Copy ({n})")),
+        };
+        match classify_copy_target(candidate.try_exists()) {
+            TargetSlot::Free => return candidate,
+            TargetSlot::Occupied => unknown_run = 0,
+            TargetSlot::Unknown => {
+                unknown_run += 1;
+                if unknown_run >= MAX_CONSECUTIVE_UNKNOWN_SLOTS {
+                    break; // the directory itself is unreadable — stop stat'ing it
+                }
+            }
         }
     }
     // Pathological fallback; effectively unreachable.
@@ -2716,7 +2790,12 @@ fn resolve_conflict(
     dest_dir: &Path,
     policy: ConflictPolicy,
 ) -> Result<Option<PathBuf>, String> {
-    if !base_target.exists() {
+    // CPE-1696: this was `if !base_target.exists()`, the same collapse `unique_target` carried — a stat
+    // failure returned the target as free and every policy arm below was skipped, so the caller wrote
+    // straight onto a path it could not prove was empty. An unknown now counts as occupied, which routes
+    // it into the policy arms rather than past them: `Skip` skips it, `Keepboth` picks a different name
+    // via `unique_target`, and `Overwrite` is the one case the user explicitly asked for.
+    if copy_target_is_free(base_target.try_exists()) {
         return Ok(Some(base_target.to_path_buf()));
     }
     match policy {
@@ -6384,6 +6463,27 @@ async fn list_drives() -> Vec<Place> {
         .await.unwrap()
 }
 
+/// Whether a Windows drive letter's root should be listed (CPE-1696) — the pure classifier behind
+/// [`list_drives_impl`]'s per-letter probe, split out so the taxonomy is unit-testable on every OS and
+/// account (a real locked BitLocker volume or an empty card reader can't be conjured in a test).
+///
+/// `stat` is the outcome of [`Path::try_exists`] on `"X:\\"`. The probe used to be `Path::exists()`, which
+/// folds every `stat` failure into `false` — so a drive that is genuinely **present but not currently
+/// readable** (a disconnected mapped network drive, a card reader with no card, a locked BitLocker volume)
+/// vanished from the sidebar entirely, which is the one thing the user can least explain. Windows Explorer
+/// itself lists those drives; so do we now. Only `Ok(false)` — an unassigned letter, which is where
+/// `fs::exists` folds a genuine `ERROR_FILE_NOT_FOUND`/`ERROR_PATH_NOT_FOUND` — hides the row.
+#[cfg(target_os = "windows")]
+fn drive_letter_is_present(stat: std::io::Result<bool>) -> bool {
+    match stat {
+        Ok(present) => present,
+        // A genuine absence, if the OS ever reports one as an error rather than `Ok(false)`.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        // Present but unreadable right now: list it rather than claim it isn't there.
+        Err(_) => true,
+    }
+}
+
 fn list_drives_impl() -> Vec<Place> {
     let mut drives = Vec::new();
 
@@ -6391,7 +6491,7 @@ fn list_drives_impl() -> Vec<Place> {
     {
         for letter in b'A'..=b'Z' {
             let root = format!("{}:\\", letter as char);
-            if Path::new(&root).exists() {
+            if drive_letter_is_present(Path::new(&root).try_exists()) {
                 drives.push(Place {
                     name: format!("Local Disk ({}:)", letter as char),
                     path: root,
@@ -8272,17 +8372,117 @@ fn sidecar_revoke_capability(
     store.revoke(&id, capability).map_err(|e| e.to_string())
 }
 
+/// The outcome of looking for a sidecar's launchable binary (CPE-1696) — three states, not two. `Missing`
+/// and `Unreadable` are different diagnoses and the difference is the whole point: given
+/// [[install-kill-all-processes-first]], a **locked or half-installed** sidecar is one of the most common
+/// real causes here, and "it isn't there — reinstall" is precisely the wrong advice for it.
+///
+/// Deliberately **not** behind `#[cfg(feature = "sidecar-platform")]`, unlike its one producer
+/// [`resolve_sidecar_bin`]: CI runs `cargo test` for `src-tauri` with default features only and reaches
+/// the sidecar feature via `cargo clippy --all-targets --features sidecar-platform`, which *compiles*
+/// tests but never *runs* them — so a `sidecar-platform`-gated unit test would silently never execute
+/// anywhere (an Evidence Rules trap: verify through the channel that will carry the message). This type
+/// and the two pure classifiers below carry no sidecar dependency, so they compile and their tests run in
+/// the default build.
+#[cfg_attr(not(feature = "sidecar-platform"), allow(dead_code))]
+#[derive(Debug, Clone)]
+enum SidecarBinLookup {
+    /// A binary resolved at this path.
+    Found(PathBuf),
+    /// Every candidate path was genuinely absent.
+    Missing,
+    /// No candidate resolved, and at least one could not be stat'd at all, so we cannot say it is absent.
+    Unreadable { path: PathBuf, cause: String },
+}
+
+impl SidecarBinLookup {
+    /// The resolved path, if one was found. Preserves the pre-CPE-1696 `Option<PathBuf>` reading for the
+    /// launch/health question — an unreadable candidate is still not launchable.
+    #[cfg_attr(not(feature = "sidecar-platform"), allow(dead_code))]
+    fn found(&self) -> Option<&Path> {
+        match self {
+            SidecarBinLookup::Found(p) => Some(p.as_path()),
+            _ => None,
+        }
+    }
+}
+
+/// What one candidate path's [`Path::try_exists`] outcome means to `resolve_sidecar_bin`'s search.
+#[cfg_attr(not(feature = "sidecar-platform"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidecarCandidate {
+    /// A binary is at this candidate path.
+    Present,
+    /// Genuinely nothing here; try the next candidate.
+    Absent,
+    /// The stat failed for a reason other than absence, so we cannot call this candidate empty.
+    Unreadable(String),
+}
+
+/// The pure classifier behind `resolve_sidecar_bin`'s per-candidate probe, split out so the
+/// `NotFound`-vs-everything-else taxonomy is unit-testable without a `tauri::AppHandle`, a real bundle
+/// layout, or a real permission denial (all three are environment-dependent — same rationale as
+/// `cpe_server::dispatch::classify_path_error`'s own unit tests).
+#[cfg_attr(not(feature = "sidecar-platform"), allow(dead_code))]
+fn classify_sidecar_candidate(stat: std::io::Result<bool>) -> SidecarCandidate {
+    match stat {
+        Ok(true) => SidecarCandidate::Present,
+        Ok(false) => SidecarCandidate::Absent,
+        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => SidecarCandidate::Absent,
+        Err(e) => SidecarCandidate::Unreadable(e.to_string()),
+    }
+}
+
+/// The `actions` line `sidecar_repair` reports for a binary lookup, or `None` when the binary resolved.
+/// Pure so the "missing" / "unreadable" wording split is testable without an `AppHandle` (CPE-1696).
+#[cfg_attr(not(feature = "sidecar-platform"), allow(dead_code))]
+fn sidecar_binary_action(lookup: &SidecarBinLookup) -> Option<String> {
+    match lookup {
+        SidecarBinLookup::Found(_) => None,
+        SidecarBinLookup::Missing => {
+            Some("binary is missing — reinstall required (auto-restore is coming in L2)".into())
+        }
+        SidecarBinLookup::Unreadable { path, cause } => Some(format!(
+            "binary could not be checked at {} ({cause}) — it may be locked by a still-running process or \
+             half-installed, rather than missing; close every cpe / ai-console process and retry before \
+             reinstalling",
+            path.display()
+        )),
+    }
+}
+
 /// Whether a sidecar `id`'s launchable binary actually resolves — the "missing binary" health signal
 /// (CPE-863). Generic over id (the exe name equals the sidecar id): checks the bundled resource copy,
-/// then the dev source-tree targets, mirroring the per-sidecar resolvers. Returns the path if found.
+/// then the dev source-tree targets, mirroring the per-sidecar resolvers.
+///
+/// **CPE-1696:** every candidate probe was `p.exists()`, which folds every `stat` failure into `false`, so
+/// the function returned the same `None` for "no such file" and "that path exists but I was refused". It
+/// now reports [`SidecarBinLookup::Unreadable`] for the latter, remembering the FIRST such candidate — a
+/// genuine absence is only ever `Ok(false)` (or an explicit `NotFound`) from [`Path::try_exists`].
 #[cfg(feature = "sidecar-platform")]
-fn resolve_sidecar_bin(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
+fn resolve_sidecar_bin(app: &tauri::AppHandle, id: &str) -> SidecarBinLookup {
     use tauri::Manager;
     let exe = if cfg!(windows) { format!("{id}.exe") } else { id.to_string() };
+    // The first candidate we could not stat, kept so the caller can name the real cause instead of
+    // reporting an absence we never established.
+    let mut unreadable: Option<(PathBuf, String)> = None;
+    let mut probe = |p: PathBuf| -> Option<PathBuf> {
+        match classify_sidecar_candidate(p.try_exists()) {
+            SidecarCandidate::Present => Some(p),
+            SidecarCandidate::Absent => None,
+            SidecarCandidate::Unreadable(cause) => {
+                if unreadable.is_none() {
+                    unreadable = Some((p, cause));
+                }
+                None
+            }
+        }
+    };
+
     if let Ok(resource) = app.path().resource_dir() {
-        let p = resource.join("sidecars").join(&exe);
-        if p.exists() {
-            return Some(p);
+        if let Some(p) = probe(resource.join("sidecars").join(&exe)) {
+            return SidecarBinLookup::Found(p);
         }
     }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -8291,13 +8491,15 @@ fn resolve_sidecar_bin(app: &tauri::AppHandle, id: &str) -> Option<PathBuf> {
             manifest.join(format!("../sidecar/{id}/target")),
             PathBuf::from(format!("sidecar/{id}/target")),
         ] {
-            let p = base.join(profile).join(&exe);
-            if p.exists() {
-                return Some(p);
+            if let Some(p) = probe(base.join(profile).join(&exe)) {
+                return SidecarBinLookup::Found(p);
             }
         }
     }
-    None
+    match unreadable {
+        Some((path, cause)) => SidecarBinLookup::Unreadable { path, cause },
+        None => SidecarBinLookup::Missing,
+    }
 }
 
 /// The sidecars we ship a pristine restore copy for (CPE-867). Matches the `.pristine` bundle entries.
@@ -8468,7 +8670,7 @@ fn sidecar_details(app: tauri::AppHandle, state: tauri::State<AiConsoleState>) -
                 compatible: cv.major == CONTRACT_VERSION.major && cv.minor <= CONTRACT_VERSION.minor,
                 running: m.id == "ai-console" && ai_running,
                 enabled: enablement.is_enabled(&m.id),
-                binary_ok: resolve_sidecar_bin(&app, &m.id).is_some(),
+                binary_ok: resolve_sidecar_bin(&app, &m.id).found().is_some(),
                 requested: m.capabilities.clone(),
                 granted: consent.granted(&m.id).into_iter().collect(),
             }
@@ -8531,9 +8733,14 @@ fn sidecar_repair(
         state.clear_error();
         actions.push("cleared the last error".into());
     }
-    let binary_ok = resolve_sidecar_bin(&app, &id).is_some();
-    if !binary_ok {
-        actions.push("binary is missing — reinstall required (auto-restore is coming in L2)".into());
+    // CPE-1696: an unreadable candidate used to be reported with the same "binary is missing — reinstall
+    // required" line as a genuinely absent one. A locked/half-installed exe is the far more common cause
+    // (CPE-483, [[install-kill-all-processes-first]]) and a reinstall is exactly the wrong next step for
+    // it, so the two now read differently. `binary_ok` keeps its meaning (not launchable either way).
+    let lookup = resolve_sidecar_bin(&app, &id);
+    let binary_ok = lookup.found().is_some();
+    if let Some(action) = sidecar_binary_action(&lookup) {
+        actions.push(action);
     }
     Ok(SidecarRepair { id, binary_ok, actions })
 }
@@ -10068,10 +10275,15 @@ fn index_watch_pump(
         // whose parent dir isn't indexed yet — so a same-window `mkdir a && touch a/f` must apply `a`
         // before `a/f`. `resolve_touched` sorts to guarantee that.
         let touched_paths: Vec<String> = touched.drain().collect();
-        events.extend(cpe_server::index_watch::resolve_touched(&touched_paths, |p| {
-            let path = std::path::Path::new(p);
-            path.exists().then(|| path.is_dir())
-        }));
+        // CPE-1696: the closure used to be `path.exists().then(|| path.is_dir())`, which folds every
+        // `stat` failure into `None` — and `None` means `Removed`, i.e. a transient permission/mount/IO
+        // blip during a debounce window TOMBSTONED a file that still existed, silently dropping it from
+        // search results. `stat_touched` returns a three-state `TouchedState`; `resolve_touched` emits no
+        // event at all for `Unknown`, leaving the index entry intact.
+        events.extend(cpe_server::index_watch::resolve_touched(
+            &touched_paths,
+            cpe_server::index_watch::stat_touched,
+        ));
         let mutations = plan_from_events(&events);
         if mutations.is_empty() {
             return;
@@ -14856,6 +15068,358 @@ overlay / overlay rw,relatime 0 0
         fs::write(d.join("README"), b"1").unwrap();
         assert_eq!(unique_target(&d, "README"), d.join("README - Copy"));
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1696: unique_target / resolve_conflict must not read a refused stat as a free name -----
+    //
+    // All three of `unique_target`'s collision probes, plus `resolve_conflict`'s own, were
+    // `!candidate.exists()`. `Path::exists()` folds EVERY stat failure into `false`, i.e. into "this name
+    // is free" — so a candidate the process could not stat was handed back as a copy target and the
+    // caller's `fs::copy` / `copy_dir_all` / `fs::rename` wrote over it. That directly contradicted the
+    // function's own doc comment: "We never overwrite an existing file — silent overwrite is data loss."
+
+    /// The deterministic half (runs on every OS and account, no privilege needed) — same role as
+    /// `cpe_server::dispatch::classify_path_error`'s own unit tests.
+    #[test]
+    fn cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so() {
+        assert!(copy_target_is_free(Ok(false)), "an absent name is free");
+        assert!(!copy_target_is_free(Ok(true)), "an occupied name is not free");
+        assert!(
+            copy_target_is_free(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            "an explicit NotFound is a genuine absence"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                !copy_target_is_free(Err(std::io::Error::new(kind, "Access is denied."))),
+                "{kind:?} must never be reported as a free name — that is the overwrite"
+            );
+        }
+
+        // The three-state classifier underneath. `Unknown` must stay DISTINCT from `Occupied`: both are
+        // "not free", but only a run of `Unknown`s means the directory itself is unreadable, which is
+        // what lets `unique_target` stop after `MAX_CONSECUTIVE_UNKNOWN_SLOTS` instead of performing
+        // 10,000 blocking stats against a dead mount. Collapsing them would restore that stall.
+        assert_eq!(classify_copy_target(Ok(false)), TargetSlot::Free);
+        assert_eq!(classify_copy_target(Ok(true)), TargetSlot::Occupied);
+        assert_eq!(
+            classify_copy_target(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            TargetSlot::Free
+        );
+        assert_eq!(
+            classify_copy_target(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))),
+            TargetSlot::Unknown,
+            "a refused stat is Unknown, never Occupied — the two drive different loop behaviour"
+        );
+    }
+
+    /// **The strongest test in this ticket: it stages REAL BYTE LOSS, not a wrong error message.**
+    ///
+    /// Drives the real `do_move_into` entry point at a destination holding a file whose `try_exists()`
+    /// the OS refuses. Pre-CPE-1696, `unique_target` handed that refused candidate back as a *free* name
+    /// and `do_move_into`'s `fs::rename` replaced its bytes. Post-fix it is treated as occupied, so the
+    /// move lands on `victim - Copy.txt` and the original survives byte-for-byte.
+    ///
+    /// **Why `do_move_into` (rename) and not `do_copy_into` (copy).** Measured for the PR #889 review
+    /// and written up on `cpe_server::fsutil::deny_stat_of`: on Windows a deny ACE that refuses
+    /// `try_exists` also refuses `fs::write`/`fs::copy` (both request SYNCHRONIZE), so a *copy* test can
+    /// only ever assert on a message — the ACL protects the victim, not the guard. `fs::rename` is the
+    /// exception: replacing a file needs `DELETE` on the target **or** `FILE_DELETE_CHILD` on its parent,
+    /// and a normal scratch parent grants the latter, so the rename destroys the bytes right through the
+    /// deny. That makes a byte-level assertion possible here and nowhere else in this ticket.
+    #[test]
+    fn cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat() {
+        use std::io::Write;
+
+        // **Windows-only, and the whole body is `#[cfg]`'d rather than early-returned** (a
+        // `#[cfg(not(windows))] { ..; return; }` block makes every following statement an `unreachable
+        // statement` error under CI's `-D warnings` on Linux and macOS — invisible from a Windows dev box).
+        //
+        // The reason it cannot run on Unix is the *point* of the test, so it is written down rather than
+        // waved at: `deny_stat_of`'s Windows mechanism denies **one file**, leaving its parent directory
+        // writable, which is what lets a buggy `fs::rename` replace the victim's bytes while `try_exists`
+        // on it fails. Unix has no equivalent. Its only lever is `chmod` on the *parent*, and
+        // `unique_target`'s candidates live in that same parent — so the very bits that make `stat` fail
+        // with `EACCES` also deny `rename(2)`, which needs write+execute on that directory. The two calls
+        // are governed by the same permission there, so no `chmod` can stage a stat failure that a rename
+        // then survives. (Confirmed the hard way: the first CI run of this test reded the Linux leg with
+        // `the move must still succeed onto a non-colliding name: "Permission denied (os error 13)"` — the
+        // legitimate control move, not the guard.)
+        //
+        // The honest case does not vanish from Unix with it:
+        // `cpe_1696_a_move_into_a_readable_folder_auto_renames_instead_of_overwriting` below drives the
+        // same `do_move_into` entry point ungated, and
+        // `cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so` pins the taxonomy everywhere.
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1696] SKIPPED the do_move_into byte-loss leg on this platform: no `chmod` can \
+                 stage it, because `stat` and `rename(2)` on a candidate are governed by the SAME \
+                 permission bits on its parent directory — the deny that makes the stat fail also makes \
+                 the rename fail, so a buggy guard cannot be caught destroying anything here. NOTHING in \
+                 this test covered CPE-1696's overwrite route on this run; the Windows leg carries that \
+                 evidence, and the ungated move/copy/taxonomy tests carry the honest cases."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1696_move_denied");
+            let src_dir = d.join("src");
+            let dest_dir = d.join("dest");
+            fs::create_dir_all(&src_dir).unwrap();
+            fs::create_dir_all(&dest_dir).unwrap();
+            let src = src_dir.join("victim.txt");
+            fs::write(&src, b"MOVED SOURCE").unwrap();
+            // The colliding candidate `unique_target` probes first, holding bytes that must survive.
+            let victim = dest_dir.join("victim.txt");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            // Armed before the deny so cleanup runs on every exit path, panic or not (Evidence Rules: a
+            // red run must never leave debris). Mirrors cpe_server's `Restore` pattern.
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _restore = Restore(&victim, &d);
+
+            // Deny only READ on the victim: enough to refuse `try_exists`, while deliberately leaving the
+            // parent's FILE_DELETE_CHILD intact so a buggy rename really can replace it. Measured for the
+            // PR #889 review and written up on `cpe_server::fsutil::deny_stat_of` — denying the parent's
+            // `(DC)` too would make the rename fail for the wrong reason and the test would prove nothing.
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&victim)
+                        .arg("/deny")
+                        .arg(format!("{user}:(R)"))
+                        .output();
+                }
+            }
+
+            if victim.try_exists().is_ok() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1696] SKIPPED the do_move_into denied-candidate leg: could not deny stat of {} \
+                     on this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in \
+                     this test covered CPE-1696's overwrite route on this run; see \
+                     cpe_1696_a_copy_target_is_only_free_when_the_stat_says_so for the taxonomy, which \
+                     does run here.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+            let landed = do_move_into(&ctx, &src, &dest_dir);
+
+            // Restore read access so the victim's bytes can be inspected — the assertion below is the
+            // point of the test and must not be defeated by the very ACL that staged it.
+            if let Ok(user) = std::env::var("USERNAME") {
+                let _ = std::process::Command::new("icacls")
+                    .arg(&victim)
+                    .arg("/remove:d")
+                    .arg(&user)
+                    .output();
+            }
+
+            // **The byte-level assertion.** Pre-fix this read back "MOVED SOURCE".
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a destination file whose stat we were refused must NEVER be renamed over — the \
+                 pre-CPE-1696 `!candidate.exists()` probe read the refusal as \"this name is free\" and \
+                 `fs::rename` replaced its bytes, which is exactly the silent overwrite \
+                 `unique_target`'s own doc comment forbids"
+            );
+            // And the move must still have gone somewhere sensible rather than failing outright (the PR
+            // #889 review's non-blocking item 1: an unknown is occupied, not fatal).
+            let landed = landed.expect("the move must still succeed onto a non-colliding name");
+            assert_eq!(
+                landed,
+                dest_dir.join("victim - Copy.txt"),
+                "it must auto-rename past the unprovable candidate, not abort the operation"
+            );
+            assert_eq!(fs::read(&landed).unwrap(), b"MOVED SOURCE".to_vec());
+        }
+    }
+
+    /// The ungated sibling for the `#[cfg(windows)]` test above — the honest `do_move_into` case, on
+    /// **every** OS. Without it, a `unique_target` that answered "occupied" to everything (or a
+    /// `do_move_into` that stopped moving at all) would be caught only on Windows, which is one of CI's
+    /// three legs. This repo has been bitten twice by a gated assertion silently vanishing elsewhere.
+    #[test]
+    fn cpe_1696_a_move_into_a_readable_folder_auto_renames_instead_of_overwriting() {
+        let d = scratch("cpe1696_move_ok");
+        let src_dir = d.join("src");
+        let dest_dir = d.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let occupied = dest_dir.join("m.txt");
+        fs::write(&occupied, b"KEEP ME").unwrap();
+
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+
+        // A free name is used as-is.
+        let free_src = src_dir.join("fresh.txt");
+        fs::write(&free_src, b"FRESH").unwrap();
+        assert_eq!(do_move_into(&ctx, &free_src, &dest_dir).unwrap(), dest_dir.join("fresh.txt"));
+
+        // A colliding name auto-renames and leaves the occupant byte-for-byte.
+        let colliding = src_dir.join("m.txt");
+        fs::write(&colliding, b"MOVED").unwrap();
+        assert_eq!(
+            do_move_into(&ctx, &colliding, &dest_dir).unwrap(),
+            dest_dir.join("m - Copy.txt"),
+            "a colliding move must auto-rename, never overwrite"
+        );
+        assert_eq!(fs::read(&occupied).unwrap(), b"KEEP ME".to_vec());
+        assert_eq!(fs::read(dest_dir.join("m - Copy.txt")).unwrap(), b"MOVED".to_vec());
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The honest cases at the same real entry point, on every OS: a free name copies, and an occupied one
+    /// still auto-renames rather than refusing (Evidence Rules: a guard that refuses everything is not a
+    /// guard).
+    #[test]
+    fn cpe_1696_a_copy_into_a_readable_folder_still_copies_and_still_auto_renames() {
+        let d = scratch("cpe1696_copy_ok");
+        let src_dir = d.join("src");
+        let dest_dir = d.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        let src = src_dir.join("f.txt");
+        fs::write(&src, b"SOURCE").unwrap();
+
+        assert_eq!(do_copy_into(&src, &dest_dir).unwrap(), dest_dir.join("f.txt"));
+        assert_eq!(
+            do_copy_into(&src, &dest_dir).unwrap(),
+            dest_dir.join("f - Copy.txt"),
+            "a second copy must auto-rename, never overwrite"
+        );
+        assert_eq!(fs::read(dest_dir.join("f.txt")).unwrap(), b"SOURCE");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1696, the sidecar-binary diagnosis split: an unreadable candidate must NOT be reported with the
+    /// "binary is missing — reinstall required" line a genuinely absent one gets. Given
+    /// [[install-kill-all-processes-first]], a locked / half-installed exe is the far more common cause and
+    /// a reinstall is the wrong next step for it. Pure, so it runs in the default `cargo test` — the
+    /// `sidecar-platform` feature is only ever *clippy*'d in CI, never test-run (see `SidecarBinLookup`).
+    #[test]
+    fn cpe_1696_an_unreadable_sidecar_binary_is_not_diagnosed_as_missing() {
+        assert_eq!(classify_sidecar_candidate(Ok(true)), SidecarCandidate::Present);
+        assert_eq!(classify_sidecar_candidate(Ok(false)), SidecarCandidate::Absent);
+        assert_eq!(
+            classify_sidecar_candidate(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            SidecarCandidate::Absent,
+            "an explicit NotFound is a genuine absence"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                matches!(
+                    classify_sidecar_candidate(Err(std::io::Error::new(kind, "boom"))),
+                    SidecarCandidate::Unreadable(ref c) if c.contains("boom")
+                ),
+                "{kind:?} must be remembered as unreadable, not folded into absent"
+            );
+        }
+
+        assert!(
+            sidecar_binary_action(&SidecarBinLookup::Found(PathBuf::from("/x/ai-console"))).is_none(),
+            "a resolved binary reports no problem"
+        );
+        let missing = sidecar_binary_action(&SidecarBinLookup::Missing).unwrap();
+        assert!(missing.contains("missing") && missing.contains("reinstall"), "{missing}");
+        let unreadable = sidecar_binary_action(&SidecarBinLookup::Unreadable {
+            path: PathBuf::from("/x/ai-console"),
+            cause: "Access is denied. (os error 5)".into(),
+        })
+        .unwrap();
+        assert!(
+            !unreadable.contains("binary is missing"),
+            "an unreadable binary must not be reported as missing: {unreadable}"
+        );
+        assert!(
+            unreadable.contains("could not be checked")
+                && unreadable.contains("locked")
+                && unreadable.contains("Access is denied."),
+            "it must name the real cause and the right next step: {unreadable}"
+        );
+    }
+
+    /// The honest half of the drive-listing site, on **every** OS: the real enumeration still returns
+    /// this machine's drives. Deliberately ungated, so the Windows-only taxonomy sibling below cannot be
+    /// the only coverage — a `drive_letter_is_present` that answered `false` to everything would empty
+    /// the sidebar, and on Linux/macOS this is the only leg that would notice `list_drives_impl`
+    /// regressing at all (CI's three-OS matrix; a Windows-gated assertion is invisible on two of them).
+    #[test]
+    fn cpe_1696_the_real_drive_enumeration_still_returns_this_machines_drives() {
+        let drives = list_drives_impl();
+        // `Place` is a `specta::Type` binding struct with no `Debug` (deriving one would force a
+        // `bindings.gen.ts` regeneration for a test message), so report the paths by hand.
+        let seen = drives.iter().map(|p| p.path.as_str()).collect::<Vec<_>>().join(", ");
+        assert!(
+            drives.iter().any(|p| p.kind == "drive"),
+            "the real drive enumeration must still return at least one drive; got: [{seen}]"
+        );
+        #[cfg(not(target_os = "windows"))]
+        assert!(
+            drives.iter().any(|p| p.path == "/"),
+            "and on Unix that is the single filesystem root; got: [{seen}]"
+        );
+    }
+
+    /// CPE-1696, the drive-listing site: a drive letter that is present but momentarily unreadable (a
+    /// disconnected mapped drive, an empty card reader, a locked BitLocker volume) must still be listed —
+    /// `Path::exists()` folded those into `false` and the row vanished from the sidebar. Only a genuine
+    /// absence hides it. Windows-only because the probe it classifies is Windows-only (`list_drives_impl`
+    /// returns a single `/` root elsewhere — pinned by the ungated sibling above); CI's Windows leg runs
+    /// this one.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn cpe_1696_a_present_but_unreadable_drive_letter_is_still_listed() {
+        assert!(drive_letter_is_present(Ok(true)), "a readable drive is listed");
+        assert!(!drive_letter_is_present(Ok(false)), "an unassigned letter is not");
+        assert!(
+            !drive_letter_is_present(Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            "an explicit NotFound is a genuine absence"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                drive_letter_is_present(Err(std::io::Error::new(kind, "The device is not ready."))),
+                "{kind:?} means present-but-unreadable; hiding the drive is the one thing the user can \
+                 least explain"
+            );
+        }
+        // And the real enumeration still finds this machine's system drive.
+        let drives = list_drives_impl();
+        let seen = drives.iter().map(|p| p.path.as_str()).collect::<Vec<_>>().join(", ");
+        assert!(
+            drives.iter().any(|p| p.kind == "drive"),
+            "the real drive enumeration must still return this machine's drives; got: [{seen}]"
+        );
     }
 
     #[test]

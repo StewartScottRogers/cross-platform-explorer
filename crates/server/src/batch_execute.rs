@@ -173,14 +173,66 @@ impl<'a> LazyInputKeys<'a> {
     }
 }
 
+/// What currently occupies a planned output path, as far as a `stat` can tell (CPE-1696). Three states,
+/// not two: the whole point is that "I could not find out" is **not** the same answer as "nothing is
+/// there", and only the second one is safe to treat as a free path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OutputOccupancy {
+    /// The path genuinely does not exist, or exists as something other than a regular file (a directory —
+    /// which the pre-CPE-1696 `Path::is_file()` gate also answered "not an overwrite" for, and which a
+    /// write to that path will fail on anyway).
+    Free,
+    /// A real regular file occupies the path.
+    File,
+    /// The `stat` failed for a reason other than the path being absent — permission denied along the
+    /// resolved path, a dead network mount, an I/O error. We do **not** know whether bytes are there.
+    Unknown,
+}
+
+/// The pure classifier behind [`output_occupancy`], split out (mirroring
+/// `crate::dispatch::classify_path_error`'s own rationale) so the `NotFound`-vs-everything-else taxonomy
+/// is unit-testable without a real filesystem: permission bits are platform- and privilege-dependent —
+/// inert as root, and on Windows `Path::exists()` is not refused by a deny ACE at all — so an ACL-based
+/// test alone would leave this taxonomy unverified on some machines.
+///
+/// `exists` is the outcome of [`Path::try_exists`] (which, unlike [`Path::exists`], returns
+/// `io::Result<bool>` instead of folding every failure into `false`); `metadata` is called only when
+/// `exists` says the path is there, to distinguish a regular file from a directory.
+fn classify_output_occupancy(
+    exists: std::io::Result<bool>,
+    metadata: impl FnOnce() -> std::io::Result<std::fs::Metadata>,
+) -> OutputOccupancy {
+    match exists {
+        Ok(false) => OutputOccupancy::Free,
+        Ok(true) => match metadata() {
+            Ok(m) if m.is_file() => OutputOccupancy::File,
+            // Exists but isn't a regular file (a directory): identical to what the old `!is_file()` gate
+            // concluded, and a write onto it fails on its own.
+            Ok(_) => OutputOccupancy::Free,
+            // A TOCTOU vanish between the two calls is a genuine absence.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => OutputOccupancy::Free,
+            Err(_) => OutputOccupancy::Unknown,
+        },
+        // `Path::try_exists` already folds a genuine `NotFound` into `Ok(false)`, but be explicit: only an
+        // absence is an absence.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => OutputOccupancy::Free,
+        Err(_) => OutputOccupancy::Unknown,
+    }
+}
+
+/// Stat `output` and classify what sits there, via [`classify_output_occupancy`].
+fn output_occupancy(output: &Path) -> OutputOccupancy {
+    classify_output_occupancy(output.try_exists(), || std::fs::metadata(output))
+}
+
 /// True when `item`'s planned write would replace bytes belonging to a file that was never submitted as
 /// one of the batch's own inputs — the original CPE-1613 in-place case (`item.output` is [`same_file`] as
 /// `item.input`), OR (CPE-1623) `item.output` resolves onto some OTHER real, pre-existing file that isn't
-/// any input in this batch. The second check is gated behind a plain `Path::is_file()` stat — cheap, and
-/// false for the overwhelmingly common case (a freshly-computed non-destructive name that doesn't exist
-/// yet) — so only a genuine collision pays for the [`path_key`]/`HashSet` lookup, and even that lookup is
-/// `O(1)` against `input_keys` (CPE-1667; see [`input_path_keys`]), not the `O(n)` pairwise scan this used
-/// to run.
+/// any input in this batch. The second check is gated behind a cheap [`output_occupancy`] stat — `Free`
+/// for the overwhelmingly common case (a freshly-computed non-destructive name that doesn't exist yet) —
+/// so only a genuine collision pays for the [`path_key`]/`HashSet` lookup, and even that lookup is `O(1)`
+/// against `input_keys` (CPE-1667; see [`input_path_keys`]), not the `O(n)` pairwise scan this used to
+/// run.
 fn is_foreign_overwrite(item: &PlannedItem, input_keys: &std::collections::HashSet<PathKey>) -> bool {
     // **Security audit finding 4 (PR #848).** Standalone, this function fails OPEN for an alternate data
     // stream: a never-before-existing stream path makes the `Path::is_file()` arm below false, so it
@@ -196,8 +248,17 @@ fn is_foreign_overwrite(item: &PlannedItem, input_keys: &std::collections::HashS
     if same_file(&item.input, &item.output) {
         return true;
     }
-    if !Path::new(&item.output).is_file() {
-        return false; // nothing sits there yet — not an overwrite of anything
+    // **CPE-1696 — the second fail-open route.** This used to be `if !Path::new(&item.output).is_file() {
+    // return false }`, and `Path::is_file()` collapses EVERY `stat` failure into `false`: a
+    // permission-denied output path therefore reported "nothing sits there — not an overwrite of
+    // anything", `execute_plan_walk`'s refusal check passed, and the write proceeded with no confirmation.
+    // An unknown must fail CLOSED here (`true` = "treat as a foreign overwrite"), because the only cost of
+    // being wrong that way is a confirmation prompt the user can accept, whereas being wrong the other way
+    // is unconfirmed data loss.
+    match output_occupancy(Path::new(&item.output)) {
+        OutputOccupancy::Free => return false, // genuinely nothing there — not an overwrite of anything
+        OutputOccupancy::Unknown => return true, // we cannot prove it's empty; refuse without consent
+        OutputOccupancy::File => {}
     }
     // A real file already occupies the output path. It's only a refusable overwrite if it's not one of
     // THIS batch's own inputs — a batch is always allowed to write into paths it explicitly selected.
@@ -1845,6 +1906,261 @@ mod tests {
              run and nothing existing at the path to trip the is_file() arm"
         );
         assert!(any_in_place(&items), "and therefore by the predicate built on it");
+    }
+
+    // ---- CPE-1696: the stat-collapse fail-open into a silent overwrite ------------------------------
+    //
+    // `is_foreign_overwrite`'s second gate was `if !Path::new(&item.output).is_file() { return false }`.
+    // `Path::is_file()` is `metadata().map(|m| m.is_file()).unwrap_or(false)` — it folds EVERY stat
+    // failure into `false`, i.e. into "nothing sits there — not an overwrite of anything". So an output
+    // path the process could not stat passed `execute_plan_walk`'s up-front refusal check and the write
+    // proceeded with no confirmation. Same shape as CPE-1678/1687/1692; this is the fifth round.
+
+    /// The deterministic half (runs on every OS and account, no privilege needed) — same role as
+    /// `crate::dispatch::classify_path_error`'s own unit tests. Pins the taxonomy the wiring below
+    /// depends on: an absence is `Free`, a real file is `File`, and **every** other stat failure is
+    /// `Unknown`, never `Free`.
+    #[test]
+    fn cpe_1696_only_a_genuine_absence_reads_as_a_free_output_path() {
+        let never_called = || panic!("metadata must not be consulted when try_exists already answered");
+        assert_eq!(
+            classify_output_occupancy(Ok(false), never_called),
+            OutputOccupancy::Free,
+            "a genuinely absent output path is free"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert_eq!(
+                classify_output_occupancy(Err(std::io::Error::new(kind, "Access is denied.")), never_called),
+                OutputOccupancy::Unknown,
+                "{kind:?} on the existence probe must never read as a free path — that is the fail-open"
+            );
+            // The same must hold when it's the *second* call that fails: try_exists said the path is
+            // there, so we already know it is NOT free, and the type probe failing cannot make it free.
+            assert_eq!(
+                classify_output_occupancy(Ok(true), || Err(std::io::Error::new(kind, "Access is denied."))),
+                OutputOccupancy::Unknown,
+                "{kind:?} on the type probe must never read as a free path either"
+            );
+        }
+        assert_eq!(
+            classify_output_occupancy(
+                Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+                never_called
+            ),
+            OutputOccupancy::Free,
+            "an explicit NotFound is a genuine absence"
+        );
+        assert_eq!(
+            classify_output_occupancy(Ok(true), || Err(std::io::Error::from(std::io::ErrorKind::NotFound))),
+            OutputOccupancy::Free,
+            "a TOCTOU vanish between the two calls is a genuine absence"
+        );
+        // Real-filesystem legs for the two `Ok` arms, so the classifier's meaning is pinned against actual
+        // syscalls and not only against synthesised results.
+        let d = scratch("cpe1696-occupancy");
+        let f = d.join("real.png");
+        fs::write(&f, png_bytes(4, 4)).unwrap();
+        assert_eq!(output_occupancy(&f), OutputOccupancy::File, "a real file occupies the path");
+        assert_eq!(
+            output_occupancy(&d.join("nope.png")),
+            OutputOccupancy::Free,
+            "a path that isn't there is free"
+        );
+        assert_eq!(
+            output_occupancy(&d),
+            OutputOccupancy::Free,
+            "a directory answers exactly what the pre-CPE-1696 `!is_file()` gate answered for it"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Drives `is_foreign_overwrite` with a **real, OS-refused** output path, on **every** platform.
+    ///
+    /// **Why the output path is a DIRECTORY.** It has to be, for the Windows leg to have any power over
+    /// the bug. `fsutil::deny_stat_of` makes `try_exists()` on the target fail while `fs::metadata()` on
+    /// the identical target still succeeds (PR #874's measurement: on Windows the two are different
+    /// syscalls, and only the attributes query is refused by a deny ACE). If the denied output were a
+    /// regular *file*, the pre-fix `!is_file()` gate would still see `metadata → Ok(is_file: true)` and
+    /// refuse — the right answer by the wrong route, i.e. a test that passes against the bug and proves
+    /// nothing. Against a denied *directory* the two answers diverge: the old gate reads `is_file: false`
+    /// → "free" → not an overwrite, while the fixed gate reads `Err` → `Unknown` → refuse.
+    ///
+    /// **Why input and output sit in SEPARATE parent directories.** This is what lets the Unix leg run
+    /// for real instead of skipping, and it is the whole reason this test is not Windows-only.
+    /// `deny_stat_of`'s Unix mechanism is `chmod 0o000` on the target's *parent* (CPE-1687: POSIX `stat()`
+    /// needs `+x` on the parent, not on the file), so a shared parent would deny the input too and the
+    /// test would be measuring the wrong thing. `is_foreign_overwrite` reads only `same_file(input,
+    /// output)` and the output's own occupancy — it never compares the two directories — so separate
+    /// parents exercise it faithfully. (The *caller* does require a shared directory, via
+    /// `classify_output_containment`; that is the end-to-end sibling's problem, not this one's.)
+    ///
+    /// **Asserted on `is_foreign_overwrite` DIRECTLY, deliberately.** The precedent is this module's own
+    /// `secaudit_is_foreign_overwrite_refuses_a_stream_output_without_relying_on_call_order`: PR #848's
+    /// finding 4 was that this function must be correct *standalone*, because "some other check happens to
+    /// run first" is an unenforced call-ordering convention, not a guarantee. At today's two live entry
+    /// points `execute_plan_walk`'s step-1 containment check reaches a denied output first (measured — see
+    /// the PR body), so the fail-open is *mitigated* there, exactly as the ADS route was before #848 closed
+    /// it. That mitigation is reported rather than relied on: it is a property of the caller, and a third
+    /// caller in the wrong order would reopen it.
+    #[test]
+    fn cpe_1696_is_foreign_overwrite_refuses_an_output_it_cannot_stat() {
+        use std::io::Write;
+        let d = scratch("cpe1696-denied-output");
+        // Separate parents on purpose — see the doc comment. `out_parent` is what the Unix deny chmods.
+        let in_parent = d.join("in");
+        let out_parent = d.join("out");
+        fs::create_dir_all(&in_parent).unwrap();
+        fs::create_dir_all(&out_parent).unwrap();
+        let input = in_parent.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let output = out_parent.join("occupied");
+        fs::create_dir_all(&output).unwrap();
+
+        // Armed BEFORE the deny so cleanup runs on every exit path, panic or not (mirrors split_join.rs's
+        // `Restore` pattern — Evidence Rules: a red run must never leave debris behind).
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                let _ = fs::remove_dir_all(self.2);
+            }
+        }
+        let _restore = Restore(&output, &out_parent, &d);
+
+        if !crate::fsutil::deny_stat_of(&output) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1696] SKIPPED the is_foreign_overwrite denied-output leg: could not deny stat of {} \
+                 on this machine (running elevated/root, or a filesystem that ignores ACLs/mode bits). \
+                 NOTHING in this test covered CPE-1696 for is_foreign_overwrite on this run; the taxonomy \
+                 is covered on every platform by \
+                 cpe_1696_only_a_genuine_absence_reads_as_a_free_output_path.",
+                output.display()
+            );
+            return;
+        }
+        // The input must still be readable, or the deny landed on the wrong thing and the assertion below
+        // would be measuring a broken tree rather than the guard.
+        assert!(input.try_exists().unwrap_or(false), "sanity: the input is still readable");
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+            summary: "an output path whose stat is refused".into(),
+        }];
+        assert!(
+            is_foreign_overwrite(&items[0], &input_path_keys(&items)),
+            "an output path whose stat we were refused must be treated as a possible overwrite by this \
+             function alone — the pre-CPE-1696 `!Path::is_file()` gate read the refusal as `false`, i.e. \
+             \"nothing sits there\", and permitted the write with no confirmation"
+        );
+        assert!(any_in_place(&items), "and therefore by the predicate built on it");
+    }
+
+    /// The end-to-end half: the real [`execute_plan`] entry point must refuse a batch whose output path
+    /// cannot be stat'd, and write nothing. Also documents *which* guard gets there first today — see the
+    /// sibling above for why that ordering is reported rather than depended on.
+    ///
+    /// **Windows-only, and the whole body is `#[cfg]`'d rather than early-returned**, because a
+    /// `#[cfg(not(windows))] { ..; return; }` block makes every following statement an `unreachable
+    /// statement` error under CI's `-D warnings` on Linux and macOS — invisible from a Windows dev box.
+    /// Unlike its `is_foreign_overwrite` sibling, this one cannot use separate parent directories to unlock
+    /// the Unix mechanism: `execute_plan`'s own `classify_output_containment` requires the output to sit in
+    /// the input's directory, so `deny_stat_of`'s Unix `chmod 0o000` on that shared parent would deny the
+    /// input and the canary read too, and the test would be measuring a broken tree instead of the guard.
+    #[test]
+    fn cpe_1696_execute_plan_refuses_a_denied_output_path() {
+        #[cfg(not(windows))]
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1696] SKIPPED the execute_plan denied-output leg on this platform: no Unix \
+                 stat-deny exists that leaves the input's own directory readable, and \
+                 `classify_output_containment` requires input and output to share a directory. NOTHING \
+                 in this test covered CPE-1696 on this run; the taxonomy and the standalone-function \
+                 legs cover it on every platform."
+            );
+        }
+        #[cfg(windows)]
+        {
+            use std::io::Write;
+            let d = scratch("cpe1696-denied-e2e");
+            let holder = d.join("holder");
+            fs::create_dir_all(&holder).unwrap();
+            let input = holder.join("in.png");
+            fs::write(&input, png_bytes(8, 8)).unwrap();
+            let output = holder.join("occupied");
+            fs::create_dir_all(&output).unwrap();
+            let canary = output.join("canary.txt");
+            fs::write(&canary, b"MUST SURVIVE").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                    let _ = fs::remove_dir_all(self.2);
+                }
+            }
+            let _restore = Restore(&output, &holder, &d);
+
+            if !crate::fsutil::deny_stat_of(&output) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1696] SKIPPED the execute_plan denied-output leg: could not deny stat of {} \
+                     on this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in \
+                     this test covered CPE-1696 on this run.",
+                    output.display()
+                );
+                return;
+            }
+
+            let items = vec![PlannedItem {
+                input: input.to_string_lossy().to_string(),
+                output: output.to_string_lossy().to_string(),
+                summary: "an output path whose stat is refused".into(),
+            }];
+            // confirmed_overwrite left at its default false
+            let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+            assert!(!job.confirmed_overwrite, "sanity: no confirmation was given");
+
+            let err = execute_plan(&items, &job).expect_err(
+                "an output path we could not stat must be refused, not waved through as an empty slot",
+            );
+            assert!(!err.is_empty(), "the refusal must carry a specific reason");
+            // Byte-level proof, not a trust-the-Result check.
+            assert_eq!(
+                fs::read(&canary).unwrap(),
+                b"MUST SURVIVE".to_vec(),
+                "nothing under the denied output path may have been touched"
+            );
+        }
+    }
+
+    /// The honest case, at the same real entry point (Evidence Rules: a guard that refuses everything is
+    /// not a guard). Runs on every OS with no privilege needed.
+    #[test]
+    fn cpe_1696_a_genuinely_free_output_path_still_runs_without_confirmation() {
+        let d = scratch("cpe1696-free-output");
+        let input = d.join("in.png");
+        fs::write(&input, png_bytes(8, 8)).unwrap();
+        let output = d.join("out.png"); // deliberately does not exist
+        assert!(!output.exists(), "sanity: the output slot really is empty");
+
+        let items = vec![PlannedItem {
+            input: input.to_string_lossy().to_string(),
+            output: output.to_string_lossy().to_string(),
+            summary: "a fresh, non-colliding output".into(),
+        }];
+        let job = BatchJob::new(vec![MediaOp::StripMetadata]);
+        let report = execute_plan(&items, &job)
+            .expect("a genuinely free output path must not be refused as a possible overwrite");
+        assert_eq!(report.written, 1, "and the write must actually happen: {report:?}");
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// **SEC-8 (executed by the audit, now a permanent regression test).** The stale `dir_scans` memo let

@@ -170,10 +170,30 @@ fn run_ffmpeg_frame(ffmpeg: &Path, input: &Path, out: &Path, offset_secs: &str, 
             String::from_utf8_lossy(&output.stderr)
         ));
     }
-    if !out.exists() {
-        return Err("ffmpeg reported success but produced no output file".to_string());
+    classify_ffmpeg_output(out, out.try_exists())
+}
+
+/// Turn the post-run existence check on ffmpeg's output file into this function's verdict (CPE-1696).
+///
+/// The check was `if !out.exists() { Err("ffmpeg reported success but produced no output file") }`, and
+/// `Path::exists()` folds every `stat` failure into `false` — so a permission-denied or otherwise
+/// unreadable scratch path was reported as *ffmpeg having produced nothing*, sending the reader after an
+/// ffmpeg bug that isn't there. Split out from `run_ffmpeg_frame` so the taxonomy is testable without a
+/// real ffmpeg binary or a real permission denial (both are environment-dependent — see
+/// `crate::dispatch::classify_path_error`'s rationale).
+fn classify_ffmpeg_output(out: &Path, stat: std::io::Result<bool>) -> Result<(), String> {
+    match stat {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("ffmpeg reported success but produced no output file".to_string()),
+        // `try_exists` already folds a genuine `NotFound` into `Ok(false)`; be explicit anyway.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err("ffmpeg reported success but produced no output file".to_string())
+        }
+        Err(e) => Err(format!(
+            "ffmpeg reported success but its output file at {} could not be confirmed: {e}",
+            out.display()
+        )),
     }
-    Ok(())
 }
 
 /// Downscales `img` so its longest edge is at most `max_edge` pixels, preserving aspect ratio and
@@ -419,5 +439,41 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// CPE-1696: `if !out.exists()` folded every stat failure into "ffmpeg produced no output file", so an
+    /// unreadable scratch path was blamed on an ffmpeg bug that isn't there. Runs on every OS with no
+    /// ffmpeg binary and no privilege needed — the taxonomy is the whole behaviour.
+    #[test]
+    fn cpe_1696_an_unconfirmable_output_file_is_not_blamed_on_ffmpeg_producing_nothing() {
+        let out = Path::new("/tmp/cpe1696/frame.png");
+        assert!(classify_ffmpeg_output(out, Ok(true)).is_ok(), "a real output file is a success");
+        let missing = classify_ffmpeg_output(out, Ok(false)).unwrap_err();
+        assert!(
+            missing.contains("produced no output file"),
+            "a genuine absence must still say ffmpeg produced nothing: {missing}"
+        );
+        assert!(
+            classify_ffmpeg_output(out, Err(std::io::Error::from(std::io::ErrorKind::NotFound)))
+                .unwrap_err()
+                .contains("produced no output file"),
+            "an explicit NotFound is a genuine absence too"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let msg = classify_ffmpeg_output(out, Err(std::io::Error::new(kind, "Access is denied.")))
+                .unwrap_err();
+            assert!(
+                !msg.contains("produced no output file"),
+                "{kind:?} must not be reported as ffmpeg having produced nothing: {msg}"
+            );
+            assert!(
+                msg.contains("could not be confirmed") && msg.contains("Access is denied."),
+                "{kind:?} must name the real cause: {msg}"
+            );
+        }
     }
 }
