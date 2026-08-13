@@ -164,6 +164,90 @@ export function caseKey(spec: string, test: string): string {
   return `${spec} :: ${test}`;
 }
 
+/** The reporter's `state` strings, narrowed to what `evaluate()` reasons about. Anything unrecognised
+ *  reduces to `"unknown"` — CPE-1680 — NEVER to `"skipped"`. A skipped case is exempt from every clause
+ *  `evaluate()` implements, so folding an unrecognised state into it would let a state this ratchet has
+ *  never seen (a new wdio version, a new runner mode, a state produced by a crash path) silently pass as
+ *  "safe to ignore" — the same "confident green where the truth is unknown" shape CPE-1677 was filed
+ *  over. `"unknown"` reds the run unconditionally instead (see `evaluate()`'s clause 6).
+ *
+ *  CPE-1680 moved this out of `scripts/run-ratchet.ts` and in here: it's the ACTUAL reduction that
+ *  performs finding #1's fix, and living inside the I/O wrapper meant `test:unit`'s `lib/**\/*.test.ts`
+ *  glob never collected a test for it — every unit test constructed an already-`"unknown"` `CaseStatus`
+ *  by hand, which exercises `evaluate()`'s reaction to the value but never the mapping that produces it.
+ *  A reviewer mutation proved this: reverting the fallback here to `"skipped"` left all 59 tests green. */
+export function toCaseStatus(state: string | undefined): CaseStatus {
+  if (state === "passed" || state === "failed" || state === "skipped" || state === "pending") return state;
+  return "unknown";
+}
+
+/** Minimal shape read out of one `@wdio/json-reporter` output file — a subset of the reporter's own
+ *  `ResultSet` type (`specs: string[]`, `suites[].tests[]`, `suites[].hooks[]`). wdio spawns one worker
+ *  per spec file in this repo's `wdio.conf.ts` (no spec grouping), so `specs` is normally length 1; a
+ *  longer array is still handled defensively by attributing the chunk's suites to every spec path it
+ *  lists (the finest granularity the reporter's schema offers without grouping). Exported so
+ *  `scripts/run-ratchet.ts`'s file-reading wrapper and this module's pure reduction share one shape. */
+export interface RawResultChunk {
+  specs: string[];
+  suites?: {
+    name?: string;
+    tests?: { name?: string; state?: string }[];
+    hooks?: { title?: string; state?: string; error?: unknown }[];
+  }[];
+}
+
+/** Reduces already-parsed `@wdio/json-reporter` chunks into one `CaseResult` per test case, keyed by the
+ *  spec file's basename + the `it()` title — the same key `known-failing.json` uses. Pure — the caller
+ *  (`scripts/run-ratchet.ts#loadCaseResults`) owns finding the files, reading them, and `JSON.parse`ing
+ *  them; this function never touches the filesystem, which is what makes it (and `toCaseStatus` above)
+ *  reachable from `ratchet.test.ts` instead of hiding inside the CLI wrapper (CPE-1680).
+ *
+ *  A FAILING HOOK (`before`/`beforeEach`/`after`/`afterEach`) becomes a synthetic case named
+ *  `<hook> "<title>"`, because a hook that throws usually means its suite's cases never ran at all: the
+ *  cases would simply be absent, and "absent" must not read as green. The synthetic case is unlisted by
+ *  construction, so it reds the job as a NEW GUI REGRESSION — and the listed cases it prevented from
+ *  running additionally trip the STALE EXEMPTION clause. Both are the honest verdict for a dead suite. */
+export function reduceResultChunks(chunks: RawResultChunk[]): CaseResult[] {
+  // Keyed so a defensive multi-spec chunk (see RawResultChunk's doc comment) can't double-count a case;
+  // a failure anywhere for that key wins.
+  const byKey = new Map<string, CaseResult>();
+  const record = (spec: string, test: string, status: CaseStatus): void => {
+    const key = caseKey(spec, test);
+    const existing = byKey.get(key);
+    if (!existing) byKey.set(key, { spec, test, status });
+    else if (status === "failed") existing.status = "failed";
+  };
+
+  for (const chunk of chunks) {
+    for (const specPath of chunk.specs ?? []) {
+      // path.basename is a pure string operation (no filesystem access) — safe in an otherwise I/O-free
+      // module, and needed because the reporter records each spec by its full path.
+      const spec = specBasename(specPath);
+      for (const suite of chunk.suites ?? []) {
+        for (const test of suite.tests ?? []) {
+          if (!test.name) continue;
+          record(spec, test.name, toCaseStatus(test.state));
+        }
+        for (const hook of suite.hooks ?? []) {
+          if (!hook.error) continue;
+          record(spec, `<hook> "${hook.title ?? "unnamed hook"}"`, "failed");
+        }
+      }
+    }
+  }
+
+  return [...byKey.values()];
+}
+
+/** `path.basename`, without importing Node's `path` module — the one file-shaped string this otherwise
+ *  I/O-free module needs to slice, and a two-line reimplementation is cheaper than explaining why a
+ *  "pure, no I/O" module imports `node:path`. Handles both `/`- and `\`-separated inputs, since the
+ *  reporter's `specs[]` entries are absolute paths written by whatever OS the suite ran on. */
+function specBasename(specPath: string): string {
+  const parts = specPath.split(/[/\\]/);
+  return parts[parts.length - 1] || specPath;
+}
+
 /** Minimum length (after trimming) a `reason` must clear for an `intermittent: true` entry to pass
  *  clause 7's evidence bar. Deliberately low — this can't verify a case is actually flaky, only real run
  *  history can, and it must not force the four already-evidenced entries in known-failing.json to be
@@ -307,7 +391,16 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
       );
       continue;
     }
-    if (known.get(key)!.intermittent) {
+    // `=== true`, not truthiness (CPE-1680, UAT finding): `known-failing.json` is hand-edited JSON, so
+    // TypeScript's `intermittent?: boolean` on `KnownFailingCase` is a type ASSERTION about well-formed
+    // input, not a runtime guarantee — a typo like `"intermittent": "false"` parses to the STRING
+    // `"false"`, which is truthy in JS. Under plain truthiness that typo would silently grant
+    // BOTH-direction exemption to an entry the author meant to be an ordinary plain one, bypassing the
+    // one-way ratchet (clause 2) the moment it starts passing. Tightened rather than refused outright: a
+    // non-`true` value degrading to "ordinary plain entry" is the least surprising reading of a malformed
+    // field, and matches how the rest of this function already treats a missing `intermittent`
+    // (`undefined`).
+    if (known.get(key)!.intermittent === true) {
       intermittentListings.push({ key, statuses });
       continue; // proven flaky: passing is expected some runs, so it can't retire the entry either
     }
@@ -333,7 +426,10 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
   // which evidence by reference, "see that entry above", rather than repeating the same run IDs four
   // times) to be rewritten to satisfy a stricter format.
   for (const [key, entry] of [...known.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
-    if (!entry.intermittent) continue;
+    // `=== true`, matching the clause 2/3 check above — same reasoning: a malformed non-boolean value
+    // (e.g. the string `"false"`) must not silently opt an entry INTO the evidence bar it never asked
+    // for either. It falls back to "ordinary plain entry" like `undefined` does, consistently.
+    if (entry.intermittent !== true) continue;
     const reasonOk = typeof entry.reason === "string" && entry.reason.trim().length >= MIN_INTERMITTENT_REASON_LENGTH;
     const ticketOk = typeof entry.ticket === "string" && TICKET_ID_PATTERN.test(entry.ticket.trim());
     if (reasonOk && ticketOk) continue;

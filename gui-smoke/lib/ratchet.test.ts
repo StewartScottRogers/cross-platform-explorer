@@ -12,7 +12,17 @@ import fs from "node:fs";
 import { describe, it } from "node:test";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { caseKey, evaluate, suggestedKnownFailingEntry, type CaseResult, type KnownFailingFile } from "./ratchet.js";
+import {
+  caseKey,
+  evaluate,
+  reduceResultChunks,
+  suggestedKnownFailingEntry,
+  toCaseStatus,
+  type CaseResult,
+  type KnownFailingCase,
+  type KnownFailingFile,
+  type RawResultChunk,
+} from "./ratchet.js";
 
 const SAMPLES = "samples.smoke.ts";
 const SAVED_SEARCH = "saved-search.smoke.ts";
@@ -608,5 +618,178 @@ describe("evaluate — clause 7: UNEVIDENCED INTERMITTENT (CPE-1680)", () => {
 
     assert.deepEqual(result.unevidencedIntermittent, []);
     assert.ok(!result.messages.some((m) => m.includes("UNEVIDENCED INTERMITTENT")));
+  });
+});
+
+// CPE-1680 (reviewer, attempt 2): the first pass's clause-6 tests all hand-constructed
+// `CaseResult`s with `status: "unknown"` — they exercised `evaluate()`'s REACTION to an
+// already-`"unknown"` status, but never the mapping that actually PRODUCES `"unknown"` from a raw wdio
+// state string. That mapping (`toCaseStatus`) used to live only inside `scripts/run-ratchet.ts`, outside
+// `test:unit`'s `lib/**/*.test.ts` glob — a reviewer mutation reverting its fallback to `"skipped"` left
+// all 59 tests green. It now lives in `lib/ratchet.ts` as a pure function (`toCaseStatus` +
+// `reduceResultChunks`), reachable from here, so THIS is the test that actually catches that mutation.
+describe("toCaseStatus — the raw wdio state reduction itself (CPE-1680, the production mapping finding #1 is about)", () => {
+  it("recognises the four real wdio states unchanged", () => {
+    assert.equal(toCaseStatus("passed"), "passed");
+    assert.equal(toCaseStatus("failed"), "failed");
+    assert.equal(toCaseStatus("skipped"), "skipped");
+    assert.equal(toCaseStatus("pending"), "pending");
+  });
+
+  it("reduces an unrecognised state string to \"unknown\", never \"skipped\"", () => {
+    // "broken" stands in for any state this ratchet has never seen: a new wdio version, a new runner
+    // mode, a state produced by a crash path.
+    assert.equal(toCaseStatus("broken"), "unknown");
+    assert.notEqual(toCaseStatus("broken"), "skipped");
+  });
+
+  it("reduces a MISSING state (undefined) to \"unknown\", never \"skipped\"", () => {
+    assert.equal(toCaseStatus(undefined), "unknown");
+    assert.notEqual(toCaseStatus(undefined), "skipped");
+  });
+});
+
+describe("reduceResultChunks — the pure @wdio/json-reporter chunk reduction (CPE-1680)", () => {
+  it("reduces a passing test, a failing test, and an unrecognised-state test from one raw chunk", () => {
+    const chunk: RawResultChunk = {
+      specs: ["/abs/path/to/specs/samples.smoke.ts"],
+      suites: [
+        {
+          name: "samples",
+          tests: [
+            { name: "a passing case", state: "passed" },
+            { name: "a failing case", state: "failed" },
+            { name: "a case wdio reports a brand-new state for", state: "some-future-wdio-state" },
+          ],
+        },
+      ],
+    };
+
+    const results = reduceResultChunks([chunk]);
+
+    assert.deepEqual(
+      results.sort((a, b) => a.test.localeCompare(b.test)),
+      [
+        { spec: "samples.smoke.ts", test: "a case wdio reports a brand-new state for", status: "unknown" },
+        { spec: "samples.smoke.ts", test: "a failing case", status: "failed" },
+        { spec: "samples.smoke.ts", test: "a passing case", status: "passed" },
+      ],
+    );
+  });
+
+  it("takes the spec's basename regardless of OS path separator", () => {
+    const posixChunk: RawResultChunk = {
+      specs: ["/home/runner/work/repo/gui-smoke/specs/samples.smoke.ts"],
+      suites: [{ tests: [{ name: "a case", state: "passed" }] }],
+    };
+    const windowsChunk: RawResultChunk = {
+      specs: ["Z:\\repos\\cross-platform-explorer\\gui-smoke\\specs\\samples.smoke.ts"],
+      suites: [{ tests: [{ name: "a case", state: "passed" }] }],
+    };
+
+    assert.equal(reduceResultChunks([posixChunk])[0]!.spec, "samples.smoke.ts");
+    assert.equal(reduceResultChunks([windowsChunk])[0]!.spec, "samples.smoke.ts");
+  });
+
+  it("a failing hook becomes a synthetic case, unlisted by construction, using the REAL wdio-shaped quoted title", () => {
+    // wdio's own literal hook title — the quotes are PART of the string, not added by us.
+    const hookTitle = `"before all" hook`;
+    const chunk: RawResultChunk = {
+      specs: ["network.smoke.ts"],
+      suites: [
+        {
+          tests: [],
+          hooks: [{ title: hookTitle, state: "failed", error: { message: "boom" } }],
+        },
+      ],
+    };
+
+    const results = reduceResultChunks([chunk]);
+
+    // Expected value computed the SAME way production code builds it (`record()`'s `<hook> "${title}"`),
+    // rather than hand-counted — a hand-typed quote count is exactly the kind of transcription error this
+    // ticket is about avoiding.
+    assert.deepEqual(results, [
+      { spec: "network.smoke.ts", test: `<hook> "${hookTitle}"`, status: "failed" },
+    ]);
+  });
+
+  it("a passing hook (no error) produces no synthetic case", () => {
+    const chunk: RawResultChunk = {
+      specs: ["network.smoke.ts"],
+      suites: [{ tests: [], hooks: [{ title: "before all hook", state: "passed" }] }],
+    };
+
+    assert.deepEqual(reduceResultChunks([chunk]), []);
+  });
+
+  it("a duplicate key across chunks keeps FAILED as sticky (a failure anywhere wins)", () => {
+    const passingChunk: RawResultChunk = {
+      specs: ["samples.smoke.ts"],
+      suites: [{ tests: [{ name: "flaky within one run", state: "passed" }] }],
+    };
+    const failingChunk: RawResultChunk = {
+      specs: ["samples.smoke.ts"],
+      suites: [{ tests: [{ name: "flaky within one run", state: "failed" }] }],
+    };
+
+    const results = reduceResultChunks([passingChunk, failingChunk]);
+    assert.deepEqual(results, [{ spec: "samples.smoke.ts", test: "flaky within one run", status: "failed" }]);
+  });
+
+  it("end-to-end: an unrecognised state surviving the REAL reduction still reds evaluate() (clause 6)", () => {
+    // The full pipeline a real CI run exercises: raw chunk -> reduceResultChunks -> evaluate(). This is
+    // the test the reviewer's mutation (toCaseStatus's fallback reverted to "skipped") is meant to catch.
+    const chunk: RawResultChunk = {
+      specs: ["samples.smoke.ts"],
+      suites: [{ tests: [{ name: "a case wdio reports an unknown state for", state: "totally-new-state" }] }],
+    };
+    const results = reduceResultChunks([chunk]);
+
+    const result = evaluate({ results, knownFailing: { cases: [] }, expectedSpecCount: 1 });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.unknownStates, [caseKey("samples.smoke.ts", "a case wdio reports an unknown state for")]);
+  });
+});
+
+// CPE-1680 (UAT, non-blocking footgun): `known-failing.json` is hand-edited JSON, so a typo like
+// `"intermittent": "false"` (the STRING, not the boolean) used to be treated as truthy — silently
+// granting an entry BOTH-direction exemption (bypassing the one-way ratchet, clause 2) even though the
+// author almost certainly meant "not intermittent". Both checks are now `=== true`.
+describe("evaluate — a non-boolean 'intermittent' value is never treated as intermittent (CPE-1680, UAT)", () => {
+  const target = "opens samples/text/data.json: no crash + preview renders or gracefully degrades";
+
+  // `known-failing.json` is hand-edited JSON: at runtime a malformed value can appear despite the
+  // `intermittent?: boolean` type, so the fixture casts through `unknown` the same way a real
+  // `JSON.parse` result would arrive untyped.
+  function knownFailingWithMalformedIntermittent(): KnownFailingFile {
+    const malformed = {
+      spec: SAMPLES,
+      test: target,
+      reason: "typo'd intermittent value — meant to be a plain entry",
+      ticket: "CPE-1680",
+      intermittent: "false", // malformed: a STRING, truthy in JS — not the boolean `false`
+    } as unknown as KnownFailingCase;
+    return { cases: [malformed] };
+  }
+
+  it("a case that always fails is NOT listed as intermittent, and clause 7's evidence bar does not apply", () => {
+    const results: CaseResult[] = [{ spec: SAMPLES, test: target, status: "failed" }];
+    const result = evaluate({ results, knownFailing: knownFailingWithMalformedIntermittent(), expectedSpecCount: 1 });
+
+    assert.equal(result.ok, true); // behaves as an ordinary plain entry: still failing, exemption doing its job
+    assert.deepEqual(result.intermittentListings, []);
+    assert.deepEqual(result.unevidencedIntermittent, []); // clause 7 is scoped to intermittent === true only
+  });
+
+  it("once the case PASSES, the one-way ratchet (clause 2) still fires — the typo did not grant a bypass", () => {
+    const results: CaseResult[] = [{ spec: SAMPLES, test: target, status: "passed" }];
+    const result = evaluate({ results, knownFailing: knownFailingWithMalformedIntermittent(), expectedSpecCount: 1 });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.fixedButStillListed, [caseKey(SAMPLES, target)]);
+    assert.deepEqual(result.intermittentListings, []);
+    assert.ok(result.messages.some((m) => m.includes("RATCHET") && m.includes(target)));
   });
 });
