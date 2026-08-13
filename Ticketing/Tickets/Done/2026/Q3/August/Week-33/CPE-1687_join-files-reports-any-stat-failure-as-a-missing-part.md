@@ -80,7 +80,7 @@ in the PR body.
 
 ## Work Log
 
-**2026-08-12 — fixed, PR #868.**
+**2026-08-12 — fixed, PR #869.**
 
 `crates/server/src/split_join.rs:309` now classifies instead of collapsing, via a small pure
 `part_stat_error(i, p, &io::Error)`: `ErrorKind::NotFound` keeps `part {i} missing: {path}`, every other
