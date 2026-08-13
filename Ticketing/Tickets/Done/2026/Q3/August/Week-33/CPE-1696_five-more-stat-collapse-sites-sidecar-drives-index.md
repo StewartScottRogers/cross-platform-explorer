@@ -3,11 +3,11 @@ id: CPE-1696
 title: Nine more stat-collapse sites — two of them fail open into a silent overwrite
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
