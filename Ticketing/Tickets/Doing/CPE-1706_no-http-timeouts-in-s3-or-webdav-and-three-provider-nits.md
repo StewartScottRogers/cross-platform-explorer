@@ -112,3 +112,72 @@ rather than fixed only in the one that happened to be under review.
 
 Related: **CPE-1683** (which surfaced them), **CPE-1684** / **CPE-1685** (the next consumers of this
 transport), **CPE-1398** (the WebDAV parser hardening whose crate carries the same missing timeouts).
+
+## Work Log
+
+**2026-08-13** — Worked on branch `cpe-1706-http-timeouts`. All six items done; nothing deferred.
+
+### Item 1 — the values chosen, and why
+
+Confirmed against the vendored source rather than from memory: `ureq` 2.12.1 `AgentBuilder::timeout_read`
+and `timeout_write` both default to `None` ("requests may block forever on reads by default", `agent.rs`),
+while `timeout_connect` already defaults to 30 s (`agent.rs:256`) — so **connect was the one phase that was
+never unbounded**, and read/write were the whole exposure.
+
+- `TIMEOUT_READ` / `TIMEOUT_WRITE` = **30 s**, in both crates. These are *per read/write*, not per request:
+  the clock restarts on every byte, so they bound a **stall** and never a slow-but-progressing transfer.
+  That is the property a large listing (or a large `read`) over a poor link needs — it may take as long as
+  it takes provided it keeps moving. 30 s is a wide margin over any real gateway's time-to-first-byte
+  (AWS's own SDKs use 30–60 s for the same knob).
+- `TIMEOUT_CONNECT` = **30 s**, set explicitly in both crates. Identical to `ureq`'s current default, so it
+  changes nothing today; it pins the value against a future `ureq` default change.
+- **`ureq`'s overall `.timeout()` is deliberately NOT set**, in either crate. Two reasons, both checked in
+  the source: (a) it caps a whole request regardless of progress, so it would kill a legitimate
+  multi-minute GET of a large object over a bad connection — a real user, not a hypothetical; (b) it
+  *takes precedence over* `timeout_read`/`timeout_write` (`agent.rs:476-477`) rather than adding to them,
+  so setting it trades a good bound for a worse one. It also would not solve the actual problem, which is
+  per-**listing**, not per-**request** — see next.
+- `MAX_LIST_WALL_CLOCK` = **10 min**, `cpe-s3` only. This is the bound a per-read timeout *cannot* give and
+  the reason the ticket's threat model needed more than the agent knobs: a server dribbling one byte per
+  29 s never trips `timeout_read`, and `MAX_LIST_PAGES` then multiplies that — 1000 pages × a 30 s stall is
+  **~8 hours of held `spawn_blocking` thread**, not meaningfully better than unbounded. A deadline over the
+  whole `list` call is the only knob whose units match the risk. 10 min is set against the *legitimate*
+  worst case, not the median: a listing cannot legitimately exceed `MAX_LIST_ENTRIES` (200 000), which at
+  `max-keys=1000` is **200 pages, not 1000**, and even a punishing 2 s per page finishes those in ~400 s.
+  **What this knowingly tolerates:** a hostile endpoint can still hold one blocking thread for ten minutes.
+  That is the price of not breaking the real user on the bad link, and it is bounded, which is the point.
+- `cpe-webdav` gets **no** listing deadline, deliberately: its `list` is a single `PROPFIND` with `Depth: 1`
+  and no pagination loop, so there is no page count for a per-request stall to be multiplied by.
+
+Testing note: the stall tests inject a short `Duration` through `connect_with_timeouts`, which is the same
+`build_agent` → `list`/`read` → `req.call()` path `connect` drives — only the `Duration`s differ — because
+waiting out the shipped 30 s would cost 30 s of CI wall clock on three OSes. The shipped values themselves
+are pinned by a separate assertion test, so removing the knob reds one test and gutting the value reds the
+other. The error *text* is not asserted beyond the URL/path prefix: a socket read timeout surfaces through
+`std::io` differently per platform (`WouldBlock` on Unix, `TimedOut` on Windows) and CI is a 3-OS matrix.
+
+### Items 2–6
+
+- **2.** Page-level `IsTruncated`/`NextContinuationToken` now read from `root_element().children()`, and
+  `Key`/`Size`/`Prefix` from their own container's `children()` — plus `Contents`/`CommonPrefixes`
+  themselves, for consistency (a `<Contents>` nested inside a `<Contents>` was previously a duplicate
+  entry). Two tests, one per level, so the two changes red separately.
+- **3.** `MAX_KEY_LEAF_BYTES = 1024`, matching real S3's own key limit; an over-long leaf is dropped exactly
+  like any other unsafe name, on both the `Contents` and `CommonPrefixes` paths.
+- **4.** `ci.yml`'s s3 comment now says the real reason (every server the tests talk to is spawned
+  in-process on loopback), keeping the unchanged conclusion.
+- **5.** `call_with_deadline` added; `a_server_that_never_stops_truncating_is_capped_by_max_list_pages`
+  routed through it at 60 s (~235× the green path's measured 255 ms). Proven: with `MAX_LIST_PAGES` raised
+  to `usize::MAX` the test reds at exactly 60.01 s instead of running to the CI job limit.
+- **6.** An over-cap body is pinned to the honest parse error `s3: bad ListObjectsV2 XML: the root node was
+  opened but never closed` — exactly the string the ticket predicted. The fixture keeps its keys under
+  `MAX_KEY_LEAF_BYTES` and its count under `MAX_LIST_ENTRIES` so that removing the body cap makes the call
+  return **`Ok` with 9882 entries**, an unambiguous break rather than a different cap's error.
+
+### Evidence
+
+Eleven guards broken one at a time, each producing a distinct red, restored with `git checkout --` and
+re-confirmed green with a real `Compiling` line. Full pasted output in the PR body.
+
+Suite cost is unchanged: `cpe-s3` 117 tests in 1.18 s (was 110 in 1.30 s), `cpe-webdav` 16 in 0.63 s.
+`cargo clippy --all-targets -- -D warnings` clean in both, plus downstream `crates/vfs`.
