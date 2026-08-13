@@ -72,6 +72,20 @@ pub struct LinkStatus {
 /// pre-delete TOCTOU recheck, only proceeds with the destructive delete when `broken` is true, so
 /// treating "unknown" as "not confirmed broken" is the safe default (never destroys a link on an
 /// uncertain read), not merely the honest one.
+///
+/// **Decided, documented (PR #874 review, "F6"): a cyclic/self-referential symlink is deliberately NOT
+/// flagged `broken` by this function.** Unlike a genuine permission-denied stat, an ELOOP-family failure
+/// (`ErrorKind::FilesystemLoop` on Unix, `ERROR_CANT_RESOLVE_FILENAME` on Windows) is not actually an
+/// "unknown" — the OS has definitively said the chain can never resolve — so this IS a case this
+/// function could in principle classify as confidently broken rather than folding it into "everything
+/// non-`NotFound` is unknown". It stays folded in anyway, for the same reason `split_join.rs`'s own
+/// CPE-1687 guard does (see its `a_manifest_that_cannot_be_stat_ed_is_not_reported_as_not_found` test
+/// comment): `ErrorKind::FilesystemLoop` is not yet practical to match on reliably against this crate's
+/// `rust-version = "1.77.2"` MSRV, and this repo's established practice (there, and here) is not to
+/// special-case an error kind it can't name in code. The trade-off this creates: `RepairLinkDialog` will
+/// no longer offer to repair a cyclic self-loop link (`broken` flips `true` → `false` for that one
+/// case), pinned by `link_status_does_not_flag_a_cyclic_self_loop_as_broken` below. If a later MSRV bump
+/// makes matching `FilesystemLoop` practical, add it as a second `true` arm here and update that test.
 fn target_stat_is_broken(stat_err_kind: Option<std::io::ErrorKind>) -> bool {
     stat_err_kind == Some(std::io::ErrorKind::NotFound)
 }
@@ -224,14 +238,17 @@ mod tests {
     }
 
     /// The end-to-end half, driving the real `link_status` entry point rather than the pure classifier
-    /// above. Constructed with a PARENT-directory traversal deny on the directory the target lives in —
-    /// the mechanism CPE-1687's brief names (a per-file deny ACE does not block `stat`, on either OS;
-    /// see `fsutil::deny_dir_traversal`'s doc comment). Two independent conditions must both be
-    /// constructible on this machine (symlink creation, then the deny), so both get their own loud,
-    /// non-silent skip notice — a bare "skip" here would be exactly the kind of under-covered sweep this
-    /// ticket exists to close a fourth time. MAY SKIP on Windows even with symlink privilege: measured
-    /// live that Windows's default "bypass traverse checking" privilege defeats a parent-directory deny
-    /// for path resolution — the deterministic test above is what pins the taxonomy unconditionally.
+    /// above. `link_status` calls `fs::metadata(p)` (it needs to *follow* the link, not just check
+    /// existence), so this genuinely belongs on `fsutil::deny_dir_traversal` — unlike the `try_exists`
+    /// sites (`disk_usage`, `native_meta`, `move_exact_impl`, `crates/sftp` `open`), which the PR #874
+    /// review found need a *different* mechanism (`fsutil::deny_stat_of`) because `try_exists` is a
+    /// different syscall on Windows that a target-level deny ACE does refuse. `deny_dir_traversal` itself
+    /// stays genuinely Unix-only (see its doc comment for the measurement); this leg SKIPS on Windows
+    /// even with symlink privilege, for real, and that's the correct mechanism for this specific site —
+    /// the deterministic test above is what pins the taxonomy on every OS/account regardless. Two
+    /// independent conditions must both be constructible on this machine (symlink creation, then the
+    /// deny), so both get their own loud, non-silent skip notice — a bare "skip" here would be exactly
+    /// the kind of under-covered sweep this ticket exists to close a fourth time.
     #[test]
     fn link_status_does_not_report_broken_for_a_permission_denied_target_not_missing() {
         use std::path::Path;
@@ -284,6 +301,36 @@ mod tests {
              just unreadable through its parent"
         );
         // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F6 (PR #874 review), pinning the decision documented on `target_stat_is_broken`: a cyclic
+    /// self-loop symlink is NOT flagged `broken`, even though — unlike a permission-denied stat — the OS
+    /// has definitively said the chain can never resolve. Needs no OS permission mechanism (a self-loop
+    /// symlink is constructible everywhere symlink creation itself is permitted), so it runs for real
+    /// wherever the existing symlink-creation-privilege gate lets it (this file's established pattern —
+    /// see `symlink_points_at_target_where_permitted` above), skipping silently only on unprivileged
+    /// Windows exactly as every other symlink-creation test in this file already does.
+    #[test]
+    fn link_status_does_not_flag_a_cyclic_self_loop_as_broken() {
+        let d = scratch();
+        let link = d.join("loopy");
+        // A relative self-loop: the link's own stored target is just its own file name, so resolving it
+        // chases the link back to itself — the same construction `dangling_links_scan`'s
+        // `self_loop_symlink_is_cyclic` test uses, here driving `link_status` instead of the walker.
+        match create_symlink("loopy", &link.to_string_lossy()) {
+            Ok(()) => {
+                let status = link_status(&link.to_string_lossy());
+                assert!(status.is_symlink, "a self-loop is still a symlink");
+                assert!(
+                    !status.broken,
+                    "documented CPE-1692/F6 decision: a cyclic loop folds into the same \
+                     not-confidently-classified bucket as an unknown stat failure, not into `broken`"
+                );
+            }
+            Err(_) => { /* unprivileged Windows — skip (symlink creation gated), same as every other
+                          symlink-creation test in this file */ }
+        }
+        let _ = fs::remove_dir_all(&d);
     }
 
     #[test]

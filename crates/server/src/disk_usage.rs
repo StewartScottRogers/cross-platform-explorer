@@ -211,39 +211,37 @@ mod tests {
     }
 
     /// The end-to-end half, driving the real `dir_size` entry point rather than the pure classifier
-    /// above (same split as `split_join`'s CPE-1687 guard). Constructed with a PARENT-directory
-    /// traversal deny (the mechanism CPE-1687's brief names — a per-file/per-dir deny on the target
-    /// itself does not block `stat`, on either OS; see `fsutil::deny_dir_traversal`'s doc comment). MAY
-    /// SKIP on Windows: measured live that Windows's default "bypass traverse checking" privilege
-    /// defeats a parent-directory deny for path resolution, so this leg only runs for real on Unix
-    /// (non-root) — the deterministic test above is what pins the taxonomy on every OS/account.
+    /// above (same split as `split_join`'s CPE-1687 guard). `dir_size` calls `p.try_exists()`, so this
+    /// uses `fsutil::deny_stat_of` (a deny directly on the target itself on Windows, on the target's
+    /// parent on Unix — see that helper's doc comment for the PR #874 review measurement establishing
+    /// this split; a plain `deny_dir_traversal` here would either skip needlessly on Windows or — worse —
+    /// pass *vacuously* if pointed at the wrong probe, which is what the review caught on this exact site
+    /// before this fix). Runs for REAL on both platforms now; both are asserted, not just hoped for.
     #[test]
     fn dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing() {
         let d = scratch("denied");
-        let denied_dir = d.join("denied");
-        fs::create_dir_all(&denied_dir).unwrap();
-        let inside = denied_dir.join("inside.txt");
+        let inside = d.join("inside.txt");
         fs::write(&inside, b"secret").unwrap();
 
         // Armed before the deny so cleanup runs on every exit path (skip, assert failure, or success) —
         // mirrors split_join.rs's `Restore` pattern (Evidence Rules: a red run must never leave debris).
-        struct Restore<'a>(&'a Path, &'a Path);
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                crate::fsutil::undo_deny_dir_traversal(self.0);
-                let _ = fs::remove_dir_all(self.1);
+                crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                let _ = fs::remove_dir_all(self.2);
             }
         }
-        let _restore = Restore(&denied_dir, &d);
+        let _restore = Restore(&inside, &d, &d);
 
-        if !crate::fsutil::deny_dir_traversal(&denied_dir, &inside) {
+        if !crate::fsutil::deny_stat_of(&inside) {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),
-                "[CPE-1692] SKIPPED dir_size permission-denied leg: could not deny traversal on {} on \
-                 this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                "[CPE-1692] SKIPPED dir_size permission-denied leg: could not deny stat of {} on this \
+                 machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
                  assertions do NOT cover CPE-1692 for disk_usage::dir_size.",
-                denied_dir.display()
+                inside.display()
             );
             return;
         }
@@ -254,6 +252,17 @@ mod tests {
             "a permission-denied stat must not be reported as absence — the file is right there: {err}"
         );
         // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F7 (PR #874 review): the honest case, pinned at the real `dir_size` entry point, not just at the
+    /// pure classifier (`dir_size_stat_error_says_not_found_only_for_a_genuine_absence` above) — a
+    /// classifier test alone cannot see a wiring regression that stops calling the classifier at all.
+    #[test]
+    fn dir_size_on_a_genuinely_missing_path_still_says_not_found_at_the_real_entry_point() {
+        let d = scratch("honest");
+        let err = dir_size(&d.join("truly-missing.txt").to_string_lossy()).unwrap_err();
+        assert!(err.contains("not found"), "a real absence must still say so: {err}");
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Create a directory symlink; returns false on unprivileged Windows so the test can skip.

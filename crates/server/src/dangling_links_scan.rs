@@ -307,16 +307,17 @@ mod tests {
     }
 
     /// The end-to-end half, driving the real `find_dangling_links` entry point rather than the pure
-    /// classifier above. Constructed with a PARENT-directory traversal deny on the directory the target
-    /// lives in — the mechanism CPE-1687's brief names (a per-file deny ACE does not block `stat`, on
-    /// either OS; see `fsutil::deny_dir_traversal`'s doc comment). Unix-only like the walk's other
-    /// symlink tests (symlink creation here is unconditional, unlike `links.rs`'s gated match), so a
-    /// runtime probe still covers the case where the account running the suite can't set the deny (e.g.
-    /// root, where permission bits are inert) — that leg gets its own loud skip notice per the Evidence
-    /// Rules. Real coverage on Windows would need a different mechanism (measured live: Windows's
-    /// default "bypass traverse checking" privilege defeats a parent-directory deny) — out of scope here
-    /// since the walk's symlink tests are Unix-only already; the deterministic test above is what pins
-    /// the taxonomy on every OS.
+    /// classifier above. This walk calls `fs::metadata(&resolved)` (it needs to follow the target, not
+    /// just check existence), so `fsutil::deny_dir_traversal` is the right mechanism here — unlike the
+    /// `try_exists`-based CPE-1692 sites (`disk_usage`, `native_meta`, `move_exact_impl`, `crates/sftp`
+    /// `open`), which the PR #874 review found need `fsutil::deny_stat_of` instead, because `try_exists`
+    /// is a different syscall on Windows that a target-level deny ACE does refuse even though
+    /// `fs::metadata` does not (see that helper's doc comment). `deny_dir_traversal` itself stays
+    /// genuinely Unix-only (its own doc comment has the measurement); this leg is `#[cfg(unix)]` like the
+    /// walk's other symlink tests (symlink creation here is unconditional, unlike `links.rs`'s gated
+    /// match), and a runtime probe still covers the case where the account running the suite can't set
+    /// the deny (e.g. root, where permission bits are inert) — that leg gets its own loud skip notice per
+    /// the Evidence Rules; the deterministic test above is what pins the taxonomy on every OS regardless.
     #[cfg(unix)]
     #[test]
     fn walk_dangling_links_does_not_flag_a_permission_denied_target_as_missing() {

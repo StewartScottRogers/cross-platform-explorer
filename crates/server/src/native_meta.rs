@@ -311,38 +311,37 @@ mod tests {
     }
 
     /// The end-to-end half, driving the real `write`/`read`/`remove` entry points rather than the pure
-    /// classifier above. Constructed with a PARENT-directory traversal deny — the mechanism CPE-1687's
-    /// brief names (a per-file deny ACE does not block `stat`, on either OS; see
-    /// `fsutil::deny_dir_traversal`'s doc comment). MAY SKIP here: measured live that Windows's default
-    /// "bypass traverse checking" privilege defeats a parent-directory deny for path resolution, so this
-    /// leg's real coverage depends on the account/policy — the deterministic test above is what pins the
-    /// taxonomy unconditionally.
+    /// classifier above. `write`/`read`/`remove` all call `require_present`, which calls
+    /// `path.try_exists()` — so this uses `fsutil::deny_stat_of` (a deny directly on the target itself on
+    /// Windows, on the target's parent on Unix; see that helper's doc comment for the PR #874 review
+    /// measurement). Runs for REAL on both platforms now — this test previously (`deny_dir_traversal`,
+    /// `fs::metadata`-targeted) always skipped on Windows and had, per the review, *never executed a
+    /// single assertion on any OS* (Windows-only `#[cfg]`, and the old mechanism doesn't move
+    /// `try_exists` either way, so the skip fired every run).
     #[cfg(windows)]
     #[test]
     fn windows_ads_ops_report_the_real_cause_for_a_permission_denied_path_not_missing() {
         let dir = scratch("denied");
-        let denied_dir = dir.join("denied");
-        std::fs::create_dir_all(&denied_dir).unwrap();
-        let inside = denied_dir.join("inside.txt");
+        let inside = dir.join("inside.txt");
         std::fs::write(&inside, b"base").unwrap();
 
-        struct Restore<'a>(&'a Path, &'a Path);
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
         impl Drop for Restore<'_> {
             fn drop(&mut self) {
-                crate::fsutil::undo_deny_dir_traversal(self.0);
-                let _ = std::fs::remove_dir_all(self.1);
+                crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                let _ = std::fs::remove_dir_all(self.2);
             }
         }
-        let _restore = Restore(&denied_dir, &dir);
+        let _restore = Restore(&inside, &dir, &dir);
 
-        if !crate::fsutil::deny_dir_traversal(&denied_dir, &inside) {
+        if !crate::fsutil::deny_stat_of(&inside) {
             use std::io::Write;
             let _ = writeln!(
                 std::io::stderr(),
-                "[CPE-1692] SKIPPED native_meta permission-denied leg: could not deny traversal on {} on \
-                 this machine (elevated/admin, or a filesystem ignoring ACLs). The remaining assertions \
-                 do NOT cover CPE-1692 for native_meta.",
-                denied_dir.display()
+                "[CPE-1692] SKIPPED native_meta permission-denied leg: could not deny stat of {} on this \
+                 machine (elevated/admin, or a filesystem ignoring ACLs). The remaining assertions do NOT \
+                 cover CPE-1692 for native_meta.",
+                inside.display()
             );
             return;
         }
@@ -353,15 +352,57 @@ mod tests {
         let remove_err = remove(&inside, &name).unwrap_err();
         for (label, err) in [("write", write_err), ("read", read_err), ("remove", remove_err)] {
             match err {
-                MetaError::Io(msg) => assert!(
-                    !msg.contains("no such path"),
-                    "{label}: a permission-denied stat must not be reported as absence — the file is \
-                     right there: {msg}"
-                ),
+                MetaError::Io(msg) => {
+                    assert!(
+                        !msg.contains("no such path"),
+                        "{label}: a permission-denied stat must not be reported as absence — the file \
+                         is right there: {msg}"
+                    );
+                    // On Windows specifically, `write`'s OWN real ADS-open failure (once the
+                    // `require_present` guard is bypassed) ALSO produces a message that happens not to
+                    // contain "no such path" — a target-level deny ACE never makes `Path::exists()` fail
+                    // on Windows (F1, PR #874 review), so a wiring regression back to `!path.exists()`
+                    // doesn't trip the buggy branch for `write` at all; it silently falls through to the
+                    // real ADS `OpenOptions::open`, which fails for its own unrelated reason and would
+                    // pass the negative assertion above vacuously (measured: `write`'s real failure is
+                    // bare `"Access is denied. (os error 5)"`, with no path prefix — `read`/`remove`
+                    // instead betray the same regression by returning `Ok` at all, since the ADS stream
+                    // was never created). This positively pins the actual code path taken: only
+                    // `require_present`'s classifier wraps the OS error with the full target path, so a
+                    // wiring regression that skips it (falling through to the operation's own raw error)
+                    // is caught here even where the negative assertion above is not.
+                    assert!(
+                        msg.contains(&inside.display().to_string()),
+                        "{label}: the classifier's own path-prefixed wrapper must be present — its \
+                         absence means the code fell through to the raw ADS I/O error instead of being \
+                         caught by the stat-existence guard: {msg}"
+                    );
+                }
                 other => panic!("{label}: expected an Io error naming the real cause, got {other:?}"),
             }
         }
         // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F7 (PR #874 review): the honest case, pinned at the real `write`/`read`/`remove` entry points, not
+    /// just the pure classifier — a classifier test alone cannot see a wiring regression that stops
+    /// calling it. `read_on_a_missing_path_is_an_io_error` above already covers `read`; this adds
+    /// `write`/`remove` and asserts the message content, not just the error variant.
+    #[test]
+    fn write_and_remove_on_a_genuinely_missing_path_say_no_such_path_at_the_real_entry_points() {
+        let dir = scratch("honest");
+        let nope = dir.join("truly-missing.txt");
+        let name = cpe_name("tags");
+
+        match write(&nope, &name, b"x") {
+            Err(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "write: {msg}"),
+            other => panic!("write on a real absence must be an Io(\"no such path\") error, got {other:?}"),
+        }
+        match remove(&nope, &name) {
+            Err(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "remove: {msg}"),
+            other => panic!("remove on a real absence must be an Io(\"no such path\") error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
