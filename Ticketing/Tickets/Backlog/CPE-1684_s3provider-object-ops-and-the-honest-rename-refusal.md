@@ -109,6 +109,46 @@ Route to `map_s3_error` when there IS a body. Say in the code which rule you app
 both bodiless cases with tests — otherwise the "distinguishable" criterion passes in unit tests that
 supply a body and fails against every real server.
 
+## `ureq` will SILENTLY DROP a header whose value has any byte outside {SP, HTAB} ∪ [0x21,0x7E]
+
+Added by the Foreman from the PR #883 (CPE-1695) review, 2026-08-13. This is a landmine sitting exactly
+where this ticket works, found by tracing the real send path rather than reading the obvious functions.
+
+`ureq`'s write loop (`ureq-2.12.1/src/unit.rs:467-473`) does **not** pass a raw value to
+`write_header`. It calls `header.value()` first and skips the header entirely when that returns `None`:
+
+```rust
+for header in &unit.headers {
+    if let Some(v) = header.value() {
+        prelude.write_header(header.name(), v)?;
+    }
+}
+```
+
+`Header::value()` (`header.rs:99-109`) filters through `is_field_vchar_or_obs_fold`
+(`header.rs:231-237`), which permits only `{SP, HTAB} ∪ [0x21, 0x7E]`. The filter applies to the whole
+`Option<&str>`, so **one** non-conforming byte makes `value()` return `None` and the entire header
+disappears from the outgoing request — silently, with no error.
+
+Bytes that trigger it include VT (`0x0B`), FF (`0x0C`), and **anything >= 0x80** — which means **NBSP**
+(`0xC2 0xA0`), the character CPE-1695 deliberately decided to *preserve* through canonicalisation because
+S3 does not trim it either.
+
+**Why this is your problem, not CPE-1695's.** A dropped signed header desynchronises what-was-signed from
+what-was-sent — the same opaque `SignatureDoesNotMatch` the S3 slice has been working to eliminate,
+arriving by a different route. CPE-1695 fixed the canonicalisation side correctly; it cannot fix the
+transport side because the transport does not exist yet. **You are the transport.**
+
+Decide, and write the decision down:
+
+- refuse the request loudly at our layer when a signed header value contains a byte the client will not
+  send (so the failure names the byte instead of arriving as a signature mismatch), or
+- encode the value, or
+- use a client without that filter.
+
+Do **not** assume the bytes reach the wire. A test that signs a header and asserts the signature is
+correct will pass while the header never leaves the process.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1681** and **CPE-1682**.
