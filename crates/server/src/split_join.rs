@@ -181,9 +181,7 @@ fn resolve_manifest_path(first_part_or_manifest: &Path) -> Result<PathBuf, Strin
         if stem.is_empty() {
             return Err(format!("{file_name}: not a valid split manifest name"));
         }
-        if !first_part_or_manifest.is_file() {
-            return Err(format!("{}: manifest not found", first_part_or_manifest.display()));
-        }
+        manifest_must_be_a_file(first_part_or_manifest, None)?;
         return Ok(first_part_or_manifest.to_path_buf());
     }
 
@@ -205,10 +203,48 @@ fn resolve_manifest_path(first_part_or_manifest: &Path) -> Result<PathBuf, Strin
     }
     let dir = first_part_or_manifest.parent().unwrap_or_else(|| Path::new("."));
     let manifest_path = dir.join(format!("{stem}{MANIFEST_SUFFIX}"));
-    if !manifest_path.is_file() {
-        return Err(format!("{}: manifest not found for part {file_name}", manifest_path.display()));
-    }
+    manifest_must_be_a_file(&manifest_path, Some(file_name))?;
     Ok(manifest_path)
+}
+
+/// The manifest equivalent of [`part_stat_error`], and it exists for the same reason.
+///
+/// These two call sites used `!Path::is_file()`, which is `metadata().map(..).unwrap_or(false)` — it folds
+/// **every** stat failure into `false`, so a manifest that is sitting in the folder but cannot be stat'ed
+/// (permission denied, a dead mount, a link that will not resolve) was reported as *"manifest not found"*.
+/// Exactly the bug this ticket is named after, one call earlier: `resolve_manifest_path` runs before any
+/// part is touched, so `join_files` could answer "not found" about a file the user can see before it ever
+/// reached the fixed line.
+///
+/// Found by the PR #869 reviewer, who also established the sharper point — a `map_err(|_| ..)` sweep cannot
+/// find this, and neither can a search for the *word* "missing", because the spelling here is a negated
+/// `is_file()` producing "not found". `Path::try_exists()` is the std API that returns `io::Result` instead
+/// of collapsing; `metadata()` is used here because the type matters too (a directory named like a manifest
+/// is not a manifest, and saying so is more useful than "not found").
+fn manifest_must_be_a_file(path: &Path, for_part: Option<&str>) -> Result<(), String> {
+    match std::fs::metadata(path) {
+        Ok(m) if m.is_file() => Ok(()),
+        Ok(_) => Err(manifest_stat_error(path, for_part, None)),
+        Err(e) => Err(manifest_stat_error(path, for_part, Some(&e))),
+    }
+}
+
+/// The pure classification [`manifest_must_be_a_file`] delegates to — split out for the same reason
+/// [`part_stat_error`] is: the taxonomy is then testable on every OS and account without depending on
+/// permission bits, which are privilege- and filesystem-dependent.
+///
+/// `None` means the `stat` succeeded and the entry simply is not a file.
+fn manifest_stat_error(path: &Path, for_part: Option<&str>, e: Option<&std::io::Error>) -> String {
+    let suffix = for_part.map(|f| format!(" for part {f}")).unwrap_or_default();
+    match e {
+        None => format!("{}: not a file, so not a split manifest{suffix}", path.display()),
+        Some(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            format!("{}: manifest not found{suffix}", path.display())
+        }
+        // Not provably absent, and we could not stat it. Say so, in the same shape `part_stat_error`
+        // uses, so a manifest and a part failing the same way read the same way to a user.
+        Some(e) => format!("manifest ({}): {e}{suffix}", path.display()),
+    }
 }
 
 fn load_manifest(path: &Path) -> Result<SplitManifest, String> {
@@ -535,6 +571,57 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
         }
+    }
+
+    /// The same bug, one call earlier, found by the PR #869 reviewer: `resolve_manifest_path` used
+    /// `!Path::is_file()`, which collapses every stat failure to `false`, so a manifest sitting in the
+    /// folder but unstattable came back "manifest not found". It runs *before* any part is touched, so
+    /// `join_files` could give the wrong answer without ever reaching the line this ticket fixed.
+    ///
+    /// Deliberately pure: the classification is tested here on every OS and account, and the end-to-end
+    /// test below constructs a real unstattable entry. Same split as `part_stat_error`.
+    #[test]
+    fn a_manifest_that_cannot_be_stat_ed_is_not_reported_as_not_found() {
+        let p = Path::new("some/dir/a.bin.split-manifest.json");
+
+        // Genuine absence — the one case that may say "not found". Must not regress.
+        let absent =
+            manifest_stat_error(p, None, Some(&std::io::Error::from(std::io::ErrorKind::NotFound)));
+        assert!(absent.contains("manifest not found"), "genuine absence must still say so: {absent}");
+
+        // Every other stat failure is an unknown, not an absence. `!Path::is_file()` folded all of these
+        // into the same `false` and produced "manifest not found" for each.
+        // `ErrorKind::FilesystemLoop` — the kind a self-referential symlink actually produces, and the
+        // one the end-to-end test below constructs for real — is still unstable to *name*, so it cannot
+        // be listed here. `Other` stands in for it: the code branches on `NotFound` and nothing else, so
+        // every non-`NotFound` kind takes the identical path.
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            let e = std::io::Error::new(kind, "the OS said so");
+            let msg = manifest_stat_error(p, None, Some(&e));
+            assert!(!msg.contains("not found"), "a {kind:?} stat failure must not claim absence: {msg}");
+            assert!(msg.contains("the OS said so"), "it must name the real cause: {msg}");
+        }
+
+        // A successful stat of something that is not a file is a *type* answer, not an absence.
+        let wrong_type = manifest_stat_error(p, None, None);
+        assert!(!wrong_type.contains("not found"), "a directory is not an absence: {wrong_type}");
+        assert!(wrong_type.contains("not a file"), "{wrong_type}");
+
+        // The part-name suffix survives on the numbered-part path, so the message still says which part
+        // sent us looking for this manifest.
+        let e = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.");
+        let with_part = manifest_stat_error(p, Some("a.bin.002"), Some(&e));
+        assert!(with_part.contains("for part a.bin.002"), "{with_part}");
+
+        // And a manifest failing at stat reads the same way a part failing at stat does — the point of
+        // the fix is that the user gets one consistent story, not two vocabularies for one problem.
+        let part = part_stat_error(2, p, &e);
+        assert!(!part.contains("missing"), "{part}");
+        assert!(part.contains("Access is denied.") && with_part.contains("Access is denied."));
     }
 
     #[test]
