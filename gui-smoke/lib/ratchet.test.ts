@@ -677,18 +677,46 @@ describe("reduceResultChunks — the pure @wdio/json-reporter chunk reduction (C
     );
   });
 
-  it("takes the spec's basename regardless of OS path separator", () => {
-    const posixChunk: RawResultChunk = {
-      specs: ["/home/runner/work/repo/gui-smoke/specs/samples.smoke.ts"],
-      suites: [{ tests: [{ name: "a case", state: "passed" }] }],
-    };
-    const windowsChunk: RawResultChunk = {
-      specs: ["Z:\\repos\\cross-platform-explorer\\gui-smoke\\specs\\samples.smoke.ts"],
-      suites: [{ tests: [{ name: "a case", state: "passed" }] }],
-    };
+  // CPE-1698: the independent UAT drove five spec-path shapes through the real CLI; four resolved to
+  // the correct basename and one (trailing separator) returned the ENTIRE path instead. All five are
+  // pinned together here so the set can't silently shrink back down to the two shapes this test used to
+  // cover. Expected values match real Node's `path.posix.basename`/`path.win32.basename`.
+  it("takes the spec's basename for all known path shapes (CPE-1698)", () => {
+    const shapes: { label: string; specPath: string; expected: string }[] = [
+      {
+        label: "Windows backslash path",
+        specPath: "Z:\\repos\\cross-platform-explorer\\gui-smoke\\specs\\samples.smoke.ts",
+        expected: "samples.smoke.ts",
+      },
+      {
+        label: "mixed separators",
+        specPath: "C:/repo/gui-smoke\\specs/case-b.smoke.ts",
+        expected: "case-b.smoke.ts",
+      },
+      {
+        label: "trailing separator (the CPE-1698 bug)",
+        specPath: "/home/runner/gui-smoke/specs/case-c.smoke.ts/",
+        expected: "case-c.smoke.ts",
+      },
+      {
+        label: "bare filename, no separator",
+        specPath: "case-d.smoke.ts",
+        expected: "case-d.smoke.ts",
+      },
+      {
+        label: "directory component containing a dot",
+        specPath: "/home/runner/gui-smoke@2.0/specs/case-e.smoke.ts",
+        expected: "case-e.smoke.ts",
+      },
+    ];
 
-    assert.equal(reduceResultChunks([posixChunk])[0]!.spec, "samples.smoke.ts");
-    assert.equal(reduceResultChunks([windowsChunk])[0]!.spec, "samples.smoke.ts");
+    for (const { label, specPath, expected } of shapes) {
+      const chunk: RawResultChunk = {
+        specs: [specPath],
+        suites: [{ tests: [{ name: "a case", state: "passed" }] }],
+      };
+      assert.equal(reduceResultChunks([chunk])[0]!.spec, expected, `shape: ${label}`);
+    }
   });
 
   it("a failing hook becomes a synthetic case, unlisted by construction, using the REAL wdio-shaped quoted title", () => {
