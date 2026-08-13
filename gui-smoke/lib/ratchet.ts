@@ -251,8 +251,11 @@ export function reduceResultChunks(chunks: RawResultChunk[]): CaseResult[] {
  *  separator and still return `"case-c.smoke.ts"`). Filtering out empty segments before taking the last
  *  one matches that real behaviour. */
 function specBasename(specPath: string): string {
-  const parts = specPath.split(/[/\\]/).filter((part) => part.length > 0);
-  return parts.length > 0 ? parts[parts.length - 1]! : specPath;
+  // SCRATCH CPE-1694 CI-PROOF: deliberately reintroducing the CPE-1698 bug (empty trailing segment on
+  // a trailing separator falls through to the `|| specPath` whole-path fallback) to prove the new
+  // "Run gui-smoke unit tests" CI step actually reds a PR. This commit is never meant to land.
+  const parts = specPath.split(/[/\\]/);
+  return parts[parts.length - 1] || specPath;
 }
 
 /** Minimum length (after trimming) a `reason` must clear for an `intermittent: true` entry to pass
