@@ -100,10 +100,14 @@ const MAX_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 /// it carries `MAX_LIST_WALL_CLOCK` on top of these.)
 ///
 /// `redirects(0)` is the pre-existing CPE-1461 policy, kept — see [`WebdavProvider::connect`].
-fn build_agent(timeout_read: Duration, timeout_write: Duration) -> ureq::Agent {
+/// `timeout_connect` is a parameter rather than a direct read of [`TIMEOUT_CONNECT`] for a testing
+/// reason (CPE-1706 round 2): `ureq`'s own default for that knob is *also* 30 s, so asserting the built
+/// agent has `timeout_connect: Some(30s)` passes identically whether the line is wired or deleted. Taking
+/// it as a parameter lets the guard test pass a value nothing else would produce.
+fn build_agent(timeout_read: Duration, timeout_write: Duration, timeout_connect: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
-        .timeout_connect(TIMEOUT_CONNECT)
+        .timeout_connect(timeout_connect)
         .timeout_read(timeout_read)
         .timeout_write(timeout_write)
         .build()
@@ -182,7 +186,7 @@ impl WebdavProvider {
         // redirects, so a future change (or a hostile server today) could bounce a request via a `3xx`
         // toward `file://` or an attacker-controlled host — an SSRF/exfiltration foothold. Refusing to
         // auto-follow surfaces the `3xx` as an error instead; a WebDAV share never needs redirects.
-        let agent = build_agent(timeout_read, timeout_write);
+        let agent = build_agent(timeout_read, timeout_write, TIMEOUT_CONNECT);
         WebdavProvider {
             agent,
             base_url: config.base_url.clone(),
@@ -798,10 +802,15 @@ mod tests {
     /// `agent_config_debug` test uses — so this inspects the built agent rather than the constants.
     #[test]
     fn build_agent_wires_every_timeout_knob_and_deliberately_leaves_the_agent_level_one_unset() {
-        let agent = format!("{:?}", build_agent(TIMEOUT_READ, TIMEOUT_WRITE));
-        assert!(agent.contains("timeout_read: Some("), "timeout_read is not wired: {agent}");
-        assert!(agent.contains("timeout_write: Some("), "timeout_write is not wired: {agent}");
-        assert!(agent.contains("timeout_connect: Some("), "timeout_connect is not wired: {agent}");
+        // Distinctive values nothing else would produce. ureq DEFAULTS timeout_connect to 30 s, so
+        // asserting `Some(30s)` would pass with the line deleted.
+        let agent = format!("{:?}", build_agent(Duration::from_secs(11), Duration::from_secs(12), Duration::from_secs(13)));
+        assert!(agent.contains("timeout_read: Some(11s)"), "timeout_read is not wired: {agent}");
+        assert!(agent.contains("timeout_write: Some(12s)"), "timeout_write is not wired: {agent}");
+        assert!(
+            agent.contains("timeout_connect: Some(13s)"),
+            "timeout_connect is not wired — ureq's own default is 30s, so a `Some(30s)` here would mean              the line was DELETED and the default was showing through: {agent}"
+        );
         assert!(
             agent.contains("timeout: None"),
             "the AGENT-level overall timeout must stay unset — it takes precedence over timeout_read \

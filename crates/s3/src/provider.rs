@@ -274,10 +274,16 @@ const MAX_LIST_WALL_CLOCK: Duration = Duration::from_secs(600);
 /// `redirects(0)` is the pre-existing CPE-1461 policy, kept: a SigV4 signature is computed for one exact
 /// host and path, so following a server-supplied `3xx` would replay it against a target it was never
 /// signed for.
-fn build_agent(timeout_read: Duration, timeout_write: Duration) -> ureq::Agent {
+/// `timeout_connect` is a parameter rather than a direct read of [`TIMEOUT_CONNECT`] for a specific
+/// testing reason (CPE-1706 round 2): `ureq`'s own default for that knob is *also* 30 s, so an assertion
+/// that the built agent has `timeout_connect: Some(30s)` passes identically whether the line is wired or
+/// deleted — the first version of this guard was verified to red on `timeout_write` and **not** on
+/// `timeout_connect` for exactly that reason. Taking it as a parameter lets the test pass a value nothing
+/// else would produce, which is the only way the wiring is observable while the value matches the default.
+fn build_agent(timeout_read: Duration, timeout_write: Duration, timeout_connect: Duration) -> ureq::Agent {
     ureq::AgentBuilder::new()
         .redirects(0)
-        .timeout_connect(TIMEOUT_CONNECT)
+        .timeout_connect(timeout_connect)
         .timeout_read(timeout_read)
         .timeout_write(timeout_write)
         .build()
@@ -641,7 +647,7 @@ impl S3Provider {
     ) -> Self {
         S3Provider {
             config: config.clone(),
-            agent: build_agent(timeout_read, timeout_write),
+            agent: build_agent(timeout_read, timeout_write, TIMEOUT_CONNECT),
             list_deadline: MAX_LIST_WALL_CLOCK,
             request_deadline: TIMEOUT_LIST_REQUEST,
         }
@@ -2133,10 +2139,16 @@ mod tests {
     /// only in prose.
     #[test]
     fn build_agent_wires_every_timeout_knob_and_deliberately_leaves_the_agent_level_one_unset() {
-        let agent = format!("{:?}", build_agent(TIMEOUT_READ, TIMEOUT_WRITE));
-        assert!(agent.contains("timeout_read: Some("), "timeout_read is not wired: {agent}");
-        assert!(agent.contains("timeout_write: Some("), "timeout_write is not wired: {agent}");
-        assert!(agent.contains("timeout_connect: Some("), "timeout_connect is not wired: {agent}");
+        // Distinctive values nothing else would produce. ureq DEFAULTS timeout_connect to 30 s, so
+        // asserting `Some(30s)` would pass with the line deleted — measured, that is exactly what the
+        // first version of this test did.
+        let agent = format!("{:?}", build_agent(Duration::from_secs(11), Duration::from_secs(12), Duration::from_secs(13)));
+        assert!(agent.contains("timeout_read: Some(11s)"), "timeout_read is not wired: {agent}");
+        assert!(agent.contains("timeout_write: Some(12s)"), "timeout_write is not wired: {agent}");
+        assert!(
+            agent.contains("timeout_connect: Some(13s)"),
+            "timeout_connect is not wired — note ureq's own default is 30s, so a `Some(30s)` here would              mean the line was DELETED and the default was showing through: {agent}"
+        );
         assert!(
             agent.contains("timeout: None"),
             "the AGENT-level overall timeout must stay unset — it takes precedence over timeout_read \
@@ -2408,6 +2420,56 @@ mod tests {
         assert!(
             err.contains(&format!("{MAX_RESPONSE_BODY_BYTES}-byte cap")),
             "the error must name the cap that fired, so the cause is diagnosable: {err}"
+        );
+    }
+
+    /// Sends a valid `200 OK` with a huge declared length and then streams as fast as the client will
+    /// take it, **forever**. Distinct from the dribbler: this one is not slow, it is endless, so no
+    /// time-based bound stops it — only the `.take()` inside [`read_body_capped`] does.
+    fn spawn_a_server_that_streams_forever() -> String {
+        use std::io::Write as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                std::thread::spawn(move || {
+                    let head = "HTTP/1.1 200 OK\r\nContent-Type: application/xml\r\n\
+                                Content-Length: 1099511627776\r\n\r\n";
+                    if s.write_all(head.as_bytes()).is_err() {
+                        return;
+                    }
+                    let chunk = [b' '; 8192];
+                    while s.write_all(&chunk).is_ok() {}
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Makes the `.take()` in [`read_body_capped`] observable, which it otherwise is not.
+    ///
+    /// CPE-1706 round 2's review found the error-path body cap reddened nothing when deleted — a pure
+    /// memory guard changes no output, so it looks untestable. Merging both read sites into one
+    /// `read_body_capped` fixed the duplication, but the length comparison, not the `.take()`, is what
+    /// the over-cap tests actually exercise: with `.take(u64::MAX)` those tests still pass, because a
+    /// 9 MiB body is still longer than the cap. (Verified by probe, not assumed.)
+    ///
+    /// Against a server that never stops sending, the difference is stark: with the `.take()` the read
+    /// ends after 8 MiB + 1 and reports the cap; without it, `read_to_end` grows the buffer until the
+    /// process dies. The deadline harness turns that into a red instead of an OOM or a hung CI job.
+    #[test]
+    fn a_server_that_streams_without_end_is_stopped_by_the_body_cap_not_read_until_memory_runs_out() {
+        let base = spawn_a_server_that_streams_forever();
+        let err = call_with_deadline(
+            "S3Provider::list against a server that never stops sending",
+            Duration::from_secs(60),
+            move || S3Provider::connect(&cfg(&base)).list("/"),
+        )
+        .expect_err("an endless body must be cut off at the cap");
+        assert!(
+            err.contains(&format!("{MAX_RESPONSE_BODY_BYTES}-byte cap")),
+            "the error must name the cap that stopped the read: {err}"
         );
     }
 
