@@ -424,7 +424,7 @@ mod tests {
     }
 
     #[test]
-    fn kill_reaps_the_child_synchronously_with_no_zombie_left_behind() {
+    fn kill_reaps_the_child_synchronously() {
         // CPE-1244: `kill()` now does its own final `wait()`, so the reap should be observable
         // *immediately* after `kill()` returns -- no polling loop needed (unlike the test above, which
         // predates this fix and tolerates a delayed reap). A long-lived command so we're sure it's still
@@ -437,24 +437,32 @@ mod tests {
 
         session.kill().unwrap();
 
-        // No sleep/poll: kill()'s own follow-up wait() must have already reaped it. This is the one
-        // thing `kill()` actually promises (CPE-1244's whole point), and it's backed by a real
-        // synchronous OS primitive: `portable_pty`'s Windows `Child::wait()` calls
-        // `WaitForSingleObject(process_handle, INFINITE)`, which only returns once the process has
-        // truly finished executing, then reads the exit code via `GetExitCodeProcess`. `try_wait()`
-        // here just replays that cached result, so this assertion is strict on purpose and has never
-        // been observed to flake -- not in CI history, and not across 940+ manual loop iterations run
-        // for CPE-1707 (150 sequential baseline, 150 sequential + 320 parallel under a 32-thread CPU
-        // load, and 320 parallel under 128 threads oversubscribing this dev box's 32 cores 4x).
+        // No sleep/poll: `try_wait()` must report the child as no longer running immediately after
+        // `kill()` returns. `try_wait()` itself is trustworthy here -- it replays `portable-pty`'s
+        // Windows `Child::try_wait()`, backed by `GetExitCodeProcess`, so `Some` means the OS has really
+        // recorded an exit code, not just that we think it should have. But don't read this assertion's
+        // strictness as proof that `kill()`'s explicit follow-up `self.child.wait()` (the CPE-1244 fix,
+        // which closes a reap gap in `portable-pty`'s *Unix* `ChildKiller` escalation path) is what makes
+        // it pass: a CPE-1707 probe that disabled that follow-up `wait()` still passed 100/100 runs here,
+        // because `TerminateProcess` against a simple console child resolves fast enough that
+        // `GetExitCodeProcess` already shows the exit by the time this line runs, with or without the
+        // explicit reap. So on Windows this assertion is strong, reliable evidence against the crudest
+        // failure mode -- `kill()` failing to actually deliver the kill at all, which would leave the
+        // child running and this line red, every time -- not evidence that the reap step specifically is
+        // exercised. Never observed to flake either way -- not in CI history, and not across 940+ manual
+        // loop iterations run for CPE-1707 (150 sequential baseline, 150 sequential + 320 parallel under
+        // a 32-thread CPU load, and 320 parallel under 128 threads oversubscribing this dev box's 32
+        // cores 4x).
         assert!(session.try_wait().is_some(), "child was not reaped synchronously by kill()");
 
-        // CPE-1707: deliberately NOT asserting `!pid_is_alive(pid)` here anymore. That assertion is
-        // what actually flaked on Windows CI (PR #887: panicked at this test, "OS process should be
-        // gone right after kill()" -- pasted verbatim from the real job log, not reproduced by
-        // rewording). `pid_is_alive()` shells out to `tasklist`, which enumerates the OS process table
-        // -- a different, weaker guarantee than the `WaitForSingleObject` wait above. Two reasons that
-        // table can still list `pid` the instant after our own `wait()` returns, neither of which is a
-        // bug in `kill()`:
+        // CPE-1707: deliberately NOT asserting `!pid_is_alive(pid)` here anymore (the test was renamed
+        // off "...with_no_zombie_left_behind" for the same reason -- a name shouldn't promise a check
+        // the body doesn't make). That assertion is what actually flaked on Windows CI (PR #887:
+        // panicked at this test, "OS process should be gone right after kill()" -- pasted verbatim from
+        // the real job log, not reproduced by rewording). `pid_is_alive()` shells out to `tasklist`,
+        // which enumerates the OS process table -- a different, weaker guarantee than the `try_wait()`
+        // check above. Two reasons that table can still list `pid` the instant after our own `wait()`
+        // returns, neither of which is a bug in `kill()`:
         //   1. `session.child` (this test's own handle to the process) stays open for the rest of the
         //      test -- `kill()` doesn't close it, only `wait()`s on it -- and Windows keeps a process
         //      object (and its enumerable PID) alive as long as *any* handle references it, regardless
