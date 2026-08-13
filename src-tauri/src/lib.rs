@@ -15313,6 +15313,356 @@ overlay / overlay rw,relatime 0 0
         let _ = fs::remove_dir_all(&d);
     }
 
+    // ---- CPE-1705: the MAIN RENAME COMMAND, and `move_exact`, must not read a refused stat as absent ---
+    //
+    // `rename_entry_impl` is the most-used mutating operation in a file explorer, and its guard was
+    // `if target.exists() { Err("already exists") }` immediately above an `fs::rename`. `Path::exists()`
+    // is `metadata().is_ok()`, so a stat that failed for ANY reason other than absence also answered
+    // `false`, the guard passed, and `fs::rename` — which replaces its destination silently on both
+    // Windows and Unix — destroyed whatever was really at that name. No warning, no error, no undo.
+
+    /// **The strongest test in this ticket: real byte loss at the main rename command.**
+    ///
+    /// Drives `rename_entry_impl`, the exact function behind the `rename_entry` Tauri command, at a
+    /// destination name holding a file whose `try_exists()` the OS refuses. Pre-CPE-1705 the guard read
+    /// that refusal as "the name is free" and the rename replaced the victim's bytes.
+    ///
+    /// **Windows-only, and the whole body is `#[cfg]`'d rather than early-returned** — a
+    /// `#[cfg(not(windows))] { ..; return; }` makes every following statement an `unreachable_statement`
+    /// error under CI's `-D warnings` on Linux and macOS, invisible from a Windows dev box.
+    ///
+    /// The reason it cannot run on Unix is the point of the test, so it is written down rather than waved
+    /// at, and it is *sharper* here than at the CPE-1696 sites: `target = parent.join(new_name)` and the
+    /// source lives in that **same** parent, so Unix's only lever — `chmod` on the parent — denies
+    /// `rename(2)` (which needs write+execute on that directory) with the very bits that make `stat` fail.
+    /// The two calls are governed by one permission there, so no `chmod` can stage a stat failure that a
+    /// rename then survives. A byte-loss test written without this platform gate fails the Unix legs on
+    /// its own *control* assertion, not on the guard — which is exactly what happened to PR #889.
+    #[test]
+    fn cpe_1705_rename_entry_never_renames_over_a_target_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the rename_entry byte-loss leg on this platform: no `chmod` can stage \
+                 it, because a rename target and its source share one parent directory, so the bits that \
+                 make `stat` fail with EACCES also deny `rename(2)`. NOTHING in this test covered \
+                 CPE-1705's overwrite route on this run; the Windows leg carries that evidence, and \
+                 `cpe_1705_rename_entry_honest_cases_still_behave` plus the `fsutil` taxonomy tests carry \
+                 the honest cases on every OS."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705_rename_denied");
+            let src = d.join("draft.txt");
+            fs::write(&src, b"RENAMED SOURCE").unwrap();
+            let victim = d.join("final.txt");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            // Armed before the deny so cleanup runs on every exit path, panic or not (Evidence Rules: a
+            // red run must never leave debris).
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _restore = Restore(&victim, &d);
+
+            // Deny only READ on the victim — `(R)`, deliberately NOT `(F)`. Both refuse `try_exists`, but
+            // only `(F)` denies the target's own `DELETE`, which lets a parent that withholds
+            // FILE_DELETE_CHILD block the rename and make this assertion pass for the wrong reason. `(R)`
+            // destroyed the bytes in every parent directory the PR #889 reviewer tested; `(F)` did not.
+            // For the same reason the parent's `(DC)` is deliberately left INTACT: denying it too cuts
+            // both delete routes and the rename fails without the guard ever being consulted.
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&victim)
+                        .arg("/deny")
+                        .arg(format!("{user}:(R)"))
+                        .output();
+                }
+            }
+
+            // The probe must match the call under test. `rename_entry_impl` asks `try_exists()`, so this
+            // checks `try_exists()`. Probing with `fs::metadata` here would be worse than not testing at
+            // all: NO deny ACE — not even `(F)` — refuses `fs::metadata`, which opens with a
+            // desired-access mask of 0, so the check would pass, the skip notice would never print, and a
+            // broken guard would go green silently. That exact mistake shipped once already (CPE-1692).
+            if victim.try_exists().is_ok() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the rename_entry denied-target leg: could not deny stat of {} on \
+                     this machine (running elevated, or a filesystem that ignores ACLs). NOTHING in this \
+                     test covered CPE-1705's overwrite route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+            let outcome =
+                rename_entry_impl(&ctx, src.to_string_lossy().into_owned(), "final.txt".to_string());
+
+            // Restore read access so the victim's bytes can be inspected — the assertion below is the
+            // point of the test and must not be defeated by the very ACL that staged it.
+            if let Ok(user) = std::env::var("USERNAME") {
+                let _ = std::process::Command::new("icacls")
+                    .arg(&victim)
+                    .arg("/remove:d")
+                    .arg(&user)
+                    .output();
+            }
+
+            // **The byte-level assertion.** Pre-fix this read back "RENAMED SOURCE".
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a rename target whose stat we were refused must NEVER be renamed over — the pre-CPE-1705 \
+                 `target.exists()` guard read the refusal as \"nothing is there\" and `fs::rename` \
+                 destroyed the user's file with no warning and no error"
+            );
+            // …and the source must still be sitting where it was: a refused rename changes nothing.
+            assert_eq!(fs::read(&src).unwrap(), b"RENAMED SOURCE".to_vec(), "the source must be untouched");
+
+            // Not a bare `is_err()`: a neutralised guard would ALSO error here (from the rename), so a
+            // bare `expect_err` passes vacuously. Assert it is OUR refusal, naming the cause and the fact
+            // that nothing happened — never a claim that the file "already exists", which is the specific
+            // lie CPE-1687 traced to users hunting for a file that was never gone.
+            let msg = outcome.expect_err("a rename onto a target we cannot stat must refuse");
+            assert!(
+                msg.contains("could not check what is at") && msg.contains("nothing was written"),
+                "the refusal must name the uncertainty, not guess: {msg}"
+            );
+            assert!(
+                !msg.contains("already exists"),
+                "must NOT claim the target exists — we do not know that: {msg}"
+            );
+        }
+    }
+
+    /// The ungated sibling — the honest cases at the same real entry point, on **every** OS. Without it a
+    /// guard that refused everything would look identical to a correct one on the two CI legs where the
+    /// byte-loss test above cannot run, and "a fix that refuses everything is as broken as one that
+    /// overwrites" is this ticket's own acceptance criterion.
+    #[test]
+    fn cpe_1705_rename_entry_honest_cases_still_behave() {
+        let d = scratch("cpe1705_rename_ok");
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+
+        // 1. A genuinely absent destination renames, and really moves the bytes.
+        let a = d.join("a.txt");
+        fs::write(&a, b"CONTENT").unwrap();
+        let landed = rename_entry_impl(&ctx, a.to_string_lossy().into_owned(), "b.txt".to_string())
+            .expect("renaming onto a genuinely absent name must still succeed");
+        assert_eq!(landed, d.join("b.txt").to_string_lossy());
+        assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"CONTENT".to_vec());
+        assert!(!a.exists(), "the source name must be gone after a successful rename");
+
+        // 2. An ordinary, readable collision still refuses — with the ORIGINAL wording, which is part of
+        //    the command's contract and what the UI shows on an everyday name clash.
+        let c = d.join("c.txt");
+        fs::write(&c, b"OTHER").unwrap();
+        let err = rename_entry_impl(&ctx, c.to_string_lossy().into_owned(), "b.txt".to_string())
+            .expect_err("an occupied destination must refuse");
+        assert_eq!(err, "\"b.txt\" already exists", "the everyday collision message must not change");
+        assert_eq!(fs::read(d.join("b.txt")).unwrap(), b"CONTENT".to_vec(), "and nothing may be clobbered");
+        assert_eq!(fs::read(&c).unwrap(), b"OTHER".to_vec(), "…nor the source moved");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The **other** bug on the same line, kept a separate test because it is a separate bug: a rename
+    /// onto a **dangling symlink** used to destroy the link.
+    ///
+    /// `exists()` follows symlinks and `fs::rename` does not, so on a dangling link `exists()` answers
+    /// `false` — and so does `try_exists()`, *correctly*: nothing resolves there. **This ticket's stat
+    /// collapse remedy therefore does not fix this route at all**, which is why the fix is a second,
+    /// separately-named guard (`fsutil::symlink_slot_refusal`) and this is a second, separately-named
+    /// test. A `try_exists` swap must never be reported as having closed it. CPE-1461 family.
+    ///
+    /// Runs on every OS; skips loudly only where creating a symlink is unprivileged (Windows without
+    /// Developer Mode), which is a property of the machine, not of the platform.
+    #[test]
+    fn cpe_1705_rename_entry_refuses_onto_a_dangling_symlink() {
+        use std::io::Write;
+        let d = scratch("cpe1705_rename_dangling");
+        let src = d.join("real.txt");
+        fs::write(&src, b"SOURCE").unwrap();
+        let link = d.join("link.txt");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(d.join("no-such-target"), &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(d.join("no-such-target"), &link).is_ok();
+        if !made {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the dangling-symlink rename leg: this machine does not permit creating \
+                 symlinks (Windows without Developer Mode / admin). NOTHING in this test covered the \
+                 link-destroying route on this run."
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        // The premise, asserted rather than assumed — if `try_exists` ever started answering `Ok(true)`
+        // here, the test would be proving something else entirely.
+        assert_eq!(
+            link.try_exists().ok(),
+            Some(false),
+            "premise: a dangling link reads as ABSENT to try_exists — which is why the stat-collapse fix \
+             cannot see it"
+        );
+
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+        let err = rename_entry_impl(&ctx, src.to_string_lossy().into_owned(), "link.txt".to_string())
+            .expect_err("renaming onto a dangling link must refuse — the rename would destroy the link");
+        assert!(err.contains("is a link"), "the refusal must say what is actually in the way: {err}");
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must still be there — pre-CPE-1705 the rename replaced it and it was gone"
+        );
+        assert_eq!(fs::read(&src).unwrap(), b"SOURCE".to_vec(), "and the source must not have moved");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The same byte-loss construction at `move_exact_impl`, the second rename-destructive command.
+    /// Distinct from the `rename_entry` test above so that neutralising **one** guard reds exactly one
+    /// test: these are two separate call sites with two separate `clobber_refusal` calls.
+    ///
+    /// This site is worth its own test for a second reason: CPE-1692 already hardened the destination's
+    /// **parent** check three statements below and left the destination's OWN check collapsed. A fix that
+    /// stops one line short of the dangerous one is this chain's signature failure.
+    #[test]
+    fn cpe_1705_move_exact_never_renames_over_a_target_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the move_exact byte-loss leg on this platform: Unix's only lever is \
+                 `chmod` on the parent, which denies `rename(2)` along with `stat`, so a buggy guard \
+                 cannot be caught destroying anything here. NOTHING in this test covered CPE-1705's \
+                 overwrite route on this run; `cpe_1705_move_exact_honest_cases_still_behave` carries the \
+                 honest case on every OS."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let d = scratch("cpe1705_move_exact_denied");
+            let src = d.join("from.txt");
+            fs::write(&src, b"MOVED SOURCE").unwrap();
+            let victim = d.join("to.txt");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a Path, &'a Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                    let _ = fs::remove_dir_all(self.1);
+                }
+            }
+            let _restore = Restore(&victim, &d);
+
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    // `(R)` on the target only; the parent's `(DC)` stays intact — see the rename test.
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&victim)
+                        .arg("/deny")
+                        .arg(format!("{user}:(R)"))
+                        .output();
+                }
+            }
+            if victim.try_exists().is_ok() {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the move_exact denied-target leg: could not deny stat of {} on \
+                     this machine. NOTHING in this test covered CPE-1705's overwrite route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+            let results = move_exact_impl(
+                &ctx,
+                vec![(src.to_string_lossy().into_owned(), victim.to_string_lossy().into_owned())],
+            );
+
+            if let Ok(user) = std::env::var("USERNAME") {
+                let _ = std::process::Command::new("icacls")
+                    .arg(&victim)
+                    .arg("/remove:d")
+                    .arg(&user)
+                    .output();
+            }
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "move_exact must never rename over a destination whose stat it was refused"
+            );
+            assert_eq!(fs::read(&src).unwrap(), b"MOVED SOURCE".to_vec(), "the source must be untouched");
+            let r = &results[0];
+            assert!(!r.ok, "the move must be reported as failed, not silently succeeded");
+            let msg = r.error.clone();
+            assert!(
+                msg.contains("could not check what is at") && !msg.contains("already exists"),
+                "must name the uncertainty rather than claim the destination exists: {msg}"
+            );
+        }
+    }
+
+    /// The ungated sibling for `move_exact` — both directions, every OS.
+    #[test]
+    fn cpe_1705_move_exact_honest_cases_still_behave() {
+        let d = scratch("cpe1705_move_exact_ok");
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+
+        // A genuinely absent destination still moves.
+        let a = d.join("a.txt");
+        fs::write(&a, b"A").unwrap();
+        let to = d.join("moved.txt");
+        let r = move_exact_impl(
+            &ctx,
+            vec![(a.to_string_lossy().into_owned(), to.to_string_lossy().into_owned())],
+        );
+        assert!(r[0].ok, "an absent destination must still accept the move: {:?}", r[0].error);
+        assert_eq!(fs::read(&to).unwrap(), b"A".to_vec());
+
+        // A readable collision still refuses, with the original wording, and destroys nothing.
+        let b = d.join("b.txt");
+        fs::write(&b, b"B").unwrap();
+        let r = move_exact_impl(
+            &ctx,
+            vec![(b.to_string_lossy().into_owned(), to.to_string_lossy().into_owned())],
+        );
+        assert!(!r[0].ok);
+        assert_eq!(r[0].error, "\"moved.txt\" already exists", "the everyday collision message stands");
+        assert_eq!(fs::read(&to).unwrap(), b"A".to_vec(), "the occupant must survive");
+        assert_eq!(fs::read(&b).unwrap(), b"B".to_vec(), "the source must survive");
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// The honest cases at the same real entry point, on every OS: a free name copies, and an occupied one
     /// still auto-renames rather than refusing (Evidence Rules: a guard that refuses everything is not a
     /// guard).

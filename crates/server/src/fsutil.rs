@@ -139,9 +139,13 @@ pub fn unknown_slot_message(target: &Path, stat: &std::io::Result<bool>) -> Stri
         // Unreachable via `classify_target_slot`; kept total rather than panicking in a guard.
         Ok(_) => "the check did not complete".to_string(),
     };
+    // Deliberately avoids the substring "already exists". That is the *occupied* verdict's wording at
+    // almost every call site, and a message that contains it reads — to a user skimming, and to a test
+    // asserting "this must not claim the file is there" — as exactly the claim this function exists to
+    // avoid making. Caught by this ticket's own tests, which is the mildest possible way to catch it.
     format!(
-        "could not check whether \"{}\" already exists, so nothing was written — refusing to guess \
-         rather than risk overwriting it: {cause}",
+        "could not check what is at \"{}\", so nothing was written — refusing to guess rather than risk \
+         overwriting it: {cause}",
         target.display()
     )
 }
@@ -176,7 +180,7 @@ pub fn symlink_slot_refusal(target: &Path) -> Option<String> {
         Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => Some(format!(
-            "could not check whether \"{}\" is a link, so nothing was changed — refusing to guess rather \
+            "could not check what is at \"{}\" is a link, so nothing was changed — refusing to guess rather \
              than risk destroying one: {e}",
             target.display()
         )),

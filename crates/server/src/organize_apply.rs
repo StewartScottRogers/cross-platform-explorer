@@ -243,4 +243,79 @@ mod tests {
         // The un-moved file is still where it started.
         assert!(dir.path().join("a.png").exists());
     }
+
+    /// CPE-1705, staging **real byte loss** through the real `organize_apply` entry point: a destination
+    /// slot whose `try_exists()` the OS refuses used to read as free, and the `fs::rename` below replaced
+    /// its bytes. Auto-organize does this for every matching file in one batch, so a single unreadable
+    /// destination folder is a batch of silent overwrites reported as successes.
+    ///
+    /// **Windows-only, whole body `#[cfg]`'d** (an early `return` in a `cfg(not)` block makes every
+    /// following statement `unreachable_statement` under CI's `-D warnings` on the Unix legs). The
+    /// mechanism cannot exist on Unix: its only lever is `chmod` on the parent directory, and `stat` and
+    /// `rename(2)` on a child are governed by the *same* bits there, so the deny that stages the stat
+    /// failure also blocks the rename and the test would pass for the wrong reason — or, as happened on
+    /// PR #889, red on its own control assertion. `organize_apply_skips_on_name_collision_without_...`
+    /// above carries the honest case on all three CI legs.
+    #[test]
+    fn cpe_1705_organize_never_renames_over_a_destination_it_cannot_stat() {
+        use std::io::Write;
+        #[cfg(not(windows))]
+        {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1705] SKIPPED the organize_apply byte-loss leg on this platform: `stat` and \
+                 `rename(2)` on a destination share one directory's permission bits on Unix, so no chmod \
+                 can stage a stat failure a rename then survives. NOTHING in this test covered CPE-1705's \
+                 overwrite route on this run."
+            );
+        }
+        #[cfg(windows)]
+        {
+            let dir = scratch("cpe1705-denied");
+            fs::write(dir.path().join("a.png"), b"NEW PICTURE").unwrap();
+            let images = dir.path().join("Images");
+            fs::create_dir_all(&images).unwrap();
+            let victim = images.join("a.png");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+            struct Restore<'a>(&'a std::path::Path, &'a std::path::Path);
+            impl Drop for Restore<'_> {
+                fn drop(&mut self) {
+                    crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                }
+            }
+            let _r = Restore(&victim, &images);
+
+            // Denies `(R)` on the victim ONLY — never `(DC)` on `Images`, which would cut the rename's
+            // FILE_DELETE_CHILD route and make this assertion pass without the guard being consulted.
+            if !crate::fsutil::deny_stat_of(&victim) {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "[CPE-1705] SKIPPED the organize_apply denied-destination leg: could not deny stat of \
+                     {} on this machine. NOTHING in this test covered the overwrite route on this run.",
+                    victim.display()
+                );
+                return;
+            }
+
+            let ctx = ctx_for(dir.path());
+            let outcome =
+                organize_apply(&ctx, &dir.path().to_string_lossy(), OrganizeRule::ByKind).unwrap();
+
+            crate::fsutil::undo_deny_stat_of(&victim, &images);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "a destination whose stat we were refused must NEVER be renamed over"
+            );
+            let r = outcome.results.iter().find(|r| r.path.ends_with("a.png")).unwrap();
+            assert!(!r.ok, "the move must be reported failed, not silently succeeded: {r:?}");
+            assert!(
+                r.error.contains("could not check what is at") && !r.error.contains("already exists"),
+                "must name the uncertainty rather than claim a collision it did not observe: {}",
+                r.error
+            );
+        }
+    }
 }
