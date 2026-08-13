@@ -272,7 +272,9 @@ jobs:
       # exist to upload/ratchet, even on a run with failures.
       - name: Run GUI smoke suite (xvfb-run)
         working-directory: gui-smoke
-        run: xvfb-run --auto-servernum npm test || true
+        # SCRATCH (CPE-1679 evidence branch only): restrict to the stress spec so the evidence run
+        # doesn't also pay for all 39 other specs. Reverted before the real fix PR.
+        run: xvfb-run --auto-servernum npm test -- --spec specs/zzz-cpe1679-stress.smoke.ts || true
 
       # CPE-1594: the actual gate, and DELIBERATELY the very next step after the suite — nothing that
       # can fail (like the screenshot upload below) is allowed to sit between the suite finishing and
