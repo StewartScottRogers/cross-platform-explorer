@@ -15871,6 +15871,10 @@ overlay / overlay rw,relatime 0 0
                 {
                     // Unix denies `gp` (self.1), `real_parent`'s parent; `real_parent` itself is untouched.
                     use std::os::unix::fs::PermissionsExt;
+                    // Mirror of the `let _ = self.1` above: `real_parent` is read only on the Windows
+                    // path, and `-D warnings` makes an unread field a hard error, so each platform has
+                    // to acknowledge the field the other one uses.
+                    let _ = self.0;
                     let _ = fs::set_permissions(self.1, fs::Permissions::from_mode(0o700));
                 }
                 let _ = fs::remove_dir_all(self.2);
