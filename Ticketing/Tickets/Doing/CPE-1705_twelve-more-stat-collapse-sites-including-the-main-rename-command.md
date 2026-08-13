@@ -282,7 +282,59 @@ The twelve sites above. **Deliberately excluded, do not re-open:**
 
 **2026-08-13 — branch `cpe-1705-stat-collapse-sites`.**
 
-### The headline finding: the ACL byte-loss construction does NOT catch this bug class
+### ROUND 2 — my headline finding was WRONG, and correction 4 is why
+
+**Retracted in full.** Everything under "the headline finding" below is false, and I am leaving it in place
+rather than deleting it because the shape of the error is the useful part.
+
+I measured correctly and generalised one step past my evidence — the exact failure `Ticketing/wiki.md`'s
+Evidence Rules were written about, committed inside a ticket whose subject is that failure, for the fourth
+time in this chain. My setup denied **only the target**. On Windows `fs::metadata` falls back from a
+refused `CreateFileW` open to `FindFirstFileW`, reading the entry out of the **parent** — which is why
+`exists()` kept answering `true`. Deny `(RD)` on the parent and the fallback dies, while `RD ≠ DC` leaves
+the rename's `FILE_DELETE_CHILD` route intact, so the stat fails *and* the rename lands.
+
+Measured, this round, through the real `rename_entry_impl` with both guards removed:
+
+```
+assertion `left == right` failed: a rename target whose stat we were refused must NEVER be renamed over
+  left: [82, 69, 78, 65, 77, 69, 68, 32, 83, 79, 85, 82, 67, 69]      // "RENAMED SOURCE" — victim destroyed
+ right: [86, 73, 67, 84, 73, 77, 32, 79, 82, 73, 71, 73, 78, 65, 76]  // "VICTIM ORIGINAL"
+```
+
+And CPE-1696's `unique_target`, reverted to `!candidate.exists()`:
+
+```
+  left: [77, 79, 86, 69, 68, 32, 83, 79, 85, 82, 67, 69]              // "MOVED SOURCE" — victim destroyed
+```
+
+**That test's original "pre-fix this read back `MOVED SOURCE`" claim was exactly, literally correct.** I
+rewrote correct documentation on already-merged code with an incorrect refutation, and deleted two
+salvageable tests as "vacuous" when it was my *construction* that was incomplete. All three are restored,
+and both restored tests are shown firing against unfixed code.
+
+What I did in round 2:
+
+1. **`fsutil::deny_stat_of` now also denies `(RD)` on the parent** — six lines, and it upgrades every ACL
+   test in the repo at once. Never `(DC)`, which would cut both delete routes and make byte-loss
+   assertions pass for the wrong reason.
+2. **`undo_deny_stat_of` lifts the PARENT's deny first, target last.** New finding, and not cosmetic:
+   `icacls <file>` cannot rewrite a file's ACL while its directory still denies list-directory. It fails
+   silently, the target keeps its deny, and the caller's `fs::read` of the victim dies with
+   `PermissionDenied` — which reads exactly like the test's own byte assertion failing. Target-first →
+   parent-first turned six red tests green.
+3. **Reverted all three doc-comment rewrites**, with the record of the wrong turn kept in place.
+4. **Fixed a real user-facing bug I had introduced and not noticed**: `symlink_slot_refusal`'s `Err` arm
+   rendered *"could not check what is at "…\final.txt" is a link"* — my bulk rename of a sibling helper's
+   wording had clipped it into nonsense. Nobody read it because the arm was *believed unreachable*. The
+   parent-`RD` construction makes it reachable, so it is now covered by a test as well as fixed. An
+   "unreachable" branch is exactly where an unread string hides.
+5. **One genuinely missed site**, inside the sweep this PR claimed: `sidecar/host/src/bin/create_sidecar.rs`
+   — `if root.exists()` guarding `File::create` + `write_all` over a whole crate tree. Dev-only CLI, low
+   severity, now fixed rather than disclosed.
+6. **Filed CPE-1710** for the ~110 `.is_dir()` re-walk, which this PR had promised and not done.
+
+### The headline finding — RETRACTED, see round 2 above. Preserved for the record.
 
 The ticket says *"for a `try_exists`-guarded, rename-destructive site you can write a test that stages
 actual byte loss."* Measured: **true only for a site already probing with `try_exists`.** Against the
