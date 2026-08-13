@@ -106,6 +106,26 @@ now live in `src/lib/network.ts` (see `schemeFieldHints`'s doc comment) and asse
   in the present tense. **Do both edits together**: deleting the hedge while leaving the future tense, or
   flipping the tense while leaving the hedge, each produces a page that contradicts itself.
 
+## BLOCKED-BEHIND CPE-1704 — do not land this before it
+
+Added by the Foreman from the PR #888 (CPE-1683) UAT, 2026-08-13.
+
+`S3Provider::list` currently reuses `crates/server`'s `is_safe_name`, the traversal guard written for local
+paths, SFTP and WebDAV. The security property holds — nothing can escape the listed prefix — but it imports
+filesystem rules into a keyspace that does not have them, and it does so **silently**:
+
+- A key containing `:` is **dropped from the listing with no error**. That rule exists for Windows
+  drive-letters and NTFS alternate data streams; `:` is a perfectly legal S3 key character. The object is
+  in the bucket, the explorer never shows it, and nothing says why.
+- A key with a literal `../` segment becomes a **phantom empty folder** and the object is unreachable.
+
+**This ticket is the one that makes those user-visible.** Nothing can hit them today because `crates/s3` is
+not wired into the app; the moment `s3` routes through `cpe_vfs::open`, a connected bucket can contain files
+the explorer silently hides. That is not an acceptable first impression of S3 support.
+
+So: **land CPE-1704 first.** If you pick this up and CPE-1704 is still open, either do that one first or say
+plainly in the PR that you are shipping a known silent-hide — do not land it quietly.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1683** and **CPE-1684** (there
