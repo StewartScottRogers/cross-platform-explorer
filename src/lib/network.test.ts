@@ -2,6 +2,14 @@ import { describe, it, expect } from "vitest";
 import {
   connectionLocation,
   secretAlwaysRequired,
+  secretLabel,
+  supportedSchemesSentence,
+  authKindsFor,
+  coerceAuthKind,
+  schemeFieldHints,
+  SUPPORTED_SCHEMES,
+  DEFAULT_PORTS,
+  DEFAULT_S3_REGION,
   stateOf,
   stateTitle,
   isDuplicateShare,
@@ -55,6 +63,18 @@ describe("network (CPE-1513)", () => {
     });
     it("is false for key auth (a key may be unencrypted)", () => {
       expect(secretAlwaysRequired({ kind: "key", key_path: "/home/me/.ssh/id_ed25519" })).toBe(false);
+    });
+
+    it("is true for access-key auth — SigV4 can't sign with a blank secret (CPE-1686)", () => {
+      expect(secretAlwaysRequired({ kind: "access_key", id: "AKIAEXAMPLE", secret_ref: "s3-prod" })).toBe(true);
+    });
+  });
+
+  describe("secretLabel (CPE-1686)", () => {
+    it("names the secret the way the user's provider does", () => {
+      expect(secretLabel({ kind: "password" })).toBe("Password");
+      expect(secretLabel({ kind: "key", key_path: "/k" })).toBe("Passphrase");
+      expect(secretLabel({ kind: "access_key", id: "AKIA", secret_ref: "s3-prod" })).toBe("Secret access key");
     });
   });
 
@@ -186,6 +206,7 @@ describe("network (CPE-1513)", () => {
         user: "deploy",
         authKind: "password",
         keyPath: "",
+        accessKeyId: "",
         path: "/srv",
       });
     });
@@ -194,6 +215,15 @@ describe("network (CPE-1513)", () => {
       const f = formFromConnection(conn({ auth: { kind: "key", key_path: "/home/me/.ssh/id_ed25519" } }));
       expect(f.authKind).toBe("key");
       expect(f.keyPath).toBe("/home/me/.ssh/id_ed25519");
+    });
+
+    it("formFromConnection carries the access key id — and nothing else — for access-key auth (CPE-1686)", () => {
+      const f = formFromConnection(
+        conn({ scheme: "s3", auth: { kind: "access_key", id: "AKIAEXAMPLE", secret_ref: "prod" } }),
+      );
+      expect(f.authKind).toBe("access_key");
+      expect(f.accessKeyId).toBe("AKIAEXAMPLE");
+      expect(f.keyPath).toBe("");
     });
   });
 
@@ -229,7 +259,9 @@ describe("network (CPE-1513)", () => {
     });
 
     it("rejects an unsupported scheme", () => {
-      expect(buildConnection(input({ scheme: "s3" }))).toMatch(/Unsupported protocol/);
+      // `nfs` is the live example: mDNS browses `_nfs._tcp` but no NFS provider exists yet. (This case used
+      // to use `s3` — CPE-1686 made s3 savable, so the negative case moved to the next unbuilt protocol.)
+      expect(buildConnection(input({ scheme: "nfs" }))).toMatch(/Unsupported protocol/);
     });
 
     it("accepts smb (CPE-1519: a discovered share's pre-filled scheme)", () => {
@@ -307,6 +339,186 @@ describe("network (CPE-1513)", () => {
     });
   });
 
+  // ── CPE-1686 (epic CPE-1503): s3 as a savable scheme + access-key auth ────────────────────────────
+  describe("s3 as a savable scheme (CPE-1686)", () => {
+    function s3Input(over: Partial<ConnectionFormInput> = {}): ConnectionFormInput {
+      return {
+        ...blankConnectionForm(),
+        name: "s3-prod",
+        scheme: "s3",
+        host: "s3.us-east-1.amazonaws.com",
+        authKind: "access_key",
+        accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        path: "/my-bucket/reports",
+        ...over,
+      };
+    }
+
+    it("isSavableScheme('s3') is true, so every gate built on it opens", () => {
+      expect(isSavableScheme("s3")).toBe(true);
+      expect(isSavableScheme(" S3 ")).toBe(true);
+    });
+
+    it("DEFAULT_PORTS.s3 is 443 — the hand-mirror of Rust's `default_port` (CPE-1685 must match)", () => {
+      // Asserted against the literal on purpose: `connections.rs`'s `default_port` is hand-mirrored here,
+      // so a change on either side has to break a test rather than silently produce two different location
+      // strings for the same profile. S3 is HTTPS, hence 443.
+      expect(DEFAULT_PORTS.s3).toBe(443);
+    });
+
+    it("connectionLocation renders an s3 profile, omitting the default port and keeping a custom one", () => {
+      expect(
+        connectionLocation(conn({ scheme: "s3", user: "us-east-1", host: "s3.us-east-1.amazonaws.com", port: 443, path: "/my-bucket/reports" })),
+      ).toBe("s3://us-east-1@s3.us-east-1.amazonaws.com/my-bucket/reports");
+      expect(
+        connectionLocation(conn({ scheme: "s3", user: "us-east-1", host: "minio.lan", port: 9000, path: "/my-bucket" })),
+      ).toBe("s3://us-east-1@minio.lan:9000/my-bucket");
+    });
+
+    it("builds a valid s3 connection: endpoint→host, region→user, bucket/prefix→path", () => {
+      expect(buildConnection(s3Input())).toEqual({
+        name: "s3-prod",
+        scheme: "s3",
+        host: "s3.us-east-1.amazonaws.com",
+        port: 443,
+        user: "us-east-1",
+        auth: { kind: "access_key", id: "AKIAIOSFODNN7EXAMPLE", secret_ref: "s3-prod" },
+        path: "/my-bucket/reports",
+      });
+    });
+
+    it("a blank Region means us-east-1, written into the profile rather than left for the backend to guess", () => {
+      expect(buildConnection(s3Input({ user: "  " }))).toMatchObject({ user: DEFAULT_S3_REGION });
+      expect(buildConnection(s3Input({ user: "eu-west-2" }))).toMatchObject({ user: "eu-west-2" });
+    });
+
+    it("keeps a MinIO-style endpoint + port verbatim (this is what makes non-AWS stores work)", () => {
+      expect(buildConnection(s3Input({ host: "minio.lan", port: "9000" }))).toMatchObject({
+        host: "minio.lan",
+        port: 9000,
+      });
+    });
+
+    it("requires a bucket — an object store has no root to land on", () => {
+      expect(buildConnection(s3Input({ path: "" }))).toBe("Bucket is required for s3 — use /bucket or /bucket/prefix.");
+      expect(buildConnection(s3Input({ path: " / " }))).toBe("Bucket is required for s3 — use /bucket or /bucket/prefix.");
+    });
+
+    it("normalises a bucket typed without its leading slash", () => {
+      expect(buildConnection(s3Input({ path: "my-bucket/reports" }))).toMatchObject({ path: "/my-bucket/reports" });
+    });
+
+    it("names the endpoint field in its own error, not 'Host'", () => {
+      expect(buildConnection(s3Input({ host: "  " }))).toBe("Endpoint is required.");
+      expect(buildConnection({ ...blankConnectionForm(), name: "prod", host: "" })).toBe("Host is required.");
+    });
+
+    it("requires an access key id", () => {
+      expect(buildConnection(s3Input({ accessKeyId: "  " }))).toBe("Access key ID is required for access-key auth.");
+    });
+
+    it("refuses an auth kind the scheme can't use, in both directions", () => {
+      expect(buildConnection(s3Input({ authKind: "password" }))).toMatch(/S3 authenticates with an access key/);
+      expect(buildConnection(s3Input({ scheme: "sftp", host: "h", path: "" }))).toMatch(
+        /Access-key auth is only used by s3/,
+      );
+    });
+
+    it("authKindsFor / coerceAuthKind keep the form's radios legal as the protocol changes", () => {
+      expect(authKindsFor("s3")).toEqual(["access_key"]);
+      expect(authKindsFor("sftp")).toEqual(["password", "key"]);
+      expect(coerceAuthKind("s3", "password")).toBe("access_key");
+      expect(coerceAuthKind("sftp", "access_key")).toBe("password");
+      expect(coerceAuthKind("sftp", "key")).toBe("key");
+      expect(coerceAuthKind("s3", "access_key")).toBe("access_key");
+    });
+
+    it("schemeFieldHints relabels only s3 — every other scheme's fields read exactly as before", () => {
+      expect(schemeFieldHints("s3")).toMatchObject({
+        hostLabel: "Endpoint",
+        userLabel: "Region",
+        pathLabel: "Bucket and prefix",
+      });
+      for (const scheme of ["sftp", "webdav", "smb", "ftp"]) {
+        expect(schemeFieldHints(scheme)).toEqual({
+          hostLabel: "Host",
+          hostPlaceholder: "host.example.com",
+          userLabel: "User",
+          userPlaceholder: "(optional)",
+          pathLabel: "Remote path",
+          pathPlaceholder: "/ (server root)",
+        });
+      }
+    });
+  });
+
+  describe("no secret material ever reaches a saved profile (CPE-1686)", () => {
+    it("the form model has no secret-shaped field at all", () => {
+      // Guards the invariant by shape rather than by convention: adding a `secret`/`password`/`passphrase`
+      // field to ConnectionFormInput — the easy way to "just collect the secret here" — fails this.
+      // A key's *path* and an access key *id* are the non-secret halves and are deliberately allowed.
+      const keys = Object.keys(blankConnectionForm());
+      expect(keys.filter((k) => /secret|password|passphrase|credential/i.test(k))).toEqual([]);
+      expect(keys).toContain("accessKeyId");
+    });
+
+    it("a built access-key Connection carries a keychain *reference*, never the secret", () => {
+      const built = buildConnection({
+        ...blankConnectionForm(),
+        name: "s3-prod",
+        scheme: "s3",
+        host: "minio.lan",
+        authKind: "access_key",
+        accessKeyId: "AKIAIOSFODNN7EXAMPLE",
+        path: "/my-bucket",
+      });
+      expect(typeof built).not.toBe("string");
+      const c = built as Connection;
+      // `secret_ref` is the keychain key, and the keychain is keyed by connection name (CPE-1510) — the
+      // convention CPE-1685 should read on the backend side.
+      expect(c.auth).toEqual({ kind: "access_key", id: "AKIAIOSFODNN7EXAMPLE", secret_ref: "s3-prod" });
+      // Nothing anywhere in the profile looks like a secret access key: the only "secret"-named field is
+      // the ref, and its value is just the connection's own name.
+      const serialized = JSON.stringify(c);
+      expect(serialized.match(/"secret[^"]*"/g)).toEqual(['"secret_ref"']);
+      expect(c.auth.kind === "access_key" && c.auth.secret_ref).toBe(c.name);
+    });
+
+    it("the secret is collected by the connect-time prompt, exactly like a password", () => {
+      const c = buildConnection({
+        ...blankConnectionForm(),
+        name: "s3-prod",
+        scheme: "s3",
+        host: "minio.lan",
+        authKind: "access_key",
+        accessKeyId: "AKIA",
+        path: "/b",
+      }) as Connection;
+      expect(secretAlwaysRequired(c.auth)).toBe(true);
+      expect(secretLabel(c.auth)).toBe("Secret access key");
+    });
+  });
+
+  describe("the unsupported-protocol message is derived, not hand-written (CPE-1686)", () => {
+    it("names every supported scheme, so a seventh needs no edit to the string", () => {
+      const msg = buildConnection({ ...blankConnectionForm(), name: "x", scheme: "nfs", host: "h" }) as string;
+      for (const scheme of SUPPORTED_SCHEMES) {
+        expect(msg).toContain(scheme);
+      }
+      expect(msg).toContain(supportedSchemesSentence());
+    });
+
+    it("reads as an English list", () => {
+      expect(supportedSchemesSentence()).toBe("sftp, webdav, smb, ftp, or s3");
+    });
+
+    it("every scheme it names actually validates — the message can't advertise an unsavable protocol", () => {
+      for (const scheme of SUPPORTED_SCHEMES) {
+        expect(isSavableScheme(scheme)).toBe(true);
+      }
+    });
+  });
+
   describe("discoveredShareToFormInput (CPE-1519: discovered row → pre-filled 'Add a connection' form)", () => {
     it("maps a server+share UNC to scheme smb, host = server, path = /share", () => {
       const share: NetShare = { name: "Media", path: "\\\\qnap\\media", kind: "discovered" };
@@ -319,6 +531,7 @@ describe("network (CPE-1513)", () => {
         user: "",
         authKind: "password",
         keyPath: "",
+        accessKeyId: "",
         path: "/media",
       });
     });
@@ -356,6 +569,7 @@ describe("network (CPE-1513)", () => {
         user: "",
         authKind: "password",
         keyPath: "",
+        accessKeyId: "",
         path: "",
       });
     });

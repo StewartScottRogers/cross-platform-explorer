@@ -62,11 +62,50 @@ that landing. It is pickable now, in parallel with CPE-1681.
 - [ ] `31-network.md` documents S3 including the no-rename and virtual-directory limits.
 - [ ] `npm run check` and the vitest suite are green.
 
+## Decisions taken while building (2026-08-12) — the shape handed to CPE-1685
+
+The ticket asked for the endpoint/region convention to be picked and written down if CPE-1685 hadn't landed.
+It hadn't. **`Connection` gains no S3-only fields** (that would be a Rust change owned by CPE-1685, and none
+is needed); S3's four inputs map onto the existing ones, and the form just relabels them per scheme:
+
+| S3 concept | `Connection` field | Example |
+|---|---|---|
+| Endpoint host | `host` | `s3.us-east-1.amazonaws.com`, `minio.lan`, `s3.us-west-004.backblazeb2.com` |
+| Endpoint port | `port` | blank ⇒ **443**; MinIO ⇒ `9000` |
+| Region | `user` | blank ⇒ **`us-east-1`**, written into the profile rather than left to the backend |
+| Bucket + prefix | `path` | `/my-bucket/reports` — **required**; the bucket is the first segment |
+| Access key **id** | `auth.access_key.id` | `AKIA…` (not secret — the public half, stored like a username) |
+| Secret access key | *nowhere in the profile* | OS keychain, keyed by the connection `name` (CPE-1510) |
+
+So a saved profile's location reads `s3://us-east-1@minio.lan:9000/my-bucket/prefix`, which `location.rs`'s
+existing `{scheme,user,host,port,path}` split already parses. An **explicit endpoint** is what makes the
+epic's "B2/GCS/Wasabi/MinIO come free" claim true — those endpoints cannot be derived from a region — and it
+keeps `host` meaning "the server you connect to" as it does for every other scheme. Note this **differs from
+CPE-1685's parenthetical** "`conn.host` is the bucket": that reading makes a custom endpoint inexpressible,
+so the bucket moved to the path (exactly as a discovered SMB share puts its share there, `/media`).
+
+- **`secret_ref` convention (its first writer):** the connection's own `name` — the same key
+  `connection_secret_get/set` and Rust's `secret_for(access, &conn.name)` already use. It is a *label*, never
+  the secret.
+- **`default_port("s3")` must be 443** in `connections.rs` (it currently falls through to `0`).
+  `network.test.ts` asserts the literal 443 on the TS side.
+- **Secret capture mirrors the existing providers exactly**: the add/edit form has *no* secret field of any
+  kind. `secretAlwaysRequired` is now true for `access_key`, so the existing connect-time
+  `NetworkSecretPrompt` asks for the "Secret access key" and stores it in the keychain — the same path a
+  password takes. This is what the acceptance criterion's "collected separately" ended up meaning.
+- Auth kinds are now scheme-scoped (`authKindsFor`): `s3` offers only Access key, everything else only
+  Password/Key file, so no profile can be saved that could only fail at connect.
+- `31-network.md` carries a one-paragraph transitional note ("the provider itself ships alongside"); **CPE-1685
+  should delete it** when `s3` routes for real.
+
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. No prereq — the pure frontend model can land
 before any backend. The one coupling is the endpoint/region field shape shared with **CPE-1685**; settle it
-in whichever lands first.
+in whichever lands first — settled here, see above.
+
+Confirmed (not assumed): this adds **no new `Section`**, so `sectionDocs.ts` needs no entry —
+`section: "network" → "31-network"` already exists and `sectionDocs.test.ts` stays green.
 
 `src/lib/network.ts`, `src/lib/network.test.ts`, `src/lib/components/NetworkConnectionForm.svelte`,
 `src/docs/31-network.md`.

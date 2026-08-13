@@ -28,8 +28,12 @@ new commands and no new frontend plumbing.
 ## Scope
 
 - An `s3` arm in `cpe_vfs::open` building an `S3Config` from the `Connection` and handing back a boxed
-  `S3Provider`. `conn.host` is the bucket (`location.rs` already parses `s3://bucket/key` that way — check
-  it, do not re-derive it), `conn.path` the prefix.
+  `S3Provider`. ~~`conn.host` is the bucket (`location.rs` already parses `s3://bucket/key` that way —
+  check it, do not re-derive it), `conn.path` the prefix.~~ **⚠ SUPERSEDED by CPE-1686 — do not build
+  this.** `host` is the **endpoint**, `user` the **region**, and the **bucket is the first segment of
+  `path`**. "Host is the bucket" leaves no field for the endpoint or the region, making custom endpoints
+  (MinIO/B2/Wasabi/GCS) inexpressible. Full convention and the reasoning: **"Handed over from CPE-1686"**
+  below — read that section before writing any of this ticket.
 - `AuthMethod::AccessKey { id, secret_ref }` → the access key id and, from the keychain, the secret. Note
   that `secret_ref` is currently **declared and used nowhere** — this is its first consumer, so decide
   deliberately how it relates to the existing `secret_for(access, &conn.name)` lookup rather than
@@ -59,9 +63,48 @@ new commands and no new frontend plumbing.
 - [ ] `default_port("s3")` returns a sensible value and the connection's derived location string matches
       what `src/lib/network.ts`'s `DEFAULT_PORTS` will produce (CPE-1686 keeps the two in sync — that
       mirroring is deliberate and already documented in `network.ts`).
+- [ ] `default_port("s3")` returns **443**, pinned by a Rust test — the TS side asserts the same literal
+      (`network.test.ts`), but nothing pins the Rust side today, so the two are currently in *silent*
+      disagreement (`0` vs `443`) with the whole suite green. That is exactly the drift the mirror exists
+      to stop, and only a test on this side closes it.
+- [ ] The transitional paragraph in `src/docs/31-network.md` ("saving works now; the provider ships
+      alongside it") is **deleted**, and the "Honest limits" list plus the `## Limits` section are flipped
+      from future tense to present. See the handover note below for why both halves must happen together.
+      *(This is an AC, not a footnote, because the prose version of it sat below the checklist and a worker
+      who works the checkboxes would have shipped a lie.)*
 - [ ] `cargo test` green across `crates/s3`, `crates/vfs`, `crates/server`; `cargo clippy --all-targets
       -D warnings` clean in both feature modes; any `Cargo.lock` delta committed, **including
       `src-tauri/Cargo.lock`** if the app pulls the new crate.
+
+## Handed over from CPE-1686 (frontend landed first, 2026-08-12) — read before deciding
+
+CPE-1686 shipped the savable `s3` scheme and had to settle the endpoint/region shape to do it. Its answers,
+now live in `src/lib/network.ts` (see `schemeFieldHints`'s doc comment) and asserted by `network.test.ts`:
+
+- **`host` = the endpoint host** (`s3.us-east-1.amazonaws.com`, `minio.lan`), **`port` = the endpoint port**,
+  **`user` = the region** (blank ⇒ `us-east-1`), **`path` = `/bucket[/prefix]`** with the bucket as the first
+  segment. This *contradicts this ticket's parenthetical* "`conn.host` is the bucket": that reading leaves a
+  custom endpoint inexpressible, which would break the epic's "B2/GCS/Wasabi/MinIO come free" claim, since
+  those endpoints cannot be derived from a region. `location.rs` still parses the result unchanged —
+  `s3://us-east-1@minio.lan:9000/my-bucket/prefix` splits the same way it always did. No new `Connection`
+  field was needed, and none was added.
+- **`secret_ref` = the connection's `name`** — the same key `secret_for(access, &conn.name)` already uses. It
+  is a label naming the keychain entry, never the secret. That is what the form now writes.
+- **`default_port("s3")` must be `443`** — `network.ts`'s `DEFAULT_PORTS.s3` is 443 and `network.test.ts`
+  asserts that literal, so anything else here reintroduces exactly the silent drift the mirror exists to stop.
+- The frontend already refuses to connect an `AccessKey` connection with no stored secret
+  (`secretAlwaysRequired`), prompting for "Secret access key" first — the backend guard this ticket adds is
+  the second line of defence, not the only one.
+- `src/docs/31-network.md` carries a transitional paragraph ("saving works now; the provider ships alongside
+  it"). **Delete that paragraph as part of this ticket** — once `s3` routes, it becomes a lie.
+- **And flip the tense with it.** The "Honest limits of object storage" list and the `## Limits` section
+  are written in the **future** tense ("there will be no rename", "listing will be paged") because they
+  describe the provider, not the form. The UAT on PR #866 caught them originally written in the present
+  tense, which told a reader that S3 browsing worked with caveats when no S3 code path existed at all —
+  and the `## Limits` copy repeated it out of sight of the hedge, where a reader skimming from the bottom
+  would never see the qualification. Once the provider lands, those sentences become true and should read
+  in the present tense. **Do both edits together**: deleting the hedge while leaving the future tense, or
+  flipping the tense while leaving the hedge, each produces a page that contradicts itself.
 
 ## Notes
 

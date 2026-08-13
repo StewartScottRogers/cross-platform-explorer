@@ -20,8 +20,28 @@ import type { AuthMethod, Connection, NetShare } from "./types";
 export type ConnState = "connected" | "disconnected" | "error";
 
 /** Default port per scheme — mirrors `cpe_server::connections::default_port` in Rust exactly, so a profile
- *  on the default port omits it from its location string on both sides. */
-const DEFAULT_PORTS: Record<string, number> = { sftp: 22, ssh: 22, smb: 445, webdav: 80, davs: 443, ftp: 21 };
+ *  on the default port omits it from its location string on both sides.
+ *
+ *  `s3: 443` (CPE-1686): S3 and every S3-compatible endpoint speaks HTTPS, so 443 is the default a blank
+ *  Port field means.
+ *
+ *  **The s3 entry is currently mirrored on ONE side only — read this before trusting it.** Rust's
+ *  `default_port` falls through to `0` for `"s3"`, so the two sides disagree *today*, silently, with the
+ *  whole suite green. `network.test.ts` pins this literal, which catches a change here; nothing pins the
+ *  Rust side, so a change there is invisible. **CPE-1685 must set it to 443 and add a Rust test**, which is
+ *  an acceptance criterion on that ticket, not a hope. Until then the drift is latent rather than live:
+ *  `find_connection` treats an absent port as a wildcard and this side omits the port at 443, so the
+ *  comparison short-circuits before the mismatch matters. Precedent for the finished shape:
+ *  `filetypes.test.ts`, which pins the TS list and names the Rust test pinning the same list. */
+export const DEFAULT_PORTS: Record<string, number> = {
+  sftp: 22,
+  ssh: 22,
+  smb: 445,
+  webdav: 80,
+  davs: 443,
+  ftp: 21,
+  s3: 443,
+};
 
 /** The `scheme://user@host[:port]/path` a saved connection navigates to — re-derives what Rust's
  *  `Connection::location()` computes, so the sidebar can build the URI to navigate to (or preview it in the
@@ -34,11 +54,24 @@ export function connectionLocation(conn: Connection): string {
 }
 
 /** Whether `auth` ALWAYS needs a stored secret before a connect can even be attempted — password auth has
- *  nothing else to authenticate with. A key's passphrase is only SOMETIMES needed (an unencrypted key needs
- *  none), so a key connection is tried directly and only re-prompted reactively on failure; this helper
- *  covers the "always" half only (see Sidebar's connect handler for the reactive key-auth retry). Pure. */
+ *  nothing else to authenticate with, and neither does access-key auth: SigV4 signs every request with the
+ *  secret access key, and signing with a blank one produces a valid-looking request that comes back
+ *  `SignatureDoesNotMatch` (CPE-1686; the backend half of that guard is CPE-1685), which sends the user
+ *  hunting for a clock-skew or policy problem that doesn't exist. Prompting first is the honest failure.
+ *  A key's passphrase is only SOMETIMES needed (an unencrypted key needs none), so a key connection is
+ *  tried directly and only re-prompted reactively on failure; this helper covers the "always" half only
+ *  (see Sidebar's connect handler for the reactive key-auth retry). Pure. */
 export function secretAlwaysRequired(auth: AuthMethod): boolean {
-  return auth.kind === "password";
+  return auth.kind === "password" || auth.kind === "access_key";
+}
+
+/** What the inline secret prompt (NetworkSecretPrompt) should call the secret it's asking for — the OS
+ *  keychain stores one secret per connection (CPE-1510), so the label is purely about naming it in words
+ *  the user recognises from their provider's console. Pure. */
+export function secretLabel(auth: AuthMethod): string {
+  if (auth.kind === "key") return "Passphrase";
+  if (auth.kind === "access_key") return "Secret access key";
+  return "Password";
 }
 
 /** Look up a connection's live state, defaulting to `"disconnected"` for a saved connection with no tracked
@@ -108,8 +141,22 @@ export function hasAnyNetworkRows(
  *  `smb` (CPE-1519): a discovered `\\server\share` pre-fills scheme `smb`, and the form must accept it
  *  rather than reject the very row it just offered to add. Saving an `smb` connection profile is honest
  *  about today's limits — there's no generic-remote SMB client yet (`Scheme::Smb` routes to a "not
- *  connected" message in `fs_route.rs`), matching the ticket's "don't build new SMB browsing" scope. */
-export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb", "ftp"] as const;
+ *  connected" message in `fs_route.rs`), matching the ticket's "don't build new SMB browsing" scope.
+ *  `s3` joins as of CPE-1686 (epic CPE-1503): S3 and every S3-compatible store (MinIO, Backblaze B2,
+ *  Wasabi, Google Cloud Storage's S3 API) are savable here, with access-key auth and the endpoint/region/
+ *  bucket convention documented on {@link schemeFieldHints}. */
+export const SUPPORTED_SCHEMES = ["sftp", "webdav", "smb", "ftp", "s3"] as const;
+
+/** The supported protocols as a human list for an error message — `"sftp, webdav, smb, ftp, or s3"`.
+ *  Derived from {@link SUPPORTED_SCHEMES} rather than hand-written (CPE-1686): the rejection string used to
+ *  spell the four schemes out literally, so adding a fifth left the message telling the user to choose from
+ *  a list that no longer matched what the dropdown offered. Now the seventh scheme needs no edit here.
+ *  Pure. */
+export function supportedSchemesSentence(): string {
+  const schemes = [...SUPPORTED_SCHEMES];
+  if (schemes.length === 1) return schemes[0];
+  return `${schemes.slice(0, -1).join(", ")}, or ${schemes[schemes.length - 1]}`;
+}
 
 /** Whether `scheme` is one of `SUPPORTED_SCHEMES` — the single check gating whether a "＋ Add a
  *  connection" affordance can actually save. Case/whitespace-tolerant, matching how `buildConnection`
@@ -122,26 +169,118 @@ export function isSavableScheme(scheme: string): boolean {
   return (SUPPORTED_SCHEMES as readonly string[]).includes(scheme.trim().toLowerCase());
 }
 
+/** How the form lets a connection authenticate. `access_key` (CPE-1686) is S3's access key id + secret
+ *  access key (SigV4); the other two are the SSH/HTTP-era pair the form has always offered. The remaining
+ *  `AuthMethod` variants (`anonymous`, `token`) have no provider that consumes them yet, so the form still
+ *  doesn't offer them. */
+export type FormAuthKind = "password" | "key" | "access_key";
+
 /** Raw text fields from the add/edit form — everything is a string (even port), matching what an `<input>`
- *  actually hands back, so `buildConnection` owns all the parsing/validation in one pure place. */
+ *  actually hands back, so `buildConnection` owns all the parsing/validation in one pure place.
+ *
+ *  **No field here ever holds secret material** — not a password, not a key passphrase, not an S3 secret
+ *  access key. Every one of those is collected by NetworkSecretPrompt at connect time and lives in the OS
+ *  keychain (CPE-1510), keyed by the connection's `name`; this form only ever carries the *non-secret* half
+ *  (a key's path, an access key **id**). `network.test.ts` guards that invariant against a future field. */
 export interface ConnectionFormInput {
   name: string;
   scheme: string;
+  /** Host — for `s3`, the **endpoint** host (`s3.us-east-1.amazonaws.com`, `minio.lan`). See
+   *  {@link schemeFieldHints} for why the S3 fields reuse the generic ones. */
   host: string;
   /** Raw port text; blank ⇒ the scheme's default port. */
   port: string;
+  /** User — for `s3`, the **region** (blank ⇒ `us-east-1`). */
   user: string;
-  authKind: "password" | "key";
+  authKind: FormAuthKind;
   /** Private-key file path; only used/validated when `authKind === "key"`. */
   keyPath: string;
-  /** Optional initial remote path; blank ⇒ the server's home/root. */
+  /** S3 access key **id** — not secret (it's the public half of the credential pair, like a username), so
+   *  it's stored in the profile. Only used/validated when `authKind === "access_key"`. */
+  accessKeyId: string;
+  /** Optional initial remote path; blank ⇒ the server's home/root. For `s3` it's `/bucket[/prefix]` and is
+   *  required — an object store has no "root" to land on. */
   path: string;
 }
 
 /** A blank add-form — the "+ Add a connection" control's default state. Pure. */
 export function blankConnectionForm(): ConnectionFormInput {
-  return { name: "", scheme: "sftp", host: "", port: "", user: "", authKind: "password", keyPath: "", path: "" };
+  return {
+    name: "",
+    scheme: "sftp",
+    host: "",
+    port: "",
+    user: "",
+    authKind: "password",
+    keyPath: "",
+    accessKeyId: "",
+    path: "",
+  };
 }
+
+/** The auth kinds a scheme can actually use — S3 signs with an access key and nothing else, while the three
+ *  shipped SSH/HTTP providers reject `AccessKey` outright. Offering the wrong one would let a user save a
+ *  profile that can only ever fail at connect time, so the form's radios come from here. Pure (CPE-1686). */
+export function authKindsFor(scheme: string): readonly FormAuthKind[] {
+  return scheme.trim().toLowerCase() === "s3" ? (["access_key"] as const) : (["password", "key"] as const);
+}
+
+/** Keep a form's `authKind` legal when the protocol dropdown changes — switching to `s3` snaps a
+ *  password/key form onto access-key auth, and switching away snaps back to password, so the radios never
+ *  show a selection the scheme can't use. Pure (CPE-1686). */
+export function coerceAuthKind(scheme: string, kind: FormAuthKind): FormAuthKind {
+  const allowed = authKindsFor(scheme);
+  return allowed.includes(kind) ? kind : allowed[0];
+}
+
+/** Per-scheme labels/placeholders for the three fields whose *meaning* changes with the protocol.
+ *
+ *  **The S3 field convention (CPE-1686 — decided here, handed to CPE-1685).** A `Connection` has exactly
+ *  `{name, scheme, host, port, user, auth, path}` and gains no S3-only fields, so S3's endpoint/region/bucket
+ *  map onto the existing ones:
+ *  - `host` → the **endpoint** host (`s3.us-east-1.amazonaws.com`, `minio.lan`, `s3.us-west-004.backblazeb2.com`).
+ *    An explicit endpoint is what makes the epic's "B2/GCS/Wasabi/MinIO come free" claim true — those can't
+ *    be derived from a region — and it keeps `host` meaning "the server you connect to", as it does for
+ *    every other scheme.
+ *  - `port` → the endpoint port (blank ⇒ 443; MinIO's 9000 is typed in).
+ *  - `user` → the **region** (blank ⇒ `us-east-1`, the universal default S3-compatible servers accept).
+ *    S3 has no user — the credential is the access key id in `auth`.
+ *  - `path` → `/bucket[/prefix]`, exactly the way a discovered SMB row puts its share in the path
+ *    (`/media`). The bucket is the first segment; anything after it is the prefix to land on.
+ *  So a saved profile's location string reads `s3://us-east-1@minio.lan:9000/my-bucket/prefix` and parses
+ *  straight back through `location.rs`'s existing `{scheme,user,host,port,path}` split. Pure. */
+export function schemeFieldHints(scheme: string): {
+  hostLabel: string;
+  hostPlaceholder: string;
+  userLabel: string;
+  userPlaceholder: string;
+  pathLabel: string;
+  pathPlaceholder: string;
+} {
+  if (scheme.trim().toLowerCase() === "s3") {
+    return {
+      hostLabel: "Endpoint",
+      hostPlaceholder: "s3.us-east-1.amazonaws.com",
+      userLabel: "Region",
+      userPlaceholder: "us-east-1",
+      pathLabel: "Bucket and prefix",
+      pathPlaceholder: "/my-bucket/prefix",
+    };
+  }
+  return {
+    hostLabel: "Host",
+    hostPlaceholder: "host.example.com",
+    userLabel: "User",
+    userPlaceholder: "(optional)",
+    pathLabel: "Remote path",
+    pathPlaceholder: "/ (server root)",
+  };
+}
+
+/** The region a blank Region field means — every S3-compatible server accepts `us-east-1`, and SigV4 needs
+ *  *some* region to sign with, so the saved profile records it explicitly rather than leaving the backend to
+ *  guess. Pure (CPE-1686). */
+export const DEFAULT_S3_REGION = "us-east-1";
 
 /** The add-form pre-filled from an existing connection — "Edit" opens the same inline form via this. Pure. */
 export function formFromConnection(conn: Connection): ConnectionFormInput {
@@ -151,11 +290,12 @@ export function formFromConnection(conn: Connection): ConnectionFormInput {
     host: conn.host,
     port: String(conn.port),
     user: conn.user,
-    // The inline form only edits password/key auth; the other AuthMethod variants
-    // (anonymous/token/access_key, reserved for future cloud providers) collapse to
-    // the password default rather than widening the form's authKind union.
-    authKind: conn.auth.kind === "key" ? "key" : "password",
+    // The inline form edits password/key/access_key auth; the remaining AuthMethod variants
+    // (anonymous/token — no provider consumes them yet) collapse to the password default
+    // rather than widening the form's authKind union.
+    authKind: conn.auth.kind === "key" ? "key" : conn.auth.kind === "access_key" ? "access_key" : "password",
     keyPath: conn.auth.kind === "key" ? conn.auth.key_path : "",
+    accessKeyId: conn.auth.kind === "access_key" ? conn.auth.id : "",
     path: conn.path ?? "",
   };
 }
@@ -167,11 +307,13 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
   const name = input.name.trim();
   const host = input.host.trim();
   const scheme = input.scheme.trim().toLowerCase();
+  const hints = schemeFieldHints(scheme);
+  const isS3 = scheme === "s3";
   if (!name) return "Give the connection a name.";
   if (!isSavableScheme(scheme)) {
-    return `Unsupported protocol "${input.scheme}" — choose sftp, webdav, smb, or ftp.`;
+    return `Unsupported protocol "${input.scheme}" — choose ${supportedSchemesSentence()}.`;
   }
-  if (!host) return "Host is required.";
+  if (!host) return `${hints.hostLabel} is required.`;
 
   let port = DEFAULT_PORTS[scheme] ?? 0;
   if (input.port.trim()) {
@@ -180,12 +322,44 @@ export function buildConnection(input: ConnectionFormInput): Connection | string
     port = parsed;
   }
 
-  const auth: AuthMethod =
-    input.authKind === "key" ? { kind: "key", key_path: input.keyPath.trim() } : { kind: "password" };
-  if (auth.kind === "key" && !auth.key_path) return "Key file path is required for key auth.";
+  // An auth kind the scheme can't use would save a profile that can only ever fail at connect time (the
+  // three SSH/HTTP providers reject AccessKey outright; S3 signs with nothing else), so refuse it here
+  // rather than at connect. The form's radios come from the same `authKindsFor`, so this is a backstop.
+  if (!authKindsFor(scheme).includes(input.authKind)) {
+    return isS3
+      ? "S3 authenticates with an access key — choose Access key."
+      : `Access-key auth is only used by s3, not ${scheme}.`;
+  }
 
-  const path = input.path.trim();
-  return { name, scheme, host, port, user: input.user.trim(), auth, path: path ? path : undefined };
+  let auth: AuthMethod;
+  if (input.authKind === "key") {
+    const keyPath = input.keyPath.trim();
+    if (!keyPath) return "Key file path is required for key auth.";
+    auth = { kind: "key", key_path: keyPath };
+  } else if (input.authKind === "access_key") {
+    const id = input.accessKeyId.trim();
+    if (!id) return "Access key ID is required for access-key auth.";
+    // `secret_ref` names the OS-keychain entry holding the secret access key — it is a *label*, never the
+    // secret. Connections are keyed in the keychain by their own `name` (CPE-1510's
+    // `connection_secret_get/set`, Rust's `secret_for(access, &conn.name)`), so that's the ref this form
+    // writes. CPE-1685 is the first backend consumer; this is the convention it should read.
+    auth = { kind: "access_key", id, secret_ref: name };
+  } else {
+    auth = { kind: "password" };
+  }
+
+  let path = input.path.trim();
+  let user = input.user.trim();
+  if (isS3) {
+    // An object store has no home directory to land on — every request is scoped to a bucket, so a profile
+    // without one can't list anything. Normalise `my-bucket/prefix` to `/my-bucket/prefix` so the location
+    // string is well-formed however the user typed it.
+    if (path && !path.startsWith("/")) path = `/${path}`;
+    const bucket = path.split("/").filter((seg) => seg.length > 0)[0] ?? "";
+    if (!bucket) return "Bucket is required for s3 — use /bucket or /bucket/prefix.";
+    if (!user) user = DEFAULT_S3_REGION;
+  }
+  return { name, scheme, host, port, user, auth, path: path ? path : undefined };
 }
 
 // ---- "Discovered on your network" tier (CPE-1519) ------------------------------------------------------

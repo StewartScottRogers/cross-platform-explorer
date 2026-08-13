@@ -1,6 +1,6 @@
 ---
 id: CPE-1503
-title: "EPIC: Network protocol — S3-compatible object-store provider (cpe-s3) [unlocks B2/GCS free]"
+title: "EPIC: Network protocol — S3-compatible object-store provider (cpe-s3) [unlocks B2/Wasabi/MinIO; GCS TBD]"
 type: Task
 status: In Progress
 priority: Medium
@@ -16,8 +16,16 @@ closed:
 
 ## Why (high leverage — one provider, many backends)
 S3 auth is *simpler* than interactive/OAuth cloud (static access-key + secret, SigV4 — no browser flow), so it
-ranks easier than Drive/OneDrive. And **Backblaze B2, Google Cloud Storage, Wasabi, MinIO** are all
-S3-compatible → they come **free** once S3 works (point the client at their endpoint).
+ranks easier than Drive/OneDrive. **Backblaze B2, Wasabi and MinIO** are S3-compatible → they come **free**
+once S3 works (point the client at their endpoint).
+
+**Claim narrowed 2026-08-12 — Google Cloud Storage is no longer part of the "free" list.** The CPE-1681
+worker, having just built the SigV4 signer, flagged that GCS's S3 shim (the XML API) carries its own
+SigV4 quirks and **does not support ListObjectsV2 the same way** — which is precisely the call CPE-1683 is
+built on. Compatible addressing is necessary but not sufficient. GCS is therefore **explicitly undecided**
+and must be scoped in or out at CPE-1683, on evidence rather than on this line. B2, Wasabi and MinIO alone
+still carry the epic's rationale. Recorded per the Evidence Rules in `Ticketing/wiki.md`: state the scope
+of a claim rather than letting a headline outrun what was verified.
 
 ## Scope
 - New `crates/s3` (`cpe-s3`) implementing `FileSystemProvider` over an object store: bucket/prefix listing
@@ -44,8 +52,13 @@ foundation it was waiting on has since landed, and the seams were left in the co
   in so many words "unblocks CPE-1503 (S3)" (CPE-1515).
 - `cpe_server::provider::ProviderCapabilities::has_real_dirs` exists, and `provider.rs` carries a test
   literally named `a_provider_can_override_capabilities_eg_s3_style_no_real_dirs`.
-- `Scheme::S3` already parses in `location.rs` (`s3://bucket/key` → host=`bucket`, path=`/key`) and
-  `fs_route.rs` already routes it to a "not connected" message.
+- `Scheme::S3` already parses in `location.rs` and `fs_route.rs` already routes it to a "not connected"
+  message. **Note (CPE-1686, 2026-08-12): the `s3://bucket/key` → host=`bucket` reading in this line was
+  wrong and is superseded.** It leaves no field for the endpoint *or* the region, which makes a custom
+  endpoint inexpressible and would have broken this epic's own "B2/GCS/Wasabi/MinIO come free" claim.
+  The settled convention is `host` = endpoint, `port` = endpoint port (blank ⇒ 443), `user` = region
+  (blank ⇒ `us-east-1`), `path` = `/bucket[/prefix]`. `location.rs`'s parser is scheme-agnostic and
+  handles it with no new arm — verified against the real parser, not assumed.
 - `cpe_vfs::open` has the hole to fill: `s3` currently falls through to `unsupported scheme 's3'`, and all
   three shipped providers return *"reserved for a future S3/cloud provider"* for `AccessKey` auth.
 - `cpe-ftp` (CPE-1514, the sibling protocol epic) proved the whole recipe end to end three months' worth of
