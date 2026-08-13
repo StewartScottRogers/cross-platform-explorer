@@ -13,13 +13,16 @@
 //!   "Backblaze B2 / Google Cloud Storage / Wasabi / MinIO come free" claim; get it wrong and half the
 //!   ecosystem answers 404.
 //! - **[`sigv4`]** — *how* a request is signed.
+//! - **[`error::map_s3_error`]** — *what actually went wrong* when a request comes back non-2xx (CPE-1682),
+//!   turning S3's `<Error><Code>…</Code></Error>` body into a message that names the real cause instead of
+//!   a bare status code, before either provider ticket below writes a line of error handling of its own.
 //!
-//! What is **not** here, on purpose: no HTTP client, no XML parsing, no
-//! `cpe_server::provider::FileSystemProvider` impl. Error mapping is CPE-1682, `list` is CPE-1683,
-//! object ops are CPE-1684, `cpe_vfs::open` routing is CPE-1685 and the frontend is CPE-1686. The slice
-//! stops at the point where everything is still a pure function of its inputs — which is exactly why it
-//! can be verified in full against AWS's published test vectors with no network, no credentials, no
-//! bucket and no Docker.
+//! What is **not** here, on purpose: no HTTP client, no general-purpose XML parser (only the small,
+//! bounded scanner `error` needs for its own two fields), no `cpe_server::provider::FileSystemProvider`
+//! impl. `list` is CPE-1683, object ops are CPE-1684, `cpe_vfs::open` routing is CPE-1685 and the frontend
+//! is CPE-1686. The slice stops at the point where everything is still a pure function of its inputs —
+//! which is exactly why it can be verified in full against AWS's published test vectors with no network,
+//! no credentials, no bucket and no Docker.
 //!
 //! # The secret
 //! [`Credentials`] holds the one genuinely secret value in the config (it will arrive from the OS
@@ -27,6 +30,7 @@
 //! a secret leaking into a log line, a panic message, or an error string; see
 //! [`Credentials::secret`], the single deliberate way to read it back.
 
+pub mod error;
 pub mod sigv4;
 
 use sigv4::{canonical_query, encode_path};
