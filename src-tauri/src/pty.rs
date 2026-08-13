@@ -481,6 +481,28 @@ mod tests {
         // PtySession the registry never touched still leaks nothing" guarantee CPE-1244's module doc
         // comment promises ("terminal tabs left open never orphan their shells") for the direct,
         // non-registry-mediated path too.
+        //
+        // CPE-1707, round 4 -- READ THIS BEFORE TREATING THE LINE BELOW AS A `kill()` GUARD. Dropping
+        // the session drops `self.master` too, and closing the ConPTY is *by itself* enough to
+        // terminate the child on Windows, whether or not `kill()` did anything. Measured by the
+        // CPE-1707 UAT with a deliberately-inert `kill()` (no signal sent, `try_wait()` stubbed to lie
+        // "exited", `Drop` guard disabled): the assertion below still passed **0/90** runs -- 30 idle
+        // and 60 under a 48-thread load -- while the pre-fix shape (check with the handle still open)
+        // caught the same sabotage 20/20. A separate probe confirmed the mechanism directly: dropping
+        // only `master`, with no `kill()`/`wait()` call at all, left `pid 43892 alive = false`.
+        //
+        // So attribute the two assertions correctly, because their names invite the wrong reading:
+        //   * `try_wait().is_some()` above is the real `kill()` guard. An inert `kill()` reds it
+        //     immediately and deterministically -- confirmed independently at 1/1 and 50/50.
+        //   * the line below is a **leak check, not a kill check**: once the session is gone, nothing
+        //     of the child is left behind. That is a genuine guarantee worth pinning (it is what
+        //     CPE-1244's module doc promises for the direct, non-registry path), but it is delivered
+        //     by teardown, not by `kill()`, and it cannot fail while `kill()` alone is broken.
+        //
+        // Restructuring to isolate `kill()`'s own effect on the PID would mean releasing the child
+        // handle without releasing `master` -- production API surgery to serve one test -- and it
+        // would buy nothing, because `try_wait()` already covers that failure deterministically.
+        // Deliberately left as-is with the attribution written down instead.
         drop(session); // release the last handle we hold to the child (see comment above)
         assert!(!pid_is_alive(pid), "OS process should be gone once we drop our handle");
     }
