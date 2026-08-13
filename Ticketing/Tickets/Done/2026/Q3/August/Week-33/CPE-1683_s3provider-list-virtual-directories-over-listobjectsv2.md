@@ -2,14 +2,14 @@
 id: CPE-1683
 title: "S3Provider::list — virtual directories over ListObjectsV2, paginated, with has_real_dirs = false"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Backend
 tags: [needs-prereq]
 epic: CPE-1503
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## What
