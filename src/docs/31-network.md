@@ -96,6 +96,10 @@ reports an unsupported protocol.
   a marker object. Deleting a "folder" will mean deleting the objects under that prefix.
 - **Uploads will be a single request**, so an individual file larger than 5 GB won't be uploadable
   (multi-part upload isn't planned for the first version).
+- **Keys are taken literally, including the slashes.** A key is an opaque string to S3, so `report.pdf`,
+  `/report.pdf` and `//report.pdf` are three different objects and the app treats them that way rather
+  than tidying the leading slashes away. A bucket written by a tool that joined paths carelessly can
+  genuinely hold all three; quietly collapsing them would mean reading — or overwriting — the wrong one.
 - **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
   the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
   is why **Access key** is the only authentication S3 offers.
