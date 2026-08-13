@@ -3247,6 +3247,24 @@ async fn move_exact(app: tauri::AppHandle, pairs: Vec<(String, String)>) -> Vec<
         .await.unwrap()
 }
 
+/// Turn a `try_exists()` outcome for the destination's parent folder into the `move_exact` error, or
+/// `None` meaning "proceed" (CPE-1692). Split out, mirroring `cpe_server::disk_usage::dir_size_stat_error`,
+/// so the `NotFound`-vs-everything-else split is unit-testable without touching a real filesystem
+/// (permission bits are platform- and privilege-dependent — inert as root, or defeated by Windows's
+/// default "bypass traverse checking" privilege — so an ACL-based test alone would leave this taxonomy
+/// unverified on some machines).
+///
+/// Only a genuine `NotFound` means the folder is actually gone; any other stat failure (permission
+/// denied along the resolved path, a dead network mount, …) names the real cause instead of claiming
+/// absence — `Path::exists()` used to swallow every `stat` failure into the same `false`.
+fn dest_parent_stat_error(stat: std::io::Result<bool>) -> Option<String> {
+    match stat {
+        Ok(true) => None,
+        Ok(false) => Some("The original folder no longer exists".to_string()),
+        Err(e) => Some(format!("Could not confirm the destination folder still exists: {e}")),
+    }
+}
+
 /// `ctx` re-keys any tag-store entries under each successfully-moved `from` to its `to` (CPE-1222) —
 /// including undo's move-back, which previously never migrated tags at all — and likewise re-keys any
 /// scheduled-snapshot catalog entry under `from` (CPE-1225).
@@ -3271,8 +3289,8 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
                 );
             }
             if let Some(parent) = dst.parent() {
-                if !parent.exists() {
-                    return OpResult::err(src, "The original folder no longer exists");
+                if let Some(e) = dest_parent_stat_error(parent.try_exists()) {
+                    return OpResult::err(src, e);
                 }
             }
             match fs::rename(src, dst) {
@@ -15796,6 +15814,160 @@ overlay / overlay rw,relatime 0 0
         )]);
         assert!(!results[0].ok, "undo must not clobber an existing file");
         assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"keep");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account, no privilege needed) —
+    /// same role as `cpe_server::dispatch::classify_path_error`'s own unit tests. Proves the taxonomy
+    /// the wiring below depends on.
+    #[test]
+    fn dest_parent_stat_error_says_gone_only_for_a_genuine_absence() {
+        assert!(dest_parent_stat_error(Ok(false)).unwrap().contains("no longer exists"));
+        assert!(dest_parent_stat_error(Ok(true)).is_none(), "an existing folder proceeds, no error");
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            let e = std::io::Error::new(kind, "Access is denied.");
+            let msg = dest_parent_stat_error(Err(e)).unwrap();
+            assert!(!msg.contains("no longer exists"), "{kind:?} must not be reported as absence: {msg}");
+            assert!(msg.contains("Access is denied."), "{kind:?} must name the OS's own cause: {msg}");
+        }
+    }
+
+    /// The end-to-end half, driving the real `move_exact_impl` entry point rather than the pure
+    /// classifier above. The check under test calls `dst.parent().try_exists()` — its target IS the
+    /// directory itself (not a child inside it) — so this needs the `deny_stat_of` mechanism the PR #874
+    /// review established: `try_exists` is a different syscall on Windows than `fs::metadata`, and a
+    /// deny ACE placed directly ON the target (not on a parent/ancestor) DOES refuse it there, even
+    /// though the earlier `deny_dir_traversal`-based version of this test (denying `gp`, the target's
+    /// *parent*) measurably did not. `src-tauri` doesn't depend on `cpe_server::fsutil`'s test-only
+    /// helpers (`pub(crate)`, crate-private), so the mechanism is inlined here rather than shared —
+    /// mirrors `fsutil::deny_stat_of`'s doc comment for the platform-asymmetric reasoning. Runs for REAL
+    /// on both platforms now.
+    #[test]
+    fn move_exact_reports_the_real_cause_when_the_destination_folder_cannot_be_confirmed() {
+        let d = scratch("move_exact_denied");
+        let ctx = HeadlessCtx::new(&d);
+        let gp = d.join("gp");
+        let real_parent = gp.join("real_parent");
+        fs::create_dir_all(&real_parent).unwrap();
+        fs::write(d.join("source.txt"), b"x").unwrap();
+
+        // Armed before the deny so cleanup runs on every exit path — mirrors split_join.rs's `Restore`
+        // pattern (Evidence Rules: a red run must never leave debris).
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                {
+                    let _ = self.1; // Windows denies `real_parent` (self.0) itself; `gp` is untouched there.
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    // Unix denies `gp` (self.1), `real_parent`'s parent; `real_parent` itself is untouched.
+                    use std::os::unix::fs::PermissionsExt;
+                    // Mirror of the `let _ = self.1` above: `real_parent` is read only on the Windows
+                    // path, and `-D warnings` makes an unread field a hard error, so each platform has
+                    // to acknowledge the field the other one uses.
+                    let _ = self.0;
+                    let _ = fs::set_permissions(self.1, fs::Permissions::from_mode(0o700));
+                }
+                let _ = fs::remove_dir_all(self.2);
+            }
+        }
+        let _restore = Restore(&real_parent, &gp, &d);
+
+        #[cfg(windows)]
+        {
+            // Windows: deny Full Control directly on `real_parent` itself — measured (PR #874 review) to
+            // be refused by `try_exists()` even though `fs::metadata` on the identical target still
+            // succeeds. Denying `gp` (the parent) here, as the old `deny_dir_traversal`-based version of
+            // this test did, measurably has NO effect on `try_exists(real_parent)`.
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&real_parent)
+                        .arg("/deny")
+                        .arg(format!("{user}:(F)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            // Unix: `try_exists` needs no different treatment than `fs::metadata` — deny stays on the
+            // parent, exactly as `deny_dir_traversal` does.
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&gp, fs::Permissions::from_mode(0o000));
+        }
+
+        let denied = real_parent.try_exists().is_err();
+        if !denied {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED move_exact permission-denied leg: could not deny stat of {} on this \
+                 machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for move_exact_impl.",
+                real_parent.display()
+            );
+            return;
+        }
+
+        let results = move_exact_impl(&ctx, vec![(
+            d.join("source.txt").to_string_lossy().to_string(),
+            real_parent.join("target.txt").to_string_lossy().to_string(),
+        )]);
+        assert!(!results[0].ok, "the destination folder could not be confirmed, so this must not succeed");
+        assert!(
+            !results[0].error.contains("no longer exists"),
+            "a permission-denied folder must not be reported as gone — it's right there: {}",
+            results[0].error
+        );
+        // On Windows specifically, `fs::rename`'s OWN real failure (once the stat guard is bypassed) can
+        // ALSO produce an error that happens not to contain "no longer exists" — a target-level deny ACE
+        // never makes `Path::exists()` fail on Windows (F1, PR #874 review), so a wiring regression back
+        // to `!parent.exists()` doesn't trip the buggy branch at all here; it silently falls through to
+        // `fs::rename`, which fails for its own unrelated reason and would pass the assertion above
+        // vacuously (measured: reverting the wiring here produced `ok=false,
+        // error="Access is denied. (os error 5)"`, which the negative assertion above does not catch).
+        // This positively pins the actual code path taken: only `dest_parent_stat_error`'s `Err(e)` arm
+        // produces this wrapper text, so a wiring regression that skips the classifier entirely (falling
+        // through to rename's raw OS error) is caught here even where the assertion above is not.
+        assert!(
+            results[0].error.contains("Could not confirm the destination folder still exists"),
+            "the classifier's own wrapper text must be present — its absence means the code fell through \
+             to fs::rename's raw error instead of being caught by the stat-existence guard: {}",
+            results[0].error
+        );
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F7 (PR #874 review): the honest case, pinned at the real `move_exact_impl` entry point, not just
+    /// the pure classifier (`dest_parent_stat_error_says_gone_only_for_a_genuine_absence` above) — the
+    /// UAT independently hit this gap and had to add its own temporary probe to confirm it; making it
+    /// permanent here per its recommendation.
+    #[test]
+    fn move_exact_when_the_destination_folder_is_genuinely_gone_still_says_so_at_the_real_entry_point() {
+        let d = scratch("move_exact_honest");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("source.txt"), b"x").unwrap();
+
+        let results = move_exact_impl(&ctx, vec![(
+            d.join("source.txt").to_string_lossy().to_string(),
+            d.join("truly-gone").join("target.txt").to_string_lossy().to_string(),
+        )]);
+        assert!(!results[0].ok);
+        assert!(
+            results[0].error.contains("no longer exists"),
+            "a real absence must still say so: {}",
+            results[0].error
+        );
         let _ = fs::remove_dir_all(&d);
     }
 

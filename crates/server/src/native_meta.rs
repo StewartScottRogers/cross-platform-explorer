@@ -107,11 +107,34 @@ mod imp {
         }
     }
 
-    pub fn write(path: &Path, name: &str, value: &[u8]) -> Result<(), MetaError> {
-        // Never conjure the base file into existence by writing a stream to a missing path.
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
+    /// Turn a `try_exists()` outcome for `path` into the `require_present` error, or `None` meaning
+    /// "proceed" (CPE-1692). Split out, mirroring `disk_usage::dir_size_stat_error`, so the
+    /// `NotFound`-vs-everything-else split is unit-testable without touching a real filesystem
+    /// (permission bits are platform- and privilege-dependent, so a real ACL-based test alone would
+    /// leave this taxonomy unverified on some machines/CI accounts; this stays deterministic).
+    ///
+    /// Only a genuine `NotFound` says "no such path"; any other stat failure (permission denied, a dead
+    /// network mount, …) names the OS's real cause instead — [`Path::exists`] used to swallow every
+    /// `stat` failure into the same `false`, reporting "we don't know" as "it isn't there".
+    pub(super) fn present_stat_error(path: &Path, stat: std::io::Result<bool>) -> Option<MetaError> {
+        match stat {
+            Ok(true) => None,
+            Ok(false) => Some(MetaError::Io(format!("no such path: {}", path.display()))),
+            Err(e) => Some(MetaError::Io(format!("{}: {e}", path.display()))),
         }
+    }
+
+    /// Guard shared by `write`/`read`/`remove`: never conjure the base file into existence, or open a
+    /// stream on it, when it isn't confirmed present.
+    fn require_present(path: &Path) -> Result<(), MetaError> {
+        match present_stat_error(path, path.try_exists()) {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    pub fn write(path: &Path, name: &str, value: &[u8]) -> Result<(), MetaError> {
+        require_present(path)?;
         let mut f = OpenOptions::new()
             .write(true)
             .create(true)
@@ -122,9 +145,7 @@ mod imp {
     }
 
     pub fn read(path: &Path, name: &str) -> Result<Option<Vec<u8>>, MetaError> {
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
-        }
+        require_present(path)?;
         match File::open(stream_path(path, name)) {
             Ok(mut f) => {
                 let mut buf = Vec::new();
@@ -141,9 +162,7 @@ mod imp {
     }
 
     pub fn remove(path: &Path, name: &str) -> Result<(), MetaError> {
-        if !path.exists() {
-            return Err(MetaError::Io(format!("no such path: {}", path.display())));
-        }
+        require_present(path)?;
         match std::fs::remove_file(stream_path(path, name)) {
             Ok(()) => Ok(()),
             Err(e) => match e.raw_os_error() {
@@ -263,6 +282,159 @@ mod tests {
         let dir = scratch("missing");
         let nope = dir.join("nope.txt");
         assert!(matches!(read(&nope, &cpe_name("tags")), Err(MetaError::Io(_))));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The deterministic half of the CPE-1692 guard (runs on every OS/account with Windows toolchain
+    /// components, no privilege needed) — same role as `dispatch::classify_path_error`'s and
+    /// `disk_usage::dir_size_stat_error`'s own unit tests. Windows-only because `present_stat_error` only
+    /// exists inside `imp`'s `#[cfg(windows)]` block.
+    #[cfg(windows)]
+    #[test]
+    fn present_stat_error_says_no_such_path_only_for_a_genuine_absence() {
+        let p = Path::new(r"C:\some\file.txt");
+        assert!(imp::present_stat_error(p, Ok(true)).is_none(), "an existing path proceeds, no error");
+        match imp::present_stat_error(p, Ok(false)) {
+            Some(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "{msg}"),
+            other => panic!("expected an absence Io error, got {other:?}"),
+        }
+        for kind in [std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut] {
+            let e = std::io::Error::new(kind, "Access is denied.");
+            match imp::present_stat_error(p, Err(e)) {
+                Some(MetaError::Io(msg)) => {
+                    assert!(!msg.contains("no such path"), "{kind:?} must not be reported as absence: {msg}");
+                    assert!(msg.contains("Access is denied."), "{kind:?} must name the OS's own cause: {msg}");
+                }
+                other => panic!("{kind:?}: expected an Io error naming the real cause, got {other:?}"),
+            }
+        }
+    }
+
+    /// The end-to-end half, driving the real `write`/`read`/`remove` entry points rather than the pure
+    /// classifier above. `write`/`read`/`remove` all call `require_present`, which calls
+    /// `path.try_exists()` — so this uses `fsutil::deny_stat_of` (a deny directly on the target itself on
+    /// Windows, on the target's parent on Unix; see that helper's doc comment for the PR #874 review
+    /// measurement). Runs for REAL on both platforms now — this test previously (`deny_dir_traversal`,
+    /// `fs::metadata`-targeted) always skipped on Windows and had, per the review, *never executed a
+    /// single assertion on any OS* (Windows-only `#[cfg]`, and the old mechanism doesn't move
+    /// `try_exists` either way, so the skip fired every run).
+    #[cfg(windows)]
+    #[test]
+    fn windows_ads_ops_report_the_real_cause_for_a_permission_denied_path_not_missing() {
+        let dir = scratch("denied");
+        let inside = dir.join("inside.txt");
+        std::fs::write(&inside, b"base").unwrap();
+
+        struct Restore<'a>(&'a Path, &'a Path, &'a Path);
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_stat_of(self.0, self.1);
+                let _ = std::fs::remove_dir_all(self.2);
+            }
+        }
+        let _restore = Restore(&inside, &dir, &dir);
+
+        if !crate::fsutil::deny_stat_of(&inside) {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED native_meta permission-denied leg: could not deny stat of {} on this \
+                 machine (elevated/admin, or a filesystem ignoring ACLs). The remaining assertions do NOT \
+                 cover CPE-1692 for native_meta.",
+                inside.display()
+            );
+            return;
+        }
+
+        let name = cpe_name("tags");
+        let write_err = write(&inside, &name, b"x").unwrap_err();
+        let read_err = read(&inside, &name).unwrap_err();
+        let remove_err = remove(&inside, &name).unwrap_err();
+        for (label, err) in [("write", write_err), ("read", read_err), ("remove", remove_err)] {
+            match err {
+                MetaError::Io(msg) => {
+                    assert!(
+                        !msg.contains("no such path"),
+                        "{label}: a permission-denied stat must not be reported as absence — the file \
+                         is right there: {msg}"
+                    );
+                    // On Windows specifically, `write`'s OWN real ADS-open failure (once the
+                    // `require_present` guard is bypassed) ALSO produces a message that happens not to
+                    // contain "no such path" — a target-level deny ACE never makes `Path::exists()` fail
+                    // on Windows (F1, PR #874 review), so a wiring regression back to `!path.exists()`
+                    // doesn't trip the buggy branch for `write` at all; it silently falls through to the
+                    // real ADS `OpenOptions::open`, which fails for its own unrelated reason and would
+                    // pass the negative assertion above vacuously (measured: `write`'s real failure is
+                    // bare `"Access is denied. (os error 5)"`, with no path prefix — `read`/`remove`
+                    // instead betray the same regression by returning `Ok` at all, since the ADS stream
+                    // was never created). This positively pins the actual code path taken: only
+                    // `require_present`'s classifier wraps the OS error with the full target path, so a
+                    // wiring regression that skips it (falling through to the operation's own raw error)
+                    // is caught here even where the negative assertion above is not.
+                    assert!(
+                        msg.contains(&inside.display().to_string()),
+                        "{label}: the classifier's own path-prefixed wrapper must be present — its \
+                         absence means the code fell through to the raw ADS I/O error instead of being \
+                         caught by the stat-existence guard: {msg}"
+                    );
+                }
+                other => panic!("{label}: expected an Io error naming the real cause, got {other:?}"),
+            }
+        }
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F7 (PR #874 review): the honest case, pinned at the real `write`/`read`/`remove` entry points, not
+    /// just the pure classifier — a classifier test alone cannot see a wiring regression that stops
+    /// calling it. `read_on_a_missing_path_is_an_io_error` above already covers `read`; this adds
+    /// `write`/`remove` and asserts the message content, not just the error variant.
+    ///
+    /// **Windows-only, and the `#[cfg]` is load-bearing (F9).** The `"no such path"` wording is
+    /// `present_stat_error`'s contract, and `present_stat_error` lives in the `#[cfg(windows)] mod imp`.
+    /// The `#[cfg(not(windows))]` `imp` has no `require_present` at all — `write` goes straight to
+    /// `xattr::set`, so a missing path yields ENOENT rendered as `"No such file or directory (os error
+    /// 2)"`, which does not contain this literal. Ungated, this test reds the Linux and macOS legs of
+    /// CI's 3-OS matrix. Its sibling `read_on_a_missing_path_is_an_io_error` is deliberately ungated
+    /// because it asserts only the error *variant*, which is portable; asserting message *content* is
+    /// not. See the `#[cfg(not(windows))]` counterpart below, which keeps the honest case covered there.
+    #[cfg(windows)]
+    #[test]
+    fn write_and_remove_on_a_genuinely_missing_path_say_no_such_path_at_the_real_entry_points() {
+        let dir = scratch("honest");
+        let nope = dir.join("truly-missing.txt");
+        let name = cpe_name("tags");
+
+        match write(&nope, &name, b"x") {
+            Err(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "write: {msg}"),
+            other => panic!("write on a real absence must be an Io(\"no such path\") error, got {other:?}"),
+        }
+        match remove(&nope, &name) {
+            Err(MetaError::Io(msg)) => assert!(msg.contains("no such path"), "remove: {msg}"),
+            other => panic!("remove on a real absence must be an Io(\"no such path\") error, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The non-Windows half of F7's honest-case coverage. The xattr `imp` has no `require_present`, so
+    /// there is no `"no such path"` wording to assert — but the entry points must still *fail* on a real
+    /// absence rather than succeed, and a wiring regression that made them succeed would go unnoticed
+    /// with no test here at all. Asserts the error variant only, which is portable across Linux and
+    /// macOS; see the `#[cfg(windows)]` counterpart above for why the message text is not.
+    #[cfg(not(windows))]
+    #[test]
+    fn write_and_remove_on_a_genuinely_missing_path_are_io_errors_at_the_real_entry_points() {
+        let dir = scratch("honest-unix");
+        let nope = dir.join("truly-missing.txt");
+        let name = cpe_name("tags");
+
+        match write(&nope, &name, b"x") {
+            Err(MetaError::Io(_)) => {}
+            other => panic!("write on a real absence must be an Io error, got {other:?}"),
+        }
+        match remove(&nope, &name) {
+            Err(MetaError::Io(_)) => {}
+            other => panic!("remove on a real absence must be an Io error, got {other:?}"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

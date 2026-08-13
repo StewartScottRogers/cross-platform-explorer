@@ -457,8 +457,16 @@ mod tests {
         }
 
         async fn opendir(&mut self, id: u32, path: String) -> Result<Handle, Self::Error> {
-            if !self.real(&path).is_dir() {
-                return Err(StatusCode::NoSuchFile);
+            // CPE-1692: `!is_dir()` collapsed a `stat` FAILURE (missing, permission-denied, …) and a
+            // successful stat of the WRONG type into the same `NoSuchFile` — the fixture's own `stat`
+            // handler above already routes a genuine stat failure through `io_err` (which distinguishes
+            // `NoSuchFile` from `PermissionDenied` from a generic `Failure`); this was the one caller
+            // that didn't. `metadata()` + `io_err` here matches that existing convention: a real stat
+            // failure gets its own real cause, and only a *successful* stat of a non-directory is the
+            // (still real, still not an absence) type mismatch.
+            let meta = std::fs::metadata(self.real(&path)).map_err(io_err)?;
+            if !meta.is_dir() {
+                return Err(StatusCode::Failure);
             }
             self.dirs_read.remove(&path);
             Ok(Handle { id, handle: path })
@@ -506,8 +514,16 @@ mod tests {
                     .truncate(pflags.contains(OpenFlags::TRUNCATE))
                     .open(&real)
                     .map_err(io_err)?;
-            } else if !real.exists() {
-                return Err(StatusCode::NoSuchFile);
+            } else {
+                // CPE-1692: `!real.exists()` swallowed a stat failure (permission-denied, a dead network
+                // mount, …) into the same `NoSuchFile` a genuine absence gets. `try_exists()` is the
+                // right primitive here — only existence is in question, not the entry's type — and its
+                // `Err` leg still goes through `io_err` for the same classification `stat`/`opendir` use.
+                match real.try_exists() {
+                    Ok(true) => {}
+                    Ok(false) => return Err(StatusCode::NoSuchFile),
+                    Err(e) => return Err(io_err(e)),
+                }
             }
             Ok(Handle { id, handle: filename })
         }
@@ -645,10 +661,11 @@ mod tests {
     }
 
     /// Like [`spawn_server`] but also returns the server's on-disk root, so a test can seed extra
-    /// (possibly hostile-named) files into it before listing. Accepts any password. Seeds the same
-    /// `readme.txt` + `sub/nested.txt` as the other spawners. (Unix-only: its sole user is the
-    /// backslash-name filter test, which needs a filename that isn't creatable on Windows.)
-    #[cfg(unix)]
+    /// (possibly hostile-named) files into it before listing, or construct an on-disk permission
+    /// condition (CPE-1692). Accepts any password. Seeds the same `readme.txt` + `sub/nested.txt` as the
+    /// other spawners. Not `#[cfg(unix)]` despite having a Unix-only first caller (a backslash filename
+    /// isn't creatable on Windows) — nothing in this function is Unix-specific, and CPE-1692's
+    /// permission-denied test needs it on every OS.
     fn spawn_server_returning_root() -> (SocketAddr, KeyFields, PathBuf) {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let key = PrivateKey::random(&mut rand_core::OsRng, Algorithm::Ed25519).expect("gen host key");
@@ -1033,5 +1050,346 @@ mod tests {
         // The legitimate entries still come through (no over-rejection).
         assert!(names.contains(&FILE_NAME.to_string()), "legit file was dropped: {names:?}");
         assert!(names.contains(&DIR_NAME.to_string()), "legit dir was dropped: {names:?}");
+    }
+
+    /// The deterministic half of the CPE-1692 guard for this fixture (runs on every OS/account, no
+    /// privilege needed) — same role as `cpe_server::dispatch::classify_path_error`'s own unit tests.
+    /// `stat`/`readdir` already routed every stat failure through `io_err`; `opendir`/`open` were the two
+    /// call sites that didn't (they used `!is_dir()`/`!exists()` instead, folding a permission-denied or
+    /// otherwise-unstattable entry into the same `NoSuchFile` a genuine absence gets). This pins the
+    /// taxonomy `io_err` itself already encoded, which the wiring fix below now reaches from all four
+    /// handlers uniformly.
+    #[test]
+    fn io_err_maps_kinds_to_distinct_status_codes() {
+        assert_eq!(io_err(std::io::Error::from(std::io::ErrorKind::NotFound)), StatusCode::NoSuchFile);
+        assert_eq!(
+            io_err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            StatusCode::PermissionDenied
+        );
+        for kind in [std::io::ErrorKind::Other, std::io::ErrorKind::TimedOut, std::io::ErrorKind::BrokenPipe] {
+            assert_eq!(
+                io_err(std::io::Error::from(kind)),
+                StatusCode::Failure,
+                "{kind:?} must not be reported as NoSuchFile (an absence) or as an unrelated code"
+            );
+        }
+    }
+
+    /// A second, fully deterministic (no privilege needed) half of the `opendir` guard specifically:
+    /// `!is_dir()` folded a SUCCESSFUL stat of the WRONG type (a real file, not a directory) into the
+    /// same `NoSuchFile` a genuine absence gets — unlike `open`'s `!exists()`, which doesn't care about
+    /// type and so never had this particular confusion, `opendir`'s old check conflated "gone" with
+    /// "present but not a directory". This needs no OS permission trick (a file that just isn't a
+    /// directory is constructible everywhere, unprivileged), so it runs for real on every OS/account
+    /// and can be broken-and-confirmed-red without depending on the platform-limited leg below.
+    #[test]
+    fn list_on_a_file_path_is_not_reported_as_missing() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        std::fs::write(root.join("plain.txt"), b"just a file").unwrap();
+
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let err = provider.list("/plain.txt").unwrap_err();
+        assert!(
+            !err.to_lowercase().contains("no such file"),
+            "a real file (wrong type for opendir, not an absence) must not be reported as missing: {err}"
+        );
+    }
+
+    /// The end-to-end half of the `opendir` guard, driving the real wire protocol —
+    /// `provider.list`, the production entry point a Tauri command ultimately calls — rather than
+    /// calling the fixture's handler methods directly (Evidence Rules: verify through the channel that
+    /// will actually carry the message). `opendir` calls `std::fs::metadata`, so the permission
+    /// condition needs a PARENT-directory traversal deny (mirrors `cpe_server::fsutil::deny_dir_traversal`
+    /// by hand, since this crate doesn't depend on that test-only helper) — genuinely Unix-only, per the
+    /// PR #874 review's measurement on `deny_dir_traversal`'s doc comment; this leg only runs for real on
+    /// Unix (non-root). `open`'s own guard is separate, below, and uses a different mechanism because it
+    /// calls `try_exists`, not `metadata`.
+    #[test]
+    fn opendir_over_a_permission_denied_directory_is_not_reported_as_missing_over_the_wire() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+
+        let gp = root.join("gp");
+        std::fs::create_dir_all(gp.join("real_dir")).unwrap();
+        std::fs::write(gp.join("real_dir").join("inner.txt"), b"secret").unwrap();
+
+        // Armed before the deny so cleanup runs on every exit path — mirrors split_join.rs's `Restore`
+        // pattern (Evidence Rules: a red run must never leave debris).
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                {
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(&self.0)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+                }
+            }
+        }
+        let _restore = Restore(gp.clone());
+
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&gp)
+                        .arg("/deny")
+                        .arg(format!("{user}:(RX)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let denied = std::fs::metadata(gp.join("real_dir"))
+            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+        if !denied {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED sftp opendir permission-denied leg: could not deny traversal on {} \
+                 on this machine (elevated/root, or a filesystem ignoring ACLs/mode bits, or simply \
+                 Windows — this mechanism is genuinely Unix-only). The remaining assertions do NOT cover \
+                 CPE-1692 for crates/sftp opendir.",
+                gp.display()
+            );
+            return;
+        }
+
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        // opendir path: `list` -> `read_dir` -> SSH_FXP_OPENDIR under the hood.
+        let dir_err = provider.list("/gp/real_dir").unwrap_err();
+        assert!(
+            !dir_err.to_lowercase().contains("no such file"),
+            "a permission-denied directory must not be reported as missing over the wire: {dir_err}"
+        );
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// The end-to-end half of the `open` guard — the ticket's stated highest-visibility site
+    /// (`StatusCode::NoSuchFile` traveling over the real wire — though see the PR body for the
+    /// correction that this fixture is a test-only stand-in, not a real shipped SFTP server). `open`
+    /// (non-`CREATE`) calls `real.try_exists()`, not `metadata`, so this needs `deny_stat_of`'s mechanism
+    /// (mirrored here by hand): a deny placed directly ON the target itself on Windows (measured, PR
+    /// #874 review, to be refused by `try_exists` even though `fs::metadata` on the same target still
+    /// succeeds — see `cpe_server::fsutil::deny_stat_of`'s doc comment), on the target's PARENT on Unix.
+    /// Runs for REAL on both platforms now — this is also the site F3 of that review flagged as having
+    /// no wiring-level guard-neutralisation evidence at all; see the PR body's mutation table.
+    #[test]
+    fn open_over_a_permission_denied_file_is_not_reported_as_missing_over_the_wire() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+
+        let gp = root.join("gp");
+        std::fs::create_dir_all(&gp).unwrap();
+        let real_file = gp.join("real_file.txt");
+        std::fs::write(&real_file, b"secret file").unwrap();
+
+        // Armed before the deny so cleanup runs on every exit path — mirrors split_join.rs's `Restore`
+        // pattern (Evidence Rules: a red run must never leave debris).
+        struct Restore { target: PathBuf, parent: PathBuf }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                {
+                    let _ = &self.parent; // Windows denies `target` itself; `parent` untouched there.
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(&self.target)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    let _ = &self.target; // Unix denies `parent`; `target` itself untouched there.
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&self.parent, std::fs::Permissions::from_mode(0o700));
+                }
+            }
+        }
+        let _restore = Restore { target: real_file.clone(), parent: gp.clone() };
+
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&real_file)
+                        .arg("/deny")
+                        .arg(format!("{user}:(F)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let denied = real_file.try_exists().is_err();
+        if !denied {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED sftp open permission-denied leg: could not deny stat of {} on this \
+                 machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for crates/sftp open.",
+                real_file.display()
+            );
+            return;
+        }
+
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        // open path: `read` -> SSH_FXP_OPEN under the hood.
+        let file_err = provider.read("/gp/real_file.txt").unwrap_err();
+        assert!(
+            !file_err.to_lowercase().contains("no such file"),
+            "a permission-denied file must not be reported as missing over the wire: {file_err}"
+        );
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// A second, SURGICAL half of the `open` guard, complementing the wire-level test above. Measured
+    /// (PR #874 review follow-up): the wire-level test above CANNOT discriminate a wiring regression on
+    /// its own — `provider.read` chains `open` with a SEPARATE, genuinely-real `std::fs::File::open` for
+    /// the actual read data (see the fixture's `read` handler), and a target-level deny ACE blocks THAT
+    /// real file-open too (Full Control deny refuses actual data access, not just the existence probe).
+    /// So reverting `open`'s own check to `!real.exists()` (which never fails under this deny on
+    /// Windows — F1) still ends up producing `PermissionDenied` over the wire, just via `read`'s
+    /// independent real failure instead of `open`'s guard — the two code paths are indistinguishable
+    /// from the client's observed message alone, which is exactly what made the wire-level test above
+    /// pass vacuously against a reverted `open` when first tried. Calling `FsSftp::open` directly (not
+    /// through the wire, and not followed by any read) isolates `open`'s OWN check: fixed code errors
+    /// with `PermissionDenied` at `open` time; broken code returns `Ok(Handle)` (success) at `open` time,
+    /// unambiguously.
+    #[tokio::test]
+    async fn open_handler_itself_reports_the_real_cause_for_a_permission_denied_file_not_missing() {
+        use russh_sftp::server::Handler;
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root =
+            std::env::temp_dir().join(format!("cpe-sftp-openh-{}-{}", std::process::id(), n));
+        let gp = root.join("gp");
+        std::fs::create_dir_all(&gp).unwrap();
+        let real_file = gp.join("real_file.txt");
+        std::fs::write(&real_file, b"secret file").unwrap();
+
+        struct Restore { target: PathBuf, parent: PathBuf, root: PathBuf }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                #[cfg(windows)]
+                {
+                    let _ = &self.parent;
+                    if let Ok(user) = std::env::var("USERNAME") {
+                        let _ = std::process::Command::new("icacls")
+                            .arg(&self.target)
+                            .arg("/remove:d")
+                            .arg(&user)
+                            .output();
+                    }
+                }
+                #[cfg(unix)]
+                {
+                    let _ = &self.target;
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&self.parent, std::fs::Permissions::from_mode(0o700));
+                }
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let _restore = Restore { target: real_file.clone(), parent: gp.clone(), root: root.clone() };
+
+        #[cfg(windows)]
+        {
+            if let Ok(user) = std::env::var("USERNAME") {
+                if !user.is_empty() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(&real_file)
+                        .arg("/deny")
+                        .arg(format!("{user}:(F)"))
+                        .output();
+                }
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
+        }
+
+        let denied = real_file.try_exists().is_err();
+        if !denied {
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1692] SKIPPED sftp open-handler permission-denied leg: could not deny stat of {} \
+                 on this machine (elevated/root, or a filesystem ignoring ACLs/mode bits). The remaining \
+                 assertions do NOT cover CPE-1692 for crates/sftp open's own guard in isolation.",
+                real_file.display()
+            );
+            return;
+        }
+
+        let mut fixture = FsSftp::new(root.clone());
+        let result = fixture.open(1, "/gp/real_file.txt".to_string(), OpenFlags::READ, FileAttributes::default()).await;
+        match result {
+            Err(StatusCode::NoSuchFile) => {
+                panic!("a permission-denied file must not be reported as missing (open's own guard)")
+            }
+            Ok(_) => panic!(
+                "expected `open` to refuse a permission-denied target on its own — the guard was not \
+                 exercised at all (this is the exact vacuous-pass shape a wiring regression produces)"
+            ),
+            Err(_) => {} // any other status (PermissionDenied here) correctly names the real cause
+        }
+        // `_restore` cleans up on the way out, panic or not.
+    }
+
+    /// F7 (PR #874 review): the honest case for BOTH `opendir` and `open`, pinned at the real wire
+    /// protocol — a genuinely missing directory/file must still come back `NoSuchFile`, distinguishably,
+    /// so the fix above doesn't accidentally make every stat failure look like "we don't know".
+    #[test]
+    fn opendir_and_open_on_a_genuinely_missing_path_still_say_no_such_file() {
+        let (addr, hostkey, _root) = spawn_server_returning_root();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let dir_err = provider.list("/truly/does-not-exist").unwrap_err();
+        assert!(
+            dir_err.to_lowercase().contains("no such file"),
+            "a real absence must still say so over the wire: {dir_err}"
+        );
+
+        let file_err = provider.read("/truly-missing.txt").unwrap_err();
+        assert!(
+            file_err.to_lowercase().contains("no such file"),
+            "a real absence must still say so over the wire: {file_err}"
+        );
     }
 }

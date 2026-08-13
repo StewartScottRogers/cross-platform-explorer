@@ -156,6 +156,144 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Test-only mechanism for the `fs::metadata`-based CPE-1692 guards in this crate (`links::link_status`,
+/// `dangling_links_scan`'s target-resolution check): deny traversal on `dir` itself so a `stat` of
+/// anything reached *through* it fails with a genuine (non-`NotFound`) error.
+///
+/// **This mechanism is genuinely Unix-only** — on Unix `stat()` needs no permission on the target
+/// itself, only `+x` on each ancestor directory, so denying an intermediate directory blocks resolution.
+/// On Windows it does **not** work, and the PR #874 review measured why in detail, correcting an
+/// over-generalisation this comment used to make: `fs::metadata` opens via `CreateFileW` with a
+/// desired-access mask of `0`, and Windows separately grants "Bypass traverse checking"
+/// (`SeChangeNotifyPrivilege`) to Everyone by default, so neither a deny ACE on the target nor on an
+/// intermediate directory blocks a `CreateFileW`-based open — confirmed live: denying `RX` on a parent
+/// directory left a child's `fs::metadata` call `Ok`. Callers of THIS helper (the `fs::metadata`-based
+/// sites) therefore legitimately skip on Windows and get their real coverage from CI's Unix legs.
+///
+/// **Sites that call [`Path::try_exists`] instead must NOT use this helper** — use [`deny_stat_of`],
+/// which the same review proved *does* work on Windows, because `try_exists` is a different underlying
+/// syscall (an attributes query) that a deny ACE on the target DOES refuse, even though `fs::metadata`
+/// (a `CreateFileW` open) on the identical denied target still succeeds. Repointing a `try_exists`-based
+/// site at this helper instead of `deny_stat_of` is worse than not testing it at all: the deny is real
+/// (so the test doesn't announce a skip) but doesn't touch the call under test, so a broken guard passes
+/// *silently* — the review caught exactly this on `links::link_status_does_not_report_broken_...`, which
+/// passed vacuously when pointed at the wrong probe.
+///
+/// `probe` must be a path that requires traversing `dir` to resolve (a child of `dir` for a
+/// file-under-directory check, or a child of a child for a directory-itself check — see each call
+/// site). Returns whether the deny demonstrably took effect, checked by actually stat'ing `probe` and
+/// requiring a non-`NotFound` error: `false` means this machine can't construct the condition (running
+/// elevated, an ACL-less filesystem, non-admin without the rights to set a deny ACE, … — or simply
+/// Windows), which callers MUST treat as a loud, `writeln!(std::io::stderr(), ..)` skip — never a silent
+/// pass (Evidence Rules, `Ticketing/wiki.md`).
+#[cfg(test)]
+pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                let _ = std::process::Command::new("icacls")
+                    .arg(dir)
+                    .arg("/deny")
+                    .arg(format!("{user}:(RX)"))
+                    .output();
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000));
+    }
+    std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+}
+
+/// Undo whatever [`deny_dir_traversal`] did to `dir`, so a scratch tree containing it can be removed.
+/// Safe to call even when the deny never took effect.
+#[cfg(test)]
+pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
+    #[cfg(windows)]
+    {
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls").arg(dir).arg("/remove:d").arg(&user).output();
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+/// Test-only mechanism for the [`Path::try_exists`]-based CPE-1692 guards in this crate and its sibling
+/// crates (`disk_usage::dir_size`, `native_meta`'s Windows ADS ops, `move_exact_impl`, `crates/sftp`'s
+/// `open`): make `target`'s own `try_exists()` fail with a genuine (non-`NotFound`) error while
+/// `fs::metadata(target)` still succeeds — the split the PR #874 review measured and named.
+///
+/// **Platform-asymmetric on purpose**, because the two OSes need different targets for the SAME
+/// observable effect on `target.try_exists()`:
+/// - **Windows**: deny **Full Control directly on `target` itself** (`icacls target /deny user:(F)`).
+///   Measured live (three cases, non-elevated, local NTFS): denying `RX` on `target`'s PARENT (the
+///   mechanism [`deny_dir_traversal`] uses) leaves `try_exists()` on a child `Ok(true)` — no effect.
+///   Denying `F` directly on the target itself makes `fs::metadata(target)` stay `Ok` (unaffected,
+///   confirming `deny_dir_traversal`'s doc comment) while `target.try_exists()` becomes
+///   `Err(PermissionDenied)` — `try_exists` resolves to `std::fs::exists`, an attributes-query syscall
+///   distinct from `fs::metadata`'s `CreateFileW` open, and an attributes query IS refused by a deny ACE
+///   on the queried path itself even though an open with desired-access `0` is not.
+/// - **Unix**: deny is still on the PARENT (`chmod 0o000`), matching [`deny_dir_traversal`] — `+x` on the
+///   parent is still what POSIX `stat()`/`access()`-family calls need, and `try_exists()` is no different
+///   from `metadata()` there. `target` itself keeps its own permission bits untouched (irrelevant on
+///   Unix per CPE-1687's own finding: `stat()` needs no permission on the file itself).
+///
+/// `target` is the exact path the code under test calls `.try_exists()` on. Returns whether the deny
+/// demonstrably took effect, checked by calling `target.try_exists()` and requiring `Err`: `false` means
+/// this machine can't construct the condition (running elevated, an ACL-less filesystem, non-admin
+/// without the rights to set a deny ACE, …), which callers MUST treat as a loud,
+/// `writeln!(std::io::stderr(), ..)` skip — never a silent pass (Evidence Rules, `Ticketing/wiki.md`).
+#[cfg(test)]
+pub(crate) fn deny_stat_of(target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if let Ok(user) = std::env::var("USERNAME") {
+            if !user.is_empty() {
+                let _ = std::process::Command::new("icacls")
+                    .arg(target)
+                    .arg("/deny")
+                    .arg(format!("{user}:(F)"))
+                    .output();
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Some(parent) = target.parent() {
+            let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o000));
+        }
+    }
+    target.try_exists().is_err()
+}
+
+/// Undo whatever [`deny_stat_of`] did, so a scratch tree containing `target` can be removed. `parent` is
+/// `target`'s parent directory — the Unix leg denies there, not on `target` itself, so both need
+/// restoring on their respective platforms. Safe to call even when the deny never took effect.
+#[cfg(test)]
+pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
+    #[cfg(windows)]
+    {
+        let _ = parent; // Windows denies `target` itself; `parent` is untouched on this platform.
+        if let Ok(user) = std::env::var("USERNAME") {
+            let _ = std::process::Command::new("icacls").arg(target).arg("/remove:d").arg(&user).output();
+        }
+    }
+    #[cfg(unix)]
+    {
+        let _ = target; // Unix denies `parent`; `target` itself is untouched on this platform.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
