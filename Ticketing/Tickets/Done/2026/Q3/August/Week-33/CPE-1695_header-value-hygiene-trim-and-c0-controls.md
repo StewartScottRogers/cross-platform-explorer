@@ -3,11 +3,11 @@ id: CPE-1695
 title: cpe-s3 trims header values more widely than SigV4 does, and lets the other C0 controls through
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
