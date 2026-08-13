@@ -75,6 +75,24 @@ pattern and reads it back may be able to work in memory, which is faster and can
       closed, and it is cheap.
 - [ ] Any test that *deliberately* leaves something behind (if one exists) says so explicitly.
 
+## The count is still climbing, and PR #888 adds another producer
+
+Measured by the PR #888 reviewer, 2026-08-13: the machine is now at **164,030** `cpe-*` directories in
+`%TEMP%`, up from the **145,207** recorded on 2026-08-12. That is **~19,000 in a day**, which is this
+sprint's own test runs.
+
+It also identified a specific new producer to add to the site list: `crates/s3/src/provider.rs`'s
+`spawn_s3_fixture_with_page_cap` does `std::env::temp_dir().join(..)` + `create_dir_all` with **no
+cleanup** — measured at ~9 directories per `cargo test` run, 90 left behind by that review alone. It
+copies `crates/webdav`'s pattern, so it is precedented rather than novel — which is rather the point of
+this ticket.
+
+The prescribed shape, from the same review: return an `impl Drop` guard from the spawner that removes the
+root, rather than relying on the test to tidy up.
+
+**Add `crates/s3` to whatever site list this ticket ends up carrying**, and check `crates/webdav` at the
+same time since that is where the pattern was copied from.
+
 ## Notes
 
 Filed by the Foreman from the PR #869 review, 2026-08-12, after independently reproducing the count and
