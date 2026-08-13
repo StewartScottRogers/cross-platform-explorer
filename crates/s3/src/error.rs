@@ -222,16 +222,53 @@ fn is_plausible_code(code: &str) -> bool {
 }
 
 /// Whether `c` is a Unicode "format" (Cf) control — a character that can change how surrounding text is
-/// laid out or rendered while never being `char::is_control()` true, so `sanitize_remote` would otherwise
-/// let it straight through. CPE-1682 already reached past `is_control()` once, for U+2028/U+2029, on
-/// exactly this reasoning ("renders as a line break but is not `is_control()`"); CPE-1700 applies the same
-/// principle to the rest of the Cf block rather than leaving it under-applied. Verified surviving the
-/// pre-CPE-1700 `sanitize_remote` unmodified: **U+202E** RIGHT-TO-LEFT OVERRIDE — the exact character the
-/// "Trojan Source" attack (the 2021 CVE-2021-42574 class) uses to make source or output text visually
-/// reorder itself and hide its real content — plus U+202C POP DIRECTIONAL FORMATTING, U+200B ZERO WIDTH
-/// SPACE, U+200F RIGHT-TO-LEFT MARK, U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM), and U+00AD SOFT HYPHEN. The
-/// remaining bidi-control and zero-width siblings in the same ranges are neutralised alongside them on the
-/// same reasoning, rather than waiting for each to be independently rediscovered surviving in the wild.
+/// laid out or rendered (or, for the Tags block below, is invisible outright) while never being
+/// `char::is_control()` true, so `sanitize_remote` would otherwise let it straight through. CPE-1682
+/// already reached past `is_control()` once, for U+2028/U+2029, on exactly this reasoning ("renders as a
+/// line break but is not `is_control()`"); CPE-1700 applied the same principle to the Trojan-Source
+/// bidi-override family, and CPE-1703 (below) extends it to the Unicode Tags block — a *different* threat
+/// this now covers, without claiming to close the entire Cf category (see "Coverage" below; that overclaim
+/// was PR #884's title, corrected by this ticket).
+///
+/// Verified surviving the pre-CPE-1700 `sanitize_remote` unmodified: **U+202E** RIGHT-TO-LEFT OVERRIDE —
+/// the exact character the "Trojan Source" attack (the 2021 CVE-2021-42574 class) uses to make source or
+/// output text visually reorder itself and hide its real content — plus U+202C POP DIRECTIONAL FORMATTING,
+/// U+200B ZERO WIDTH SPACE, U+200F RIGHT-TO-LEFT MARK, U+FEFF ZERO WIDTH NO-BREAK SPACE (BOM), and
+/// U+00AD SOFT HYPHEN. The remaining bidi-control and zero-width siblings in the same ranges are
+/// neutralised alongside them on the same reasoning, rather than waiting for each to be independently
+/// rediscovered surviving in the wild. U+206A-U+206F (the deprecated symmetric-swapping / Arabic-shaping /
+/// digit-shape format characters — obsolete, but still Cf and still invisible) are included on that same
+/// "adjacent sibling in the same block, zero legitimate-content cost" reasoning the U+2060-U+2069 block
+/// already used.
+///
+/// # CPE-1703: the Unicode Tags block (U+E0001, U+E0020-U+E007F)
+/// Found by the independent reviewer on PR #884: CPE-1700 covered every character *that ticket named* plus
+/// adjacent bidi/zero-width siblings, but not the Tags block — Cf codepoints, invisible in every normal
+/// renderer, and the documented mechanism behind "ASCII smuggling" / hidden-instruction attacks (payload
+/// text that renders as nothing to a human but is legible to a downstream model reading the same string).
+/// Trojan Source deceives a *human* reader; the Tags block deceives a *model* reader. This repo's Agent
+/// Watch mode and AI Console sidecar make a remote S3 error message plausible content to eventually reach
+/// an agent's context window, so this is in scope even though no path today actually routes one there —
+/// the point is not to wait for that path to exist before the hole is closed.
+///
+/// # Decision: the Arabic/Syriac format marks are deliberately NOT covered
+/// U+0600-U+0605 (ARABIC NUMBER SIGN and siblings), U+06DD (ARABIC END OF AYAH), U+070F (SYRIAC
+/// ABBREVIATION MARK), and U+08E2 (ARABIC DISPUTED END OF AYAH) are genuine Cf format characters, but
+/// unlike the Tags block they occur inside real Arabic/Syriac numeric and liturgical text as functional
+/// formatting (marking a Quranic verse boundary, an abbreviation, a number), not as an invisible-payload
+/// mechanism. This module's own regression bar requires Arabic *content* to survive sanitisation
+/// untouched, and CPE-1703 itself rates this family "lower relevance" as a smuggling vector than the Tags
+/// block. Given a real cost to legitimate non-English text and a low threat return, they are excluded —
+/// a decision, not an oversight.
+///
+/// # Coverage: hand-listed ranges, not the whole Cf category — and the cost of that choice
+/// This function hand-lists ranges instead of testing Unicode's general category `Cf` directly, which
+/// would need a `unicode-*` dependency this workspace avoids for one string-cleaning function (this crate
+/// otherwise stays dependency-lean by design). That is a real trade-off, not a free lunch: a category test
+/// can never miss a Cf codepoint, while a hand-list can — CPE-1703 exists *because* CPE-1700's hand-list
+/// missed one. The cost accepted here, explicitly, is that this can recur: a future Cf codepoint found in
+/// the wild and not yet listed above needs the same "found a gap, patch the list" cycle rather than being
+/// closed once for all. That cost is accepted again rather than pulling in a dependency for this.
 fn is_format_control(c: char) -> bool {
     matches!(
         c,
@@ -241,16 +278,21 @@ fn is_format_control(c: char) -> bool {
         | '\u{202A}'..='\u{202E}' // LRE, RLE, POP DIRECTIONAL FORMATTING, LRO, RLO (Trojan Source)
         | '\u{2060}'..='\u{2064}' // WORD JOINER and the invisible-operator block
         | '\u{2066}'..='\u{2069}' // LRI, RLI, FSI, PDI
+        | '\u{206A}'..='\u{206F}' // deprecated symmetric-swapping / shaping / digit-shape format chars
         | '\u{FEFF}'        // ZERO WIDTH NO-BREAK SPACE / BOM
+        | '\u{E0001}'       // LANGUAGE TAG (Unicode Tags block — CPE-1703, ASCII-smuggling vector)
+        | '\u{E0020}'..='\u{E007F}' // TAG SPACE..CANCEL TAG (Unicode Tags block — CPE-1703)
     )
 }
 
 /// Neutralise remote-controlled text before it reaches an error string a user reads as coming from this
 /// app: every control character (`char::is_control()`, plus U+2028/U+2029 — the Unicode line/paragraph
-/// separators, which render as a line break in most UI toolkits but are not `is_control()` — and the wider
-/// Unicode "format" (Cf) class [`is_format_control`] covers, such as U+202E RIGHT-TO-LEFT OVERRIDE) becomes
-/// a space, and the result is capped at `max_chars` characters with a trailing `…` added only when
-/// truncation actually happened, so a short message is never given a `…` it didn't earn.
+/// separators, which render as a line break in most UI toolkits but are not `is_control()` — and the named
+/// Cf-class ranges [`is_format_control`] covers, such as U+202E RIGHT-TO-LEFT OVERRIDE and the Unicode Tags
+/// block) becomes a space, and the result is capped at `max_chars` characters with a trailing `…` added
+/// only when truncation actually happened, so a short message is never given a `…` it didn't earn. This is
+/// the named ranges [`is_format_control`] documents, not the full Unicode Cf category — see that
+/// function's doc for what is and is not covered, and why.
 ///
 /// This is the inbound mirror of a standard this crate already holds itself to outbound:
 /// `validate_structural_text` (`crate::lib`) refuses control characters in fields that reach a signed
@@ -908,6 +950,85 @@ mod tests {
             let cleaned = sanitize_remote(&hostile, 512);
             assert!(!cleaned.contains(ch), "{name} survived sanitize_remote: {cleaned:?}");
         }
+    }
+
+    /// CPE-1703: the Unicode Tags block (U+E0001, U+E0020-U+E007F) is the documented mechanism behind
+    /// "ASCII smuggling" / hidden-instruction attacks — payload text that renders as nothing to a human
+    /// but is legible to a downstream model reading the same string. Named explicitly so this is never
+    /// deleted later as paranoia: a remote S3 error message is exactly the kind of text this repo's Agent
+    /// Watch mode / AI Console sidecar could plausibly carry into an agent's context window, and Tags-block
+    /// characters would be invisible to the human who first sees the error but readable by that agent.
+    #[test]
+    fn sanitize_remote_neutralises_the_unicode_tags_block_the_ascii_smuggling_and_hidden_instruction_vector()
+    {
+        // U+E0001 LANGUAGE TAG.
+        let language_tag = "hello\u{E0001}world";
+        let cleaned = sanitize_remote(language_tag, 512);
+        assert!(!cleaned.contains('\u{E0001}'), "U+E0001 LANGUAGE TAG survived sanitize_remote: {cleaned:?}");
+
+        // U+E0020 TAG SPACE and U+E007F CANCEL TAG bound the range; probe both ends plus a mid-range tag
+        // character standing in for a smuggled instruction payload (U+E0020..=U+E007F mirror ASCII
+        // 0x20..=0x7F one-for-one, so "ignore prior instructions" would be spelled with codepoints in
+        // exactly this span).
+        for (name, ch) in [
+            ("U+E0020 TAG SPACE (range start)", '\u{E0020}'),
+            ("U+E0069 TAG LATIN SMALL LETTER I (mid-range payload character)", '\u{E0069}'),
+            ("U+E007F CANCEL TAG (range end)", '\u{E007F}'),
+        ] {
+            let hostile = format!("visible text{ch}hidden payload");
+            let cleaned = sanitize_remote(&hostile, 512);
+            assert!(!cleaned.contains(ch), "{name} survived sanitize_remote: {cleaned:?}");
+        }
+    }
+
+    /// CPE-1703 decision: U+206A-U+206F (deprecated symmetric-swapping / Arabic-shaping / digit-shape
+    /// format characters) are included — same Cf category, same "invisible, adjacent to an already-covered
+    /// block, zero legitimate-content cost" reasoning already used for U+2060-U+2069.
+    #[test]
+    fn sanitize_remote_neutralises_the_deprecated_symmetric_swapping_format_characters() {
+        for (name, ch) in [
+            ("U+206A INHIBIT SYMMETRIC SWAPPING", '\u{206A}'),
+            ("U+206F NOMINAL DIGIT SHAPES", '\u{206F}'),
+        ] {
+            let hostile = format!("hello{ch}world");
+            let cleaned = sanitize_remote(&hostile, 512);
+            assert!(!cleaned.contains(ch), "{name} survived sanitize_remote: {cleaned:?}");
+        }
+    }
+
+    /// CPE-1703 decision: the Arabic/Syriac format marks (U+0600-U+0605, U+06DD, U+070F, U+08E2) are
+    /// deliberately NOT covered — recorded as a decision, not an oversight. Unlike the Tags block they
+    /// occur in real Arabic/Syriac numeric and liturgical text as functional formatting, and this module's
+    /// regression bar requires Arabic *content* to survive sanitisation untouched; CPE-1703 itself rates
+    /// this family lower-relevance as a smuggling vector than the Tags block. This test locks the decision
+    /// in: if someone later "fixes" this by adding the range, this test goes red and points at this doc.
+    #[test]
+    fn sanitize_remote_deliberately_leaves_arabic_syriac_format_marks_untouched() {
+        for (name, ch) in [
+            ("U+0600 ARABIC NUMBER SIGN", '\u{0600}'),
+            ("U+0605 ARABIC NUMBER MARK ABOVE", '\u{0605}'),
+            ("U+06DD ARABIC END OF AYAH", '\u{06DD}'),
+            ("U+070F SYRIAC ABBREVIATION MARK", '\u{070F}'),
+            ("U+08E2 ARABIC DISPUTED END OF AYAH", '\u{08E2}'),
+        ] {
+            let text = format!("سعر{ch}100");
+            let cleaned = sanitize_remote(&text, 512);
+            assert!(cleaned.contains(ch), "{name} was unexpectedly stripped by sanitize_remote: {cleaned:?}");
+        }
+    }
+
+    /// The regression bar CPE-1703's reviewer verified and this ticket requires it not shrink: CJK,
+    /// accented Latin, emoji, Arabic content, Hebrew content, Cyrillic and Greek all survive sanitisation
+    /// untouched, and only the two bidi override *controls* embedded in the string are replaced — the RTL
+    /// *characters* (Arabic/Hebrew letters) are content, not controls, and must never be touched.
+    #[test]
+    fn sanitize_remote_leaves_legitimate_non_english_content_untouched_and_only_strips_bidi_overrides() {
+        let text = "中文 café ü Ω д ا ب א ב 😀🔥 \u{202E}RLO\u{202D}LRO";
+        let cleaned = sanitize_remote(text, 512);
+        let expected = "中文 café ü Ω д ا ب א ב 😀🔥  RLO LRO";
+        assert_eq!(cleaned, expected, "legitimate non-English content must survive with only the bidi overrides replaced");
+        assert!(!cleaned.contains('\u{202E}'), "{cleaned}");
+        assert!(!cleaned.contains('\u{202D}'), "{cleaned}");
     }
 
     /// The end-to-end capture: a hostile `<Message>` carrying a forged log line, an ANSI screen-clear, and
