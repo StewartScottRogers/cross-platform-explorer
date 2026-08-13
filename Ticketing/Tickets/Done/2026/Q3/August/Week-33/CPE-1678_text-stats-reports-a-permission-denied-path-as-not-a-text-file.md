@@ -3,11 +3,11 @@ id: CPE-1678
 title: text_stats reports a permission-denied path as "not a text file" — the right code with the wrong cause
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## Problem
