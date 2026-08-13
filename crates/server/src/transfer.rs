@@ -100,18 +100,67 @@ pub fn guarded_join(base: &Path, rel: &str) -> Option<PathBuf> {
 
 /// The longest ancestor of `path` (inclusive) that currently exists on disk as *some* node — file,
 /// directory, or symlink — using `symlink_metadata` so a symlink is detected without being followed.
-/// Returns `None` only if nothing up the chain (not even a root) resolves. Used to canonicalize-and-verify
+/// `Ok(None)` only if nothing up the chain (not even a root) resolves. Used to canonicalize-and-verify
 /// the real, already-existing portion of a to-be-created path BEFORE creating anything, so a pre-existing
 /// symlink pointing outside the download root is caught before any `mkdir` follows it (CPE-1461).
-fn existing_ancestor(path: &Path) -> Option<PathBuf> {
+///
+/// **`Err` = "this chain cannot be inspected" (CPE-1696).** The walk used to be
+/// `if p.symlink_metadata().is_ok() { return Some(..) }`, which treats *every* `lstat` failure as "this
+/// level doesn't exist" and keeps climbing. That is a fail-open in a security guard: a level whose `lstat`
+/// is refused (permission denied, a dead mount, an I/O error) is skipped, so the containment check lands
+/// on a **shallower** ancestor, and if the skipped level is a symlink pointing out of the download root
+/// then `create_dir_all` follows it with nothing having verified it. Only a genuine `NotFound` means "not
+/// here, keep climbing"; anything else returns `Err` and the caller fails closed by skipping the entry.
+///
+/// (Mitigation note, recorded per the ticket: a path you cannot `lstat` you very probably cannot traverse
+/// either, so in practice the subsequent `create_dir_all` would fail anyway and no escape would occur.
+/// That is a *probable* consequence of one OS's permission model, not an invariant — the two checks are
+/// separate syscalls with separate access requirements, and on Windows in particular the ACL that refuses
+/// an attributes query is not the ACL that refuses a directory create. A guard whose correctness rests on
+/// a different call happening to fail later is not a guard, so it is closed here rather than argued about.)
+fn existing_ancestor(path: &Path) -> Result<Option<PathBuf>, String> {
     let mut cur = Some(path);
     while let Some(p) = cur {
-        if p.symlink_metadata().is_ok() {
-            return Some(p.to_path_buf());
+        match classify_ancestor_probe(p.symlink_metadata().map(|_| ()).map_err(|e| e.kind())) {
+            AncestorProbe::Here => return Ok(Some(p.to_path_buf())),
+            AncestorProbe::KeepClimbing => {}
+            AncestorProbe::Uninspectable => {
+                return Err(format!(
+                    "could not inspect {} while locating the deepest existing ancestor",
+                    p.display()
+                ))
+            }
         }
         cur = p.parent();
     }
-    None
+    Ok(None)
+}
+
+/// What one level's `lstat` outcome means to [`existing_ancestor`]'s walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AncestorProbe {
+    /// Something is here — this is the deepest existing ancestor.
+    Here,
+    /// Genuinely nothing here; try the parent.
+    KeepClimbing,
+    /// The `lstat` failed for a reason other than absence, so we cannot say this level is empty and must
+    /// not silently step over it (CPE-1696).
+    Uninspectable,
+}
+
+/// The pure classifier behind [`existing_ancestor`]'s per-level decision, split out so the
+/// `NotFound`-vs-everything-else taxonomy of a **security** guard is unit-testable on every OS and account:
+/// the real conditions that produce a non-`NotFound` `lstat` failure are platform- and
+/// privilege-dependent (inert as root; and on Windows a deny ACE does not refuse `symlink_metadata` at
+/// all, since it opens with a desired-access mask of `0` — PR #874's measurement), so an ACL-based test
+/// alone would leave this taxonomy unverified on some machines. Mirrors
+/// `crate::dispatch::classify_path_error`'s own rationale.
+fn classify_ancestor_probe(lstat: Result<(), std::io::ErrorKind>) -> AncestorProbe {
+    match lstat {
+        Ok(()) => AncestorProbe::Here,
+        Err(std::io::ErrorKind::NotFound) => AncestorProbe::KeepClimbing,
+        Err(_) => AncestorProbe::Uninspectable,
+    }
 }
 
 /// Join a directory + child name. An empty `dir` (the provider root) yields the bare name — so a
@@ -224,7 +273,19 @@ pub fn download_tree(
         // follow a pre-existing symlink out of the root before the check runs. The portion we then create
         // is brand-new (no symlinks), rooted at a verified-contained real directory. Fail closed on a
         // dangling/unresolvable ancestor (skip the entry with a surfaced notice).
-        match existing_ancestor(dir_to_make).as_deref().map(std::fs::canonicalize) {
+        let ancestor = match existing_ancestor(dir_to_make) {
+            Ok(a) => a,
+            // CPE-1696: an `lstat` that failed for a reason OTHER than absence used to be silently
+            // skipped, moving the containment check onto a shallower ancestor. Fail closed instead.
+            Err(e) => {
+                eprintln!(
+                    "transfer: skipped entry whose existing ancestors could not be inspected ({e}): {}",
+                    entry.path
+                );
+                return;
+            }
+        };
+        match ancestor.as_deref().map(std::fs::canonicalize) {
             Some(Ok(c)) if c.starts_with(&canonical_root) => {}
             Some(Ok(_)) => {
                 eprintln!("transfer: skipped entry escaping the download root (symlinked dir?): {}", entry.path);
@@ -242,9 +303,24 @@ pub fn download_tree(
         if !entry.is_dir {
             // A pre-existing leaf that is itself a symlink must NOT be followed on write (it could point
             // outside the root). Skip it — fail closed (CPE-1461 leaf-symlink defect fix).
-            if let Ok(md) = std::fs::symlink_metadata(&local) {
-                if md.file_type().is_symlink() {
+            //
+            // CPE-1696: this was `if let Ok(md) = symlink_metadata(&local)` with no `else`, so an `lstat`
+            // that failed for a reason other than absence skipped the symlink check entirely and fell
+            // through to `fs::write` — the same fail-open as `existing_ancestor`'s, in the same guard. Only
+            // a genuine `NotFound` means "no leaf there, safe to create".
+            match std::fs::symlink_metadata(&local) {
+                Ok(md) if md.file_type().is_symlink() => {
                     eprintln!("transfer: skipped entry whose local path is a pre-existing symlink: {}", entry.path);
+                    return;
+                }
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    eprintln!(
+                        "transfer: skipped entry whose local path could not be inspected for a \
+                         pre-existing symlink ({e}): {}",
+                        entry.path
+                    );
                     return;
                 }
             }
@@ -706,5 +782,73 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let err = walk(&p, "", &cancel, |_| {}).unwrap_err();
         assert!(err.contains("safety cap"), "expected a safety-cap abort, got: {err}");
+    }
+
+    // ---- CPE-1696: the CPE-1461 symlink-escape guard must not step over a level it cannot lstat -----
+    //
+    // `existing_ancestor` climbed on `p.symlink_metadata().is_ok()` being false, which is true both for
+    // "nothing here" and for "I was refused" — so a level whose lstat failed was silently skipped, the
+    // containment check landed on a SHALLOWER ancestor, and a symlink at the skipped level went unverified
+    // before `create_dir_all` followed it. The taxonomy is asserted here rather than through an ACL,
+    // because on Windows a deny ACE does not refuse `symlink_metadata` at all (it opens with a
+    // desired-access mask of 0 — PR #874's measurement) and on Unix the mechanism is inert as root, so a
+    // permission-based test would be unverified on some of CI's three OSes. See the PR body for the
+    // written-out reasoning on this guard, including its practical mitigation.
+
+    #[test]
+    fn cpe_1696_an_uninspectable_ancestor_level_is_never_treated_as_absent() {
+        assert_eq!(classify_ancestor_probe(Ok(())), AncestorProbe::Here);
+        assert_eq!(
+            classify_ancestor_probe(Err(std::io::ErrorKind::NotFound)),
+            AncestorProbe::KeepClimbing,
+            "a genuine absence is the ONLY reason to keep climbing"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::NotADirectory,
+        ] {
+            assert_eq!(
+                classify_ancestor_probe(Err(kind)),
+                AncestorProbe::Uninspectable,
+                "{kind:?} must stop the walk, not be mistaken for an empty level — stepping over it is \
+                 what leaves a symlink at that level unverified"
+            );
+        }
+    }
+
+    /// The honest cases against real syscalls, on every OS: the deepest existing ancestor of a
+    /// partly-existing path is found, and an entirely-present path returns itself.
+    #[test]
+    fn cpe_1696_existing_ancestor_still_finds_the_deepest_real_level() {
+        let d = std::env::temp_dir().join(format!("cpe-xfer-anc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("real")).unwrap();
+        assert_eq!(
+            existing_ancestor(&d.join("real").join("nope").join("deeper")).unwrap(),
+            Some(d.join("real")),
+            "the deepest level that actually exists must still be found"
+        );
+        assert_eq!(
+            existing_ancestor(&d.join("real")).unwrap(),
+            Some(d.join("real")),
+            "a path that exists is its own deepest existing ancestor"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// And the guard still lets a legitimate nested download through — `download_tree`'s happy path is
+    /// already covered by `download_tree_still_downloads_a_legit_nested_tree`, so this pins the narrower
+    /// claim that the new `Err` arm did not turn the common case into a skip.
+    #[test]
+    fn cpe_1696_a_normal_download_is_not_skipped_by_the_hardened_ancestor_walk() {
+        let fs = seeded();
+        let out = std::env::temp_dir().join(format!("cpe-xfer-anc-dl-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let cancel = AtomicBool::new(false);
+        assert_eq!(download_tree(&fs, "", &out, &cancel).unwrap(), 2);
+        assert_eq!(std::fs::read(out.join("sub").join("b.txt")).unwrap(), b"bravo");
+        let _ = std::fs::remove_dir_all(&out);
     }
 }
