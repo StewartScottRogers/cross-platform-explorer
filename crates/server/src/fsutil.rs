@@ -179,8 +179,15 @@ pub fn symlink_slot_refusal(target: &Path) -> Option<String> {
         // Not a link: either free, or occupied by a real entry `clobber_refusal` already judged.
         Ok(_) => None,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // CPE-1705 round 2 — a real user-facing bug, fixed. A bulk rename of the *other* helper's wording
+        // clipped this string into "could not check what is at "…\final.txt" is a link, so nothing was
+        // changed": ungrammatical nonsense that would have reached a user. Nobody read it because this arm
+        // was *believed unreachable* — an earlier round concluded no ACL could make `symlink_metadata`
+        // fail. Correction 4's parent `(RD)` deny makes it fail, so the arm is reachable, is now covered by
+        // a test, and now says what it means. An "unreachable" branch is exactly where an unread string
+        // hides.
         Err(e) => Some(format!(
-            "could not check what is at \"{}\" is a link, so nothing was changed — refusing to guess rather \
+            "could not check whether \"{}\" is a link, so nothing was changed — refusing to guess rather \
              than risk destroying one: {e}",
             target.display()
         )),
@@ -392,38 +399,49 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///   Unix per CPE-1687's own finding: `stat()` needs no permission on the file itself).
 ///
 /// **What this helper can and cannot prove — measured for CPE-1696, corrected and extended in the PR
-/// #889 review (non-elevated, local NTFS).** The minimal Windows deny that makes `try_exists()` fail is
-/// `S` (SYNCHRONIZE); `(R)`, `(RX)`, `(W)` and `(F)` all work too, while `(RA)`, `(REA)`, `(RD)` and
-/// `(RC)` do **not** (they leave `try_exists()` at `Ok(true)`). No deny — not even `(F)` — refuses
-/// `Path::exists()` or `fs::metadata`. What the deny does to the *write* that follows depends entirely on
-/// which write:
+/// #889 review, then **corrected again by the PR #893 UAT** (non-elevated, local NTFS).** The minimal
+/// Windows deny that makes `try_exists()` fail is `S` (SYNCHRONIZE); `(R)`, `(RX)`, `(W)` and `(F)` all
+/// work too, while `(RA)`, `(REA)`, `(RD)` and `(RC)` do **not** (they leave `try_exists()` at `Ok(true)`).
 ///
-/// | deny ACE on the target | `try_exists()` | `fs::write` / `fs::copy` | `fs::rename` **onto** it |
-/// |---|---|---|---|
-/// | `S`, `R`, `RX`, `W` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **`Ok` — bytes replaced** |
-/// | `F` | `Err(PermissionDenied)` | `Err(PermissionDenied)` | **parent-dependent** — see below |
-/// | `S`/`R`/`RX`/`W`, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | **`Ok` — still destroyed** |
-/// | `F`, **plus `(DC)` denied on the PARENT** | `Err(PermissionDenied)` | `Err` | `Err(PermissionDenied)` |
+/// # The deny on the target is only half of it — you must also deny `(RD)` on the PARENT
+///
+/// **Mechanism, and the thing four separate measurements missed.** On Windows `std::fs::metadata` does not
+/// give up when its `CreateFileW` open returns `ACCESS_DENIED`. It **falls back to `FindFirstFileW`**,
+/// which reads the entry out of the **parent directory** instead of opening the file. That fallback is the
+/// entire reason a deny on the target alone leaves `Path::exists()` answering `true`. Deny
+/// **list-directory (`RD`) on the parent** and the fallback dies.
+///
+/// Crucially **`RD` is not `DC`**: the rename's `FILE_DELETE_CHILD` route on the parent is untouched, so
+/// the rename still replaces the target. That is the combination that makes byte loss stageable — the stat
+/// fails *and* the destructive operation succeeds.
+///
+/// | deny | `exists()` | `metadata()` | `try_exists()` | `fs::write`/`copy` | `fs::rename` onto it | unfixed `.exists()` guard clobbers? |
+/// |---|---|---|---|---|---|---|
+/// | `(R)` on target only | true | Ok | Err | Err | Ok | **no** — the case four rounds kept measuring |
+/// | `(F)` on target only | true | Ok | Err | Err | Err | no |
+/// | `(S)` on target only | true | Ok | Err | Err | Ok | no |
+/// | **`(R)` target + `(RD)` parent** | **false** | **Err** | Err | Err | **Ok** | **YES — bytes destroyed** |
+/// | **`(S)` target + `(RD)` parent** | **false** | Err | Err | Err | Ok | **YES** |
+/// | `(RD)` parent only | true | Ok | Ok(true) | Ok | Ok | no |
+/// | any target deny + **`(DC)`** on the parent | — | — | Err | Err | **Err** | no — `(DC)` cuts BOTH delete routes |
 ///
 /// `fs::write`/`fs::copy` request SYNCHRONIZE in their own `CreateFileW` access mask, so every deny that
 /// refuses `try_exists` also refuses them. **`fs::rename` is the exception, and it is the important one:**
-/// replacing an existing file needs `DELETE` on the target *or* `FILE_DELETE_CHILD` on its parent
-/// directory, and a normal scratch parent grants the latter — so the rename destroys the bytes straight
-/// through the deny (measured: `"ORIGINAL"` → `"NEWDATA"`). An earlier revision of this comment claimed
-/// "every deny that refuses `try_exists` also refuses the subsequent write" and concluded that observable
-/// byte loss could never be constructed. That is true for `write`/`copy` and **false for `rename`**.
+/// replacing an existing file needs `DELETE` on the target *or* `FILE_DELETE_CHILD` on its parent, and a
+/// normal scratch parent grants the latter — so the rename destroys the bytes straight through the deny
+/// (measured: `"ORIGINAL"` → `"NEWDATA"`). `(F)` is the one target spec that denies the target's own
+/// `DELETE`, which is why this helper uses `(R)`: `(R)` destroyed the bytes in every parent directory
+/// tested, `(F)` is parent-dependent. **Never additionally deny `(DC)` on the parent** — that cuts both
+/// delete routes, the rename fails for the wrong reason, and the assertion passes vacuously.
 ///
-/// **This table has now been revised three times, and the `(F)` row is why.** The revision that said "any
-/// of the above, plus `(DC)` on the parent, blocks the rename" was generalised from `(F)` alone. It does
-/// not hold: `(F)` is the *only* spec that denies the target's own `DELETE`, so `(F)` is the only one the
-/// parent's ACL can rescue the victim from — and whether it does is a property of **the parent directory**,
-/// not of the ACE. The same `(F)` gave opposite answers in two directories on one machine, which is how the
-/// wrong generalisation survived two reviews. **Which is why [`deny_stat_of`] denies `(R)`, not `(F)`:**
-/// `(R)` destroyed the bytes in every one of three different parent directories tested, and it refuses
-/// `try_exists` just as `(F)` does. **Do not "improve" it back to `(F)`, and do not additionally deny
-/// `(DC)` on the parent when staging a byte-loss test** — that cuts both delete routes, the rename fails
-/// for the wrong reason, and the assertion passes vacuously. If you re-measure any of this, vary the
-/// parent directory too; nobody thought to, for three revisions.
+/// # Do not write "byte loss is not stageable via ACLs" into this comment again
+///
+/// It has now been the wrong conclusion **four times**, each time from a correct measurement of an
+/// incomplete setup — most recently by CPE-1705's own author, who reverted `unique_target`'s probe to
+/// `!candidate.exists()`, watched the test pass green, and concluded (wrongly) that the byte-loss
+/// construction could not catch a `.exists()` bug. It could; the setup was denying the target only. If a
+/// future round cannot stage it, **scope the null result to the exact denies applied — target *and*
+/// parent — rather than stating it as a property of ACLs.**
 ///
 /// Consequences for testing a guard in this class:
 /// - At a **`write`/`copy`-destructive** site, this helper proves the guard *refuses* but cannot stage
@@ -431,25 +449,15 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 ///   `expect_err` passes vacuously, because neutralised code still errors, just with "Access is denied.
 ///   (os error 5)" from the write.
 /// - At a **`rename`-destructive** site (`unique_target` → `do_move_into`, `move_exact`, `rename_entry`,
-///   and the rest of CPE-1705's sites), a byte-level assertion is available *given a `try_exists`-based
-///   probe*, and is worth keeping as a regression guard. Do not deny `(DC)` on the parent when staging
-///   one, or the rename fails for the wrong reason and the test proves nothing.
-///
-///   **CORRECTED (CPE-1705, measured): a byte-level assertion here does NOT catch the original
-///   `.exists()` bug, and an earlier revision of this comment said it did.** The row above is the reason,
-///   read one step further than it was: **no deny refuses `Path::exists()`**, so the *unfixed*
-///   `.exists()`-based guard sees `true`, refuses (wrongly worded, but refuses), and the victim survives.
-///   Every assertion in such a test then passes against the bug. This was verified the only way that
-///   settles it — reverting `unique_target`'s probe to `!candidate.exists()` and re-running
-///   `cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat`, which recompiled and passed **green**.
-///   That test's "pre-fix this read back `MOVED SOURCE`" claim is false; its doc comment now says so.
-///
-///   So at a `.exists()` site the ACL can only prove the guard's **wording** changed from a confident
-///   false claim to an honest "I could not tell" — assert on the message. The overwrite itself is
-///   reachable only via the non-permission tail (`EIO`, dead mount, stale handle), which no local ACL
-///   simulates, and which is precisely why every site in this family also carries a **pure classifier**
-///   whose unit test injects any `io::ErrorKind` on all three CI legs. Those pure tests are the
-///   load-bearing evidence; the ACL legs are corroboration.
+///   and the rest of CPE-1705's sites), a **byte-level assertion is available and is strictly stronger**,
+///   and it catches the original `.exists()` bug — see
+///   `cpe_1696_a_move_never_renames_over_a_target_it_cannot_stat` and
+///   `cpe_1705_rename_entry_never_renames_over_a_target_it_cannot_stat` in `src-tauri`. Prefer it.
+/// - `symlink_metadata` also fails under the parent-`RD` construction, so a symlink-slot `Unknown` arm is
+///   reachable too — another thing an earlier round declared untestable.
+/// - The **pure classifiers remain load-bearing** alongside this: they inject any `io::ErrorKind` and run
+///   on all three CI legs, covering the non-permission tail (`EIO`, dead mount, stale handle) that no ACL
+///   reaches. Both kinds of evidence, not one instead of the other.
 ///
 /// Either way the unguarded overwrite is also real for stat failures the ACL model cannot stage at all — a
 /// dead network mount, `EIO`, a transient resolve failure — which is why every CPE-1696 site additionally
@@ -468,15 +476,29 @@ pub(crate) fn deny_stat_of(target: &Path) -> bool {
     {
         if let Ok(user) = std::env::var("USERNAME") {
             if !user.is_empty() {
+                // `(R)`, deliberately, NOT `(F)` — see the table above. Both refuse `try_exists`, but
+                // only `(F)` denies the target's own `DELETE`, which lets a parent directory that
+                // withholds `FILE_DELETE_CHILD` block a `fs::rename` that this helper's callers need to
+                // go THROUGH in order to observe the byte loss they assert on.
                 let _ = std::process::Command::new("icacls")
                     .arg(target)
                     .arg("/deny")
-                    // `(R)`, deliberately, NOT `(F)` — see the table above. Both refuse `try_exists`,
-                    // but only `(F)` denies the target's own `DELETE`, which lets a parent directory
-                    // that withholds `FILE_DELETE_CHILD` block a `fs::rename` that this helper's
-                    // callers need to go THROUGH in order to observe the byte loss they assert on.
                     .arg(format!("{user}:(R)"))
                     .output();
+                // …and `(RD)` — list-directory — on the PARENT. Without this, `fs::metadata` falls back
+                // from its refused `CreateFileW` open to `FindFirstFileW`, reads the entry out of the
+                // parent directory, and answers `Ok` — which is why `Path::exists()` kept returning
+                // `true` and why four rounds of this chain concluded that byte loss was not stageable.
+                // `RD` is NOT `DC`: the rename's `FILE_DELETE_CHILD` route survives, so the stat fails
+                // AND the destructive rename still lands. Never deny `(DC)` here — that cuts both delete
+                // routes and every byte-loss assertion downstream passes for the wrong reason.
+                if let Some(parent) = target.parent() {
+                    let _ = std::process::Command::new("icacls")
+                        .arg(parent)
+                        .arg("/deny")
+                        .arg(format!("{user}:(RD)"))
+                        .output();
+                }
             }
         }
     }
@@ -497,8 +519,26 @@ pub(crate) fn deny_stat_of(target: &Path) -> bool {
 pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
     #[cfg(windows)]
     {
-        let _ = parent; // Windows denies `target` itself; `parent` is untouched on this platform.
+        // Windows denies BOTH the target `(R)` and its parent `(RD)` (CPE-1705 correction 4), so both
+        // have to come off — leaving the parent's deny in place makes the scratch tree unlistable and
+        // the next test in the same directory fail for an unrelated reason.
+        //
+        // **Parents FIRST, target last, and the order is not cosmetic.** `icacls <file>` has to resolve
+        // and enumerate the file to rewrite its ACL, and it cannot do that while the containing directory
+        // still denies list-directory: the call fails silently (this helper ignores its exit status), the
+        // target keeps its `(R)` deny, and the caller's `fs::read` of the victim then dies with
+        // `PermissionDenied` — which reads exactly like the test's own byte assertion failing. Measured:
+        // reordering target-first → parent-first turned four red CPE-1705 tests green.
         if let Ok(user) = std::env::var("USERNAME") {
+            let mut dirs = vec![parent];
+            if let Some(real_parent) = target.parent() {
+                if real_parent != parent {
+                    dirs.push(real_parent);
+                }
+            }
+            for dir in dirs {
+                let _ = std::process::Command::new("icacls").arg(dir).arg("/remove:d").arg(&user).output();
+            }
             let _ = std::process::Command::new("icacls").arg(target).arg("/remove:d").arg(&user).output();
         }
     }
