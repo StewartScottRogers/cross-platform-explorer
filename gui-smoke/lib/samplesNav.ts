@@ -16,17 +16,32 @@ import { $, $$, browser } from "@wdio/globals";
  *  per-kind breakdown of why each selector is here. `aside.details` is the CPE-1357 graceful-fallback
  *  terminal state (DetailsPane.svelte via PreviewPane's default slot).
  *
- *  Deliberately byte-identical to the list `specs/samples.smoke.ts` used before this was extracted
- *  (CPE-1629) — this list is what `gui-smoke/known-failing.json`'s `samples.smoke.ts` entry (CPE-1507)
- *  was measured against, so changing it here would silently change what that spec considers "settled"
- *  without a corresponding, independently-verified ratchet update. `specs/preview-pane.smoke.ts` needs
- *  a couple of ADDITIONAL testids (`cert-preview`/`jwt-preview`/`binary-preview`) this list doesn't
- *  carry — it passes them via `waitForPreviewToSettle`'s `extraSelectors` option instead of widening
- *  this shared constant, so `samples.smoke.ts`'s settle-detection (and therefore its known-failing
- *  baseline) is provably unchanged by this refactor. */
+ *  Formerly documented as "byte-identical to the list `specs/samples.smoke.ts` used before this was
+ *  extracted" (CPE-1629) — CPE-1679 deliberately breaks that byte-identity by adding `.mp-fallback`
+ *  (see below), a real settle-check bug fix, not drift. `specs/preview-pane.smoke.ts` needs a couple
+ *  of ADDITIONAL testids (`cert-preview`/`jwt-preview`/`binary-preview`) this list doesn't carry — it
+ *  passes them via `waitForPreviewToSettle`'s `extraSelectors` option instead of widening this shared
+ *  constant. */
 export const PREVIEW_CONTENT_SELECTOR = [
   ".preview-img",
   ".mp-media",
+  // CPE-1679: MediaPlayer's OWN graceful-fallback terminal state — `<div class="mp-fallback" ...>`
+  // (MediaPlayer.svelte), rendered instead of `.mp-media` when the <audio>/<video> element's `error`
+  // event fires (unsupported codec/container, or — the actual measured cause of the four flaky
+  // `samples/{audio,video}/*` cases — a GStreamer/WebKitGTK decode error under Xvfb that this exact
+  // file plays back fine on other runs). Before this fix, `waitForPreviewToSettle` had no selector
+  // for it: neither `.mp-media` (unmounted — the `{#if errored}` branch replaces it) nor `.preview-note`
+  // (MediaPlayer's fallback is its own markup, not that class) ever matched, so the loop spun for the
+  // FULL 20s timeout on every fallback and then failed — even though the app had already reached a
+  // legitimate, intentional terminal state matching this spec's own name ("no crash + preview renders
+  // OR gracefully degrades"). Confirmed against a real failure: CI run 31630437256's
+  // `samples-walk-fail.png` (the `snapFailure` shot taken the instant `clip.mp4`'s case timed out)
+  // shows the pane already settled on "Can't play this media file — its codec or container isn't
+  // supported here." / "Open externally" — `.mp-fallback`'s exact markup — proving the settle check,
+  // not the app, was the bug. This was the real proxy-vs-real-condition gap CPE-1679 was filed to find:
+  // the check waited on a fixed selector list (a proxy for "reached ANY terminal preview state") that
+  // was simply incomplete for the media kind, not on a wall-clock window that needed raising.
+  ".mp-fallback",
   ".preview-pdf",
   // CPE-1639: was ".preview-font", which matches zero elements — FontPreview.svelte's root is
   // `<div class="font-preview" data-testid="font-preview">` (the words are swapped from the old

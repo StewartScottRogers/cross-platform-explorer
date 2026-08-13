@@ -58,6 +58,14 @@ describe("PREVIEW_CONTENT_SELECTOR (CPE-1639)", () => {
     assert.ok(selectors.includes('[data-testid="font-preview"]'));
   });
 
+  // CPE-1679: MediaPlayer's graceful-fallback (`.mp-fallback`, unsupported codec/container — the
+  // state a real CI run's failure screenshot proved the settle check was blind to) must be
+  // recognised as a settled terminal state, exactly like every other kind's own fallback markup
+  // (`aside.details` for CPE-1357, `.preview-note` for the text-based kinds).
+  it("recognises MediaPlayer's graceful-fallback terminal state (.mp-fallback)", () => {
+    assert.ok(selectors.includes(".mp-fallback"));
+  });
+
   it("every entry matches at least one real element in the shipped frontend (systematic audit)", () => {
     const source = componentsSource();
     for (const sel of selectors) {
