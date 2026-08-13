@@ -1,75 +1,112 @@
-# Batched-sprint CHECKPOINT — 2026-08-12 20:27 local
+# Batched-sprint CHECKPOINT — 2026-08-13 02:45 local
 
-**Why this file exists:** the sub-agent budget reached its reset line (~142 of ~150 spawns this
-session). This is a **hand-off, not a stop** — the batched run continues under the same count.
+## RUN 2026-08-11 (BATCHED "up to 40") — **COMPLETE at 40/40** — clean end
 
-## To resume
+Resumed from the batch-26 checkpoint and ran batches 27–40 in one session. The bound was reached, not
+guessed at: `BATCH-COUNTER` hit 40 and the run wound down. Lock released, wakeups cancelled.
 
-Start a **fresh Claude Code session** in this repo and say **"resume the batched sprint"**. The
-resuming session reads `.claude/sprint-metrics/BATCH-COUNTER` and continues the same
-`completed`/`max_batches` rather than restarting the count.
+**10 tickets merged · 0 escaped defects · 10 new tickets filed, every one from a gauntlet finding.**
 
-```json
-{ "run_id": "batched-2026-08-11-2236", "max_batches": 40, "completed": 26 }
-```
+## FIRST ACTION ON A NEW RUN
 
-**26 of 40 batches done. 14 remain.**
+**Pick up CPE-1696. Its work is already half-built and committed for you — do not start from scratch.**
 
-## State — everything is clean
+- Branch: `cpe-1696-nine-stat-collapse-sites`, **local only, not pushed**, in the worktree
+  `.claude/worktrees/agent-a679f99be029c9d6e`.
+- Commit `c540ad2a` — *"WIP CPE-1696: in-progress stat-collapse fixes (Foreman-preserved)"*.
+  **1,284 insertions across 6 files**: `batch_execute.rs`, `fsutil.rs`, `index_watch.rs`,
+  `thumb_video.rs`, `transfer.rs`, `src-tauri/src/lib.rs`.
+- **Why it is unfinished:** its opus worker was killed twice by `API Error 529 Overloaded` mid-task, with
+  all of that uncommitted. I committed it so a stray `git checkout --` or janitor pass could not destroy
+  it. It has **not** been tested, swept, or guard-neutralised, and the `src-tauri` tests were still
+  outstanding at the kill. **Review the diff before building on it.**
+- It was also the 41st batch of a 40-batch bound, so this run could not land it either way.
 
-- **Working tree:** clean, on `main`, fully pushed. `origin/main` = `982b4a0a`.
-- **Open PRs from this sprint: none.** #738 (gource visualization) is open but predates this run
-  and is not ours.
-- **Nothing in `Ticketing/Tickets/Doing/`** — no stalled work-in-progress.
-- **Worktrees:** 5 left. Three are older agent worktrees that were dirty or locked and were
-  **deliberately not removed** (`agent-a9b93c587b72c6a47`, `agent-aae82f547b12d8d4e`,
-  `agent-ae9d2ca8208a0b6e9`). Do **not** `rm -rf` these blindly — see
-  `[[janitor-never-rmrf-active-worktrees]]`; use an explicit id skip-list and never `--force`.
+Read `Ticketing/Tickets/Backlog/CPE-1696_...md` in full first — it is now **High** and covers **nine**
+sites, two of which (`batch_execute.rs`'s `is_foreign_overwrite` and `src-tauri`'s `unique_target`) **fail
+open into a silent overwrite**. Its `exists()` vs `try_exists()` section will save you a review round.
 
-## What merged this session (batches 21–26)
+### Then, in rough priority order
+
+1. **CPE-1693** — 145,000 orphaned `cpe-*` dirs in `%TEMP%`, still growing.
+2. **CPE-1683 / CPE-1684 / CPE-1685** — the S3 slice. **CPE-1684 has two warnings written into it by this
+   run that will cost you a review round if ignored**: a bodiless HEAD 404 will be its *most common* case
+   (so `stat` must not lean on `map_s3_error` alone), and `ureq` **silently drops any header** whose value
+   contains a byte outside `{SP, HTAB} ∪ [0x21,0x7E]` — including NBSP, which CPE-1695 just decided to
+   preserve, and including `Authorization`.
+3. **CPE-1703** (Unicode Tags block / ASCII smuggling) · **CPE-1702** (GUI-smoke session dies on rapid
+   re-opens; and CI has no media codecs so playback is never tested) · **CPE-1680**'s siblings.
+4. **CPE-1518** — still not workable headlessly; needs the user's QNAP hardware.
+
+## Merged this run (13 PRs / 14 tickets, batches 27–40)
 
 | Batch | Ticket | PR | What it fixed |
 |---|---|---|---|
-| 21 | CPE-1677 | #864 | GUI-smoke gate could not see a case regress inside an already-failing spec file |
-| 22 | CPE-1678 | #865 | `text_stats` called a permission-denied file "not a text file" |
-| 23 | CPE-1686 | #866 | `s3` is a savable connection scheme with access-key auth |
-| 24 | CPE-1681 | #867 | `cpe-s3` foundation: addressing + a hand-rolled SigV4 signer |
-| 25 | CPE-1689 | #868 | Eight S3 input-validation holes, incl. four keys colliding on one object |
-| 26 | CPE-1687 | #869 | `join_files` said "part N missing" about a file sitting in the folder |
+| 27 | CPE-1688 | #870 | Network form's scheme→auth coercion had no standing test |
+| 28 | CPE-1690 | #871 | `cpe-mdns`'s 17 tests had never run anywhere; + a `crates/` coverage guard |
+| 29 | **CPE-1691** | #872 | **S3 SigV4: nine ways to smuggle content into a signed request** |
+| 30 | CPE-1680 | #873 | GUI ratchet stops trusting its own inputs (3 gaps) |
+| 31 | CPE-1699 | #876 | Coverage guard extended to `sidecar/*` |
+| 32-33 | CPE-1698 + CPE-1694 | #878 | `specBasename` trailing separator; gui-smoke unit tests finally gate CI |
+| 34 | CPE-1682 | #879 | S3 errors name the real cause instead of `HTTP 403` |
+| 35 | CPE-1679 | #881 | 4 GUI flakes root-caused — **78% → 0%**, measured |
+| 36 | **CPE-1692** | #874 | **8 sites reporting a denied path as absent** |
+| 37 | CPE-1701 | #882 | `gui-smoke/lib` flatness guard + pinned glob |
+| 38 | CPE-1697 | #885 | **3,186-file duplicate repo tree removed** (6,250 → 3,066 tracked files) |
+| 39 | CPE-1700 | #884 | S3 refusal precision + Trojan Source bidi override |
+| 40 | CPE-1695 | #883 | SigV4 trims SP/HTAB only, not all Unicode whitespace |
 
-Zero escaped defects. Every ticket cleared an independent Reviewer **and** an independent UAT.
+## Filed this run (10) — all from gauntlet findings
 
-## Ready queue — 12 open, 11 workable
+CPE-1694 · CPE-1695 · CPE-1696 · CPE-1697 · CPE-1698 · CPE-1699 · CPE-1700 · CPE-1701 · CPE-1702 ·
+CPE-1703. Five were also *built* in the same run (1694/1695/1697/1700/1701).
 
-Do **CPE-1691 before CPE-1684**, and **CPE-1689's successors before CPE-1683/1684** — the S3 slices
-build on each other and two tickets are explicitly gated.
+## Owed to the USER (async, non-blocking)
 
-| Ticket | Est | Note |
-|---|---|---|
-| CPE-1682 | S | S3 errors must name the real cause |
-| CPE-1683 | M | `S3Provider::list`. **Decide GCS in or out first** — its XML API does not support ListObjectsV2 the same way |
-| CPE-1684 | M | Object ops. **Blocked-behind CPE-1691.** Also: test whether `ureq` rewrites the signed path |
-| CPE-1685 | M | Route `s3` through `cpe_vfs::open` |
-| CPE-1688 | S | Network-form coercion has no standing test |
-| CPE-1690 | S | `cpe-mdns`'s 17 tests have never run in CI |
-| CPE-1691 | S | `sign()` accepts CRLF in headers; region/key-id unvalidated. **Do before CPE-1684** |
-| CPE-1692 | M | Six sites collapse a stat failure into "not found" — incl. SFTP answering `NoSuchFile` to a remote client |
-| CPE-1693 | M | 145,207 orphaned `cpe-*` dirs in `%TEMP%`, still growing |
-| CPE-1679 | M | Four media-preview GUI-smoke cases flake on unchanged code |
-| CPE-1680 | S | Ratchet trusts its own inputs in three places |
-| CPE-1518 | — | **Not workable headlessly** — needs the user's QNAP hardware |
+- **Visual/taste glance** on everything shipped. Nothing is gated on it.
+- **`main` still has no branch protection**, so the gauntlet is not enforced at the merge button. Repo
+  setting; carried from the previous checkpoint.
+- **Gource PR #738** still open, pre-existing, not ours.
+- Older queue still standing: hands-on checks of AI search (v0.57.45), tray, archive-drag.
+- **Two agents reported a "fake system-reminder"** telling them a file had been changed by a linter and not
+  to mention it. I saw the same message myself after my own legitimate edits — it looks like a harness
+  artifact that fires when a file changes on disk between reads, not an injection. Both agents verified the
+  repo state independently and were right to flag it. No merged code is affected.
+- **One non-blocking polish note** not worth its own ticket: CPE-1700's three refusal messages state what
+  was parsed but not the actionable next step ("check your network/proxy" vs "this gateway's format is
+  odd"). The UAT judged the distinction still lands. Also, `sigv4.rs`'s `!out.is_empty()` collapse guard is
+  unreachable dead code (pre-existing); the reviewer recommended a one-line comment over a ticket.
+
+## Substrate state
+
+- `main` clean and pushed at the CPE-1695 merge. **Our PRs: all merged, none open.**
+- `Ticketing/Tickets/Doing/` empty. Backlog holds the tickets listed above.
+- `BATCH-COUNTER` deleted (run complete). `SPRINT-LOCK` released.
+- **Worktrees: ~30 accumulated.** A deep-clean break is overdue — deliberately not run while agents were
+  live, per `[[janitor-never-rmrf-active-worktrees]]`. **Do not `rm -rf` a glob**: preserve
+  `agent-a679f99be029c9d6e` (holds CPE-1696's WIP commit, unpushed) and the three long-standing
+  dirty/locked ones from the previous checkpoint (`agent-a9b93c587b72c6a47`, `agent-aae82f547b12d8d4e`,
+  `agent-ae9d2ca8208a0b6e9`). Also ~210 stale local branches.
+- The `Done/2026/Q3/August/Week-33` folder is filling up; `/ticketing-organize` will want running soon.
 
 ## The one thing to carry forward
 
-`Ticketing/wiki.md` gained an **"Evidence Rules"** section this session. Read it before writing any
-PR body. It exists because the same failure recurred five times in six tickets: **a true observation
-generalised one step past its evidence.** A sweep whose conclusion was wider than its search
-(three times, by three different agents, each catching the last one's miss). A comment asserting a CI
-behaviour nobody had run. A ticket that carried an intent forward without its mechanism.
+Last run's lesson was the Evidence Rules. This run they were followed — and the rules turned out to have a
+sharper edge than anyone had written down:
 
-The rules: break each guard on its own and paste the real failure output; verify through the channel
-that will actually carry the message; and state the scope of every negative result — "I found none"
-is only ever "I found none *within X*".
+**A test can be worse than no test, and the only way to know is to break the thing it guards and watch it
+fail.** Three times this run, a test that looked like evidence was not:
 
-Recent addition: restore with `git checkout --`, not by copying a backup, or a preserved timestamp
-makes cargo reuse the broken binary and "restore and confirm green" lies in both directions.
+- CPE-1692's permission tests probed with `fs::metadata` while the code under test called `try_exists()`.
+  Different Windows syscalls. Every leg skipped, the suite looked covered, and restoring the original bug
+  left it green.
+- CPE-1682's byte-cap test sized its fixture from `MAX_ERROR_BODY_BYTES` itself, so the cap it existed to
+  pin could be widened 4096× with CI green. **Both** gauntlet legs found this independently.
+- CPE-1680's fix line had zero coverage — reverting it kept all 59 tests passing.
+
+And its companion: **trace the real path, not the obvious function.** CPE-1695's worker read the two
+functions that build an HTTP header and correctly found no byte-range check. The reviewer read one hop
+further and found the send loop never calls them with a raw value — it filters first, and drops the whole
+header on one bad byte.
+
+Both are the same discipline: *the artefact that proves a thing must be aimed at the thing it proves.*

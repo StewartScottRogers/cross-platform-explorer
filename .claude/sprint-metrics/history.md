@@ -1431,3 +1431,56 @@ when a reviewer prescribes an exact, small change.
 backend gate — the exploit chain's step 2), 1652 (reparse tags + census cost), 1653 (link debris), 1654
 (refused-lock UX + docs), 1655 (errors with no level word), 1656 (u16-table binaries + Go/Ruby/Rust traces),
 1657 (timestamp-shaped digits defeat the bracket gate), 1658 (idle conhost survives close-all).
+
+---
+
+## 2026-08-12 → 08-13 (CLI, BATCHED "up to 40") — **COMPLETE at 40/40**
+
+Resumed from the batch-26 checkpoint; ran batches 27–40 in one session. **10 tickets merged, 0 escaped
+defects, 10 new tickets filed** (every one from a gauntlet finding, not invented).
+
+**Shipped:** CPE-1688 (network-form coercion guard) · CPE-1690 (cpe-mdns's 17 never-run tests now in CI +
+a crates/ coverage guard) · CPE-1691 (S3 SigV4: nine ways to smuggle content into a signed request) ·
+CPE-1680 (GUI ratchet stops trusting its own inputs) · CPE-1692 (8 sites reporting denied-as-absent) ·
+CPE-1682 (S3 errors name the real cause) · CPE-1679 (4 GUI flakes root-caused, 78% → 0%) ·
+CPE-1698+1694 (specBasename + gui-smoke unit tests finally gate CI) · CPE-1699 (guard extended to
+sidecar/*) · CPE-1701 (gui-smoke/lib flatness guard) · CPE-1697 (3,186-file duplicate tree removed) ·
+CPE-1700 (S3 refusal precision + Trojan Source) · CPE-1695 (SigV4 SP/HTAB-only trim).
+
+**Tuned defaults learned:**
+- `error-taxonomy-sweep` and `parser-hardening`: **opus reviewer, sonnet worker**. Both classes had
+  round-1 findings a sonnet reviewer would plausibly have missed (the `exists()`/`try_exists()` syscall
+  split; the `>`-inside-a-comment evasion). Worth the tier every time on security-adjacent parsing.
+- `ci-coverage` / `guard-hardening`: **sonnet both legs** is sufficient — 4 of 4 came back clean or with
+  one exactly-prescribed nit.
+- **3 Foreman-applied fixes, 0 agents each.** Every one was an exactly-prescribed reviewer nit
+  (a `#[cfg]` gate, a dead-field acknowledgement, a doc correction). Applying these directly instead of
+  spawning a worker round-trip is the single best budget lever found this run.
+- **CI is the throughput ceiling, not the crew.** Median gauntlet leg 14 min; `Server crates (windows)`
+  alone ran 55 min. Four concurrent PRs saturated the runner pool and everything queued behind it.
+
+**Lessons worth carrying (the theme was one thing, five times over):**
+- **A test can be worse than no test.** CPE-1692's permission tests probed with `fs::metadata` while the
+  code called `try_exists()` — different Windows syscalls — so every leg skipped and the suite looked
+  covered. Restoring the original bug left it green. CPE-1682's byte-cap test sized its fixture from the
+  constant it was meant to pin, so the cap could be widened 4096× with CI green. CPE-1680's fix line had
+  zero coverage; reverting it kept all 59 tests passing.
+- **Trace the real path, not the obvious function.** CPE-1695's worker read `write_header` and concluded
+  VT/FF reach the wire. The reviewer read one hop further: the send loop calls `Header::value()` first,
+  which drops the *entire header* on one non-conforming byte — including the NBSP that ticket had just
+  decided to preserve.
+- **Two independent legs converging is the strongest signal.** Reviewer and UAT independently found
+  CPE-1682's self-referential cap test, and independently reached CPE-1694's nested-test blind spot.
+- **The 3-OS matrix earns its cost.** Two CPE-1692 failures were Unix-only and invisible on this Windows
+  box: an ungated Windows-only message assertion, and a struct field only the Windows cleanup path reads
+  (dead code under `-D warnings`).
+- **Hand agents the blocking command, not just the prohibition.** Six stalls, all the same shape: an agent
+  pushes a branch, wants to watch CI, invents a "background poll", and parks. The brief said "you get no
+  notifications"; it did not say `gh run watch <id> --interval 30`. Saying the latter is what stops it.
+  Memory `[[subagents-run-work-synchronously]]` updated.
+- **Commit before you probe.** Four separate agents (and the Foreman once) wiped uncommitted work with
+  `git checkout --` during guard-neutralisation. Committing the fix first makes the restore correct.
+
+**Capacity note:** two consecutive `API Error 529 Overloaded` kills on an opus worker mid-task. Backed off
+rather than retrying a third time, and preserved its 1,284 uncommitted lines as a WIP commit so nothing
+was lost. Handed to the next run.
