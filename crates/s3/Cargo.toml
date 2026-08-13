@@ -1,0 +1,32 @@
+[package]
+name = "cpe-s3"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77.2"
+description = "S3-compatible object-store backend for the Cross-Platform Explorer (epic CPE-1503). Foundation slice (CPE-1681): S3Config, path-style vs virtual-host endpoint addressing, and a hand-rolled AWS SigV4 signer. Sync, no async runtime, no AWS SDK."
+license = "MIT"
+
+# The 4th remote backend alongside cpe-sftp (SSH/SFTP), cpe-webdav (HTTP/WebDAV) and cpe-ftp (FTP/FTPS).
+# Standalone (out of any workspace), like the sibling crates.
+#
+# WHY NO S3 SDK (decided at the CPE-1503 activation — do not re-open without a ticket):
+# the S3 REST surface this app needs is five requests (ListObjectsV2, HEAD, GET, PUT, DELETE) plus one
+# signing algorithm. `aws-sdk-s3` drags a tokio/hyper/aws-lc tree into a codebase whose every remote
+# provider is deliberately synchronous and `ring`-backed; `opendal` is the same weight wearing a
+# strategic hat; `rust-s3` carries both maintainer risk and its own HTTP stack. Hand-rolling over the
+# crates already in the tree adds NO new dependency family at all — PURPOSE.md's fast/small/predictable
+# tiebreaker applied literally.
+#
+# This foundation slice is pure computation (URL construction + signing), so it needs no HTTP client and
+# no XML parser yet. `ureq` (already used by cpe-webdav) and `roxmltree` (ditto) arrive with the request
+# layer in CPE-1683/CPE-1684, and `cpe-server` arrives with the `FileSystemProvider` impl — declaring
+# them here before anything uses them would just be dead weight in a crate that has to stay lean.
+
+[dependencies]
+# HMAC-SHA256 for the SigV4 signing-key derivation chain and the final signature. Already in the tree:
+# `crates/security` uses the same `hmac` 0.12 for its opt-in JWT verifier (its `jwt` feature).
+hmac = "0.12"
+# SHA-256 for the payload hash and the canonical-request digest. Already in the tree: `crates/server`
+# depends on `sha2` 0.10 directly (checksums/backups), and `crates/security` behind `jwt`. Same
+# RustCrypto family and major version as both, so this resolves to the crate already being compiled.
+sha2 = "0.10"

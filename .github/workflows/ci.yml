@@ -231,6 +231,7 @@ jobs:
             ./crates/sftp -> target
             ./crates/webdav -> target
             ./crates/ftp -> target
+            ./crates/s3 -> target
             ./crates/vfs -> target
             ./crates/updater-verify -> target
 
@@ -311,6 +312,20 @@ jobs:
           cargo test
           cargo clippy --all-targets --features e2e-extra-ca -- -D warnings
           cargo test --features e2e-extra-ca
+
+      - name: s3 — clippy + test
+        # The S3-compatible object-store backend (CPE-1681, epic CPE-1503): the 4th remote backend, and
+        # the 2nd net-new Network protocol after FTP. Deliberately NO AWS SDK — the five REST requests and
+        # the SigV4 signer are hand-rolled over `hmac`/`sha2`, which are already in the tree, so this adds
+        # no new dependency family (and no tokio/hyper/aws-lc tree).
+        #
+        # This slice is pure computation — endpoint addressing + signing, verified against AWS's published
+        # SigV4 test vectors — so there is nothing to run against and no fixture server: it runs
+        # identically on all three OSes with no network, no credentials and no Docker.
+        working-directory: crates/s3
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test
 
       - name: vfs — clippy + test
         # The scheme router (CPE-616/CPE-1502): open(connection, secret, …) -> boxed FileSystemProvider,
