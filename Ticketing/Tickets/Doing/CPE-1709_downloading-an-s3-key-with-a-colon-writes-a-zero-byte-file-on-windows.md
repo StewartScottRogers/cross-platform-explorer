@@ -3,7 +3,7 @@ id: CPE-1709
 title: Downloading an S3 key containing ":" silently writes a 0-byte file on Windows
 type: bug
 priority: High
-status: Backlog
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-13
