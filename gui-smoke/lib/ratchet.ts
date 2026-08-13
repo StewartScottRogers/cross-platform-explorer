@@ -249,7 +249,22 @@ export function reduceResultChunks(chunks: RawResultChunk[]): CaseResult[] {
  *  last element and falling back to the whole path on falsy would return the ENTIRE input instead of a
  *  basename — the opposite of what `path.basename`/`path.win32.basename` do (they strip the trailing
  *  separator and still return `"case-c.smoke.ts"`). Filtering out empty segments before taking the last
- *  one matches that real behaviour. */
+ *  one matches that real behaviour.
+ *
+ *  CPE-1701 (deliberate non-goal): this is not a full `path.basename` reimplementation, and three more
+ *  shapes were found to diverge from real `path.basename`/`path.win32.basename` past the five CPE-1698
+ *  covers — recorded here so nobody rediscovers them, not fixed because none is reachable from a real
+ *  `@wdio/json-reporter` chunk (`specs[]` entries are always real absolute paths ending in an actual
+ *  `.smoke.ts` file):
+ *    - `"///"` (separators only) → this returns the whole string `"///"` (every segment filters out as
+ *      empty, so the `parts.length > 0 ? … : specPath` fallback fires); real `basename` returns `""`.
+ *    - `"C:x.ts"` (a Windows drive-relative path with no separator after the colon) → this returns
+ *      `"C:x.ts"` unchanged (no separator to split on); real `win32.basename` returns `"x.ts"`.
+ *    - `"C:\\"` (a bare drive root) → this returns `"C:"` (the one non-empty segment); real
+ *      `win32.basename` returns `""`.
+ *  Fixing these would mean hand-rolling real basename semantics (drive letters, the `///` edge case)
+ *  purely for inputs this function is never actually given — not worth the complexity it would add to a
+ *  "pure, no I/O" module that exists specifically to avoid importing `node:path`. */
 function specBasename(specPath: string): string {
   const parts = specPath.split(/[/\\]/).filter((part) => part.length > 0);
   return parts.length > 0 ? parts[parts.length - 1]! : specPath;
