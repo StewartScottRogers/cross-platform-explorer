@@ -2,14 +2,14 @@
 id: CPE-1681
 title: "cpe-s3 crate foundation — S3Config, path-style vs virtual-host addressing, and the SigV4 signer"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Backend
 tags: [ready]
 epic: CPE-1503
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## What

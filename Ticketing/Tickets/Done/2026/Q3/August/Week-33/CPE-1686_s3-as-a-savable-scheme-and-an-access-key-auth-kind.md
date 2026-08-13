@@ -2,14 +2,14 @@
 id: CPE-1686
 title: "Frontend: s3 as a savable scheme and an access-key auth kind in the connection form"
 type: Feature
-status: Backlog
+status: Done
 priority: Medium
 component: Frontend
 tags: [ready]
 epic: CPE-1503
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-12
 ---
 
 ## What
