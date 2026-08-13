@@ -37,12 +37,15 @@ interface RawResultChunk {
   }[];
 }
 
-/** The reporter's `state` strings, narrowed to what the ratchet reasons about. Anything unrecognised is
- *  treated as `skipped` — neither a pass (can't retire an exemption) nor a failure (can't red the job),
- *  but still proof the title exists. */
+/** The reporter's `state` strings, narrowed to what the ratchet reasons about. Anything unrecognised
+ *  reduces to `"unknown"` — CPE-1680 — NEVER to `"skipped"`. A skipped case is exempt from every clause
+ *  `evaluate()` implements, so folding an unrecognised state into it would let a state this ratchet has
+ *  never seen (a new wdio version, a new runner mode, a state produced by a crash path) silently pass as
+ *  "safe to ignore" — the same "confident green where the truth is unknown" shape CPE-1677 was filed
+ *  over. `"unknown"` reds the run unconditionally instead (see `evaluate()`'s clause 6). */
 function toCaseStatus(state: string | undefined): CaseStatus {
   if (state === "passed" || state === "failed" || state === "skipped" || state === "pending") return state;
-  return "skipped";
+  return "unknown";
 }
 
 /** Reads every `*.json` file in `resultsDir` (one per spec-file worker) and reduces each into one
@@ -137,13 +140,23 @@ function main(): void {
 
   const passedCount = results.filter((r) => r.status === "passed").length;
   const failedCount = results.filter((r) => r.status === "failed").length;
-  const otherCount = results.length - passedCount - failedCount;
+  const unknownCount = results.filter((r) => r.status === "unknown").length;
+  const otherCount = results.length - passedCount - failedCount - unknownCount;
   // eslint-disable-next-line no-console
   console.log(
     `[gui-smoke ratchet] ${verdict.reportedSpecCount}/${expectedSpecCount} spec file(s) reported, ` +
-      `${results.length} case(s) — ${passedCount} passed, ${failedCount} failed, ${otherCount} skipped/pending; ` +
-      `${knownFailing.cases.length} known-failing case(s) listed.`,
+      `${results.length} case(s) — ${passedCount} passed, ${failedCount} failed, ${otherCount} skipped/pending, ` +
+      `${unknownCount} unrecognised state; ${knownFailing.cases.length} known-failing case(s) listed.`,
   );
+
+  // CPE-1680: an unrecognised wdio state must never go quiet. Print it exactly like the failing-case
+  // block below — loud AND red (verdict.ok already covers red; this covers loud) — every run it occurs,
+  // not just when it happens to be the reason the job failed.
+  if (verdict.unknownStates.length > 0) {
+    // eslint-disable-next-line no-console
+    console.log(`[gui-smoke ratchet] UNRECOGNISED-state case(s) observed this run (${verdict.unknownStates.length}):`);
+    for (const key of verdict.unknownStates) console.log(`[gui-smoke ratchet]   ? ${key}`);
+  }
 
   // Always print the per-case failing set, green or red. This is the log line CPE-1677 was filed over:
   // the OLD ratchet printed a spec-level tally that was byte-identical on a clean run and on a run with
@@ -190,6 +203,8 @@ function main(): void {
       `${verdict.fixedButStillListed.length} now-passing entr${verdict.fixedButStillListed.length === 1 ? "y" : "ies"}, ` +
       `${verdict.unmatchedListings.length} stale entr${verdict.unmatchedListings.length === 1 ? "y" : "ies"} matching no test, ` +
       `${verdict.duplicateListings.length} duplicate entr${verdict.duplicateListings.length === 1 ? "y" : "ies"}, ` +
+      `${verdict.unknownStates.length} unrecognised-state case(s), ` +
+      `${verdict.unevidencedIntermittent.length} unevidenced intermittent entr${verdict.unevidencedIntermittent.length === 1 ? "y" : "ies"}, ` +
       `incomplete=${verdict.incomplete}.`,
   );
   process.exit(1);

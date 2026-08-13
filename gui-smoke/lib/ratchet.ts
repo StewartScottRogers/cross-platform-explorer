@@ -17,7 +17,7 @@
 // ratchet now works at **case** granularity: the unit of exemption is one `it()` inside one spec file,
 // identified by `spec` + `test` title (see `caseKey`).
 //
-// FIVE distinct failure modes, each with its own message so a future engineer knows exactly what to do
+// SEVEN distinct failure modes, each with its own message so a future engineer knows exactly what to do
 // without re-deriving the ratchet's rules from scratch:
 //   1. NEW GUI REGRESSION      — a CASE failed that isn't in known-failing.json. This is the clause that
 //      makes a regression inside a partially-failing spec file visible at the gate (CPE-1677).
@@ -39,6 +39,21 @@
 //   5. DUPLICATE EXEMPTION     — the same `spec` + `test` is listed twice in known-failing.json. Not a
 //      product signal; a list-hygiene one, caught here because a duplicate makes the "delete its entry"
 //      instruction in clauses 2/3 silently insufficient.
+//   6. UNRECOGNISED TEST STATE — a case reported a wdio `state` this ratchet has never seen (CPE-1680).
+//      The reduction in `run-ratchet.ts#toCaseStatus` used to default anything unrecognised to
+//      `"skipped"` — but a skipped case is exempt from EVERY clause above, so an unknown state (a new
+//      wdio version, a new runner mode, a state produced by a crash path) silently reclassified a
+//      possibly-FAILING case as one that never ran, and the gate stayed green. The same shape as the bug
+//      CPE-1677 fixed: not a wrong answer, a confident green where the truth is unknown. This clause
+//      reds the run unconditionally — see the comment on `"unknown"` below for why RED was chosen over
+//      "warn but stay green".
+//   7. UNEVIDENCED INTERMITTENT — an `intermittent: true` entry whose `reason`/`ticket` don't clear a
+//      minimum evidence bar (CPE-1680). Proven by the UAT probing `evaluate()` directly: an entry with an
+//      EMPTY `reason` and EMPTY `ticket` was accepted just as readily as the four real, well-evidenced
+//      entries — silencing a case that fails on EVERY run, forever, with nothing distinguishing it from a
+//      permanent break (which `intermittent` is explicitly not for). This cannot prove a case is actually
+//      flaky — only real run history can, and it should not pretend to — but it can and does refuse the
+//      one thing that's structurally checkable: no evidence attached at all.
 //
 // One narrow escape hatch, `intermittent: true` on an entry (CPE-1677, forced by the evidence): case
 // granularity turns a genuinely FLAKY case into a coin-flip gate — clause 1 reds the runs where it
@@ -53,8 +68,16 @@
 
 /** A case's outcome as the JSON reporter records it. `skipped`/`pending` are neither a pass nor a
  *  failure: they can't red the job (clause 1) and can't retire an exemption (clause 2), but they DO
- *  count as "this title still exists" for clause 3. */
-export type CaseStatus = "passed" | "failed" | "skipped" | "pending";
+ *  count as "this title still exists" for clause 3.
+ *
+ *  `unknown` (CPE-1680) is the reduction's honest answer when wdio reports a `state` this ratchet has
+ *  never seen — deliberately its OWN value, not a synonym for `skipped`. Folding an unrecognised state
+ *  into `skipped` would exempt it from every clause above, so a state produced by (say) a new wdio
+ *  version or a crash path could hide a genuine failure behind a green gate. `unknown` still counts as
+ *  "this title exists" for clause 3, exactly like `skipped`/`pending` — but unlike them it is ALSO its
+ *  own failure mode (clause 6) that unconditionally reds the run, listed or not: an "I don't know"
+ *  about a test result must never be silently treated as "safe to ignore". */
+export type CaseStatus = "passed" | "failed" | "skipped" | "pending" | "unknown";
 
 /** One test case's outcome, already reduced from the raw WebdriverIO JSON report (see
  *  `scripts/run-ratchet.ts#loadCaseResults` for how that reduction happens). `spec` is the spec file's
@@ -116,6 +139,14 @@ export interface EvaluateResult {
   /** Keys listed with `intermittent: true`, paired with what they actually did this run — printed every
    *  run by the CLI wrapper so a proven-flaky exemption stays visible instead of going quiet. */
   intermittentListings: { key: string; statuses: CaseStatus[] }[];
+  /** Cases (as `caseKey` strings) that reported at least one `"unknown"` status this run — a wdio
+   *  `state` this ratchet's reduction didn't recognise. Always reds the run (clause 6, CPE-1680),
+   *  whether or not the case happens to be listed in known-failing.json, because an unknown result
+   *  can't be verified to be a legitimate exemption either. */
+  unknownStates: string[];
+  /** `intermittent: true` entries in known-failing.json (as `caseKey` strings) whose `reason`/`ticket`
+   *  don't clear the minimum evidence bar — see clause 7 / CPE-1680. */
+  unevidencedIntermittent: string[];
   /** True when fewer spec FILES reported a result than `expectedSpecCount` — a timeout/crash/hang, not
    *  a clean run. This alone is enough to flip `ok` false, independent of the other clauses. */
   incomplete: boolean;
@@ -133,9 +164,32 @@ export function caseKey(spec: string, test: string): string {
   return `${spec} :: ${test}`;
 }
 
+/** Minimum length (after trimming) a `reason` must clear for an `intermittent: true` entry to pass
+ *  clause 7's evidence bar. Deliberately low — this can't verify a case is actually flaky, only real run
+ *  history can, and it must not force the four already-evidenced entries in known-failing.json to be
+ *  rewritten to satisfy a stricter format (three of them evidence-by-reference — "see that entry
+ *  above" — rather than repeating the same run IDs four times, which the bar has to accept as-is). It
+ *  exists to catch exactly the UAT-proven failure mode: an entry with an EMPTY reason. */
+const MIN_INTERMITTENT_REASON_LENGTH = 20;
+
+/** A ticket id shape loose enough to accept this repo's `CPE-NNN` (and any other `PREFIX-NNN` project)
+ *  without being so strict it becomes a second thing to keep in sync with the ticketing system. */
+const TICKET_ID_PATTERN = /^[A-Za-z]+-\d+$/;
+
+/** Builds the `known-failing.json` entry to suggest in a NEW GUI REGRESSION message, pre-filled with the
+ *  REAL `spec`/`test` so it's paste-ready (only `reason`/`ticket` need writing in). Uses `JSON.stringify`
+ *  — never string concatenation — so a title containing a double quote round-trips as valid JSON. wdio's
+ *  own global-hook titles are exactly such a title (e.g. `"before all" hook`, which `run-ratchet.ts`
+ *  further wraps as `<hook> "..."` when a hook throws): string-concatenating that into `"${test}"` used
+ *  to print `<hook> ""before all" hook""` — not valid JSON, and not pasteable (CPE-1680, reviewer nit 3
+ *  on PR #864). `JSON.stringify` escapes it correctly regardless of how many quotes the title contains. */
+export function suggestedKnownFailingEntry(spec: string, test: string): string {
+  return JSON.stringify({ spec, test, reason: "<why this is allowed to fail>", ticket: "<owning ticket>" });
+}
+
 /**
  * Pure verdict function. No filesystem, no process exit, no console — a caller (the CI wrapper script,
- * or a unit test) decides what to do with the result. See the module header above for the five failure
+ * or a unit test) decides what to do with the result. See the module header above for the seven failure
  * modes this implements.
  */
 export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateInput): EvaluateResult {
@@ -146,6 +200,8 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
   const unmatchedListings: string[] = [];
   const duplicateListings: string[] = [];
   const intermittentListings: { key: string; statuses: CaseStatus[] }[] = [];
+  const unknownStates: string[] = [];
+  const unevidencedIntermittent: string[] = [];
 
   const reportedSpecs = new Set(results.map((r) => r.spec));
   const reportedSpecCount = reportedSpecs.size;
@@ -180,13 +236,19 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
 
   // Observed cases, grouped by key. A key normally maps to exactly one case; a spec that reuses an
   // `it()` title within the same file produces several, so the group's statuses are aggregated (a
-  // failure anywhere in the group means "this key still fails").
+  // failure anywhere in the group means "this key still fails"). `keyToCase` keeps one representative
+  // `{ spec, test }` per key so messages can rebuild the real suggested-entry JSON (clause 1) without
+  // re-parsing the `caseKey` string, which would be ambiguous for a title that itself contains " :: ".
   const observed = new Map<string, CaseStatus[]>();
+  const keyToCase = new Map<string, { spec: string; test: string }>();
   for (const r of results) {
     const key = caseKey(r.spec, r.test);
     const statuses = observed.get(key);
     if (statuses) statuses.push(r.status);
-    else observed.set(key, [r.status]);
+    else {
+      observed.set(key, [r.status]);
+      keyToCase.set(key, { spec: r.spec, test: r.test });
+    }
   }
 
   // Sort for deterministic output (Map/array order isn't guaranteed stable across a re-run, and a
@@ -199,11 +261,35 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
     if (!statuses.includes("failed")) continue;
     if (known.has(key)) continue;
     newFailures.push(key);
+    const { spec, test } = keyToCase.get(key)!;
     messages.push(
       `NEW GUI REGRESSION: "${key}" failed and is not listed in gui-smoke/known-failing.json. If this is a ` +
-        `genuine new regression, fix it. If it's a case you're intentionally deferring, add an entry ` +
-        `{ "spec": ..., "test": ..., "reason": ..., "ticket": ... } for it to known-failing.json — do not ` +
-        `just re-run, and do NOT exempt its whole spec file (case granularity is the point, see CPE-1677).`,
+        `genuine new regression, fix it. If it's a case you're intentionally deferring, add this entry ` +
+        `(fill in "reason"/"ticket") to known-failing.json — do not just re-run, and do NOT exempt its ` +
+        `whole spec file (case granularity is the point, see CPE-1677): ${suggestedKnownFailingEntry(spec, test)}`,
+    );
+  }
+
+  // Clause 6 — UNRECOGNISED TEST STATE (CPE-1680). A state `toCaseStatus()` (run-ratchet.ts) didn't
+  // recognise reduces to `"unknown"`, never to `"skipped"` — see the `CaseStatus` doc comment for why.
+  // Choice made here, spelled out because "report loudly but stay green" was the other option the ticket
+  // allowed: RED unconditionally, regardless of whether the case happens to be listed. Reasoning: (1) this
+  // ratchet's entire reason to exist (CPE-1594) is turning a soft/swallowed signal into a hard exit code —
+  // a merely-logged warning that leaves `ok` true reintroduces that exact failure shape one layer up, and
+  // CI logs are precisely what gets skimmed past; (2) an unknown state cannot be verified to be a
+  // legitimate "still failing, exemption is doing its job" (clause 2/3's logic) OR a legitimate "this
+  // passed" (clause 2's ratchet) — there is no safe default to fall back to, only a red one. `run-ratchet.ts`
+  // additionally prints every unknown-state case on every run (loud AND red, not loud OR red).
+  for (const key of observedKeys) {
+    const statuses = observed.get(key)!;
+    if (!statuses.includes("unknown")) continue;
+    unknownStates.push(key);
+    messages.push(
+      `UNRECOGNISED TEST STATE: "${key}" reported a wdio "state" this ratchet does not recognise (reduced ` +
+        `to "unknown", never to "skipped" — an unrecognised state must never be silently exempt from every ` +
+        `clause). Treated as RED unconditionally, whether or not it is listed in known-failing.json, ` +
+        `because an unknown result can't be verified as a legitimate exemption either. If wdio added a new ` +
+        `state, teach toCaseStatus() in gui-smoke/scripts/run-ratchet.ts about it explicitly.`,
     );
   }
 
@@ -236,12 +322,39 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
     );
   }
 
+  // Clause 7 — UNEVIDENCED INTERMITTENT (CPE-1680). `intermittent: true` is a claim that THIS exact case
+  // has been observed both passing and failing on unchanged code — not a config switch for "annoying".
+  // The UAT proved the marker alone has no machine-checkable bar: an entry with an empty `reason` and
+  // empty `ticket` sailed through exactly like the four real, well-evidenced ones, silencing a case that
+  // fails on EVERY run — a permanent break — forever. This clause cannot prove flakiness (only real run
+  // history can) so it does not try to; it refuses only the structurally checkable failure mode: no
+  // evidence attached at all. Checked independent of `results` — a UAT probing `evaluate()` directly with
+  // no matching case should still catch it, and it must not force the four existing entries (three of
+  // which evidence by reference, "see that entry above", rather than repeating the same run IDs four
+  // times) to be rewritten to satisfy a stricter format.
+  for (const [key, entry] of [...known.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    if (!entry.intermittent) continue;
+    const reasonOk = typeof entry.reason === "string" && entry.reason.trim().length >= MIN_INTERMITTENT_REASON_LENGTH;
+    const ticketOk = typeof entry.ticket === "string" && TICKET_ID_PATTERN.test(entry.ticket.trim());
+    if (reasonOk && ticketOk) continue;
+    unevidencedIntermittent.push(key);
+    messages.push(
+      `UNEVIDENCED INTERMITTENT: "${key}" is marked "intermittent": true but its "reason"/"ticket" don't ` +
+        `clear the evidence bar (a "reason" of at least ${MIN_INTERMITTENT_REASON_LENGTH} characters, and a ` +
+        `"ticket" that looks like a real ticket id). "intermittent" means this exact case has been OBSERVED ` +
+        `both passing and failing on unchanged code — a case that fails every run is a plain entry, not ` +
+        `this. Cite the evidence in "reason" and the owning ticket in "ticket", or drop the marker.`,
+    );
+  }
+
   const ok =
     !incomplete &&
     newFailures.length === 0 &&
     fixedButStillListed.length === 0 &&
     unmatchedListings.length === 0 &&
-    duplicateListings.length === 0;
+    duplicateListings.length === 0 &&
+    unknownStates.length === 0 &&
+    unevidencedIntermittent.length === 0;
 
   return {
     ok,
@@ -250,6 +363,8 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
     unmatchedListings,
     duplicateListings,
     intermittentListings,
+    unknownStates,
+    unevidencedIntermittent,
     incomplete,
     reportedSpecCount,
     messages,
