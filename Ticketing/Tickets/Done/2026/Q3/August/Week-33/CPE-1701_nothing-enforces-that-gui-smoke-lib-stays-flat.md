@@ -3,11 +3,11 @@ id: CPE-1701
 title: Nothing enforces that gui-smoke/lib stays flat, so a nested test file would silently stop being run
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-13
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
