@@ -295,13 +295,14 @@ impl FileSystemProvider for WebdavProvider {
         // writes whatever comes back to disk as the finished file, so a silent truncation here is data
         // loss wearing a success. See MAX_READ_BYTES.
         resp.into_reader()
-            .take(MAX_READ_BYTES + 1)
+            .take(self.read_cap + 1)
             .read_to_end(&mut buf)
             .map_err(|e| format!("{path}: {e}"))?;
-        if buf.len() as u64 > MAX_READ_BYTES {
+        if buf.len() as u64 > self.read_cap {
             return Err(format!(
-                "{path}: the server sent more than the {MAX_READ_BYTES}-byte read cap without finishing \
-                 — refusing rather than returning a truncated file as if it were complete"
+                "{path}: the server sent more than the {}-byte read cap without finishing — refusing \
+                 rather than returning a truncated file as if it were complete",
+                self.read_cap
             ));
         }
         Ok(buf)
