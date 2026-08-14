@@ -564,6 +564,19 @@ mod tests {
         let _ = req.as_reader().read_to_end(&mut body);
         let real = root.join(url.trim_start_matches('/'));
 
+        /// Drop `.` and empty components so two spellings of the same place compare equal.
+        ///
+        /// Deliberately **lexical and `..`-preserving**: it exists so the MOVE handler can ask *"does
+        /// this destination resolve to the served root?"* without enumerating `/`, `//`, `/.`, `/./`,
+        /// `/.//`, `//./`, `/./.` … — a denylist that has been incomplete three rounds running. It is
+        /// **not** a containment check: `..` is left in place precisely so this cannot be mistaken for
+        /// one. Escaping the root is CPE-1730.
+        fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
+            p.components()
+                .filter(|c| !matches!(c, std::path::Component::CurDir))
+                .collect()
+        }
+
         match method.as_str() {
             "PROPFIND" => match std::fs::metadata(&real) {
                 Ok(meta) => {
@@ -687,20 +700,43 @@ mod tests {
                     .find(|h| h.field.equiv("Host"))
                     .map(|h| h.value.as_str().to_string())
                     .unwrap_or_default();
-                if !dest_authority.is_empty()
-                    && !host.is_empty()
-                    && !dest_authority.eq_ignore_ascii_case(&host)
-                {
-                    let _ = req.respond(tiny_http::Response::empty(502));
-                    return;
-                }
-                // Trim BEFORE the emptiness check — this is the ordering the UAT caught.
-                let dest_rel = dest_path.trim_start_matches('/');
-                if dest_rel.is_empty() || dest_rel == "." {
+                // `Host` is mandatory in HTTP/1.1, so its absence is a malformed request — **refuse it
+                // rather than skipping the check**. Round 3 skipped when either side was absent, and the
+                // round-3 UAT measured the consequence: a client sending no `Host` had its cross-host
+                // `Destination` executed against the local tree with a `201`, which is the same
+                // "execute what you could not understand" shape the `502` was added to close.
+                if host.is_empty() {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
                 }
+                if !dest_authority.is_empty() && !dest_authority.eq_ignore_ascii_case(&host) {
+                    let _ = req.respond(tiny_http::Response::empty(502));
+                    return;
+                }
+                let dest_rel = dest_path.trim_start_matches('/');
                 let dest_real = root.join(dest_rel);
+                // **Compare the RESOLVED destination against the root — do not enumerate spellings.**
+                //
+                // This check has now been wrong three times, each time by naming shapes instead of the
+                // property. Round 1 rejected nothing; round 2 rejected `""` before trimming, so `//` and
+                // `///` still resolved to the root; round 3 trimmed first and rejected `""` and `"."`,
+                // and the UAT found four more — `/./`, `/.//`, `//./`, `/./.` — because `/./` trims to
+                // `"./"`, which is neither literal. Round 3 also shipped a doc claiming its table was
+                // *"exhaustive over the shapes that resolve to the served root"*, which those four
+                // falsified on the very code that carried the claim.
+                //
+                // A denylist of literals can only ever close the members someone thought of. Asking
+                // whether the destination **resolves to the root** closes the family: every path built
+                // from `.` and `/` components normalises to the same place, and this compares that place.
+                //
+                // `canonicalize` is deliberately not used — it requires the path to exist, and a MOVE to
+                // a not-yet-existing name is the ordinary case. Lexical normalisation is enough here
+                // because the rig's own resolver is lexical; genuine containment (`..` escaping the root)
+                // is CPE-1730's scope, and this is not a substitute for it.
+                if normalise_lexically(&dest_real) == normalise_lexically(root) {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                }
                 // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a
                 // category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not
                 // wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
@@ -1364,7 +1400,7 @@ mod tests {
                  symlink at {}. Rust's `symlink_dir` passes ALLOW_UNPRIVILEGED_CREATE and normally \
                  succeeds unelevated on Windows too, so this is an unusual environment — under CI this \
                  is a hard red, not this notice. NOTHING in this test is covered on this run: the \
-                 `symlink_metadata`-not-`is_dir` classifier in the rig's DELETE handler is unverified.",
+                 behaviour this pins — DELETE of a link removes the LINK and spares its target — is unverified.",
                 slot.display()
             );
             return;
