@@ -1248,8 +1248,16 @@ mod tests {
         let addr = base.trim_start_matches("http://").to_string();
 
         let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
-        sock.write_all(b"MOVE /readme.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
-            .expect("send a MOVE with no Destination header");
+        // `Connection: close` and a read timeout are both load-bearing, not tidiness: tiny_http speaks
+        // HTTP/1.1 keep-alive, so without the header `read_to_string` waits for an EOF the server has no
+        // reason to send and the test becomes a **hang** rather than a red — libtest has no per-test
+        // timeout, so CI would sit there until the job's own limit (the same trap `call_with_deadline`
+        // above exists for).
+        sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+        sock.write_all(
+            b"MOVE /readme.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        )
+        .expect("send a MOVE with no Destination header");
         let mut resp = String::new();
         let _ = sock.read_to_string(&mut resp);
 
