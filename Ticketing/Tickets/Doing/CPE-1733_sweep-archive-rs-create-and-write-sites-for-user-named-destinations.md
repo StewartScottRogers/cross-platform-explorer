@@ -3,7 +3,7 @@ id: CPE-1733
 title: Sweep archive.rs's ~14 create/write sites and decide which destinations are user-named
 type: task
 priority: Medium
-status: Backlog
+status: In Progress
 tags: ready
 estimate: L
 created: 2026-08-14

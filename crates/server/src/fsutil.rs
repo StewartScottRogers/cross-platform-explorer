@@ -278,8 +278,38 @@ pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
 /// Both are write-through, so both deserve the write-through message. A plain occupied name still gets
 /// the site's own wording: a regular file answers `Ok(false)` to the link question and falls through.
 pub fn create_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
+    create_slot_link_refusal(target).or_else(|| clobber_refusal(target, occupied))
+}
+
+/// **The link half of [`create_slot_refusal`], alone** (CPE-1733) — for a create site whose *occupancy*
+/// answer is legitimately "overwrite it" but whose *link* answer is still "refuse".
+///
+/// This is not a weaker `create_slot_refusal`; it is the other half of a split that CPE-1733's
+/// enumeration of `archive.rs` forced. Every archive-creation destination there (`compress_to_zip` and
+/// its five siblings) writes a whole new archive at a caller-supplied path, and overwriting an existing
+/// archive at that path is a **legitimate, long-standing behaviour** — the app's own compress flow even
+/// depends on re-running onto a name it picked. Wiring `create_slot_refusal` in wholesale would have
+/// changed that contract as a side effect of a link fix, which is the "one step past the evidence"
+/// failure this family keeps filing tickets about. The link hazard is separable and was measured on its
+/// own, so it is guarded on its own.
+///
+/// The link verdict itself is unchanged and shares one implementation with [`create_slot_refusal`]:
+/// both are [`classify_create_slot`] over one [`std::fs::symlink_metadata`], and `create_slot_refusal`
+/// is now literally this function plus [`clobber_refusal`]. A site that also wants the occupancy half
+/// must call [`create_slot_refusal`] — do not stack this with a hand-rolled existence check.
+///
+/// Measured on Windows for CPE-1733, with the guard removed, at a `fs::File::create` destination:
+///
+/// ```text
+/// [M1 File::create on DANGLING file symlink] result = Ok(())
+///       target now exists = true, bytes = Some([78, 69, 87, 32, 66, 89, 84, 69, 83])
+///       slot still a symlink = Ok(true)
+/// [M2 File::create on LIVE file symlink] result = Ok(())
+///       victim bytes = Some("CLOBBERED")
+///       slot still a symlink = Ok(true)
+/// ```
+pub fn create_slot_link_refusal(target: &Path) -> Option<String> {
     classify_create_slot(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
-        .or_else(|| clobber_refusal(target, occupied))
 }
 
 /// The pure decision behind [`create_slot_refusal`], split out for the reason

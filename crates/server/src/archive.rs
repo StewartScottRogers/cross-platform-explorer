@@ -208,6 +208,90 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // ---------------------------------------------------------------------------
 // Archive creation & extraction (CPE-251/252/242)
 // ---------------------------------------------------------------------------
+//
+// # Where every file-creating call in this module writes, and who chose the name (CPE-1733)
+//
+// PR #901's review observed that this module has ~14 `File::create`/`fs::write` calls with no clobber or
+// link guard on any of them, and deliberately scoped the claim to *"same primitive shape, unguarded"*
+// rather than *"same bug"*, because nobody had split which of those destinations a **user** names from
+// which are app-internal. This is that split. It is the load-bearing half of CPE-1733; the guards below
+// are what it concluded, not what it assumed.
+//
+// Provenance is the question that decides whether a guard is owed, because the hazard is a **pre-existing
+// link at the destination name**, and only a path the user (or an archive) can point somewhere can have
+// one:
+//
+// | # | Site                                       | Primitive        | Destination provenance                      | Guard |
+// |---|--------------------------------------------|------------------|---------------------------------------------|-------|
+// |  1| `temp_extract_target`                      | `create_dir_all` | app-owned: `%TEMP%/cpe-archive/<pid>-<seq>`  | none — see below |
+// |  2| `extract_archive_entry`                    | `File::create`   | app-owned temp dir + `file_name()` of entry  | none — see below |
+// |  3| `extract_tar_entry`                        | `File::create`   | `out`, always a `temp_extract_target`        | none — see below |
+// |  4| `extract_7z_entry`                         | `File::create`   | `out`, always a `temp_extract_target`        | none — see below |
+// |  5| `extract_rar_entry`                        | `fs::write`      | `out`, always a `temp_extract_target`        | none — see below |
+// |  6| `compress_to_zip`                          | `File::create`   | **caller-supplied `dest`**                   | link |
+// |  7| `create_empty_zip`                         | `create_new`     | **caller-supplied `dest`**                   | link (+ `create_new`) |
+// |  8| `compress_to_targz`                        | `File::create`   | **caller-supplied `dest`**                   | link |
+// |  9| `compress_to_zip_encrypted`                | `File::create`   | **caller-supplied `dest`**                   | link |
+// | 10| `compress_to_zip_streamed`                 | `File::create`   | **caller-supplied `dest`**                   | link |
+// | 11| `compress_to_targz_streamed`               | `File::create`   | **caller-supplied `dest`**                   | link |
+// | 12| `compress_to_zip_encrypted_streamed`       | `File::create`   | **caller-supplied `dest`**                   | link |
+// | 13| `extract_archive` (`.gz` branch)           | `File::create`   | **user-named dir** + stem of the archive name| link |
+// | 14| `extract_archive_streamed` (`.gz` branch)  | `File::create`   | **user-named dir** + stem of the archive name| link |
+// | 15| `extract_zip_encrypted`                    | `File::create`   | **archive-controlled** name under user dir   | link (skip) + `entry_name_is_safe` |
+// | 16| `extract_zip_archive_stream`               | `File::create`   | **archive-controlled** name under user dir   | link (skip) + `entry_name_is_safe` |
+// | 17| the four extraction `dest` roots           | `create_dir_all` | **user-named dir** / archive-controlled dir  | none — see below |
+//
+// ## The three primitives do NOT behave alike, and each row above was measured, not reasoned about
+//
+// - `File::create` / `fs::write` **follow the link and write through it.** Measured on Windows for this
+//   ticket, with no guard: on a *dangling* link `File::create` returns `Ok`, creates the link's target,
+//   and leaves the slot a symlink; on a *live* link it returns `Ok` and the link's target is clobbered
+//   (`victim bytes = Some("CLOBBERED")`). This is the CPE-1719 finding, reproduced here.
+// - `create_dir_all` is **not** destructive, and on a dangling link does nothing at all — measured for
+//   CPE-1729 *after the opposite had been assumed*. That is why every `create_dir_all` row above is
+//   unguarded: there is no measured hazard to guard against, and adding a refusal there would be a guard
+//   written from a story rather than from evidence.
+// - `create_new` (row 7) is the only site here that was **already** safe, and it is safe by the OS rather
+//   than by us. Measured on Windows: `create_new` on a dangling link fails `AlreadyExists (os error 80)`
+//   and does *not* create the target; on a live link it fails the same way and the target is untouched.
+//   Its message, though, is *"The file exists"* — the exact wording `fsutil`'s module doc calls out as
+//   sending the user to delete a file at a name that actually holds a link elsewhere. So row 7's guard is
+//   a **message** fix on top of a working belt, not a new belt, and it is labelled that way at the site.
+//
+// ## Rows 1–5: app-owned, and why that is a conclusion rather than a shrug
+//
+// Every one of them writes under `temp_extract_target`, which is `%TEMP%/cpe-archive/<pid>-<seq>/<leaf>`
+// with `seq` from a process-wide monotonic counter (CPE-1195). The **directory is created by that call
+// and never reused**, so nothing — no user, no archive — can have placed a link at the leaf name before
+// we get there. The leaf is `Path::file_name()` of the entry, so an archive-controlled name cannot carry
+// a directory component out of that directory either. These are not "probably fine": they are
+// unreachable by the hazard, and guarding them would add a stat per extraction for no case.
+//
+// ## Rows 15–16, and what is NOT covered by them — the traversal half is already answered elsewhere
+//
+// `guarded_join`/`is_safe_name` (CPE-1461, `crate::transfer`) is **not** in this path and does not need to
+// be added: this module has had its own equivalent since CPE-628, [`entry_name_is_safe`], applied to every
+// archive-controlled name at every site this module writes itself, plus `extract_archive_entry_any` and
+// `extract_rar_entry` validate `inner` up front. Adding a second traversal guard alongside it would be two
+// guards for one question — the thing this ticket explicitly says to say so about rather than do. The
+// remaining half, a link *inside* the destination at an entry's name, is what rows 15–16 now skip on.
+//
+// **Not covered, stated rather than implied:** the extractors that are not our own write loop — `tar`'s
+// `Archive::unpack`/`Entry::unpack_in`, `zip`'s `ZipArchive::extract`, and `sevenz_rust`'s
+// `default_entry_extract_fn` — create their files inside those crates, so this module has no create site
+// to guard there and cannot reach one without reimplementing each crate's extraction. A link already
+// sitting in the destination folder at an entry's name is therefore still followed on the tar, 7z and
+// one-shot-zip paths. That is a real, known gap with a shape of its own (it belongs upstream, or in a
+// pre-extraction sweep of the destination), and it is written down here so the next sweep finds a recorded
+// absence rather than an overlooked one, per CPE-1718.
+//
+// ## Why the guard on rows 6–14 is the **link** half only
+//
+// `fsutil::create_slot_link_refusal`, not `create_slot_refusal`. Overwriting an existing archive at a
+// destination the caller named is a legitimate, long-standing behaviour of these functions (and the app's
+// own compress flow picks its own non-colliding name upstream in `App.svelte`), so refusing on occupancy
+// would be a contract change smuggled in as a link fix. The link hazard was measured on its own, so it is
+// guarded on its own. See `create_slot_link_refusal`'s doc for the full argument.
 
 /// The flat temp-file target for a single-entry extraction: `%TEMP%/cpe-archive/<basename of inner>`
 /// (CPE-242/1102/1180). Shared by every format's single-entry extractor so they all land in the same
@@ -220,6 +304,21 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 /// concurrent extract-and-opens of same-named files.
 static EXTRACT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Refuse before creating a file at `dest` when a **link** already occupies that name (CPE-1733) — the
+/// one call every guarded row in the table above makes, so the sites stay one line each and a `grep` for
+/// this name is the inventory of what is guarded.
+///
+/// It is a thin `Result` adapter over [`crate::fsutil::create_slot_link_refusal`] and adds no decision of
+/// its own: the classification, the wording, and the "not provably a non-link ⇒ do not write" failure
+/// policy all live there, shared with the rename/create family. Deliberately **not** the occupancy half —
+/// see the section comment above for why overwriting an existing archive stays legal here.
+fn refuse_link_at_new_file(dest: &Path) -> Result<(), String> {
+    match crate::fsutil::create_slot_link_refusal(dest) {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     let base = Path::new(inner)
         .file_name()
@@ -231,6 +330,9 @@ fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     let dir = std::env::temp_dir()
         .join("cpe-archive")
         .join(format!("{}-{}", std::process::id(), seq));
+    // Row 1 of the CPE-1733 table: app-owned and unreachable by the link hazard — this call creates the
+    // directory, `<pid>-<seq>` makes it never-reused, so nothing can have put a link at the leaf. No guard,
+    // deliberately; `create_dir_all` is also non-destructive on a link (measured, CPE-1729).
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     Ok(dir.join(base))
 }
@@ -248,6 +350,9 @@ pub fn extract_archive_entry(zip: &str, inner: &str) -> Result<String, String> {
         .ok_or_else(|| format!("entry not found: {inner}"))?;
     let mut entry = archive.by_index(idx).map_err(|e| e.to_string())?;
 
+    // Row 2 of the CPE-1733 table: unguarded on purpose — `temp_extract_target` is a fresh, per-call,
+    // app-owned directory, and the leaf is `file_name()` of the entry, so no user and no archive can have
+    // placed a link at this path.
     let out = temp_extract_target(inner)?;
     let mut w = fs::File::create(&out).map_err(|e| e.to_string())?;
     std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
@@ -267,6 +372,8 @@ fn extract_tar_entry<R: std::io::Read>(reader: R, inner: &str, out: &Path) -> Re
             .map(|p| p.to_string_lossy().to_string())
             .unwrap_or_default();
         if name == inner || name == backslashed {
+            // Row 3 of the CPE-1733 table: `out` is always a `temp_extract_target` (its only caller is
+            // `extract_archive_entry_any`), so it is app-owned — unguarded for the row-2 reason.
             let mut w = fs::File::create(out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut w).map_err(|e| e.to_string())?;
             return Ok(true);
@@ -288,6 +395,8 @@ fn extract_7z_entry(path: &str, inner: &str, out: &Path) -> Result<bool, String>
         sevenz_rust::decompress_file_with_extract_fn(path, &scratch, |entry, reader, _dest| {
             let name = entry.name();
             if !found && entry_name_is_safe(name) && (name == inner || name == backslashed) {
+                // Row 4 of the CPE-1733 table: `out` is a `temp_extract_target`, app-owned — unguarded for
+                // the row-2 reason.
                 let mut w = fs::File::create(out).map_err(sevenz_rust::Error::io)?;
                 std::io::copy(reader, &mut w).map_err(sevenz_rust::Error::io)?;
                 found = true;
@@ -346,6 +455,8 @@ pub fn extract_rar_entry(path: &str, inner: &str) -> Result<String, String> {
         return Err(format!("unsafe entry name: {inner}"));
     }
     let bytes = crate::rar::rar_extract_entry(path, inner)?;
+    // Row 5 of the CPE-1733 table: `fs::write` writes through a link exactly like `File::create` does
+    // (measured), but `out` is a `temp_extract_target` — app-owned, so unguarded for the row-2 reason.
     let out = temp_extract_target(inner)?;
     fs::write(&out, &bytes).map_err(|e| e.to_string())?;
     Ok(out.to_string_lossy().to_string())
@@ -387,6 +498,7 @@ pub fn compress_to_zip(paths: &[String], dest: &str) -> Result<String, String> {
     if paths.is_empty() {
         return Err("nothing to compress".into());
     }
+    refuse_link_at_new_file(Path::new(dest))?; // row 6
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -408,7 +520,17 @@ pub fn compress_to_zip(paths: &[String], dest: &str) -> Result<String, String> {
 /// real archive needs at least the End-Of-Central-Directory record, which `ZipWriter::finish` writes.
 /// Uses `create_new` so it fails atomically rather than clobbering an existing file (mirrors the
 /// explorer's `create_file`). Returns the created path.
+///
+/// **Row 7 of the CPE-1733 table, and the only site there that was already safe.** Measured on Windows:
+/// `create_new` on a *dangling* link fails `AlreadyExists (os error 80)` without creating the link's
+/// target, and on a *live* link fails the same way with the target's bytes untouched — so unlike its five
+/// sibling creation sites this one never wrote through a link. What it did do was **explain itself
+/// wrongly**: `AlreadyExists` stringifies to *"The file exists"*, which is precisely the wording
+/// `fsutil::create_slot_refusal`'s doc calls out as sending the user to delete a file at a name that
+/// actually holds a link to somewhere else. The guard below is therefore a **message** fix in front of a
+/// working belt, not a second belt — `create_new` stays, and stays the thing that makes this atomic.
 pub fn create_empty_zip(dest: &str) -> Result<String, String> {
+    refuse_link_at_new_file(Path::new(dest))?; // row 7 — see above: wording, not safety
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -452,6 +574,7 @@ pub fn compress_to_targz(paths: &[String], dest: &str) -> Result<String, String>
     if paths.is_empty() {
         return Err("nothing to compress".into());
     }
+    refuse_link_at_new_file(Path::new(dest))?; // row 8
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
@@ -490,6 +613,7 @@ pub fn compress_to_zip_encrypted(paths: &[String], dest: &str, password: &str) -
     if password.is_empty() {
         return Err("a password is required for an encrypted archive".into());
     }
+    refuse_link_at_new_file(Path::new(dest))?; // row 9
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
@@ -514,6 +638,9 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
+    // Row 17 of the CPE-1733 table: `dest` is user-named, but `create_dir_all` is not destructive and on a
+    // dangling link does nothing at all — measured for CPE-1729, after the opposite had been assumed. No
+    // guard, because there is no measured hazard here to guard.
     fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index_decrypt(i, password.as_bytes()).map_err(|e| e.to_string())?;
@@ -527,6 +654,16 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
         } else {
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            // Row 15 of the CPE-1733 table. The name is the *archive's*, the folder is the *user's*, so a
+            // link the user already has in that folder is reachable by an entry name — and `File::create`
+            // would write the entry's bytes through it into a file they never named. Skipped rather than
+            // aborted, exactly like the zip-slip skip above: this function's contract is "extract what is
+            // safe, keep going". **That skip is silent here** — this signature predates `ArchiveReport`
+            // and has nowhere to put a per-entry note, the same limitation the unsafe-name `continue`
+            // already lives with. Its streamed sibling (row 16) does record it.
+            if refuse_link_at_new_file(&out).is_err() {
+                continue;
             }
             let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
@@ -573,6 +710,7 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 /// format is guarded against zip-slip: zip via `enclosed_name`, tar via the crate's checked `unpack`, 7z
 /// via [`extract_7z_safe`].
 pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
+    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -589,9 +727,13 @@ pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "extracted".to_string());
+        // Row 13: the destination *folder* is the user's, and the leaf is the archive's own filename
+        // minus `.gz` — so the whole path is one the user can already have a link sitting at.
+        let leaf = dest_path.join(stem);
+        refuse_link_at_new_file(&leaf)?;
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = flate2::read::GzDecoder::new(file);
-        let mut out = fs::File::create(dest_path.join(stem)).map_err(|e| e.to_string())?;
+        let mut out = fs::File::create(&leaf).map_err(|e| e.to_string())?;
         std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
     } else if lower.ends_with(".7z") {
         extract_7z_safe(Path::new(path), dest_path)?;
@@ -708,6 +850,7 @@ pub fn compress_to_zip_streamed(
     let total_bytes = entries.iter().map(|e| e.size).sum();
     let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
 
+    refuse_link_at_new_file(Path::new(dest))?; // row 10
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
@@ -754,6 +897,7 @@ pub fn compress_to_targz_streamed(
     let total_bytes = entries.iter().map(|e| e.size).sum();
     let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
 
+    refuse_link_at_new_file(Path::new(dest))?; // row 11
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let encoder = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut builder = tar::Builder::new(encoder);
@@ -820,6 +964,7 @@ pub fn compress_to_zip_encrypted_streamed(
     let total_bytes = entries.iter().map(|e| e.size).sum();
     let total_items = entries.iter().filter(|e| !e.is_dir).count() as u64;
 
+    refuse_link_at_new_file(Path::new(dest))?; // row 12
     let file = fs::File::create(dest).map_err(|e| e.to_string())?;
     let mut writer = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
@@ -900,6 +1045,7 @@ fn extract_zip_archive_stream(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
+    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let total_items = archive.len() as u64;
     let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items, done_items: 0, current: String::new() };
@@ -928,6 +1074,15 @@ fn extract_zip_archive_stream(
         } else {
             if let Some(parent) = out.parent() {
                 fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            // Row 16 of the CPE-1733 table — the streamed twin of row 15, with somewhere to put the note.
+            // Recorded in `errors` and counted as a done *item* (not a done *file*), the same shape the
+            // unsafe-name skip above uses, so the progress bar still reaches its total.
+            if let Err(e) = refuse_link_at_new_file(&out) {
+                report.errors.push(format!("{name}: {e}"));
+                prog.done_items += 1;
+                emit(&prog);
+                continue;
             }
             let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
@@ -1083,6 +1238,7 @@ pub fn extract_archive_streamed(
     cancel: &AtomicBool,
     mut emit: impl FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
+    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -1103,9 +1259,12 @@ pub fn extract_archive_streamed(
             .unwrap_or_else(|| "extracted".to_string());
         let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items: 1, done_items: 0, current: stem.clone() };
         emit(&prog);
+        // Row 14 — the streamed twin of row 13; same destination shape, same guard.
+        let leaf = dest_path.join(&stem);
+        refuse_link_at_new_file(&leaf)?;
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         let mut decoder = flate2::read::GzDecoder::new(file);
-        let mut out = fs::File::create(dest_path.join(&stem)).map_err(|e| e.to_string())?;
+        let mut out = fs::File::create(&leaf).map_err(|e| e.to_string())?;
         std::io::copy(&mut decoder, &mut out).map_err(|e| e.to_string())?;
         prog.done_items = 1;
         prog.current.clear();
@@ -1937,6 +2096,319 @@ mod tests {
         let _ = extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
         assert!(!d.join("escape.txt").exists());
         assert!(!dest.parent().unwrap().join("escape.txt").exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPE-1733 — the guarded rows of the create/write provenance table
+    // -----------------------------------------------------------------------
+    //
+    // The table lives in the section comment above `temp_extract_target`; these are its teeth. Rows 1–5
+    // and 17 are *recorded absences* (app-owned temp paths, and `create_dir_all`, which CPE-1729 measured
+    // as non-destructive) and have nothing to assert. Rows 6–14 refuse the whole operation; rows 15–16
+    // skip one entry and keep extracting, so they get their own legs below.
+
+    /// Gzip `raw`, so the row-13/14 legs can build a single-file gzip whose extraction leaf lands on the
+    /// staged link.
+    fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
+        let mut e = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        e.write_all(raw).unwrap();
+        e.finish().unwrap()
+    }
+
+    /// A file for a compress row to pack, so the run actually reaches its `File::create(dest)`.
+    fn row_src(d: &Path) -> String {
+        let src = d.join("payload.txt");
+        fs::write(&src, b"payload").unwrap();
+        src.to_string_lossy().to_string()
+    }
+
+    /// **The whole assertion, in one place, so no row can be checked more weakly than its neighbours.**
+    ///
+    /// Three things matter here and each was got wrong somewhere in this ticket family first:
+    ///
+    /// 1. **Assert on the filesystem before unwrapping the `Result`.** Every bug in this family returned
+    ///    `Ok` while destroying something, so the `Result` is the *least* informative witness — and if a
+    ///    guard regresses to returning `Ok`, an `expect_err` placed first panics before the assertion that
+    ///    names the damage ever runs.
+    /// 2. **Pin OUR refusal, not merely a failure.** On an unprivileged Windows runner `make_dangling_link`
+    ///    falls back to a dangling **junction**, and `File::create` on one of those fails by itself —
+    ///    measured for this ticket: `Err("Access is denied. (os error 5)", kind PermissionDenied)`. An
+    ///    `is_err()`-only leg would therefore stay green straight through a deleted guard. The substring
+    ///    check is what makes this leg about the guard instead of about the OS.
+    /// 3. **The link must survive.** A guard that deleted the link and then refused would also pass 1 and 2.
+    #[track_caller]
+    fn assert_row_refuses_a_dangling_link(n: u8, link_name: &str, run: fn(&Path) -> Result<(), String>) {
+        let d = scratch(&format!("cpe1733_row{n}_dangling"));
+        let link = d.join(link_name);
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!(
+                "[CPE-1733] SKIPPED row {n}'s dangling-link leg: this machine could not stage a link at \
+                 {}. Nothing about row {n}'s guard was covered on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let target = crate::fsutil::dangling_link_target(&link);
+        assert!(!target.exists(), "row {n}: the staged link must be DANGLING or this leg proves nothing");
+
+        let outcome = run(&d);
+
+        assert!(
+            !target.exists(),
+            "row {n}: the link's target was created — the bytes went THROUGH the link into a path nobody \
+             named (outcome was {outcome:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "row {n}: the link at {} must survive untouched (outcome was {outcome:?})",
+            link.display()
+        );
+        let err = outcome.expect_err("a link at the destination must be refused, not written through");
+        assert!(
+            err.contains("is a link"),
+            "row {n}: the refusal must be OURS. `is_err()` alone proves nothing here — a dangling junction \
+             (the unprivileged-Windows staging fallback) fails `File::create` by itself with \"Access is \
+             denied. (os error 5)\", so this leg would pass through a guard that had been deleted. Got: {err}"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Declares every whole-operation-refusing row **once**: it generates one `#[test]` per row (so
+    /// neutralising a single site turns a single, named test red) and the `GUARDED_ROWS` array the
+    /// live-link leg below walks (so the two can never drift apart).
+    macro_rules! guarded_rows {
+        ($(($n:expr, $test:ident, $link:expr, $run:expr)),* $(,)?) => {
+            const GUARDED_ROWS: &[(u8, &str, fn(&Path) -> Result<(), String>)] = &[$(($n, $link, $run)),*];
+            $(
+                #[test]
+                fn $test() {
+                    assert_row_refuses_a_dangling_link($n, $link, $run);
+                }
+            )*
+        };
+    }
+
+    guarded_rows![
+        (6, row6_compress_to_zip_refuses_a_link_at_its_destination, "out.zip", |d: &Path| {
+            compress_to_zip(&[row_src(d)], &d.join("out.zip").to_string_lossy()).map(|_| ())
+        }),
+        (7, row7_create_empty_zip_refuses_a_link_at_its_destination, "empty.zip", |d: &Path| {
+            create_empty_zip(&d.join("empty.zip").to_string_lossy()).map(|_| ())
+        }),
+        (8, row8_compress_to_targz_refuses_a_link_at_its_destination, "out.tar.gz", |d: &Path| {
+            compress_to_targz(&[row_src(d)], &d.join("out.tar.gz").to_string_lossy()).map(|_| ())
+        }),
+        (9, row9_compress_to_zip_encrypted_refuses_a_link_at_its_destination, "out.zip", |d: &Path| {
+            compress_to_zip_encrypted(&[row_src(d)], &d.join("out.zip").to_string_lossy(), "hunter2").map(|_| ())
+        }),
+        (10, row10_compress_to_zip_streamed_refuses_a_link_at_its_destination, "out.zip", |d: &Path| {
+            let cancel = AtomicBool::new(false);
+            compress_to_zip_streamed(&[row_src(d)], &d.join("out.zip").to_string_lossy(), &cancel, |_| {}).map(|_| ())
+        }),
+        (11, row11_compress_to_targz_streamed_refuses_a_link_at_its_destination, "out.tar.gz", |d: &Path| {
+            let cancel = AtomicBool::new(false);
+            compress_to_targz_streamed(&[row_src(d)], &d.join("out.tar.gz").to_string_lossy(), &cancel, |_| {})
+                .map(|_| ())
+        }),
+        (12, row12_compress_to_zip_encrypted_streamed_refuses_a_link_at_its_destination, "out.zip", |d: &Path| {
+            let cancel = AtomicBool::new(false);
+            compress_to_zip_encrypted_streamed(
+                &[row_src(d)],
+                &d.join("out.zip").to_string_lossy(),
+                "hunter2",
+                &cancel,
+                |_| {},
+            )
+            .map(|_| ())
+        }),
+        // Rows 13/14: the destination FOLDER is the user's and the leaf is the archive's own name minus
+        // `.gz`, so the staged link is named `a` and the archive is `a.gz`.
+        (13, row13_extract_archive_gz_refuses_a_link_at_its_leaf, "a", |d: &Path| {
+            fs::write(d.join("a.gz"), gzip_bytes(b"decompressed bytes")).unwrap();
+            extract_archive(&d.join("a.gz").to_string_lossy(), &d.to_string_lossy()).map(|_| ())
+        }),
+        (14, row14_extract_archive_streamed_gz_refuses_a_link_at_its_leaf, "a", |d: &Path| {
+            fs::write(d.join("a.gz"), gzip_bytes(b"decompressed bytes")).unwrap();
+            let cancel = AtomicBool::new(false);
+            extract_archive_streamed(&d.join("a.gz").to_string_lossy(), &d.to_string_lossy(), &cancel, |_| {})
+                .map(|_| ())
+        }),
+    ];
+
+    /// **The live-link half, as one table over the same rows** (CPE-1718's live-link leg, generalised).
+    ///
+    /// The dangling legs above pass under a guard that only handled *live* links, and vice versa — they
+    /// are different measured behaviours (`try_exists` answers `Ok(false)` for a dangling link and
+    /// `Ok(true)` for a live one), and only the live case can destroy bytes that already exist. Measured
+    /// for this ticket with no guard: `File::create` on a live link returns `Ok` and the link's target
+    /// reads `"CLOBBERED"`.
+    ///
+    /// A live **file** symlink is the one thing this repo cannot fake (a junction is directory-only, a
+    /// hard link is `is_symlink() == false` — CPE-1716), so this is one leg for all nine rows rather than
+    /// nine skippable ones, and it routes through `require_staged` so a runner that *should* stage goes
+    /// red instead of silently covering nothing (CPE-1717).
+    #[test]
+    fn every_guarded_row_refuses_a_live_link_without_touching_its_target() {
+        for (n, link_name, run) in GUARDED_ROWS {
+            let d = scratch(&format!("cpe1733_row{n}_live"));
+            let victim = d.join("victim-the-user-never-named.bin");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let link = d.join(link_name);
+            let staged = {
+                #[cfg(windows)]
+                {
+                    std::os::windows::fs::symlink_file(&victim, &link).is_ok()
+                }
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&victim, &link).is_ok()
+                }
+            };
+            if !crate::fsutil::require_staged("live_file_symlink", true, staged) {
+                crate::skip_notice!(
+                    "[CPE-1733] SKIPPED the live-link table: this machine could not create a file symlink \
+                     at {}. The dangling legs pass under a live-link-blind guard, so NOTHING covered the \
+                     live case on this run.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&d);
+                return;
+            }
+
+            let outcome = run(&d);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "row {n}: the link's target was rewritten — the write followed the link into a file the \
+                 caller never named (outcome was {outcome:?})"
+            );
+            let err = outcome.expect_err("a live link at the destination must be refused");
+            assert!(
+                err.contains("is a link"),
+                "row {n}: a LIVE link must be reported AS a link. Occupancy-first ordering would say \
+                 \"already exists\" and send the user to delete a name that actually holds a link \
+                 elsewhere — the failure `fsutil`'s CPE-1718 leg exists for. Got: {err}"
+            );
+            assert!(
+                !err.contains("already exists"),
+                "row {n}: and it must not fall through to an occupancy message: {err}"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// Row 15: `extract_zip_encrypted` **skips** an entry whose name lands on a link and keeps extracting.
+    ///
+    /// The refusal shape differs from rows 6–14 on purpose — the name is the archive's, not the caller's,
+    /// so one poisoned entry must not abort a legitimate extraction. That makes the `Result` useless as a
+    /// witness (it is `Ok` either way when the guard works), which is exactly why the assertions are on
+    /// the filesystem: the link's target must not have been created, the link must survive, and the
+    /// *other* entry must still be there.
+    #[test]
+    fn row15_extract_zip_encrypted_skips_an_entry_that_lands_on_a_link() {
+        let d = scratch("cpe1733_row15");
+        let src_dir = d.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("a.txt"), b"ARCHIVED A").unwrap();
+        fs::write(src_dir.join("b.txt"), b"ARCHIVED B").unwrap();
+        let zip = d.join("enc.zip");
+        compress_to_zip_encrypted(
+            &[
+                src_dir.join("a.txt").to_string_lossy().to_string(),
+                src_dir.join("b.txt").to_string_lossy().to_string(),
+            ],
+            &zip.to_string_lossy(),
+            "hunter2",
+        )
+        .unwrap();
+
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let link = dest.join("a.txt");
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!("[CPE-1733] SKIPPED row 15: could not stage a link at {}.", link.display());
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let target = crate::fsutil::dangling_link_target(&link);
+
+        let outcome = extract_zip_encrypted(&zip.to_string_lossy(), &dest.to_string_lossy(), "hunter2");
+
+        assert!(
+            !target.exists(),
+            "row 15: the entry's bytes went THROUGH the link into {} (outcome was {outcome:?})",
+            target.display()
+        );
+        assert!(
+            fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "row 15: the link must survive (outcome was {outcome:?})"
+        );
+        outcome.expect("row 15: one skipped entry must not abort the extraction");
+        assert_eq!(
+            fs::read(dest.join("b.txt")).unwrap(),
+            b"ARCHIVED B".to_vec(),
+            "row 15: the entries that did not hit a link must still extract"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Row 16: the streamed twin of row 15 — same skip, and it has somewhere to record the reason, so this
+    /// leg additionally pins the recorded message. Without that substring the leg would pass on a runner
+    /// where the OS refused the write for its own reasons.
+    #[test]
+    fn row16_extract_zip_archive_stream_skips_and_records_an_entry_that_lands_on_a_link() {
+        let d = scratch("cpe1733_row16");
+        let src_dir = d.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("a.txt"), b"ARCHIVED A").unwrap();
+        fs::write(src_dir.join("b.txt"), b"ARCHIVED B").unwrap();
+        let zip = d.join("plain.zip");
+        compress_to_zip(
+            &[
+                src_dir.join("a.txt").to_string_lossy().to_string(),
+                src_dir.join("b.txt").to_string_lossy().to_string(),
+            ],
+            &zip.to_string_lossy(),
+        )
+        .unwrap();
+
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let link = dest.join("a.txt");
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!("[CPE-1733] SKIPPED row 16: could not stage a link at {}.", link.display());
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let target = crate::fsutil::dangling_link_target(&link);
+
+        let cancel = AtomicBool::new(false);
+        let outcome = extract_archive_streamed(&zip.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        assert!(
+            !target.exists(),
+            "row 16: the entry's bytes went THROUGH the link into {} (outcome was {outcome:?})",
+            target.display()
+        );
+        assert!(
+            fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "row 16: the link must survive (outcome was {outcome:?})"
+        );
+        let report = outcome.expect("row 16: one skipped entry must not abort the extraction");
+        assert!(
+            report.errors.iter().any(|e| e.contains("a.txt") && e.contains("is a link")),
+            "row 16: the skip must be RECORDED, and recorded as OUR link refusal rather than as whatever \
+             the OS happened to say — got {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fs::read(dest.join("b.txt")).unwrap(),
+            b"ARCHIVED B".to_vec(),
+            "row 16: the entries that did not hit a link must still extract"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 }
