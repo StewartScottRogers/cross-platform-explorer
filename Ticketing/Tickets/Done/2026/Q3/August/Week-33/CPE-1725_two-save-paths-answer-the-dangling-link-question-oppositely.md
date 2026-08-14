@@ -3,11 +3,11 @@ id: CPE-1725
 title: The two file-save paths answer the dangling-link question oppositely
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-14
 ---
 
 ## Problem

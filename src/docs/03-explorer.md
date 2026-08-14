@@ -75,9 +75,11 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
     ever find again.
   - **Everything else about your file is kept.** The save rewrites the file in place, so its permissions,
     its owner, its Windows attributes (including the "downloaded from the internet" mark), any alternate
-    data streams and any hard links to it all survive the edit untouched — and a program that has the file
-    open keeps working. Some editors save by writing a new file and renaming it over yours, which quietly
-    loses all of that; this one doesn't.
+    data streams and any hard links to it all survive the edit untouched. Some editors save by writing a
+    new file and renaming it over yours, which quietly loses all of that; this one doesn't — and a file
+    another program merely has *open* stays saveable, where the rename approach would refuse it.
+    (A program that has opened the file and asked to keep others from writing still blocks the save, as
+    it always has — that is the file being locked, not the way we save it.)
   - **The trade-off: a save that is interrupted can leave the file part-written.** If the app is killed or
     the disk fills up half-way through writing, you can be left with a truncated file. Metadata Studio
     makes the opposite trade (see its page) because a media file is harder to retype than a text file. If
