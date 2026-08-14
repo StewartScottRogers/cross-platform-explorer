@@ -76,8 +76,16 @@ valid (if incomplete) archive rather than leaving a corrupt file.
 
 ## Safety limits
 
-Two independent protections apply to every extraction, automatically — you don't opt into either:
+Three independent protections apply automatically — you don't opt into any of them:
 
+- **A symlink at the destination is refused, never written through.** Creating a file at a symlink's name
+  doesn't replace the link: it writes *through* it, into whatever the link points at, and reports success
+  about a file you never named. So if the archive you're about to create — or the file a single-file `.gz`
+  would unpack to — lands on a name that already holds a symlink, the operation stops before writing
+  anything and tells you it found a link, rather than quietly overwriting the link's target. During a ZIP
+  extraction the same check applies per entry: an entry that would land on an existing link in the
+  destination folder is **skipped** and the rest of the archive still extracts. Overwriting an ordinary
+  existing file is unaffected — that stays allowed, because it's a thing you can reasonably mean.
 - **Zip-slip (path traversal) protection.** An archive entry whose name would escape the destination
   folder — an absolute path, or one containing `..` — is **silently skipped** during extraction rather than
   written outside where you asked, for every supported format (zip, tar, 7z, the one-entry-at-a-time RAR
@@ -173,6 +181,12 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   readable and one of those trips the danger threshold, the **DANGER** banner still leads, with a note
   that other entries couldn't be assessed. An all-encrypted zip, and an archive whose suspicious entries
   all exhausted the verification budget, both report as unassessed rather than safe or dangerous.
+- **The symlink refusal covers ZIP extraction, not TAR or 7-Zip extraction.** Stated plainly rather than
+  implied: the per-entry link check described under *Safety limits* is applied where this app writes the
+  file itself, which is archive creation, single-file `.gz` unpacking, and ZIP extraction. TAR and 7-Zip
+  entries are written by their respective decoder libraries, so an entry landing on a symlink that already
+  exists in the destination folder is still followed there. Extract those into a **new, empty folder** (the
+  plain **Extract** action already does exactly that) if you don't trust the archive.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —

@@ -77,3 +77,54 @@ Related: **CPE-1718** (`create_slot_refusal` and the four-primitive sweep patter
 (`fs::write` writes *through* a link — measured), **CPE-1729** (`create_dir_all` does not — measured after
 the opposite was assumed), **CPE-1461** (`guarded_join` for archive-controlled names), **CPE-1732** (the
 enforcement decision).
+
+## Work Log
+
+**2026-08-14 — enumeration published, then guards written from it.**
+
+The table is in `crates/server/src/archive.rs`'s "Archive creation & extraction" section comment (17 rows).
+Split:
+
+- **Rows 1–5 — app-owned.** Every single-entry extractor (`extract_archive_entry`, `extract_tar_entry`,
+  `extract_7z_entry`, `extract_rar_entry`, and `temp_extract_target` itself) writes under a per-call
+  `%TEMP%/cpe-archive/<pid>-<seq>/` directory that this code creates and never reuses, with
+  `Path::file_name()` as the leaf. Unreachable by the hazard, not merely unlikely. Recorded at each site.
+- **Rows 6–12 — caller-supplied `dest`.** Six archive-creation destinations (`compress_to_zip`,
+  `compress_to_targz`, `compress_to_zip_encrypted` and their three streamed siblings) plus
+  `create_empty_zip`. Guarded.
+- **Rows 13–14 — user-named folder, archive-derived leaf.** The `.gz` branch of `extract_archive` and
+  `extract_archive_streamed`. Guarded.
+- **Rows 15–16 — archive-controlled names under a user-named folder.** The two ZIP write loops. Guarded,
+  but as a per-entry **skip** rather than an abort, matching the existing zip-slip skip.
+- **Row 17 — the four `create_dir_all` roots.** Unguarded, deliberately: CPE-1729 measured that
+  `create_dir_all` is not destructive and does nothing at all on a dangling link.
+
+**Measured on Windows for this ticket** (not reasoned about): `File::create` on a dangling link → `Ok`,
+creates the link's target; on a live link → `Ok`, target reads `"CLOBBERED"`, link survives both times.
+`create_new` on either → `Err AlreadyExists (os error 80)`, target untouched. `File::create` on a dangling
+**junction** → `Err Access is denied (os error 5)`.
+
+That last one is why every leg pins the substring `"is a link"` rather than `is_err()`: a dangling junction
+is the unprivileged-Windows staging fallback, so an `is_err()`-only leg would pass through a deleted guard.
+Demonstrated live — with row 7's guard removed the test still went red, but on the *message* assertion,
+reporting `Got: The file exists. (os error 80)`.
+
+The `create_new` finding also downgrades row 7 from a safety fix to a **message** fix, and it is labelled
+that way at the site.
+
+**Traversal:** `guarded_join` is not in this path and was not added — `entry_name_is_safe` (CPE-628) is this
+module's equivalent and is already applied at every site it writes itself. Said so rather than adding a
+second guard, per the ticket.
+
+**Recorded gap:** `tar::Archive::unpack`/`Entry::unpack_in`, `zip::ZipArchive::extract` and
+`sevenz_rust::default_entry_extract_fn` create their files inside those crates, so a link already sitting in
+the destination is still followed on the tar / 7z / one-shot-zip paths. Written down at the site and in the
+in-app docs rather than left implied.
+
+Guard: `fsutil::create_slot_link_refusal` — the link half of `create_slot_refusal` split out, one shared
+implementation. The occupancy half is deliberately not applied; overwriting an existing archive is
+long-standing behaviour of these functions.
+
+Evidence: all 11 guarded sites neutralised **one at a time**, each turning its own named test red, restored
+with `git checkout --` each time. Full `cpe-server` suite (2156 + integration) and `src-tauri` (182) green;
+`cargo clippy --all-targets -D warnings` clean in both feature modes and in `src-tauri`.
