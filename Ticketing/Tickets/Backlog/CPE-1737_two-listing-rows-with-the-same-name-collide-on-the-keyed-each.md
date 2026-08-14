@@ -34,11 +34,22 @@ priority):
 
 - `crates/vfs/src/connect.rs:244` — `dir_entry_from_provider` builds `path: child_uri(uri, loc, &e.name)`.
   The path is derived from the **name alone**, so both rows get the **identical** `path`.
-- `src/lib/components/FileList.svelte:720` — `{#each windowed as { entry, i } (entry.path)}`. That is a
-  **keyed** each, and Svelte rejects duplicate keys at runtime rather than rendering them.
+- **Three components key directly on it**, so this is not confined to the main pane (all three verified in
+  the tree by the PR #903 UAT, round 4):
+  - `src/lib/components/FileList.svelte:720` — `{#each windowed as { entry, i } (entry.path)}`
+  - `src/lib/components/FolderBrowser.svelte:127` — `{#each sorted as entry (entry.path)}`
+  - `src/lib/components/DropStackPanel.svelte:91` — `{#each $dropStackEntries as entry (entry.path)}`
 
-So the expected symptom is not two confusing rows, it is a **listing that fails to render** for the whole
-folder — every unrelated file in it included.
+This repo is on `"svelte": "^4"` (`package.json`), where a duplicate key in a keyed `{#each}` **throws**
+rather than rendering the second row. So the expected symptom is not two confusing rows, and not merely
+"the folder fails to render" — it is the **whole list failing to render**, every unrelated file in it
+included, on whichever of the three surfaces hits the collision first.
+
+A repo-wide sweep finds ~29 keyed `{#each}` blocks keyed on `.path`, of which at least two more list
+*directory children* (`SidebarNode.svelte:55`, `Sidebar.svelte:808`); the UAT did not trace whether those
+are fed by `remote_dir_entries`, so they are named as candidates rather than counted. The point either way
+is that keying on `path` is the house convention, which is the argument for fixing the path at its source
+(option 1 below) rather than re-keying one component.
 
 ## Not verified
 
