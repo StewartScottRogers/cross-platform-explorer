@@ -2483,6 +2483,81 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// **The leg that makes the link-first ordering evidence rather than a sentence** (PR #901 review).
+    ///
+    /// `create_slot_refusal` checks the link question *before* occupancy — the opposite of
+    /// [`rename_slot_refusal`] — and the module doc argues for twenty lines that this is deliberate. It
+    /// was pinned by nothing: swapping the order to match `rename_slot_refusal` **redded not one test**
+    /// out of 2143.
+    ///
+    /// The reason is structural. Under **either** ordering a *dangling* link reaches the link classifier,
+    /// because `try_exists` answers `Ok(false)` for it, occupancy returns `Free`, and it falls through.
+    /// Every other CPE-1718 test stages a dangling link. **The ordering only changes behaviour for a
+    /// *live* link**, and there was no live-link leg anywhere in the PR — so the one case the argument is
+    /// about was the one case untested.
+    ///
+    /// Measured both ways by the reviewer:
+    ///
+    /// ```text
+    /// link-first (as shipped): "…rebuilt.bin" is a link, and creating a file at a link's name writes
+    ///                          THROUGH it — the bytes would land at the link's target…
+    /// occupancy-first:         rebuilt.bin: already exists — refusing to overwrite
+    /// ```
+    ///
+    /// That second message is exactly what this module's own table calls out as *"sends the user to
+    /// delete a file at a name that actually holds a link to somewhere else"* — and it is the same
+    /// failure PR #899's reviewer measured at the rename site, recorded at `fsutil.rs`'s
+    /// occupancy-first comment. **The repo has been bitten by this ordering once already**; the fix for
+    /// it should not ship undefended.
+    #[test]
+    fn a_live_link_at_a_create_slot_is_reported_as_a_link_not_as_already_exists() {
+        let d = std::env::temp_dir().join(format!("cpe1718-live-order-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let real = d.join("real-target.bin");
+        std::fs::write(&real, b"VICTIM ORIGINAL").unwrap();
+        let slot = d.join("slot.bin");
+
+        // A *live* file symlink is the one staging this repo cannot fake: a junction is directory-only
+        // and a hard link is `is_symlink() == false` (both measured on CPE-1716). Per CPE-1717 a leg that
+        // cannot stage where it is supposed to work goes red rather than green.
+        let staged = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&real, &slot).is_ok()
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&real, &slot).is_ok()
+            }
+        };
+        if !require_staged("live_file_symlink", true, staged) {
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        assert!(
+            std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+            "staging must produce a link, or this test proves nothing"
+        );
+
+        let msg = create_slot_refusal(&slot, "slot.bin: already exists")
+            .expect("a live link at a create slot must be refused, not written through");
+        assert!(
+            msg.contains("is a link"),
+            "a LIVE link must be reported AS a link — occupancy-first would say \"already exists\" and \
+             send the user to delete a name that actually holds a link elsewhere: {msg}"
+        );
+        assert!(
+            !msg.contains("already exists"),
+            "and it must not fall through to the site's occupancy wording: {msg}"
+        );
+        assert_eq!(
+            std::fs::read(&real).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "nothing may touch the link's target"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn epoch_ms_is_monotonic_for_later_times() {
         use std::time::Duration;
