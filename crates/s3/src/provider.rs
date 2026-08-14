@@ -405,6 +405,71 @@ fn guard_header_sendable(label: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether `segment` is a path segment the WHATWG URL parser (and so the `url` crate, and so `ureq`)
+/// treats as a dot segment and resolves away.
+///
+/// The spec's definitions are deliberately wider than a literal `.`/`..`: a **single-dot** segment is `.`
+/// or an ASCII-case-insensitive `%2e`, and a **double-dot** segment is `..`, `.%2e`, `%2e.`, or `%2e%2e`.
+/// Mirrored here rather than simplified, because a guard that only caught the literal forms would let the
+/// encoded ones through and be wrong in the one direction that matters.
+///
+/// The `%2e` arms cannot fire from this crate's own encoder today ([`crate::sigv4::encode_path`] leaves `.`
+/// alone as an unreserved character and escapes a literal `%` to `%25`), so they are pure future-proofing
+/// against an encoder change — and they cannot produce a false refusal, because nothing this crate emits
+/// can look like them by accident.
+fn is_url_dot_segment(segment: &str) -> bool {
+    let unescaped = segment.to_ascii_lowercase().replace("%2e", ".");
+    unescaped == "." || unescaped == ".."
+}
+
+/// Refuse, before any request is sent, a key whose path the HTTP client will rewrite between signing and
+/// sending (CPE-1684).
+///
+/// # This is a measurement, not a precaution
+///
+/// The ticket flagged it as an unverified hypothesis ("**Test this first**: the HTTP client may rewrite the
+/// path you signed"), explicitly labelled by the reviewer who raised it as something they could not check.
+/// **Measured here against the real send path, it reproduces exactly.**
+/// `tests::a_key_with_a_dot_segment_is_refused_because_ureq_resolves_it_away_before_sending` records the
+/// observation: signing `/test-bucket/a/../b//c%252Fd.txt` and asking `ureq` 2.12.1 to send it puts
+/// `/test-bucket/b//c%252Fd.txt` on the wire. `ureq` parses every URL through the `url` crate, which
+/// implements WHATWG URL parsing, which resolves dot segments as part of parsing — before `ureq` has any
+/// say in it.
+///
+/// **Only dot segments are affected**, and that is measured too, not assumed: in the same request, `//` and
+/// `%25` both survived byte for byte, so the empty-segment and percent-encoding cases the ticket also asked
+/// about are fine. `tests::a_key_with_a_double_slash_and_a_percent_encoded_slash_reaches_the_wire_intact`
+/// pins that half.
+///
+/// # Why refuse rather than normalise, or rather than send it anyway
+///
+/// S3 keys are opaque byte strings: `a/../b.txt` is a **real, distinct object** from `b.txt`, and CPE-1689
+/// established that this crate signs the canonical path unnormalised precisely so such a key is reachable.
+/// Normalising to match what the client sends would silently address a different object — the exact
+/// silently-wrong-object failure CPE-1689 exists to prevent. Sending it anyway produces
+/// `SignatureDoesNotMatch`, with nothing in the message to say why, which is the opaque failure the whole
+/// S3 slice has been working to eliminate.
+///
+/// So the honest answer is the third one: refuse, and name the cause. The crate's "one construction, so the
+/// URL and the signature cannot disagree" guarantee ends at the crate boundary; this is where it ends, said
+/// out loud. Actually reaching such a key needs an HTTP client that does not normalise URLs, which is
+/// **CPE-1718**, filed from this measurement.
+fn guard_path_survives_the_client(encoded_path: &str) -> Result<(), String> {
+    if let Some(segment) = encoded_path.split('/').find(|s| is_url_dot_segment(s)) {
+        return Err(format!(
+            "s3: this key contains the path segment {segment:?}, and this crate's HTTP client (ureq 2, \
+             which parses URLs through the `url` crate) resolves dot segments away while parsing — \
+             measured, not assumed: signing `/a/../b.txt` puts `/b.txt` on the wire. An S3 key is an \
+             opaque byte string, so `a/../b.txt` is a real object distinct from `b.txt` (CPE-1689) and \
+             this crate signs it unnormalised on purpose. The request would therefore be signed for one \
+             key and sent for another, and the server would answer SignatureDoesNotMatch with nothing in \
+             the message to say why. Refusing here and naming the cause instead. Reaching a key with a \
+             dot segment needs an HTTP client that does not normalise URLs — see CPE-1718."
+        ));
+    }
+    Ok(())
+}
+
 /// Cheap, non-recursive guard against maliciously (or accidentally) deep XML nesting, run before the
 /// document is handed to `roxmltree`. Ported near-verbatim from `crates/webdav/src/lib.rs`'s
 /// `xml_nesting_too_deep` (CPE-1398) — walks the real tokens from [`xmlparser::Tokenizer`] rather than a
@@ -922,6 +987,10 @@ impl S3Provider {
         guard_header_sendable("x-amz-date", &amz_date)?;
         guard_header_sendable("x-amz-content-sha256", payload_hash)?;
         guard_header_sendable("Authorization", &signed.authorization)?;
+        // The path half of the same problem, and the one the ticket told this worker to measure first:
+        // `ureq` rewrites a path carrying a dot segment between here and the wire, so what is signed above
+        // would not be what is sent below. Checked in this one place, so no verb can miss it.
+        guard_path_survives_the_client(&target.encoded_path)?;
 
         let url = target.url_with_query(query);
         let mut req = self
@@ -1452,6 +1521,13 @@ impl FileSystemProvider for S3Provider {
     /// deleted that is still entirely there.
     fn delete(&mut self, path: &str) -> Result<(), String> {
         let key = provider_path_to_object_key(path)?;
+        // Checked BEFORE the probe, unlike the other ops, which reach `signed_request`'s copy of this
+        // guard on their first request. `delete`'s first request is the prefix probe, whose path is the
+        // bucket root (the key travels as a query parameter, which is not normalised) — so the probe would
+        // sail through and only the DELETE itself would be refused, after a round trip spent deciding the
+        // shape of something that can never be deleted through this client anyway. See
+        // `guard_path_survives_the_client`.
+        guard_path_survives_the_client(&self.config.object_target(&key)?.encoded_path)?;
         let (raw_entries, real_entries, more_pages) = self.probe_prefix(&format!("{key}/"))?;
         // `more_pages`: a marker-only page that is ALSO truncated means the server under-filled a page it
         // was allowed to under-fill and there is more beneath the prefix — treat it as content, never as
@@ -1668,19 +1744,19 @@ mod tests {
         let real = root.join(path.trim_start_matches('/'));
         let leaf = path.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
 
-        // CPE-1684 sentinels, so the object-op tests can reach the response shapes a real gateway produces
-        // but a `std::fs`-backed fixture otherwise never would. Both are keyed off the key's LAST segment,
-        // so an ordinary key can never trip them by accident:
-        //   * `deny-*`  -> a bodiless 403, the shape S3 sends for a denied key (and, per AWS's documented
-        //                  behaviour, for a missing key when the caller lacks s3:ListBucket).
-        //   * `nolen-*` -> a 200 HEAD with NO Content-Length, the broken-server shape `stat` must refuse
-        //                  rather than report as a zero-byte object.
+        // CPE-1684 sentinel: a key whose LAST segment starts with `deny-` gets a **bodiless 403**, the
+        // shape S3 sends for a denied key (and, per AWS's documented behaviour, for a *missing* key when
+        // the caller lacks `s3:ListBucket`). Keyed off the last segment so an ordinary key cannot trip it
+        // by accident. A `std::fs`-backed fixture has no other way to produce a denial.
+        //
+        // The other shape `stat` has to handle — a 200 with **no** `Content-Length` — deliberately is NOT
+        // a sentinel here: `tiny_http` always emits a `Content-Length` (or chunked encoding) and drops a
+        // header it cannot parse as one (`response.rs:266-270`), so this fixture *cannot* produce that
+        // response. `spawn_a_server_that_answers_head_200_with_no_content_length` writes the response bytes
+        // over a raw socket instead. Trying it here would have produced `Content-Length: 0` and a test that
+        // passed while measuring nothing.
         if leaf.starts_with("deny-") {
             let _ = req.respond(tiny_http::Response::empty(403));
-            return;
-        }
-        if method == "HEAD" && leaf.starts_with("nolen-") {
-            let _ = req.respond(tiny_http::Response::empty(200));
             return;
         }
 
@@ -3148,5 +3224,579 @@ mod tests {
         assert_eq!(provider_path_to_key_prefix("/photos"), "photos/");
         assert_eq!(provider_path_to_key_prefix("/photos/2024"), "photos/2024/");
         assert_eq!(provider_path_to_key_prefix("photos/2024/"), "photos/2024/");
+    }
+
+    // =============================================================================================
+    // CPE-1684: the object operations — stat / read / write / delete / mkdir, and the rename refusal.
+    // =============================================================================================
+
+    /// A provider wired to a fresh fixture, plus that fixture's root directory and request counter.
+    fn s3_fixture_provider() -> (S3Provider, PathBuf, Arc<AtomicUsize>) {
+        let (base, root, requests) = spawn_s3_fixture();
+        (S3Provider::connect(&cfg(&base)), root, requests)
+    }
+
+    /// Compare two byte buffers without letting a failure `Debug`-print hundreds of kilobytes: report the
+    /// first differing offset instead, which is the only part of the answer anyone can read.
+    fn assert_bytes_eq(got: &[u8], want: &[u8], what: &str) {
+        assert_eq!(got.len(), want.len(), "{what}: length differs");
+        if let Some(i) = got.iter().zip(want).position(|(a, b)| a != b) {
+            panic!("{what}: first difference at byte {i}: got {:#04x}, want {:#04x}", got[i], want[i]);
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AC1: each op round-trips against the fixture.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn write_then_stat_round_trips_the_object_and_reports_the_size_the_server_actually_holds() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        let body = b"hello from CPE-1684".to_vec();
+        provider.write("/notes/hello.txt", &body).expect("write must succeed");
+
+        // Assert on what the user GETS, not on the `Result`: two bugs shipped this week where the return
+        // value said `Ok` while the file was empty or absent.
+        let stored = std::fs::read(root.join("notes/hello.txt"))
+            .expect("write returned Ok but the object is not on the server");
+        assert_bytes_eq(&stored, &body, "the object the PUT actually stored");
+
+        let entry = provider.stat("/notes/hello.txt").expect("stat must find the object just written");
+        assert_eq!(entry.name, "hello.txt", "stat must name the key's last segment");
+        assert!(!entry.is_dir, "an object is not a directory");
+        assert_eq!(
+            entry.size,
+            body.len() as u64,
+            "stat must report the size the server sent in Content-Length, not a placeholder"
+        );
+    }
+
+    #[test]
+    fn read_round_trips_a_multi_chunk_object_byte_for_byte() {
+        let (mut provider, _root, _requests) = s3_fixture_provider();
+        // Three full READ_CHUNK_BYTES chunks plus a partial one, with a position-dependent pattern, so a
+        // loop that dropped, duplicated, reordered or short-read a chunk cannot pass by accident.
+        let body: Vec<u8> = (0..(READ_CHUNK_BYTES * 3 + 1234)).map(|i| (i % 251) as u8).collect();
+        provider.write("/big.bin", &body).expect("write must succeed");
+
+        let got = provider.read("/big.bin").expect("read must return the object");
+        assert_bytes_eq(&got, &body, "the object read back over several chunks");
+    }
+
+    #[test]
+    fn delete_removes_the_object_and_the_listing_stops_showing_it() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        provider.write("/docs/a.txt", b"a").unwrap();
+        provider.write("/docs/b.txt", b"b").unwrap();
+
+        provider.delete("/docs/a.txt").expect("deleting one object must succeed");
+
+        assert!(
+            !root.join("docs/a.txt").exists(),
+            "delete returned Ok while the object is still on the server — S3 answers 204 for anything, so \
+             the Result alone proves nothing"
+        );
+        let names: Vec<String> =
+            provider.list("/docs").unwrap().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["b.txt".to_string()], "the listing must reflect the delete");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AC5: the mkdir marker is the exact key CPE-1683's parser filters out.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn mkdir_writes_the_marker_at_the_key_list_filters_so_the_parent_shows_a_dir_and_no_stray_file() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+
+        provider.mkdir("/photos/2024").expect("mkdir must succeed");
+
+        // The shape itself, pinned against the function CPE-1683 made `pub` for exactly this call. Deriving
+        // it a second way here — off by one slash — is precisely how a phantom folder gets created.
+        assert_eq!(provider_path_to_key_prefix("/photos/2024"), "photos/2024/");
+        assert!(
+            root.join("photos/2024/.s3marker").is_file(),
+            "the marker object was not written at the agreed key `photos/2024/`"
+        );
+
+        let parent: Vec<(String, bool)> =
+            provider.list("/photos").unwrap().into_iter().map(|e| (e.name, e.is_dir)).collect();
+        assert_eq!(
+            parent,
+            vec![("2024".to_string(), true)],
+            "the parent must show the new directory, and nothing else"
+        );
+
+        let inside = provider.list("/photos/2024").unwrap();
+        assert!(
+            inside.is_empty(),
+            "the marker came back as a phantom zero-byte file inside its own directory: {:?}",
+            inside.iter().map(|e| (e.name.as_str(), e.is_dir, e.size)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stat_reports_a_freshly_created_empty_directory_as_a_directory_not_as_missing() {
+        let (mut provider, _root, _requests) = s3_fixture_provider();
+        provider.mkdir("/photos/2024").expect("mkdir must succeed");
+
+        let entry = provider
+            .stat("/photos/2024")
+            .expect("a directory this very module just created must not stat as missing");
+        assert!(entry.is_dir, "a prefix with a marker under it is a directory");
+        assert_eq!(entry.name, "2024");
+    }
+
+    #[test]
+    fn stat_reports_a_marker_less_prefix_with_content_under_it_as_a_directory() {
+        // The common real-bucket shape: nobody wrote a marker, the "directory" exists only because keys
+        // sit under the prefix. A HEAD on `photos` 404s, and answering "not found" for a path `list` will
+        // happily show would be a flat contradiction between two ops on the same provider.
+        let (mut provider, _root, _requests) = s3_fixture_provider();
+        provider.write("/photos/a.jpg", b"jpeg").unwrap();
+
+        let entry = provider.stat("/photos").expect("a prefix with keys under it is a directory");
+        assert!(entry.is_dir);
+        assert_eq!(entry.name, "photos");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AC4: a missing key and a denied key are distinguishable, through a BODILESS HEAD response.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn stat_on_a_missing_key_is_a_clear_not_found_and_not_the_parsers_refusing_to_guess() {
+        let (provider, _root, _requests) = s3_fixture_provider();
+        let err = provider.stat("/nope.txt").expect_err("a missing key must not stat");
+
+        assert!(err.contains("not found"), "a missing key must be reported as not found: {err}");
+        assert!(err.contains("404"), "the error must name the status it saw: {err}");
+        assert!(
+            !err.contains("refusing to guess"),
+            "the bodiless-HEAD rule exists precisely so this does NOT fall through to map_s3_error's \
+             \"the response body could not be read … refusing to guess which cause applies\", which would \
+             otherwise be the majority user experience for the single most common failure: {err}"
+        );
+        assert!(
+            !err.to_lowercase().contains("denied"),
+            "a missing key must never be reported as a denial: {err}"
+        );
+    }
+
+    #[test]
+    fn stat_on_a_denied_key_reports_the_denial_and_is_distinguishable_from_a_missing_one() {
+        let (provider, _root, _requests) = s3_fixture_provider();
+        let denied = provider.stat("/deny-secret.txt").expect_err("a 403 must not stat");
+        let missing = provider.stat("/nope.txt").expect_err("a 404 must not stat");
+
+        assert!(denied.contains("access denied"), "a 403 must be reported as a denial: {denied}");
+        assert!(denied.contains("403"), "the error must name the status it saw: {denied}");
+        assert!(
+            !denied.contains("not found"),
+            "a denial must never be softened into not-found — that is the exact confusion the criterion \
+             forbids: {denied}"
+        );
+        assert_ne!(denied, missing, "the two cases must not produce the same message");
+        // The honest caveat, not a hedge: AWS documents answering 403 rather than 404 for a key that does
+        // not exist when the caller lacks s3:ListBucket, so a flat "access denied" would be a confident
+        // wrong answer a third of the time.
+        assert!(
+            denied.contains("s3:ListBucket"),
+            "the message must say that a 403 can also mean 'missing, and you may not be told so': {denied}"
+        );
+    }
+
+    /// A raw-socket server, not the `tiny_http` fixture, and that is the point: `tiny_http` **always**
+    /// emits a `Content-Length` (or chunked encoding) and silently drops a `Content-Length` header it
+    /// cannot parse (`response.rs:266-270`), so it physically cannot produce the response this test needs.
+    /// The first version of this test used the fixture and passed while measuring nothing — it received
+    /// `Content-Length: 0` and `stat` dutifully reported a zero-byte object.
+    fn spawn_a_server_that_answers_head_200_with_no_content_length() -> String {
+        use std::io::{BufRead as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut s) = stream else { break };
+                // Drain the request head BEFORE answering. Writing a response and closing while the client
+                // is still sending resets the connection, and the client then reports a transport error
+                // instead of the response — measured, not guessed: the first version of this helper did
+                // exactly that and produced `os error 10054, An existing connection was forcibly closed`.
+                let Ok(peek) = s.try_clone() else { continue };
+                let mut reader = std::io::BufReader::new(peek);
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) if line == "\r\n" || line == "\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                // `Connection: close` plus a clean write-shutdown gives the client a definite end of
+                // message without ever stating a length — the shape a broken gateway produces.
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                let _ = s.flush();
+                let _ = s.shutdown(std::net::Shutdown::Write);
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn stat_refuses_a_200_head_with_no_usable_content_length_rather_than_inventing_a_zero_size() {
+        let base = spawn_a_server_that_answers_head_200_with_no_content_length();
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let err = call_with_deadline(
+            "S3Provider::stat against a 200 HEAD carrying no Content-Length",
+            Duration::from_secs(60),
+            move || provider.stat("/x.bin"),
+        )
+        .expect_err("a 200 HEAD with no Content-Length has not told us the size");
+        assert!(err.contains("Content-Length"), "the error must name what was missing: {err}");
+        assert!(
+            err.contains("refusing to report 0"),
+            "size 0 would be an invented measurement, not a read one: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AC2: `read` is bounded, and the bound fires DURING the transfer.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn a_read_past_the_cap_is_refused_and_never_returns_the_truncated_prefix_as_the_file() {
+        let (base, root, _requests) = spawn_s3_fixture();
+        std::fs::write(root.join("big.bin"), vec![b'x'; 300 * 1024]).unwrap();
+        let provider = S3Provider::connect(&cfg(&base)).with_read_cap(128 * 1024);
+
+        let result = call_with_deadline(
+            "S3Provider::read of an object past the read cap",
+            Duration::from_secs(60),
+            move || provider.read("/big.bin"),
+        );
+        let err = match result {
+            Err(e) => e,
+            Ok(bytes) => panic!(
+                "an over-cap object came back as {} bytes of `Ok` — `cpe_server::transfer`'s download sink \
+                 writes whatever comes back to disk as the finished file, so a truncated Vec here is data \
+                 loss wearing a success",
+                bytes.len()
+            ),
+        };
+        assert!(err.contains("read cap"), "the error must name the bound that fired: {err}");
+        assert!(err.contains("131072"), "the error must name the cap's value: {err}");
+    }
+
+    /// The one that proves the cap fires **during** the transfer rather than after it.
+    ///
+    /// Against a finite over-cap object the check above is satisfied by any bound at all, including one
+    /// applied after a `read_to_end`. Against a server that never stops sending, only a check inside the
+    /// [`READ_CHUNK_BYTES`] loop can end the call: without it the buffer grows until the process dies, so
+    /// the deadline harness turns the regression into a red instead of an OOM or a six-hour CI job.
+    #[test]
+    fn a_read_from_a_server_that_never_stops_sending_is_cut_off_by_the_cap_not_read_until_memory_runs_out() {
+        let base = spawn_a_server_that_streams_forever();
+        let provider = S3Provider::connect(&cfg(&base)).with_read_cap(64 * 1024);
+
+        let err = call_with_deadline(
+            "S3Provider::read against a server that never stops sending",
+            Duration::from_secs(60),
+            move || provider.read("/endless.bin"),
+        )
+        .expect_err("an endless body must be cut off at the cap");
+        assert!(err.contains("read cap"), "the error must name the cap that stopped the read: {err}");
+    }
+
+    #[test]
+    fn the_read_chunk_size_matches_the_convention_cpe_ftp_settled() {
+        assert_eq!(
+            READ_CHUNK_BYTES,
+            64 * 1024,
+            "the fixed 64 KiB chunk is the convention `cpe-ftp` settled and this ticket was told to match"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // AC3: `rename` refuses honestly — no PUT-copy, no DELETE, and the capability says so up front.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn rename_is_refused_by_name_and_issues_no_request_at_all() {
+        let (base, root, requests) = spawn_s3_fixture();
+        let mut provider = S3Provider::connect(&cfg(&base));
+        std::fs::write(root.join("a.txt"), b"a").unwrap();
+
+        let err = provider
+            .rename("/a.txt", "/b.txt")
+            .expect_err("S3 has no rename; a copy+delete emulation must not be attempted");
+        assert!(err.contains("no rename"), "the error must name S3's lack of a rename: {err}");
+        assert!(
+            err.contains("not atomic"),
+            "the error must say why the emulation is refused, not just that it is: {err}"
+        );
+
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            0,
+            "rename reached the network — refusing means refusing: no CopyObject PUT and no DELETE may be \
+             issued, because a delete that fails after a successful copy silently leaves two objects"
+        );
+        assert!(root.join("a.txt").is_file(), "the source object must be untouched");
+        assert!(!root.join("b.txt").exists(), "no destination object may have been created");
+
+        assert!(
+            !provider.capabilities().supports_rename,
+            "a caller must be able to see the refusal coming instead of discovering it by trying"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // `delete`: exactly one key. A directory with content is refused, not silently no-op'd.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn delete_of_a_directory_with_content_is_refused_and_removes_nothing() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        provider.write("/photos/2024/a.jpg", b"a").unwrap();
+        provider.write("/photos/2024/b.jpg", b"b").unwrap();
+
+        let err = provider.delete("/photos/2024").expect_err(
+            "S3 answers 204 to a DELETE of a key that never existed, so a single-key delete of a \
+             directory prefix would report success while the whole subtree stayed put",
+        );
+        assert!(
+            err.contains("recursive"),
+            "the error must name the missing capability, not just fail: {err}"
+        );
+
+        // Assert on what the user still has, not on the `Result`.
+        assert!(root.join("photos/2024/a.jpg").is_file(), "a.jpg was deleted by a refused delete");
+        assert!(root.join("photos/2024/b.jpg").is_file(), "b.jpg was deleted by a refused delete");
+    }
+
+    #[test]
+    fn delete_of_an_empty_directory_removes_its_marker_key_because_that_really_is_one_key() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        provider.mkdir("/scratch").expect("mkdir must succeed");
+        assert!(root.join("scratch/.s3marker").is_file(), "precondition: the marker exists");
+
+        provider.delete("/scratch").expect("an empty directory is one key and can be deleted honestly");
+        assert!(!root.join("scratch").exists(), "the marker key survived a successful-looking delete");
+    }
+
+    /// The marker of a directory is a strict prefix of every key beneath it, so S3's lexicographic order
+    /// always returns it **first**. This pins the reason [`S3Provider::probe_prefix`] cannot ask for one
+    /// key: with `max-keys=1` a directory holding a thousand objects looks exactly like an empty one, and
+    /// `delete` would remove its marker and report success. The fixture paginates for real, so capping its
+    /// pages at one key reproduces exactly that under-filled response.
+    #[test]
+    fn a_directory_whose_first_returned_key_is_only_its_marker_is_still_refused_by_delete() {
+        let (base, root, _requests) = spawn_s3_fixture_with_page_cap(Some(1));
+        let mut provider = S3Provider::connect(&cfg(&base));
+        std::fs::create_dir_all(root.join("photos/2024")).unwrap();
+        std::fs::write(root.join("photos/2024/.s3marker"), b"").unwrap();
+        std::fs::write(root.join("photos/2024/a.jpg"), b"a").unwrap();
+
+        let err = provider.delete("/photos/2024").expect_err(
+            "a server that returned only the marker on the first page must not be read as an empty \
+             directory — IsTruncated said there was more",
+        );
+        assert!(err.contains("recursive"), "{err}");
+        assert!(root.join("photos/2024/a.jpg").is_file(), "the content was deleted anyway");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The bucket root, and the CPE-1689 rule that a dot segment is a real key.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn the_bucket_root_stats_as_a_directory_but_is_not_an_object_to_read_write_or_delete() {
+        let (base, _root, _requests) = spawn_s3_fixture();
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let entry = provider.stat("/").expect("the bucket root must stat");
+        assert!(entry.is_dir);
+        assert_eq!(entry.name, "/");
+
+        for err in [
+            provider.read("/").expect_err("the bucket is not an object to read"),
+            provider.write("/", b"x").expect_err("the bucket is not an object to write"),
+            provider.delete("/").expect_err("the bucket is not an object to delete"),
+        ] {
+            assert!(
+                err.contains("bucket itself"),
+                "the refusal must say the path addresses the bucket, not something vaguer: {err}"
+            );
+        }
+        let err = provider.mkdir("/").expect_err("the bucket root needs no marker");
+        assert!(err.contains("bucket root"), "{err}");
+    }
+
+    /// CPE-1689 established that dot segments are a real, distinct key and are preserved on purpose. The
+    /// `is_safe_s3_leaf` guard refuses a `..` **leaf** because it cannot be surfaced as a navigable child
+    /// name — a different question from whether the key is addressable, and applying it to a whole path
+    /// here would refuse a key the crate deliberately signs unnormalised.
+    #[test]
+    fn an_object_key_keeps_its_dot_segments_and_double_slashes_instead_of_being_normalised() {
+        assert_eq!(provider_path_to_object_key("/a/../b.txt").unwrap(), "a/../b.txt");
+        assert_eq!(provider_path_to_object_key("/a//b.txt").unwrap(), "a//b.txt");
+        assert_eq!(provider_path_to_object_key("/report%2ffinal.txt").unwrap(), "report%2ffinal.txt");
+        assert_eq!(provider_path_to_object_key("/plain.txt").unwrap(), "plain.txt");
+        assert!(provider_path_to_object_key("/").is_err(), "the bucket root is not an object");
+        assert!(provider_path_to_object_key("").is_err(), "the empty path is not an object");
+    }
+
+    /// **The good half of the measurement the ticket demanded first** ("Test this first: the HTTP client
+    /// may rewrite the path you signed"). `crates/s3`'s "one construction, so the URL and the signature
+    /// cannot disagree" guarantee ends at the crate boundary, and this is the first ticket to cross it.
+    ///
+    /// Two of the three shapes the ticket named survive intact: an **empty path segment** (`//`, which S3
+    /// treats as a real key byte and CPE-1689 established must not collapse) and a **percent-encoded
+    /// slash** (`%2F` in the key, which this crate escapes to `%252F` on the wire). The recorder reports
+    /// the raw request target off the request line — what actually left the process — compared against the
+    /// exact string that was signed. Nothing here is inferred from `ureq`'s source.
+    #[test]
+    fn a_key_with_a_double_slash_and_a_percent_encoded_slash_reaches_the_wire_intact() {
+        let (base, seen) = spawn_a_request_line_recorder();
+        let key = "b//c%2Fd.txt";
+        let signed_path = cfg(&base).object_target(key).unwrap().encoded_path;
+        assert_eq!(
+            signed_path, "/test-bucket/b//c%252Fd.txt",
+            "precondition: the signer must escape the literal % and keep the empty segment"
+        );
+
+        let provider = S3Provider::connect(&cfg(&base));
+        let _ = provider.read(&format!("/{key}"));
+
+        let lines = seen.lock().unwrap().clone();
+        assert_eq!(lines.len(), 1, "exactly one request should have been sent: {lines:?}");
+        assert_eq!(
+            lines[0], signed_path,
+            "the client rewrote the path between signing and sending. SIGNED {:?}, SENT {:?} — a real \
+             server would answer SignatureDoesNotMatch with nothing to say why",
+            signed_path, lines[0]
+        );
+    }
+
+    /// **The bad half, and the ticket's hypothesis confirmed.** The PR #868 reviewer flagged this and
+    /// explicitly labelled it unverified, being offline. It reproduces exactly.
+    ///
+    /// Measured with the guard removed, this same rig reported:
+    ///
+    /// ```text
+    /// SIGNED "/test-bucket/a/../b//c%252Fd.txt", SENT "/test-bucket/b//c%252Fd.txt"
+    /// ```
+    ///
+    /// `ureq` 2.12.1 parses every URL through the `url` crate, which implements WHATWG URL parsing, which
+    /// resolves dot segments as part of parsing — so the rewrite happens before `ureq` has any say in it.
+    /// The request would be signed for `a/../b//c%2Fd.txt` and sent for `b//c%2Fd.txt`, and a real server
+    /// would answer `SignatureDoesNotMatch` with nothing in the message to say why.
+    ///
+    /// So the key is refused, by name, **before anything is sent** — the request counter proves it — rather
+    /// than normalised (which would silently address a different object, the failure CPE-1689 exists to
+    /// prevent) or sent anyway (which would produce the opaque 403 this slice keeps working to eliminate).
+    #[test]
+    fn a_key_with_a_dot_segment_is_refused_because_ureq_resolves_it_away_before_sending() {
+        let (base, seen) = spawn_a_request_line_recorder();
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider
+            .read("/a/../b.txt")
+            .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
+        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
+        assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
+        assert!(err.contains("CPE-1718"), "the error must point at the follow-up that would fix it: {err}");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            0,
+            "the guard must fire BEFORE the request leaves the process — a request reached the server \
+             despite the refusal"
+        );
+
+        // Every verb goes through the same one guard, so none of them can miss it.
+        let mut provider = provider;
+        assert!(provider.stat("/a/./b.txt").is_err(), "stat must refuse a single-dot segment too");
+        assert!(provider.write("/a/../b.txt", b"x").is_err(), "write must refuse it too");
+        assert!(provider.delete("/a/../b.txt").is_err(), "delete must refuse it too");
+        assert!(provider.mkdir("/a/../b").is_err(), "mkdir must refuse it too");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            0,
+            "one of the other verbs sent a request whose path ureq would have rewritten"
+        );
+    }
+
+    #[test]
+    fn the_url_dot_segment_rule_matches_the_whatwg_definition_including_the_percent_encoded_forms() {
+        for dotty in [".", "..", "%2e", "%2E", "%2e%2e", ".%2e", "%2e.", "%2E%2E"] {
+            assert!(is_url_dot_segment(dotty), "{dotty:?} is a dot segment the URL parser resolves away");
+        }
+        for ordinary in ["", "a", "...", ".txt", "a.b", "..a", "a..", "%252e", "%2f"] {
+            assert!(!is_url_dot_segment(ordinary), "{ordinary:?} is an ordinary segment and must be sent");
+        }
+    }
+
+    /// Records the raw request target from each request line and answers `200` with an empty body — a
+    /// measurement rig, not a fixture: it never looks at the filesystem, so what it reports is exactly what
+    /// the client put on the wire.
+    fn spawn_a_request_line_recorder() -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_thread = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                seen_thread.lock().unwrap().push(req.url().to_string());
+                let _ = req.respond(tiny_http::Response::empty(200));
+            }
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The single-PUT ceiling, and dispatch through the channel production actually uses.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn the_single_put_ceiling_refuses_one_byte_past_five_gibibytes_and_no_sooner() {
+        assert_eq!(MAX_SINGLE_PUT_BYTES, 5 * 1024 * 1024 * 1024);
+        assert!(!too_big_for_single_put(0));
+        assert!(!too_big_for_single_put(MAX_SINGLE_PUT_BYTES - 1));
+        assert!(
+            !too_big_for_single_put(MAX_SINGLE_PUT_BYTES),
+            "exactly the ceiling is still a legal single PUT — refusing it would reject a legal upload on \
+             our side, the one failure direction this refusal must not have"
+        );
+        assert!(too_big_for_single_put(MAX_SINGLE_PUT_BYTES + 1));
+    }
+
+    /// **Rule: verify through the channel the real caller uses.** CPE-1704 burned four rounds on fixes that
+    /// were correct at a boundary production never goes through — including one where an *inherent* method
+    /// shadowed a trait method, so every test passed on the concrete type while `crates/vfs`, holding
+    /// `&dyn FileSystemProvider`, silently got the trait's default. None of the six ops added here has an
+    /// inherent twin, but "none today" is not a property a test can rely on, so every one of them is
+    /// exercised once through a trait object.
+    #[test]
+    fn every_object_op_works_through_a_trait_object_the_way_production_holds_the_provider() {
+        let (base, root, _requests) = spawn_s3_fixture();
+        let mut concrete = S3Provider::connect(&cfg(&base));
+        let provider: &mut dyn FileSystemProvider = &mut concrete;
+
+        provider.write("/dyn/a.txt", b"hello").expect("write through dyn");
+        assert_bytes_eq(&provider.read("/dyn/a.txt").expect("read through dyn"), b"hello", "read via dyn");
+        assert_eq!(provider.stat("/dyn/a.txt").expect("stat through dyn").size, 5);
+
+        provider.mkdir("/dyn/sub").expect("mkdir through dyn");
+        assert!(provider.stat("/dyn/sub").expect("stat a dir through dyn").is_dir);
+
+        provider.delete("/dyn/a.txt").expect("delete through dyn");
+        assert!(!root.join("dyn/a.txt").exists(), "delete through dyn left the object in place");
+
+        assert!(provider.rename("/dyn/x", "/dyn/y").is_err(), "rename must refuse through dyn too");
+        assert!(!provider.capabilities().supports_rename);
+        assert!(!provider.capabilities().has_real_dirs);
     }
 }
