@@ -130,6 +130,9 @@ pub fn write_baseline(base: &Path, session: &str, baseline: &Baseline) -> Result
     let json = serde_json::to_string(baseline).map_err(|e| e.to_string())?;
     let tmp = file.with_extension("json.tmp");
     fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    // CPE-1710: app-private baseline under `app_data_dir()/audit`, leaf = sanitised session id + fixed
+    // suffix; atomic replace of our own file.
+    #[allow(clippy::disallowed_methods)]
     fs::rename(&tmp, &file).map_err(|e| e.to_string())?;
     Ok(())
 }

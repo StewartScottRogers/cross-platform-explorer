@@ -612,6 +612,9 @@ impl Index {
         let bytes = self.to_bytes();
         let tmp = path.with_extension("cpeidx.tmp");
         std::fs::write(&tmp, &bytes).map_err(|e| IndexError::Io(e.to_string()))?;
+        // CPE-1710: app-private index at `app_data_dir()/index/{volume_id}.idx`; `volume_id` is a `u64`,
+        // so no separator can appear in the leaf. Atomic replace of our own file.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(&tmp, path).map_err(|e| IndexError::Io(e.to_string()))?;
         Ok(())
     }
@@ -978,6 +981,8 @@ mod tests {
         a.apply_remove(&abs(&d, &["docs", "report.md"]));
         fs::remove_file(d.join("docs/report.md")).unwrap();
         a.apply_rename(&abs(&d, &["README.md"]), &abs(&d, &["TOP.md"]));
+        // CPE-1710: test fixture — renames a file this test just created in its own scratch tree.
+        #[allow(clippy::disallowed_methods)]
         fs::rename(d.join("README.md"), d.join("TOP.md")).unwrap();
         let b = build(&d);
 

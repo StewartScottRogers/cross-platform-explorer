@@ -245,6 +245,13 @@ fn create_vault_with_verifier(
             return Err(e);
         }
     }
+    // CPE-1710: the destination IS user-named — `dest_blob_path` is the `.cpevault` path the user chose
+    // in the create dialog, so "a file we own" (the PR #895 round-1 claim) was the wrong reason even
+    // though leaving this alone is the right answer. Replacing whatever is at the confirmed destination
+    // is this command's contract: the user named that path and confirmed it, the staging file is written
+    // with `O_EXCL` and verified before this line, and refusing here would break creating a vault at a
+    // path the user deliberately pointed at. See CPE-1670 for the symlink-destination decision.
+    #[allow(clippy::disallowed_methods)]
     if let Err(e) = std::fs::rename(&staging, dest_blob_path) {
         let _ = std::fs::remove_file(&staging);
         return Err(VaultError::Io(e));
@@ -742,6 +749,13 @@ fn reseal_session_with_hooks(
     // destroyed — both files exist and both are decryptable — and the path the user actually opens holds
     // the current contents. *Reads* still follow a link (unlock reads the blob with `std::fs::read`);
     // only writes replace it.
+    //
+    // CPE-1710: so the destination here IS user-named (it is the user's `.cpevault`), and the guard is
+    // deliberately absent — the paragraph above is the decision, taken with its consequences written into
+    // the user docs. Recorded at the site because a future sweep will otherwise read this as an oversight
+    // and "fix" a settled design decision. (PR #895's first round called it "a file we own", which reached
+    // the right answer for the wrong reason.)
+    #[allow(clippy::disallowed_methods)]
     if let Err(e) = std::fs::rename(&staging, blob_path) {
         let _ = std::fs::remove_file(&staging);
         return Err(reseal_failed(VaultError::Io(e)));

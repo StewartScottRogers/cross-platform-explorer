@@ -291,6 +291,9 @@ fn trim_failures(file: &Path, max: usize) -> Result<(), String> {
     let mut body = keep.join("\n");
     body.push('\n');
     fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // CPE-1710: app-private store. The path is `app_data_dir()/checkpoints/<hex digest of the root>` —
+    // the user's root is hashed, never joined — and this is a deliberate atomic replace of our own file.
+    #[allow(clippy::disallowed_methods)]
     fs::rename(&tmp, file).map_err(|e| e.to_string())?;
     Ok(())
 }

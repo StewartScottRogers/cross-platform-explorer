@@ -116,6 +116,10 @@ fn trim(file: &Path, max_events: usize) -> Result<(), String> {
     let mut body = keep.join("\n");
     body.push('\n');
     fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // CPE-1710: app-private journal. `file` is `app_data_dir()/audit/<sanitised session id>` — the
+    // caller cannot steer it onto a user-named path, and the tmp -> final replace is the atomicity this
+    // write depends on.
+    #[allow(clippy::disallowed_methods)]
     fs::rename(&tmp, file).map_err(|e| e.to_string())?;
     Ok(())
 }

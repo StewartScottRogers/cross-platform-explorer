@@ -485,7 +485,10 @@ mod tests {
         }
         // apply_bundle expects `index.json`, not `catalog-index.json` — mirror the fetch, which
         // saves the index under that name.
+        // CPE-1710: test fixture — renames files this test just wrote into its own tempdir.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(stage.path().join("catalog-index.json"), stage.path().join("index.json")).unwrap();
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(
             stage.path().join("catalog-index.json.sig"),
             stage.path().join("index.json.sig"),

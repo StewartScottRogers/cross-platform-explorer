@@ -335,6 +335,8 @@ mod tests {
 
         let from = abs(&tree, &["README.md"]);
         let to = abs(&tree, &["CHANGES.md"]);
+        // CPE-1710: test fixture — renames a file this test created in its own scratch tree.
+        #[allow(clippy::disallowed_methods)]
         fs::rename(&from, &to).unwrap();
         let mutations = plan_from_events(&[WatchEvent::Renamed { from, to }]);
         assert!(svc.apply_mutations(&idxdir, 3, &mutations).unwrap());

@@ -222,6 +222,9 @@ impl SemanticIndex {
     pub fn save(&self, path: &Path) -> Result<(), SemanticIndexError> {
         let tmp = path.with_extension("semidx.tmp");
         std::fs::write(&tmp, self.to_bytes()).map_err(|e| SemanticIndexError::Io(e.to_string()))?;
+        // CPE-1710: app-private index at `app_data_dir()/content-index/{fnv1a64(root):016x}.cix` — the
+        // user's root is hashed into the leaf, never joined. Atomic replace of our own file.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(&tmp, path).map_err(|e| SemanticIndexError::Io(e.to_string()))?;
         Ok(())
     }

@@ -186,6 +186,9 @@ pub fn save_known_hosts(path: &std::path::Path, entries: &[KnownHost]) -> Result
     // Same-directory temp file so the rename is same-filesystem (atomic on all three target OSes).
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, out).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    // CPE-1710: the app's OWN known_hosts, `default_app_known_hosts_path()` in the app config dir —
+    // never `~/.ssh/known_hosts`, which this crate only ever reads. Atomic replace of our own file.
+    #[allow(clippy::disallowed_methods)]
     std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
 }
 

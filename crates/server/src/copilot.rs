@@ -224,13 +224,10 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
             };
             let dst = parent.join(new_name);
             // CPE-1705: was `if dst.exists()` in front of an `fs::rename`, which replaces its
-            // destination silently. See `fsutil::clobber_refusal`.
-            if let Some(e) =
-                crate::fsutil::clobber_refusal(&dst, &format!("\"{new_name}\" already exists"))
-            {
-                return OpResult::err(p, e);
-            }
-            match std::fs::rename(p, &dst) {
+            // destination silently. CPE-1710: and it got only HALF the guard — `clobber_refusal` alone,
+            // which follows links, so a **dangling** symlink at `dst` read as a free name and the rename
+            // destroyed the link. `rename_slot_refusal` is both halves in one call.
+            match crate::fsutil::rename_into_slot(p, &dst, &format!("\"{new_name}\" already exists")) {
                 Ok(()) => OpResult::ok(&dst),
                 Err(e) => OpResult::err(p, e),
             }
@@ -258,13 +255,23 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
     }
     // CPE-1705: was `if d.exists()`, guarding BOTH a silent-replacing `fs::rename` and a `copy_recursive`
     // whose leaf `fs::copy` truncates whatever it lands on.
-    if let Some(e) = crate::fsutil::clobber_refusal(d, "destination already exists") {
+    //
+    // CPE-1710: `clobber_refusal` on its own let a **dangling** link at `d` through — it follows links, so
+    // a link to a missing target reads as "nothing there", and `fs::rename` (which does not follow the
+    // final component) then destroyed the link itself. The copy branch is guarded by the same call on
+    // purpose: `fs::copy` DOES follow the final component, so it would instead materialise the link's
+    // absent target — a different surprise, equally unasked-for.
+    // Refuse first, so a refusal is still reported against the DESTINATION path (the thing in the way),
+    // which is what this command has always reported and what the UI shows.
+    if let Some(e) = crate::fsutil::rename_slot_refusal(d, "destination already exists") {
         return OpResult::err(d, e);
     }
     let outcome = if copy {
-        copy_recursive(s, d)
+        copy_recursive(s, d).map_err(|e| e.to_string())
     } else {
-        std::fs::rename(s, d)
+        // …and the move re-checks inside `rename_into_slot` (CPE-1710 round 3): the guard and the
+        // destructive call are one function, so nothing can be inserted between them later.
+        crate::fsutil::rename_into_slot(s, d, "destination already exists")
     };
     match outcome {
         Ok(()) => OpResult::ok(d),
@@ -386,6 +393,8 @@ mod tests {
             let src = Path::new(path);
             let name = src.file_name().ok_or_else(|| "no file name".to_string())?;
             let dst = self.holding.join(name);
+            // CPE-1710: test double for the recycle bin — moves into a holding dir this fake owns.
+            #[allow(clippy::disallowed_methods)]
             fs::rename(src, &dst).map_err(|e| e.to_string())?;
             self.trashed.lock().unwrap().push(path.to_string());
             Ok(())
@@ -645,6 +654,104 @@ mod tests {
                 out.results[0].error
             );
         }
+    }
+
+    /// CPE-1710, **site 1 of 2**: `apply_op`'s `Rename` arm. CPE-1705 gave it `clobber_refusal` and stopped
+    /// there, so the destination name was probed with a check that **follows links** — and a *dangling*
+    /// link resolves to nothing, so the slot read as free and `fs::rename` (which does not follow the final
+    /// component) destroyed the link itself.
+    ///
+    /// **The assertion is on the slot, not on the `Result`.** The reviewer's reproduction returned
+    /// `ok: true`: the op reported success while quietly deleting something the user had made. An
+    /// assertion on the returned error would have passed pre-fix on the `ok` alone.
+    ///
+    /// No ACLs and no privileges are needed for the *bug*; a dangling link is an ordinary thing to have.
+    /// Only *creating* the link can be refused (Windows without Developer Mode, where the junction
+    /// fallback in `make_dangling_link` covers most machines), and that is a loud skip, never a silent one.
+    #[test]
+    fn cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name() {
+        use std::io::Write;
+        let root = scratch("cpe1710-rename");
+        fs::write(root.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = root.join("b.txt");
+        if !crate::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the copilot Rename dangling-link leg: this machine could not create a \
+                 link at {} (Windows without Developer Mode / admin, and no junction either). NOTHING in \
+                 this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            return;
+        }
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1710-hold-rename"));
+
+        let plan = FileOpPlan {
+            ops: vec![FileOp::Rename {
+                path: root_str(&root.join("a.txt")),
+                new_name: "b.txt".to_string(),
+            }],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the dangling link at the new name was DESTROYED — `clobber_refusal` alone follows the link, \
+             finds nothing, reads the slot as free, and `fs::rename` replaces the link itself"
+        );
+        assert!(!out.results[0].ok, "the op must be reported failed, not silently succeeded: {:?}", out.results[0]);
+        assert!(
+            out.results[0].error.contains("is a link"),
+            "and it must say what is in the way: {}",
+            out.results[0].error
+        );
+        // The source is still where it started — a refusal that moved the file anyway is not a refusal.
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec());
+    }
+
+    /// CPE-1710, **site 2 of 2**: `transfer_entry`, reached here through a `Move` op — the arm whose
+    /// outcome is `fs::rename`. Same missing half of the same guard, a separate function and a separate
+    /// test, so breaking one guard reds one test.
+    #[test]
+    fn cpe_1710_execute_never_moves_over_a_dangling_link_at_the_destination() {
+        use std::io::Write;
+        let root = scratch("cpe1710-move");
+        fs::write(root.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = root.join("dest.txt");
+        if !crate::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the copilot Move dangling-link leg: this machine could not create a \
+                 link at {} (Windows without Developer Mode / admin, and no junction either). NOTHING in \
+                 this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            return;
+        }
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1710-hold-move"));
+
+        let plan = FileOpPlan {
+            ops: vec![FileOp::Move {
+                src: root_str(&root.join("a.txt")),
+                dst: root_str(&link),
+            }],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the dangling link at the destination was DESTROYED by the move — the same half-guard, at the \
+             site that carries every Move and Copy the copilot plans"
+        );
+        assert!(!out.results[0].ok, "the op must be reported failed, not silently succeeded: {:?}", out.results[0]);
+        assert!(
+            out.results[0].error.contains("is a link"),
+            "and it must say what is in the way: {}",
+            out.results[0].error
+        );
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec());
     }
 
     /// Create `link` pointing at directory `target` without needing admin: an NTFS **junction** on Windows

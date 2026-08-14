@@ -121,6 +121,9 @@ fn trim(file: &Path, max_rows: usize) -> Result<(), String> {
     let mut body = keep.join("\n");
     body.push('\n');
     fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    // CPE-1710: app-private journal at `app_data_dir()/agent-metrics/history.jsonl` — a fixed leaf under
+    // a fixed directory; atomic replace of our own file.
+    #[allow(clippy::disallowed_methods)]
     fs::rename(&tmp, file).map_err(|e| e.to_string())?;
     Ok(())
 }

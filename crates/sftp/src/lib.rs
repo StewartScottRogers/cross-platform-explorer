@@ -563,6 +563,9 @@ mod tests {
         }
 
         async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
+            // CPE-1710: SFTP server-side `rename` against its own sandbox root — the protocol's semantics,
+            // not an app-side destination guard.
+            #[allow(clippy::disallowed_methods)]
             std::fs::rename(self.real(&oldpath), self.real(&newpath)).map_err(io_err)?;
             Ok(ok_status(id))
         }

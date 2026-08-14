@@ -155,8 +155,9 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     let dest = dest_dir.join(&file_name);
     // CPE-1705: was `if dest.exists()`, whose `false` covers "not there" AND "could not tell", ahead of
     // an `fs::rename` that replaces its destination silently. A board move that landed on an unreadable
-    // slot destroyed the ticket file already sitting there.
-    if let Some(e) = cpe_server::fsutil::clobber_refusal(
+    // slot destroyed the ticket file already sitting there. CPE-1710: paired with the dangling-link check
+    // via `rename_slot_refusal`, so this site cannot carry one half of the guard without the other.
+    if let Some(e) = cpe_server::fsutil::rename_slot_refusal(
         &dest,
         &format!("a ticket file already exists at {}", dest.display()),
     ) {
@@ -164,7 +165,14 @@ fn board_move_impl(root: String, id: String, to_column: String) -> Result<(), St
     }
     let md = std::fs::read_to_string(&src).map_err(|e| e.to_string())?;
     std::fs::write(&src, ticket_board::set_status(&md, status)).map_err(|e| e.to_string())?;
-    std::fs::rename(&src, &dest).map_err(|e| e.to_string())?;
+    // The refusal above runs BEFORE the status rewrite, so a refused move never leaves a ticket whose
+    // frontmatter says one column while the file sits in another. This second call re-checks immediately
+    // before the rename (CPE-1710 round 3) — guard and destructive call in one function.
+    cpe_server::fsutil::rename_into_slot(
+        &src,
+        &dest,
+        &format!("a ticket file already exists at {}", dest.display()),
+    )?;
     Ok(())
 }
 
@@ -1829,17 +1837,14 @@ fn rename_entry_impl(ctx: &dyn ServerCtx, path: String, new_name: String) -> Res
     // `fs::rename` below ran — and `fs::rename` replaces its destination silently on both Windows and
     // Unix. The user's existing file was destroyed with no warning and no error. Two independent guards,
     // because two independent things can be sitting at `target`:
-    if let Some(e) = cpe_server::fsutil::clobber_refusal(&target, &format!("\"{new_name}\" already exists"))
-    {
-        return Err(e);
-    }
-    // …and a DANGLING SYMLINK at `target`, which the check above genuinely cannot see: `try_exists`
+    // a real entry, and a DANGLING SYMLINK — which the occupancy check genuinely cannot see: `try_exists`
     // follows links, so it correctly answers `Ok(false)` for one, while `fs::rename` does not follow the
     // final component and destroys the link. A different bug (CPE-1461 family) at the same line.
-    if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(&target) {
-        return Err(e);
-    }
-    fs::rename(src, &target).map_err(|e| e.to_string())?;
+    //
+    // CPE-1710 made the pairing a single call. This site had both halves open-coded and was one of only
+    // two that did; four sibling sites had just the first, so the convention was not holding. Order and
+    // wording are unchanged — `rename_slot_refusal` runs occupancy first, exactly as these two lines did.
+    cpe_server::fsutil::rename_into_slot(src, &target, &format!("\"{new_name}\" already exists"))?;
     let target_str = target.to_string_lossy().to_string();
     let _ = cpe_server::tags::retag(ctx, &path, &target_str);
     let _ = cpe_server::snapshot_schedule::reschedule(ctx, &path, &target_str);
@@ -2432,6 +2437,12 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
         return Err("Cannot move a folder into itself".to_string());
     }
     let target = unique_target(dest_dir, file_name);
+    // CPE-1710: NOT `rename_into_slot`. `unique_target` has already *picked* a name it believes is free,
+    // so the paired guard's occupancy half would refuse the name this function just chose. The residual
+    // hazard is real and is **CPE-1715**: `unique_target`'s probe follows links, so a dangling link reads
+    // as a free name and this rename destroys it. Fixing it means teaching the name-picker to treat a link
+    // slot as occupied — a different change from a refusal, which is why it is its own ticket.
+    #[allow(clippy::disallowed_methods)]
     if fs::rename(src, &target).is_ok() {
         let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
         let _ = cpe_server::snapshot_schedule::reschedule(
@@ -3068,6 +3079,10 @@ fn run_transfer(
             }
         };
         // Same-volume move: an atomic rename, no byte streaming needed.
+        // CPE-1710: `resolve_conflict` above already applied the user's chosen policy to this name, so the
+        // paired guard would refuse the target it just authorised. Same residual hazard as `do_move_into`
+        // — a dangling link reads as a free name — tracked in **CPE-1715**.
+        #[allow(clippy::disallowed_methods)]
         if kind == TransferKind::Move && fs::rename(src, &target).is_ok() {
             report.transferred += 1;
             prog.done_bytes += sb;
@@ -3396,16 +3411,12 @@ fn move_exact_impl(ctx: &dyn ServerCtx, pairs: Vec<(String, String)>) -> Vec<OpR
             // left the destination's OWN check collapsed, so a `dst` whose stat was refused read as a
             // free name and the `fs::rename` below replaced it silently. Same two guards as
             // `rename_entry_impl`, for the same two reasons — a real entry, and a dangling link.
-            if let Some(e) = cpe_server::fsutil::clobber_refusal(
+            // CPE-1710: the two calls are now one — `rename_slot_refusal`, same order, same messages.
+            match cpe_server::fsutil::rename_into_slot(
+                src,
                 dst,
                 &format!("\"{}\" already exists", dst.file_name().unwrap_or_default().to_string_lossy()),
             ) {
-                return OpResult::err(src, e);
-            }
-            if let Some(e) = cpe_server::fsutil::symlink_slot_refusal(dst) {
-                return OpResult::err(src, e);
-            }
-            match fs::rename(src, dst) {
                 Ok(()) => {
                     let _ = cpe_server::tags::retag(ctx, from, to);
                     let _ = cpe_server::snapshot_schedule::reschedule(ctx, from, to);
@@ -3542,6 +3553,14 @@ async fn metadata_write(
             .unwrap_or(0);
         let tmp = format!("{path}.{stamp}.cpe-meta-tmp");
         std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
+        // CPE-1710 / **CPE-1716 (High, open)**: this is NOT the app's own file. `path` comes straight off
+        // IPC and is the user's own media file, so this rename destroys a symlink standing there — a
+        // **live** one, not merely a dangling one, because there is no occupancy guard here either — and
+        // the edit lands on the link's former target instead of being written through it, while the
+        // command reports success. Left as-is deliberately: fixing it means deciding whether a symlinked
+        // media file should be written *through* rather than replaced, which is CPE-1716's job, not a
+        // silent change inside CPE-1710. The allow is here so the decision is visible at the site.
+        #[allow(clippy::disallowed_methods)]
         std::fs::rename(&tmp, &path).map_err(|e| {
             let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on a failed rename
             e.to_string()
@@ -15397,6 +15416,139 @@ overlay / overlay rw,relatime 0 0
         assert_eq!(fs::read(&occupied).unwrap(), b"KEEP ME".to_vec());
         assert_eq!(fs::read(dest_dir.join("m - Copy.txt")).unwrap(), b"MOVED".to_vec());
 
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1710: the three app-adapter rename sites, each proving a DANGLING LINK survives ----------
+    //
+    // These three shipped in CPE-1710's first round with **no test each**, covered only by the source
+    // scan in `fsutil` — which the PR #895 UAT then showed is bypassable three ways. A lint is not a test.
+    //
+    // They need no ACL staging: a dangling link is an ordinary object, `try_exists` answers `Ok(false)`
+    // for one on every platform, and `fs::rename` does not follow the final component. So all three run on
+    // all three CI legs; only *creating* the link can be refused, and
+    // `cpe_server::fsutil::make_dangling_link` falls back to a privilege-free NTFS junction before giving
+    // up — at which point it is a loud skip, never a silent pass.
+    //
+    // Each asserts on the **slot** (`symlink_metadata(..).is_symlink()`), never on the returned `Result`:
+    // the reviewer's original reproduction returned success while destroying the link.
+
+    /// The main rename command. `rename_entry_impl` had the pairing before CPE-1710 (open-coded) and has
+    /// it via `rename_slot_refusal` now — but nothing asserted it end to end.
+    #[test]
+    fn cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name() {
+        use std::io::Write;
+        let d = scratch("cpe1710_rename_link");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = d.join("b.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the rename_entry dangling-link leg: this machine could not create a \
+                 link at {} (no symlink privilege and no junction). NOTHING in this test covered the \
+                 link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = rename_entry_impl(&ctx, d.join("a.txt").to_string_lossy().to_string(), "b.txt".into());
+
+        // The slot first, deliberately: an `expect_err` here would red on the RESULT, and the whole point
+        // of this bug is that the result looked fine while the link was gone.
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link was DESTROYED by the rename (result was {r:?})"
+        );
+        let e = r.expect_err("and the rename must be refused, not silently performed");
+        assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
+        assert_eq!(fs::read(d.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec(), "source must not move");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The exact-destination primitive behind bulk move and undo.
+    #[test]
+    fn cpe_1710_move_exact_never_renames_over_a_dangling_link_at_the_destination() {
+        use std::io::Write;
+        let d = scratch("cpe1710_move_exact_link");
+        let ctx = HeadlessCtx::new(&d);
+        fs::write(d.join("a.txt"), b"NEW CONTENT").unwrap();
+        let link = d.join("dest.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the move_exact dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let results = move_exact_impl(
+            &ctx,
+            vec![(
+                d.join("a.txt").to_string_lossy().to_string(),
+                link.to_string_lossy().to_string(),
+            )],
+        );
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's link was DESTROYED by the move"
+        );
+        assert!(!results[0].ok, "the move must be reported failed, not silently succeeded: {results:?}");
+        assert!(
+            results[0].error.contains("is a link"),
+            "and it must say what is in the way: {}",
+            results[0].error
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The Agent Board's ticket move — the site CPE-1710's enumeration turned up unreported, and the one
+    /// whose destination is a **ticket file** (this repo's own tickets are the app's dogfood data).
+    #[test]
+    fn cpe_1710_board_move_never_renames_over_a_dangling_link_at_the_destination() {
+        use std::io::Write;
+        let d = scratch("cpe1710_board_link");
+        let tickets = d.join("Ticketing").join("Tickets");
+        fs::create_dir_all(tickets.join("Backlog")).unwrap();
+        fs::create_dir_all(tickets.join("Doing")).unwrap();
+        let name = "CPE-9999_a-ticket.md";
+        fs::write(
+            tickets.join("Backlog").join(name),
+            "---\nid: CPE-9999\nstatus: Open\n---\n\nbody\n",
+        )
+        .unwrap();
+        let link = tickets.join("Doing").join(name);
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1710] SKIPPED the board_move dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the link-destruction route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = board_move_impl(d.to_string_lossy().to_string(), "CPE-9999".into(), "Doing".into());
+
+        // The slot first — see the note in the rename test above.
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link in the destination column was DESTROYED by the board move (result was {r:?})"
+        );
+        let e = r.expect_err("and the move must be refused, not silently performed");
+        assert!(e.contains("is a link"), "and the refusal must say what is in the way: {e}");
+        assert!(
+            tickets.join("Backlog").join(name).is_file(),
+            "and the ticket must still be in its original column — a refused move that moved is not a \
+             refusal"
+        );
         let _ = fs::remove_dir_all(&d);
     }
 
