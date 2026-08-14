@@ -744,9 +744,9 @@ fn marker_confirmation_failure(
         // "you lack a permission" — that was true a moment ago and is not what changed — it is that the
         // authority itself moved underneath the call.
         Some(s @ (401 | 403)) => format!(
-            " The server answered HTTP {s}, a denial — and the identical listing, same prefix and same \
-             credential, had succeeded moments earlier, so whatever changed, changed between two \
-             back-to-back requests. **The server's own error code below names which.** A code about the \
+            " The server answered HTTP {s}, a denial — and the same listing, same prefix and same \
+             credential, differing only by the start-after parameter, had succeeded moments earlier. \
+             **The server's own error code below names what changed.** A code about the \
              credential's authority — an expired session token (an STS token hits its expiry as a cliff, \
              on whichever request crosses it), or a policy revoked or edited in between — means \
              re-authenticate or refresh the token and try again. A code about the *signature* or the \
@@ -769,11 +769,10 @@ fn marker_confirmation_failure(
         // an expired token as 400 would land here, and the stronger sentence would then be a guess
         // dressed as a finding. (PR #903 round-3 review.)
         Some(s) => format!(
-            " The server answered HTTP {s}, which is not a denial status, so it did not refuse this \
-             request on credential grounds. What the second request adds is the start-after parameter, \
-             so a server that does not implement it — or a transient failure — is the likelier \
-             explanation. If the error below names a credential or token problem, believe the error \
-             rather than this sentence."
+            " The server answered HTTP {s} — not one of the statuses S3 denies with. What the second \
+             request adds is the start-after parameter, so a server that does not implement it — or a \
+             transient failure — is a likely explanation; the server's own error code below is the \
+             better evidence."
         ),
         None => " No HTTP status was obtained at all, so the request failed before any reply — most \
                  likely transport. Nothing here is evidence about permissions either way."
@@ -992,6 +991,26 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
     // empty, so the name comparisons below simply never match them.
     let root = doc.root_element();
 
+    // **The document must actually BE a listing.** Nothing checked the root element, so any well-formed
+    // XML read as a listing — and one with no `<Contents>` read as an *empty* one. A proxy's
+    // `<html>…</html>` error page therefore meant "this prefix holds nothing", which on the delete belt
+    // is the single verdict that permits removing a key. Measured by the round-4 UAT: the marker deleted
+    // on the strength of an HTML error page.
+    //
+    // This is the same principle the module already states and CPE-1706 already applied one level down —
+    // *never assume a network-controlled response honours its own protocol.* The page-level fields were
+    // taught to read from their own container; this teaches the parser to check it has the right
+    // container at all. Fixed here rather than deferred to CPE-1740 because the belt's half of that
+    // ticket is a deletion path, and it is one condition. CPE-1740 keeps the rest.
+    if !root.has_tag_name("ListBucketResult") {
+        return Err(format!(
+            "s3: the response parsed as XML but its root element is <{}>, not <ListBucketResult> — \
+             this is not a ListObjectsV2 listing, and an unrecognised document must not be read as an \
+             empty one",
+            root.tag_name().name()
+        ));
+    }
+
     let is_truncated = root
         .children()
         .find(|n| n.tag_name().name() == "IsTruncated")
@@ -1152,12 +1171,20 @@ impl S3Provider {
     /// bound that closes the dribble hole (CPE-1706 round 2). It must be `Some` for a small,
     /// already-byte-capped response like `ListObjectsV2` and **`None` for a large-object `GET`** — see
     /// [`TIMEOUT_LIST_REQUEST`] for why that distinction is the whole point.
+    ///
+    /// The error carries `Option<u16>`: **`Some` when the server answered and the failure came after**
+    /// (a body-read failure, the over-cap refusal), `None` when no status was ever obtained. Only
+    /// [`S3Provider::probe_prefix_after`] reads it — every other caller drops it with
+    /// `.map_err(|(_, m)| m)` — but it must be produced *here*, because here is the only place that
+    /// knows. Round 4 of CPE-1727 mapped these failures to `None` and produced a message saying the
+    /// request "failed before any reply" while quoting a failure to read the reply. See
+    /// [`marker_confirmation_failure`].
     fn signed_get(
         &self,
         target: &RequestTarget,
         query: &[(&str, &str)],
         request_deadline: Option<Duration>,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<u8>), (Option<u16>, String)> {
         self.signed_exchange("GET", target, query, None, request_deadline)
     }
 
@@ -1271,32 +1298,42 @@ impl S3Provider {
         query: &[(&str, &str)],
         body: Option<&[u8]>,
         request_deadline: Option<Duration>,
-    ) -> Result<(u16, Vec<u8>), String> {
+    ) -> Result<(u16, Vec<u8>), (Option<u16>, String)> {
         let payload_hash = match body {
             Some(bytes) => sigv4::sha256_hex(bytes),
             None => sigv4::EMPTY_PAYLOAD_SHA256.to_string(),
         };
-        let (url, req) =
-            self.signed_request(method, target, query, &payload_hash, request_deadline)?;
-        let (status, resp) = Self::send_capturing_status(req, body, &url)?;
+        // No status yet at either of these: signing has not sent anything, and `send_capturing_status`
+        // only errors when no response came back at all (it maps `Error::Status` to `Ok`).
+        let (url, req) = self
+            .signed_request(method, target, query, &payload_hash, request_deadline)
+            .map_err(|e| (None, e))?;
+        let (status, resp) = Self::send_capturing_status(req, body, &url).map_err(|e| (None, e))?;
         let ok = (200..300).contains(&status);
         // On the success path a body-read failure is the call's failure. On the error path it is not:
         // `map_response_error`/`error::map_s3_error` already handle an empty/truncated/garbled body
         // honestly, and failing there would replace S3's own diagnosis with a transport complaint.
         let (buf, over_cap) = match read_body_capped(resp.into_reader()) {
             Ok(v) => v,
+            // `Some(status)` — the server DID answer; this failure is downstream of that. Round-4 UAT.
             Err(e) if ok => {
-                return Err(format!("s3: {url}: reading the response body failed: {e}"))
+                return Err((
+                    Some(status),
+                    format!("s3: {url}: reading the response body failed: {e}"),
+                ))
             }
             Err(_) => (Vec::new(), false),
         };
         // Deliberately only on the success path, unchanged from CPE-1706: an over-cap ERROR body is not
         // worth failing the call over, because it is already being interpreted best-effort.
         if over_cap && ok {
-            return Err(format!(
-                "s3: {url}: the response body exceeded the {MAX_RESPONSE_BODY_BYTES}-byte cap \
-                 without finishing — refusing rather than parsing a truncated body, which can \
-                 look like a complete but much shorter listing"
+            return Err((
+                Some(status),
+                format!(
+                    "s3: {url}: the response body exceeded the {MAX_RESPONSE_BODY_BYTES}-byte cap \
+                     without finishing — refusing rather than parsing a truncated body, which can \
+                     look like a complete but much shorter listing"
+                ),
             ));
         }
         Ok((status, buf))
@@ -1461,10 +1498,25 @@ impl S3Provider {
         if let Some(after) = start_after {
             query.push(("start-after", after));
         }
-        let (status, body) = self
-            .signed_get(&target, &query, Some(self.request_deadline))
-            .map_err(no_status)?;
-        if !(200..300).contains(&status) {
+        // `signed_get` now produces the `(Option<u16>, String)` shape directly, and its `Some` is the
+        // one that matters here: a body-read failure or the over-cap refusal happens AFTER the server
+        // answered. Round 4 wrapped this in `no_status` and threw that away.
+        let (status, body) = self.signed_get(&target, &query, Some(self.request_deadline))?;
+        // **`200` exactly, not `2xx`.** A `206 Partial Content` says by definition that the reply is
+        // incomplete, and `parse_list_bucket_result` will happily read a well-formed fragment of a
+        // listing as a *complete* one — which on this path means "nothing past the marker" and the
+        // DELETE goes out. The round-4 UAT measured exactly that: a 206 carrying an empty listing, and
+        // `*** DELETE WENT THROUGH (Ok) ***`.
+        //
+        // `signed_exchange`'s over-cap guard already refuses truncation in so many words — "refusing
+        // rather than parsing a truncated body, which can look like a complete but much shorter
+        // listing" — and this is the identical hazard arriving by status code instead of by byte count.
+        // A listing that is not whole cannot answer a question about absence.
+        //
+        // The wider family — any well-formed XML being accepted as a listing, `text/html` included —
+        // is crate-wide, predates the belt, and is CPE-1740. This narrowing is only the belt's half,
+        // taken here because on the belt the consequence is a deletion.
+        if status != 200 {
             return Err((
                 Some(status),
                 map_response_error("GET", status, &body, &format!("{key_prefix:?}")),
@@ -1649,7 +1701,9 @@ impl S3Provider {
             // `Some(..)`: a ListObjectsV2 page is small and already byte-capped, so an end-to-end deadline
             // is exactly right for it. CPE-1684's large-object GET must pass `None` — see
             // `TIMEOUT_LIST_REQUEST`.
-            let (status, body) = self.signed_get(&target, &query, Some(self.request_deadline))?;
+            let (status, body) = self
+                .signed_get(&target, &query, Some(self.request_deadline))
+                .map_err(|(_, m)| m)?;
             if !(200..300).contains(&status) {
                 // CPE-1683 AC6: every non-2xx response goes through the one shared error path, never an
                 // ad-hoc string built here. CPE-1727 item 3 wraps — not replaces — that shared diagnosis,
@@ -1919,7 +1973,9 @@ impl FileSystemProvider for S3Provider {
             ));
         }
         let target = self.config.object_target(&key)?;
-        let (status, body) = self.signed_exchange("PUT", &target, &[], Some(data), None)?;
+        let (status, body) = self
+            .signed_exchange("PUT", &target, &[], Some(data), None)
+            .map_err(|(_, m)| m)?;
         if !(200..300).contains(&status) {
             return Err(map_response_error("PUT", status, &body, path));
         }
@@ -1949,7 +2005,8 @@ impl FileSystemProvider for S3Provider {
         let target = self.config.object_target(&marker_key)?;
         // A zero-byte marker is a metadata-sized exchange, not a transfer: bounded end to end.
         let (status, body) =
-            self.signed_exchange("PUT", &target, &[], Some(&[]), Some(self.request_deadline))?;
+            self.signed_exchange("PUT", &target, &[], Some(&[]), Some(self.request_deadline))
+                .map_err(|(_, m)| m)?;
         if !(200..300).contains(&status) {
             return Err(map_response_error("PUT", status, &body, path));
         }
@@ -2102,13 +2159,9 @@ impl FileSystemProvider for S3Provider {
                 // leaves the question unanswered, and an unanswered question is refused, not guessed.
                 if self.head_proves_object(&key).unwrap_or(false) {
                     let target = self.config.object_target(&key)?;
-                    let (status, body) = self.signed_exchange(
-                        "DELETE",
-                        &target,
-                        &[],
-                        None,
-                        Some(self.request_deadline),
-                    )?;
+                    let (status, body) = self
+                        .signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))
+                        .map_err(|(_, m)| m)?;
                     if !(200..300).contains(&status) {
                         return Err(map_response_error("DELETE", status, &body, path));
                     }
@@ -2181,7 +2234,8 @@ impl FileSystemProvider for S3Provider {
         let doomed_key = if raw_entries > 0 { format!("{key}/") } else { key };
         let target = self.config.object_target(&doomed_key)?;
         let (status, body) =
-            self.signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))?;
+            self.signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))
+                .map_err(|(_, m)| m)?;
         if !(200..300).contains(&status) {
             return Err(map_response_error("DELETE", status, &body, path));
         }
@@ -5274,7 +5328,7 @@ mod tests {
              so advising the user to grant it sends them to fix the one cause already ruled out: {err}"
         );
         assert!(
-            err.contains("did not refuse this request on credential grounds"),
+            err.contains("not one of the statuses S3 denies with"),
             "and it should rule the category out outright, rather than merely omitting the false \
              advice: {err}"
         );
@@ -5285,7 +5339,7 @@ mod tests {
         // would then be a guess dressed as a finding. Two literals standing in for a property is the
         // shape this whole ticket keeps producing.
         assert!(
-            !err.contains("this is not a permissions problem"),
+            !err.contains("so it did not refuse"),
             "the 401|403 list cannot support the stronger claim — a gateway reporting an expired token \
              as 400 lands in this arm, so the sentence must stay inside what the status proves: {err}"
         );
@@ -5311,8 +5365,99 @@ mod tests {
     /// what failed was reading it. That says nothing about permissions **and nothing about
     /// `start-after`** either, which the old wording quietly implied by falling through to the arm that
     /// blames the new parameter.
+    /// Every unreadable-reply shape, **each one on its own row**.
+    ///
+    /// The round-4 fix carried the status on two routes and the round-4 *test* covered one of them. The
+    /// UAT reverted the other — `parse_list_bucket_result`'s — and the suite stayed green at 188/0. The
+    /// parse route is the **more** reachable of the two (any malformed XML, any valid-UTF-8 document
+    /// that is not a listing), so the half without a guard was the half more likely to come back. Hence
+    /// a table: a new way for a reply to be unreadable gets a row, not a judgement call about whether
+    /// the existing row already covers it.
     #[test]
-    fn a_two_hundred_the_belt_cannot_parse_does_not_claim_the_server_never_answered() {
+    fn a_two_hundred_the_belt_cannot_read_does_not_claim_the_server_never_answered() {
+        // (what the server sends as the belt's reply, what makes it unreadable)
+        let bodies: &[(&[u8], &str)] = &[
+            (&[0xff, 0xfe, 0xfd], "not valid UTF-8 — the `from_utf8` route"),
+            (
+                b"<?xml version=\"1.0\"?><ListBucketResult><Contents></ListBucketResult>",
+                "valid UTF-8, malformed XML — the `parse_list_bucket_result` route the UAT found unguarded",
+            ),
+            (
+                b"<?xml version=\"1.0\"?><html><body>proxy error</body></html>",
+                "well-formed XML that is not a listing at all",
+            ),
+        ];
+
+        for (body, why) in bodies {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_ip().unwrap();
+            let root = fixture_root();
+            let requests = Arc::new(AtomicUsize::new(0));
+            let requests_thread = Arc::clone(&requests);
+            let root_for_thread = root.clone();
+            let body_owned = body.to_vec();
+            std::thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    let full = req.url().to_string();
+                    let query =
+                        full.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+                    let params = parse_query(&query);
+                    let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                    if is_list && params.iter().any(|(k, _)| k == "start-after") {
+                        // 200 OK. The server has answered, successfully; the failure is entirely on
+                        // this side of the wire.
+                        let _ =
+                            req.respond(tiny_http::Response::from_data(body_owned.clone()));
+                        continue;
+                    }
+                    handle(req, &root_for_thread, None, &requests_thread);
+                }
+            });
+            let base = format!("http://{addr}");
+            let mut provider = S3Provider::connect(&cfg(&base));
+
+            provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
+            assert!(root.join("scratch/.s3marker").is_file(), "[{why}] precondition: marker exists");
+
+            let err = provider
+                .delete("/scratch")
+                .expect_err("the confirmation could not be read, so the verdict is unconfirmed");
+
+            assert!(
+                root.join("scratch/.s3marker").is_file(),
+                "[{why}] an unreadable confirmation must not be treated as consent"
+            );
+            assert!(
+                !err.contains("failed before any reply"),
+                "[{why}] THE DEFECT: the server answered 200 and this message said no reply ever \
+                 arrived — while quoting a failure to read the reply it had received. `None` must mean \
+                 no status was obtained, not that one was discarded: {err}"
+            );
+            assert!(
+                err.contains("it did reply, and successfully"),
+                "[{why}] a 2xx that could not be read is its own diagnosis and must say so: {err}"
+            );
+            assert!(
+                !err.contains("a server that does not implement it"),
+                "[{why}] and must not blame start-after — a successful reply is no evidence about \
+                 parameter support: {err}"
+            );
+        }
+    }
+
+    /// A **`206 Partial Content`** listing must not answer a question about absence.
+    ///
+    /// `probe_prefix_after` accepted any `2xx`, and `parse_list_bucket_result` reads a well-formed
+    /// fragment as a *complete* listing — so on the belt a 206 carrying an empty listing meant "nothing
+    /// past the marker" and the DELETE went out. The round-4 UAT measured `*** DELETE WENT THROUGH
+    /// (Ok) ***`.
+    ///
+    /// This is the same hazard `signed_exchange`'s over-cap guard already refuses in words — *"refusing
+    /// rather than parsing a truncated body, which can look like a complete but much shorter listing"* —
+    /// arriving by status code rather than by byte count. The assertion is on the **DELETEs sent**, not
+    /// on the `Result`, because the whole failure mode was a cheerful `Ok`.
+    #[test]
+    fn a_partial_content_listing_is_refused_rather_than_read_as_an_empty_one() {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let root = fixture_root();
@@ -5326,9 +5471,11 @@ mod tests {
                 let params = parse_query(&query);
                 let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
                 if is_list && params.iter().any(|(k, _)| k == "start-after") {
-                    // 200 OK, and a body that is not valid UTF-8. The server has answered, successfully;
-                    // the failure is entirely on this side of the wire.
-                    let _ = req.respond(tiny_http::Response::from_data(vec![0xff, 0xfe, 0xfd]));
+                    let body = "<?xml version=\"1.0\"?><ListBucketResult>\
+                                <IsTruncated>false</IsTruncated></ListBucketResult>";
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(body).with_status_code(206),
+                    );
                     continue;
                 }
                 handle(req, &root_for_thread, None, &requests_thread);
@@ -5339,31 +5486,18 @@ mod tests {
 
         provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
 
-        let deletes_before = root.join("scratch/.s3marker").is_file();
-        assert!(deletes_before, "precondition: the marker exists");
-
         let err = provider
             .delete("/scratch")
-            .expect_err("the confirmation could not be read, so the verdict is unconfirmed");
+            .expect_err("a partial listing cannot confirm that a prefix is empty");
 
         assert!(
             root.join("scratch/.s3marker").is_file(),
-            "an unreadable confirmation must not be treated as consent"
+            "THE DEFECT: a 206 says the reply is incomplete by definition, and an incomplete listing \
+             was read as an empty one — so the marker was deleted on the strength of a fragment"
         );
         assert!(
-            !err.contains("failed before any reply"),
-            "THE DEFECT: the server answered 200 and this message said no reply ever arrived — while \
-             quoting a failure to read the reply it had received. `None` must mean no status was \
-             obtained, not that one was discarded: {err}"
-        );
-        assert!(
-            err.contains("it did reply, and successfully"),
-            "a 2xx that could not be parsed is its own diagnosis and must say so: {err}"
-        );
-        assert!(
-            !err.contains("a server that does not implement it"),
-            "and must not blame start-after, which is what falling through to the non-denial arm did — \
-             a successful reply is no evidence about parameter support: {err}"
+            err.contains("206"),
+            "and the refusal must name the status that caused it: {err}"
         );
     }
 
@@ -5436,7 +5570,7 @@ mod tests {
              {err}"
         );
         assert!(
-            err.contains("changed between two back-to-back requests"),
+            err.contains("differing only by the start-after parameter"),
             "on a denial the message must name what is actually established — that something changed \
              between two requests that are not atomic: {err}"
         );
@@ -5451,7 +5585,7 @@ mod tests {
         // refused; only the server's error code says why — and `map_s3_error` has already distinguished
         // them, so the finer evidence was being computed and discarded.
         assert!(
-            err.contains("error code below names which"),
+            err.contains("error code below names what changed"),
             "a 403 licenses 'the server refused this', not a specific cause — the message must defer to \
              the server's own error code rather than prescribing one: {err}"
         );
