@@ -39,9 +39,10 @@
 //! here so the next reader does not have to re-derive that the absence is real rather than overlooked.
 //!
 //! `create_dir_all` is the one left alone, and the reason is that it is **not destructive**: it cannot
-//! truncate and cannot delete, so the worst a link at `out_dir` can do is put the output in a directory
-//! the user did not name — a surprise, not a loss — and a *live* directory link is a perfectly ordinary
-//! way to name a USB stick or an external drive, which refusing would break.
+//! truncate and cannot delete. For a ***live*** directory link the worst it can do is put the output in a
+//! directory the user did not name — a surprise, not a loss — and a live directory link is a perfectly
+//! ordinary way to name a USB stick or an external drive, which refusing would break. (The **dangling**
+//! case is different again and is measured below: nothing happens at all.)
 //!
 //! The **dangling**-`out_dir` case was filed as CPE-1729 on the assumption that `create_dir_all` would
 //! walk through the link and write the whole series somewhere unnamed. **The CPE-1718 UAT measured that

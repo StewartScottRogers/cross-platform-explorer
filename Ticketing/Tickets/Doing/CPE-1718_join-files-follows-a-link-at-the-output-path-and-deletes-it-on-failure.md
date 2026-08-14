@@ -118,3 +118,68 @@ CPE-1717 (a different, closed ticket), and `rename_slot_refusal`'s doc credited 
 
 2026-08-14 — `cargo test` 2143 pass (default) / 2191 pass (`--features index`), `cargo clippy
 --all-targets -D warnings` clean in both modes. In-app docs updated (`src/docs/33-split-join.md`).
+
+## Round 2 (Foreman-applied, from the review and UAT)
+
+Two things happened that the round-1 log does not record, and both are the point of the ticket rather than
+footnotes to it.
+
+**A design decision argued for twenty lines and pinned by nothing.** `create_slot_refusal` checks the link
+question *before* occupancy — the opposite of `rename_slot_refusal` — and the module doc defends that at
+length. The reviewer swapped it back and **not one test out of 2143 redded.**
+
+The reason is structural, and it is the interesting half: under **either** ordering a *dangling* link
+reaches the link classifier, because `try_exists` answers `Ok(false)`, occupancy returns `Free`, and it
+falls through. Every CPE-1718 test staged a dangling link. **The ordering only changes behaviour for a
+*live* link, and there was no live-link leg anywhere** — so the single case the whole argument is about was
+the single case untested.
+
+Occupancy-first yields `rebuilt.bin: already exists — refusing to overwrite`: exactly what this module's own
+table calls out as sending the user to delete a name that actually holds a link elsewhere, and exactly the
+failure PR #899's reviewer already measured at the rename site. **The repo had been bitten by this ordering
+once already**, and the fix for it was shipping undefended.
+
+Pinned by `a_live_link_at_a_create_slot_is_reported_as_a_link_not_as_already_exists`, gated with
+`require_staged` per CPE-1717 so a runner that loses symlink privilege goes red rather than green. The swap
+now reds **exactly one test, the one aimed at** — verified independently by the reviewer, including that
+the panic carries the occupancy wording, so it fails for the reason it exists for rather than incidentally.
+
+The reviewer's framing of why this mattered is worth keeping: *"I am not asking because I doubt the
+decision. The decision is right. I am asking because a confident sentence with nothing behind it is the
+failure mode."*
+
+**A follow-up ticket falsified by its own UAT.** CPE-1729 was filed claiming a dangling `out_dir` link would
+make `create_dir_all` walk through and write the whole part series somewhere unnamed. Measured twice, two
+link shapes:
+
+```
+split -> Err("Cannot create a file when that file already exists. (os error 183)")
+post: is_link=Ok(true)  missing_dir_created=Ok(false)  missing_census=[]
+```
+
+`create_dir_all` tests `is_dir()` — which follows the link and answers `false` for a dangling one — calls
+`create_dir`, gets `AlreadyExists` because the **name** is held by the reparse point, and returns. **It
+never walks through.** A correct observation generalised one step past its evidence, the shape this sprint
+kept hitting, this time in a ticket nobody had worked yet.
+
+CPE-1729 was rewritten around the real residual the original missed — the error discards the path and calls
+a directory a "file" — and kept rather than deleted, because *"we thought this was a bug and it is not,
+here is the measurement"* is worth more than silence. The reviewer, who had approved the original reasoning,
+noted plainly that the falsification came from the UAT and not from the review, and added that the
+mechanism is **std-level rather than Windows-specific** (POSIX `mkdir(2)` returns `EEXIST` for an existing
+symlink at the final component), so the Linux/macOS acceptance criterion will likely confirm rather than
+reopen. The criterion stays: Windows was measured and said so.
+
+**Also applied:** a skip notice on the new live-link leg, which returned silently green on an unprivileged
+local machine while its four siblings all announced — CI red is the consequential half, but Evidence Rule 3
+calls a visible notice the floor; and a clause scoping the `create_dir_all` prose to the *live* case, since
+the sentence above the dangling measurement read as covering both.
+
+**Split out on the reviewer's recommendation**, because they are different kinds of work: the `archive.rs`
+sweep is *investigation* (~14 sites, and deciding which destinations are user-named comes first), while
+adding `File::create`/`fs::write` to `clippy.toml`'s `disallowed-methods` is a *repo-wide policy decision*
+whose allow-list will be long, since `File::create` is legitimate at app-owned paths far more often than
+`rename` is. Bundled, the cheap decisive one would wait on the expensive exploratory one.
+
+Final: `cargo test` 2144 default / 2192 `--features index`, clippy `-D warnings` clean in both modes.
+Verdicts: Reviewer **APPROVE**, UAT **PASS**.

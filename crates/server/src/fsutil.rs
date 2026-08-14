@@ -2531,6 +2531,19 @@ mod tests {
             }
         };
         if !require_staged("live_file_symlink", true, staged) {
+            // CI red is the consequential half and `require_staged` handles it — but Evidence Rule 3 says
+            // a visible notice is the floor, not the goal, and this leg had no floor. On an unprivileged
+            // local Windows machine it returned **silently green**, over zero coverage of the exact case
+            // it exists for — and that contributor is precisely the audience `classify_create_slot`'s
+            // pure-classifier split was designed for. Its four siblings in this PR all announce; this one
+            // did not. (PR #901 review.)
+            crate::skip_notice!(
+                "[CPE-1718] SKIPPED the live-link ordering leg: this machine could not create a file \
+                 symlink at {} (a junction is directory-only and a hard link is not a symlink, so \
+                 neither can stand in). NOTHING in this test covered the link-first ordering on this \
+                 run — the dangling-link legs pass under either ordering.",
+                slot.display()
+            );
             let _ = std::fs::remove_dir_all(&d);
             return;
         }
