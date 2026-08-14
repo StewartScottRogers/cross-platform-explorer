@@ -3,7 +3,7 @@ id: CPE-1723
 title: S3 delete and stat silently require s3:ListBucket, and four smaller gaps from the same review
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-13
