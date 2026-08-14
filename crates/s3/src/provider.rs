@@ -1229,7 +1229,14 @@ impl S3Provider {
         // `entries` is what `list` would DISPLAY; `filtered_count` is what `is_safe_s3_leaf` refused to
         // display. Both are real objects sitting under this prefix: that guard's own doc says so outright
         // ("A leaf this refuses is a real S3 key"). The shapes that actually reach here are `\`, a leaf
-        // that is exactly `..` or `.`, and a **tab, LF or CR** — every one of them legal in an S3 key.
+        // that is exactly `..` or `.`, and a **tab or LF** — every one of them legal in an S3 key.
+    //
+    // Not CR, and the distinction was measured (CPE-1723 review): XML 1.0 §2.11 normalises CR→LF in
+    // element content, so a CR-bearing key comes back from the parser as byte `0x0A`, not `0x0D`. The
+    // reachable control-byte set **at this guard** is `{0x09, 0x0A}` — three bytes leave the server,
+    // two arrive. `filtered_count` still moves either way, so the correction above is unaffected; this
+    // names what the guard sees rather than what was sent, because that is the thing the sentence is
+    // about.
         //
         // CPE-1723 item 8 flagged the earlier unqualified "control bytes" in this list as over-broad, on
         // the grounds that a raw control character makes the listing non-XML and `roxmltree` rejects the
@@ -4079,6 +4086,36 @@ mod tests {
         );
         assert!(err.contains("ListObjectsV2"), "the error must name the probe: {err}");
         assert!(err.contains("s3:ListBucket"), "the error must name the permission that fixes it: {err}");
+    }
+
+    /// **The third probe call site — untested until the CPE-1723 review removed its wrapper and found
+    /// the whole suite still green.**
+    ///
+    /// The PR claimed the wrapper was "wired at all three probe call sites". Two were pinned; this one
+    /// was not, so Evidence Rule 1 was unmet for a third of the guard in a PR whose own body presents
+    /// guard-neutralisation as its evidence. No behaviour was ever wrong — the wrapper is present and
+    /// correct — but it was unprotected against a future refactor, and the coverage claim was one third
+    /// wider than the evidence.
+    ///
+    /// This site matters more than its share suggests: `stat("/")` is plausibly the **first** thing a
+    /// credential holding only `s3:GetObject` hits on connecting, so it is the first message such a user
+    /// ever sees.
+    #[test]
+    fn stat_of_the_bucket_root_without_listbucket_also_names_the_probe() {
+        let (base, root, _requests) = spawn_s3_fixture_without_listbucket();
+        std::fs::write(root.join("a.jpg"), b"a").unwrap();
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider
+            .stat("/")
+            .expect_err("the bucket-root probe was denied, so whether the bucket is reachable is unknown");
+        assert!(err.contains("ListObjectsV2"), "the error must name the probe: {err}");
+        assert!(err.contains("s3:ListBucket"), "the error must name the permission that fixes it: {err}");
+        assert!(
+            !err.starts_with("s3: \"\""),
+            "and it must not report a bare empty prefix as its subject, which is what the unwrapped \
+             error renders for the bucket root: {err}"
+        );
     }
 
     /// The other half of the acceptance criterion, and the reason the fix is a message rather than a
