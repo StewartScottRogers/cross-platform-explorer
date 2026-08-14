@@ -3,7 +3,7 @@ id: CPE-1727
 title: Restore delete for a GetObject-holding credential, add the start-after belt, and fix list's bare 403
 type: bug
 priority: Medium
-status: Backlog
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-14
@@ -92,13 +92,13 @@ treatment.
 
 ## Acceptance criteria
 
-- [ ] A credential with `s3:GetObject` + `s3:DeleteObject` but no `s3:ListBucket` can delete a real object,
+- [x] A credential with `s3:GetObject` + `s3:DeleteObject` but no `s3:ListBucket` can delete a real object,
       and still **cannot** delete a virtual directory. Both pinned.
-- [ ] The object-and-prefix name collision is measured and its behaviour recorded.
-- [ ] The `start-after` belt catches the double-liar and leaves every conforming case untouched — with the
+- [x] The object-and-prefix name collision is measured and its behaviour recorded.
+- [x] The `start-after` belt catches the double-liar and leaves every conforming case untouched — with the
       fixture taught `start-after` first, so the test is not vacuous.
-- [ ] `list`'s denied-`ListBucket` message names the operation, the path and the permission.
-- [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per the
+- [x] `list`'s denied-`ListBucket` message names the operation, the path and the permission.
+- [x] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per the
       Evidence Rules in `Ticketing/wiki.md`.
 - [ ] **Nothing here has been measured against a real gateway.** If a real S3/MinIO/Ceph endpoint or the
       QNAP becomes available, item 1's 404-vs-403 premise and item 2's `start-after` reliance are the two
@@ -112,3 +112,36 @@ anyway — including a working counter-example to a closure **I** had authorised
 Related: **CPE-1723** (which refused the fallback and closed item 6), **CPE-1684** (the delete decision and
 `probe_prefix`), **CPE-1683** (`list`'s 403 message), **CPE-1685** (which makes all of this user-reachable),
 **CPE-1518** (the QNAP, the first real endpoint).
+
+## Work Log
+
+**2026-08-14 — implemented in `crates/s3` (branch `cpe-1727-getobject-delete-startafter`).**
+
+1. **HEAD-proof delete.** `S3Provider::head_proves_object` (2xx only — a 403 is not proof, since AWS
+   answers 403 for a missing key without `s3:ListBucket`). `delete` calls it when `probe_prefix` fails and
+   DELETEs the exact key that HEADed, never the `key/` marker form. Directory-with-content is still
+   refused (the pure prefix HEADs 404), and a nonexistent key is still refused.
+2. **The object/prefix name collision, measured.** `spawn_a_keyspace_server_without_listbucket` backs a
+   flat keyspace instead of a filesystem, because no filesystem can hold `photos` and `photos/a.jpg` at
+   once. Result: the object `photos` is removed, `photos/a.jpg` and `photos/b.jpg` are untouched. Recorded
+   in `delete`'s doc, including the cost — a user who meant the folder gets a success and a folder that is
+   still there. No client that may not list can tell those intentions apart.
+3. **The `start-after` belt**, on the marker-only verdict only, via `probe_prefix_after`, counting
+   `entries.len() + filtered_count`. The fixture was taught `start-after` first, and that teaching is
+   pinned by its own test so the belt is not measured against a server that ignores the parameter.
+4. **`list_failure`** wraps (never replaces) `map_s3_error` for every non-2xx listing; the `s3:ListBucket`
+   sentence is conditional on 401/403.
+5. The item-6 characterisation test is now filesystem-backed and asserts the measured harm (marker gone,
+   `photos/a.jpg` alive) instead of `is_ok()`.
+
+Two pre-existing assertions were **retargeted, not deleted**: the `delete_without_listbucket_...` message
+test now uses a key that does not exist (the message is unchanged and still reachable), and
+`the_object_operations_..._entitled_to_still_work` now asserts the delete succeeds and the object leaves
+the server — that assertion was the pin on the behaviour this ticket exists to undo.
+
+`src/docs/31-network.md` updated: its "therefore can't delete" bullet stated the old behaviour.
+
+180 tests pass; `cargo clippy --all-targets -- -D warnings` clean. Six guard neutralisations, each red on
+a distinct test with the real output pasted in the PR body. **Still unmeasured against a real gateway** —
+item 1's 404-vs-403 premise and item 2's `start-after` reliance remain the two things to check first when
+a real S3/MinIO/Ceph endpoint or the QNAP (CPE-1518) is available.
