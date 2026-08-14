@@ -522,6 +522,13 @@ mod tests {
                         let mut buf = Vec::new();
                         let _ = d.read_to_end(&mut buf);
                         let path = real_path(&root, &arg);
+                        // **CPE-1742 — this invents the parent chain, and RFC 959 gives `STOR` no
+                        // licence to.** A real daemon answers `550` when the parent is missing, so a
+                        // client can upload to `/a/b/c.txt` against this rig with no `MKD` at all and
+                        // pass. Same family as the `RMD`/`MKD` fixes below, one verb over; left in
+                        // place because removing it changes what a *client* must do before uploading
+                        // (it interacts with CPE-1741). The full reasoning — including a first draft
+                        // of it that measurement falsified — is in the `MKD` arm below.
                         if let Some(p) = path.parent() {
                             let _ = std::fs::create_dir_all(p);
                         }
@@ -563,16 +570,22 @@ mod tests {
                 // test double that succeeds where the wire refuses lets a client test pass against
                 // behaviour no real server has, which is the whole reason `RMD` changed.
                 //
-                // Cost measured before taking the fix: with `create_dir`, `cpe-ftp` is 13/13 and
-                // `cpe-sftp` 28/28 green, so nothing in either suite depended on the recursion or on
-                // `create_dir_all`'s idempotence.
+                // Cost measured before taking the fix, when the suites stood at 13 and 28 tests: with
+                // `create_dir`, `cpe-ftp` was 13/13 and `cpe-sftp` 28/28 green, so nothing in either
+                // suite depended on the recursion or on `create_dir_all`'s idempotence. (They are 14
+                // and 29 now — this fix brought its own tests. The figures are left as measured rather
+                // than silently updated to today's, since the point they make is about what the suite
+                // looked like *before* the change.)
                 //
                 // **The `create_dir_all` in `STOR` above is deliberately left alone (CPE-1741), and the
                 // first draft of this note gave a reason that measurement falsified.** It claimed
-                // `upload_tree`'s round-trip needed it; removing the call leaves this crate **13/13
-                // green**, and `cpe-ftp` has no `upload_tree` test at all — the reason was invented,
-                // which is the exact substitution this ticket family exists to stop, so it is recorded
-                // rather than quietly swapped for a better one.
+                // `upload_tree`'s round-trip needed it; removing the call leaves this crate green, and
+                // `cpe-ftp` has no `upload_tree` test at all — the reason was invented, which is the
+                // exact substitution this ticket family exists to stop, so it is recorded rather than
+                // quietly swapped for a better one. **Re-measured at the current suite size** after the
+                // reviewer pointed out the first figure (13/13) had gone stale: still **14/14 green**
+                // with the call removed, so the "nothing here depends on it" claim is this round's
+                // measurement and not an inherited one.
                 //
                 // The real reason is shape, not cost. It is a **different** defect: `STOR` has no
                 // directory-creating semantics to model at all — a real daemon fails outright when the

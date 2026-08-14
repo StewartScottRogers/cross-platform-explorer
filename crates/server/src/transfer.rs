@@ -741,7 +741,20 @@ pub fn upload_tree(
     cancel: &AtomicBool,
 ) -> Result<usize, String> {
     let base = remote_root.trim_end_matches('/').to_string();
-    provider.mkdir(&base)?; // ensure the remote root exists
+    // **CPE-1741 — this does NOT "ensure the remote root exists", which is what the comment here used
+    // to claim.** `mkdir` is `mkdir(2)` on every real backend (`SSH_FXP_MKDIR`, FTP `MKD`), so a `base`
+    // that already exists is an *error*, and the `?` aborts the whole upload before a single file is
+    // written. Uploading into an existing remote folder fails — measured `FRESH -> Ok(2)`, `EXIST ->
+    // Err("…: Failure: Failure")`.
+    //
+    // It stayed invisible because the only `mkdir`s this crate's own tests see are idempotent:
+    // `LocalProvider::mkdir` and the test `FakeProvider::mkdir` both tolerate an existing directory, as
+    // did `cpe-sftp`'s and `cpe-ftp`'s `#[cfg(test)]` rigs until CPE-1731 changed them to `create_dir`.
+    // No unit test in `cpe-server` could ever have caught it; making the doubles honest is what exposed
+    // it. Deliberately **not** pinned by a test — one asserting today's failure would encode the bug as
+    // the expectation, and whoever fixes CPE-1741 would meet a red test named as though the failure
+    // were correct. This comment is what holds it instead.
+    provider.mkdir(&base)?;
     let mut stack = vec![local_dir.to_path_buf()];
     let mut files = 0usize;
     while let Some(dir) = stack.pop() {
@@ -758,6 +771,9 @@ pub fn upload_tree(
             let remote = join(&base, &rel.to_string_lossy().replace('\\', "/"));
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
+                // Same CPE-1741 shape as the `mkdir(&base)` above, one level down: any directory in the
+                // tree that already exists remotely is an error here, so a *partial re-upload* aborts
+                // too. Whatever fixes the base case has to fix this one in the same change.
                 provider.mkdir(&remote)?;
                 stack.push(local);
             } else {

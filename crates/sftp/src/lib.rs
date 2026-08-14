@@ -580,9 +580,11 @@ mod tests {
         /// `ErrorKind::AlreadyExists` → (neither `NotFound` nor `PermissionDenied`) → `Failure`. That
         /// is exactly the pair OpenSSH returns.
         ///
-        /// Cost measured before taking the fix: `cpe-sftp` is 28/28 and `cpe-ftp` 13/13 green with
-        /// `create_dir`, so nothing in either suite depended on the recursion or on `create_dir_all`'s
-        /// idempotence.
+        /// Cost measured before taking the fix, when the suites stood at 28 and 13 tests: `cpe-sftp`
+        /// was 28/28 and `cpe-ftp` 13/13 green with `create_dir`, so nothing in either suite depended
+        /// on the recursion or on `create_dir_all`'s idempotence. (They are 29 and 14 now — this fix
+        /// brought its own tests. Left as measured rather than silently updated, since the point is
+        /// about what the suite looked like *before* the change.)
         ///
         /// # It also un-hid a real client bug — CPE-1741
         ///
