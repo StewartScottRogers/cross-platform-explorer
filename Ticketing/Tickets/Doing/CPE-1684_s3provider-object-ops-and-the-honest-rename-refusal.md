@@ -2,10 +2,10 @@
 id: CPE-1684
 title: "S3Provider object ops — stat/read/write/delete/mkdir, and rename refused honestly rather than faked"
 type: Feature
-status: Backlog
+status: Doing
 priority: Medium
 component: Backend
-tags: [needs-prereq]
+tags: [ready]
 epic: CPE-1503
 estimate: M
 created: 2026-08-12

@@ -4,9 +4,24 @@
 //! and [`crate::error`] is a pure function of its inputs, checkable against fixed vectors with no network
 //! at all. `list` here is `ListObjectsV2` with `delimiter=/`, paginated to completion, presenting
 //! `<CommonPrefixes>` as virtual directories (`ProviderCapabilities::has_real_dirs = false`) and
-//! `<Contents>` as files. The remaining ops (`stat`/`read`/`write`/`delete`/`mkdir`/`rename`) are CPE-1684
-//! and are stubbed here with a named "not yet implemented" error rather than a `todo!()`, so a caller that
-//! reaches one gets a message instead of a panic.
+//! `<Contents>` as files. CPE-1684 then added the remaining ops — `stat` (HEAD + a prefix probe), `read`
+//! (GET, chunked), `write` (PUT), `mkdir` (the zero-byte marker object), `delete` (exactly one key) — and
+//! made `rename` an honest, permanent refusal.
+//!
+//! # The three decisions CPE-1684 made, so they are not silently re-litigated
+//!
+//! 1. **`rename` refuses, and always will.** S3 has no rename; copy-then-delete is not atomic, is O(size),
+//!    and rewrites storage class and metadata. `capabilities().supports_rename` is `false` so a caller sees
+//!    it coming. See [`FileSystemProvider::rename`] for the full reasoning.
+//! 2. **`delete` removes exactly one key, and refuses a non-empty virtual directory.** S3 answers `204` for
+//!    a key that never existed, so a single-key `DELETE` of a directory prefix would report success while
+//!    the entire subtree stayed put. One prefix probe decides the case before anything is deleted; a
+//!    recursive per-key loop is out of scope precisely because a half-failed one reports success. See
+//!    [`FileSystemProvider::delete`].
+//! 3. **A bodiless response is mapped by status *and method*, not by parsing.** HEAD responses carry no
+//!    body, so the body-driven [`error::map_s3_error`] would answer "could not be read … refusing to guess"
+//!    for every missing key. [`map_response_error`] applies the status+method rule when there is no body
+//!    and defers to CPE-1682's parser when there is.
 //!
 //! # GCS decision (ticket-mandated, made before anything below was written)
 //! The epic's original claim — "B2/Wasabi/MinIO/GCS all come free once addressing is right" — was
@@ -176,6 +191,47 @@ const MAX_XML_NESTING_DEPTH: usize = 64;
 /// it is *counted* into `filtered_count` and surfaced rather than silently vanishing, and means the bound
 /// also applies through `S3Provider`'s `is_safe_leaf_name` override in `crates/vfs`.
 const MAX_KEY_LEAF_BYTES: usize = 1024;
+
+/// Bytes copied per iteration of [`S3Provider::read`]'s body loop (CPE-1684).
+///
+/// The ticket names the convention and where it came from: `cpe-ftp` settled on a **fixed 64 KiB chunk**
+/// rather than one `read_to_end`, and this matches it byte for byte (`crates/ftp/src/lib.rs`'s
+/// `READ_CHUNK_BYTES`). The property that matters is that no single `Read::read` call can be made to demand
+/// an outsized allocation by whatever the server claims or streams — the buffer is a fixed stack array, so
+/// what the peer sends changes how many iterations happen, never how much is asked for at once. It is also
+/// what makes [`MAX_OBJECT_READ_BYTES`] enforceable *during* the transfer instead of after it.
+///
+/// **What this does NOT do, stated plainly** (see [`MAX_OBJECT_READ_BYTES`]): it does not stop the whole
+/// object being in memory at the end. [`FileSystemProvider::read`] returns `Vec<u8>`, so by the time it
+/// returns, it must. Chunking bounds the *incremental* demand and makes the cap fire mid-transfer; it is
+/// not, and cannot be, a streaming read.
+const READ_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Per-object byte cap for [`S3Provider::read`] — **2 GiB**, the same value and the same reasoning as the
+/// sibling `cpe-webdav`'s `MAX_READ_BYTES`, so the two remote HTTP backends refuse at the same point rather
+/// than each picking a number.
+///
+/// This is a **memory backstop, not a file-size policy**. `FileSystemProvider::read` hands back a whole
+/// `Vec<u8>`, so at 2 GiB the whole-file-in-a-`Vec` contract is itself the problem; refusing there costs
+/// nothing that works today. Deliberately separate from [`MAX_RESPONSE_BODY_BYTES`] (8 MiB), which bounds a
+/// *listing* page — an 8 MiB ceiling on object reads would make the provider useless for ordinary files.
+///
+/// **An over-cap read is a loud `Err`, never a truncated `Vec` returned as if it were the file** — the same
+/// distinction `cpe-webdav` documents, for the same consumer: `cpe_server::transfer`'s download sink writes
+/// whatever comes back to disk as the finished file, so a silent truncation here is data loss wearing a
+/// success. The cap is checked inside the [`READ_CHUNK_BYTES`] loop, so it fires while the transfer is still
+/// running rather than after the process has already buffered everything.
+const MAX_OBJECT_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// The largest body [`S3Provider::write`] will attempt in one `PUT` — **5 GiB**, S3's documented ceiling for
+/// a single-part upload (CPE-1684; multipart upload is explicitly out of this ticket's scope).
+///
+/// Read as **5 GiB and not 5 GB on purpose.** AWS's docs say "5 GB" without saying which; refusing at
+/// 5×10⁹ when the server would have accepted 5×2³⁰ would reject a legal upload *on our side*, which is the
+/// one failure direction this refusal must not have. Erring high can only ever produce a server-side
+/// rejection, which is the server's own answer rather than our guess. This is a courtesy refusal that names
+/// the real ceiling a beat before the round trip; it is not a correctness guard.
+const MAX_SINGLE_PUT_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
 /// How long a single socket read may make **no progress at all** before the request is abandoned
 /// (CPE-1706 item 1). See this module's top doc, "Why these timeout values", for the full reasoning:
@@ -392,6 +448,100 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
     }
 }
 
+/// Convert a `/`-rooted provider path into the S3 key of **one object** (CPE-1684) — the `stat`/`read`/
+/// `write`/`delete` counterpart to [`provider_path_to_key_prefix`], trimming the same slashes so the two
+/// cannot disagree about where a path's key starts, and simply not appending the `/` that makes a prefix.
+///
+/// The bucket root has no object key, so `""`/`"/"` is an `Err` rather than a silent address of something
+/// else — the same refusal, for the same reason, that [`S3Config::object_target`] already applies to an
+/// empty key ("S3 has no zero-length key").
+///
+/// # No `is_safe_s3_leaf` pass here, and this is a deliberate decision, not an omission
+///
+/// [`S3Provider::list_with_filtered_count`]'s doc instructs whoever wires these ops up not to accept "ANY
+/// provider-supplied name as a literal key without going through the same [`is_safe_s3_leaf`] check `list`
+/// already applies". Applied **literally to the whole path**, that instruction would break CPE-1689: it
+/// would split `/a/../b.txt` into the segments `a`, `..`, `b.txt`, refuse the `..`, and so refuse a key
+/// that CPE-1689 established is a real, distinct, legitimately addressable object — the crate signs
+/// `/a/../b.txt` canonically and unnormalised precisely so it can be reached.
+///
+/// The two are reconciled by noticing what [`is_safe_s3_leaf`] is *for*: it decides whether a leaf may be
+/// **surfaced as a navigable child name**, not whether a key is addressable. Those are different questions
+/// with legitimately different answers. And the instruction's own premise — "provider-supplied" — cannot
+/// arise here: a leaf that guard refuses never becomes a [`ProviderEntry`] at all, so no path built by
+/// navigating a listing can contain one. A path containing `..` therefore only ever arrives because a
+/// caller typed that exact key, which is the case CPE-1689 says must work.
+///
+/// What genuinely must not happen — a raw control byte or a `/` injected into the request line or a signed
+/// header — is closed where it actually lives: [`crate::sigv4::encode_path`] percent-encodes every byte
+/// outside the unreserved set into the path (so a `\n` in a key travels as `%0A`, never as a request-line
+/// break), and [`guard_header_sendable`] covers the header side.
+fn provider_path_to_object_key(path: &str) -> Result<String, String> {
+    let key = path.trim_matches('/').to_string();
+    if key.is_empty() {
+        return Err(format!(
+            "s3: {path:?} addresses the bucket itself, which is not an object — S3 has no zero-length \
+             key, so there is nothing here to stat, read, write or delete"
+        ));
+    }
+    Ok(key)
+}
+
+/// Turn a non-2xx response into an error, choosing the rule by whether the response actually carried a
+/// body — the CPE-1682 error path when there is something to parse, an explicit status+method rule when
+/// there is not (CPE-1684).
+///
+/// # Why a bodiless rule has to exist at all
+///
+/// [`error::map_s3_error`] is body-driven and correct: with no `<Code>` to read it says *"HTTP 404 and the
+/// response body could not be read as an S3 error … refusing to guess which cause applies"*. That is the
+/// right answer for a **parser**. But **HTTP HEAD responses never carry a body** (RFC 9110 §9.3.2), and
+/// every existence check in this module is HEAD-shaped, so routing them through the parser alone would make
+/// "could not be read" the majority experience for the single most common failure in the whole provider —
+/// precisely where a missing key and a denied key have to stay distinguishable.
+///
+/// So: when `body` is empty, the status **and** the method are the evidence, and they are enough. Nothing
+/// is being guessed — an empty body from a `HEAD` is what the protocol *requires*, not a symptom of a
+/// broken server, so there is no missing information to be honest about. When there IS a body, this defers
+/// to [`error::map_s3_error`] unchanged; that line was drawn by CPE-1682 and is not redrawn here.
+fn map_response_error(method: &str, status: u16, body: &[u8], what: &str) -> String {
+    if !body.is_empty() {
+        return format!("s3: {what}: {}", error::map_s3_error(status, body));
+    }
+    match status {
+        404 => format!(
+            "s3: {what}: not found (HTTP 404 to a {method} request, which carries no response body by \
+             protocol — for a {method} on an object key, 404 is S3's answer for a key that does not exist)"
+        ),
+        // 403 is NOT simply "denied", and saying so flatly would be a confident wrong answer. Documented
+        // AWS behaviour: when the caller lacks `s3:ListBucket` on the bucket, S3 answers **403 for a key
+        // that does not exist** rather than 404, specifically so that a probe cannot enumerate keys. So a
+        // bodiless 403 genuinely means "denied, or missing and you are not permitted to be told which" —
+        // and the honest message says both, rather than picking one. It remains cleanly distinguishable
+        // from the 404 arm above, which is what the AC asks for.
+        401 | 403 => format!(
+            "s3: {what}: access denied (HTTP {status} to a {method} request, which carries no response \
+             body by protocol). Note S3 also answers {status} rather than 404 for a key that does NOT \
+             exist when the credentials lack s3:ListBucket on the bucket, so this may mean the key is \
+             missing and the server is declining to say so — check the credentials and the bucket policy \
+             before concluding the object is there"
+        ),
+        _ => format!(
+            "s3: {what}: HTTP {status} with an empty response body, so there is no S3 error code to read \
+             and nothing beyond the status to go on — refusing to guess which cause applies"
+        ),
+    }
+}
+
+/// Whether `len` bytes exceed what one S3 `PUT` can carry ([`MAX_SINGLE_PUT_BYTES`]).
+///
+/// A separate predicate purely so the boundary is testable without allocating five gigabytes — the guard it
+/// backs is otherwise only reachable by actually having a 5 GiB slice in hand. Takes `u64` rather than
+/// `usize` so the boundary can be named exactly on a 32-bit target too, where a `usize` could not hold it.
+fn too_big_for_single_put(len: u64) -> bool {
+    len > MAX_SINGLE_PUT_BYTES
+}
+
 /// The part of `key` (a `<Key>` or `<Prefix>` from a `ListObjectsV2` response) that comes after
 /// `key_prefix`, or `None` if `key` does not actually start with it.
 ///
@@ -485,6 +635,20 @@ struct ListPage {
     /// round 3: an earlier version of this fix did exactly that, and it turned out to be worse than the
     /// silent drop it replaced — see that method's doc).
     filtered_count: usize,
+    /// How many `<Contents>`/`<CommonPrefixes>` entries on this page genuinely sat under the requested
+    /// prefix, counted **before** the marker filter and **before** [`is_safe_s3_leaf`] — i.e. the raw
+    /// question *"does anything at all exist under this prefix?"* (CPE-1684).
+    ///
+    /// `entries` cannot answer that, and the gap is not hypothetical: a directory holding only its own
+    /// zero-byte marker — exactly the shape [`FileSystemProvider::mkdir`] writes — yields **zero**
+    /// `entries`, because the marker is correctly filtered as the directory itself rather than as a file
+    /// inside it. Using `entries.is_empty()` as "this directory does not exist" would therefore report a
+    /// directory this module had just created as missing.
+    ///
+    /// Entries the server returned *outside* the requested prefix are deliberately not counted: a server
+    /// answering outside its own advertised prefix is misbehaving, and letting that invent a directory
+    /// would be trusting exactly the response this module refuses to trust everywhere else.
+    raw_entries: usize,
     is_truncated: bool,
     next_token: Option<String>,
 }
@@ -552,6 +716,7 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
 
     let mut entries = Vec::new();
     let mut filtered_count = 0usize;
+    let mut raw_entries = 0usize;
 
     for content in root.children().filter(|n| n.tag_name().name() == "Contents") {
         let Some(key) = content.children().find(|n| n.tag_name().name() == "Key").and_then(|n| n.text())
@@ -559,6 +724,10 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
             continue;
         };
         let Some(leaf) = leaf_under_prefix(key, key_prefix) else { continue };
+        // Counted here, before every filter below — see `ListPage::raw_entries`. The marker entry (whose
+        // leaf is empty) is counted deliberately: it is the one thing that proves an otherwise-empty
+        // directory exists.
+        raw_entries += 1;
         if leaf.is_empty() {
             continue; // the directory's own zero-byte marker object, not a file inside it (AC4)
         }
@@ -585,6 +754,7 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
             continue;
         };
         let Some(leaf) = leaf_under_prefix(prefix_text, key_prefix) else { continue };
+        raw_entries += 1;
         let leaf = leaf.trim_end_matches('/');
         if leaf.is_empty() {
             continue;
@@ -598,7 +768,7 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         entries.push(ProviderEntry { name: leaf.to_string(), is_dir: true, size: 0 });
     }
 
-    Ok(ListPage { entries, filtered_count, is_truncated, next_token })
+    Ok(ListPage { entries, filtered_count, raw_entries, is_truncated, next_token })
 }
 
 /// An S3-compatible bucket presented as a synchronous [`FileSystemProvider`].
@@ -620,11 +790,15 @@ pub struct S3Provider {
     /// agent's `timeout_read`, because setting a per-request deadline replaces that read timeout rather
     /// than layering on it, so a test cannot reach this bound by shrinking the other one.
     request_deadline: Duration,
+    /// Per-object byte cap for `read` — [`MAX_OBJECT_READ_BYTES`] in production, a field for the same
+    /// reason the two deadlines are: so the refusal can be observed firing against a few kilobytes rather
+    /// than by streaming two gigabytes through a test. Mirrors `cpe-webdav`'s `read_cap` exactly.
+    read_cap: u64,
 }
 
 impl S3Provider {
-    /// Build a provider for `config`. Does not perform a request; the first `list` (and, once CPE-1684
-    /// lands, `stat`/`read`/…) issues one and surfaces addressing/auth/connection errors then.
+    /// Build a provider for `config`. Does not perform a request; the first `list`/`stat`/`read`/… issues
+    /// one and surfaces addressing/auth/connection errors then.
     ///
     /// This is the constructor production uses, and it is the *only* place the shipped timeout values are
     /// chosen — see this module's top doc, "Why these timeout values".
@@ -651,7 +825,16 @@ impl S3Provider {
             agent: build_agent(timeout_read, timeout_write, TIMEOUT_CONNECT),
             list_deadline: MAX_LIST_WALL_CLOCK,
             request_deadline: TIMEOUT_LIST_REQUEST,
+            read_cap: MAX_OBJECT_READ_BYTES,
         }
+    }
+
+    /// Override the per-object `read` byte cap ([`MAX_OBJECT_READ_BYTES`] by default). Production never
+    /// calls this; it exists so the cap can be observed refusing an over-size object without a test having
+    /// to push 2 GiB through a socket. Same rationale, same shape, as `cpe-webdav`'s `with_read_cap`.
+    pub fn with_read_cap(mut self, cap: u64) -> Self {
+        self.read_cap = cap;
+        self
     }
 
     /// Override the per-request end-to-end deadline ([`TIMEOUT_LIST_REQUEST`] by default). Production
@@ -684,6 +867,32 @@ impl S3Provider {
         query: &[(&str, &str)],
         request_deadline: Option<Duration>,
     ) -> Result<(u16, Vec<u8>), String> {
+        self.signed_exchange("GET", target, query, None, request_deadline)
+    }
+
+    /// Sign one request and build the `ureq::Request` for it, without sending — the single place every verb
+    /// in this crate (`GET`, `HEAD`, `PUT`, `DELETE`) turns a [`RequestTarget`] into something sendable, so
+    /// no verb can drift into signing one thing and sending another. Returns the URL alongside the request
+    /// because every error message downstream wants it and rebuilding it would reintroduce exactly the
+    /// two-constructions hazard [`RequestTarget`] exists to remove.
+    ///
+    /// `payload_hash` is the SigV4 `x-amz-content-sha256` value: [`sigv4::EMPTY_PAYLOAD_SHA256`] for a
+    /// bodiless verb, `sha256_hex(body)` for a `PUT`. It is both signed and sent, so the two cannot
+    /// disagree — passing it as one parameter used twice is the point.
+    ///
+    /// `request_deadline` bounds the whole exchange, body read included, and is a **per-call-site
+    /// decision**: `Some(..)` for the small metadata exchanges (a `ListObjectsV2` page, a `HEAD`, a
+    /// `DELETE`, the zero-byte marker `PUT`), and **`None` for a bulk transfer** — a large-object `GET` or
+    /// `PUT` is legitimately slow over a poor link and must keep [`TIMEOUT_READ`]'s per-read stall
+    /// semantics instead. See [`TIMEOUT_LIST_REQUEST`] for why that distinction is the whole point.
+    fn signed_request(
+        &self,
+        method: &str,
+        target: &RequestTarget,
+        query: &[(&str, &str)],
+        payload_hash: &str,
+        request_deadline: Option<Duration>,
+    ) -> Result<(String, ureq::Request), String> {
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| format!("s3: system clock reads before the Unix epoch: {e}"))?
@@ -692,15 +901,15 @@ impl S3Provider {
 
         let signer = sigv4::Signer::new(&self.config.credentials, &self.config.region)?;
         let signed = signer.sign(&sigv4::SigningInput {
-            method: "GET",
+            method,
             encoded_path: &target.encoded_path,
             query,
             headers: &[
                 ("host", target.host.as_str()),
                 ("x-amz-date", amz_date.as_str()),
-                ("x-amz-content-sha256", sigv4::EMPTY_PAYLOAD_SHA256),
+                ("x-amz-content-sha256", payload_hash),
             ],
-            payload_hash: sigv4::EMPTY_PAYLOAD_SHA256,
+            payload_hash,
             amz_date: &amz_date,
         })?;
 
@@ -711,51 +920,133 @@ impl S3Provider {
         // validation because it is a property of the transport, not of addressing correctness.
         guard_header_sendable("Host (in the request URL's authority)", &target.host)?;
         guard_header_sendable("x-amz-date", &amz_date)?;
-        guard_header_sendable("x-amz-content-sha256", sigv4::EMPTY_PAYLOAD_SHA256)?;
+        guard_header_sendable("x-amz-content-sha256", payload_hash)?;
         guard_header_sendable("Authorization", &signed.authorization)?;
 
         let url = target.url_with_query(query);
         let mut req = self
             .agent
-            .get(&url)
+            .request(method, &url)
             .set("x-amz-date", &amz_date)
-            .set("x-amz-content-sha256", sigv4::EMPTY_PAYLOAD_SHA256)
+            .set("x-amz-content-sha256", payload_hash)
             .set("Authorization", &signed.authorization);
         // `ureq::Request::timeout` is per-REQUEST and overrides the agent's per-read setting for this one
         // call (`request.rs:60`, "overriding agent's configuration if any"). Unlike the agent-level
         // `.timeout()` this crate still declines, applying it here is a per-call choice, so the large
-        // object GET CPE-1684 adds can keep the per-read semantics it actually wants.
+        // object GET/PUT keeps the per-read semantics it actually wants.
         if let Some(deadline) = request_deadline {
             req = req.timeout(deadline);
         }
+        Ok((url, req))
+    }
 
-        match req.call() {
-            Ok(resp) => {
-                let status = resp.status();
-                let (buf, over_cap) = read_body_capped(resp.into_reader())
-                    .map_err(|e| format!("s3: {url}: reading the response body failed: {e}"))?;
-                if over_cap {
-                    return Err(format!(
-                        "s3: {url}: the response body exceeded the {MAX_RESPONSE_BODY_BYTES}-byte cap \
-                         without finishing — refusing rather than parsing a truncated body, which can \
-                         look like a complete but much shorter listing"
-                    ));
-                }
-                Ok((status, buf))
-            }
-            // A non-2xx status: still try to read whatever body came with it (best-effort — S3's error
-            // detail lives there), but never fail the call over a body read error on the error path
-            // itself; `error::map_s3_error` already handles an empty/truncated/garbled body honestly.
-            Err(ureq::Error::Status(code, resp)) => {
-                // Best-effort, and deliberately NOT failed over an over-cap body: S3's error detail lives
-                // here, and `error::map_s3_error` already handles an empty/truncated/garbled body
-                // honestly. Goes through the same `read_body_capped` as the success path so there is
-                // exactly ONE `.take()` in this module — see that function's doc.
-                let (buf, _over_cap) = read_body_capped(resp.into_reader()).unwrap_or_default();
-                Ok((code, buf))
-            }
+    /// Send `req` and hand back the status **and the response**, never deciding success or failure itself:
+    /// a non-2xx comes back as `Ok((status, resp))` rather than an `Err`, so every caller reads the body
+    /// through the same code and sees the exact bytes the server sent.
+    ///
+    /// `body` distinguishes a bodiless verb (`None` → `.call()`) from a `PUT` (`Some` → `.send_bytes`).
+    /// Both funnel through `ureq`'s `do_call`, which validates every outbound header **before** any socket
+    /// work — see this module's top doc for why that matters and what was measured about it.
+    fn send_capturing_status(
+        req: ureq::Request,
+        body: Option<&[u8]>,
+        url: &str,
+    ) -> Result<(u16, ureq::Response), String> {
+        let sent = match body {
+            Some(bytes) => req.send_bytes(bytes),
+            None => req.call(),
+        };
+        match sent {
+            Ok(resp) => Ok((resp.status(), resp)),
+            // A non-2xx status still carries whatever body the server chose to send (S3's error detail
+            // lives there); it is the caller's job to interpret, not this function's.
+            Err(ureq::Error::Status(code, resp)) => Ok((code, resp)),
             Err(ureq::Error::Transport(t)) => Err(format!("s3: {url}: {t}")),
         }
+    }
+
+    /// Sign, send, and read a **small** response body to completion, capped by
+    /// [`MAX_RESPONSE_BODY_BYTES`] — the shared path for `ListObjectsV2`, `HEAD`, `DELETE` and the marker
+    /// `PUT`. Never used for a large-object `GET`, whose body has its own, much larger cap and its own
+    /// chunked loop ([`S3Provider::read`]).
+    fn signed_exchange(
+        &self,
+        method: &str,
+        target: &RequestTarget,
+        query: &[(&str, &str)],
+        body: Option<&[u8]>,
+        request_deadline: Option<Duration>,
+    ) -> Result<(u16, Vec<u8>), String> {
+        let payload_hash = match body {
+            Some(bytes) => sigv4::sha256_hex(bytes),
+            None => sigv4::EMPTY_PAYLOAD_SHA256.to_string(),
+        };
+        let (url, req) =
+            self.signed_request(method, target, query, &payload_hash, request_deadline)?;
+        let (status, resp) = Self::send_capturing_status(req, body, &url)?;
+        let ok = (200..300).contains(&status);
+        // On the success path a body-read failure is the call's failure. On the error path it is not:
+        // `map_response_error`/`error::map_s3_error` already handle an empty/truncated/garbled body
+        // honestly, and failing there would replace S3's own diagnosis with a transport complaint.
+        let (buf, over_cap) = match read_body_capped(resp.into_reader()) {
+            Ok(v) => v,
+            Err(e) if ok => {
+                return Err(format!("s3: {url}: reading the response body failed: {e}"))
+            }
+            Err(_) => (Vec::new(), false),
+        };
+        // Deliberately only on the success path, unchanged from CPE-1706: an over-cap ERROR body is not
+        // worth failing the call over, because it is already being interpreted best-effort.
+        if over_cap && ok {
+            return Err(format!(
+                "s3: {url}: the response body exceeded the {MAX_RESPONSE_BODY_BYTES}-byte cap \
+                 without finishing — refusing rather than parsing a truncated body, which can \
+                 look like a complete but much shorter listing"
+            ));
+        }
+        Ok((status, buf))
+    }
+
+    /// One `ListObjectsV2` request against `key_prefix` asking for a single key, used purely to answer
+    /// *"does anything exist under this prefix?"* — the question that separates a virtual directory from a
+    /// path that is simply not there (CPE-1684).
+    ///
+    /// Returns `(raw_entries, real_entries, is_truncated)`: the first counts everything under the prefix
+    /// **including the zero-byte marker object**, the second counts only entries that would be shown as
+    /// children, and the third is the page's own `IsTruncated`. Together they distinguish the three cases
+    /// `stat` and `delete` need — nothing there, an empty directory holding only its own marker, and a
+    /// directory with real content. See [`ListPage::raw_entries`].
+    ///
+    /// # `max-keys=2`, and why `1` is the wrong number here
+    ///
+    /// This is an existence question, not a listing, so it must not pull a thousand keys to answer. But it
+    /// cannot ask for one: S3 returns keys in **lexicographic order**, and a directory's own marker key
+    /// (`photos/2024/`) is a strict prefix of every key beneath it, so the marker is *always* the first
+    /// entry returned. `max-keys=1` would therefore see nothing but the marker for a directory holding a
+    /// thousand objects, and `delete` would read that as "an empty directory" and cheerfully remove the
+    /// marker while reporting success. Two keys is the smallest number that can ever show a second one.
+    ///
+    /// # `is_truncated` closes the case `max-keys` alone cannot
+    ///
+    /// S3 is explicitly permitted to return **fewer** keys than `max-keys` asks for, so a gateway that
+    /// under-fills could still answer with the marker alone. `IsTruncated=true` says there is more under
+    /// this prefix regardless of how few keys came back, so the caller treats a truncated marker-only page
+    /// as a non-empty directory. Without this, correctness would rest on a server's discretion.
+    fn probe_prefix(&self, key_prefix: &str) -> Result<(usize, usize, bool), String> {
+        let target = self.config.bucket_target()?;
+        let mut query: Vec<(&str, &str)> =
+            vec![("list-type", "2"), ("delimiter", "/"), ("max-keys", "2")];
+        if !key_prefix.is_empty() {
+            query.push(("prefix", key_prefix));
+        }
+        let (status, body) = self.signed_get(&target, &query, Some(self.request_deadline))?;
+        if !(200..300).contains(&status) {
+            return Err(map_response_error("GET", status, &body, &format!("{key_prefix:?}")));
+        }
+        let text = std::str::from_utf8(&body)
+            .map_err(|e| format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"))?;
+        let page = parse_list_bucket_result(text, key_prefix)?;
+        Ok((page.raw_entries, page.entries.len(), page.is_truncated))
     }
 }
 
@@ -924,30 +1215,298 @@ impl FileSystemProvider for S3Provider {
         is_safe_s3_leaf(name)
     }
 
-    fn stat(&self, _path: &str) -> Result<ProviderEntry, String> {
-        Err("s3: stat is not yet implemented (CPE-1684)".to_string())
+    /// `HEAD` on the object key, falling back to a prefix probe so a virtual directory is reported as one
+    /// rather than as missing (CPE-1684).
+    ///
+    /// # A missing key and a denied key must stay distinguishable, and HEAD makes that hard
+    ///
+    /// **HEAD responses carry no body by protocol**, so [`error::map_s3_error`] — which is body-driven and
+    /// correct as a parser — would answer *"the body could not be read … refusing to guess"* for every
+    /// missing key, i.e. for the single most common failure in the whole provider. [`map_response_error`]
+    /// is the rule that fixes it: with no body, the **status and the method** are the evidence. Nothing is
+    /// guessed, because an empty body from a HEAD is what the protocol requires rather than a symptom.
+    ///
+    /// **The 403 arm is not simply "denied", and says so.** AWS answers 403 rather than 404 for a key that
+    /// does not exist when the caller lacks `s3:ListBucket`, so a bodiless 403 genuinely means "denied, or
+    /// missing and you may not be told which". The message states both instead of picking one; it is still
+    /// cleanly distinct from the 404 arm, which is what the criterion asks for.
+    ///
+    /// # The directory fallback, and why `entries.is_empty()` could not be it
+    ///
+    /// S3 has no directories, so a 404 on the object key does **not** mean the path is absent — a virtual
+    /// directory is just a prefix with keys under it. On a 404 (and only a 404 — a denial is reported as a
+    /// denial, never softened into "not found") this probes `key/` via [`S3Provider::probe_prefix`] and
+    /// reports a directory if anything at all sits under it. That must count the zero-byte marker object,
+    /// which the listing parser correctly filters out of `entries`; otherwise a directory this very module
+    /// had just created with `mkdir` would stat as missing. See [`ListPage::raw_entries`].
+    ///
+    /// # A 200 with no usable `Content-Length` is refused, not reported as zero
+    ///
+    /// The size is the one thing a HEAD exists to learn. A server that answers 200 and does not supply a
+    /// parseable `Content-Length` has not told us, and `size: 0` would be an invented measurement — the
+    /// exact class of confident wrong answer this crate is written against. (Note `ureq` reports a
+    /// *malformed* response header as absent, so "absent" here covers both; the message says so.)
+    fn stat(&self, path: &str) -> Result<ProviderEntry, String> {
+        let key = match provider_path_to_object_key(path) {
+            Ok(key) => key,
+            // The bucket root: not an object, and no HEAD addresses it. Rather than fabricate a success
+            // for a path nothing was asked about, prove it — a one-key listing exercises the endpoint,
+            // the addressing and the credentials, and fails loudly if any of them is wrong.
+            Err(_) => {
+                self.probe_prefix("")?;
+                return Ok(ProviderEntry { name: "/".to_string(), is_dir: true, size: 0 });
+            }
+        };
+        let name = key.rsplit('/').next().unwrap_or(&key).to_string();
+        let target = self.config.object_target(&key)?;
+        let (url, req) = self.signed_request(
+            "HEAD",
+            &target,
+            &[],
+            sigv4::EMPTY_PAYLOAD_SHA256,
+            // A metadata exchange, not a transfer: bounded end to end.
+            Some(self.request_deadline),
+        )?;
+        let (status, resp) = Self::send_capturing_status(req, None, &url)?;
+        if (200..300).contains(&status) {
+            let size = resp
+                .header("Content-Length")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .ok_or_else(|| {
+                    format!(
+                        "s3: stat {path:?}: the server answered HTTP {status} but sent no usable \
+                         Content-Length (absent, malformed, or not a number), so the object's size is \
+                         unknown — refusing to report 0 as if it had been measured"
+                    )
+                })?;
+            return Ok(ProviderEntry { name, is_dir: false, size });
+        }
+        // A HEAD response has no body to read; this is empty by protocol, which is exactly what routes
+        // `map_response_error` to its status+method rules.
+        let (body, _) = read_body_capped(resp.into_reader()).unwrap_or_default();
+        if status == 404 {
+            let (raw_entries, _, _) = self.probe_prefix(&format!("{key}/"))?;
+            if raw_entries > 0 {
+                return Ok(ProviderEntry { name, is_dir: true, size: 0 });
+            }
+        }
+        Err(map_response_error("HEAD", status, &body, path))
     }
 
-    fn read(&self, _path: &str) -> Result<Vec<u8>, String> {
-        Err("s3: read is not yet implemented (CPE-1684)".to_string())
+    /// `GET` the object, read in fixed [`READ_CHUNK_BYTES`] chunks, capped at `read_cap` (CPE-1684).
+    ///
+    /// # What "bounded" honestly means here — the ticket's wording is not achievable as written
+    ///
+    /// The acceptance criterion says *"`read` of a large object never holds the whole body in memory at
+    /// once"*. **It cannot**, and no implementation of this trait method could: `FileSystemProvider::read`
+    /// returns `Vec<u8>`, so by the time it returns, the whole object is in memory by construction. A
+    /// genuinely streaming read is a trait-level change across all four remote backends — `cpe-ftp`'s
+    /// module doc already names it as the real fix and puts it out of scope, and `cpe-webdav` says the same.
+    ///
+    /// What IS delivered, and what the tests actually assert:
+    ///
+    /// - **No unbounded single allocation.** The buffer is a fixed 64 KiB stack array, matching `cpe-ftp`'s
+    ///   [`READ_CHUNK_BYTES`] convention exactly. What the server sends changes how many iterations happen,
+    ///   never how much is demanded in one call — so a huge declared `Content-Length` cannot itself make
+    ///   this ask for a huge allocation.
+    /// - **The cap fires DURING the transfer, not after it.** Checked per chunk, before the bytes are
+    ///   appended, so an endless or over-size body is refused at `read_cap` + one chunk rather than after
+    ///   the process has already buffered everything. That is the difference a `read_to_end` cannot make,
+    ///   and it is what the negative-control test measures.
+    /// - **An over-cap read is a loud `Err`, never a truncated `Vec`.** `cpe_server::transfer`'s download
+    ///   sink writes whatever comes back to disk as the finished file, so a silent truncation here would be
+    ///   data loss wearing a success.
+    ///
+    /// # No end-to-end deadline, deliberately
+    ///
+    /// This is the call site [`S3Provider::signed_request`]'s `None` exists for. An overall
+    /// `ureq::Request::timeout` would kill a legitimately slow multi-minute download of a large object over
+    /// a bad link — it bounds elapsed time regardless of progress, and it *replaces* rather than
+    /// supplements [`TIMEOUT_READ`]. A per-read stall bound is the right one here: it fires when the server
+    /// stops sending, not when the file is big. Memory is bounded separately, by `read_cap` above.
+    fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        let key = provider_path_to_object_key(path)?;
+        let target = self.config.object_target(&key)?;
+        let (url, req) =
+            self.signed_request("GET", &target, &[], sigv4::EMPTY_PAYLOAD_SHA256, None)?;
+        let (status, resp) = Self::send_capturing_status(req, None, &url)?;
+        if !(200..300).contains(&status) {
+            let (body, _) = read_body_capped(resp.into_reader()).unwrap_or_default();
+            return Err(map_response_error("GET", status, &body, path));
+        }
+
+        let mut reader = resp.into_reader();
+        let mut out: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; READ_CHUNK_BYTES];
+        loop {
+            let n = reader
+                .read(&mut chunk)
+                .map_err(|e| format!("s3: read {path:?}: reading the object body failed: {e}"))?;
+            if n == 0 {
+                break;
+            }
+            // Checked BEFORE the append, so the cap bounds what is ever held rather than describing what
+            // already is. Deleting this check turns `a_read_past_the_cap_is_refused_...` red.
+            if out.len() as u64 + n as u64 > self.read_cap {
+                return Err(format!(
+                    "s3: read {path:?}: the object ran past the {}-byte read cap without finishing — \
+                     refusing rather than returning a truncated object as if it were the whole file",
+                    self.read_cap
+                ));
+            }
+            out.extend_from_slice(&chunk[..n]);
+        }
+        Ok(out)
     }
 
-    fn write(&mut self, _path: &str, _data: &[u8]) -> Result<(), String> {
-        Err("s3: write is not yet implemented (CPE-1684)".to_string())
+    /// `PUT` the whole body under the object key (CPE-1684).
+    ///
+    /// **Multipart upload is out of scope by decision, not by omission.** The trait hands over a complete
+    /// `&[u8]` that is already in memory, so S3's 5 GB single-`PUT` ceiling is nowhere near the binding
+    /// constraint — `read_cap`'s 2 GiB memory backstop and the caller's own RAM bind first. A body past
+    /// [`MAX_SINGLE_PUT_BYTES`] is refused here, before the round trip, purely so the ceiling is named
+    /// rather than arriving as a server-side rejection.
+    ///
+    /// No end-to-end deadline, for the same reason [`FileSystemProvider::read`] has none: uploading a large
+    /// object over a poor link is legitimately slow, and [`TIMEOUT_WRITE`]'s per-write stall bound is the
+    /// one that distinguishes "slow" from "gone".
+    fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        let key = provider_path_to_object_key(path)?;
+        if too_big_for_single_put(data.len() as u64) {
+            return Err(format!(
+                "s3: write {path:?}: {} bytes exceeds the {MAX_SINGLE_PUT_BYTES}-byte ceiling for a \
+                 single S3 PUT, and multipart upload is not implemented — refusing here rather than \
+                 sending an upload the server will reject",
+                data.len()
+            ));
+        }
+        let target = self.config.object_target(&key)?;
+        let (status, body) = self.signed_exchange("PUT", &target, &[], Some(data), None)?;
+        if !(200..300).contains(&status) {
+            return Err(map_response_error("PUT", status, &body, path));
+        }
+        Ok(())
     }
 
-    fn mkdir(&mut self, _path: &str) -> Result<(), String> {
-        Err("s3: mkdir is not yet implemented (CPE-1684)".to_string())
+    /// `PUT` a zero-byte object at exactly the key [`provider_path_to_key_prefix`] produces — the marker
+    /// convention every S3 client uses to make an empty virtual directory visible (CPE-1684).
+    ///
+    /// **The key shape is not re-derived here on purpose.** CPE-1683 settled it and made that function
+    /// `pub` for this exact call: `/photos/2024` → `photos/2024/`, no leading slash, one trailing slash,
+    /// nothing else. `parse_list_bucket_result` filters a `<Contents>` entry whose `<Key>` equals the
+    /// requested prefix, so writing the marker at precisely that key is what keeps it from coming back as
+    /// a phantom zero-byte *file* inside its own directory. Deriving the same string a second way here —
+    /// off by one slash — is exactly how that phantom gets created.
+    ///
+    /// The bucket root is refused rather than given a marker: it needs none (it always exists), and an
+    /// object key of `""` is not a thing S3 has.
+    fn mkdir(&mut self, path: &str) -> Result<(), String> {
+        let marker_key = provider_path_to_key_prefix(path);
+        if marker_key.is_empty() {
+            return Err(format!(
+                "s3: mkdir {path:?}: that is the bucket root, which always exists and has no marker \
+                 object — S3 has no zero-length key to write one under"
+            ));
+        }
+        let target = self.config.object_target(&marker_key)?;
+        // A zero-byte marker is a metadata-sized exchange, not a transfer: bounded end to end.
+        let (status, body) =
+            self.signed_exchange("PUT", &target, &[], Some(&[]), Some(self.request_deadline))?;
+        if !(200..300).contains(&status) {
+            return Err(map_response_error("PUT", status, &body, path));
+        }
+        Ok(())
     }
 
-    fn delete(&mut self, _path: &str) -> Result<(), String> {
-        Err("s3: delete is not yet implemented (CPE-1684)".to_string())
+    /// `DELETE` exactly **one** key. A virtual directory with content under it is refused, not walked
+    /// (CPE-1684).
+    ///
+    /// # What the user is told, given that S3 answers 204 for a key that never existed
+    ///
+    /// S3's `DELETE` is idempotent: a missing key returns `204 No Content`, identically to a key that was
+    /// really removed. So a 2xx here proves *"that key is absent now"* and **not** *"an object was
+    /// deleted"*, and this method claims only the former. It deliberately does **not** add a
+    /// `HEAD`-before-`DELETE`: that would be an extra round trip which is racy by construction (the key can
+    /// appear or vanish between the two calls) and still could not prove the `DELETE` removed anything —
+    /// paying for a stronger-sounding claim that is not actually stronger.
+    ///
+    /// That is benign for a single object — a file the user could see, which is already gone, reports
+    /// success — but it would be **actively dangerous for a directory**, which is where the ticket's
+    /// warning bites: a plain single-key `DELETE` of `photos/2024` returns 204 while every object under
+    /// `photos/2024/` stays exactly where it was. "Deleted" would be a flat lie about a whole subtree.
+    ///
+    /// # So the directory case is decided first, with one request, and refused
+    ///
+    /// [`S3Provider::probe_prefix`] answers all three cases in one `ListObjectsV2`:
+    ///
+    /// - **real entries under the prefix** → refused, and the message says why. S3 has no recursive or
+    ///   atomic multi-key delete; a per-key loop that fails halfway leaves part of the tree gone while
+    ///   reporting success, which is the same class of confident-wrong-answer as a copy+delete pretending
+    ///   to be a rename. Recursive delete is out of scope for v1 for that reason, exactly as the ticket
+    ///   offers as one of its two options.
+    /// - **only the zero-byte marker** (an empty directory, the shape `mkdir` writes) → that *is* a single
+    ///   key, so it is deleted honestly, at the marker key `key/`.
+    /// - **nothing under the prefix** → an ordinary object; delete the key itself.
+    ///
+    /// The probe costs one extra request per delete. That is the price of never reporting a subtree
+    /// deleted that is still entirely there.
+    fn delete(&mut self, path: &str) -> Result<(), String> {
+        let key = provider_path_to_object_key(path)?;
+        let (raw_entries, real_entries, more_pages) = self.probe_prefix(&format!("{key}/"))?;
+        // `more_pages`: a marker-only page that is ALSO truncated means the server under-filled a page it
+        // was allowed to under-fill and there is more beneath the prefix — treat it as content, never as
+        // an empty directory. See `probe_prefix`.
+        if real_entries > 0 || (raw_entries > 0 && more_pages) {
+            return Err(format!(
+                "s3: delete {path:?}: this is a virtual directory with content under it, and S3 has no \
+                 recursive or atomic multi-key delete. Removing it means deleting every key beneath the \
+                 prefix one at a time, and a loop that failed halfway would leave part of the tree gone \
+                 while reporting success — so it is refused rather than faked, for the same reason rename \
+                 is. Delete the objects inside it first."
+            ));
+        }
+        // `raw_entries > 0` with no real entries means the prefix holds only its own zero-byte marker —
+        // an empty directory, which really is one key and really can be deleted.
+        let doomed_key = if raw_entries > 0 { format!("{key}/") } else { key };
+        let target = self.config.object_target(&doomed_key)?;
+        let (status, body) =
+            self.signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))?;
+        if !(200..300).contains(&status) {
+            return Err(map_response_error("DELETE", status, &body, path));
+        }
+        Ok(())
     }
 
-    fn rename(&mut self, _from: &str, _to: &str) -> Result<(), String> {
-        Err("s3: rename is not supported — S3 has no atomic rename (a copy+delete emulation is not \
-             attempted; see the CPE-1684 rename decision)"
-            .to_string())
+    /// **Refused. S3 has no rename, and faking one would be a confident wrong answer** (CPE-1684 — this is
+    /// the decision the ticket exists to make, and `ProviderCapabilities::supports_rename = false` is how a
+    /// caller sees it coming rather than discovering it here).
+    ///
+    /// The tempting implementation is `CopyObject` then `DeleteObject`. Every part of it is wrong for a
+    /// thing presented to the user as a rename:
+    ///
+    /// - **Not atomic.** Two independent requests with no transaction between them. If the delete fails
+    ///   after the copy succeeds, the user now has two copies and believes they have one. If the copy
+    ///   half-fails on a large object, they may have neither.
+    /// - **O(size), not O(1).** Renaming a 40 GB object copies 40 GB, server-side but not free — and it can
+    ///   time out, in which case see the previous point.
+    /// - **It silently rewrites the object.** Storage class, server-side-encryption settings and
+    ///   user metadata do not survive a naive `CopyObject` unchanged; a "rename" that quietly moves an
+    ///   object from Glacier to Standard, or drops its metadata, has done something the user never asked
+    ///   for and was never told about.
+    ///
+    /// No request of any kind is issued: this returns before touching the network, and a test asserts the
+    /// fixture's request counter is still `0` afterwards — proving it refused rather than half-faked.
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        Err(format!(
+            "s3: rename {from:?} -> {to:?} is not supported: S3 has no rename operation and no atomic \
+             multi-object operation to build one from. The usual emulation — copy the object to the new \
+             key, then delete the old one — is refused here deliberately: it is not atomic (a delete that \
+             fails after the copy succeeds silently leaves two copies), it costs time proportional to the \
+             object's size rather than being instant, and it rewrites storage class and metadata behind \
+             the user's back. capabilities().supports_rename is false so this can be seen before it is \
+             attempted. Copy the object to the new key and delete the old one explicitly if that is really \
+             what you want."
+        ))
     }
 
     /// S3 "directories" are a key-prefix convention, not real objects, and S3 has no atomic rename
@@ -1107,6 +1666,24 @@ mod tests {
         }
 
         let real = root.join(path.trim_start_matches('/'));
+        let leaf = path.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_string();
+
+        // CPE-1684 sentinels, so the object-op tests can reach the response shapes a real gateway produces
+        // but a `std::fs`-backed fixture otherwise never would. Both are keyed off the key's LAST segment,
+        // so an ordinary key can never trip them by accident:
+        //   * `deny-*`  -> a bodiless 403, the shape S3 sends for a denied key (and, per AWS's documented
+        //                  behaviour, for a missing key when the caller lacks s3:ListBucket).
+        //   * `nolen-*` -> a 200 HEAD with NO Content-Length, the broken-server shape `stat` must refuse
+        //                  rather than report as a zero-byte object.
+        if leaf.starts_with("deny-") {
+            let _ = req.respond(tiny_http::Response::empty(403));
+            return;
+        }
+        if method == "HEAD" && leaf.starts_with("nolen-") {
+            let _ = req.respond(tiny_http::Response::empty(200));
+            return;
+        }
+
         match method.as_str() {
             "GET" => match std::fs::read(&real) {
                 Ok(data) => {
@@ -1117,12 +1694,35 @@ mod tests {
                 }
             },
             "HEAD" => {
-                let code = if real.is_file() { 200 } else { 404 };
-                let _ = req.respond(tiny_http::Response::empty(code));
+                // A real HEAD answers 200 with the object's `Content-Length` and no body. `tiny_http`
+                // turns an explicit `Content-Length` header into the response's `data_length`
+                // (`response.rs:266-270`) and suppresses the body itself for a HEAD request
+                // (`request.rs:449`), so this puts the right bytes on the wire without sending any.
+                match std::fs::metadata(&real) {
+                    Ok(meta) if meta.is_file() => {
+                        let len = tiny_http::Header::from_bytes(
+                            &b"Content-Length"[..],
+                            meta.len().to_string().as_bytes(),
+                        )
+                        .unwrap();
+                        let _ = req.respond(tiny_http::Response::empty(200).with_header(len));
+                    }
+                    _ => {
+                        let _ = req.respond(tiny_http::Response::empty(404));
+                    }
+                }
             }
             "PUT" => {
                 if path.ends_with('/') {
                     let _ = std::fs::create_dir_all(&real);
+                    // Real S3 stores a `mkdir` marker as a genuine zero-byte OBJECT at a key ending in
+                    // `/`, and returns it as a `<Contents>` whose `<Key>` equals the prefix when that
+                    // prefix is listed. A filesystem cannot hold a file whose name ends in the separator,
+                    // so the fixture records the marker with the `.s3marker` sentinel `list_page_xml`
+                    // already understands. Without this, a directory `mkdir` had just created would list
+                    // with no marker at all — and every existence probe that depends on the marker would
+                    // be testing a shape real S3 never produces.
+                    let _ = std::fs::write(real.join(".s3marker"), b"");
                 } else {
                     if let Some(p) = real.parent() {
                         let _ = std::fs::create_dir_all(p);
@@ -1134,7 +1734,17 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(200));
             }
             "DELETE" => {
-                let _ = std::fs::remove_file(&real);
+                if path.ends_with('/') {
+                    // Deleting the marker object. `remove_dir` only succeeds when the directory is empty,
+                    // which mirrors what deleting the marker key alone actually achieves on S3: the
+                    // prefix stops existing exactly when nothing else is under it.
+                    let _ = std::fs::remove_file(real.join(".s3marker"));
+                    let _ = std::fs::remove_dir(&real);
+                } else {
+                    let _ = std::fs::remove_file(&real);
+                }
+                // 204 unconditionally, including for a key that was never there — S3's real, idempotent
+                // DELETE semantics, and the reason `S3Provider::delete` cannot claim an object existed.
                 let _ = req.respond(tiny_http::Response::empty(204));
             }
             _ => {
