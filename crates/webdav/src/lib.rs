@@ -570,6 +570,17 @@ mod tests {
         /// root?"* without enumerating `/`, `//`, `/.`, `/./`, `/.//`, `//./`, `/./.` … — a denylist
         /// that was incomplete three rounds running.
         ///
+        /// **This function does not close the `/./` family, and an earlier version of this doc
+        /// claimed it did.** `Path::components()` already drops every non-leading `CurDir` before
+        /// anything here runs — probe: `Path::new(r"C:\tmp\rig\.\.").components()` yields
+        /// `[Prefix, RootDir, "tmp", "rig"]`, no `CurDir` at all. Deleting the `CurDir` arm below
+        /// leaves all six tests green; deleting the whole filter at the commit before `..` popping
+        /// was added left all 25 green. The arm is kept as a total match over `Component` rather
+        /// than as load-bearing code, and the `/./` rows do not even reach here now that
+        /// `canonicalize` short-circuits them. Recorded because crediting a function with work the
+        /// standard library had already done is the same over-attribution this PR keeps finding in
+        /// other people's comments. (PR #902 review.)
+        ///
         /// **`..` is popped, and that changed in round 4.** Round 4 first *preserved* `..`, reasoning
         /// that popping it would turn this into a containment check and containment is CPE-1730's
         /// scope. The UAT showed the reasoning had skipped a case: `/nonexistent/..` escapes nothing
@@ -581,10 +592,22 @@ mod tests {
         /// So `..` pops a preceding ordinary component. What it does **not** do is claim containment:
         /// a `..` with nothing to pop is *kept*, so `/../x` normalises to a path still carrying `..`,
         /// compares unequal to the root, and is allowed through to `fs::rename` — which is the
-        /// documented CPE-1730 escape, unchanged by this. **Lexical `..` resolution is not sound in
-        /// the presence of symlinks** (`a/link/..` need not be `a`); it is used here only to answer
-        /// an equality question about one specific path, never to decide that something is inside the
-        /// root.
+        /// documented CPE-1730 escape, unchanged by this.
+        ///
+        /// **Lexical `..` resolution is not sound in the presence of symlinks** (`a/link/..` need not
+        /// be `a`) — and the *direction* of that unsoundness is what bounds it. It errs **safe**, by
+        /// proof rather than by hope (PR #902 review):
+        ///
+        /// 1. If the destination exists, `canonicalize` decides and this function never runs.
+        /// 2. A path that does not exist cannot have a symlink as its *final* component.
+        /// 3. So the only residual case is a `link/..` **mid-path** in a destination that does not
+        ///    exist — and popping makes the path *shorter*, hence *more* likely to equal the root,
+        ///    hence more likely to **refuse**.
+        ///
+        /// There is no input for which popping makes a root-destination compare unequal. The unsound
+        /// direction refuses a legitimate move; it can never allow one onto the root. The previous
+        /// wording flagged the unsoundness without saying which way it fell, which is a caveat rather
+        /// than a bound — nothing a reader could act on.
         fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
             let mut out: Vec<std::path::Component> = Vec::new();
             for c in p.components() {
@@ -618,6 +641,19 @@ mod tests {
         /// not-yet-existing name is the ordinary case. So: canonicalize when both sides resolve, fall
         /// back to the lexical comparison when they do not. The fallback is what handles the common
         /// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
+        ///
+        /// **"When they do not resolve" means any `Err`, not just "does not exist"** — `EACCES` on a
+        /// parent, `ELOOP`, `ENAMETOOLONG`, a Windows sharing violation. In those cases this silently
+        /// becomes the byte-wise comparison, with the case-insensitivity and trailing-dot blind spots
+        /// that motivated `canonicalize` in the first place. That degrade is **kept deliberately**
+        /// (PR #902 review): the tempting alternative — refuse if *either* comparison says
+        /// same-place — is wrong, because for `root/link/..` where `link` leaves the tree
+        /// `canonicalize` is right to say "different place, allow", and OR-ing the lexical answer
+        /// would refuse a legitimate move. The degrade is also narrow: every spelling that *needs*
+        /// `canonicalize` requires the client to know the absolute root path, which is CPE-1730's
+        /// territory rather than this guard's. What was missing was the bound, not a behaviour
+        /// change — an unbounded "falls back when they do not resolve" reads as "when the path does
+        /// not exist", and that is not what the code does.
         /// **The two halves overlap on Windows, and the guard-neutralisation probes say so plainly:**
         ///
         /// **Each half is load-bearing on exactly one platform, and neither is redundant** — measured
@@ -778,8 +814,12 @@ mod tests {
                 // Also measured and left alone, all failing *safe*: duplicate `Destination` headers
                 // take the **first** where a real server may take the last; and `user@host`, a
                 // trailing dot on the hostname, and `localhost` vs `127.0.0.1` all answer `502` —
-                // over-strict, never falsely local. No two distinct authority strings compare equal
-                // under `eq_ignore_ascii_case`, so there is no false-local direction to exploit.
+                // over-strict, never falsely local. **Case is the only equivalence the comparison
+                // admits**, and that is the right one — so every other difference errs towards 502
+                // and there is no false-local direction to exploit here. (The earlier wording, "no
+                // two distinct authority strings compare equal under `eq_ignore_ascii_case`", is
+                // literally false: `HOST` and `host` are distinct and do compare equal. That is the
+                // whole point of the call.)
                 let parsed = req
                     .headers()
                     .iter()
@@ -1634,15 +1674,23 @@ mod tests {
             // The converse misfire: a legitimately local destination whose path contains `://` was
             // answered 502. A guard that refuses valid requests is still a wrong guard.
             //
-            // Asserted as **not-502** rather than as a status, because the status is genuinely
-            // platform-dependent and this row is not about the status. Windows forbids `:` in a
-            // filename, so the rename fails and the rig answers 404; on Linux the same request
-            // creates the file and answers 201. Pinning either number would red this row on the
-            // other half of CI's 3-OS matrix. What must hold everywhere is that the *host* check
-            // does not fire: this destination names the server it was sent to.
+            // **`404`, and the reason it is not asserted as "not 502" is worth keeping.** This row
+            // first read `not:502`, justified by a platform split: Windows forbids `:` in a filename
+            // so the rename fails, "on Linux the same request creates the file and answers 201", so
+            // no single status could be pinned. The reviewer measured that on real Linux and it is
+            // false — `p:` and `evil.example` are missing intermediate directories and `fs::rename`
+            // does not create parents, so it is `ENOENT` and the rig answers **404 on Linux and
+            // macOS too**. The platform split that justified the negative assertion did not exist.
+            //
+            // That matters beyond the tidiness: `not:502` passes on an **empty** response. Its only
+            // two assertions were `!stolen.txt.exists()` and `!resp.contains("502")`, and the
+            // tree-intact assert is skipped for `not:` rows — so a dead server, a reset connection
+            // or a read timeout satisfied all of it. A row asserting a negative about a string is
+            // satisfied by the absence of the string, which the absence of a *response* also
+            // provides. Pinning `404` requires the server to have actually answered.
             (
                 Some("http://{host}/p://evil.example/ok.txt"),
-                "not:502",
+                "404",
                 "a LOCAL Destination whose path contains `://` — must not be read as cross-host",
             ),
         ];
@@ -1662,11 +1710,18 @@ mod tests {
                 Some(d) => format!("Destination: {}\r\n", d.replace("{host}", &addr)),
                 None => String::new(),
             };
-            // Rows about the *host* move a **file**, not `/`. Every row used to send `MOVE /`, which
-            // 404s before the Destination is ever consulted — so `!stolen.txt.exists()` below could
-            // not have fired for any input, and the comment above it described a request the test
-            // never sent. With a real source, a Destination that got executed locally actually
-            // produces `stolen.txt`, so the assertion can fail. (PR #902 review.)
+            // Rows about the *host* move a **file**, not `/`. Every row used to send `MOVE /`, and
+            // `!stolen.txt.exists()` below could not have fired for any of them — so the comment
+            // above it described a request the test never sent. With a real source, a Destination
+            // that got executed locally actually produces `stolen.txt`, so the assertion can fail.
+            //
+            // The **reason** matters and the first version of this comment got it wrong: it said
+            // `MOVE /` "404s before the Destination is ever consulted". Measured against the rig,
+            // that request answers `502` with the host guard present and `404` with it removed —
+            // and the 404 comes from `fs::rename(root, root/stolen.txt)` failing, which is *after*
+            // the Destination has been parsed, resolved and used. No path through `MOVE` 404s
+            // before reading the Destination. The conclusion held; the mechanism named for it did
+            // not, which is the exact substitution this file exists to stop. (PR #902 review.)
             //
             // The root-resolution rows keep `MOVE /`: their subject is the destination, and a `/`
             // source is the shape the original bug was reported in.
@@ -1691,29 +1746,17 @@ mod tests {
                 "[{why}] a Destination naming another host must never be executed against the local \
                  tree (response was {resp:?})"
             );
-            // Only the refusal rows assert the tree is untouched. The `201` row is a *legitimate*
-            // move and is supposed to relocate its source — asserting otherwise would demand the
-            // guard refuse a valid request, which is the failure mode that row exists to catch.
-            if !want.starts_with("not:") {
-                assert!(
-                    root.join("readme.txt").is_file()
-                        && root.join("sub").join("nested.txt").is_file(),
-                    "[{why}] the served tree must be intact; the rig renamed onto the served root \
-                     rather than refusing (response was {resp:?})"
-                );
-            }
-            match want.strip_prefix("not:") {
-                Some(forbidden) => assert!(
-                    !resp.contains(forbidden),
-                    "[{why}] must NOT answer {forbidden}. A destination naming the server it was \
-                     sent to is local, whatever its path happens to contain. Got {resp:?}"
-                ),
-                None => assert!(
-                    resp.contains(want),
-                    "[{why}] expected {want}; a destination that resolves to the served root is a \
-                     refusal, not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
-                ),
-            }
+            // Every row here is refused one way or another, so the tree must survive all of them.
+            assert!(
+                root.join("readme.txt").is_file() && root.join("sub").join("nested.txt").is_file(),
+                "[{why}] the served tree must be intact; the rig renamed onto the served root \
+                 rather than refusing (response was {resp:?})"
+            );
+            assert!(
+                resp.contains(want),
+                "[{why}] expected {want}; a destination that resolves to the served root is a \
+                 refusal, not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
+            );
         }
     }
 
