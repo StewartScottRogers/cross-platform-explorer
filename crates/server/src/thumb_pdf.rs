@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn render_first_page_renders_a_real_minimal_pdf_when_pdfium_is_available() {
         if pdfium().is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping render_first_page real-render test: no pdfium library available in this \
                  environment (expected until CPE-1258 provisions one for CI/dev)"
             );
@@ -309,7 +309,7 @@ mod tests {
     #[test]
     fn render_first_page_handles_a_zero_max_edge_without_panicking() {
         if pdfium().is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping render_first_page zero-max-edge test: no pdfium library available in this \
                  environment (expected until CPE-1258 provisions one for CI/dev)"
             );
@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn extract_text_returns_real_text_when_pdfium_is_available() {
         if pdfium().is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_text real-extraction test: no pdfium library available in this \
                  environment (expected until CPE-1258 provisions one for CI/dev)"
             );
@@ -399,7 +399,7 @@ mod tests {
     #[test]
     fn extract_text_respects_max_chars() {
         if pdfium().is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_text max_chars test: no pdfium library available in this environment \
                  (expected until CPE-1258 provisions one for CI/dev)"
             );

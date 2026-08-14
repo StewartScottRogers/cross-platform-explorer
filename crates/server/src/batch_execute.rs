@@ -1233,7 +1233,7 @@ mod tests {
         let victim = outside.join("newly-planted.jpg"); // deliberately does NOT exist yet
         let link = selected.join("link.jpg");
         if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping dangling-symlink containment test: could not create a symlink in this \
                  environment (Windows needs Developer Mode or elevation) — same skip pattern links.rs uses"
             );
@@ -1290,7 +1290,7 @@ mod tests {
         let link_b = selected.join("linkB.jpg");
         let link_a = selected.join("linkA.jpg");
         if crate::links::create_symlink(&victim.to_string_lossy(), &link_b.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1642_symlink_chain_alias_is_refused: could not create a symlink here \
                  (Windows needs Developer Mode or elevation) — this test verified NOTHING"
             );
@@ -1298,7 +1298,7 @@ mod tests {
             return;
         }
         if crate::links::create_symlink("linkB.jpg", &link_a.to_string_lossy()).is_err() {
-            eprintln!("SKIPPING cpe_1642_symlink_chain_alias_is_refused: second hop could not be created");
+            crate::skip_notice!("SKIPPING cpe_1642_symlink_chain_alias_is_refused: second hop could not be created");
             let _ = fs::remove_dir_all(&d);
             return;
         }
@@ -1418,7 +1418,7 @@ mod tests {
         // the probe has to cope with a `..` segment inside an over-MAX_PATH path too.
         let link_a = selected.join("linkA.jpg");
         if crate::links::create_symlink("..\\outside\\important.jpg", &link_a.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1642_over_max_path_symlink_alias: could not create a symlink here \
                  (Windows needs Developer Mode or elevation) — this test verified NOTHING"
             );
@@ -1467,7 +1467,7 @@ mod tests {
         if crate::links::create_symlink("linkB.jpg", &link_a.to_string_lossy()).is_err()
             || crate::links::create_symlink("linkA.jpg", &link_b.to_string_lossy()).is_err()
         {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1642_unverifiable_output_message: could not create a symlink here \
                  (Windows needs Developer Mode or elevation) — this test verified NOTHING"
             );
@@ -1688,7 +1688,7 @@ mod tests {
         if crate::links::create_symlink(&inside_target.to_string_lossy(), &link_path.to_string_lossy())
             .is_err()
         {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1624_a_link_repointed_mid_batch_is_caught_at_write_time: could not create \
                  a symlink here (Windows needs Developer Mode or elevation) — this test verified NOTHING"
             );
@@ -1843,7 +1843,7 @@ mod tests {
         fs::write(&a, png_bytes(8, 8)).unwrap();
         let b = d.join("shared-2.png");
         if fs::hard_link(&a, &b).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1652_a_census_past_the_cap_refuses_the_write: no hard-link support here \
                  — this test verified NOTHING"
             );
@@ -2192,7 +2192,7 @@ mod tests {
         fs::write(&target, b"the attacker's planted target file").unwrap();
         let decoy = selected.join("decoy.png");
         if fs::hard_link(&target, &decoy).is_err() {
-            eprintln!("SKIP secaudit_e2e: no hard links on this fs — VERIFIED NOTHING");
+            crate::skip_notice!("SKIP secaudit_e2e: no hard links on this fs — VERIFIED NOTHING");
             return;
         }
         let original = fs::read(&target).unwrap();

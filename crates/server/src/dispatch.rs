@@ -331,7 +331,15 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000));
         }
-        std::fs::read(path).is_err() && std::fs::metadata(path).is_ok()
+        // CPE-1717: `supported_here = true` — `(RD)` on Windows and `chmod 0o000` on Unix both leave
+        // the entry stattable while refusing its bytes, on every platform CI runs. So a failure to
+        // stage is a runner that changed under us, and under CI that is red rather than a notice
+        // printed inside a passing run of a 2,100-test suite. See `fsutil::require_staged`.
+        crate::fsutil::require_staged(
+            "deny_read",
+            true,
+            std::fs::read(path).is_err() && std::fs::metadata(path).is_ok(),
+        )
     }
 
     /// Undo [`deny_read`] so the scratch directory can be removed.

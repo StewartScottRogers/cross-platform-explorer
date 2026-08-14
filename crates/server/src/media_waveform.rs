@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn extract_waveform_peaks_extracts_a_real_non_degenerate_envelope_when_ffmpeg_is_available() {
         if !ffmpeg_available() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_waveform_peaks real-render test: no ffmpeg binary available in this \
                  environment"
             );
@@ -482,7 +482,7 @@ mod tests {
     #[test]
     fn extract_waveform_peaks_downsamples_a_longer_source_to_the_same_bucket_count() {
         if !ffmpeg_available() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_waveform_peaks downsample test: no ffmpeg binary available in this \
                  environment"
             );

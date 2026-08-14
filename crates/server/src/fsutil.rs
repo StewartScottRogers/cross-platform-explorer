@@ -397,6 +397,143 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1717 — what a FAILED staging attempt means, decided in one place
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What to do about a leg that could not stage the condition it exists to test.
+///
+/// A pure classifier — no environment, no filesystem — so the policy itself is unit-testable without
+/// the env-var races that make "set a variable and run a test" unreliable under a parallel harness.
+/// [`require_staged`] is the thin wrapper that reads the environment and applies this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagingVerdict {
+    /// The condition is staged; the leg runs for real.
+    Staged,
+    /// Staging failed on a platform where the mechanism *cannot* work (an ACL deny on Linux, the
+    /// `fs::metadata` traversal deny on Windows). Legitimate: announce it and move on.
+    LegitimateSkip,
+    /// Staging failed on a platform where the mechanism is *supposed* to work, under a harness that
+    /// has asked for strictness. The runner changed under us — go red.
+    Fail,
+}
+
+/// The CPE-1717 policy, as a pure function of the four facts that decide it.
+///
+/// `supported_here` is the caller's own claim about the platform it is running on: "this mechanism is
+/// supposed to work here". It is a **compile-time** property of the mechanism (`cfg!(unix)` for the
+/// traversal deny, `true` for the target deny and for link creation), never a runtime observation of
+/// whether it happened to work — deriving it from the outcome would make the check vacuous.
+pub fn staging_verdict(
+    supported_here: bool,
+    staged: bool,
+    strict: bool,
+    sabotaged: bool,
+) -> StagingVerdict {
+    // Sabotage simulates a runner that lost the capability, so the enforcement below can be broken on
+    // demand and shown to go red (Evidence Rules, `Ticketing/wiki.md` → "Guard neutralisation").
+    if staged && !sabotaged {
+        return StagingVerdict::Staged;
+    }
+    if supported_here && strict {
+        StagingVerdict::Fail
+    } else {
+        StagingVerdict::LegitimateSkip
+    }
+}
+
+/// Whether a staging failure on a supporting platform is a hard failure rather than a loud skip.
+///
+/// **Strict under CI, lenient locally, and that asymmetry is the whole point of CPE-1717.** The bug
+/// this fixes is not that the skip notices are unprintable — measured, they are not; see
+/// [`require_staged`] — it is that a *passing* leg with a notice in a 2,100-test log is a green board
+/// over zero coverage, and nobody reads a green log. CI is exactly where the board lies, so CI is
+/// where a leg that verified nothing must be red. A developer, meanwhile, may legitimately be in an
+/// environment the mechanism cannot work in (a root Docker shell, a network share, an ACL-less
+/// filesystem, a Windows account with neither Developer Mode nor the junction fallback) and must not
+/// be blocked by it; there the loud skip is still the right answer.
+///
+/// `CPE_STAGING_STRICT=1` forces strictness on (use it locally to check a leg really stages),
+/// `CPE_STAGING_STRICT=0` forces it off (an escape hatch if a runner image genuinely regresses and
+/// the fix has to wait); otherwise it follows `CI`, which GitHub Actions sets to `true` on every
+/// runner.
+pub fn staging_is_strict() -> bool {
+    match std::env::var("CPE_STAGING_STRICT").ok().as_deref() {
+        Some("1") => true,
+        Some("0") | Some("") => false,
+        _ => std::env::var_os("CI").is_some(),
+    }
+}
+
+/// Test-only sabotage hook: with `CPE_STAGING_SABOTAGE=1`, every [`require_staged`] call reports that
+/// it could not stage, exactly as a runner that lost symlink privilege or stopped honouring deny ACEs
+/// would. CI uses it to prove — rather than assert — that such a runner turns a step red instead of
+/// green (`.github/workflows/ci.yml`, the "skip-visibility guard" steps).
+pub fn staging_is_sabotaged() -> bool {
+    std::env::var("CPE_STAGING_SABOTAGE").is_ok_and(|v| v == "1")
+}
+
+/// The one gate every staging attempt passes through. Returns whether the leg may proceed; the caller
+/// prints its own leg-specific notice and returns early on `false`.
+///
+/// # Why this exists (CPE-1717), and the measurement that reshaped it
+///
+/// The family CPE-1678 → CPE-1692 → CPE-1696 → CPE-1705 → CPE-1710 built a pattern: a leg that cannot
+/// stage its condition announces itself loudly instead of passing silently. CPE-1717 was filed on the
+/// belief that the announcement never reaches CI, because libtest captures output for passing tests
+/// and `.github/workflows/ci.yml` runs plain `cargo test` with no `--nocapture`.
+///
+/// **Half of that is true, and the half that matters is not.** Measured directly with a one-test
+/// harness (`rustc --test`, run with no flags, exactly as `cargo test` runs it):
+///
+/// ```text
+/// running 1 test
+/// VIA-WRITELN-STDERR: this is the CPE-1705/1710 shape
+/// VIA-WRITELN-STDOUT: control
+/// test passing_test_that_announces_a_skip ... ok
+/// ```
+///
+/// `eprintln!`/`println!` were swallowed; `writeln!(std::io::stderr(), ..)` and its stdout twin were
+/// not. libtest's capture works by swapping a thread-local inside the `print!`/`eprint!` macros, so a
+/// direct write to the process's stderr handle goes around it. That is why the CPE-1678 comment in
+/// `dispatch.rs` calls the choice of emitter load-bearing, and it holds: **every notice in this family
+/// already reaches the CI log.** `--nocapture` would add nothing to them.
+///
+/// So the real defect is not visibility, it is consequence. A skip that prints into a passing run of a
+/// 2,100-test suite is a green board over an uncovered platform, and no one reads a green log. On a
+/// platform where the mechanism is *supposed* to work, that must be red. See [`staging_is_strict`] for
+/// why the strictness is scoped to CI.
+///
+/// `#[track_caller]` is load-bearing: the panic reports the **call site's** file and line, so a red
+/// build names the exact leg that stopped staging rather than pointing back into this helper.
+#[track_caller]
+pub fn require_staged(mechanism: &str, supported_here: bool, staged: bool) -> bool {
+    match staging_verdict(supported_here, staged, staging_is_strict(), staging_is_sabotaged()) {
+        StagingVerdict::Staged => true,
+        StagingVerdict::LegitimateSkip => false,
+        StagingVerdict::Fail => panic!("{}", staging_failure_message(mechanism)),
+    }
+}
+
+/// The message [`require_staged`] panics with, as a value rather than a `panic!` literal, so the CI
+/// guard step's `grep 'CPE-1717'` has something a unit test can assert on without catching an unwind.
+pub fn staging_failure_message(mechanism: &str) -> String {
+    format!(
+        "[CPE-1717] `{mechanism}` could not stage its condition on {os}, a platform where this \
+         mechanism IS supposed to work. The leg that called this therefore verified NOTHING, and \
+         under CI a leg that verified nothing must be red rather than a notice inside a green log.\n\
+         \n\
+         Likely causes: the runner image changed (symlink privilege, Developer Mode, the junction \
+         fallback, `icacls` behaviour); the job is running elevated or as root, where a deny cannot \
+         bind; the workspace moved to a filesystem that ignores ACLs and mode bits; or \
+         `CPE_STAGING_SABOTAGE=1` is set, which is how CI proves this check still bites.\n\
+         \n\
+         Re-run with `CPE_STAGING_STRICT=0` to fall back to the loud-skip behaviour and read the \
+         leg's own notice — but treat that as a diagnosis step, not a fix.",
+        os = std::env::consts::OS
+    )
+}
+
 /// Test-only mechanism for the `fs::metadata`-based CPE-1692 guards in this crate (`links::link_status`,
 /// `dangling_links_scan`'s target-resolution check): deny traversal on `dir` itself so a `stat` of
 /// anything reached *through* it fails with a genuine (non-`NotFound`) error.
@@ -427,7 +564,13 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
 /// elevated, an ACL-less filesystem, non-admin without the rights to set a deny ACE, … — or simply
 /// Windows), which callers MUST treat as a loud, `writeln!(std::io::stderr(), ..)` skip — never a silent
 /// pass (Evidence Rules, `Ticketing/wiki.md`).
+///
+/// **CPE-1717:** the `false` return is routed through [`require_staged`] with `supported_here =
+/// cfg!(unix)`, because this mechanism provably cannot work on Windows (see above) — so a Windows skip
+/// stays a legitimate, notice-only skip on every harness, while a **Unix** runner that stops honouring
+/// mode bits turns the step red under CI instead of quietly covering nothing.
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -446,7 +589,11 @@ pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000));
     }
-    std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+    require_staged(
+        "deny_dir_traversal",
+        cfg!(unix),
+        std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+    )
 }
 
 /// Undo whatever [`deny_dir_traversal`] did to `dir`, so a scratch tree containing it can be removed.
@@ -558,7 +705,13 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 /// this machine can't construct the condition (running elevated, an ACL-less filesystem, non-admin
 /// without the rights to set a deny ACE, …), which callers MUST treat as a loud,
 /// `writeln!(std::io::stderr(), ..)` skip — never a silent pass (Evidence Rules, `Ticketing/wiki.md`).
+///
+/// **CPE-1717:** this mechanism is supposed to work on **every** platform CI runs — the target deny on
+/// Windows, the parent `chmod` on Unix — so the `false` return is routed through [`require_staged`]
+/// with `supported_here = true`. Under CI a failure to stage is therefore red, not a notice in a green
+/// log; locally it stays a loud skip, for the root-container / network-share / ACL-less cases.
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn deny_stat_of(target: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -597,7 +750,7 @@ pub(crate) fn deny_stat_of(target: &Path) -> bool {
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o000));
         }
     }
-    target.try_exists().is_err()
+    require_staged("deny_stat_of", true, target.try_exists().is_err())
 }
 
 /// Undo whatever [`deny_stat_of`] did, so a scratch tree containing `target` can be removed. `parent` is
@@ -669,7 +822,16 @@ pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
 /// was a third inlined copy of the construction (which is how `deny_stat_of`'s inline duplicates in
 /// `src-tauri` ended up needing the parent-`RD` fix applied separately, per CPE-1705 correction 4). One
 /// implementation, reachable from both crates, is the lesser evil.
+/// **CPE-1717:** `supported_here = true` — between `symlink_file` and the privilege-free junction
+/// fallback there is no platform CI runs on where this construction is *expected* to fail, so a
+/// failure means the runner changed under us and the step goes red under CI rather than announcing
+/// into a green log. Locally it remains a loud skip (see [`staging_is_strict`]).
+#[track_caller]
 pub fn make_dangling_link(link: &Path) -> bool {
+    require_staged("make_dangling_link", true, make_dangling_link_inner(link))
+}
+
+fn make_dangling_link_inner(link: &Path) -> bool {
     let missing = link.with_file_name(format!(
         "{}-target-that-does-not-exist",
         link.file_name().unwrap_or_default().to_string_lossy()
@@ -707,6 +869,83 @@ mod tests {
     #[test]
     fn epoch_ms_of_unix_epoch_is_zero() {
         assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
+    }
+
+    /// CPE-1717. The whole policy as a table, because the policy is the deliverable and it has to be
+    /// checkable without setting process-global environment variables under a parallel harness.
+    ///
+    /// Read the columns as: *is the mechanism supposed to work here* × *did it work* × *strict* ×
+    /// *sabotaged*. The two rows that matter are the last two: a supporting platform that failed to
+    /// stage is `Fail` under strictness (CI) and `LegitimateSkip` without it (a developer's machine).
+    #[test]
+    fn cpe_1717_staging_policy_only_fails_where_the_mechanism_was_supposed_to_work() {
+        use StagingVerdict::*;
+        // supported, staged, strict, sabotaged  →  verdict
+        let table = [
+            (true, true, true, false, Staged),
+            (true, true, false, false, Staged),
+            (false, true, true, false, Staged),
+            // A platform the mechanism cannot work on is a legitimate skip under EVERY harness — this
+            // is the `deny_dir_traversal`-on-Windows / ACL-test-on-Linux row, and it must never become
+            // a false red just because CI asked for strictness.
+            (false, false, true, false, LegitimateSkip),
+            (false, false, false, false, LegitimateSkip),
+            (false, true, true, true, LegitimateSkip),
+            // …and a platform where it IS supposed to work is red under CI, loud-skip locally.
+            (true, false, true, false, Fail),
+            (true, false, false, false, LegitimateSkip),
+            // Sabotage turns a genuine success into the failure case, which is how CI neutralises this
+            // guard on purpose and proves it still bites.
+            (true, true, true, true, Fail),
+            (true, true, false, true, LegitimateSkip),
+        ];
+        for (supported, staged, strict, sabotaged, want) in table {
+            assert_eq!(
+                staging_verdict(supported, staged, strict, sabotaged),
+                want,
+                "supported={supported} staged={staged} strict={strict} sabotaged={sabotaged}"
+            );
+        }
+    }
+
+    /// The failure message is load-bearing twice over: a human has to be able to tell a changed runner
+    /// from a real bug, and **the CI guard step greps it** — `.github/workflows/ci.yml`'s
+    /// "skip-visibility guard" steps fail the build if a sabotaged run dies without `CPE-1717` in the
+    /// output, on the grounds that a failure for some other reason is not evidence about this
+    /// mechanism. So the two strings that grep depends on are asserted here, not assumed.
+    #[test]
+    fn cpe_1717_the_failure_message_names_the_ticket_the_mechanism_and_the_way_out() {
+        let msg = staging_failure_message("deny_stat_of");
+        assert!(msg.contains("CPE-1717"), "the CI guard greps for this, got: {msg}");
+        assert!(msg.contains("deny_stat_of"), "must name the mechanism that failed, got: {msg}");
+        assert!(msg.contains(std::env::consts::OS), "must name the platform, got: {msg}");
+        assert!(
+            msg.contains("CPE_STAGING_STRICT=0"),
+            "must offer the escape hatch, or a runner regression blocks every PR with no way out: \
+             {msg}"
+        );
+        assert!(
+            msg.contains("verified NOTHING"),
+            "must say what actually went wrong — that the leg covered nothing — rather than only that \
+             a helper returned false: {msg}"
+        );
+    }
+
+    /// `CPE_STAGING_STRICT` has to override `CI` in both directions, because CI is exactly where the
+    /// escape hatch is needed if a runner image regresses before the fix lands.
+    #[test]
+    fn cpe_1717_strictness_reads_its_overrides() {
+        // Parsed the same way `staging_is_strict` parses it, without touching the process environment.
+        let parse = |v: Option<&str>, ci: bool| match v {
+            Some("1") => true,
+            Some("0") | Some("") => false,
+            _ => ci,
+        };
+        assert!(parse(Some("1"), false), "an explicit 1 is strict even off CI");
+        assert!(!parse(Some("0"), true), "an explicit 0 is lenient even on CI");
+        assert!(!parse(Some(""), true), "an empty value is lenient, not strict-by-accident");
+        assert!(parse(None, true), "unset follows CI");
+        assert!(!parse(None, false), "unset off CI is lenient");
     }
 
     /// The five spellings the PR #855 audit drove through a consented `apply_backup_plan` and watched
@@ -1144,6 +1383,84 @@ mod tests {
     }
 
     /// Every `.rs` under `dir`, recursively — the scan's file list.
+    /// CPE-1717. A skip notice written with `eprintln!` **reaches nobody**, and 56 sites in this tree
+    /// were written that way while two separate comments elsewhere explained why they must not be.
+    ///
+    /// libtest replays a test's captured output only when the test FAILS, and a skip is a pass; CI
+    /// runs plain `cargo test` with no `--nocapture`. The capture is installed inside the
+    /// `print!`/`eprint!` macros, so `writeln!(std::io::stderr(), ..)` — which [`skip_notice!`] wraps
+    /// — goes around it. Measured, not assumed: see that macro's doc comment for the harness output.
+    ///
+    /// So this scan fails the build on any `eprintln!` whose message opens with a skip word. It is a
+    /// lint for one recognised-wrong **shape**, not a proof that every skip is visible: a notice
+    /// phrased without those words, or built up in a variable first, slips past. Stating that is the
+    /// point — this family has repeatedly mistaken a green lint for a closed class.
+    ///
+    /// [`skip_notice!`]: crate::skip_notice
+    #[test]
+    fn skip_notices_never_use_eprintln() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let mut files = Vec::new();
+        for group in ["crates", "sidecar"] {
+            if let Ok(entries) = std::fs::read_dir(root.join(group)) {
+                for entry in entries.flatten() {
+                    collect_rs(&entry.path().join("src"), &mut files);
+                    collect_rs(&entry.path().join("tests"), &mut files);
+                }
+            }
+        }
+        collect_rs(&root.join("src-tauri").join("src"), &mut files);
+
+        // Asserted inputs: a scan that reads nothing passes vacuously, which is the exact failure this
+        // whole ticket is about.
+        assert!(
+            files.len() > 60,
+            "the scan read only {} files — it is not looking where it thinks it is",
+            files.len()
+        );
+
+        let mut offences = Vec::new();
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else { continue };
+            for (i, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || code.starts_with("///") {
+                    continue; // a comment explaining the rule is not a breach of it
+                }
+                // `eprintln!(` and the message on the same line, or the message on the next — the two
+                // shapes rustfmt produces.
+                let opens_here = code.contains("eprintln!(\"SKIP")
+                    || code.contains("eprintln!(\"skipping")
+                    || code.contains("eprintln!(\"SKIPPING");
+                let opens_next = code.ends_with("eprintln!(")
+                    && text
+                        .lines()
+                        .nth(i + 1)
+                        .map(str::trim_start)
+                        .is_some_and(|n| {
+                            n.starts_with("\"SKIP") || n.starts_with("\"skipping")
+                        });
+                if opens_here || opens_next {
+                    offences.push(format!("{}:{}", file.display(), i + 1));
+                }
+            }
+        }
+        assert!(
+            offences.is_empty(),
+            "these skip notices use `eprintln!`, whose output libtest swallows for a PASSING test — so \
+             they announce a leg that verified nothing to nobody, on the only harness that matters:\n\
+             {}\n\n\
+             Fix: `cpe_server::skip_notice!(..)` (or `crate::skip_notice!` inside this crate) — same \
+             arguments, writes straight to the process's stderr handle, survives the capture.\n\
+             Better still, if the staging mechanism is supposed to work on that platform, use \
+             `fsutil::require_staged` and let the leg go RED under CI instead of printing into a green \
+             log.\n\n\
+             Not covered by this scan, so a green run is not a proof: a notice phrased without a SKIP \
+             word, one assembled into a variable before printing, or one written with `println!`.",
+            offences.join("\n")
+        );
+    }
+
     fn collect_rs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {

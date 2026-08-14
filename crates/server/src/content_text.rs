@@ -287,7 +287,7 @@ mod tests {
 
         match content_text_of(&f, &bytes) {
             Some(text) => assert!(text.contains("Hello World"), "extracted text: {text:?}"),
-            None => eprintln!(
+            None => crate::skip_notice!(
                 "skipping real_pdf_extracts_text_through_dispatch: no pdfium library available in \
                  this environment (expected until CPE-1258 provisions one for CI/dev)"
             ),

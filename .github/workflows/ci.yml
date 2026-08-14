@@ -96,6 +96,33 @@ jobs:
         working-directory: src-tauri
         run: cargo test
 
+      # CPE-1717 — the same neutralisation guard the `crates` job runs, for the app adapter's own
+      # staged legs (`cpe_1710_*`, `cpe_1705_*`, `cpe_1696_*` in `src-tauri/src/lib.rs`). Sabotage the
+      # staging and the leg must go RED; if it still passes, a runner that quietly lost symlink
+      # privilege or ACL denies would report green over zero coverage, which is the whole bug.
+      # Nothing recompiles — same profile, same features, one filtered re-run.
+      - name: skip-visibility guard (CPE-1717)
+        working-directory: src-tauri
+        shell: bash
+        env:
+          CPE_STAGING_SABOTAGE: "1"
+          CPE_STAGING_STRICT: "1"
+        run: |
+          set -u
+          log="${RUNNER_TEMP:-/tmp}/cpe1717-sabotage.log"   # outside the checkout: no stray file can dirty a later git-diff guard
+          filter=cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name
+          if cargo test "$filter" > "$log" 2>&1; then
+            echo "::error::CPE-1717 regression: '$filter' PASSED with staging sabotaged — a leg that staged nothing is reporting green. Check that cpe_server::fsutil::require_staged is still on this path."
+            exit 1
+          fi
+          if ! grep -q 'CPE-1717' "$log"; then
+            echo "::error::CPE-1717: '$filter' failed, but not with the require_staged panic, so this step no longer proves anything about skip visibility. Full log:"
+            cat "$log"
+            exit 1
+          fi
+          echo "OK: '$filter' went red, and for the right reason:"
+          grep -m1 -A6 'CPE-1717' "$log"
+
       # The default build above is the delete-test: the explorer compiles with ZERO
       # sidecar code. This proves the opt-in integration also compiles (CPE-272).
       - name: cargo check (sidecar-platform feature)
@@ -343,6 +370,55 @@ jobs:
           # installed above let the real-render tests actually assert instead of skipping.
           cargo clippy --all-targets --features pdf-thumb,video-thumb,waveform,dicom-thumb -- -D warnings
           cargo test --features pdf-thumb,video-thumb,waveform,dicom-thumb
+
+      # ─── CPE-1717 ────────────────────────────────────────────────────────────────────────────────
+      # The skip-visibility guard, and it is a *neutralisation* step, not another test run.
+      #
+      # A dozen legs across this repo stage a condition that cannot always be created — a denied stat,
+      # a dangling link on an unprivileged Windows runner — and, when staging fails, they announce it
+      # rather than passing silently (CPE-1678 → 1692 → 1696 → 1705 → 1710). CPE-1717's finding: the
+      # announcement DOES reach this log (they write to the process's stderr handle directly, which
+      # libtest's `print!`-macro capture does not intercept — measured, see `fsutil::require_staged`),
+      # but a passing leg with a notice buried in a 2,100-test log is a green board over ZERO coverage,
+      # and nobody reads a green log. So `fsutil::require_staged` makes such a leg RED under CI, on the
+      # platforms where the staging mechanism is supposed to work.
+      #
+      # This step proves that enforcement still bites instead of asserting it. `CPE_STAGING_SABOTAGE=1`
+      # makes every staging attempt report failure — exactly what a runner that lost symlink privilege
+      # or stopped honouring deny ACEs looks like — and the step FAILS IF THE TESTS PASS. Delete the
+      # `require_staged` call from any of those helpers and this step goes red on its own, which is what
+      # `Ticketing/wiki.md` → "Evidence Rules" asks of a guard.
+      #
+      # Cheap: same crate, same features, same profile as the step above, so nothing recompiles — it
+      # re-runs two already-built test binaries with a filter.
+      - name: server — skip-visibility guard (CPE-1717)
+        working-directory: crates/server
+        shell: bash
+        env:
+          CPE_STAGING_SABOTAGE: "1"
+          CPE_STAGING_STRICT: "1"
+        run: |
+          set -u
+          log="${RUNNER_TEMP:-/tmp}/cpe1717-sabotage.log"   # outside the checkout: no stray file can dirty a later git-diff guard
+          fail=0
+          # One leg per staging mechanism: a denied stat (`fsutil::deny_stat_of`) and a dangling link
+          # (`fsutil::make_dangling_link`). Neither is cfg-gated, so all three OS legs are proved.
+          for filter in dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing \
+                        cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name; do
+            echo "--- sabotaged run: $filter"
+            if cargo test "$filter" > "$log" 2>&1; then
+              echo "::error::CPE-1717 regression: '$filter' PASSED while staging was sabotaged. A leg that could not stage its condition is reporting green, which is the exact silent-coverage-loss this guard exists to stop. Check that fsutil::require_staged is still called on this path."
+              fail=1
+            elif grep -q 'CPE-1717' "$log"; then
+              echo "OK: '$filter' went red, and for the right reason:"
+              grep -m1 -A6 'CPE-1717' "$log" || true
+            else
+              echo "::error::CPE-1717: '$filter' failed, but NOT with the require_staged panic — so this step is no longer evidence about the skip-visibility mechanism. Full log:"
+              cat "$log"
+              fail=1
+            fi
+          done
+          exit $fail
 
       - name: net — clippy + test
         # The headless network transport loop (Client(Rust) proxy + reference Server,
