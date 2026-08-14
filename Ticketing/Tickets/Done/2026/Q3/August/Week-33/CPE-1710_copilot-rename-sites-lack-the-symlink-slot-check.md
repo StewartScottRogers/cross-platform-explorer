@@ -1,13 +1,13 @@
----
+﻿---
 id: CPE-1710
 title: copilot's rename and transfer sites destroy a dangling symlink at the destination
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-13
 ---
 
 ## Problem
@@ -16,7 +16,7 @@ Found by the PR #893 (CPE-1705) reviewer, 2026-08-13, while enumerating that tic
 spot-checking them.
 
 `copilot::apply_op` (the `Rename` arm) and `copilot::transfer_entry` are both **`fs::rename`-destructive**
-at the destination. Both received the `clobber_refusal` guard in CPE-1705 — but **neither got
+at the destination. Both received the `clobber_refusal` guard in CPE-1705 â€” but **neither got
 `symlink_slot_refusal`**, which `rename_entry_impl` and `move_exact_impl` both have.
 
 The consequence: **a dangling symlink sitting at the destination is silently destroyed.** `clobber_refusal`
@@ -29,7 +29,7 @@ These two sites are the exceptions to a rule the same PR wrote down.
 ## Why it is Medium and not High
 
 A dangling symlink is a less common thing to lose than a file with contents, and the loss is of the link
-rather than of data — the link's target was already absent. It is still a silent destruction of something
+rather than of data â€” the link's target was already absent. It is still a silent destruction of something
 the user created, at a site whose two siblings guard against exactly this.
 
 ## Scope
@@ -42,13 +42,13 @@ the user created, at a site whose two siblings guard against exactly this.
 - [ ] Both sites apply `symlink_slot_refusal` alongside `clobber_refusal`, matching `rename_entry_impl`.
 - [ ] A test proves a **dangling** symlink at the destination survives, for each of the two sites, and that
       removing the check turns a **distinct** test red. Assert on the slot still being a symlink after the
-      call — not on the returned `Result`, which was `ok: true` in the reviewer's reproduction.
+      call â€” not on the returned `Result`, which was `ok: true` in the reviewer's reproduction.
 - [ ] Check whether any **other** `fs::rename`-destructive site is missing the pairing. The reviewer found
       these two by enumeration; enumerate again rather than fixing only the two reported. If the pairing is
       always required, consider making it structurally impossible to apply one without the other rather
       than relying on every future author remembering.
 - [ ] Platform-gate correctly. Symlink creation on Windows needs either Developer Mode or elevation, so a
-      test that silently no-ops on an unprivileged runner proves nothing — detect and skip **loudly** with a
+      test that silently no-ops on an unprivileged runner proves nothing â€” detect and skip **loudly** with a
       `writeln!(stderr)` notice, and make sure the Linux and macOS legs assert something real. CI runs a
       3-OS matrix.
 - [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted in the PR, per the
@@ -60,7 +60,7 @@ Filed by the Foreman from the PR #893 review, 2026-08-13, on the reviewer's reco
 a follow-up rather than widening that PR.
 
 **Useful technique, measured on this sprint:** a slot whose stat is genuinely refused can be staged locally
-on Windows two independent ways — deny `(R)` on the target **plus `RD` on its parent** (which kills
+on Windows two independent ways â€” deny `(R)` on the target **plus `RD` on its parent** (which kills
 `fs::metadata`'s `FindFirstFileW` fallback), or a **symlink whose resolution target is denied**. The second
 exercises the reparse path and is the more natural fit here. See CPE-1705's "CORRECTION 4" section; that
 ticket's guidance was wrong four times before this was understood, so read it before writing an ACL test.
@@ -70,38 +70,38 @@ wording pattern), **CPE-1696** (the sibling stat-collapse round).
 
 ## Work Log
 
-**2026-08-13 — worked to a pushed PR (branch `cpe-1710-copilot-symlink-slot`).**
+**2026-08-13 â€” worked to a pushed PR (branch `cpe-1710-copilot-symlink-slot`).**
 
 ### What the fix is
 
-`fsutil::rename_slot_refusal(target, occupied)` — `clobber_refusal` then `symlink_slot_refusal`, in the
+`fsutil::rename_slot_refusal(target, occupied)` â€” `clobber_refusal` then `symlink_slot_refusal`, in the
 order the two correct sites already used, as **one call that cannot be half-applied**. The reported two
 sites were fixed by converting to it, and so were the other two the enumeration turned up.
 
-### Enumeration — every `fs::rename` in the tree, and its guard status
+### Enumeration â€” every `fs::rename` in the tree, and its guard status
 
 Scope of the search (stated, per Evidence Rule 2): `grep -rn "fs::rename"` over `crates/`, `src-tauri/src/`
 and `sidecar/`, then each hit read in context.
 
-**Rename-destructive at a user-named slot — the class this ticket is about (6 sites):**
+**Rename-destructive at a user-named slot â€” the class this ticket is about (6 sites):**
 
 | Site | Before | After |
 |---|---|---|
 | `copilot::apply_op` `Rename` arm (`copilot.rs:233`) | `clobber_refusal` only | `rename_slot_refusal` |
 | `copilot::transfer_entry` (`copilot.rs:267`) | `clobber_refusal` only | `rename_slot_refusal` |
-| `organize_apply::apply_proposals` (`organize_apply.rs:99`) | **`clobber_refusal` only — same bug, not reported** | `rename_slot_refusal` |
-| `ticket_move` board move (`src-tauri/src/lib.rs:167`) | **`clobber_refusal` only — same bug, not reported** | `rename_slot_refusal` |
+| `organize_apply::apply_proposals` (`organize_apply.rs:99`) | **`clobber_refusal` only â€” same bug, not reported** | `rename_slot_refusal` |
+| `ticket_move` board move (`src-tauri/src/lib.rs:167`) | **`clobber_refusal` only â€” same bug, not reported** | `rename_slot_refusal` |
 | `rename_entry_impl` (`src-tauri/src/lib.rs:1842`) | both, open-coded | `rename_slot_refusal` |
 | `move_exact_impl` (`src-tauri/src/lib.rs:3408`) | both, open-coded | `rename_slot_refusal` |
 
 So it was **four of six** missing the pairing, not two of six. That is the argument for making it
 structural: CPE-1705 wrote the rule into a doc comment and two thirds of its own sites did not follow it.
 
-### Round 1's out-of-class list was ASSUMED. Round 2 traced it — and it was wrong twice
+### Round 1's out-of-class list was ASSUMED. Round 2 traced it â€” and it was wrong twice
 
 The PR #895 UAT rejected the first version of the list below, correctly. It said "the destination is a file
 we own" of twelve sites without checking, and the reason it was wrong is worth writing down: the framing
-was *"only a dangling link is at risk, because `clobber_refusal` catches the live ones"* — which holds
+was *"only a dangling link is at risk, because `clobber_refusal` catches the live ones"* â€” which holds
 **only where `clobber_refusal` is actually called**. Carrying that assumption from the guarded sites onto
 an unguarded one is what hid a live user-data bug.
 
@@ -112,66 +112,66 @@ Every entry below is now traced back to where its destination path comes from.
 | Site | Destination provenance |
 |---|---|
 | `audit_journal.rs:119` | `app_data_dir()/audit`, leaf = session id **sanitised** to `[A-Za-z0-9_-]` |
-| `checkpoint_store.rs:294` | `app_data_dir()/checkpoints/<hex digest of root>` — the root is hashed, never joined |
+| `checkpoint_store.rs:294` | `app_data_dir()/checkpoints/<hex digest of root>` â€” the root is hashed, never joined |
 | `metrics_journal.rs:124` | `app_data_dir()/agent-metrics/history.jsonl`, fixed leaf |
 | `replay_baseline.rs:133` | `app_data_dir()/audit`, leaf = sanitised session id + fixed suffix |
-| `known_hosts.rs:189` | `default_app_known_hosts_path()` — the app's own config dir, never `~/.ssh` |
+| `known_hosts.rs:189` | `default_app_known_hosts_path()` â€” the app's own config dir, never `~/.ssh` |
 | `index.rs:615` | `app_data_dir()/index/{volume_id}.idx`; `volume_id` is a `u64`, so it cannot carry a separator |
-| `semantic_index.rs:225` | `app_data_dir()/content-index/{fnv1a64(root):016x}.cix` — root hashed |
+| `semantic_index.rs:225` | `app_data_dir()/content-index/{fnv1a64(root):016x}.cix` â€” root hashed |
 | `vector_index.rs:223` | **no production caller at all** (only its own test); prod persists via `SemanticIndex::save` |
 
-**User-reachable destinations — three of them, and the first version called all three "a file we own":**
+**User-reachable destinations â€” three of them, and the first version called all three "a file we own":**
 
-- **`src-tauri/src/lib.rs:3546` (`metadata_write`)** — `path` straight off IPC; the final rename lands on
+- **`src-tauri/src/lib.rs:3546` (`metadata_write`)** â€” `path` straight off IPC; the final rename lands on
   the **user's own media file**, and it has **no guard of any kind**, so a **live** symlink is destroyed
   and the edit is lost. Found by the UAT, **filed as CPE-1716 (High)**, not fixed here.
-- **`vault_manager.rs:248` (`create_vault`)** — `dest` is a user-chosen `.cpevault` path from the create
+- **`vault_manager.rs:248` (`create_vault`)** â€” `dest` is a user-chosen `.cpevault` path from the create
   dialog. Only the *staging* name is app-owned; the final rename replaces `dest` including a link at it.
   Guarded by `create_staging_exclusive` (`O_EXCL`) and a `confirmed` gate, with no occupancy/symlink check
   on the final rename.
-- **`vault_manager.rs:745` (`reseal_session`)** — `blob_path` is the user's vault file. Heavily guarded
+- **`vault_manager.rs:745` (`reseal_session`)** â€” `blob_path` is the user's vault file. Heavily guarded
   (`symlink_metadata` refusal on the session dir, containment checks, `ensure_no_aliased_files` twice,
   `O_EXCL` staging), and the final replace-in-place is the **documented CPE-1670 decision**.
 
   Flagged rather than changed: the vault's replace-in-place is a deliberate recorded design decision, and
   reopening it belongs with someone holding that ticket's context, not inside this one.
 
-- `vault_crypto.rs:542` (`promote`) — user-supplied `session_dir`, but `ensure_session_dir_contained`
+- `vault_crypto.rs:542` (`promote`) â€” user-supplied `session_dir`, but `ensure_session_dir_contained`
   requires it to resolve inside the app's own `vault-sessions` root, and `promote` refuses a non-empty
   existing `out_dir`.
 
 **Still out of class, with the checked reason:**
 
-- **`provider.rs:156` (`LocalProvider::rename`)** — an unguarded `std::fs::rename` on raw path arguments
+- **`provider.rs:156` (`LocalProvider::rename`)** â€” an unguarded `std::fs::rename` on raw path arguments
   that appeared in **neither** of round 1's lists (the UAT caught the omission). Traced: it has **no
-  production caller** — the only construction of `LocalProvider` is `fs_route::provider_for`, called
+  production caller** â€” the only construction of `LocalProvider` is `fs_route::provider_for`, called
   solely from that file's own tests; `cpe_vfs::connect` exposes no rename. Real renames go through
   `rename_entry_impl`. So: not user-reachable **today**, and it would need the pairing the moment it is
   wired up.
-- **Name-picking probes rather than refusals** — `unique_target` → `do_move_into`, and `resolve_conflict`.
+- **Name-picking probes rather than refusals** â€” `unique_target` â†’ `do_move_into`, and `resolve_conflict`.
   These *advance past* an occupied slot, so `rename_slot_refusal` is the wrong shape. **Real residual
   instance**, filed as **CPE-1715**.
-- **Protocol server rigs** — `crates/ftp`, `crates/sftp`, `crates/webdav` implement a wire protocol's own
+- **Protocol server rigs** â€” `crates/ftp`, `crates/sftp`, `crates/webdav` implement a wire protocol's own
   rename semantics against a sandbox root.
-- **`clobber_refusal` sites that are not renames** — `folder_template` and `src-tauri` trash-restore (×2)
+- **`clobber_refusal` sites that are not renames** â€” `folder_template` and `src-tauri` trash-restore (Ã—2)
   precede `fs::write` or an OS restore. **`split_join` was wrongly included here**: the UAT showed
-  `join_files` follows a link at `out_path` — deleting it on the failure path, and writing the user's
+  `join_files` follows a link at `out_path` â€” deleting it on the failure path, and writing the user's
   bytes *through* it on the success path. **Filed as CPE-1718.**
 - **No other `fs::rename` exists** in `src-tauri/src/` outside `lib.rs` (nine sibling files, zero hits) or
   under `sidecar/` in non-test code (the two hits are inside `catalog.rs`'s `#[cfg(test)]` module).
 
-### Round 3 — the structural guard is clippy, not a source scan
+### Round 3 â€” the structural guard is clippy, not a source scan
 
 The reviewer (CHANGES REQUESTED) reproduced the >25-line and alias bypasses independently before seeing
 the UAT's report, and recommended the shape that actually works. Adopted:
 
-- **`clippy.toml` with `disallowed-methods = [{ path = "std::fs::rename", … }]`** in each workspace root
-  that renames — `crates/server`, `src-tauri`, `crates/ftp`, `crates/sftp`, `crates/webdav`,
+- **`clippy.toml` with `disallowed-methods = [{ path = "std::fs::rename", â€¦ }]`** in each workspace root
+  that renames â€” `crates/server`, `src-tauri`, `crates/ftp`, `crates/sftp`, `crates/webdav`,
   `sidecar/host`. (There is no root `Cargo.toml`; every one of these is an independent root.)
 - **`fsutil::rename_into_slot(src, target, occupied)`** does the pairing *and* the rename, carrying the
   single `#[allow]` for the guarded path. All six user-named-slot sites call it.
 - **Every other `fs::rename` carries `#[allow(clippy::disallowed_methods)]` with a one-line reason at the
-  site** — **25** of them (24 excluding `rename_into_slot`'s own sanctioned one), each naming why that destination is not a user-named slot. The figure was stated as 17 until the round-4 UAT counted them: the same species of unverified number this whole design exists to eliminate.
+  site** â€” **25** of them (24 excluding `rename_into_slot`'s own sanctioned one), each naming why that destination is not a user-named slot. The figure was stated as 17 until the round-4 UAT counted them: the same species of unverified number this whole design exists to eliminate.
 
 Why this and not a tighter scan:
 
@@ -188,13 +188,13 @@ Why this and not a tighter scan:
 trait object, so `Provider::rename` is not covered by it. That is written into the `clippy.toml` comment
 and at `provider.rs` itself.
 
-### Round 3 — a second wrong out-of-class entry, fixed here
+### Round 3 â€” a second wrong out-of-class entry, fixed here
 
 **`vault_crypto::promote`.** `out_dir` is the user's unlock destination, not a file this crate owns. Its
 emptiness probe is `read_dir`, which follows the link. Both legs are now guarded and tested, and the
 measurement is narrower than the report in one direction and worse in the other:
 
-- **Dangling link:** the pre-fix code does **not** destroy it — renaming a *directory* onto a
+- **Dangling link:** the pre-fix code does **not** destroy it â€” renaming a *directory* onto a
   non-directory entry is refused by the OS first (`ENOTDIR`; "The directory name is invalid", os error
   267, on Windows). So that leg's pre-fix bug is a confusing OS error, not data loss. Recorded honestly in
   the test rather than claimed as destruction.
@@ -202,11 +202,11 @@ measurement is narrower than the report in one direction and worse in the other:
   `remove_dir(out_dir)` deletes **the link**; the rename then succeeds. Measured: `result was Ok(())` with
   the link replaced by a real directory. That is the real loss, and it is the `metadata_write` shape.
 
-`vault_manager` ×2 reached the right conclusion for the wrong stated reason — the destination is the
+`vault_manager` Ã—2 reached the right conclusion for the wrong stated reason â€” the destination is the
 user's chosen `.cpevault` path and replacing it is a documented CPE-1670 decision. The justification is
 fixed at both sites; the code is not.
 
-### The scan is a lint for one shape — NOT a structural guarantee
+### The scan is a lint for one shape â€” NOT a structural guarantee
 
 Round 1 claimed this made the pairing structurally impossible to get wrong. The UAT bypassed it three
 ways, each measured, and the first bypass destroyed a link with the scan green:
@@ -227,7 +227,7 @@ pre-CPE-1705 `if dst.exists()` shape, is invisible to it. The claim is withdrawn
   lines above a rename *in a different function*) and skips test modules (a unit test that asserts
   `clobber_refusal` while using `fs::rename` to stage a scenario is not a half-guarded site). Both
   behaviours are unit-tested in `the_scan_window_stops_at_a_function_boundary`, including an assertion
-  that the beyond-the-window hole is still there — so the doc comment cannot quietly stop being true.
+  that the beyond-the-window hole is still there â€” so the doc comment cannot quietly stop being true.
 - **Widened** from "`crates/server/src` + `src-tauri/src/lib.rs`" to every `.rs` under `crates/*/src`,
   `src-tauri/src` and `sidecar/*/src`. The old scope missed nine files in `src-tauri/src/` alone, and
   skipped any file named `fsutil.rs` **anywhere** by basename; the exemption is now the full path of this
@@ -243,36 +243,36 @@ Committed **before** probing. Each guard broken **on its own**, restored with `g
 recompiles observed. Full output pasted in the PR body. **All six sites now have a test**, and each break
 reds a **distinct** one:
 
-1. `copilot` `Rename` arm → only `cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name`
-   (+ the scan, by design — it is the shape that is wrong). The other site tests stayed green.
-2. `copilot::transfer_entry` → only `cpe_1710_execute_never_moves_over_a_dangling_link_at_the_destination`.
-3. `organize_apply` → only `cpe_1710_organize_never_renames_over_a_dangling_link_in_the_destination_folder`.
-4. `rename_entry_impl` → only `cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name`.
-5. `move_exact_impl` → only `cpe_1710_move_exact_never_renames_over_a_dangling_link_at_the_destination`.
-6. `board_move_impl` → only `cpe_1710_board_move_never_renames_over_a_dangling_link_at_the_destination`.
-7. `rename_entry_impl` re-separated into two calls → the scan fires **both** of its rules at once.
+1. `copilot` `Rename` arm â†’ only `cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name`
+   (+ the scan, by design â€” it is the shape that is wrong). The other site tests stayed green.
+2. `copilot::transfer_entry` â†’ only `cpe_1710_execute_never_moves_over_a_dangling_link_at_the_destination`.
+3. `organize_apply` â†’ only `cpe_1710_organize_never_renames_over_a_dangling_link_in_the_destination_folder`.
+4. `rename_entry_impl` â†’ only `cpe_1710_rename_entry_never_renames_over_a_dangling_link_at_the_new_name`.
+5. `move_exact_impl` â†’ only `cpe_1710_move_exact_never_renames_over_a_dangling_link_at_the_destination`.
+6. `board_move_impl` â†’ only `cpe_1710_board_move_never_renames_over_a_dangling_link_at_the_destination`.
+7. `rename_entry_impl` re-separated into two calls â†’ the scan fires **both** of its rules at once.
 
 Rounds 1's last three sites (`rename_entry_impl`, `move_exact_impl`, `board_move_impl`) had **no test
-each** and leaned entirely on the scan, which the UAT then showed is bypassable — a lint is not a test.
+each** and leaned entirely on the scan, which the UAT then showed is bypassable â€” a lint is not a test.
 The blocker was real: `make_dangling_link` was `#[cfg(test)] pub(crate)` in `cpe-server` and unreachable
 from the app adapter. It is now `pub`, so there is one implementation instead of a third inlined copy.
 
 Each test asserts on the **slot** (`symlink_metadata(...).is_symlink()`) **before** touching the returned
 `Result`, deliberately: an `expect_err` first would red on the result, and the whole bug is that the result
-looked fine. The red output shows it — *"the user's link was DESTROYED by the rename (result was
-Ok(\"…\\b.txt\"))"*.
+looked fine. The red output shows it â€” *"the user's link was DESTROYED by the rename (result was
+Ok(\"â€¦\\b.txt\"))"*.
 
 ### Platform gating
 
 No ACLs are needed here at all: a *dangling* link is an ordinary object, and `try_exists` answers
 `Ok(false)` for one on every platform. Only **creating** the link can be refused. `fsutil::make_dangling_link`
 tries `symlink_file` first (needs Developer Mode / elevation on Windows) and falls back to an NTFS
-**junction** (no privilege — created against a real directory that is then removed), so the Windows leg
+**junction** (no privilege â€” created against a real directory that is then removed), so the Windows leg
 asserts for real on an unprivileged runner too. If both fail it is a `writeln!(stderr)` skip that says
-nothing was covered — **but see the caveat below: that notice is not visible under CI's `cargo test`.**
+nothing was covered â€” **but see the caveat below: that notice is not visible under CI's `cargo test`.**
 
 **The skip notice is invisible in CI, and this PR does not claim otherwise.** `.github/workflows/ci.yml`
-runs `cargo test` with no `--nocapture`, and libtest captures stderr for *passing* tests — and a skip is
+runs `cargo test` with no `--nocapture`, and libtest captures stderr for *passing* tests â€” and a skip is
 a pass. So on a Windows runner that could create neither a symlink nor a junction, these tests would pass,
 print nothing anyone sees, and cover nothing. That is true of CPE-1705's notices as well. Filed by the
 Foreman as **CPE-1717 (High)**; not fixed here.
@@ -280,7 +280,7 @@ Foreman as **CPE-1717 (High)**; not fixed here.
 **Round 1's evidence for this was true but did not prove itself**, as the UAT pointed out: "verified with
 `--nocapture`, no skip notice" only establishes that *a* link was created, and this machine has Developer
 Mode on, so leg 1 always won and **the junction fallback CI depends on never ran**. Round 2 drives leg 2
-directly instead of inferring it — `the_junction_fallback_stages_the_same_hazard_as_a_symlink` builds a
+directly instead of inferring it â€” `the_junction_fallback_stages_the_same_hazard_as_a_symlink` builds a
 junction, deletes its target, and asserts the resulting slot is the same hazard: a link by
 `symlink_metadata`, invisible to `clobber_refusal`, refused by `rename_slot_refusal`. That runs on every
 Windows CI leg regardless of the runner's privilege state.
@@ -293,14 +293,14 @@ feature modes (default and `--features index`); `src-tauri` clippy clean in both
 
 ### Follow-ups filed
 
-- **CPE-1715** — `unique_target` / `resolve_conflict` treat a dangling link as a free name, so a bulk move
+- **CPE-1715** â€” `unique_target` / `resolve_conflict` treat a dangling link as a free name, so a bulk move
   auto-renames *onto* it. Different fix shape (treat as occupied, pick the next name), hence its own
   ticket.
-- **CPE-1718** — `join_files` follows a link at `out_path`: the failure path `remove_file`s the user's
+- **CPE-1718** â€” `join_files` follows a link at `out_path`: the failure path `remove_file`s the user's
   link, and the success path writes their bytes *through* it to a path they never named. Round 1 wrongly
-  classified `split_join` as safe on the strength of "it precedes `File::create`" — the `File::create` is
+  classified `split_join` as safe on the strength of "it precedes `File::create`" â€” the `File::create` is
   what makes it worse.
-- **CPE-1716** (filed by the Foreman from the UAT, High) — `metadata_write` renames onto the user's own
+- **CPE-1716** (filed by the Foreman from the UAT, High) â€” `metadata_write` renames onto the user's own
   media path with **no guard at all**, destroying even a **live** symlink and losing the edit while
   reporting success.
 
@@ -346,3 +346,109 @@ justification sits three lines above, which is not true of a function- or module
 `fs::write` and destroys the user's unrelated file while returning `Ok` -- **CPE-1719**, measured. It is
 the sidecar twin of `board_move_impl`, missed because the primitive differs from `fs::rename` *and* its
 root was one of the eleven uncovered.
+
+## Work Log
+
+**Closed 2026-08-13, merged as PR #895 (`4b336f5c`).** Four rounds. The two-line fix was right in round 1;
+the other three rounds were spent discovering that **the machinery claiming to prevent recurrence didn't**.
+
+### The bug
+
+`clobber_refusal` stats *through* links, so a **dangling** symlink at a destination reads as a free slot,
+and `fs::rename` â€” which does not follow the final component â€” destroys it while reporting `ok: true`.
+
+### Enumeration beat the ticket, three times over
+
+The ticket named **two** sites. The worker swept every `fs::rename` in the tree and found **four**
+unguarded â€” `organize_apply::apply_proposals` and `ticket_move`'s board move had the identical bug and
+nobody had reported them. Six sites total now route through `fsutil::rename_into_slot`.
+
+Then the checks beat the worker's own enumeration. Of twelve entries classified "out of class â€” the
+destination is a file we own", **two were wrong**:
+
+- **`metadata_write`** â€” the user's own media file path, no `clobber_refusal` at all, so a **live** symlink
+  dies too. The symlink is destroyed, the real file is never edited, and the UI reports success and echoes
+  the edited field back. Filed **CPE-1716 (High)**.
+- **`vault_crypto::promote`** â€” the user's unlock destination. Filed and fixed here.
+
+The root cause of both misses is worth keeping: the framing was *"only a dangling link is at risk, because
+`clobber_refusal` catches live ones."* True **only where `clobber_refusal` is actually called.** A correct
+assumption carried one step past where it applies â€” the same shape as CPE-1705's four-times-corrected ACL
+guidance.
+
+Eight of the twelve were verified sound and are listed in the ticket so nobody re-audits them.
+
+### The structural guard took two attempts, and the first was worse than it looked
+
+**Round 2 shipped a source-text scan** that failed when a bare `clobber_refusal` sat within 25 lines of an
+`fs::rename`. The UAT beat it three ways, each measured alone with a real recompile: **30 lines apart**;
+`use std::fs::rename as move_entry;` with the two **adjacent**; and the rename behind a **3-line helper**.
+
+Worse, it only caught *half*-guarded sites. A rename with **no** guard was invisible â€” and one already
+existed in the tree (`LocalProvider::rename`, in neither of the PR's lists). It also cried wolf on an
+ordinary unit test and across function boundaries.
+
+**Round 3 replaced it with clippy**, on the reviewer's recommendation, and the decisive argument was not
+technical: *the out-of-class justification ends up in the code, at the site, permanently, instead of in a
+PR description nobody reads twice.* This PR's own out-of-class reasoning had already been wrong twice, in
+exactly that place.
+
+`disallowed-methods = [{ path = "std::fs::rename" }]`, `fsutil::rename_into_slot` carrying the single
+sanctioned `#[allow]`, and every other rename annotated with a one-line reason at the site.
+
+### Round 4: the guard covered a third of what it claimed
+
+The round-4 UAT measured it: an unguarded `std::fs::rename` appended to `crates/vfs` drew **zero**
+diagnostics from that crate's own CI command. There is no root `Cargo.toml`, so **all 17 crates are
+independent workspace roots** and a missing `clippy.toml` is a *silent hole*, not an error. Only the six
+that rename *today* had one â€” leaving `crates/s3` (whose rename is a stub) and `crates/vfs` (the
+remote-filesystem layer) uncovered, precisely where the next rename gets written.
+
+All 17 now carry it. Proved by inverting the probe in **two** roots, deliberately including
+`sidecar/agent-board` â€” the root whose gap produced CPE-1719 â€” so the "the other ten are identical"
+argument is anchored on a file someone watched fail. The reviewer independently broke one `#[allow]` per
+root and confirmed a real diagnostic in each.
+
+**Evasion probes, between both checks: six shapes defeated** â€” alias, re-export, bound-but-uncalled fn
+value, macro expansion, const fn-pointer field, and impl body. **One escape**, documented: a *caller*
+through `&dyn`.
+
+Two further corrections in round 4, both the same species as the bug itself:
+
+- The `dyn` gap was worded so it read as *"impls don't need guarding"*. Measured false â€” removing
+  `provider.rs:162`'s `#[allow]` produces a real diagnostic. The impl **is** covered; the caller is not.
+  The correction reached all 17 config files and initially **not** `rename_into_slot`'s own doc, which is
+  the one a developer actually reads.
+- **The `#[allow]` count was stated as 17. It is 25.** Recorded rather than quietly fixed, because it is
+  the same species of unverified figure this design exists to eliminate. The UAT's final catch was that
+  the **PR description** still carried it â€” and the PR body lands in the merge commit, so this change
+  would have shipped carrying the very number it exists to disown.
+
+### A disputed measurement, settled against the reviewer
+
+The round-3 review reported `vault_crypto::promote` destroying a **dangling** link. The worker measured
+otherwise and was right: renaming a directory onto a non-directory is refused by the OS first
+(`ENOTDIR` / os error 267), so there the pre-fix bug is a *confusing error*, not loss. The real loss is a
+**live directory link over an empty target** â€” `read_dir` follows it, `remove_dir` deletes *the link*, the
+rename returns `Ok(())`. Both later checks drove both legs and confirmed the worker.
+
+### Accepted, not fixed
+
+An `#[allow]` on an `if` **statement** covers its body, so a second unguarded rename added inside would
+pass â€” measured at `vault_manager.rs:255`, exit 0. Both checks judged it **recommended, not required**: the
+aperture is a 7â€“8 line block a reader sees whole with its justification three lines above, and the lint
+re-fires the moment anyone extracts it into a function. Unlike a function- or module-scoped allow, it is
+bounded and visible.
+
+Also accepted: `disallowed_methods` is **warn-by-default** and bites only because CI passes `-D warnings`.
+Now stated in every `clippy.toml` and in the helper's doc.
+
+### Filed, not fixed
+
+**CPE-1716** (`metadata_write`, High), **CPE-1717** (skip notices invisible under CI, High), **CPE-1718**
+(`join_files`' recovery delete), **CPE-1719** (`agent-board::move_card` writes *through* a live link and
+destroys the user's unrelated file while returning `Ok` â€” measured; the sidecar twin of `board_move_impl`,
+missed because the primitive differs *and* its root was uncovered).
+
+Verdicts: Reviewer **APPROVE**, UAT **PASS**. All CI green.
+
