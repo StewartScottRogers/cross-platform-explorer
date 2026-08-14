@@ -5419,14 +5419,22 @@ mod tests {
             provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
             assert!(root.join("scratch/.s3marker").is_file(), "[{why}] precondition: marker exists");
 
-            let err = provider
-                .delete("/scratch")
-                .expect_err("the confirmation could not be read, so the verdict is unconfirmed");
+            // **Effect before verdict.** The `Result` is captured, not unwrapped, so the assertion
+            // carrying the harm is reachable. The round-5 UAT caught the reverse here: with the guard
+            // removed the run stopped at `expect_err` and never reached the marker check, so the
+            // assertion naming the damage could not fire — and I had reported "delete Ok, marker gone"
+            // when only the first half was ever asserted. Same "assert on the bytes, not on the
+            // `Result`" rule this ticket has been applying to everything else, broken in the tests
+            // written to enforce it.
+            let outcome = provider.delete("/scratch");
 
             assert!(
                 root.join("scratch/.s3marker").is_file(),
-                "[{why}] an unreadable confirmation must not be treated as consent"
+                "[{why}] THE HARM: an unreadable confirmation was treated as consent and the marker \
+                 was deleted (outcome was {outcome:?})"
             );
+            let err = outcome
+                .expect_err("the confirmation could not be read, so the verdict is unconfirmed");
             assert!(
                 !err.contains("failed before any reply"),
                 "[{why}] THE DEFECT: the server answered 200 and this message said no reply ever \
@@ -5486,15 +5494,16 @@ mod tests {
 
         provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
 
-        let err = provider
-            .delete("/scratch")
-            .expect_err("a partial listing cannot confirm that a prefix is empty");
+        // Effect before verdict — see the sibling test above for why.
+        let outcome = provider.delete("/scratch");
 
         assert!(
             root.join("scratch/.s3marker").is_file(),
             "THE DEFECT: a 206 says the reply is incomplete by definition, and an incomplete listing \
-             was read as an empty one — so the marker was deleted on the strength of a fragment"
+             was read as an empty one — so the marker was deleted on the strength of a fragment \
+             (outcome was {outcome:?})"
         );
+        let err = outcome.expect_err("a partial listing cannot confirm that a prefix is empty");
         assert!(
             err.contains("206"),
             "and the refusal must name the status that caused it: {err}"
