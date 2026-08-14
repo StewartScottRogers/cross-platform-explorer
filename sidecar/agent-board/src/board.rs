@@ -517,6 +517,10 @@ pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    // For the CPE-1717 skip notice below: `writeln!` into a `Stderr` handle needs the trait in scope.
+    // Deliberately the direct-handle form, not `eprintln!` — the macro is what libtest captures.
+    #[allow(unused_imports)]
+    use std::io::Write as _;
 
     fn write_ticket(root: &Path, column: &str, id: &str, status: &str) {
         let dir = tickets_dir(root).join(column);
@@ -1036,9 +1040,27 @@ mod tests {
 
         let slot = root.join("Ticketing/Tickets/Doing/CPE-9995_x.md");
         fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        // CPE-1717, found by this ticket's own UAT. The version of this block written for CPE-1719
+        // returned **silently**, justified by "a skip notice would not be visible under CI anyway
+        // (CPE-1717)". That justification was false — the mechanism is the macro, not the stream, so a
+        // `writeln!(stderr)` notice *is* visible — and it cited this ticket as its authority for the
+        // claim this ticket disproved. Worse, a silent `return` is the exact shape this ticket exists
+        // to eliminate: a leg that reports green having asserted nothing.
+        //
+        // There is genuinely no privilege-free way to stage a **live file symlink** on Windows — a
+        // junction is directory-only and a hard link is `is_symlink() == false`, both measured on
+        // CPE-1716. So this leg cannot simply be made unconditional. It announces instead, loudly, and
+        // CI's `windows-latest` does hold the privilege (proved on CPE-1716 by the *absence* of this
+        // notice in a green job while the test is recorded running), so on CI it never fires.
         if std::os::windows::fs::symlink_file(&real, &slot).is_err() {
-            // No privilege and no junction equivalent for a *file*; assert nothing rather than pass
-            // vacuously. CPE-1717: a skip notice would not be visible under CI anyway.
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1719] SKIPPED the symlinked-ticket exemption leg: this machine cannot create a \
+                 file symlink at {} (Windows without Developer Mode / admin; a junction is \
+                 directory-only and a hard link is not a symlink, so neither can stand in). NOTHING \
+                 in this test covered the exemption's symlink claim on this run.",
+                slot.display()
+            );
             return;
         }
         assert!(fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(), "staging must produce a link");
