@@ -1384,6 +1384,14 @@ async metadataWritable(path: string) : Promise<Result<boolean, string>> {
  * fields, apply the edit policy, re-serialise with the format's write codec, then write via a temp file +
  * rename so a mid-write failure never truncates the original. Returns the re-read fields so the studio
  * refreshes. `Err` for a format with no writer yet.
+ * 
+ * **CPE-1716:** the save goes through [`cpe_server::fsutil::replace_file_contents`], which resolves a
+ * symlink at `path` and rewrites the file the link points at. `path` comes straight off IPC and is the
+ * user's own media file, so the open-coded `fs::rename` this replaced destroyed a **live** symlink
+ * standing there, wrote the edit to the link's former slot instead of the real file, and still returned
+ * `Ok` with the edited fields echoed back. Both halves are fixed here: the link survives and the edit
+ * reaches the real file, so the fields returned below describe bytes that provably landed — the rename
+ * is the last thing that can fail, and its `Err` propagates instead of being reported as a save.
  */
 async metadataWrite(path: string, edits: MetaEdit[]) : Promise<Result<MetaField[], string>> {
     try {
