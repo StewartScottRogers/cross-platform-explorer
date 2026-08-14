@@ -3,7 +3,7 @@ id: CPE-1731
 title: The FTP and SFTP rigs accept an empty rename destination, and both remove non-empty directories on an empty-only verb
 type: bug
 priority: Medium
-status: Backlog
+status: In Progress
 tags: ready
 estimate: S
 created: 2026-08-14

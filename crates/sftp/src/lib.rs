@@ -566,12 +566,65 @@ mod tests {
             Ok(ok_status(id))
         }
 
+        /// CPE-1731: `remove_dir`, **not** `remove_dir_all`. `SSH_FXP_RMDIR` (RFC 4251 draft-filexfer
+        /// §7.3, and OpenSSH's `sftp-server.c` `process_rmdir`) is `rmdir(2)` — it removes an *empty*
+        /// directory and fails otherwise. Deleting the subtree instead is behaviour no server this
+        /// client will ever meet has, and a test double that quietly succeeds where the wire says
+        /// "directory not empty" lets a client test pass against a fiction.
+        ///
+        /// The error code follows from [`io_err`] rather than from a new branch: `ENOTEMPTY` is neither
+        /// `NotFound` nor `PermissionDenied`, so it maps to `StatusCode::Failure` — which is what
+        /// OpenSSH returns for it under protocol 3 (`SSH_FX_FAILURE`; the finer `SSH_FX_DIR_NOT_EMPTY`
+        /// only exists from version 6). Measured on both CI platforms: `remove_dir` on a non-empty
+        /// directory is `Err` with `raw_os_error 145`/`ERROR_DIR_NOT_EMPTY` on Windows and `39`/
+        /// `ENOTEMPTY` on Linux, `ErrorKind::DirectoryNotEmpty` on each, and the directory and its
+        /// contents are untouched afterwards. (`ErrorKind::DirectoryNotEmpty` is deliberately not named
+        /// in the code: it stabilised in Rust 1.83 and this crate declares `rust-version = "1.77.2"`.)
+        ///
+        /// `SftpProvider::delete` — the **shipped** half — already classifies dir-vs-file and issues
+        /// `remove_file` or `rmdir`, so a client deleting a populated directory now gets the same
+        /// refusal from this rig that a real server would give it.
         async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
-            std::fs::remove_dir_all(self.real(&path)).map_err(io_err)?;
+            std::fs::remove_dir(self.real(&path)).map_err(io_err)?;
             Ok(ok_status(id))
         }
 
+        /// **CPE-1731: compare the RESOLVED destination against the served root — do not enumerate
+        /// spellings.** `rename("/", "")` and `rename("/", ".")` were answered `Ok(())`, in a crate
+        /// CPE-1726 declared *structurally immune* to that defect on the grounds that SFTP takes both
+        /// paths from one resolver in one message rather than from a second header. True of the source;
+        /// false of the destination — [`FsSftp::real`] maps empty *and* `"."` *and* `"/"` to the served
+        /// root, so the rig expressed the identical shape the WebDAV half had just been fixed for.
+        ///
+        /// The property is shared, so the implementation is too: [`cpe_server::fsutil::same_place`] is
+        /// the one CPE-1726 arrived at after five rounds of denylists, and its doc carries the whole
+        /// argument (why it canonicalizes when both sides resolve, why the lexical fallback pops `..`,
+        /// and the proof that the pop errs safe). Read it before changing this line.
+        ///
+        /// **Reused after re-measuring, not inherited** — inheriting a claim across these three crates
+        /// is what produced this ticket. CPE-1731's probe ran *this* rig's `real` over all three escape
+        /// families on Windows and Linux; the one difference that matters is that a wire path is
+        /// `/`-separated even on Windows, so a resolved destination is mixed-separator
+        /// (`…\cpe-sftp-srv-0\sub/..`). `Path::components()` and `canonicalize` both accept that, and
+        /// every root-resolving row still compares equal. Full findings on `same_place`.
+        ///
+        /// The reply is `SSH_FX_FAILURE`, which is what OpenSSH's `sftp-server` returns for a rename it
+        /// will not perform. **No separate "the path is empty" branch**, tempting as one is: an empty
+        /// destination is a *member* of the family this guard closes, and a second check catching it
+        /// first would keep the headline regression row green with this comparison deleted — masking
+        /// exactly the guard the row exists to prove.
+        ///
+        /// **The SOURCE side is deliberately NOT guarded, and the gap is real:** `rename("/", "/x")`
+        /// still moves the served root into a subdirectory. Out of scope by choice, not by oversight —
+        /// this ticket's subject is the destination, `cpe-webdav` has the identical asymmetry recorded
+        /// at its own MOVE, and a source guard needs the containment check CPE-1730 is opening.
+        /// Recorded here so the next sweep reads it as a decision rather than as an absence nobody
+        /// noticed.
         async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
+            let dest = self.real(&newpath);
+            if cpe_server::fsutil::same_place(&dest, &self.root) {
+                return Err(StatusCode::Failure);
+            }
             // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a category
             // ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not wrap this in
             // `cpe_server::fsutil::rename_into_slot`; the measurement is:
@@ -601,7 +654,7 @@ mod tests {
             // What `fs::rename` does to a link at the destination is pinned, not assumed, by
             // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
             #[allow(clippy::disallowed_methods)]
-            std::fs::rename(self.real(&oldpath), self.real(&newpath)).map_err(io_err)?;
+            std::fs::rename(self.real(&oldpath), &dest).map_err(io_err)?;
             Ok(ok_status(id))
         }
     }
@@ -1166,6 +1219,199 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1731 — the destination that resolves to the served root, and the empty-only verb
+    // ---------------------------------------------------------------------------------------------
+
+    /// CPE-1731 acceptance: a `rename` whose destination **resolves to the served root** is refused.
+    ///
+    /// The defect this replaces answered `Ok(())` to `rename("/", "")` and `rename("/", ".")` — the
+    /// WebDAV defect CPE-1726 had just fixed, in the crate that PR declared *structurally immune* to it
+    /// on the grounds that SFTP takes both paths from one resolver in one message. True of the source;
+    /// false of the destination, since [`FsSftp::real`] maps empty, `"."` and `"/"` all to the root.
+    ///
+    /// # What the rows are, and what they are not
+    /// **Regression pins, not a specification.** CPE-1726 shipped a table like this three times and the
+    /// UAT falsified each one on the code that carried it; the fix is the resolved comparison in
+    /// `Handler::rename`, and these record which spellings have actually been observed escaping a
+    /// previous round. Families 1 and 2 are here as the cheapest available evidence that the comparison
+    /// closes *families* rather than members; family 3 (spellings only the filesystem calls equal) is
+    /// Windows-only and lives in the test below.
+    ///
+    /// # The source is a column, not a function of the expected outcome
+    /// Each row carries its own source path. CPE-1726's equivalent table first derived the source from
+    /// the row's expected status, which worked only by coincidence — a proxy standing in for a
+    /// property, in the one file whose subject is that substitution. Here the root-resolution rows
+    /// rename **`/`** because that is the shape the bug was reported in, and it is the only source that
+    /// reproduces it: with the guard deleted and a *file* source, `fs::rename` fails anyway (a file
+    /// cannot replace the populated root) — a red produced by an errno rather than by the defect. From
+    /// `/` it returns `Ok(())` for a rename that did nothing, which is the defect verbatim. Being saved
+    /// by an errno is not the same as being guarded.
+    ///
+    /// # The last row is a positive control, and it is load-bearing
+    /// Without it, a client that silently failed to drive the rig would satisfy every refusal row (the
+    /// tree stays intact when nothing happens). The control asserts `readme.txt`'s **bytes** arrive at
+    /// the new name — so the refusals are measured against a session that demonstrably can rename.
+    ///
+    /// # What the filesystem assertions can and cannot catch here — stated rather than implied
+    /// They **cannot fail today**, and pretending otherwise would be the vacuous-assertion trap this
+    /// sprint keeps finding. A destination that resolves to the root cannot destroy anything: renaming
+    /// the root onto itself is a no-op, and renaming a file onto the populated root fails. So the
+    /// observable defect is the *reply* — a success reported for a rename that never happened, which a
+    /// client will believe and then delete its source. The tree assertions are kept as the cheap thing
+    /// that goes red if a future change ever makes this shape destructive, not as this test's evidence.
+    #[test]
+    fn cpe_1731_a_rename_whose_destination_resolves_to_the_served_root_is_refused() {
+        // (source path, destination as sent on the wire, must it be refused?, why)
+        let cases: &[(&str, &str, bool, &str)] = &[
+            ("/", "", true, "an empty destination — the shape the ticket was filed on"),
+            ("/", ".", true, "a bare `.` — `real` maps it to the root explicitly"),
+            ("/", "/", true, "a bare `/` — trims to empty"),
+            ("/", "//", true, "two slashes — survived CPE-1726's round-2 pre-trim filter"),
+            ("/", "///", true, "three slashes — same evasion"),
+            // Family 1 — the spellings a literal denylist of `""` and `"."` let through.
+            ("/", "/.", true, "`/.` — trims to `.`"),
+            ("/", "/./", true, "`/./` — trims to `./`, neither denied literal"),
+            ("/", "/.//", true, "`/.//` — a CurDir component then an empty one"),
+            ("/", "//./", true, "`//./` — leading empty component before the dot"),
+            ("/", "/./.", true, "`/./.` — two CurDir components, no trailing slash"),
+            ("/", "//.", true, "`//.` — slashes then a dot"),
+            // Family 2 — `..` landing ON the root rather than escaping it.
+            ("/", "/nonexistent/..", true, "`..` popping a name that never existed"),
+            ("/", "/sub/..", true, "`..` popping a real subdirectory"),
+            ("/", "/./sub/../.", true, "`..` and `.` mixed, still the root"),
+            // The positive control (see the doc above).
+            ("/readme.txt", "/renamed.txt", false, "an ordinary destination must still be renamed"),
+        ];
+
+        for (source, dest, refuse, why) in cases {
+            let (addr, hostkey, root) = spawn_server_returning_root();
+            let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+            let mut provider =
+                SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                    .expect("connect");
+
+            let r = provider.rename(source, dest);
+
+            if *refuse {
+                assert_eq!(
+                    std::fs::read(root.join(FILE_NAME)).ok().as_deref(),
+                    Some(FILE_BODY),
+                    "[{why}] the served tree must be intact after a refusal (rename reported {r:?})"
+                );
+                assert!(
+                    root.join(DIR_NAME).join("nested.txt").is_file(),
+                    "[{why}] and the rest of the served tree must be intact (rename reported {r:?})"
+                );
+                assert!(
+                    r.is_err(),
+                    "[{why}] a destination that resolves to the served root is a refusal, not a \
+                     rename the server reports as done"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read(root.join("renamed.txt")).ok().as_deref(),
+                    Some(FILE_BODY),
+                    "[{why}] the control row must actually move the file's bytes, or every refusal \
+                     row above is measured against a rig that renames nothing (rename reported {r:?})"
+                );
+                assert!(
+                    !root.join(FILE_NAME).exists(),
+                    "[{why}] and the source name must be gone (rename reported {r:?})"
+                );
+            }
+        }
+    }
+
+    /// Family 3: the served root spelled in a way **only the filesystem** knows is the same place.
+    ///
+    /// Windows matches names case-insensitively and strips trailing dots, while `PathBuf` equality
+    /// compares `Component::Normal` byte-wise — so this is the row `normalise_lexically` alone cannot
+    /// answer, and the reason `fsutil::same_place` consults `canonicalize`. Removing that half turns
+    /// exactly this test red and leaves the table above green (measured; see the PR body).
+    ///
+    /// **Windows-only, and measured rather than assumed.** [`FsSftp::real`] trims the leading `/` before
+    /// joining, so on Linux an absolute destination becomes a *relative* one and lands inside the root
+    /// (`/tmp/<root>` resolved to `<root>/tmp/<root>`, `same_place = false` — measured under WSL). On a
+    /// case-sensitive filesystem these spellings are genuinely different places anyway. Two independent
+    /// reasons there is nothing to catch there; on Windows a `C:\…` destination survives the trim and
+    /// `Path::join` discards the base, so it arrives as the spelling itself.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1731_a_rename_naming_the_root_by_another_spelling_is_refused() {
+        for (spell, why) in [
+            ("upper-case", "Windows matches names case-insensitively"),
+            ("trailing dot", "Windows strips a trailing dot during path processing"),
+        ] {
+            let (addr, hostkey, root) = spawn_server_returning_root();
+            let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+            let mut provider =
+                SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                    .expect("connect");
+            let literal = root.to_string_lossy().to_string();
+            let dest = if spell == "upper-case" { literal.to_uppercase() } else { format!("{literal}.") };
+
+            // Source `/` for the same reason the table above uses it: it is the source that reproduces
+            // the defect (an `Ok(())` for a rename that did nothing) rather than one an errno stops.
+            let r = provider.rename("/", &dest);
+
+            assert_eq!(
+                std::fs::read(root.join(FILE_NAME)).ok().as_deref(),
+                Some(FILE_BODY),
+                "[{spell}] the served tree must survive a rename onto a different spelling of the root \
+                 ({why}); rename reported {r:?}"
+            );
+            assert!(
+                r.is_err(),
+                "[{spell}] {why}, so this destination IS the served root and must be refused. \
+                 Byte-wise path equality does not know that, which is why the check consults the \
+                 filesystem"
+            );
+        }
+    }
+
+    /// CPE-1731 acceptance: `SSH_FXP_RMDIR` is the **empty-directory** verb, so a non-empty directory
+    /// is refused and its contents survive.
+    ///
+    /// The rig implemented it with `remove_dir_all`, which deleted the tree and answered `Ok(())` —
+    /// behaviour no real server has, and the mirror image of CPE-1726's thesis (which had WebDAV as the
+    /// crate that got its verb semantics wrong; WebDAV's `DELETE` is correctly recursive).
+    ///
+    /// **Asserted on the filesystem, and on the exact file the seeder created** — not on the returned
+    /// `Result` and not on a bare `!exists()`. A negative assertion guarded by a filename typed twice
+    /// passes vacuously the moment the two drift, so `nested.txt`'s **bytes** are what is checked, and
+    /// the positive control proves `rmdir` still works on the case it is defined for.
+    ///
+    /// `SftpProvider::delete` tries `remove_file` first and falls back to `remove_dir`, so this drives
+    /// the same path a user deleting a populated remote folder would.
+    #[test]
+    fn cpe_1731_rmdir_refuses_a_non_empty_directory_and_leaves_it_intact() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                .expect("connect");
+
+        let r = provider.delete(&format!("/{DIR_NAME}"));
+        assert!(
+            root.join(DIR_NAME).is_dir(),
+            "the non-empty directory itself must survive an empty-only verb (delete reported {r:?})"
+        );
+        assert_eq!(
+            std::fs::read(root.join(DIR_NAME).join("nested.txt")).ok().as_deref(),
+            Some(&b"deep"[..]),
+            "and its contents must still be there, byte for byte — `rmdir` is not a recursive delete \
+             (delete reported {r:?})"
+        );
+        assert!(r.is_err(), "a refusal the client reads as success is the CPE-1726 failure shape");
+
+        // Positive control: `rmdir` on the directory it IS defined for still works, so the assertions
+        // above are not measuring a verb that simply stopped functioning.
+        provider.mkdir("/emptydir").expect("mkdir");
+        provider.delete("/emptydir").expect("rmdir must still remove an EMPTY directory");
+        assert!(!root.join("emptydir").exists(), "the empty directory must actually be gone");
     }
 
     #[test]
