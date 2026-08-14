@@ -745,23 +745,38 @@ fn marker_confirmation_failure(
         // authority itself moved underneath the call.
         Some(s @ (401 | 403)) => format!(
             " The server answered HTTP {s}, a denial — and the identical listing, same prefix and same \
-             credential, had succeeded moments earlier. These two requests are back to back but not \
-             atomic, so what this most likely means is that the credential's authority changed **between** \
-             them: an expired session token (an STS token hits its expiry as a cliff, on whichever request \
-             crosses it) or a bucket/IAM policy revoked or edited in between. Re-authenticate, or refresh \
-             the session token, and try again; if the denial persists on a fresh credential, the policy \
-             really has changed."
+             credential, had succeeded moments earlier, so whatever changed, changed between two \
+             back-to-back requests. **The server's own error code below names which.** A code about the \
+             credential's authority — an expired session token (an STS token hits its expiry as a cliff, \
+             on whichever request crosses it), or a policy revoked or edited in between — means \
+             re-authenticate or refresh the token and try again. A code about the *signature* or the \
+             clock means this request was refused on how it was formed rather than on who sent it; note \
+             that the second request differs from the first only by the start-after parameter, so a \
+             gateway that signs an unexpected parameter differently lands here too."
         ),
-        // Everything else: a status that is not S3's way of saying "no". Here — and only here — the
-        // permission category can honestly be ruled out, because the server said something other than a
-        // denial rather than because of what it said last time.
+        // The server answered, and answered *successfully* — the failure was ours, reading what came
+        // back. Round 3 had no such arm, so this fell to `None` and claimed the server never answered
+        // while quoting a parse of its body. It is a distinct diagnosis from both the others: nothing
+        // is known about permissions, and nothing is implied about `start-after` either.
+        Some(s) if (200..300).contains(&s) => format!(
+            " The server answered HTTP {s} — it did reply, and successfully; what failed was reading the \
+             reply. That says nothing about permissions, and nothing about whether start-after is \
+             supported: the response arrived and could not be understood."
+        ),
+        // A status that is not S3's way of saying "no". Note the claim is scoped to what the status
+        // licenses — the server did not *refuse* this request — rather than to "this is not a
+        // permissions problem", which the 401/403 list cannot support on its own: a gateway reporting
+        // an expired token as 400 would land here, and the stronger sentence would then be a guess
+        // dressed as a finding. (PR #903 round-3 review.)
         Some(s) => format!(
-            " The server answered HTTP {s}, which is not a denial, so this is not a permissions problem. \
-             What the second request adds is the start-after parameter, so a server that does not \
-             implement it — or a transient failure — is the likelier explanation."
+            " The server answered HTTP {s}, which is not a denial status, so it did not refuse this \
+             request on credential grounds. What the second request adds is the start-after parameter, \
+             so a server that does not implement it — or a transient failure — is the likelier \
+             explanation. If the error below names a credential or token problem, believe the error \
+             rather than this sentence."
         ),
-        None => " No HTTP status was read at all, so the request failed before the server could answer — \
-                 not a permissions problem, and most likely transport or a malformed response."
+        None => " No HTTP status was obtained at all, so the request failed before any reply — most \
+                 likely transport. Nothing here is evidence about permissions either way."
             .to_string(),
     };
     format!("{preamble}{diagnosis} Underlying error: {cause}")
@@ -1455,10 +1470,19 @@ impl S3Provider {
                 map_response_error("GET", status, &body, &format!("{key_prefix:?}")),
             ));
         }
+        // **`Some(status)`, not `no_status`, from here down** — the server has answered by this point.
+        // Round 3 used `no_status` for both, so a 200 whose body failed to parse produced a message
+        // saying the request "failed before the server could answer" with an appended cause describing
+        // the body it had read. `None` must mean *no status was ever obtained*, not *we discarded it*.
+        // (PR #903 round-3 UAT.)
         let text = std::str::from_utf8(&body).map_err(|e| {
-            (None, format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"))
+            (
+                Some(status),
+                format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"),
+            )
         })?;
-        let page = parse_list_bucket_result(text, key_prefix).map_err(no_status)?;
+        let page =
+            parse_list_bucket_result(text, key_prefix).map_err(|e| (Some(status), e))?;
         // `entries.len() + filtered_count`, NOT `entries.len()` — the round-2 UAT's sharpest finding.
         //
         // `entries` is what `list` would DISPLAY; `filtered_count` is what `is_safe_s3_leaf` refused to
@@ -5250,8 +5274,96 @@ mod tests {
              so advising the user to grant it sends them to fix the one cause already ruled out: {err}"
         );
         assert!(
-            err.contains("not a permissions problem"),
-            "and it should say so outright, rather than merely omitting the false advice: {err}"
+            err.contains("did not refuse this request on credential grounds"),
+            "and it should rule the category out outright, rather than merely omitting the false \
+             advice: {err}"
+        );
+        // Round-4 review. The wording here is deliberately scoped to what the status licenses — the
+        // server did not *refuse* — rather than the stronger "this is not a permissions problem", which
+        // rests on `401 | 403` being a complete list of the ways a server says no. It is not: AWS's own
+        // error table maps `ExpiredToken` to 400, which would land in this arm, and the stronger sentence
+        // would then be a guess dressed as a finding. Two literals standing in for a property is the
+        // shape this whole ticket keeps producing.
+        assert!(
+            !err.contains("this is not a permissions problem"),
+            "the 401|403 list cannot support the stronger claim — a gateway reporting an expired token \
+             as 400 lands in this arm, so the sentence must stay inside what the status proves: {err}"
+        );
+    }
+
+    /// **The blocking finding of the PR #903 UAT's fourth round: the `None` arm said the server never
+    /// answered, when it had.**
+    ///
+    /// `probe_prefix_after` obtains its status at `signed_get` and then failed *after* that point —
+    /// `from_utf8` on the body, or `parse_list_bucket_result` — while mapping both to `None`. So a server
+    /// answering **200** with a body the crate could not read produced *"No HTTP status was read at all,
+    /// so the request failed before the server could answer"*, with an appended cause describing the body
+    /// it had just read. The message contradicted its own evidence, which is the third distinct instance
+    /// of that shape in this one function.
+    ///
+    /// The reachable route is the parser one, and it is not exotic: a gateway emitting an unescaped `&`
+    /// in a key — precisely the escaping CPE-1736 documents — yields a 200 that is answered and then
+    /// rejected locally. This fixture uses the same shape with an invalid-UTF-8 body, which is the
+    /// cheaper half to stage and exercises the identical arm.
+    ///
+    /// `None` now means *no status was ever obtained* — transport, or a failure before any reply. A 2xx
+    /// that could not be read is its own diagnosis: the server replied, and replied successfully, and
+    /// what failed was reading it. That says nothing about permissions **and nothing about
+    /// `start-after`** either, which the old wording quietly implied by falling through to the arm that
+    /// blames the new parameter.
+    #[test]
+    fn a_two_hundred_the_belt_cannot_parse_does_not_claim_the_server_never_answered() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let root = fixture_root();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_thread = Arc::clone(&requests);
+        let root_for_thread = root.clone();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let full = req.url().to_string();
+                let query = full.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+                let params = parse_query(&query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if is_list && params.iter().any(|(k, _)| k == "start-after") {
+                    // 200 OK, and a body that is not valid UTF-8. The server has answered, successfully;
+                    // the failure is entirely on this side of the wire.
+                    let _ = req.respond(tiny_http::Response::from_data(vec![0xff, 0xfe, 0xfd]));
+                    continue;
+                }
+                handle(req, &root_for_thread, None, &requests_thread);
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
+
+        let deletes_before = root.join("scratch/.s3marker").is_file();
+        assert!(deletes_before, "precondition: the marker exists");
+
+        let err = provider
+            .delete("/scratch")
+            .expect_err("the confirmation could not be read, so the verdict is unconfirmed");
+
+        assert!(
+            root.join("scratch/.s3marker").is_file(),
+            "an unreadable confirmation must not be treated as consent"
+        );
+        assert!(
+            !err.contains("failed before any reply"),
+            "THE DEFECT: the server answered 200 and this message said no reply ever arrived — while \
+             quoting a failure to read the reply it had received. `None` must mean no status was \
+             obtained, not that one was discarded: {err}"
+        );
+        assert!(
+            err.contains("it did reply, and successfully"),
+            "a 2xx that could not be parsed is its own diagnosis and must say so: {err}"
+        );
+        assert!(
+            !err.contains("a server that does not implement it"),
+            "and must not blame start-after, which is what falling through to the non-denial arm did — \
+             a successful reply is no evidence about parameter support: {err}"
         );
     }
 
@@ -5324,13 +5436,29 @@ mod tests {
              {err}"
         );
         assert!(
-            err.contains("authority changed"),
-            "on a denial the message must name what actually changed — the credential's authority, \
+            err.contains("changed between two back-to-back requests"),
+            "on a denial the message must name what is actually established — that something changed \
              between two requests that are not atomic: {err}"
         );
         assert!(
             err.contains("session token"),
             "and name the reachable cause, since an STS expiry needs no administrator, only time: {err}"
+        );
+        // Round-4 UAT. The arm used to *prescribe* "the credential's authority changed; re-authenticate",
+        // which is a positive claim the numeric status cannot support: a gateway that signs an unexpected
+        // query parameter differently answers `403 SignatureDoesNotMatch` on an unchanged credential and
+        // unchanged policy, and both prescribed actions are then wrong. The status says the server
+        // refused; only the server's error code says why — and `map_s3_error` has already distinguished
+        // them, so the finer evidence was being computed and discarded.
+        assert!(
+            err.contains("error code below names which"),
+            "a 403 licenses 'the server refused this', not a specific cause — the message must defer to \
+             the server's own error code rather than prescribing one: {err}"
+        );
+        assert!(
+            err.contains("signature") && err.contains("clock"),
+            "and must cover the non-authority denial, or it prescribes re-authentication for a request \
+             that was refused on how it was formed: {err}"
         );
         assert!(
             err.contains("ExpiredToken"),
