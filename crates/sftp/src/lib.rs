@@ -508,6 +508,15 @@ mod tests {
             let real = self.real(&filename);
             if pflags.contains(OpenFlags::CREATE) {
                 // Create (and truncate if asked) up front; the seek-based write() ops fill it in.
+                //
+                // CPE-1726, the sibling primitive (CPE-1719's failure shape, checked here rather than
+                // only `rename`): this is the write path, and `OpenOptions::create(true)` **follows** a
+                // link at the final component — an SFTP `open` onto a symlink truncates and rewrites the
+                // link's *target*, not the link. `create_new(true)` is the opener that refuses instead
+                // (`cpe_server::fsutil::stage_exclusive`), but that is the wrong semantics for a server:
+                // OpenSSH's sftp-server follows the link too. Left as-is for the same measured reason as
+                // `rename` below — this is `#[cfg(test)]`-only — but recorded so the next sweep does not
+                // have to rediscover which of the two shapes this is.
                 std::fs::OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -563,8 +572,29 @@ mod tests {
         }
 
         async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
-            // CPE-1710: SFTP server-side `rename` against its own sandbox root — the protocol's semantics,
-            // not an app-side destination guard.
+            // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a category
+            // ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not wrap this in
+            // `cpe_server::fsutil::rename_into_slot`; the measurement is:
+            //
+            // 1. This entire SFTP server is `#[cfg(test)]`. `cpe-sftp` ships a *client*
+            //    ([`SftpProvider`]) and no server, so this line is not compiled into the app. The
+            //    "remote client" supplying `newpath` is a test in this same file, over loopback,
+            //    against a per-test temp root this rig created and seeded itself. There is no third
+            //    party whose files sit at the destination — the premise the ticket weighed ("a user
+            //    running the SFTP server to share a folder did not agree to have their symlinks
+            //    replaced by whoever connects") describes a server this repo does not ship, and that
+            //    absence is what decides it.
+            // 2. That premise is pinned rather than trusted:
+            //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red the
+            //    moment this line (or any sibling destructive primitive) moves above the `#[cfg(test)]`
+            //    marker, so promoting the rig to production forces the decision to be re-taken rather
+            //    than silently inherited.
+            // 3. A test double must model the wire, not defend against it. Hardening the rig would make
+            //    the client tests pass against a server unlike the OpenSSH one the app will actually
+            //    meet.
+            //
+            // What `fs::rename` does to a link at the destination is pinned, not assumed, by
+            // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
             #[allow(clippy::disallowed_methods)]
             std::fs::rename(self.real(&oldpath), self.real(&newpath)).map_err(io_err)?;
             Ok(ok_status(id))
@@ -928,6 +958,173 @@ mod tests {
         provider.rename("/readme.txt", "/renamed.txt").expect("rename");
         assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
         assert!(provider.read("/readme.txt").is_err(), "old path should be gone");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1726 — the unguarded `fs::rename` on a remote-supplied path, decided by measurement
+    // ---------------------------------------------------------------------------------------------
+
+    /// Every `std::fs` primitive that can destroy something, as the literal source text a sweep would
+    /// grep for. `fs::copy` and `File::create` are in the list even though this crate has neither: the
+    /// point of a guard is to catch the one that gets added later, and CPE-1719 was missed precisely
+    /// because the sweep looked for `rename` while the bug was a `write`.
+    const CPE_1726_DESTRUCTIVE_CALLS: &[&str] = &[
+        "std::fs::rename(",
+        "std::fs::write(",
+        "std::fs::copy(",
+        "std::fs::remove_file(",
+        "std::fs::remove_dir(",
+        "std::fs::remove_dir_all(",
+        "std::fs::File::create(",
+        "std::fs::OpenOptions",
+    ];
+
+    /// **The guard that carries CPE-1726's decision.** The `#[allow(clippy::disallowed_methods)]` on the
+    /// rig's `rename` argues that the unguarded rename is safe *because the whole server is a
+    /// `#[cfg(test)]` test double* — no shipped code, no third-party files at the destination. That is a
+    /// measurement, not a category, and this test is what keeps it a measurement: if the rig (or any
+    /// single destructive call in it) is ever promoted above the `#[cfg(test)]` marker, this goes red
+    /// and the decision has to be re-taken rather than inherited from a comment written when it was
+    /// still true.
+    ///
+    /// Note the shipped half of this crate *does* delete things — `SftpProvider::delete` issues an SFTP
+    /// `remove_file` — but over the wire, on the **remote**, which is the app asking a real server to do
+    /// something rather than a local destructive primitive. The needles are `std::fs::`-qualified
+    /// precisely so that distinction survives: `self.sftp.remove_file(..)` is not a local write and must
+    /// not be reported as one.
+    ///
+    /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
+    /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
+    /// fail on half the matrix is the failure this ticket family exists to stop.
+    #[test]
+    fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
+        let src = include_str!("lib.rs").replace('\r', "");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let rig_starts = src.find(marker).expect(
+            "[CPE-1726] this guard finds the test rig by its exact `#[cfg(test)] / mod tests {` header \
+             at column 0. It is missing, so the scan below has no boundary to test against and would \
+             pass vacuously. Fix the needle to match the new header — never delete the guard.",
+        );
+        let mut leaked = Vec::new();
+        for needle in CPE_1726_DESTRUCTIVE_CALLS {
+            let mut from = 0;
+            while let Some(hit) = src[from..].find(needle) {
+                let at = from + hit;
+                if at < rig_starts {
+                    leaked.push(format!("  line {}: {needle}", src[..at].matches('\n').count() + 1));
+                }
+                from = at + needle.len();
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "[CPE-1726] a destructive `std::fs` call now exists in the SHIPPED half of cpe-sftp:\n{}\n\n\
+             CPE-1726 left the rig's `rename` unguarded on one measured premise: this crate ships a \
+             client and its SFTP *server* is a `#[cfg(test)]` test double, so no user's files are ever \
+             at a destination it is handed. The call(s) above are outside that rig, so the premise no \
+             longer holds for them and the decision must be re-taken, not inherited:\n\
+             - renaming onto a slot a user or a remote named → `cpe_server::fsutil::rename_into_slot`;\n\
+             - editing a file that may be a link → `cpe_server::fsutil::replace_file_contents`;\n\
+             - claiming a new name → `cpe_server::fsutil::stage_exclusive`.\n\
+             Moving the line back inside the rig is also a fix. Deleting this assertion is not.",
+            leaked.join("\n")
+        );
+    }
+
+    /// CPE-1726 acceptance: what actually happens when a **symlink** sits at the destination of the
+    /// rig's SFTP `rename`. Both legs assert on the slot and on the victim's bytes and **never on the
+    /// returned `Result`** — every bug in this family (CPE-1710/1716/1719) returned `Ok` while
+    /// destroying something, so the return value is the one witness that has never been reliable.
+    ///
+    /// The property being pinned is the one that separates `rename` from `write`: **`fs::rename` does
+    /// not follow the final component**, so it replaces the link and leaves the link's target alone,
+    /// whereas the `open`+`write` path's `OpenOptions::create(true)` at the same slot would truncate
+    /// *through* it and clobber the target. That is the whole reason the two need different fixes, and
+    /// it is asserted rather than trusted.
+    ///
+    /// # Platform split (measured on CPE-1716, re-measured here)
+    /// A **live file symlink** cannot be staged on an unprivileged Windows runner at all — a junction is
+    /// directory-only and a hard link reports `is_symlink() == false` — so the live leg declares
+    /// `supported_here = cfg!(unix)`: a legitimate skip on Windows, and red under CI on Unix if the
+    /// runner ever loses the capability. The **dangling** leg runs everywhere, because
+    /// `fsutil::make_dangling_link` has a privilege-free junction fallback.
+    #[test]
+    fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        // ── Leg 1: a LIVE link at the destination, pointing at a victim with known bytes.
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"victim bytes").unwrap();
+        let slot = root.join("slot.txt");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
+        if cpe_server::fsutil::require_staged("live_file_symlink", cfg!(unix), staged) {
+            provider.write("/live-src.txt", b"source bytes").expect("seed the rename source");
+            let r = provider.rename("/live-src.txt", "/slot.txt");
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"victim bytes",
+                "the link's TARGET must be untouched — `fs::rename` does not follow the final \
+                 component, so a write-through here would mean the rig had stopped using `rename` \
+                 (rename reported {r:?})"
+            );
+            assert!(
+                !std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+                "and the link itself must be GONE, replaced by the moved file: that is the silent \
+                 destruction CPE-1726 weighed and deliberately accepted for a `#[cfg(test)]` rig \
+                 (rename reported {r:?})"
+            );
+            assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "rename reported {r:?}");
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-sftp's rename test: this machine cannot \
+                 create a file symlink at {} (Windows without Developer Mode or elevation; a junction \
+                 is directory-only and a hard link is not a symlink — measured on CPE-1716). The \
+                 DANGLING leg below runs on this runner and covers the write-through property.",
+                slot.display()
+            );
+            let _ = std::fs::remove_file(&slot);
+        }
+
+        // ── Leg 2: a DANGLING link. Runs on every platform (junction fallback), and it is the leg that
+        // proves the write-through property without needing a live target: if the rig ever wrote
+        // *through* the link instead of replacing it, the link's non-existent target would spring into
+        // existence. It never may.
+        let dangling = root.join("dangling.txt");
+        if cpe_server::fsutil::make_dangling_link(&dangling) {
+            let never = root.join("dangling.txt-target-that-does-not-exist");
+            provider.write("/dangling-src.txt", b"dangling source").expect("seed the rename source");
+            let r = provider.rename("/dangling-src.txt", "/dangling.txt");
+            assert!(
+                !matches!(never.try_exists(), Ok(true)),
+                "the dangling link's target must NEVER be created: it existing means the rig wrote \
+                 THROUGH the link (the CPE-1719 shape) instead of replacing it (rename reported {r:?})"
+            );
+            // Outcome consistency, so a rig that reports success without moving anything is red rather
+            // than green. Not an assertion *on* the `Result` — it is an assertion on the slot, selected
+            // by what the rig claimed.
+            let link_now = std::fs::symlink_metadata(&dangling).map(|m| m.file_type().is_symlink());
+            if r.is_ok() {
+                assert_eq!(
+                    std::fs::read(&dangling).ok().as_deref(),
+                    Some(&b"dangling source"[..]),
+                    "rename reported success, so the slot must now hold the moved file's bytes; it \
+                     holds something else (is_symlink = {link_now:?})"
+                );
+            } else {
+                assert_eq!(
+                    link_now.ok(),
+                    Some(true),
+                    "rename reported failure ({r:?}), so it must have left the link alone — a failed \
+                     rename that still destroyed the destination is the worst of both outcomes"
+                );
+            }
+        }
     }
 
     #[test]

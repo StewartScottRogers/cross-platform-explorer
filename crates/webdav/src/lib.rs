@@ -604,6 +604,12 @@ mod tests {
                 if let Some(p) = real.parent() {
                     let _ = std::fs::create_dir_all(p);
                 }
+                // CPE-1726, the sibling primitive (CPE-1719's failure shape, checked here rather than
+                // only `rename`): `fs::write` **follows** a link at the final component and writes
+                // *through* it, so a PUT onto a symlink clobbers the link's target rather than the link.
+                // Left as-is for the same measured reason as MOVE below — this is `#[cfg(test)]`-only,
+                // and a real WebDAV share follows the link too — but recorded so the next sweep does not
+                // have to rediscover which of the two shapes this is.
                 let code = if std::fs::write(&real, &body).is_ok() { 201 } else { 500 };
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
@@ -612,25 +618,65 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
             "DELETE" => {
-                let r = if real.is_dir() {
-                    std::fs::remove_dir_all(&real)
-                } else {
-                    std::fs::remove_file(&real)
+                // CPE-1726 (found while sweeping the sibling primitives, and the one place this crate's
+                // rig differed from `cpe-ftp`'s and `cpe-sftp`'s): those two get `DELE`/`RMD` and
+                // `remove`/`rmdir` as *separate wire verbs*, so they never have to classify. WebDAV's
+                // `DELETE` is one verb for both, and the classifier was `real.is_dir()`, which
+                // **follows** the final component — a symlink to a directory answered "directory" and
+                // went to `remove_dir_all`, recursing through the link into whatever it points at.
+                // `symlink_metadata` never follows, so one stat answers link / dir / file on its own
+                // (CPE-1719's measurement); a link is unlinked, never traversed.
+                let r = match std::fs::symlink_metadata(&real).map(|m| m.file_type()) {
+                    Ok(t) if t.is_dir() => std::fs::remove_dir_all(&real),
+                    Ok(_) => std::fs::remove_file(&real),
+                    Err(e) => Err(e),
                 };
                 let _ = req.respond(tiny_http::Response::empty(if r.is_ok() { 204 } else { 404 }));
             }
             "MOVE" => {
                 // The Destination header is an absolute URL; map its path under `root`.
+                //
+                // CPE-1726: this used to end `.unwrap_or_default()` and then `root.join(dest_path)`, so
+                // an **absent or malformed** `Destination` collapsed to the empty string and the
+                // destination silently became the server root itself — a request that named no target at
+                // all still got handed a real, live path to rename onto. A `None` here is now a 400,
+                // which is both what RFC 4918 §9.9.4 says and the honest answer: a rig that invents a
+                // destination when the client supplied none cannot be trusted to be modelling the wire.
                 let dest_path = req
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("Destination"))
                     .map(|h| h.value.as_str().to_string())
-                    .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default()))
-                    .unwrap_or_default();
+                    .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.to_string()))
+                    .and_then(|rest| rest.split_once('/').map(|(_, p)| p.to_string()))
+                    .filter(|p| !p.is_empty());
+                let Some(dest_path) = dest_path else {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                };
                 let dest_real = root.join(dest_path.trim_start_matches('/'));
-                // CPE-1710: WebDAV MOVE against this server's own sandbox root — the protocol's
-                // semantics (MOVE with Overwrite is defined to replace), not an app-side guard.
+                // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a
+                // category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not
+                // wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
+                //
+                // 1. This entire WebDAV server is `#[cfg(test)]`. `cpe-webdav` ships a *client*
+                //    ([`WebdavProvider`]) and no server, so this line is not compiled into the app. The
+                //    "remote client" supplying the Destination header is a test in this same file, over
+                //    loopback, against a per-test temp root this rig created and seeded itself. There is
+                //    no third party whose files sit at the destination — the premise the ticket weighed
+                //    ("the client is not the person whose files are there") is simply absent here, and
+                //    that absence is what decides it.
+                // 2. That premise is pinned rather than trusted:
+                //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red
+                //    the moment this line (or any sibling destructive primitive) moves above the
+                //    `#[cfg(test)]` marker, so promoting the rig to production forces the decision to be
+                //    re-taken rather than silently inherited.
+                // 3. A test double must model the wire, not defend against it. MOVE with the default
+                //    `Overwrite: T` is *defined* to replace the destination; hardening the rig would make
+                //    the client tests pass against a server unlike any Nextcloud the app will ever meet.
+                //
+                // What `fs::rename` does to a link at the destination is pinned, not assumed, by
+                // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
                 #[allow(clippy::disallowed_methods)]
                 let code = if std::fs::rename(&real, &dest_real).is_ok() { 201 } else { 404 };
                 let _ = req.respond(tiny_http::Response::empty(code));
@@ -644,6 +690,14 @@ mod tests {
     /// Spawn the in-process WebDAV server on an ephemeral port; returns its base URL. Seeds a temp root:
     /// `readme.txt` ("hello webdav") + `sub/nested.txt`.
     fn spawn_webdav_server() -> String {
+        spawn_webdav_server_returning_root().0
+    }
+
+    /// Like [`spawn_webdav_server`] but also hands back the server's on-disk root, so a test can stage a
+    /// condition *inside* the served tree (CPE-1726 needs a symlink sitting at a MOVE destination) rather
+    /// than only driving it through the wire. Same seeding, same uniqueness scheme — the root is simply
+    /// not thrown away.
+    fn spawn_webdav_server_returning_root() -> (String, PathBuf) {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
@@ -663,12 +717,13 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("readme.txt"), FILE_BODY).unwrap();
         std::fs::write(root.join("sub").join("nested.txt"), b"deep").unwrap();
+        let root_ret = root.clone();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 handle(req, &root);
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), root_ret)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1013,6 +1068,206 @@ mod tests {
         provider.rename("/readme.txt", "/renamed.txt").expect("MOVE");
         assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
         assert!(provider.read("/readme.txt").is_err(), "old path should be gone");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1726 — the unguarded `fs::rename` on a remote-supplied path, decided by measurement
+    // ---------------------------------------------------------------------------------------------
+
+    /// Every `std::fs` primitive that can destroy something, as the literal source text a sweep would
+    /// grep for. `fs::copy` and `File::create` are in the list even though this crate has neither: the
+    /// point of a guard is to catch the one that gets added later, and CPE-1719 was missed precisely
+    /// because the sweep looked for `rename` while the bug was a `write`.
+    const CPE_1726_DESTRUCTIVE_CALLS: &[&str] = &[
+        "std::fs::rename(",
+        "std::fs::write(",
+        "std::fs::copy(",
+        "std::fs::remove_file(",
+        "std::fs::remove_dir(",
+        "std::fs::remove_dir_all(",
+        "std::fs::File::create(",
+        "std::fs::OpenOptions",
+    ];
+
+    /// **The guard that carries CPE-1726's decision.** The `#[allow(clippy::disallowed_methods)]` on
+    /// `MOVE` argues that the unguarded rename is safe *because the whole server is a `#[cfg(test)]`
+    /// test double* — no shipped code, no third-party files at the destination. That is a measurement,
+    /// not a category, and this test is what keeps it a measurement: if the rig (or any single
+    /// destructive call in it) is ever promoted above the `#[cfg(test)]` marker, this goes red and the
+    /// decision has to be re-taken rather than inherited from a comment written when it was still true.
+    ///
+    /// A source scan rather than a type-level trick because the property *is* textual — "no destructive
+    /// `std::fs` call exists in the compiled-into-the-app half of this file" is exactly what a reviewer
+    /// or a future sweep would check by hand, and this makes CI check it on every commit instead.
+    /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
+    /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
+    /// fail on half the matrix is the failure this ticket family exists to stop.
+    #[test]
+    fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
+        let src = include_str!("lib.rs").replace('\r', "");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let rig_starts = src.find(marker).expect(
+            "[CPE-1726] this guard finds the test rig by its exact `#[cfg(test)] / mod tests {` header \
+             at column 0. It is missing, so the scan below has no boundary to test against and would \
+             pass vacuously. Fix the needle to match the new header — never delete the guard.",
+        );
+        let mut leaked = Vec::new();
+        for needle in CPE_1726_DESTRUCTIVE_CALLS {
+            let mut from = 0;
+            while let Some(hit) = src[from..].find(needle) {
+                let at = from + hit;
+                if at < rig_starts {
+                    leaked.push(format!("  line {}: {needle}", src[..at].matches('\n').count() + 1));
+                }
+                from = at + needle.len();
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "[CPE-1726] a destructive `std::fs` call now exists in the SHIPPED half of cpe-webdav:\n{}\n\n\
+             CPE-1726 left the `MOVE` rename unguarded on one measured premise: this crate ships a \
+             client and its WebDAV *server* is a `#[cfg(test)]` test double, so no user's files are \
+             ever at a destination it is handed. The call(s) above are outside that rig, so the premise \
+             no longer holds for them and the decision must be re-taken, not inherited:\n\
+             - renaming onto a slot a user or a remote named → `cpe_server::fsutil::rename_into_slot`;\n\
+             - editing a file that may be a link → `cpe_server::fsutil::replace_file_contents`;\n\
+             - claiming a new name → `cpe_server::fsutil::stage_exclusive`.\n\
+             Moving the line back inside the rig is also a fix. Deleting this assertion is not.",
+            leaked.join("\n")
+        );
+    }
+
+    /// CPE-1726 acceptance: what actually happens when a **symlink** sits at the destination of the
+    /// rig's `MOVE`. Both legs assert on the slot and on the victim's bytes and **never on the returned
+    /// `Result`** — every bug in this family (CPE-1710/1716/1719) returned `Ok` while destroying
+    /// something, so the return value is the one witness that has never been reliable.
+    ///
+    /// The property being pinned is the one that separates `rename` from `write`: **`fs::rename` does
+    /// not follow the final component**, so it replaces the link and leaves the link's target alone,
+    /// whereas the `PUT` handler's `fs::write` at the same slot would write *through* it and clobber the
+    /// target. That is the whole reason the two need different fixes, and it is asserted rather than
+    /// trusted.
+    ///
+    /// # Platform split (measured on CPE-1716, re-measured here)
+    /// A **live file symlink** cannot be staged on an unprivileged Windows runner at all — a junction is
+    /// directory-only and a hard link reports `is_symlink() == false` — so the live leg declares
+    /// `supported_here = cfg!(unix)`: a legitimate skip on Windows, and red under CI on Unix if the
+    /// runner ever loses the capability. The **dangling** leg runs everywhere, because
+    /// `fsutil::make_dangling_link` has a privilege-free junction fallback.
+    #[test]
+    fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        // ── Leg 1: a LIVE link at the destination, pointing at a victim with known bytes.
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"victim bytes").unwrap();
+        let slot = root.join("slot.txt");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
+        if cpe_server::fsutil::require_staged("live_file_symlink", cfg!(unix), staged) {
+            provider.write("/live-src.txt", b"source bytes").expect("seed the MOVE source");
+            let r = provider.rename("/live-src.txt", "/slot.txt");
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"victim bytes",
+                "the link's TARGET must be untouched — `fs::rename` does not follow the final \
+                 component, so a write-through here would mean the rig had stopped using `rename` \
+                 (MOVE reported {r:?})"
+            );
+            assert!(
+                !std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+                "and the link itself must be GONE, replaced by the moved file: that is the silent \
+                 destruction CPE-1726 weighed and deliberately accepted for a `#[cfg(test)]` rig \
+                 (MOVE reported {r:?})"
+            );
+            assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "MOVE reported {r:?}");
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-webdav's MOVE test: this machine cannot \
+                 create a file symlink at {} (Windows without Developer Mode or elevation; a junction \
+                 is directory-only and a hard link is not a symlink — measured on CPE-1716). The \
+                 DANGLING leg below runs on this runner and covers the write-through property.",
+                slot.display()
+            );
+            let _ = std::fs::remove_file(&slot);
+        }
+
+        // ── Leg 2: a DANGLING link. Runs on every platform (junction fallback), and it is the leg that
+        // proves the write-through property without needing a live target: if the rig ever wrote
+        // *through* the link instead of replacing it, the link's non-existent target would spring into
+        // existence. It never may.
+        let dangling = root.join("dangling.txt");
+        if cpe_server::fsutil::make_dangling_link(&dangling) {
+            let never = root.join("dangling.txt-target-that-does-not-exist");
+            provider.write("/dangling-src.txt", b"dangling source").expect("seed the MOVE source");
+            let r = provider.rename("/dangling-src.txt", "/dangling.txt");
+            assert!(
+                !matches!(never.try_exists(), Ok(true)),
+                "the dangling link's target must NEVER be created: it existing means the rig wrote \
+                 THROUGH the link (the CPE-1719 shape) instead of replacing it (MOVE reported {r:?})"
+            );
+            // Outcome consistency, so a rig that reports success without moving anything is red rather
+            // than green. Not an assertion *on* the `Result` — it is an assertion on the slot, selected
+            // by what the rig claimed.
+            let link_now = std::fs::symlink_metadata(&dangling).map(|m| m.file_type().is_symlink());
+            if r.is_ok() {
+                assert_eq!(
+                    std::fs::read(&dangling).ok().as_deref(),
+                    Some(&b"dangling source"[..]),
+                    "MOVE reported success, so the slot must now hold the moved file's bytes; it holds \
+                     something else (is_symlink = {link_now:?})"
+                );
+            } else {
+                assert_eq!(
+                    link_now.ok(),
+                    Some(true),
+                    "MOVE reported failure ({r:?}), so it must have left the link alone — a failed \
+                     rename that still destroyed the destination is the worst of both outcomes"
+                );
+            }
+        }
+    }
+
+    /// CPE-1726, the defect this crate had and its two siblings did not (they get `DELE`/`RMD` and
+    /// `remove`/`rmdir` as separate wire verbs, so they never have to classify): the rig's `MOVE`
+    /// derived its destination with `.unwrap_or_default()`, so a request whose `Destination` header was
+    /// **absent or malformed** collapsed to the empty string and `root.join("")` handed `fs::rename` the
+    /// **server root itself** as a live destination.
+    ///
+    /// Driven over the real wire with a raw request rather than through `WebdavProvider`, because the
+    /// provider always sets the header — the bug is only reachable by a client that does not, which is
+    /// exactly the "obeying a remote instruction" case CPE-1726 is about. Asserts on the root still
+    /// being there with its seeded contents, never on the status code alone.
+    #[test]
+    fn cpe_1726_a_move_with_no_destination_header_never_targets_the_server_root() {
+        use std::io::{Read as _, Write as _};
+        let (base, root) = spawn_webdav_server_returning_root();
+        let addr = base.trim_start_matches("http://").to_string();
+
+        let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+        sock.write_all(b"MOVE /readme.txt HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n")
+            .expect("send a MOVE with no Destination header");
+        let mut resp = String::new();
+        let _ = sock.read_to_string(&mut resp);
+
+        assert!(
+            root.join("readme.txt").is_file(),
+            "the source must still be there: with no Destination the rig had nothing to move it to, and \
+             pre-fix it moved it onto `root.join(\"\")` — the served root — instead of refusing \
+             (response was {resp:?})"
+        );
+        assert!(
+            root.join("sub").join("nested.txt").is_file(),
+            "and the served tree must be intact (response was {resp:?})"
+        );
+        assert!(
+            resp.contains("400"),
+            "a MOVE with no Destination is a 400 (RFC 4918 §9.9.4), not an invented destination; got \
+             {resp:?}"
+        );
     }
 
     #[test]
