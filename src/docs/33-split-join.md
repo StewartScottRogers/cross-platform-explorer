@@ -43,6 +43,23 @@ clear error and any partial output is removed — never a silent partial file. J
 overwrite** a file that already exists at the output path; pick a different path (or delete the existing
 file first) and try again.
 
+### Links at an output path are refused, not followed
+
+If the output path you pick — for a join, or for any part or manifest name a split would write — is a
+**symlink, junction or shortcut-style link**, the operation refuses and names the link instead of writing
+through it. Both kinds of link are refused, including a **broken** one whose target no longer exists.
+
+That matters because following a link would write your file to the link's *target*, which is a different
+path from the one you chose, and the operation would then report success about a file that isn't where
+you asked for it. A link that points nowhere is the worst case: the app would create the missing target
+and tell you the join worked.
+
+The same rule protects the cleanup. When a join fails part-way it deletes the partial file it created —
+but only if that really is a file it created. A link sitting at the output name is never deleted, so a
+failed join can no longer remove something you made while reporting an unrelated problem.
+
+If you meant to write through the link, remove the link first; the app won't guess.
+
 ## Honest limits
 
 This first cut shows only the app-wide busy cursor while a split or join of a large file runs — there's

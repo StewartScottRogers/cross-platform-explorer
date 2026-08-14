@@ -264,8 +264,8 @@ YYYY-MM-DD — Short description of discovery, decision, or action.
 
 ## Evidence Rules
 
-Two rules about *proof*, not about code. They apply to every ticket, and to the PR body and review
-that close it. Both exist because the crew has broken them and paid for it.
+Four rules about *proof*, not about code. They apply to every ticket, and to the PR body and review
+that close it. Each exists because the crew has broken it and paid for it.
 
 ### 1. Guard neutralisation — a test that cannot fail is not evidence
 
@@ -355,6 +355,42 @@ handle goes around it. So:
 - **Prove the enforcement, don't assert it.** `CPE_STAGING_SABOTAGE=1` makes every staging attempt
   report failure; CI's "skip-visibility guard" steps run a filtered `cargo test` under it and **fail if
   the tests pass**.
+
+### 4. Pin a verdict to the **code**, not to the commit (PR #901)
+
+A review approves *code*. A commit sha changes when a comma moves in a Markdown file; the **tree hash**
+changes only when the tree does. Recording "APPROVE at `<sha>`" therefore invalidates itself for reasons
+that have nothing to do with what was reviewed — and the fix for that (re-review, note the new sha, push
+the note, invalidate again) is a recursion with no base case. PR #901 spent three review rounds inside it,
+each one a record *of the record* rather than of the code.
+
+**So:** state the verdict against the hash of the subtree you actually reviewed —
+
+```
+git rev-parse HEAD:crates      # 644762d648a8b1bd87bdb28a6554c1b1d745a53f
+```
+
+— and a later commit that only edits the ticket, the PR body, or a doc outside that subtree **carries the
+verdict forward unchanged**, provably, without anyone re-reading anything. If the hash differs, the code
+differs and the review genuinely is stale. Name the subtree you hashed; `HEAD:` (the whole tree) defeats
+the purpose, because that is what the sha already tracks.
+
+The same reviewer then caught **its own** waiter making a smaller version of the mistake:
+
+```sh
+gh pr checks 901 | grep "Server crates" | grep -qv pending   # WRONG
+```
+
+`grep -qv pending` succeeds when **any** line is non-pending, not when **all** are — so a run with one
+green leg and two still queued reads as ready to merge. Use a count, not a match:
+
+```sh
+[ "$(gh pr checks 901 | grep -c 'Server crates.*pending')" -eq 0 ]
+```
+
+And note the companion trap already recorded elsewhere: **`gh pr checks --watch` exits 0 when the branch
+moves under it**, so an exit-0 spanning a push is not a green signal. When you gate a merge on CI, name
+the **run id** you gated on — a previous run's green does not describe the new head.
 
 ---
 

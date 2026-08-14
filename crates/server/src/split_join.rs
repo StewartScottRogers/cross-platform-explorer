@@ -11,6 +11,54 @@
 //! any target part file already exists in `out_dir`; **join** refuses if `out_path` already exists. Both
 //! fail loudly rather than silently clobbering something — callers that want to replace prior output
 //! delete it first (or the future GUI dialog offers that as an explicit choice, CPE-1509).
+//!
+//! # Link policy at every output slot, and the enumeration behind it (CPE-1718)
+//!
+//! Every path this module writes to is a name the **user typed** for a file that does not exist yet, so
+//! by CPE-1716's discriminating question — *"am I claiming this name, or editing this file?"* — every one
+//! of them is **claiming**, and a link at any of them is refused rather than followed. The write-through
+//! is not hypothetical: measured on Windows against a dangling link at `join_files`' `out_path`,
+//! `clobber_refusal` answered `None`, `File::create` answered `Ok`, and 4096 bytes landed at the link's
+//! target while the slot stayed a link and the caller was told the join had succeeded.
+//!
+//! CPE-1719 was missed because a previous sweep looked for one primitive and this module's differed, so
+//! here is the **whole inventory** of things in this file that create, truncate or delete, and the verdict
+//! on each:
+//!
+//! | # | Primitive | Slot | Verdict |
+//! |---|-----------|------|---------|
+//! | 1 | `File::create` in [`join_into`] | `out_path` | **fixed** — [`crate::fsutil::create_slot_refusal`] guard + [`crate::fsutil::create_exclusive`] open |
+//! | 2 | `fs::remove_file` in [`join_files`]' recovery | `out_path` | **fixed** — [`remove_partial_output`] never removes a link |
+//! | 3 | `File::create` per part in [`split_file`] | each `<name>.NNN` | **fixed** — same guard + exclusive open, once per part |
+//! | 4 | `fs::write` of the manifest in [`split_file`] | `<name>.split-manifest.json` | **fixed** — same guard + exclusive open (`fs::write` follows a link exactly as `File::create` does) |
+//! | 5 | `fs::create_dir_all(out_dir)` in [`split_file`] | `out_dir` | **left, deliberately** — see below |
+//!
+//! There is no temp file and no staging in this module (both directions write their final names
+//! directly), and [`split_file`] has **no recovery path at all** — a split that fails part-way leaves its
+//! partial parts on disk. That is pre-existing behaviour and not a link hazard, but it is written down
+//! here so the next reader does not have to re-derive that the absence is real rather than overlooked.
+//!
+//! `create_dir_all` is the one left alone, and the reason is that it is **not destructive**: it cannot
+//! truncate and cannot delete. For a ***live*** directory link the worst it can do is put the output in a
+//! directory the user did not name — a surprise, not a loss — and a live directory link is a perfectly
+//! ordinary way to name a USB stick or an external drive, which refusing would break. (The **dangling**
+//! case is different again and is measured below: nothing happens at all.)
+//!
+//! The **dangling**-`out_dir` case was filed as CPE-1729 on the assumption that `create_dir_all` would
+//! walk through the link and write the whole series somewhere unnamed. **The CPE-1718 UAT measured that
+//! and it does not happen.** `std::fs::create_dir_all` tests `is_dir()` — which follows the link and
+//! answers `false` for a dangling one — then calls `create_dir`, gets `AlreadyExists` because the *name*
+//! is held by the reparse point, and returns. Nothing is created, nothing is written, the link survives,
+//! and the split fails:
+//!
+//! ```text
+//! split -> Err("Cannot create a file when that file already exists. (os error 183)")
+//! post: is_link=Ok(true)  missing_dir_created=Ok(false)  missing_census=[]
+//! ```
+//!
+//! (Measured on Windows, two link shapes; **not** measured on Linux or macOS.) So the residual here is not
+//! data placement — it is that the message names neither the path nor the real problem, and calls a
+//! directory a "file". CPE-1729 has been rewritten around that.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -111,8 +159,13 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
     // which **truncates** — so an unreadable slot here read as free and the split overwrote whatever was
     // really at that name. Worse than a lone overwrite, because a split writes a whole numbered *series*:
     // one unreadable directory turns into N destroyed files in one operation.
+    //
+    // CPE-1718 upgraded both to `create_slot_refusal`, which adds the link half `clobber_refusal`
+    // structurally cannot see (`try_exists` follows links, so a dangling one reads as a free name). The
+    // series argument applies here twice over: one link in `out_dir` is one part written to a path the
+    // user never named, and a split plants a whole numbered run of guessable names for one to sit at.
     let manifest_path = out_dir.join(format!("{original_name}{MANIFEST_SUFFIX}"));
-    if let Some(e) = crate::fsutil::clobber_refusal(
+    if let Some(e) = crate::fsutil::create_slot_refusal(
         &manifest_path,
         &format!("{}: already exists — remove it before re-splitting", manifest_path.display()),
     ) {
@@ -122,7 +175,7 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
     let mut part_paths = Vec::with_capacity(part_count as usize);
     for i in 1..=part_count {
         let p = part_path(out_dir, &original_name, i, width);
-        if let Some(e) = crate::fsutil::clobber_refusal(
+        if let Some(e) = crate::fsutil::create_slot_refusal(
             &p,
             &format!("{}: already exists — remove it before re-splitting", p.display()),
         ) {
@@ -151,7 +204,13 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
                 let p = part_paths
                     .get(part_idx)
                     .ok_or_else(|| "internal error: ran out of parts mid-split".to_string())?;
-                part_file = Some(File::create(p).map_err(|e| format!("{}: {e}", p.display()))?);
+                // CPE-1718: `create_exclusive`, not `File::create`. The guard above already proved this
+                // slot free, so this can only fail on a race or on a link the guard's probe could not
+                // see — and `O_CREAT|O_EXCL` does not follow a link at the final component, so it fails
+                // rather than creating the link's target.
+                part_file = Some(
+                    crate::fsutil::create_exclusive(p).map_err(|e| format!("{}: {e}", p.display()))?,
+                );
                 bytes_in_part = 0;
             }
             let remaining_in_part = part_size - bytes_in_part;
@@ -174,7 +233,14 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
     let sha256 = to_hex(&hasher.finalize());
     let manifest = SplitManifest { original_name, total_size, part_count, part_size, sha256 };
     let json = serde_json::to_string_pretty(&manifest).map_err(|e| e.to_string())?;
-    std::fs::write(&manifest_path, json).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    // CPE-1718: was `fs::write`, which follows a link at the final component exactly as `File::create`
+    // does — same hazard as the parts, and the manifest's name is the most guessable of the lot.
+    {
+        let mut f = crate::fsutil::create_exclusive(&manifest_path)
+            .map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+        f.write_all(json.as_bytes()).map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+        f.flush().map_err(|e| format!("{}: {e}", manifest_path.display()))?;
+    }
     Ok(manifest)
 }
 
@@ -314,8 +380,10 @@ fn validate_manifest(m: &SplitManifest) -> Result<(), String> {
 /// in the same pass. Errors — never panics — on a missing part, a part that is present but cannot be
 /// stat'ed (the OS's own cause is reported, *not* "missing" — CPE-1687, see `part_stat_error`), a part
 /// whose size doesn't match the manifest, or a checksum mismatch after reconstruction (in which case the
-/// partial `out_path` is removed rather than left behind looking like a good file). Refuses to overwrite
-/// a pre-existing `out_path`.
+/// partial `out_path` is removed rather than left behind looking like a good file — but **only if it is
+/// the regular file this call created**; a link at that name is never removed, CPE-1718). Refuses to
+/// overwrite a pre-existing `out_path`, and refuses a **link** at `out_path`, live or dangling, rather
+/// than writing the reconstruction through it to a path the caller never named.
 pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), String> {
     let manifest_path = resolve_manifest_path(first_part_or_manifest)?;
     let manifest = load_manifest(&manifest_path)?;
@@ -324,7 +392,11 @@ pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), 
     // CPE-1705: was `if out_path.exists()`. `join_into` opens `out_path` with `File::create`, which
     // truncates — and the recovery path below `remove_file`s `out_path` on ANY failure, so a collapsed
     // guard here does not merely overwrite the victim, it can also delete it on the way out.
-    if let Some(e) = crate::fsutil::clobber_refusal(
+    //
+    // CPE-1718: `create_slot_refusal`, not `clobber_refusal`. This is a name the user is **claiming**,
+    // and `clobber_refusal` alone let a dangling link through as a free name — measured on Windows, the
+    // join then reported `Ok(())` with the reconstructed bytes at the link's target.
+    if let Some(e) = crate::fsutil::create_slot_refusal(
         out_path,
         &format!("{}: already exists — refusing to overwrite", out_path.display()),
     ) {
@@ -338,9 +410,51 @@ pub fn join_files(first_part_or_manifest: &Path, out_path: &Path) -> Result<(), 
     match join_into(&manifest, &dir, out_path) {
         Ok(()) => Ok(()),
         Err(e) => {
-            let _ = std::fs::remove_file(out_path);
+            remove_partial_output(out_path);
             Err(e)
         }
+    }
+}
+
+/// Delete the partial output a failed [`join_into`] left behind — **and nothing else** (CPE-1718).
+///
+/// # Why the bare `fs::remove_file` this replaces was the sharper half of the bug
+///
+/// The recovery ran on *any* error, and `fs::remove_file` on a symlink removes **the link**. So with a
+/// dangling link at `out_path` the sequence was: the guard read the name as free, `File::create` wrote
+/// the reconstruction to the link's target, a later part failed, and the recovery then deleted the
+/// user's link — while reporting an error about a missing **part**. Measured, and it is the shape that
+/// makes this worse than an ordinary overwrite: the thing destroyed is not mentioned in the message,
+/// and the operation is at that moment busy reporting a *different* failure, so nothing in the error
+/// gives the user any reason to go and look.
+///
+/// The rule is therefore narrower than "clean up after yourself": **remove only what this operation
+/// created**, which is a regular file. A link at that name was there before, cannot have been created
+/// by the open (`create_exclusive` refuses one), and is not ours to delete.
+fn remove_partial_output(out_path: &Path) {
+    let is_link = std::fs::symlink_metadata(out_path).map(|m| m.file_type().is_symlink());
+    if partial_output_is_removable(&is_link) {
+        let _ = std::fs::remove_file(out_path);
+    }
+}
+
+/// The pure decision behind [`remove_partial_output`], split out for the same reason every other
+/// classifier in this family is: a live *file* symlink cannot be staged on an unprivileged Windows
+/// account, and a decision left inline is a decision one arm of which nobody ever runs.
+///
+/// Failure policy matches the rest of the module — **only a proven non-link is removable.** A stat that
+/// fails for a reason other than absence means we cannot tell what is at that name, and deleting
+/// something we could not identify, in the middle of reporting an unrelated error, is the worst
+/// available answer.
+fn partial_output_is_removable(is_link: &std::io::Result<bool>) -> bool {
+    match is_link {
+        // A regular file at the name we exclusively created: ours, and partial. Remove it.
+        Ok(false) => true,
+        // The user's link. Never ours to delete.
+        Ok(true) => false,
+        // Already gone — nothing to remove, and no reason to ask the OS twice.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => false,
     }
 }
 
@@ -371,7 +485,13 @@ fn part_stat_error(i: u64, p: &Path, e: &std::io::Error) -> String {
 fn join_into(manifest: &SplitManifest, dir: &Path, out_path: &Path) -> Result<(), String> {
     let width = part_width(manifest.part_count);
 
-    let mut out_file = File::create(out_path).map_err(|e| format!("{}: {e}", out_path.display()))?;
+    // CPE-1718: `create_exclusive`, not `File::create`. `join_files` has already proved this slot free,
+    // so this open can only fail on a race or on something its probe could not see; `O_CREAT|O_EXCL`
+    // does not follow a link at the final component, which is what keeps the reconstruction off a
+    // link's target even if the guard above is somehow bypassed. Measured on Windows as well as Unix —
+    // see `fsutil::create_exclusive`.
+    let mut out_file =
+        crate::fsutil::create_exclusive(out_path).map_err(|e| format!("{}: {e}", out_path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; CHUNK_SIZE];
 
@@ -430,6 +550,15 @@ mod tests {
     /// pass against the **unfixed** code too — the neutralised version still errors, just from the
     /// `File::create` rather than from the guard. So this asserts on **which** error, which is the only
     /// non-vacuous assertion available here (Evidence Rules, `Ticketing/wiki.md`).
+    ///
+    /// **CPE-1718 changed which guard answers first, and therefore this string.** The output slot is now
+    /// `create_slot_refusal`, whose link half runs before its occupancy half, so a slot nothing can stat
+    /// is now reported by the link classifier (*"could not check whether … is a link"*) rather than the
+    /// occupancy one (*"could not check what is at …"*). The test's *intent* is unchanged and still
+    /// enforced: the error must be a **guard's refusal to guess**, not an incidental failure from the
+    /// open, and it must not claim the output exists. The assertion was widened to the two wordings a
+    /// guard can produce rather than pinned to one, because pinning it to the newer one would have
+    /// re-created the same brittleness in the other direction.
     #[test]
     fn cpe_1705_join_refuses_an_output_slot_it_cannot_stat() {
         use std::io::Write;
@@ -477,9 +606,11 @@ mod tests {
 
             let err = join_files(&manifest_file, &out).expect_err("an unprovable output must refuse");
             assert!(
-                err.contains("could not check what is at") && err.contains("nothing was written"),
-                "the refusal must be the GUARD's, not an incidental `File::create` failure — those are \
-                 the same red for opposite reasons, and only this string tells them apart: {err}"
+                err.contains("could not check")
+                    && err.contains("nothing was written")
+                    && err.contains("refusing to guess"),
+                "the refusal must be the GUARD's, not an incidental `create_exclusive` failure — those \
+                 are the same red for opposite reasons, and only this string tells them apart: {err}"
             );
             assert!(
                 !err.contains("already exists"),
@@ -511,6 +642,196 @@ mod tests {
         assert_eq!(std::fs::read(&free).unwrap(), vec![9u8; 300]);
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+    // CPE-1718 — a link at an output slot is refused, and the recovery never deletes one
+    // ─────────────────────────────────────────────────────────────────────────────────────────────
+
+    /// The recovery's decision, as a table. Pure, so it runs on every OS and every account — which is
+    /// the point, because the `Ok(true)` arm (a live link at the output name) cannot be staged on an
+    /// unprivileged Windows account at all.
+    ///
+    /// The `Ok(false)` row is not filler: a recovery that removed *nothing* would be as broken as one
+    /// that removed the user's link, and it is what `corrupted_part_byte_flip_is_checksum_mismatch_err`
+    /// depends on.
+    #[test]
+    fn cpe_1718_partial_output_is_removable_only_for_a_proven_non_link() {
+        use std::io::ErrorKind;
+        assert!(partial_output_is_removable(&Ok(false)), "a regular file we created is ours to remove");
+        assert!(!partial_output_is_removable(&Ok(true)), "a link at the name was never ours");
+        assert!(
+            !partial_output_is_removable(&Err(std::io::Error::from(ErrorKind::NotFound))),
+            "already gone"
+        );
+        assert!(
+            !partial_output_is_removable(&Err(std::io::Error::from(ErrorKind::PermissionDenied))),
+            "could not tell what is there — deleting it while reporting an unrelated error is the worst \
+             available answer"
+        );
+    }
+
+    /// **The recovery half, on its own.** `join_files`' front guard now refuses a link before
+    /// `join_into` is ever called, so the recovery is unreachable end-to-end with a link at `out_path`
+    /// — which is exactly why it is exercised directly here rather than through a scenario the guard
+    /// would short-circuit. A race, or any future caller, still reaches it.
+    ///
+    /// Asserted on **the slot**, never on a `Result`: this function returns `()`, and the whole bug was
+    /// that the destruction happened silently while an unrelated error was being reported.
+    #[test]
+    fn cpe_1718_recovery_never_deletes_a_link_at_the_output_path() {
+        let d = scratch("cpe1718-recovery");
+        let outs = d.join("outs");
+        std::fs::create_dir_all(&outs).unwrap();
+        let link = outs.join("rebuilt.bin");
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!(
+                "[CPE-1718] SKIPPED the recovery-path link leg: no link could be created at {} on this \
+                 machine (neither a symlink nor the junction fallback). NOTHING in this test covered the \
+                 recovery's link arm on this run; \
+                 `cpe_1718_partial_output_is_removable_only_for_a_proven_non_link` carries the \
+                 classification on every OS.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        remove_partial_output(&link);
+
+        assert!(
+            std::fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "the recovery deleted the user's link at {} — the pre-CPE-1718 bug, in which the link goes \
+             while the error message talks about a missing part",
+            link.display()
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The front guard, on the success path.** Valid parts, a dangling link at `out_path`: before
+    /// CPE-1718 this returned `Ok(())` with the whole reconstruction written **through** the link.
+    ///
+    /// The load-bearing assertion is the directory census — `outs/` must still hold exactly the one
+    /// link — because that is what "the bytes went somewhere the user never named" looks like from
+    /// outside, and it does not depend on knowing the link helper's naming convention.
+    #[test]
+    fn cpe_1718_join_refuses_a_link_at_the_output_rather_than_writing_through_it() {
+        let d = scratch("cpe1718-join-link");
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+        let manifest = split_file(&src, 128, &d).unwrap();
+        let manifest_file = d.join(format!("{}{MANIFEST_SUFFIX}", manifest.original_name));
+
+        let outs = d.join("outs");
+        std::fs::create_dir_all(&outs).unwrap();
+        let link = outs.join("rebuilt.bin");
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!(
+                "[CPE-1718] SKIPPED the join write-through leg: no link could be created at {} on this \
+                 machine. NOTHING in this test covered the write-through route on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let _ = join_files(&manifest_file, &link);
+
+        assert!(
+            std::fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "the slot must still be the user's link"
+        );
+        let census: Vec<_> = std::fs::read_dir(&outs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            census,
+            vec!["rebuilt.bin".to_string()],
+            "nothing may be created anywhere near a refused output slot — anything else here is a file \
+             written to a path the user never named"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The same guard's **wording**, which is the half `create_exclusive` cannot supply. With the
+    /// refusal removed, `create_exclusive` still keeps the bytes off the link's target (measured on
+    /// Windows and guaranteed by POSIX on Unix), so the census above would stay green while the user
+    /// was told `The file exists. (os error 80)` about a name `try_exists` reports as free. That is the
+    /// confidently-wrong answer this repo keeps filing tickets about, so it gets its own assertion.
+    #[test]
+    fn cpe_1718_the_join_refusal_says_link_not_the_os_already_exists_error() {
+        let d = scratch("cpe1718-join-wording");
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+        let manifest = split_file(&src, 128, &d).unwrap();
+        let manifest_file = d.join(format!("{}{MANIFEST_SUFFIX}", manifest.original_name));
+
+        let link = d.join("rebuilt.bin");
+        if !crate::fsutil::make_dangling_link(&link) {
+            crate::skip_notice!(
+                "[CPE-1718] SKIPPED the join refusal-wording leg: no link could be created at {} on this \
+                 machine. NOTHING in this test covered the refusal's wording on this run.",
+                link.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let err = join_files(&manifest_file, &link).expect_err("a link at the output must refuse");
+        assert!(
+            err.contains("is a link") && err.contains("writes THROUGH it"),
+            "the refusal must name the link and say what following it would have done, not leak the \
+             OS's `AlreadyExists` from the exclusive open: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The split half.** A split plants a whole numbered *series* of guessable names, so one link in
+    /// `out_dir` is one part written somewhere unnamed — the reason the ticket's scope reached past the
+    /// site it was filed about. Both slots are covered: a part path and the manifest path.
+    #[test]
+    fn cpe_1718_split_refuses_a_link_at_a_part_or_manifest_slot() {
+        for slot in ["part", "manifest"] {
+            let d = scratch(&format!("cpe1718-split-{slot}"));
+            let src = d.join("a.bin");
+            std::fs::write(&src, pattern(300)).unwrap();
+            let outs = d.join("outs");
+            std::fs::create_dir_all(&outs).unwrap();
+
+            let link = match slot {
+                "part" => part_path(&outs, "a.bin", 1, 3),
+                _ => outs.join(format!("a.bin{MANIFEST_SUFFIX}")),
+            };
+            if !crate::fsutil::make_dangling_link(&link) {
+                crate::skip_notice!(
+                    "[CPE-1718] SKIPPED the split {slot}-slot link leg: no link could be created at {} on \
+                     this machine. NOTHING in this test covered that slot on this run.",
+                    link.display()
+                );
+                let _ = std::fs::remove_dir_all(&d);
+                continue;
+            }
+            let expected = link.file_name().unwrap().to_string_lossy().into_owned();
+
+            let _ = split_file(&src, 128, &outs);
+
+            assert!(
+                std::fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "the {slot} slot must still be the user's link"
+            );
+            let census: Vec<_> = std::fs::read_dir(&outs)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(
+                census,
+                vec![expected],
+                "a split refused at the {slot} slot must leave no part, no manifest and nothing written \
+                 through the link"
+            );
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     fn scratch(tag: &str) -> PathBuf {

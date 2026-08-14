@@ -220,8 +220,11 @@ pub fn classify_symlink_slot(stat: &std::io::Result<bool>, target: &Path) -> Opt
 /// the hazard is not.
 ///
 /// So the pairing is now a **call, not a convention**. A future `fs::rename` site calls this and gets both
-/// checks or it calls neither; `guards_are_paired_at_every_rename_destructive_site` in this module's tests
-/// fails CI if a site reaches for one half directly.
+/// checks or it calls neither, and `clippy.toml`'s `disallowed-methods` ban on bare `std::fs::rename` is
+/// what makes skipping it impossible. (An earlier version of this sentence credited a
+/// `guards_are_paired_at_every_rename_destructive_site` source scan in this module's tests. That scan was
+/// replaced by the clippy ban in round 3 — see [`rename_into_slot`] on why the scan was oversold — so the
+/// citation named an enforcement mechanism that no longer exists. Corrected under CPE-1718.)
 ///
 /// ## Order is load-bearing, and it is the existing order
 ///
@@ -236,6 +239,71 @@ pub fn classify_symlink_slot(stat: &std::io::Result<bool>, target: &Path) -> Opt
 /// separately; see the test's allow-list for the current inventory.
 pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
     clobber_refusal(target, occupied).or_else(|| symlink_slot_refusal(target))
+}
+
+/// **The one guard for a slot a caller is about to CREATE a file at** (CPE-1718) — the create-shaped
+/// sibling of [`rename_slot_refusal`], and the third member of the family alongside
+/// [`replace_file_contents`].
+///
+/// ## Which of the three a site wants, in one question
+///
+/// CPE-1716 settled it: *"am I claiming this name, or editing this file?"* [`replace_file_contents`] is
+/// the **editing** answer and follows a link, because the user opened a file and a link is how they
+/// reach it. This and [`rename_slot_refusal`] are the **claiming** answers and refuse a link, because
+/// the user typed a name for a file that does not exist yet and following the link would put their
+/// bytes somewhere else entirely.
+///
+/// ## Why a create site needs its own helper rather than reusing `rename_slot_refusal`
+///
+/// The two differ in what the link does to you, and therefore in what the message must say. At a
+/// `fs::rename` site the link is **destroyed** (rename does not follow the final component). At a
+/// `File::create`/`fs::write` site the link is **followed**: the bytes land at its target and the link
+/// survives, so the operation reports success about a file the user never named. `rename_slot_refusal`
+/// would refuse correctly and then explain it wrongly — *"renaming onto a link destroys it"* is a
+/// confident false statement about what was going to happen here, which is the failure mode this repo
+/// has filed four tickets about.
+///
+/// ## Order is the OPPOSITE of `rename_slot_refusal`'s, and that is deliberate
+///
+/// There the occupancy half runs first, so an ordinary collision keeps the site's own wording and the
+/// link wording is reachable only for a **dangling** link — the one case occupancy cannot judge. Here
+/// the link half runs first, because at a create site **both** kinds of link are the same hazard:
+///
+/// - a **dangling** link reads as a free name ([`Path::try_exists`] follows links, so it answers
+///   `Ok(false)`) and `File::create` then creates the link's target — measured on Windows for CPE-1718:
+///   `clobber_refusal = None`, `File::create -> Ok`, 4096 bytes at the target, slot still a link;
+/// - a **live** link is already refused by the occupancy half, but as *"already exists"*, which sends
+///   the user to delete a file at that name when what is there is a link to somewhere else.
+///
+/// Both are write-through, so both deserve the write-through message. A plain occupied name still gets
+/// the site's own wording: a regular file answers `Ok(false)` to the link question and falls through.
+pub fn create_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
+    classify_create_slot(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
+        .or_else(|| clobber_refusal(target, occupied))
+}
+
+/// The pure decision behind [`create_slot_refusal`], split out for the reason
+/// [`classify_symlink_slot`] and [`classify_write_target`] are: **a live *file* symlink cannot be staged
+/// without privilege on an unprivileged Windows account**, so with the decision inline the live-link arm
+/// would go unverified on exactly the machines most likely to hit it.
+pub fn classify_create_slot(stat: &std::io::Result<bool>, target: &Path) -> Option<String> {
+    match stat {
+        Ok(true) => Some(format!(
+            "\"{}\" is a link, and creating a file at a link's name writes THROUGH it — the bytes would \
+             land at the link's target, a path you did not name, and a failure part-way would then \
+             delete the link itself. Nothing was written; remove the link first if that is what you meant",
+            target.display()
+        )),
+        // Not a link: either free, or occupied by a real entry the occupancy half will judge.
+        Ok(false) => None,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // Same failure policy as everywhere else in this module: not provably a non-link ⇒ do not write.
+        Err(e) => Some(format!(
+            "could not check whether \"{}\" is a link, so nothing was written — refusing to guess rather \
+             than risk writing through one: {e}",
+            target.display()
+        )),
+    }
 }
 
 /// **Guard and rename in one call — the only sanctioned way to `fs::rename` onto a user-named slot**
@@ -370,9 +438,26 @@ pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// not this crate's use of them. That is Evidence Rule 1 — a test that cannot fail is not evidence —
 /// inside the change made to close a finding that was itself about testability.
 ///
-/// One line, one caller, no behaviour change; its whole purpose is to be reachable from a test.
-fn stage_exclusive(tmp: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)
+/// One line, few callers, no behaviour change; its whole purpose is to be reachable from a test.
+///
+/// # It is also the belt behind [`create_slot_refusal`] (CPE-1718), and it bites on Windows too
+///
+/// [`create_slot_refusal`] is a probe followed by an open, so it is TOCTOU by construction. This is the
+/// atomic half: `O_CREAT|O_EXCL` does not follow a symlink at the final component, so a link at the name
+/// makes the *open itself* fail rather than being followed. Measured on Windows for CPE-1718, on a
+/// dangling symlink where `File::create` writes 4096 bytes straight through to the target:
+///
+/// ```text
+/// [PROBE] B create_new -> Err((AlreadyExists, "The file exists. (os error 80)"))
+/// [PROBE] B post: is_link=Ok(true) target_exists=Ok(false)
+/// ```
+///
+/// So the two are not redundant, and each is load-bearing for a different thing: **this** one keeps the
+/// bytes off the link's target, and **the refusal** is what makes the failure say *"is a link"* instead
+/// of `The file exists. (os error 80)` about a name `try_exists` reports as free. A site that creates a
+/// file at a user-named path wants both, in that order.
+pub fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -392,11 +477,11 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
     // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which calls
-    // [`stage_exclusive`] — **this** function's opener, not a copy of it. The temp name carries
+    // [`create_exclusive`] — **this** function's opener, not a copy of it. The temp name carries
     // pid+nanos, so racing the real one is not the way to test it; extracting the opener is.
     {
         use std::io::Write as _;
-        let mut f = stage_exclusive(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        let mut f = create_exclusive(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
         if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
             drop(f);
             let _ = std::fs::remove_file(&tmp);
@@ -1701,7 +1786,7 @@ mod tests {
     /// that untestable because the temp name carries pid+nanos and cannot be raced — true of the temp
     /// name, and the wrong conclusion: the guarantee belongs to the **primitive**, so the primitive is
     /// what this drives, with `fs::write` on an identically-staged link as the contrast that shows the
-    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`stage_exclusive`] -- that function's own opener -- rather than a copy of it.
+    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`create_exclusive`] -- that function's own opener -- rather than a copy of it.
     ///
     /// The dangling leg runs on every runner ([`make_dangling_link`]'s junction fallback needs no
     /// privilege). The live leg needs a real file symlink and says so when it cannot have one; no
@@ -1712,11 +1797,11 @@ mod tests {
     fn create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it() {
         use std::io::Write;
         let d = scratch("create-new-link");
-        // **`stage_exclusive` is the opener `replace_file_contents` actually uses.** The first version
+        // **`create_exclusive` is the opener `replace_file_contents` actually uses.** The first version
         // of this test built its own `OpenOptions` closure here, so swapping `create_new(true)` for
         // `create(true).truncate(true)` at the call site left this green — a test named after a guard,
         // passing with the guard removed. Call the real one.
-        let staged = stage_exclusive;
+        let staged = create_exclusive;
 
         // ---- dangling link in the staging slot: every runner ----
         let dangling = d.join("staging-dangling");
@@ -2335,6 +2420,155 @@ mod tests {
             );
             assert!(!msg.contains("what is at"), "the clipped wording must never return: {msg}");
         }
+    }
+
+    /// CPE-1718: the create-shaped classifier, arm by arm. Pure, so the `Ok(true)` arm — the one an
+    /// unprivileged Windows account cannot stage a live file symlink for — is exercised everywhere.
+    #[test]
+    fn classify_create_slot_refuses_a_link_and_says_it_would_write_through_it() {
+        let p = Path::new("/tmp/rebuilt.bin");
+        let link = classify_create_slot(&Ok(true), p).expect("a link at a create slot must refuse");
+        assert!(link.contains("is a link"), "{link}");
+        assert!(
+            link.contains("writes THROUGH it"),
+            "the whole reason this is not `classify_symlink_slot` is that a create FOLLOWS the link \
+             rather than destroying it, and saying the wrong one is a confident false statement: {link}"
+        );
+        assert!(
+            !link.contains("renaming onto"),
+            "the rename wording must never leak into a create site: {link}"
+        );
+
+        assert_eq!(classify_create_slot(&Ok(false), p), None, "a real entry is the occupancy half's job");
+        assert_eq!(
+            classify_create_slot(&Err(std::io::Error::from(std::io::ErrorKind::NotFound)), p),
+            None,
+            "a genuine absence is free — creating a file at a free name is the point"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            let msg = classify_create_slot(&Err(std::io::Error::new(kind, "Access is denied.")), p)
+                .unwrap_or_else(|| panic!("{kind:?} must refuse — an lstat we could not do is not a 'no'"));
+            assert!(
+                msg.contains("could not check whether") && msg.contains("nothing was written"),
+                "the unknown arm must say what it could not determine and that nothing happened: {msg}"
+            );
+        }
+    }
+
+    /// CPE-1718: the composed guard puts the **link** half first, the opposite of
+    /// [`rename_slot_refusal`] — and an ordinary occupied name must still get the site's own wording,
+    /// which is the thing that ordering could plausibly have broken.
+    #[test]
+    fn create_slot_refusal_keeps_the_sites_own_wording_for_an_ordinary_occupant() {
+        let d = std::env::temp_dir().join(format!("cpe1718-order-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let taken = d.join("taken.bin");
+        std::fs::write(&taken, b"KEEP ME").unwrap();
+        assert_eq!(
+            create_slot_refusal(&taken, "taken.bin: already exists"),
+            Some("taken.bin: already exists".to_string()),
+            "a regular file answers Ok(false) to the link question and must fall through to the site's \
+             own message"
+        );
+        assert_eq!(
+            create_slot_refusal(&d.join("free.bin"), "unused"),
+            None,
+            "a free name must still be usable — a guard that refused everything would be as broken as \
+             one that followed links"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The leg that makes the link-first ordering evidence rather than a sentence** (PR #901 review).
+    ///
+    /// `create_slot_refusal` checks the link question *before* occupancy — the opposite of
+    /// [`rename_slot_refusal`] — and the module doc argues for twenty lines that this is deliberate. It
+    /// was pinned by nothing: swapping the order to match `rename_slot_refusal` **redded not one test**
+    /// out of 2143.
+    ///
+    /// The reason is structural. Under **either** ordering a *dangling* link reaches the link classifier,
+    /// because `try_exists` answers `Ok(false)` for it, occupancy returns `Free`, and it falls through.
+    /// Every other CPE-1718 test stages a dangling link. **The ordering only changes behaviour for a
+    /// *live* link**, and there was no live-link leg anywhere in the PR — so the one case the argument is
+    /// about was the one case untested.
+    ///
+    /// Measured both ways by the reviewer:
+    ///
+    /// ```text
+    /// link-first (as shipped): "…rebuilt.bin" is a link, and creating a file at a link's name writes
+    ///                          THROUGH it — the bytes would land at the link's target…
+    /// occupancy-first:         rebuilt.bin: already exists — refusing to overwrite
+    /// ```
+    ///
+    /// That second message is exactly what this module's own table calls out as *"sends the user to
+    /// delete a file at a name that actually holds a link to somewhere else"* — and it is the same
+    /// failure PR #899's reviewer measured at the rename site, recorded at `fsutil.rs`'s
+    /// occupancy-first comment. **The repo has been bitten by this ordering once already**; the fix for
+    /// it should not ship undefended.
+    #[test]
+    fn a_live_link_at_a_create_slot_is_reported_as_a_link_not_as_already_exists() {
+        let d = std::env::temp_dir().join(format!("cpe1718-live-order-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let real = d.join("real-target.bin");
+        std::fs::write(&real, b"VICTIM ORIGINAL").unwrap();
+        let slot = d.join("slot.bin");
+
+        // A *live* file symlink is the one staging this repo cannot fake: a junction is directory-only
+        // and a hard link is `is_symlink() == false` (both measured on CPE-1716). Per CPE-1717 a leg that
+        // cannot stage where it is supposed to work goes red rather than green.
+        let staged = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&real, &slot).is_ok()
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&real, &slot).is_ok()
+            }
+        };
+        if !require_staged("live_file_symlink", true, staged) {
+            // CI red is the consequential half and `require_staged` handles it — but Evidence Rule 3 says
+            // a visible notice is the floor, not the goal, and this leg had no floor. On an unprivileged
+            // local Windows machine it returned **silently green**, over zero coverage of the exact case
+            // it exists for — and that contributor is precisely the audience `classify_create_slot`'s
+            // pure-classifier split was designed for. Its four siblings in this PR all announce; this one
+            // did not. (PR #901 review.)
+            crate::skip_notice!(
+                "[CPE-1718] SKIPPED the live-link ordering leg: this machine could not create a file \
+                 symlink at {} (a junction is directory-only and a hard link is not a symlink, so \
+                 neither can stand in). NOTHING in this test covered the link-first ordering on this \
+                 run — the dangling-link legs pass under either ordering.",
+                slot.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+        assert!(
+            std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+            "staging must produce a link, or this test proves nothing"
+        );
+
+        let msg = create_slot_refusal(&slot, "slot.bin: already exists")
+            .expect("a live link at a create slot must be refused, not written through");
+        assert!(
+            msg.contains("is a link"),
+            "a LIVE link must be reported AS a link — occupancy-first would say \"already exists\" and \
+             send the user to delete a name that actually holds a link elsewhere: {msg}"
+        );
+        assert!(
+            !msg.contains("already exists"),
+            "and it must not fall through to the site's occupancy wording: {msg}"
+        );
+        assert_eq!(
+            std::fs::read(&real).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "nothing may touch the link's target"
+        );
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
