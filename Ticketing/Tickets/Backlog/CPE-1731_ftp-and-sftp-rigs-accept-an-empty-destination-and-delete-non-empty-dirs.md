@@ -51,9 +51,19 @@ lets a client test pass against behaviour no real server has.
 `crates/ftp/src/lib.rs` (`RNTO`, `RMD`) and `crates/sftp/src/lib.rs` (`Handler::rename`,
 `Handler::rmdir`), both inside the `#[cfg(test)]` rigs.
 
-- Reject a rename destination that resolves to the served root (empty, `/`, `.`), the way CPE-1726 did
-  for `MOVE` — **trim first, then reject**, which is the ordering that ticket got wrong on its first
-  attempt and had to fix.
+- Reject a rename destination that **resolves to the served root**, the way CPE-1726 ended up doing for
+  `MOVE`. **Do not enumerate spellings.** CPE-1726 tried that three times: round 1 rejected nothing;
+  round 2 rejected `""` before trimming, so `//` and `///` survived; round 3 trimmed first and rejected
+  `""` and `"."` — and this ticket's own UAT then measured four more (`/./`, `/.//`, `//./`, `/./.`)
+  returning `201 Created`, because `/./` trims to `./`, which is neither literal. It shipped that round
+  under a doc calling its table *"exhaustive over the shapes that resolve to the served root."*
+
+  What finally worked was resolving the destination and comparing it to the root
+  (`normalise_lexically(&dest_real) == normalise_lexically(root)`, dropping `CurDir` and empty
+  components). A denylist closes the members someone thought of; the comparison closes the family. Reuse
+  that shape here rather than the trim-then-reject ordering, which was an intermediate wrong answer, not
+  the fix. **This ticket's earlier wording said "(empty, `/`, `.`)" and was corrected on 2026-08-14** —
+  implemented as written it would have shipped FTP and SFTP with `./` open, exactly as webdav was.
 - Make `RMD`/`rmdir` non-recursive (`remove_dir`, not `remove_dir_all`), answering the protocol's
   not-empty error. Check whether any existing test deletes a non-empty directory through those verbs
   first — `cpe-sftp`'s `writes_mkdirs_lists_and_deletes_round_trip` is the one to look at.
@@ -64,8 +74,13 @@ and issues `remove_file` or `rmdir` accordingly; it is a reasonable model, and i
 
 ## Acceptance criteria
 
-- [ ] `RNTO` with no argument, and SFTP `rename` to `""` / `"."` / `"/"`, are refused with the protocol's
-      own error rather than answered success.
+- [ ] A rename whose destination **resolves to the served root** is refused with the protocol's own
+      error rather than answered success — the property, not a list of strings. `RNTO` with no argument
+      and SFTP `rename` to `""` / `"."` / `"/"` are the *observed* instances and belong in the test as
+      regression rows, but a row is never the fix; the resolved comparison is.
+- [ ] The four spellings the webdav denylist let through — `/./`, `/.//`, `//./`, `/./.` — are checked
+      here too, in whatever form each protocol expresses them. They are the cheapest available evidence
+      that the comparison closes the family rather than a longer list of members.
 - [ ] `RMD` / `rmdir` on a **non-empty** directory is refused, and the directory and its contents are
       still there afterwards — asserted on the filesystem, not on the status code.
 - [ ] Each guard broken on its own turns a distinct test red, real output pasted (Evidence Rules,
