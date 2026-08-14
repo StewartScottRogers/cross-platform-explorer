@@ -65,6 +65,23 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   **minimap** down the right edge whose highlighted box tracks your scroll position — click or drag the
   minimap to jump. Select-all and copy still yield the whole file as plain text. Above the code, the
   **symbol outline** strip lets you jump straight to a function or class when one is recognised.
+- **Saving an edited file** — the preview editor saves the same way Metadata Studio does, so the two never
+  behave differently on the same file:
+  - **A failed save never damages the original.** Your text is written to a temporary file first and only
+    then moved into place, in one step. If the save is interrupted — the disk fills up, the file is locked
+    by another program, the app is closed — the file on disk is left exactly as it was rather than
+    half-written or emptied, and the temporary file is cleaned up. (This is about *interrupted saves*, not
+    power cuts: like most desktop apps, the app doesn't force the change all the way down to the physical
+    disk before reporting success.)
+  - **Symlinks are followed.** If the file you opened is a symlink, the save edits the file the link points
+    at and the link stays a link.
+  - **A broken symlink is refused.** If the link points at something that isn't there any more, the save
+    stops and tells you which link it was and that nothing was written — rather than quietly creating a new
+    file at the far end of a broken link, which is what you'd get from a plain save and is not something
+    you'd ever find again.
+  - **A hard link is a different thing.** The file you opened receives the edit as normal, but any other
+    name for the same file keeps the old contents, because the save writes a new file and moves it into
+    place. That's how every editor that saves this way behaves.
 - **Log preview** — `.log` files get their own read-only view: each line is tinted by its detected
   severity (Error/Warn/Info/Debug/Trace, or a plain "Other" for lines with no detectable level), with
   chips to filter the view down to just the levels you want. A big real-world log (an incident's
