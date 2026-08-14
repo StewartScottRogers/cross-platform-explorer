@@ -36,9 +36,12 @@ pending. Nothing touches disk until you click **Save**:
   edits to every selected file instead of just the first. The checkpoint still fires once before the
   whole batch.
 
-- **The save is atomic.** Edits are written to a temporary file alongside the original and then moved
-  into place in one step, so a crash or a power cut part-way through a save can never leave you with a
-  half-written media file.
+- **A failed save never damages the original.** Edits are written to a temporary file first and only
+  then moved into place, in one step. If the save fails part-way through — the disk fills up, the file
+  is locked by another program, the app is closed — your file is left exactly as it was, never
+  half-rewritten, and the temporary file is cleaned up. (This is about *interrupted saves*, not about
+  power cuts: like most desktop apps, the app doesn't force the change all the way down to the physical
+  disk before reporting success.)
 
 ## Symlinked files
 
@@ -46,12 +49,12 @@ If the file you opened is a **symlink** — the usual arrangement for a music li
 playlist folders — Metadata Studio edits the file the link points at, and the link stays a link.
 
 If the link is **broken** (it points at something that isn't there any more), the save is refused and
-says so. The alternative would be to quietly replace your link with a new file, which is worse than
-an error message.
+tells you which link it was and that nothing was written. The alternative would be to quietly replace
+your link with a new file, which is worse than an error message.
 
 A **hard link** is a different thing and behaves differently: the file you opened receives the edit as
-normal, but the other name for it keeps the old metadata, because an atomic save writes a new file and
-moves it into place. That's how every rename-based editor behaves.
+normal, but the other name for it keeps the old metadata, because the save writes a new file and moves
+it into place. That's how every editor that saves this way behaves.
 
 ## Batch operations
 

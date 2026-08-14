@@ -3554,17 +3554,24 @@ async fn metadata_write(
 /// runtime (CPE-1716 — the bug it fixes returned `Ok` throughout, so it can only be caught by a test that
 /// asserts on the *file*, and that test needs to be able to call this).
 ///
-/// `std::fs::read` follows a symlink, so `bytes` are already the real file's; the save now writes back to
-/// the same place rather than over the link.
+/// **The link is resolved BEFORE the read, and the resolved path is used for both** (PR #899 UAT round 2).
+/// `std::fs::read` follows a symlink too, so reading first meant a dangling link failed here with the OS's
+/// bare `The system cannot find the file specified. (os error 2)` — no path, no mention of a link — and
+/// `replace_file_contents`'s refusal, which says all of that, could never fire from its only caller.
+/// Resolving first also means the bytes read and the bytes written provably concern the same file.
+///
+/// `ext` stays keyed on the path the **user** opened, matching `metadata_read` / `metadata_writable`: the
+/// studio decided which codec to offer from that name, and the save must not silently pick a different one.
 fn metadata_write_impl(
     path: &str,
     edits: &[cpe_server::media_meta_edit::MetaEdit],
 ) -> Result<Vec<cpe_server::media_meta_edit::MetaField>, String> {
-    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let target = cpe_server::fsutil::resolve_write_target(std::path::Path::new(path))?;
+    let bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
     let ext = std::path::Path::new(path)
         .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
     let out = cpe_server::media_meta::write_back(&ext, &bytes, edits)?;
-    cpe_server::fsutil::replace_file_contents(std::path::Path::new(path), &out)?;
+    cpe_server::fsutil::replace_file_contents(&target, &out)?;
     Ok(cpe_server::media_meta::read_all(&ext, &out))
 }
 
@@ -15601,11 +15608,21 @@ overlay / overlay rw,relatime 0 0
     /// must land on the file the link points at, and the link must still be a link afterwards.
     ///
     /// Runs for real on Unix always, and on Windows with Developer Mode or elevation. A file symlink is
-    /// the one construction that cannot be faked without privilege — a junction is directory-only, and a
-    /// hard link is not a link as far as `symlink_metadata` is concerned — so where this cannot run, the
-    /// decision it drives is still covered on that runner by `fsutil`'s `classify_write_target` arms and
-    /// by `replace_file_contents`'s dangling-link leg (which the junction fallback stages everywhere).
-    /// That matters because a skip notice printed here is invisible under CI (CPE-1717).
+    /// the one construction that cannot be faked without privilege — a junction reports
+    /// `is_symlink = true` but fails `canonicalize` with `NotADirectory`, so it is refused as *dangling*
+    /// and cannot stand in for a live file link, and a hard link is `is_symlink = false`. Where this
+    /// cannot run, the decision it drives is still covered on that runner by `fsutil`'s
+    /// `classify_write_target` arms and by `replace_file_contents`'s dangling-link leg (which the junction
+    /// fallback stages everywhere).
+    ///
+    /// **That fallback coverage is for an unprivileged contributor machine, not for CI** — a claim an
+    /// earlier version of this comment got backwards. The skip below is emitted with
+    /// `writeln!(std::io::stderr())`, which a plain `cargo test` does **not** swallow for a passing test
+    /// (unlike `println!`/`eprintln!`), so a skipped leg announces itself in the CI log; PR #899's UAT and
+    /// Reviewer measured this independently, the second by finding `links.rs`'s identically-emitted notice
+    /// in a real Windows CI log. No `[CPE-1716] SKIPPED` line appears in either Windows job of run
+    /// `31772062682` while both live-link tests are recorded running, so this leg ran for real on all
+    /// three CI legs.
     #[test]
     fn cpe_1716_metadata_write_edits_the_file_a_live_link_points_at_and_keeps_the_link() {
         use std::io::Write;
@@ -15649,6 +15666,46 @@ overlay / overlay rw,relatime 0 0
             fields.iter().find(|f| f.key == "Title").map(|f| f.value.as_str()),
             Some("EDITED"),
             "and the fields reported back must be the ones now on disk"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The refusal has to be reachable from the command, not just present in the helper** (PR #899 UAT
+    /// round 2, finding F3). `std::fs::read` follows a link too, so reading before resolving meant a
+    /// dangling link failed with the OS's bare `The system cannot find the file specified. (os error 2)` —
+    /// no path, no mention of a link — while the message that says all of that could never fire from its
+    /// only caller. The shipped user docs described the message the user could not get.
+    ///
+    /// Runs on **every runner**: `make_dangling_link` falls back to a privilege-free junction.
+    #[test]
+    fn cpe_1716_metadata_write_refuses_a_dangling_link_with_a_message_that_names_it() {
+        use std::io::Write;
+        let d = scratch("cpe1716_meta_dangling");
+        let link = d.join("gone.wav");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1716] SKIPPED the metadata_write dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the reachable-refusal route on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = metadata_write_impl(&link.to_string_lossy(), &[set_title("EDITED")])
+            .expect_err("a dangling link has no file to edit — the save must be refused");
+
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link must survive being refused"
+        );
+        assert!(e.contains("gone.wav"), "the refusal must name the link the user opened: {e}");
+        assert!(e.contains("is a link"), "and say that it IS a link: {e}");
+        assert!(e.contains("nothing was written"), "and that the edit did not happen: {e}");
+        assert!(
+            !link.with_file_name("gone.wav-target-that-does-not-exist").exists(),
+            "and refusing must not invent the missing target"
         );
         let _ = fs::remove_dir_all(&d);
     }

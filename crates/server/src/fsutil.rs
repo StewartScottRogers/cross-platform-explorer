@@ -320,11 +320,23 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///
 /// If `path` is a link whose target does not resolve there is nothing to edit — "follow the link" has no
 /// answer. Rather than create the missing target (inventing a file the user never asked for) or fall back
-/// to replacing the link (the bug), this returns an error naming the link. Callers that read the file
-/// first will usually never reach this: `std::fs::read` follows the link too and fails with `NotFound`
-/// before the save is attempted. It is guarded here anyway because that ordering is the *caller's*
-/// property, not this function's, and a future caller that produces its bytes without reading first would
-/// otherwise walk into the original bug.
+/// to replacing the link (the bug), this returns an error naming the link.
+///
+/// **Callers that read the file first must call [`resolve_write_target`] BEFORE the read, and read the
+/// path it returns** — otherwise this refusal is unreachable and the user sees the read's bare
+/// `NotFound` instead. Measured by the PR #899 UAT round 2: `std::fs::read` follows the link too, so
+/// `metadata_write` failed with `The system cannot find the file specified. (os error 2)` — no path, no
+/// mention of a link — while the message below, which says all of that, could never fire. It now resolves
+/// first and hands the resolved path to both the read and this function, which also means the bytes read
+/// and the bytes replaced provably concern the same file.
+///
+/// # Where the staging file lands — a behaviour change worth stating
+///
+/// The temp is a sibling of the **resolved target**, not of `path`. For a symlinked file that is a
+/// different directory from the one the user is looking at (the library folder rather than the playlist
+/// folder). It is required rather than incidental: a rename is only atomic within one filesystem, and the
+/// resolved target's directory is the only one guaranteed to be on the target's volume. The temp is
+/// removed on every failure path, so it is not left sitting there either way.
 ///
 /// # What this does NOT do
 ///
@@ -335,6 +347,14 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   reader does not mistake the two.
 /// - **Permissions/ownership of the original are not carried onto the replacement.** Unchanged from the
 ///   open-coded save this replaces; noted rather than silently inherited.
+/// - **Durability across a power loss is NOT provided, only atomic visibility** (PR #899 Reviewer). The
+///   bytes are `sync_all`ed before the rename, so no observer can ever see a half-written file and a
+///   failed save leaves the original exactly as it was. The **directory entry** the rename creates is a
+///   different question and is not synced: closing that needs a parent-directory `sync_all` on Unix and
+///   `MOVEFILE_WRITE_THROUGH` on Windows. `vault_manager::sync_parent_dir` does the Unix half for the
+///   vault and its own comment records that Windows is only *narrowed*, not closed — so adding the Unix
+///   call here would buy a guarantee this crate cannot state platform-uniformly. The user docs are scoped
+///   to what is actually provided instead of claiming power-cut safety.
 /// - **TOCTOU.** The link is resolved and then written; nothing is atomic across those two steps.
 pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = resolve_write_target(path)?;
@@ -351,29 +371,55 @@ pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
     ));
     // `create_new` is `O_CREAT|O_EXCL`, which refuses an existing entry **and does not follow a symlink at
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
-    // (guessable-in-principle) staging name. `fs::write` would follow one.
+    // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
+    // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which drives the
+    // primitive directly (the temp name carries pid+nanos, so racing the real one is not the way to
+    // test it) and contrasts it with `fs::write` on the same staged link.
     {
         use std::io::Write as _;
         let mut f = std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&tmp)
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
+            .map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
         if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
             drop(f);
             let _ = std::fs::remove_file(&tmp);
-            return Err(format!("{}: {e}", tmp.display()));
+            return Err(format!("{}: {e}", display_path(&tmp)));
         }
     }
-    // NOT `rename_into_slot`: its occupancy half would refuse the very file this call exists to rewrite
-    // ("already exists" is the precondition here, not the error), and its link half would refuse a
-    // symlinked path that `resolve_write_target` has just correctly resolved *past*. The guard that
-    // matters here is that resolution — `target` is a real file, never a link — and it has already run.
+    // NOT `rename_into_slot`, and the reason is its FIRST half, measured rather than assumed (PR #899
+    // Reviewer): `clobber_refusal` runs first and `try_exists` follows a live link, so on the user's
+    // symlinked media file it refuses with `"01 - My Track.wav" already exists` and the link half is
+    // never reached at all. Nor does resolving first rescue it — the resolved target is an existing file
+    // by construction, so the occupancy half then refuses that instead (`Some("real.wav already
+    // exists")`, measured). "Already exists" is this call's *precondition*, not its error. The link half
+    // would additionally refuse a dangling symlinked path, which `resolve_write_target` has already
+    // judged. So this is a genuinely different primitive, not a duplicate: the guard that matters here is
+    // that resolution — `target` is a real file, never a link — and it has already run.
     #[allow(clippy::disallowed_methods)]
     std::fs::rename(&tmp, &target).map_err(|e| {
         let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed rename
-        format!("{}: {e}", target.display())
+        format!("{}: {e}", display_path(&target))
     })
+}
+
+/// Render a path for a **user-facing message**, stripping Windows' `\\?\` verbatim prefix.
+///
+/// [`std::fs::canonicalize`] returns a verbatim path on Windows (`\\?\C:\music\track.wav`), and a
+/// resolved path is exactly what the interesting errors here name — the read-only far end of a link, or a
+/// link that resolves to a directory (PR #899 UAT round 2 nit). `\\?\` is a Win32 API escape hatch, not
+/// something the user typed or will recognise, so it is noise in an error message even though the path
+/// itself is correct and useful.
+///
+/// `\\?\UNC\server\share` is folded back to `\\server\share` rather than left as a bare `UNC\…`, which is
+/// not a path at all. Everything else, including every Unix path, is returned unchanged.
+pub fn display_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s)
 }
 
 /// Which path [`replace_file_contents`] should actually write: `path` itself, or — when `path` is a
@@ -385,20 +431,33 @@ pub fn resolve_write_target(path: &Path) -> Result<PathBuf, String> {
 
 /// The pure decision behind [`resolve_write_target`], split out for the same reason
 /// [`classify_symlink_slot`] is split out of [`symlink_slot_refusal`] — and this time the reason is sharper
-/// than style. **A live *file* symlink cannot be staged on an unprivileged Windows runner at all**
-/// (`SeCreateSymbolicLinkPrivilege`; [`make_dangling_link`]'s junction fallback is directory-only, so it
-/// covers the dangling case and not this one). With the decision inline, the live-link arm — the one
-/// CPE-1716's data loss actually travelled through — would be covered on Unix and on nothing else. As a
-/// pure function every arm is exercised on every runner and every CI account.
+/// than style. **A live *file* symlink cannot be staged without privilege on Windows**
+/// (`SeCreateSymbolicLinkPrivilege`): [`make_dangling_link`]'s junction fallback is directory-only, and a
+/// junction reports `is_symlink = true` but fails `canonicalize` with `NotADirectory`, so it stages the
+/// *dangling* verdict and cannot stand in for a live link. With the decision inline, the live-link arm —
+/// the one CPE-1716's data loss actually travelled through — would be untestable on any machine without
+/// that privilege. As a pure function every arm is exercised on every account. (CI's `windows-latest`
+/// turns out to *have* the privilege — measured, see the live-link test — so this buys coverage for an
+/// unprivileged contributor machine rather than for CI.)
 ///
 /// `resolve` is a closure rather than a value so the canonicalisation is not performed for a path that is
 /// not a link, which is the overwhelmingly common case.
 ///
-/// Failure policy, in the same spirit as [`classify_target_slot`]: **only a proven "not a link" proceeds
-/// on the original path.** If the link check itself fails for a reason other than `NotFound` the write is
-/// refused rather than guessed at, because guessing here means renaming over something we could not
-/// identify. `NotFound` proceeds: creating a brand-new file at a free path is a legitimate use, and
-/// nothing can be destroyed at a name that provably holds nothing.
+/// # Failure policy, and the one place it is weaker than it reads
+///
+/// In the same spirit as [`classify_target_slot`]: **only a proven "not a link" proceeds on the original
+/// path.** If the link check fails for a reason other than `NotFound` the write is refused rather than
+/// guessed at, because guessing here means renaming over something we could not identify. `NotFound`
+/// proceeds, because creating a brand-new file at a free name is a legitimate use.
+///
+/// **`NotFound` is not always proof of absence on Windows**, and saying otherwise would repeat the exact
+/// over-claim this repo has filed two tickets about. Rust folds `ERROR_BAD_NETPATH` (53),
+/// `ERROR_BAD_NET_NAME` and `ERROR_INVALID_DRIVE` into `ErrorKind::NotFound`, so a **disconnected UNC
+/// share** reaches this arm and is classified free (PR #899 Reviewer). Nothing is destroyed — the path is
+/// unreachable, so `create_new` in [`replace_file_contents`] then fails and the save reports it — but on
+/// that route `create_new` is the only thing standing between the classifier and a write, which is worth
+/// knowing before anyone "simplifies" it back to `fs::write`. This matches [`classify_target_slot`]'s
+/// pre-existing policy rather than inventing a new one, and it is contained; it is recorded, not fixed.
 pub fn classify_write_target(
     is_link: &std::io::Result<bool>,
     resolve: impl FnOnce() -> std::io::Result<PathBuf>,
@@ -1079,6 +1138,18 @@ mod tests {
         assert!(msg.contains("Access is denied."), "must quote the OS's own cause: {msg}");
     }
 
+    /// `\\?\` is a Win32 escape hatch, not something a user typed — and [`std::fs::canonicalize`] hands one
+    /// back on every Windows resolution, so it reaches error messages naming the far end of a link (PR #899
+    /// round 2). Pure string work, so all four cases run on every platform.
+    #[test]
+    fn display_path_strips_the_windows_verbatim_prefix_including_unc() {
+        assert_eq!(display_path(Path::new(r"\\?\C:\music\track.wav")), r"C:\music\track.wav");
+        assert_eq!(display_path(Path::new(r"\\?\UNC\nas\media\track.wav")), r"\\nas\media\track.wav");
+        // Not verbatim — left exactly as-is, including an ordinary UNC path.
+        assert_eq!(display_path(Path::new(r"\\nas\media\track.wav")), r"\\nas\media\track.wav");
+        assert_eq!(display_path(Path::new("/home/me/music/track.wav")), "/home/me/music/track.wav");
+    }
+
     /// CPE-1716, end to end on a real filesystem: the ordinary save still works, and a **dangling** link is
     /// refused with the link left standing. The dangling leg runs on every runner — [`make_dangling_link`]
     /// falls back to a privilege-free NTFS junction — and it is the leg that proves the guard is wired into
@@ -1130,9 +1201,17 @@ mod tests {
     ///
     /// Runs for real on Unix always and on a Windows machine with Developer Mode or elevation. Where it
     /// cannot run, the `Ok(true)` arm it exercises is still covered by
-    /// `classify_write_target_resolves_a_link_and_refuses_a_dangling_one` on that same runner — this test
-    /// is not the only thing standing between that arm and zero coverage, which matters because a skip
-    /// notice printed here is invisible under CI (CPE-1717).
+    /// `classify_write_target_resolves_a_link_and_refuses_a_dangling_one` on that same runner, so this test
+    /// is not the only thing standing between that arm and zero coverage.
+    ///
+    /// **The skip below is visible, and its absence is therefore evidence** — measured by the PR #899 UAT
+    /// round 2, correcting what an earlier version of this comment claimed. Under a plain `cargo test`
+    /// (no `--nocapture`, which is what CI runs) libtest swallows `println!`/`eprintln!` for a *passing*
+    /// test but **not** `writeln!(std::io::stderr())`, which writes the real fd 2 directly. Every skip
+    /// notice in this module and in `src-tauri/src/lib.rs` uses `writeln!(stderr)`, so a skipped leg says
+    /// so in the CI log — and CI run `31772062682` shows this test passing on **windows-latest with no
+    /// skip notice**, i.e. the live-link route was exercised for real on all three legs. The gap below
+    /// bites an unprivileged, non-Developer-Mode dev box, not CI.
     #[test]
     fn replace_file_contents_edits_the_file_a_live_link_points_at_and_keeps_the_link() {
         use std::io::Write;
@@ -1171,6 +1250,94 @@ mod tests {
              file and reported success (result was {r:?})"
         );
         r.expect("and the save itself must succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **`create_new` on the staging file, pinned** (PR #899 Reviewer/UAT round 2).
+    ///
+    /// [`replace_file_contents`] stages through `create_new` rather than `fs::write` so a link pre-placed
+    /// at the staging name is refused instead of written *through*. An earlier round of this PR called
+    /// that untestable because the temp name carries pid+nanos and cannot be raced — true of the temp
+    /// name, and the wrong conclusion: the guarantee belongs to the **primitive**, so the primitive is
+    /// what this drives, with `fs::write` on an identically-staged link as the contrast that shows the
+    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for
+    /// `create(true).truncate(true)` leaves the rest of the suite green; it does not leave this green.
+    ///
+    /// The dangling leg runs on every runner ([`make_dangling_link`]'s junction fallback needs no
+    /// privilege). The live leg needs a real file symlink and says so when it cannot have one; no
+    /// `fs::write` contrast is asserted on the dangling leg because writing through a dangling *junction*
+    /// fails on Windows for an unrelated reason, and a contrast that means two different things on two
+    /// platforms proves neither.
+    #[test]
+    fn create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it() {
+        use std::io::Write;
+        let d = scratch("create-new-link");
+        let staged = |p: &Path| {
+            std::fs::OpenOptions::new().write(true).create_new(true).open(p)
+        };
+
+        // ---- dangling link in the staging slot: every runner ----
+        let dangling = d.join("staging-dangling");
+        if !make_dangling_link(&dangling) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1716] SKIPPED the dangling leg of the create_new staging guard: this machine could \
+                 not create a link at {}.",
+                dangling.display()
+            );
+        } else {
+            let e = staged(&dangling).expect_err("create_new must refuse a link already at the name");
+            assert_eq!(
+                e.kind(),
+                std::io::ErrorKind::AlreadyExists,
+                "and it must refuse BECAUSE the name is taken, not for some incidental reason: {e}"
+            );
+            assert!(
+                std::fs::symlink_metadata(&dangling).is_ok_and(|m| m.file_type().is_symlink()),
+                "and the link must still be a link"
+            );
+        }
+
+        // ---- live link in the staging slot, with the fs::write contrast ----
+        let far = d.join("far-end.txt");
+        std::fs::write(&far, b"FAR ORIGINAL").unwrap();
+        let live = d.join("staging-live");
+        let far2 = d.join("far-end-2.txt");
+        std::fs::write(&far2, b"FAR ORIGINAL").unwrap();
+        let live2 = d.join("staging-live-2");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&far, &live).is_ok()
+            && std::os::windows::fs::symlink_file(&far2, &live2).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&far, &live).is_ok()
+            && std::os::unix::fs::symlink(&far2, &live2).is_ok();
+        if !made {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1716] SKIPPED the LIVE leg of the create_new staging guard: this machine cannot \
+                 create a file symlink at {} (Windows without Developer Mode / admin).",
+                live.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let e = staged(&live).expect_err("create_new must refuse a LIVE link at the staging name too");
+        assert_eq!(e.kind(), std::io::ErrorKind::AlreadyExists, "for the same reason: {e}");
+        assert_eq!(
+            std::fs::read(&far).unwrap(),
+            b"FAR ORIGINAL",
+            "and nothing may reach the far end of somebody else's link"
+        );
+
+        // The contrast: the same staged link, written with the primitive `create_new` replaced.
+        std::fs::write(&live2, b"WROTE THROUGH").expect("fs::write follows the link and succeeds");
+        assert_eq!(
+            std::fs::read(&far2).unwrap(),
+            b"WROTE THROUGH",
+            "`fs::write` writes THROUGH the link to the far end — which is exactly why the staging open \
+             uses create_new instead"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
