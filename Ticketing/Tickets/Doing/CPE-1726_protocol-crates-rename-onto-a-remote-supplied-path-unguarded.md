@@ -116,27 +116,55 @@ rigs to production and the decision is forced open again instead of being inheri
 **not** apply. All three crates already carry `cpe-server = { path = "../server" }`, so
 `fsutil::require_staged`, `fsutil::make_dangling_link` and `skip_notice!` were reachable directly.
 
-**Where the three crates genuinely differed** — `cpe-webdav` only, and both are real defects the other two
-are structurally immune to:
+**One real defect fixed, in `cpe-webdav`:** `MOVE`'s destination was invented when the client named none.
+The header parse ended `.unwrap_or_default()`, so an absent or malformed `Destination` became `""` and
+`root.join("")` handed `fs::rename` the **served root itself**. Measured: `MOVE /` with no header returned
+**`201 Created`**. Now a `400`, plus a `502` for a `Destination` naming another host (RFC 4918 §9.9.4),
+which was previously executed against the local tree.
 
-1. **`MOVE`'s destination was invented when the client named none.** The header parse ended
-   `.unwrap_or_default()`, so an absent or malformed `Destination` became `""` and `root.join("")` handed
-   `fs::rename` the **served root itself**. Measured: `MOVE /` with no header returned **`201 Created`**.
-   Now a `400`. FTP and SFTP take source and destination from the *same* resolver in the same message, so
-   neither has a second path to get wrong.
-2. **`DELETE` classified dir-vs-file with `real.is_dir()`, which follows the final component** — a symlink
-   to a directory answered "directory" and went to `remove_dir_all`, recursing *through* the link. Now
-   `symlink_metadata`, which never follows, so one stat answers link/dir/file (CPE-1719's finding). FTP
-   (`DELE`/`RMD`) and SFTP (`remove`/`rmdir`) get separate wire verbs and never classify at all.
+**Two corrections the PR's own reviewer and UAT forced, recorded because both were my errors, not
+refinements:**
+
+1. **The "webdav is structurally immune, FTP and SFTP are not" framing was false, and it must not be
+   inherited from this ticket.** I claimed FTP and SFTP could not express the empty-destination shape
+   because they take source and destination from one resolver in one message. That is true of the
+   *source* only. The UAT made both rigs express it: `RNFR /` then an `RNTO` with **no argument** is
+   answered `250 Renamed`, and SFTP `rename("/", "")` / `rename("/", ".")` both return `Ok(())`. Split
+   out as **CPE-1731**, together with a second fidelity defect the sweep missed — both rigs implement an
+   **empty-directory-only** verb (`RMD`, `SSH_FXP_RMDIR`) with a **recursive** primitive, so a non-empty
+   directory is silently deleted where a real daemon answers "not empty". That is the mirror image of the
+   thesis I argued.
+2. **A `DELETE` "fix" was shipped on a false premise and has been reverted.** I claimed `real.is_dir()`
+   followed a link so a directory symlink would be handed to `remove_dir_all` and recursed *through*. The
+   UAT measured the primitive: `remove_dir_all(dir-symlink)` and `remove_dir_all(junction)` both returned
+   `Ok(())` with the target directory and its contents intact, and `std::fs::remove_dir_all`'s own docs
+   say plainly that it *"does not follow symbolic links and will simply remove the symbolic link
+   itself"*. The original code was already correct. Worse, my replacement was a **Windows regression**:
+   `symlink_metadata` reports a Windows directory symlink as `is_dir = false`, routing it to
+   `remove_file`, which cannot unlink a reparse point — `404` with the link still there, where the
+   original returns `204`. No upside on any platform, a regression on one. Reverted, and pinned by a test
+   that reds if it is ever reintroduced.
+
+The generalisable lesson, which is the same one Evidence Rule 2 already states: I reasoned about what
+`is_dir()` and `remove_dir_all` *would* do from their signatures and never ran them. A one-line probe
+would have killed the hunk before it was written.
 
 **Sibling primitives, all crates** (AC 4): `fs::write` in FTP's `STOR` and WebDAV's `PUT`, and
 `OpenOptions::create(true)` in SFTP's `open`, all **follow** a link and write *through* it — CPE-1719's
 shape. Left as-is on the same measured reason, and now recorded at each site so the next sweep does not
 rediscover which shape it is. No `fs::copy` or `File::create` in any of the three.
 
-**Filed:** CPE-1730 — the rigs' path resolvers are bare `root.join(rel)` with no confinement, so a
-`..`-shaped remote path escapes the temp root. Latent (nothing sends one today) but the blast radius is a
-developer's working tree, so it is a ticket rather than a shrug. Deliberately out of scope here.
+**Filed:** **CPE-1730** — the rigs' path resolvers are bare `root.join(rel)` with no confinement, so a
+`..`-shaped remote path escapes the temp root (the UAT reproduced the escape on all three, over the wire).
+Latent (nothing sends one today) but the blast radius is a developer's working tree. **CPE-1731** — the
+FTP/SFTP empty-destination shape and the recursive-`RMD` fidelity defect, per correction 1 above.
+
+**Scope of the confinement guard, stated because I first overstated it:** the needles are fully
+`std::fs::`-qualified. That is load-bearing in one direction (it keeps `SftpProvider::delete`'s wire op on
+the remote from being reported as a local write) and a gap in the other — written in these files' own
+prevailing style (`use std::fs;` then `fs::write(..)`), **seven of the eight primitives pass the scan**,
+and clippy's CPE-1710 ban catches only `rename`. So it is a backstop against verbatim promotion of the
+current rigs, which is the specific regression this ticket reasoned about, and not a general audit.
 
 **Also fixed while building the evidence:** the first version of the new WebDAV raw-socket test omitted
 `Connection: close`, and tiny_http's keep-alive turned it into a **hang** rather than a red — libtest has

@@ -984,7 +984,12 @@ mod tests {
         "std::fs::OpenOptions",
     ];
 
-    /// **The guard that carries CPE-1726's decision.** The `#[allow(clippy::disallowed_methods)]` on the
+    /// **Catches verbatim promotion of the current rig — not a general audit of the shipped half.**
+    /// (An earlier draft called this "the guard that carries CPE-1726's decision", which the UAT
+    /// showed is too strong: written in this file's own prevailing style — `use std::fs;` at the top,
+    /// then `fs::write(..)` — **seven** of the eight primitives slip past this scan, and clippy's
+    /// CPE-1710 ban catches only one of them, `rename`. See the scope section below.)
+    /// The `#[allow(clippy::disallowed_methods)]` on the
     /// rig's `rename` argues that the unguarded rename is safe *because the whole server is a
     /// `#[cfg(test)]` test double* — no shipped code, no third-party files at the destination. That is a
     /// measurement, not a category, and this test is what keeps it a measurement: if the rig (or any

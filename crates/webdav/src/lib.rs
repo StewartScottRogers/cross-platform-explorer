@@ -1140,7 +1140,12 @@ mod tests {
         "std::fs::OpenOptions",
     ];
 
-    /// **The guard that carries CPE-1726's decision.** The `#[allow(clippy::disallowed_methods)]` on
+    /// **Catches verbatim promotion of the current rig — not a general audit of the shipped half.**
+    /// (An earlier draft called this "the guard that carries CPE-1726's decision", which the UAT
+    /// showed is too strong: written in this file's own prevailing style — `use std::fs;` at the top,
+    /// then `fs::write(..)` — **seven** of the eight primitives slip past this scan, and clippy's
+    /// CPE-1710 ban catches only one of them, `rename`. See the scope section below.)
+    /// The `#[allow(clippy::disallowed_methods)]` on
     /// `MOVE` argues that the unguarded rename is safe *because the whole server is a `#[cfg(test)]`
     /// test double* — no shipped code, no third-party files at the destination. That is a measurement,
     /// not a category, and this test is what keeps it a measurement: if the rig (or any single
@@ -1390,11 +1395,19 @@ mod tests {
         );
     }
 
-    /// CPE-1726, the defect this crate had and its two siblings did not (they get `DELE`/`RMD` and
-    /// `remove`/`rmdir` as separate wire verbs, so they never have to classify): the rig's `MOVE`
+    /// CPE-1726: the rig's `MOVE`
     /// derived its destination with `.unwrap_or_default()`, so a request whose `Destination` header was
     /// **absent or malformed** collapsed to the empty string and `root.join("")` handed `fs::rename` the
     /// **server root itself** as a live destination.
+    ///
+    /// **This is not a WebDAV-only defect, and an earlier draft of this PR wrongly said it was.** The
+    /// claim was that FTP and SFTP are structurally immune because they take source and destination
+    /// from the same resolver in one message. The UAT falsified it by making both rigs express exactly
+    /// this shape — `RNFR /` followed by an `RNTO` carrying **no argument at all** is answered
+    /// `250 Renamed`, and `rename("/", "")` / `rename("/", ".")` both return `Ok(())` — because both
+    /// resolvers map empty and `/` to the served root just as this one did. **CPE-1731 tracks the FTP
+    /// and SFTP halves**; do not re-derive the immunity claim from this crate being the one that got
+    /// fixed first.
     ///
     /// Driven over the real wire with a raw request rather than through `WebdavProvider`, because the
     /// provider always sets the header — the bug is only reachable by a client that does not, which is
