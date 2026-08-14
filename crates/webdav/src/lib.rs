@@ -620,20 +620,27 @@ mod tests {
         /// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
         /// **The two halves overlap on Windows, and the guard-neutralisation probes say so plainly:**
         ///
-        /// | probe | `..` rows | spelling rows |
+        /// **Each half is load-bearing on exactly one platform, and neither is redundant** — measured
+        /// on both, the second column by the round-5 UAT:
+        ///
+        /// | probe | Windows | Linux |
         /// |---|---|---|
-        /// | `canonicalize` removed | pass (lexical catches them) | **red** |
-        /// | `..` popping removed | pass (canonicalize catches them) | pass |
+        /// | `canonicalize` removed | **red** (spelling rows) | pass |
+        /// | `..` popping removed | pass | **red** (`..` rows) |
         /// | both removed | **red** | **red** |
         ///
-        /// So on this platform neither half is *individually* necessary for the `..` family — Windows
-        /// normalises `..` during path processing, so `root\nonexistent\..` opens as `root` and
-        /// `canonicalize` succeeds even though `nonexistent` does not exist. On a system that resolves
-        /// `..` against real directories, that call fails and the lexical pop is the only thing left;
-        /// **that is reasoning, not a measurement — I ran these probes on Windows only**, and CI's
-        /// 3-OS matrix is where the other half gets checked. Recorded rather than smoothed over,
-        /// because "each guard was shown to be load-bearing" would be the tidier sentence and not a
-        /// true one.
+        /// Windows normalises `..` during path processing, so `root\nonexistent\..` opens as `root`
+        /// and `canonicalize` succeeds even though `nonexistent` does not exist — which is why the
+        /// lexical pop looks redundant there. Linux resolves `..` against real directories, so that
+        /// call fails and the pop is the only thing left. Conversely `canonicalize` is what catches
+        /// the case-insensitive and trailing-dot spellings, which only exist on Windows.
+        ///
+        /// This table was first written with the Linux column as *reasoning* and marked as such; the
+        /// UAT then built a toolchain inside WSL and measured it. One detail the reasoning had wrong:
+        /// with the pop removed, Linux answers the `..` rows **404, not 201** — the guard does not
+        /// fire and the request is stopped only by an errno. The test still goes red, and being saved
+        /// by an errno is not the same as being guarded, which is the distinction this whole file
+        /// keeps turning on.
         fn same_place(dest: &std::path::Path, root: &std::path::Path) -> bool {
             if let (Ok(a), Ok(b)) = (dest.canonicalize(), root.canonicalize()) {
                 return a == b;
@@ -760,6 +767,19 @@ mod tests {
                 // ("the text after the last `://`") rather than the property ("which host does this URL
                 // name"). The authority of an absolute URL is what follows the *first* `://` and runs to
                 // the first `/`; a `://` later in the string is path, by definition.
+                //
+                // **Known and accepted** (round-5 UAT): `Destination: http:///x` *with* a valid `Host`
+                // executes locally. The empty authority skips the 502 below by design — an absent
+                // authority is not evidence of a *different* host — and the no-`Host` guard does not
+                // apply because the `Host` is present and did establish which server the client meant.
+                // It is the one input that reaches `fs::rename` with no authority in the `Destination`
+                // at all, so it is named here rather than left to be re-found.
+                //
+                // Also measured and left alone, all failing *safe*: duplicate `Destination` headers
+                // take the **first** where a real server may take the last; and `user@host`, a
+                // trailing dot on the hostname, and `localhost` vs `127.0.0.1` all answer `502` —
+                // over-strict, never falsely local. No two distinct authority strings compare equal
+                // under `eq_ignore_ascii_case`, so there is no false-local direction to exploit.
                 let parsed = req
                     .headers()
                     .iter()
@@ -837,6 +857,24 @@ mod tests {
                 //    `root.join(..)` here has no containment check, so a `..`-shaped path would
                 //    resolve outside the temp root. Nothing sends one today; CPE-1730 tracks closing
                 //    it. If that ever changes before CPE-1730 lands, this reason expires with it.
+                //
+                //    **Three shapes get out, not one** (round-5 UAT). Enumerated because naming only
+                //    `..` would imply the other two are handled:
+                //      a. a `..`-shaped destination — `MOVE /` to `/../x` moved the served root itself
+                //         out to the parent and answered `201`;
+                //      b. an **absolute** destination, since `Path::join` discards the base;
+                //      c. a destination **through a symlinked subdirectory**, which needs neither `..`
+                //         nor an absolute path — measured writing to `/tmp/…/inner/escaped.txt`.
+                //    (c) is not reachable over the wire because nothing in the rig lets a client
+                //    create the link, and (a)/(b) need a client that does not exist. That is why this
+                //    is CPE-1730's scope rather than a blocker here — but the *enumeration* has to be
+                //    right, or the next reader closes `..` and believes the job is done.
+                //
+                //    **`DELETE /` needs none of them.** MOVE now refuses to be renamed onto the root
+                //    while DELETE removes the root outright (`204`, measured). That is arguably
+                //    correct by the wire — WebDAV `DELETE` on a collection deletes the collection —
+                //    but the asymmetry is deliberate-looking and was not deliberate, so it is written
+                //    down here rather than left for round 6 to rediscover.
                 // 2. That premise is pinned rather than trusted:
                 //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red
                 //    the moment this line (or any sibling destructive primitive) moves above the
