@@ -1473,12 +1473,26 @@ mod tests {
         use std::io::{Read as _, Write as _};
 
         // (what the client sends as the Destination header, the status it must get back, why)
+        //
+        // These rows are **regression pins, not a specification**. Rounds 1–3 each shipped a table
+        // like this one and each was incomplete, because a table can only hold the spellings someone
+        // thought of. The property is enforced in `handle` by comparing the *resolved* destination
+        // against the root; what follows is the set of spellings that have actually been observed to
+        // slip past a previous round, kept so none of them can come back. Adding a row is cheap and
+        // welcome — but a new row is never the fix. Fixing the comparison is.
         let cases: &[(Option<&str>, &str, &str)] = &[
             (None, "400", "no Destination header at all — the round-2 case"),
             (Some("http://{host}/"), "400", "a bare `/` path — trims to empty"),
             (Some("http://{host}//"), "400", "two slashes — survived round 2's pre-trim filter"),
             (Some("http://{host}///"), "400", "three slashes — same evasion"),
             (Some("http://{host}//."), "400", "slashes then a dot — trims to `.`, still the root"),
+            // The four the round-3 UAT measured returning `201 Created` against the literal denylist
+            // (`""` and `"."`) that round 3 shipped under a doc claiming to be exhaustive. Each trims
+            // to something that is neither literal — `/./` trims to `./` — yet resolves to the root.
+            (Some("http://{host}/./"), "400", "`/./` — trims to `./`, neither denied literal"),
+            (Some("http://{host}/.//"), "400", "`/.//` — a CurDir component then an empty one"),
+            (Some("http://{host}//./"), "400", "`//./` — leading empty component before the dot"),
+            (Some("http://{host}/./."), "400", "`/./.` — two CurDir components, no trailing slash"),
             (Some("http://other.example//stolen.txt"), "502", "a Destination on ANOTHER host"),
         ];
 
@@ -1497,8 +1511,14 @@ mod tests {
                 Some(d) => format!("Destination: {}\r\n", d.replace("{host}", &addr)),
                 None => String::new(),
             };
+            // The cross-host row moves a **file**, not `/`. Every row used to send `MOVE /`, which
+            // 404s before the Destination is ever consulted — so `!stolen.txt.exists()` below could
+            // not have fired for any input, and the comment above it described a request the test
+            // never sent. With a real source, a Destination that got executed locally would actually
+            // produce `stolen.txt`, so the assertion can fail. (PR #902 review.)
+            let source = if why.contains("ANOTHER host") { "/readme.txt" } else { "/" };
             let req = format!(
-                "MOVE / HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
+                "MOVE {source} HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
                  Content-Length: 0\r\n\r\n"
             );
             sock.write_all(req.as_bytes()).expect("send the MOVE");
@@ -1523,6 +1543,48 @@ mod tests {
                  not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
             );
         }
+    }
+
+    /// A client that sends **no `Host` header** must be refused, not accommodated.
+    ///
+    /// Round 3 checked the cross-host rule as *"if both sides are present and they differ, 502"*, so
+    /// a client that simply omitted `Host` skipped the check entirely and had its cross-host
+    /// `Destination` executed against the local tree with a `201`. That is the same shape the 502 was
+    /// added to close: **executing a request you could not fully understand.** It is kept separate
+    /// from the table above because the table's request builder always sends a `Host`, and a row that
+    /// cannot express the input it names is worse than no row.
+    #[test]
+    fn cpe_1726_a_move_from_a_client_that_sends_no_host_header_is_refused_not_executed() {
+        use std::io::{Read as _, Write as _};
+
+        let (base, root) = spawn_webdav_server_returning_root();
+        let addr = base.trim_start_matches("http://").to_string();
+        let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+        sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+        // HTTP/1.0 so that omitting Host is a well-formed request rather than a protocol error the
+        // parser might reject for its own reasons — the refusal under test must be ours.
+        let req = "MOVE /readme.txt HTTP/1.0\r\nDestination: http://other.example/stolen.txt\r\n\
+                   Connection: close\r\nContent-Length: 0\r\n\r\n";
+        sock.write_all(req.as_bytes()).expect("send the MOVE");
+        let mut resp = String::new();
+        let _ = sock.read_to_string(&mut resp);
+
+        assert!(
+            root.join("readme.txt").is_file(),
+            "a MOVE from a client with no Host header must not be executed; readme.txt was moved \
+             away (response was {resp:?})"
+        );
+        assert!(
+            !root.join("stolen.txt").exists(),
+            "a cross-host Destination must never land locally just because Host was absent and the \
+             comparison was therefore skipped (response was {resp:?})"
+        );
+        assert!(
+            resp.contains("400"),
+            "expected 400: with no Host there is nothing to compare the Destination's authority \
+             against, so the request cannot be understood and must be refused rather than assumed \
+             local. Got {resp:?}"
+        );
     }
 
     #[test]
