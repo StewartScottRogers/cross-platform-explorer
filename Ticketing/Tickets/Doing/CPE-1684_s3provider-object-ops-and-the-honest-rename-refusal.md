@@ -355,3 +355,64 @@ produced over a raw socket, and now is.
 the shipped code deliberately breaks — *"Deleting a 'folder' will mean deleting the objects under that
 prefix"*. Corrected to the refusal, moved to the present tense, and given the two new user-visible facts:
 the 204-proves-nothing semantics of a successful delete, and the unreachable `.`/`..` keys.
+
+### 2026-08-13 — round 2, from the UAT
+
+**Blocker: `delete` reported success on a non-empty directory and deleted nothing.** The real bug of this
+ticket, and my own. `probe_prefix` reported "real entries" as `page.entries.len()` — a count taken
+**after** `is_safe_s3_leaf` filtering. That guard refuses a leaf containing `\`, a control byte, or a
+literal `..`/`.`, every one of which is a legal S3 key. Such an object landed in `raw_entries` but not in
+`entries`, so `delete` read the directory as marker-only, removed the marker, took S3's `204`, and
+returned `Ok(())`. On a **conforming** server. The marker-present variant is the worse one: the folder
+then vanishes from every listing while the object survives underneath it, unreachable through the UI.
+
+Fixed to `page.entries.len() + page.filtered_count`. What makes it worth recording is that
+`is_safe_s3_leaf`'s own doc already said *"A leaf this refuses is a real S3 key"* — the model was written
+down correctly and the probe consulted the wrong number anyway. `filtered_count` is part of "is there
+content here", not a diagnostic sideline.
+
+The suite passed **identically with and without the fix**, so the fix was the easy half. Reaching the case
+at all needed a new fixture sentinel (`.s3unsafe`), because a filesystem-backed fixture cannot hold a file
+named `holiday\2024.jpg` — which is exactly why no existing test covered it. Reproduced red before fixing
+(`Ok(())`), then green, then re-probed after committing: dropping `filtered_count` again reds that one
+test and nothing else.
+
+**Blocker: two doc claims the code did not honour.** The first — *"deleting a folder that still has
+things in it is refused"* — was falsified by the bug above and is true again now the code is fixed. The
+second was real and separate: `provider_path_to_object_key`'s `trim_matches('/')` collapses leading and
+trailing slashes **one layer above** `object_target`, which preserves them exactly as CPE-1689 intended.
+Measured to the wire: `"//a.txt"` → `/test-bucket/a.txt`, so `write("//report.pdf", …)` overwrites
+`report.pdf`.
+
+Decided: **fix the doc now, file the collapse as CPE-1722** — not fixed inside this ticket, because the
+sibling `provider_path_to_key_prefix` (merged, CPE-1683) carries the identical trim and feeds
+`list`/`mkdir`, so changing one alone would leave two path grammars inside one provider; and
+trailing-slash insignificance is a cross-backend `FileSystemProvider` contract that `stat`/`delete` rely
+on when they build `format!("{key}/")`. Reachable only by a hand-typed path. The reasoning is on
+`provider_path_to_object_key` as a KNOWN GAP section, so the CPE-1689 citation there no longer implies a
+guarantee this layer does not provide.
+
+**`max-keys=2` had no test** — changing it to `1` left the suite green. It is only observable against a
+**non-conforming** server, since on a conforming one the `IsTruncated` belt catches the same case first;
+that is the division of labour between the two halves. Added a server that honours `max-keys` but always
+claims `IsTruncated=false`; `max-keys=1` now reds that test alone.
+
+**Corrected a wrong comment on a security guard.** The `%2e` arms of `is_url_dot_segment` were described
+as "pure future-proofing". The UAT's wider probe measured `ureq` actually rewriting `a/%2e%2e/b.txt` →
+`b.txt` — they are a **live match for real behaviour**, merely unreachable through this crate's own
+encoder (which escapes `%` to `%25`). The guard is exactly as wide as the defect, which is the property to
+keep; the old wording invited a later reader to delete the arms as dead weight.
+
+**Fixture sprawl contained, not fixed.** CPE-1693 owns the class. The uniqueness stamp now runs once per
+test-binary run with numbered subdirectories, so a run leaves one top-level `cpe-s3-fixtures-*` entry
+instead of one per spawn site — nothing is deleted, but the count stops being multiplied by the number of
+tests and CPE-1693 gets a single path to remove.
+
+**Verified against PR #895 before and after it merged.** It adds `crates/s3/clippy.toml` banning bare
+`std::fs::rename` under `-D warnings`. `crates/s3/src` has none (its `rename` is a refusal that never
+touches the filesystem). Pre-merge I fetched that exact file from the #895 branch, dropped it in, forced a
+real recompile and re-ran clippy: clean. Post-merge, rebased and re-ran for real: clean. Worth noting that
+changing `clippy.toml` alone does **not** invalidate cargo's cache — the first run reported a cached
+`Finished` and measured nothing.
+
+166 tests pass; `cargo clippy --all-targets -- -D warnings` clean on the merged state.
