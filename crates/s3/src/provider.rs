@@ -4774,17 +4774,22 @@ mod tests {
         let (base, deletes) = spawn_an_underfilling_server_that_honours_start_after();
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider.delete("/photos").expect_err(
-            "the first page under-filled and denied truncation, but the re-list past the marker found \
-             photos/a.jpg — so this prefix has content",
-        );
-        assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
+        let result = provider.delete("/photos");
+
+        // Asserted BEFORE the `Result`, deliberately: what matters is that nothing was sent to be
+        // destroyed. Without the belt this is `["/test-bucket/photos/"]` — the marker gone and
+        // photos/a.jpg left unreachable — and that is the line that must red.
         assert_eq!(
             deletes.lock().unwrap().clone(),
             Vec::<String>::new(),
             "no DELETE may be sent at all: the one this would have sent removes the marker and leaves \
              photos/a.jpg unreachable"
         );
+        let err = result.expect_err(
+            "the first page under-filled and denied truncation, but the re-list past the marker found \
+             photos/a.jpg — so this prefix has content",
+        );
+        assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
     }
 
     /// The same gateway, one lie further: it **ignores `start-after`** and re-serves its marker-only page.
