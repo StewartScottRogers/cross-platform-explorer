@@ -41,9 +41,23 @@
 //! `create_dir_all` is the one left alone, and the reason is that it is **not destructive**: it cannot
 //! truncate and cannot delete, so the worst a link at `out_dir` can do is put the output in a directory
 //! the user did not name — a surprise, not a loss — and a *live* directory link is a perfectly ordinary
-//! way to name a USB stick or an external drive, which refusing would break. The dangling-`out_dir` case
-//! is filed as CPE-1729 rather than folded in here, because its verdict genuinely differs from the four
-//! above and deserves its own argument.
+//! way to name a USB stick or an external drive, which refusing would break.
+//!
+//! The **dangling**-`out_dir` case was filed as CPE-1729 on the assumption that `create_dir_all` would
+//! walk through the link and write the whole series somewhere unnamed. **The CPE-1718 UAT measured that
+//! and it does not happen.** `std::fs::create_dir_all` tests `is_dir()` — which follows the link and
+//! answers `false` for a dangling one — then calls `create_dir`, gets `AlreadyExists` because the *name*
+//! is held by the reparse point, and returns. Nothing is created, nothing is written, the link survives,
+//! and the split fails:
+//!
+//! ```text
+//! split -> Err("Cannot create a file when that file already exists. (os error 183)")
+//! post: is_link=Ok(true)  missing_dir_created=Ok(false)  missing_census=[]
+//! ```
+//!
+//! (Measured on Windows, two link shapes; **not** measured on Linux or macOS.) So the residual here is not
+//! data placement — it is that the message names neither the path nor the real problem, and calls a
+//! directory a "file". CPE-1729 has been rewritten around that.
 
 use std::fs::File;
 use std::io::{Read, Write};
