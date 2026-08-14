@@ -105,11 +105,14 @@ client, and none of this applies to it yet.
   successful delete means *"this key is gone now"* rather than *"something was removed"*.
 - **Uploads are a single request**, so an individual file larger than 5 GB isn't uploadable
   (multi-part upload isn't planned for the first version).
-- **Keys are taken literally, including the slashes.** A key is an opaque string to S3, so
-  `report.pdf`, `/report.pdf` and `//report.pdf` are three different objects and the app treats them
-  that way rather than tidying the leading slashes away. A bucket written by a tool that joined paths
-  carelessly can genuinely hold all three; quietly collapsing them would mean reading — or overwriting —
-  the wrong one.
+- **Keys are taken literally in the middle, but the app currently tidies the ends.** A key is an opaque
+  string to S3, so `report.pdf`, `/report.pdf` and `//report.pdf` are genuinely three different objects,
+  and a bucket written by a tool that joined paths carelessly can hold all three. Inside a key the app
+  preserves that exactly — `a//b.txt` keeps its doubled slash. **At the start and end of a path it does
+  not yet:** typing `//report.pdf` currently addresses `report.pdf`, so writing to it would overwrite
+  that object rather than create a separate one. Reaching such a key deliberately isn't possible today;
+  you can't get there by clicking, only by typing it, and this is tracked as a known gap rather than
+  intended behaviour.
 - **One shape of key can't be reached yet: a `.` or `..` between the slashes.** A key like
   `photos/../logo.png` is, to S3, an ordinary object with nothing to do with `logo.png` — but the HTTP
   library the app uses rewrites those segments away while building the request, so the app would end up
@@ -238,8 +241,9 @@ there's no NFS client yet, so an NFS row can't be turned into a saved connection
 ## Limits
 
 S3 connections carry their own limits — no rename, a refusal to delete a folder that still has contents,
-virtual directories, single-request uploads, keys with `.`/`..` segments being unreachable, and
-access-key-only credentials — all described in the S3 section above. If a saved S3 row reports an
+virtual directories, single-request uploads, keys with `.`/`..` segments being unreachable, leading and
+trailing slashes on a typed path being tidied away, and access-key-only credentials — all described in
+the S3 section above. If a saved S3 row reports an
 unsupported protocol when you click it, your build has the form but not yet the provider.
 
 Reconnecting after an app restart may ask for your password/passphrase again even if you didn't

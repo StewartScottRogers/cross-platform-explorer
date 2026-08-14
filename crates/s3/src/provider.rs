@@ -413,10 +413,23 @@ fn guard_header_sendable(label: &str, value: &str) -> Result<(), String> {
 /// Mirrored here rather than simplified, because a guard that only caught the literal forms would let the
 /// encoded ones through and be wrong in the one direction that matters.
 ///
-/// The `%2e` arms cannot fire from this crate's own encoder today ([`crate::sigv4::encode_path`] leaves `.`
-/// alone as an unreserved character and escapes a literal `%` to `%25`), so they are pure future-proofing
-/// against an encoder change — and they cannot produce a false refusal, because nothing this crate emits
-/// can look like them by accident.
+/// **Corrected after the round-2 UAT: the `%2e` arms are NOT "future-proofing".** An earlier version of
+/// this comment said they were — hedging against a possible future encoder change — which was wrong about
+/// the thing that matters. They are a **live match for measured `ureq` behaviour**: the UAT widened the
+/// wire probe to 20 shapes and recorded `ASK /test-bucket/a/%2e%2e/b.txt` → `SENT /test-bucket/b.txt` and
+/// `ASK /test-bucket/a/%2E/b.txt` → `SENT /test-bucket/a/b.txt`. `ureq` really does resolve them, today.
+///
+/// What *is* true is narrower and worth stating precisely: those arms are **unreachable through this
+/// crate's own encoder**, because [`crate::sigv4::encode_path`] leaves `.` alone as an unreserved
+/// character and escapes a literal `%` to `%25`, so a key containing the text `%2e` travels as `%252e`.
+/// So the guard is exactly as wide as the defect rather than narrower — which is the property to keep —
+/// and it costs nothing, since nothing this crate emits can trip these arms by accident.
+///
+/// The distinction is not pedantry. "Future-proofing against a hypothetical" invites a later reader to
+/// delete the arms as dead weight; "as wide as a defect we measured, currently gated by our own encoder"
+/// tells them what actually breaks if the encoder changes or a pre-encoded path is ever passed in. This
+/// repo's own rule — a wrong comment on a security guard is worse than none — is why this paragraph
+/// exists rather than a one-word edit.
 fn is_url_dot_segment(segment: &str) -> bool {
     let unescaped = segment.to_ascii_lowercase().replace("%2e", ".");
     unescaped == "." || unescaped == ".."
@@ -520,6 +533,22 @@ pub fn provider_path_to_key_prefix(path: &str) -> String {
 /// The bucket root has no object key, so `""`/`"/"` is an `Err` rather than a silent address of something
 /// else — the same refusal, for the same reason, that [`S3Config::object_target`] already applies to an
 /// empty key ("S3 has no zero-length key").
+///
+/// # KNOWN GAP (CPE-1722): `trim_matches('/')` collapses the ends, and CPE-1689 does not cover that
+///
+/// Say this plainly, because the CPE-1689 reference below otherwise implies a guarantee this function
+/// does not provide. [`S3Config::object_target`] genuinely preserves a leading slash — `"/a.txt"` builds
+/// `/bucket//a.txt` — so `a.txt`, `/a.txt` and `//a.txt` really are three distinct objects *at that
+/// layer*. **This function sits above it and trims both ends first**, so a provider path of `//a.txt`
+/// reaches `object_target` as the key `a.txt`. Measured to the wire by the CPE-1684 round-2 UAT:
+/// `"//a.txt"` → `/test-bucket/a.txt`. `write("//report.pdf", …)` therefore overwrites `report.pdf`.
+///
+/// Not fixed here, deliberately, and CPE-1722 carries the full reasoning: the sibling
+/// [`provider_path_to_key_prefix`] (merged, CPE-1683) has the identical trim and feeds `list`/`mkdir`, so
+/// changing one alone would leave two path grammars inside one provider; and trailing-slash
+/// insignificance is a cross-backend `FileSystemProvider` contract that `stat`/`delete` rely on when they
+/// build a probe prefix as `format!("{key}/")`. Reachable only by a hand-typed path — `is_safe_s3_leaf`
+/// refuses any leaf containing `/`, so no listing can surface one.
 ///
 /// # No `is_safe_s3_leaf` pass here, and this is a deliberate decision, not an omission
 ///
@@ -1122,7 +1151,19 @@ impl S3Provider {
         let text = std::str::from_utf8(&body)
             .map_err(|e| format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"))?;
         let page = parse_list_bucket_result(text, key_prefix)?;
-        Ok((page.raw_entries, page.entries.len(), page.is_truncated))
+        // `entries.len() + filtered_count`, NOT `entries.len()` — the round-2 UAT's sharpest finding.
+        //
+        // `entries` is what `list` would DISPLAY; `filtered_count` is what `is_safe_s3_leaf` refused to
+        // display. Both are real objects sitting under this prefix: that guard's own doc says so outright
+        // ("A leaf this refuses is a real S3 key"), and it refuses `\`, control bytes and a literal
+        // `..`/`.` leaf, every one of which is legal in an S3 key. Asking `entries.len()` alone answers
+        // "what can I show the user here", when the question this function exists to answer is "is there
+        // anything here at all". A directory whose only content was a filtered leaf therefore read as
+        // empty, and `delete` removed its marker and reported success — on a fully conforming server.
+        //
+        // Not `raw_entries` either: that counts the directory's own marker object, which is the one key a
+        // `delete` of an empty directory is legitimately allowed to remove.
+        Ok((page.raw_entries, page.entries.len() + page.filtered_count, page.is_truncated))
     }
 }
 
@@ -1668,11 +1709,20 @@ mod tests {
         if has_marker {
             rows.push(format!("<Contents><Key>{prefix}</Key><Size>0</Size></Contents>"));
         }
+        // A sentinel file `.s3unsafe` makes the page additionally emit a `<Contents>` whose leaf is a
+        // **perfectly legal S3 key that `is_safe_s3_leaf` refuses** — here one containing a backslash. A
+        // real filesystem cannot hold such a name (on Windows `\` is a separator), which is exactly why it
+        // needs a sentinel: without one, no test can reach the case where a directory's only content is an
+        // object that `list` filters out. That is the shape the UAT found `delete` reporting success on.
+        // It sorts immediately after the marker, matching S3's lexicographic order for this key.
+        if dir.join(".s3unsafe").is_file() {
+            rows.push(format!("<Contents><Key>{prefix}holiday\\2024.jpg</Key><Size>7</Size></Contents>"));
+        }
         let mut names: Vec<(String, bool, u64)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
-                if name == ".s3marker" {
+                if name == ".s3marker" || name == ".s3unsafe" {
                     continue;
                 }
                 if let Ok(meta) = e.metadata() {
@@ -1849,12 +1899,23 @@ mod tests {
         // reuses process ids, so a later run can inherit an earlier one's files. The sibling `cpe-webdav`
         // fixture was actually bitten by this during CPE-1706; same shape, same fix, applied here before
         // it bites too.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let root =
-            std::env::temp_dir().join(format!("cpe-s3-fixture-{}-{}-{}", std::process::id(), n, stamp));
+        //
+        // CPE-1684 round 2: the uniqueness stamp is now taken ONCE PER TEST BINARY RUN rather than once
+        // per spawn, and each spawn gets a numbered subdirectory of it. The roots are still never cleaned
+        // up — that is CPE-1693's job, not this ticket's — but a run now leaves **one** top-level
+        // `cpe-s3-fixtures-*` entry instead of one per spawn site. The round-2 UAT counted 1 339 leftover
+        // directories in `%TEMP%` from the old shape, across a 3-OS matrix and 16 spawn sites; nesting
+        // does not delete anything, it just stops the count being multiplied by the number of tests, and
+        // gives CPE-1693 a single path to remove.
+        static PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let parent = PARENT.get_or_init(|| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!("cpe-s3-fixtures-{}-{}", std::process::id(), stamp))
+        });
+        let root = parent.join(n.to_string());
         std::fs::create_dir_all(&root).unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
@@ -3613,6 +3674,109 @@ mod tests {
         );
         assert!(err.contains("recursive"), "{err}");
         assert!(root.join("photos/2024/a.jpg").is_file(), "the content was deleted anyway");
+    }
+
+    /// **The sharpest bug the round-2 UAT found, and it was mine.** `probe_prefix` reported "real
+    /// entries" as `page.entries.len()` — a count taken **after** [`is_safe_s3_leaf`] filtering. That guard
+    /// refuses a leaf containing `\`, a control byte, or exactly `..`/`.`, every one of which is a
+    /// perfectly legal S3 key. Such an object landed in `raw_entries` but not in `entries`, so `delete`
+    /// read a directory holding one as "marker only", deleted the marker, got its `204`, and told the user
+    /// the folder was gone. On a **conforming** server — right ordering, right `IsTruncated`, `max-keys`
+    /// honoured. Not a hostile one.
+    ///
+    /// The marker-present variant is the worse one: the marker really is removed, so the folder vanishes
+    /// from every listing while the object survives underneath it, now unreachable through the UI.
+    ///
+    /// What makes it worth this comment is that [`is_safe_s3_leaf`]'s own doc already said *"A leaf this
+    /// refuses is a real S3 key"*. The model was written down correctly and the probe consulted the wrong
+    /// number anyway.
+    ///
+    /// `filtered_count` is therefore part of "is there content here", not a diagnostic sideline.
+    #[test]
+    fn delete_refuses_a_directory_whose_only_content_is_an_object_list_filters_out() {
+        let (mut provider, root, _requests) = s3_fixture_provider();
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        // The directory holds its own marker AND one real object whose leaf `is_safe_s3_leaf` refuses.
+        std::fs::write(root.join("photos/.s3marker"), b"").unwrap();
+        std::fs::write(root.join("photos/.s3unsafe"), b"").unwrap();
+
+        // Precondition, and the whole trap in two lines: the listing shows NOTHING but reports one entry
+        // filtered — so `entries.len()` is 0 while the prefix genuinely holds an object.
+        let (entries, filtered) = provider.list_with_filtered_count("/photos").unwrap();
+        assert_eq!(entries.len(), 0, "precondition: the filtered leaf must not be surfaced");
+        assert_eq!(filtered, 1, "precondition: it must be counted as filtered, not vanish");
+
+        let err = provider.delete("/photos").expect_err(
+            "the prefix holds a real object that `list` merely refuses to display — deleting the marker \
+             and reporting success would tell the user a folder was removed while its contents survive, \
+             now unreachable through the UI",
+        );
+        assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
+
+        // Assert on what the user still has: the marker must NOT have been deleted, because deleting it
+        // is what makes the folder disappear while the object stays.
+        assert!(
+            root.join("photos/.s3marker").is_file(),
+            "the marker was deleted by a refused delete — the folder would vanish from listings while \
+             the object underneath it survived"
+        );
+    }
+
+    /// A server that honours `max-keys` but **always** says `IsTruncated=false`, even when it has just
+    /// under-filled the page. S3 is explicitly permitted to return fewer keys than asked for; a server
+    /// that does so *and* fails to admit there is more is non-conforming, and it is the exact shape
+    /// [`S3Provider::probe_prefix`]'s `max-keys=2` exists to survive. The two rows are a directory's own
+    /// marker followed by one real object, in S3's lexicographic order — the marker always sorts first
+    /// because it is a strict prefix of everything beneath it.
+    fn spawn_a_server_that_underfills_without_admitting_it() -> String {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let full = req.url().to_string();
+                let (_, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
+                let params = parse_query(raw_query);
+                let max_keys: usize = params
+                    .iter()
+                    .find(|(k, _)| k == "max-keys")
+                    .and_then(|(_, v)| v.parse().ok())
+                    .unwrap_or(1000);
+                let rows = [
+                    "<Contents><Key>photos/</Key><Size>0</Size></Contents>",
+                    "<Contents><Key>photos/a.jpg</Key><Size>3</Size></Contents>",
+                ];
+                let body = format!(
+                    "<?xml version=\"1.0\"?><ListBucketResult>\
+                     <IsTruncated>false</IsTruncated>{}</ListBucketResult>",
+                    rows[..max_keys.min(rows.len())].join("")
+                );
+                let ct =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// Pins the `max-keys=2` half of [`S3Provider::probe_prefix`], which the round-2 UAT correctly noted
+    /// was unverified: changing it to `1` left the whole suite green, so a future edit would ship silently.
+    ///
+    /// It needs a **non-conforming** server to be observable at all, because on a conforming one the
+    /// `IsTruncated` belt catches the same case first — that is precisely the division of labour the two
+    /// halves have, and why `probe_prefix`'s doc calls `IsTruncated` load-bearing and this a second belt.
+    /// Against a server that under-fills without admitting it, `max-keys=1` returns the marker alone, no
+    /// truncation flag, and `delete` would remove the marker and report success with `photos/a.jpg` still
+    /// there. Asking for two keys is what makes the second one visible.
+    #[test]
+    fn a_server_that_underfills_without_setting_is_truncated_is_still_seen_as_a_non_empty_directory() {
+        let base = spawn_a_server_that_underfills_without_admitting_it();
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider.delete("/photos").expect_err(
+            "the second key asked for is what reveals this directory has content — the server under-filled \
+             the page and did not set IsTruncated, so nothing else can",
+        );
+        assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
     }
 
     // ---------------------------------------------------------------------------------------------
