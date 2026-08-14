@@ -295,8 +295,13 @@ own subject was that failure:
   was wider than the search — the sibling bug was an `fs::metadata` collapse, which that search could
   not find (CPE-1687).
 - A skip-notice was verified with `cargo test -- --nocapture` and a comment written asserting the CI log
-  would show it. CI runs plain `cargo test`; libtest captures output for *passing* tests, and a skip is a
-  pass. The notice reached nobody.
+  would show it. CI runs plain `cargo test`, and that notice used `eprintln!`, **whose output libtest
+  replaces with a capture buffer that is replayed only for FAILING tests** — a skip is a pass, so the
+  notice reached nobody. **The mechanism is the macro, not the stream:** the capture lives inside
+  `print!`/`eprint!`, so a direct `writeln!(std::io::stderr(), ..)` is *not* captured and does reach the
+  log. Stating it as "libtest captures stderr" is the over-generalisation that later produced CPE-1717's
+  wrong premise, and propagated into an unrelated file in `main` citing CPE-1717 as its authority. See
+  §3 for the measurement.
 - The follow-up ticket's acceptance criteria then carried the intent ("the test must announce itself")
   forward **without the mechanism**, which would have handed the next person the same trap.
 
@@ -313,6 +318,43 @@ which is what makes the failure worth a rule instead of a shrug. In practice:
 Related: the recurring product rule these keep proving — *a confident wrong answer is worse than an
 honest "I don't know"* (CPE-1673, CPE-1678, CPE-1680, CPE-1687). These two rules are that same idea
 applied to our own evidence rather than to the app's error messages.
+
+### 3. A skip must be *consequential*, not merely visible (CPE-1717)
+
+The bullet above about `--nocapture` is true history, and it was then over-generalised into "libtest
+eats a skip notice, full stop". **Measured, with a one-test harness run with no flags at all:**
+
+```text
+running 1 test
+VIA-WRITELN-STDERR: this is the CPE-1705/1710 shape
+VIA-WRITELN-STDOUT: control
+test passing_test_that_announces_a_skip ... ok
+```
+
+The same test's `eprintln!` and `println!` lines are **absent**. libtest's capture is a thread-local
+swap installed *inside* the `print!`/`eprint!` macros, so a direct write to the process's stderr
+handle goes around it. So:
+
+- **`eprintln!` at a skip notice reaches nobody** — nor do `eprint!`, `println!` or `print!`; the
+  capture sits in all four. Use `cpe_server::skip_notice!(..)`: same arguments, capture-proof.
+  `fsutil`'s `skip_notices_never_use_a_captured_print_macro` scan fails the build on **one recognised
+  shape**: in test code, a captured macro whose literal contains one of an enumerated `SKIP_PHRASES`
+  vocabulary. It does **not** close the class. A notice phrased outside that vocabulary, one assembled
+  into a variable first, or a test module not called `mod tests`, all still pass it — and that is not
+  hypothetical twice over. Its first version let four shapes through, including
+  `eprintln!("[CPE-1692] SKIPPED …")`, the one 56 sites actually use; and a real notice reading *"NOTE
+  …: no symlink privilege here, so only the regular-file and hard-link forms were verified"* survived
+  **both** the conversion sweep and that first scan, because the sweep and the scan shared one search
+  and therefore one blind spot. **A search cannot audit itself** — that is the reusable lesson, and it
+  is why the claim here is scoped rather than "the scan catches new ones".
+- **A visible notice is the floor, not the goal.** A *passing* leg with a notice inside a 2,100-test
+  log is a green board over zero coverage, and nobody reads a green log. Where the staging mechanism is
+  supposed to work on that platform, use `cpe_server::fsutil::require_staged(..)` so the leg goes **red
+  under CI** instead. Where it genuinely cannot work — the traversal deny on Windows, an ACL test on
+  Linux — `supported_here = false` keeps the quiet skip, and that distinction is the whole design.
+- **Prove the enforcement, don't assert it.** `CPE_STAGING_SABOTAGE=1` makes every staging attempt
+  report failure; CI's "skip-visibility guard" steps run a filtered `cargo test` under it and **fail if
+  the tests pass**.
 
 ---
 

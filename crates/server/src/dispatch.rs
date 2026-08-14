@@ -310,6 +310,12 @@ mod tests {
     /// filesystem that ignores ACLs and mode bits, leaves the file readable â€” the caller then skips
     /// rather than fails, because a machine that cannot construct a denied path is not evidence of a
     /// bug. CI runs Linux + macOS + Windows, so both branches are exercised somewhere.
+    ///
+    /// `#[track_caller]` for the same reason the three `fsutil` staging helpers carry it (CPE-1717):
+    /// when `require_staged` below turns a failed staging into a panic, the report must name the leg
+    /// that called this, not this function. Harmless today with a single caller in this file — and
+    /// wrong the moment a second one appears, which is exactly when nobody re-reads it.
+    #[track_caller]
     fn deny_read(path: &std::path::Path) -> bool {
         #[cfg(windows)]
         {
@@ -331,7 +337,15 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o000));
         }
-        std::fs::read(path).is_err() && std::fs::metadata(path).is_ok()
+        // CPE-1717: `supported_here = true` — `(RD)` on Windows and `chmod 0o000` on Unix both leave
+        // the entry stattable while refusing its bytes, on every platform CI runs. So a failure to
+        // stage is a runner that changed under us, and under CI that is red rather than a notice
+        // printed inside a passing run of a 2,100-test suite. See `fsutil::require_staged`.
+        crate::fsutil::require_staged(
+            "deny_read",
+            true,
+            std::fs::read(path).is_err() && std::fs::metadata(path).is_ok(),
+        )
     }
 
     /// Undo [`deny_read`] so the scratch directory can be removed.

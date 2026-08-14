@@ -15,6 +15,44 @@
 /// dependency direction the epic establishes: GUI/adapter → Server → contract).
 pub use cpe_contract as contract;
 
+/// Announce that a test leg could not stage the condition it exists to test — **the one spelling**,
+/// so it cannot be got wrong site by site (CPE-1717).
+///
+/// Takes exactly the arguments `eprintln!` takes, and is a drop-in replacement for it at a skip
+/// notice. The difference is the only thing that matters here: **`eprintln!` output never reaches
+/// CI.**
+///
+/// libtest captures a test's output and replays it only for **failing** tests, and a skip is a pass;
+/// `.github/workflows/ci.yml` runs plain `cargo test` with no `--nocapture`. But the capture works by
+/// swapping a thread-local *inside the `print!`/`eprint!` macros*, so a direct write to the process's
+/// stderr handle goes around it. Measured for CPE-1717 with a one-test harness run with no flags:
+///
+/// ```text
+/// running 1 test
+/// VIA-WRITELN-STDERR: this is the CPE-1705/1710 shape
+/// VIA-WRITELN-STDOUT: control
+/// test passing_test_that_announces_a_skip ... ok
+/// ```
+///
+/// The `eprintln!`/`println!` lines in that same test were swallowed. That is why CPE-1678 called the
+/// choice of emitter load-bearing, and why this macro exists rather than a convention: the convention
+/// was written down twice and 56 sites still used `eprintln!`.
+///
+/// **A visible notice is the floor, not the goal.** Where the staging mechanism is *supposed* to work
+/// on the platform in question, prefer [`fsutil::require_staged`], which makes the leg red under CI
+/// instead of printing into a green log. Use this macro for the skips that are genuinely legitimate —
+/// an ACL test on Linux, a codec that isn't installed — where a notice really is the right answer.
+///
+/// Enforced by `fsutil`'s `skip_notices_never_use_eprintln` scan, which fails the build on a new
+/// `eprintln!`-shaped skip notice anywhere in the tree.
+#[macro_export]
+macro_rules! skip_notice {
+    ($($arg:tt)*) => {{
+        use ::std::io::Write as _;
+        let _ = ::std::writeln!(::std::io::stderr(), $($arg)*);
+    }};
+}
+
 /// The runtime seam abstracting host services (dir resolution, event emit, cancellation) off
 /// the domain logic (CPE-814).
 pub mod ctx;

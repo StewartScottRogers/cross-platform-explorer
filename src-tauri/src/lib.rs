@@ -13763,7 +13763,7 @@ mod tests {
         // `trash_roundtrip_available`. The product guarantee is proven on any real desktop / a CI
         // runner whose Recycle Bin works (Linux does; a headless Windows Server session may not).
         if !trash_roundtrip_available() {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "skipping trash round-trip test: this environment cannot delete→list→restore via the \
                  OS trash (e.g. a headless CI Windows Server session with no working Recycle Bin) — \
                  CPE-1268"
@@ -14024,7 +14024,7 @@ mod tests {
     #[test]
     fn list_trash_then_restore_trash_items_round_trips_a_probe_file() {
         if !trash_roundtrip_available() {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "skipping list_trash/restore_trash_items round-trip test: this environment cannot \
                  delete→list→restore via the OS trash (e.g. a headless CI Windows Server session with no \
                  working Recycle Bin) — CPE-1268"
@@ -14058,7 +14058,7 @@ mod tests {
     #[test]
     fn restore_trash_items_reports_a_collision_as_a_distinguishable_per_item_error_without_aborting_the_batch() {
         if !trash_roundtrip_available() {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "skipping restore_trash_items collision test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
             );
@@ -14121,7 +14121,7 @@ mod tests {
     #[test]
     fn empty_trash_purges_only_the_selected_probe_item() {
         if !trash_roundtrip_available() {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "skipping empty_trash selective-purge test: this environment cannot delete→list→restore \
                  via the OS trash — CPE-1268"
             );
@@ -14162,7 +14162,7 @@ mod tests {
     #[test]
     fn list_trash_stream_flushes_batches_over_the_channel_and_matches_the_collect_variant() {
         if !trash_roundtrip_available() {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "skipping list_trash_stream test: this environment cannot delete→list→restore via the OS \
                  trash — CPE-1268"
             );
@@ -15323,7 +15323,15 @@ overlay / overlay rw,relatime 0 0
             // (`Path::exists()`) must now answer FALSE on a file that is really sitting there. If this
             // ever regresses to `true`, the parent deny stopped working and the test is back to being
             // vacuous — so it is asserted, not assumed.
-            if victim.exists() {
+            //
+            // CPE-1717: routed through `require_staged` (`supported_here = true` — this block is
+            // `#[cfg(windows)]`, and the deny is measured to work there) so that under CI a runner
+            // that stopped staging goes RED. Un-staged is not "nothing to see"; it is zero coverage.
+            if !cpe_server::fsutil::require_staged(
+                "do_move_into parent (RD) deny",
+                true,
+                !victim.exists(),
+            ) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "[CPE-1696] SKIPPED the do_move_into byte-loss leg: the parent `(RD)` deny did not \
@@ -15333,7 +15341,11 @@ overlay / overlay rw,relatime 0 0
                 );
                 return;
             }
-            if victim.try_exists().is_ok() {
+            if !cpe_server::fsutil::require_staged(
+                "do_move_into target deny",
+                true, // CPE-1717 — `#[cfg(windows)]` block; the target deny is supposed to work here
+                victim.try_exists().is_err(),
+            ) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "[CPE-1696] SKIPPED the do_move_into denied-candidate leg: could not deny stat of {} \
@@ -15675,7 +15687,15 @@ overlay / overlay rw,relatime 0 0
             // answers `Ok`, the pre-fix guard refuses on its own, and the byte assertion below passes
             // against the bug. That is precisely the vacuous pass CPE-1705 first mistook for proof that
             // byte loss could not be staged at all — so it is checked, loudly, rather than assumed.
-            if victim.try_exists().is_ok() || victim.exists() {
+            //
+            // CPE-1717: both probes together are the staging premise, so they are handed to
+            // `require_staged` as one fact — a Windows runner that can no longer stage either half
+            // covers nothing, and under CI that is red rather than a notice in a green log.
+            if !cpe_server::fsutil::require_staged(
+                "rename_entry target + parent deny",
+                true,
+                victim.try_exists().is_err() && !victim.exists(),
+            ) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "[CPE-1705] SKIPPED the rename_entry byte-loss leg: could not stage the denied stat of \
@@ -15873,7 +15893,11 @@ overlay / overlay rw,relatime 0 0
                         .output();
                 }
             }
-            if victim.try_exists().is_ok() {
+            if !cpe_server::fsutil::require_staged(
+                "move_exact target deny",
+                true, // CPE-1717 — `#[cfg(windows)]` block; the target deny is supposed to work here
+                victim.try_exists().is_err(),
+            ) {
                 let _ = writeln!(
                     std::io::stderr(),
                     "[CPE-1705] SKIPPED the move_exact denied-target leg: could not deny stat of {} on \
@@ -17124,7 +17148,14 @@ overlay / overlay rw,relatime 0 0
             let _ = fs::set_permissions(&gp, fs::Permissions::from_mode(0o000));
         }
 
-        let denied = real_parent.try_exists().is_err();
+        // CPE-1717: `supported_here = true` — the deny is on the target on Windows and on the parent on
+        // Unix, and both are measured to make `try_exists()` fail, so this stages on every CI leg. A
+        // failure means the runner changed under us: red, not a notice inside a passing run.
+        let denied = cpe_server::fsutil::require_staged(
+            "move_exact permission-denied staging",
+            true,
+            real_parent.try_exists().is_err(),
+        );
         if !denied {
             use std::io::Write;
             let _ = writeln!(

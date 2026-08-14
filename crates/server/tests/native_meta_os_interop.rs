@@ -49,7 +49,7 @@ fn os_native_tool_reads_back_what_native_meta_wrote() {
             // A CI runner whose temp filesystem lacks ADS/xattr support (e.g. an old-kernel tmpfs) is a
             // valid environment, not a code failure — degrade gracefully instead of flaking the 3-OS
             // matrix. `is_supported` must agree.
-            eprintln!(
+            cpe_server::skip_notice!(
                 "SKIP: {} does not support native metadata on this filesystem/runner; nothing to \
                  OS-interop-test here (MetaError::Unsupported).",
                 path.display()
@@ -108,7 +108,7 @@ fn os_native_read_and_assert(path: &Path, attr_name: &str, expected: &[u8]) {
     let output = match Command::new("getfattr").args(["-n", attr_name, "--only-values", &path_str]).output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
+            cpe_server::skip_notice!(
                 "SKIP: `getfattr` is not installed on this runner; cannot independently verify the xattr \
                  {attr_name:?} on {path_str}. (Debian/Ubuntu CI images ship `attr`; if this ever fires, \
                  install it in the workflow rather than trusting native_meta::read circularly.)"
@@ -150,7 +150,7 @@ fn os_native_read_and_assert(path: &Path, attr_name: &str, expected: &[u8]) {
     let output = match Command::new("xattr").args(["-p", attr_name, &path_str]).output() {
         Ok(o) => o,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!("SKIP: the `xattr` command is not available on this runner; cannot independently verify.");
+            cpe_server::skip_notice!("SKIP: the `xattr` command is not available on this runner; cannot independently verify.");
             return;
         }
         Err(e) => panic!("failed to spawn xattr: {e}"),

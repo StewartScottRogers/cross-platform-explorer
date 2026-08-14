@@ -291,7 +291,7 @@ mod tests {
     #[test]
     fn extract_frame_extracts_a_real_frame_from_a_synthetic_clip_when_ffmpeg_is_available() {
         if !ffmpeg_available() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_frame real-render test: no ffmpeg binary available in this \
                  environment (expected until CPE-1258 provisions/bundles one for CI/dev)"
             );
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn extract_frame_handles_a_zero_max_edge_without_panicking() {
         if !ffmpeg_available() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_frame zero-max-edge test: no ffmpeg binary available in this \
                  environment (expected until CPE-1258 provisions/bundles one for CI/dev)"
             );
@@ -410,7 +410,7 @@ mod tests {
     #[test]
     fn extract_frame_removes_the_scratch_dir_after_a_successful_extract() {
         if !ffmpeg_available() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping extract_frame scratch-dir-no-leak test: no ffmpeg binary available in this \
                  environment"
             );

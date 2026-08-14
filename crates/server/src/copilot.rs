@@ -802,7 +802,7 @@ mod tests {
 
         let link = root.join("link"); // root/link -> outside (junction/symlink, no admin needed)
         if !make_dir_link(&outside, &link) {
-            eprintln!("skipping symlink-escape exec test: could not create a link in this environment \
+            crate::skip_notice!("skipping symlink-escape exec test: could not create a link in this environment \
 (the parent_confined unit test still covers the confinement logic)");
             return;
         }

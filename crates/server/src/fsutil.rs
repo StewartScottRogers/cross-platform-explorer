@@ -397,6 +397,223 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1717 — what a FAILED staging attempt means, decided in one place
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// What to do about a leg that could not stage the condition it exists to test.
+///
+/// A pure classifier — no environment, no filesystem — so the policy itself is unit-testable without
+/// the env-var races that make "set a variable and run a test" unreliable under a parallel harness.
+/// [`require_staged`] is the thin wrapper that reads the environment and applies this.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagingVerdict {
+    /// The condition is staged; the leg runs for real.
+    Staged,
+    /// Staging failed on a platform where the mechanism *cannot* work (an ACL deny on Linux, the
+    /// `fs::metadata` traversal deny on Windows). Legitimate: announce it and move on.
+    LegitimateSkip,
+    /// Staging failed on a platform where the mechanism is *supposed* to work, under a harness that
+    /// has asked for strictness. The runner changed under us — go red.
+    Fail,
+}
+
+/// The CPE-1717 policy, as a pure function of the four facts that decide it.
+///
+/// `supported_here` is the caller's own claim about the platform it is running on: "this mechanism is
+/// supposed to work here". It is a **compile-time** property of the mechanism (`cfg!(unix)` for the
+/// traversal deny, `true` for the target deny and for link creation), never a runtime observation of
+/// whether it happened to work — deriving it from the outcome would make the check vacuous.
+pub fn staging_verdict(
+    supported_here: bool,
+    staged: bool,
+    strict: bool,
+    sabotaged: bool,
+) -> StagingVerdict {
+    // Sabotage simulates a runner that lost the capability, so the enforcement below can be broken on
+    // demand and shown to go red (Evidence Rules, `Ticketing/wiki.md` → "Guard neutralisation").
+    if staged && !sabotaged {
+        return StagingVerdict::Staged;
+    }
+    if supported_here && strict {
+        StagingVerdict::Fail
+    } else {
+        StagingVerdict::LegitimateSkip
+    }
+}
+
+/// Whether a staging failure on a supporting platform is a hard failure rather than a loud skip.
+///
+/// **Strict under CI, lenient locally, and that asymmetry is the whole point of CPE-1717.** The bug
+/// this fixes is not that the skip notices are unprintable — measured, they are not; see
+/// [`require_staged`] — it is that a *passing* leg with a notice in a 2,100-test log is a green board
+/// over zero coverage, and nobody reads a green log. CI is exactly where the board lies, so CI is
+/// where a leg that verified nothing must be red. A developer, meanwhile, may legitimately be in an
+/// environment the mechanism cannot work in (a root Docker shell, a network share, an ACL-less
+/// filesystem, a Windows account with neither Developer Mode nor the junction fallback) and must not
+/// be blocked by it; there the loud skip is still the right answer.
+///
+/// `CPE_STAGING_STRICT=1` forces strictness on (use it locally to check a leg really stages),
+/// `CPE_STAGING_STRICT=0` forces it off (an escape hatch if a runner image genuinely regresses and
+/// the fix has to wait); otherwise it follows `CI`, which GitHub Actions sets to `true` on every
+/// runner.
+pub fn staging_is_strict() -> bool {
+    strict_from(
+        std::env::var("CPE_STAGING_STRICT").ok().as_deref(),
+        ci_from(std::env::var("CI").ok().as_deref()),
+    )
+}
+
+/// Is this a CI harness? A pure function of `$CI`, because the first version asked
+/// `var_os("CI").is_some()` — under which `CI=false`, `CI=0` and `CI=""` all counted as CI, flatly
+/// contradicting the doc comment that said it "follows `CI`".
+///
+/// **Unlike [`strict_from`], an unrecognised value here is tolerated rather than refused, and the
+/// asymmetry is deliberate.** `CPE_STAGING_STRICT` is *our* knob: a value we do not understand is a
+/// typo by someone reaching for a documented escape hatch, and silently ignoring it hands them a green
+/// run they believe they forced. `CI` is *not ours* — dozens of tools set it to whatever they like —
+/// so anything present and not falsy means CI, which is the convention every other tool uses.
+pub fn ci_from(var: Option<&str>) -> bool {
+    match var {
+        None => false,
+        Some(raw) => !matches!(raw.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"),
+    }
+}
+
+/// The decision [`staging_is_strict`] makes, as a **pure** function of its two inputs.
+///
+/// # Why this is split out, which is a bug this PR shipped and its reviewer caught
+///
+/// The first version left the `match` inline in [`staging_is_strict`] and "tested" it against a
+/// hand-written closure in the test module that duplicated the same `match`. That is not a test: the
+/// reviewer inverted the real function completely — `=0` meaning strict, `=1` meaning lenient, `CI`
+/// negated — and every CPE-1717 test still passed. The subtle break was worse. Changing only the
+/// `None => ci` arm to `None => false`:
+///
+/// - an ordinary CI run (`CI=true`, no override, staging broken) went **green over zero coverage** —
+///   precisely the bug this whole ticket exists to fix; and
+/// - the CI guard step **still reported OK**, because it pinned `CPE_STAGING_STRICT=1` and so routed
+///   around the very arm that had broken.
+///
+/// So the one line connecting this feature to real CI could stop working with nothing in the repo
+/// noticing, including the guard built to notice. Two changes followed: this pure function, table-
+/// tested over every input; and a CI assertion that runs the sabotaged leg with **no override set**,
+/// so the guard exercises the `None => ci` arm rather than stepping past it.
+///
+/// # Values
+///
+/// Accepts the obvious spellings, case-insensitively and after trimming: `1`/`true`/`yes`/`on` enable
+/// strictness, `0`/`false`/`no`/`off` disable it, and an empty or unset value follows `ci`. **An
+/// unrecognised value panics** rather than falling through to the default — an escape hatch that
+/// silently does nothing is worse than no escape hatch, because the person using it believes it
+/// worked. (The first version matched only the digits `1` and `0`, so `CPE_STAGING_STRICT=true`
+/// quietly did nothing on a developer's machine and `=false` quietly did nothing on CI.)
+pub fn strict_from(var: Option<&str>, ci: bool) -> bool {
+    let Some(raw) = var else { return ci };
+    match strict_token(raw) {
+        StrictToken::Unset => ci,
+        StrictToken::On => true,
+        StrictToken::Off => false,
+        StrictToken::Unrecognised => panic!(
+            "[CPE-1717] CPE_STAGING_STRICT={raw:?} is not a value this understands, and silently \
+             ignoring it would leave you believing an escape hatch worked when it did nothing. Use \
+             one of 1/true/yes/on or 0/false/no/off, or unset it to follow CI."
+        ),
+    }
+}
+
+/// How one raw `CPE_STAGING_STRICT` value classifies. Split out so the whole vocabulary is testable
+/// without a `catch_unwind` per spelling — five panics in a test log is noise that trains people to
+/// scroll past panics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictToken {
+    /// Empty — treat as though the variable were not set at all.
+    Unset,
+    On,
+    Off,
+    /// Not in the vocabulary. [`strict_from`] refuses this rather than guessing.
+    Unrecognised,
+}
+
+/// Classify one raw value, trimmed and case-folded.
+pub fn strict_token(raw: &str) -> StrictToken {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => StrictToken::Unset,
+        "1" | "true" | "yes" | "on" => StrictToken::On,
+        "0" | "false" | "no" | "off" => StrictToken::Off,
+        _ => StrictToken::Unrecognised,
+    }
+}
+
+/// Test-only sabotage hook: with `CPE_STAGING_SABOTAGE=1`, every [`require_staged`] call reports that
+/// it could not stage, exactly as a runner that lost symlink privilege or stopped honouring deny ACEs
+/// would. CI uses it to prove — rather than assert — that such a runner turns a step red instead of
+/// green (`.github/workflows/ci.yml`, the "skip-visibility guard" steps).
+pub fn staging_is_sabotaged() -> bool {
+    std::env::var("CPE_STAGING_SABOTAGE").is_ok_and(|v| v == "1")
+}
+
+/// The one gate every staging attempt passes through. Returns whether the leg may proceed; the caller
+/// prints its own leg-specific notice and returns early on `false`.
+///
+/// # Why this exists (CPE-1717), and the measurement that reshaped it
+///
+/// The family CPE-1678 → CPE-1692 → CPE-1696 → CPE-1705 → CPE-1710 built a pattern: a leg that cannot
+/// stage its condition announces itself loudly instead of passing silently. CPE-1717 was filed on the
+/// belief that the announcement never reaches CI, because libtest captures output for passing tests
+/// and `.github/workflows/ci.yml` runs plain `cargo test` with no `--nocapture`.
+///
+/// **Half of that is true, and the half that matters is not.** Measured directly with a one-test
+/// harness (`rustc --test`, run with no flags, exactly as `cargo test` runs it):
+///
+/// ```text
+/// running 1 test
+/// VIA-WRITELN-STDERR: this is the CPE-1705/1710 shape
+/// VIA-WRITELN-STDOUT: control
+/// test passing_test_that_announces_a_skip ... ok
+/// ```
+///
+/// `eprintln!`/`println!` were swallowed; `writeln!(std::io::stderr(), ..)` and its stdout twin were
+/// not. libtest's capture works by swapping a thread-local inside the `print!`/`eprint!` macros, so a
+/// direct write to the process's stderr handle goes around it. That is why the CPE-1678 comment in
+/// `dispatch.rs` calls the choice of emitter load-bearing, and it holds: **every notice in this family
+/// already reaches the CI log.** `--nocapture` would add nothing to them.
+///
+/// So the real defect is not visibility, it is consequence. A skip that prints into a passing run of a
+/// 2,100-test suite is a green board over an uncovered platform, and no one reads a green log. On a
+/// platform where the mechanism is *supposed* to work, that must be red. See [`staging_is_strict`] for
+/// why the strictness is scoped to CI.
+///
+/// `#[track_caller]` is load-bearing: the panic reports the **call site's** file and line, so a red
+/// build names the exact leg that stopped staging rather than pointing back into this helper.
+#[track_caller]
+pub fn require_staged(mechanism: &str, supported_here: bool, staged: bool) -> bool {
+    match staging_verdict(supported_here, staged, staging_is_strict(), staging_is_sabotaged()) {
+        StagingVerdict::Staged => true,
+        StagingVerdict::LegitimateSkip => false,
+        StagingVerdict::Fail => panic!("{}", staging_failure_message(mechanism)),
+    }
+}
+
+/// The message [`require_staged`] panics with, as a value rather than a `panic!` literal, so the CI
+/// guard step's `grep 'CPE-1717'` has something a unit test can assert on without catching an unwind.
+pub fn staging_failure_message(mechanism: &str) -> String {
+    format!(
+        "[CPE-1717] `{mechanism}` could not stage its condition on {os}, a platform where this \
+         mechanism IS supposed to work. The leg that called this therefore verified NOTHING, and \
+         under CI a leg that verified nothing must be red rather than a notice inside a green log.\n\
+         \n\
+         Likely causes: the runner image changed (symlink privilege, Developer Mode, the junction \
+         fallback, `icacls` behaviour); the job is running elevated or as root, where a deny cannot \
+         bind; the workspace moved to a filesystem that ignores ACLs and mode bits; or \
+         `CPE_STAGING_SABOTAGE=1` is set, which is how CI proves this check still bites.\n\
+         \n\
+         Re-run with `CPE_STAGING_STRICT=0` to fall back to the loud-skip behaviour and read the \
+         leg's own notice — but treat that as a diagnosis step, not a fix.",
+        os = std::env::consts::OS
+    )
+}
+
 /// Test-only mechanism for the `fs::metadata`-based CPE-1692 guards in this crate (`links::link_status`,
 /// `dangling_links_scan`'s target-resolution check): deny traversal on `dir` itself so a `stat` of
 /// anything reached *through* it fails with a genuine (non-`NotFound`) error.
@@ -427,7 +644,13 @@ pub fn contained_under(joined: &Path, root: &Path) -> Result<(), String> {
 /// elevated, an ACL-less filesystem, non-admin without the rights to set a deny ACE, … — or simply
 /// Windows), which callers MUST treat as a loud, `writeln!(std::io::stderr(), ..)` skip — never a silent
 /// pass (Evidence Rules, `Ticketing/wiki.md`).
+///
+/// **CPE-1717:** the `false` return is routed through [`require_staged`] with `supported_here =
+/// cfg!(unix)`, because this mechanism provably cannot work on Windows (see above) — so a Windows skip
+/// stays a legitimate, notice-only skip on every harness, while a **Unix** runner that stops honouring
+/// mode bits turns the step red under CI instead of quietly covering nothing.
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -446,7 +669,11 @@ pub(crate) fn deny_dir_traversal(dir: &Path, probe: &Path) -> bool {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o000));
     }
-    std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound)
+    require_staged(
+        "deny_dir_traversal",
+        cfg!(unix),
+        std::fs::metadata(probe).is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+    )
 }
 
 /// Undo whatever [`deny_dir_traversal`] did to `dir`, so a scratch tree containing it can be removed.
@@ -558,7 +785,13 @@ pub(crate) fn undo_deny_dir_traversal(dir: &Path) {
 /// this machine can't construct the condition (running elevated, an ACL-less filesystem, non-admin
 /// without the rights to set a deny ACE, …), which callers MUST treat as a loud,
 /// `writeln!(std::io::stderr(), ..)` skip — never a silent pass (Evidence Rules, `Ticketing/wiki.md`).
+///
+/// **CPE-1717:** this mechanism is supposed to work on **every** platform CI runs — the target deny on
+/// Windows, the parent `chmod` on Unix — so the `false` return is routed through [`require_staged`]
+/// with `supported_here = true`. Under CI a failure to stage is therefore red, not a notice in a green
+/// log; locally it stays a loud skip, for the root-container / network-share / ACL-less cases.
 #[cfg(test)]
+#[track_caller]
 pub(crate) fn deny_stat_of(target: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -597,7 +830,7 @@ pub(crate) fn deny_stat_of(target: &Path) -> bool {
             let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o000));
         }
     }
-    target.try_exists().is_err()
+    require_staged("deny_stat_of", true, target.try_exists().is_err())
 }
 
 /// Undo whatever [`deny_stat_of`] did, so a scratch tree containing `target` can be removed. `parent` is
@@ -669,7 +902,16 @@ pub(crate) fn undo_deny_stat_of(target: &Path, parent: &Path) {
 /// was a third inlined copy of the construction (which is how `deny_stat_of`'s inline duplicates in
 /// `src-tauri` ended up needing the parent-`RD` fix applied separately, per CPE-1705 correction 4). One
 /// implementation, reachable from both crates, is the lesser evil.
+/// **CPE-1717:** `supported_here = true` — between `symlink_file` and the privilege-free junction
+/// fallback there is no platform CI runs on where this construction is *expected* to fail, so a
+/// failure means the runner changed under us and the step goes red under CI rather than announcing
+/// into a green log. Locally it remains a loud skip (see [`staging_is_strict`]).
+#[track_caller]
 pub fn make_dangling_link(link: &Path) -> bool {
+    require_staged("make_dangling_link", true, make_dangling_link_inner(link))
+}
+
+fn make_dangling_link_inner(link: &Path) -> bool {
     let missing = link.with_file_name(format!(
         "{}-target-that-does-not-exist",
         link.file_name().unwrap_or_default().to_string_lossy()
@@ -707,6 +949,190 @@ mod tests {
     #[test]
     fn epoch_ms_of_unix_epoch_is_zero() {
         assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
+    }
+
+    /// CPE-1717. The whole policy as a table, because the policy is the deliverable and it has to be
+    /// checkable without setting process-global environment variables under a parallel harness.
+    ///
+    /// Read the columns as: *is the mechanism supposed to work here* × *did it work* × *strict* ×
+    /// *sabotaged*. The two rows that matter are the last two: a supporting platform that failed to
+    /// stage is `Fail` under strictness (CI) and `LegitimateSkip` without it (a developer's machine).
+    #[test]
+    fn cpe_1717_staging_policy_only_fails_where_the_mechanism_was_supposed_to_work() {
+        use StagingVerdict::*;
+        // **All sixteen rows, not a chosen subset.** The first version listed ten and left out six as
+        // "equivalent by construction" — which is true, and is exactly the argument a table test
+        // exists to stop anyone having to make. With four booleans, exhaustiveness is free, and a
+        // future edit that breaks the equivalence has nowhere to hide.
+        //
+        // supported, staged, strict, sabotaged  →  verdict
+        let table = [
+            // ── not supported here: a legitimate skip under EVERY harness. These are the
+            // `deny_dir_traversal`-on-Windows / ACL-test-on-Linux rows, and none of them may become a
+            // false red just because CI asked for strictness.
+            (false, false, false, false, LegitimateSkip),
+            (false, false, false, true, LegitimateSkip),
+            (false, false, true, false, LegitimateSkip),
+            (false, false, true, true, LegitimateSkip),
+            (false, true, false, false, Staged),
+            (false, true, false, true, LegitimateSkip),
+            (false, true, true, false, Staged),
+            (false, true, true, true, LegitimateSkip),
+            // ── supported here: strictness is what separates a red from a loud skip.
+            (true, false, false, false, LegitimateSkip),
+            (true, false, false, true, LegitimateSkip),
+            (true, false, true, false, Fail),
+            (true, false, true, true, Fail),
+            (true, true, false, false, Staged),
+            (true, true, false, true, LegitimateSkip),
+            (true, true, true, false, Staged),
+            // Sabotage turns a genuine success into the failure case — how CI neutralises this guard
+            // on purpose and proves it still bites.
+            (true, true, true, true, Fail),
+        ];
+        assert_eq!(table.len(), 16, "four booleans have sixteen combinations; list all of them");
+        for (supported, staged, strict, sabotaged, want) in table {
+            assert_eq!(
+                staging_verdict(supported, staged, strict, sabotaged),
+                want,
+                "supported={supported} staged={staged} strict={strict} sabotaged={sabotaged}"
+            );
+        }
+    }
+
+    /// The failure message is load-bearing twice over: a human has to be able to tell a changed runner
+    /// from a real bug, and **the CI guard step greps it** — `.github/workflows/ci.yml`'s
+    /// "skip-visibility guard" steps fail the build if a sabotaged run dies without `CPE-1717` in the
+    /// output, on the grounds that a failure for some other reason is not evidence about this
+    /// mechanism. So the two strings that grep depends on are asserted here, not assumed.
+    #[test]
+    fn cpe_1717_the_failure_message_names_the_ticket_the_mechanism_and_the_way_out() {
+        let msg = staging_failure_message("deny_stat_of");
+        assert!(msg.contains("CPE-1717"), "the CI guard greps for this, got: {msg}");
+        assert!(msg.contains("deny_stat_of"), "must name the mechanism that failed, got: {msg}");
+        assert!(msg.contains(std::env::consts::OS), "must name the platform, got: {msg}");
+        assert!(
+            msg.contains("CPE_STAGING_STRICT=0"),
+            "must offer the escape hatch, or a runner regression blocks every PR with no way out: \
+             {msg}"
+        );
+        assert!(
+            msg.contains("verified NOTHING"),
+            "must say what actually went wrong — that the leg covered nothing — rather than only that \
+             a helper returned false: {msg}"
+        );
+    }
+
+    /// `CPE_STAGING_STRICT` has to override `CI` in both directions, because CI is exactly where the
+    /// escape hatch is needed if a runner image regresses before the fix lands.
+    ///
+    /// **This test used to assert against a hand-written closure that duplicated the `match` it was
+    /// meant to check**, so the reviewer could invert the real function entirely and watch every
+    /// CPE-1717 test pass. It now drives [`strict_from`] itself. The two `None` rows are the important
+    /// ones: they are the only connection between this feature and an ordinary CI run, and breaking
+    /// that arm alone was measured to turn a broken-staging CI run green while the guard step —
+    /// which pinned the override — still reported OK.
+    #[test]
+    fn cpe_1717_strictness_reads_its_overrides() {
+        // (value, ci) → strict
+        let table = [
+            // The arm that decides an ordinary CI run. Break it and a leg that stages nothing goes
+            // green; nothing else in this file would notice.
+            (None, true, true),
+            (None, false, false),
+            // Explicit overrides, which must win in BOTH directions.
+            (Some("1"), false, true),
+            (Some("0"), true, false),
+            (Some("true"), false, true),
+            (Some("false"), true, false),
+            (Some("yes"), false, true),
+            (Some("no"), true, false),
+            (Some("on"), false, true),
+            (Some("off"), true, false),
+            // Spelling tolerance: a value typed by a human in a hurry still has to work, because an
+            // escape hatch that silently does nothing is worse than no escape hatch.
+            (Some("TRUE"), false, true),
+            (Some("  1  "), false, true),
+            (Some("Off"), true, false),
+            // Empty is treated as unset — a workflow that writes `CPE_STAGING_STRICT: ""` means "leave
+            // it alone", not "turn CI strictness off".
+            (Some(""), true, true),
+            (Some(""), false, false),
+        ];
+        for (value, ci, want) in table {
+            assert_eq!(
+                strict_from(value, ci),
+                want,
+                "strict_from({value:?}, ci={ci}) must be {want}"
+            );
+        }
+    }
+
+    /// `CI` is read by *other people's* tools, so it is parsed leniently — but `is_some()` was too
+    /// lenient by half: `CI=false` counted as CI, which is not "following `CI`" by any reading.
+    #[test]
+    fn cpe_1717_ci_detection_treats_a_falsy_value_as_not_ci() {
+        for truthy in ["true", "1", "TRUE", "yes", " true ", "azure-pipelines", "woodpecker"] {
+            assert!(ci_from(Some(truthy)), "CI={truthy:?} must read as CI");
+        }
+        for falsy in ["", "0", "false", "FALSE", "no", "off", "  "] {
+            assert!(!ci_from(Some(falsy)), "CI={falsy:?} must NOT read as CI");
+        }
+        assert!(!ci_from(None), "unset is not CI");
+    }
+
+    /// An unrecognised value must be **loud**, not silently folded into the default. Folding it in is
+    /// the same "unknown quietly treated as the safe answer" shape CPE-1680 is about, and here it
+    /// would mean someone reaches for the documented escape hatch, mistypes it, and believes it took.
+    ///
+    /// The spellings below are the ones an independent audit drove through the knob and found
+    /// **silently lenient** in the first version, which matched the literal `1` and nothing else: a
+    /// developer forcing the check got a green run and believed they had run it. That is CPE-1717's
+    /// own bug — a check reporting success without having run — reintroduced inside CPE-1717's own
+    /// knob. `strict` and `2` are not in the vocabulary, so they must be refused, not ignored.
+    #[test]
+    fn cpe_1717_an_unrecognised_strictness_value_is_refused_not_ignored() {
+        // The 19 spellings the independent audit drove through the knob. Under the first version —
+        // which matched the literal `1` and nothing else — every row below that is now `On` was
+        // SILENTLY LENIENT, so forcing the check produced a green run the developer believed they had
+        // forced.
+        use StrictToken::*;
+        let vocabulary = [
+            ("1", On),
+            ("true", On),
+            ("True", On),
+            ("TRUE", On),
+            ("yes", On),
+            ("YES", On),
+            ("on", On),
+            (" 1", On),
+            ("1 ", On),
+            (" true ", On),
+            ("0", Off),
+            ("false", Off),
+            ("False", Off),
+            ("no", Off),
+            ("off", Off),
+            ("", Unset),
+            ("   ", Unset),
+            // Not in the vocabulary — refused, never guessed at.
+            ("strict", Unrecognised),
+            ("2", Unrecognised),
+            ("maybe", Unrecognised),
+            ("enabled", Unrecognised),
+            ("y", Unrecognised),
+        ];
+        for (raw, want) in vocabulary {
+            assert_eq!(strict_token(raw), want, "CPE_STAGING_STRICT={raw:?}");
+        }
+    }
+
+    /// …and `Unrecognised` really does stop the run rather than falling through to the default. This
+    /// is the assertion that makes the vocabulary table above mean something.
+    #[test]
+    #[should_panic(expected = "CPE_STAGING_STRICT")]
+    fn cpe_1717_an_unrecognised_strictness_value_panics_rather_than_defaulting() {
+        let _ = strict_from(Some("strict"), true);
     }
 
     /// The five spellings the PR #855 audit drove through a consented `apply_backup_plan` and watched
@@ -1141,6 +1567,255 @@ mod tests {
             }
         }
         false
+    }
+
+    /// The captured print macros. **All four**, not just `eprintln!`: libtest's capture is installed
+    /// in `std::io::_print`/`_eprint`, which every one of these routes through, so `eprint!` hides a
+    /// notice exactly as well as `eprintln!` does. The first version of this scan matched `eprintln!`
+    /// alone and an `eprint!("SKIPPED …\n")` walked straight past it.
+    const CAPTURED_MACROS: [&str; 4] = ["eprintln!", "eprint!", "println!", "print!"];
+
+    /// The vocabulary this tree's skip notices actually use. **A vocabulary, not a semantic check** —
+    /// naming it that way is the point, because the alternative is believing the scan understands
+    /// intent.
+    ///
+    /// `skip` alone was not enough: `vault_manager.rs`'s `the_staging_open_is_exclusive` notice reads
+    /// *"NOTE …: no symlink privilege here, so only the regular-file and hard-link forms were
+    /// verified."* — a genuine, invisible, `eprintln!` skip notice that **never says "skip"**. It
+    /// survived the CPE-1717 conversion pass precisely because that pass and the first scan shared one
+    /// pattern, so they shared one blind spot: the same search cannot audit itself.
+    const SKIP_PHRASES: [&str; 6] = [
+        "skip",
+        "not covered",
+        "were verified",
+        "verified nothing",
+        "nothing to verify",
+        "no symlink privilege",
+    ];
+
+    /// Does `literal_start` — the text from a `"` onwards — read like a notice that a leg did not run?
+    ///
+    /// **Case-insensitive `contains`, not a prefix match against a list of spellings.** The first
+    /// version tested `starts_with("\"SKIP")`/`("\"skipping")`, which missed, in the reviewer's own
+    /// counter-examples: `"[CPE-1692] SKIPPED …"` — **the shape 56 sites in this tree actually use**,
+    /// and the richer convention a future author will copy — plus sentence-case `"Skipping …"` and a
+    /// leading space `" SKIPPED …"`. Three near-misses out of five is not a lint, it is a coin flip.
+    ///
+    /// No length cap: the survivor above puts its phrase well into the message, and a cap is one more
+    /// way for a notice to sit just outside the window.
+    fn mentions_skipping(literal_start: &str) -> bool {
+        let lower = literal_start.to_ascii_lowercase();
+        SKIP_PHRASES.iter().any(|p| lower.contains(p))
+    }
+
+    /// CPE-1717. A skip notice written with a **captured** print macro reaches nobody, and 56 sites in
+    /// this tree were written that way while two separate comments elsewhere explained why they must
+    /// not be.
+    ///
+    /// libtest replays a test's captured output only when the test FAILS, and a skip is a pass; CI
+    /// runs plain `cargo test` with no `--nocapture`. The capture is installed inside the
+    /// `print!`/`eprint!` macros, so `writeln!(std::io::stderr(), ..)` — which [`skip_notice!`] wraps
+    /// — goes around it. Measured, not assumed: see that macro's doc comment for the harness output.
+    ///
+    /// # Scope, stated because a scan that quietly misses a shape is worse than no scan
+    ///
+    /// **Test code only** — from each file's `mod tests` onwards, plus whole files under a `tests/`
+    /// directory. That boundary is not tidiness: production code legitimately logs about skipping
+    /// (`"cpe: vault-session sweep skipped: …"`, `"[agent-watch] audit dir unavailable, skipping …"`),
+    /// and those are runtime diagnostics on a real stderr, not test notices. Flagging them would be
+    /// the cry-wolf failure this file's other scan already had to be corrected for.
+    ///
+    /// **What it still misses, and this list is deliberately not reassuring:**
+    /// - a notice phrased outside [`SKIP_PHRASES`] — "this environment cannot create a symlink; the
+    ///   assertions below prove less than they look like they do" would pass. This is not
+    ///   hypothetical: exactly one such notice (`vault_manager.rs`'s `the_staging_open_is_exclusive`)
+    ///   survived the CPE-1717 conversion pass **because that pass and this scan's first version
+    ///   shared one pattern**, and it took an independent audit to find. A search cannot audit itself;
+    ///   the vocabulary now names that phrase, and the next one will be outside it too;
+    /// - a message built into a variable, or read from a `const`, before printing;
+    /// - a `write!(std::io::stdout(), ..)`-shaped notice, which is visible but goes to the wrong
+    ///   stream;
+    /// - a test module not literally named `mod tests`.
+    ///
+    /// Aliasing (`use std::eprintln as announce;`) is the one indirection that *is* caught, because
+    /// it is cheap to catch and has no legitimate use here.
+    ///
+    /// [`skip_notice!`]: crate::skip_notice
+    #[test]
+    fn skip_notices_never_use_a_captured_print_macro() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let mut files = Vec::new();
+        for group in ["crates", "sidecar"] {
+            if let Ok(entries) = std::fs::read_dir(root.join(group)) {
+                for entry in entries.flatten() {
+                    collect_rs(&entry.path().join("src"), &mut files);
+                    collect_rs(&entry.path().join("tests"), &mut files);
+                }
+            }
+        }
+        collect_rs(&root.join("src-tauri").join("src"), &mut files);
+        collect_rs(&root.join("src-tauri").join("tests"), &mut files);
+
+        // Asserted inputs: a scan that reads nothing passes vacuously, which is the exact failure this
+        // whole ticket is about.
+        assert!(
+            files.len() > 60,
+            "the scan read only {} files — it is not looking where it thinks it is",
+            files.len()
+        );
+
+        let mut offences = Vec::new();
+        let mut scanned_test_lines = 0usize;
+        for file in &files {
+            let Ok(text) = std::fs::read_to_string(file) else { continue };
+            let all: Vec<&str> = text.lines().collect();
+            // A file under `tests/` is test code end to end; a `src/` file's test code starts at
+            // `mod tests`. Production logging about skipping is not this scan's business.
+            let in_tests_dir = file.components().any(|c| c.as_os_str() == "tests");
+            let start = if in_tests_dir {
+                0
+            } else {
+                match all.iter().position(|l| l.trim_start().starts_with("mod tests")) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            };
+            let lines = &all[start..];
+            scanned_test_lines += lines.len();
+            for (i, line) in lines.iter().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") {
+                    continue; // a comment explaining the rule is not a breach of it
+                }
+                // The scan reads its own source, so its detector strings and the fixtures that prove
+                // it still catches things look exactly like offences. The marker is deliberately ugly
+                // — the same reasoning as `LINK-ONLY:` above — and per-LINE rather than per-file:
+                // exempting all of `fsutil.rs` would make this module the one place a real invisible
+                // notice could hide.
+                if line.contains("SCAN-FIXTURE") {
+                    continue;
+                }
+                // …and the deliberate escape for a real call site whose message merely *mentions*
+                // skipping — a diagnostic dump of a batch report's own `skipped` field, say — rather
+                // than announcing that the test declined to run. Broad matching is the point of this
+                // scan; the price of broad matching is a per-site opt-out that states its reason. A
+                // lint that flags correct code teaches people to ignore it, which is the failure the
+                // sibling scan in this file was already corrected for once.
+                if line.contains("NOT-A-SKIP-NOTICE:") {
+                    continue;
+                }
+                let lineno = start + i + 1;
+
+                // Aliasing the captured macros hides a notice from every check above.
+                if code.contains("use std::eprint") // SCAN-FIXTURE
+                    || code.contains("use ::std::eprint") // SCAN-FIXTURE
+                    || code.contains("use std::print") // SCAN-FIXTURE
+                    || code.contains("use ::std::print") // SCAN-FIXTURE
+                {
+                    offences.push(format!(
+                        "{}:{lineno}: aliases a captured print macro, which routes around this scan",
+                        file.display()
+                    ));
+                    continue;
+                }
+
+                for mac in CAPTURED_MACROS {
+                    // `print!` is a suffix of `eprint!`; only treat this as a call to `mac` when the
+                    // preceding character cannot be part of an identifier.
+                    let Some(at) = find_macro_call(code, mac) else { continue };
+                    let rest = &code[at + mac.len()..];
+                    // …the message on the same line, or — the other shape rustfmt produces — on the
+                    // next one.
+                    let hit = match rest.strip_prefix('(') {
+                        Some(args) if args.trim_start().starts_with('"') => {
+                            mentions_skipping(args.trim_start())
+                        }
+                        Some(args) if args.trim().is_empty() => lines
+                            .get(i + 1)
+                            .map(|n| n.trim_start())
+                            .is_some_and(|n| n.starts_with('"') && mentions_skipping(n)),
+                        _ => false,
+                    };
+                    if hit {
+                        offences.push(format!(
+                            "{}:{lineno}: `{mac}` skip notice",
+                            file.display()
+                        ));
+                        break;
+                    }
+                }
+            }
+        }
+        assert!(
+            scanned_test_lines > 20_000,
+            "only {scanned_test_lines} lines of test code were scanned — the `mod tests` boundary is \
+             not finding the test modules, so this scan is looking at almost nothing"
+        );
+        assert!(
+            offences.is_empty(),
+            "these skip notices use a print macro whose output libtest SWALLOWS for a passing test — \
+             so they announce a leg that verified nothing to nobody, on the only harness that \
+             matters:\n{}\n\n\
+             Fix: `cpe_server::skip_notice!(..)` (or `crate::skip_notice!` inside this crate) — same \
+             arguments, writes straight to the process's stderr handle, survives the capture.\n\
+             Better still, if the staging mechanism is supposed to work on that platform, use \
+             `fsutil::require_staged` and let the leg go RED under CI instead of printing into a green \
+             log.\n\n\
+             What a green run here does NOT prove: see this test's doc comment. A notice that never \
+             says \"skip\", one assembled into a variable first, or a test module not called \
+             `mod tests`, all still slip past.",
+            offences.join("\n")
+        );
+    }
+
+    /// Byte offset of a call to the macro `mac` in `code`, requiring that the character before it
+    /// cannot continue an identifier — so `eprint!` is not reported as a `print!` call.
+    fn find_macro_call(code: &str, mac: &str) -> Option<usize> {
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find(mac) {
+            let at = from + rel;
+            let ok = code[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != ':');
+            if ok {
+                return Some(at);
+            }
+            from = at + mac.len();
+        }
+        None
+    }
+
+    /// The scan's own premise, asserted rather than assumed: it must recognise the shapes the
+    /// reviewer of PR #898 smuggled past its first version, and must **not** flag the visible
+    /// `skip_notice!`/`writeln!(stderr)` form or production logging that happens to mention skipping.
+    #[test]
+    fn cpe_1717_the_capture_scan_recognises_the_shapes_that_slipped_past_it() {
+        for good in [
+            r#"eprintln!("[CPE-1692] SKIPPED the leg: …");"#, // SCAN-FIXTURE
+            r#"eprintln!("Skipping the leg: …");"#,           // SCAN-FIXTURE
+            r#"eprintln!(" SKIPPED the leg: …");"#,           // SCAN-FIXTURE
+            r#"eprint!("SKIPPED the leg: …\n");"#,            // SCAN-FIXTURE
+            r#"println!("skipping the leg");"#,               // SCAN-FIXTURE
+            r#"print!("SKIPPED");"#,                          // SCAN-FIXTURE
+            // The survivor an independent audit found: a real skip notice that never says "skip".
+            r#"eprintln!("NOTE …: no symlink privilege here, so only the regular-file and hard-link forms were verified.");"#, // SCAN-FIXTURE
+        ] {
+            let at = find_macro_call(good, "eprintln!")
+                .or_else(|| find_macro_call(good, "eprint!"))
+                .or_else(|| find_macro_call(good, "println!"))
+                .or_else(|| find_macro_call(good, "print!"))
+                .unwrap_or_else(|| panic!("no macro call found in {good:?}"));
+            let args = good[at..].split_once('(').unwrap().1;
+            assert!(mentions_skipping(args.trim_start()), "must be caught: {good}");
+        }
+        // `eprint!` must not be mistaken for a `print!` call — that is what makes the four-macro list
+        // safe to widen.
+        assert_eq!(find_macro_call(r#"eprint!("x")"#, "print!"), None);
+        assert!(find_macro_call(r#"eprint!("x")"#, "eprint!").is_some());
+        // …and the visible forms this ticket is steering people towards are not offences.
+        assert!(find_macro_call(r#"crate::skip_notice!("SKIPPED …");"#, "eprintln!").is_none());
+        assert!(!mentions_skipping(r#""a message with no s-word""#));
     }
 
     /// Every `.rs` under `dir`, recursively — the scan's file list.

@@ -2856,7 +2856,7 @@ mod tests {
         let victim = outside.join("newly-planted.jpg"); // deliberately does not exist yet
         let link = selected.join("link.jpg");
         if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "skipping dangling-symlink containment test: could not create a symlink in this \
                  environment (Windows needs Developer Mode or elevation)"
             );
@@ -2893,7 +2893,7 @@ mod tests {
         std::fs::write(&victim, b"victim").unwrap();
         let link = selected.join("link.jpg");
         if crate::links::create_symlink(&victim.to_string_lossy(), &link.to_string_lossy()).is_err() {
-            eprintln!("skipping live-symlink containment test: could not create a symlink in this environment");
+            crate::skip_notice!("skipping live-symlink containment test: could not create a symlink in this environment");
             let _ = std::fs::remove_dir_all(dir.path());
             return;
         }
@@ -2919,7 +2919,7 @@ mod tests {
         std::fs::write(&real, b"data").unwrap();
         let link = dir.path().join("link.jpg");
         if crate::links::create_symlink(&real.to_string_lossy(), &link.to_string_lossy()).is_err() {
-            eprintln!("skipping same-directory symlink test: could not create a symlink in this environment");
+            crate::skip_notice!("skipping same-directory symlink test: could not create a symlink in this environment");
             let _ = std::fs::remove_dir_all(dir.path());
             return;
         }
@@ -2974,7 +2974,7 @@ mod tests {
         match crate::links::create_symlink(&target.to_string_lossy(), &link.to_string_lossy()) {
             Ok(()) => true,
             Err(e) => {
-                eprintln!(
+                crate::skip_notice!(
                     "SKIPPING {test}: could not create a symlink in this environment ({e}) — Windows \
                      needs Developer Mode or elevation. This test did NOT verify anything."
                 );
@@ -4038,7 +4038,7 @@ mod tests {
         // shape that reaches the census at all.
         let b = selected.join("b.jpg");
         if std::fs::hard_link(&a, &b).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPING cpe_1652_the_census_cap_fails_closed: this filesystem does not support hard \
                  links — this test verified NOTHING"
             );
@@ -4320,7 +4320,7 @@ mod tests {
         std::fs::write(&out, b"the user's own bytes").unwrap();
         let decoy = selected.join("decoy.png");
         if std::fs::hard_link(&out, &decoy).is_err() {
-            eprintln!("SKIP secaudit census memo: no hard links here — VERIFIED NOTHING");
+            crate::skip_notice!("SKIP secaudit census memo: no hard links here — VERIFIED NOTHING");
             return;
         }
         let out_s = out.to_string_lossy().to_string();

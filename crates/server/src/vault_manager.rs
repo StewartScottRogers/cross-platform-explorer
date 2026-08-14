@@ -2462,7 +2462,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&decoy, &session);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED lock_refuses_an_in_root_link_before_re_sealing_anything_through_it: this \
                  OS/account cannot create a directory link. The in-root link case was NOT verified."
             );
@@ -2713,7 +2713,7 @@ mod tests {
 
         let link = root.join("looks-like-a-session");
         if !try_symlink_dir(&outside, &link) {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED unlock_refuses_a_session_dir_that_symlinks_out_of_the_root: this OS/account \
                  cannot create a directory symlink (on Windows this needs Developer Mode or admin). \
                  The symlink-escape case was NOT verified on this run."
@@ -2966,7 +2966,7 @@ mod tests {
     #[test]
     fn lock_refuses_to_shred_a_victim_dir_symlinked_over_the_session_path() {
         if !lock_must_refuse_a_link_swapped_session(try_symlink_dir, "symlink") {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED lock_refuses_to_shred_a_victim_dir_symlinked_over_the_session_path: this \
                  OS/account cannot create a directory symlink (on Windows this needs Developer Mode or \
                  admin). The symlink form of the swap was NOT verified on this run — the junction form \
@@ -2992,7 +2992,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &link);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED wipe_session_dir_refuses_a_session_path_that_is_itself_a_link: this OS/account \
                  cannot create a directory link. The wipe-side refusal was NOT verified on this run."
             );
@@ -3471,7 +3471,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &debris);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED sweep_unlinks_link_debris_without_ever_touching_what_it_points_at: this \
                  OS/account cannot create a directory link. Link-debris cleanup was NOT verified."
             );
@@ -3591,7 +3591,7 @@ mod tests {
         if crate::links::create_hard_link(&victim.to_string_lossy(), &legacy_staging.to_string_lossy())
             .is_err()
         {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED a_hard_link_planted_at_the_staging_name_is_never_written_through: this volume \
                  refused a hard link. The staging-trap case was NOT verified on this run."
             );
@@ -3651,9 +3651,14 @@ mod tests {
             assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
             assert_eq!(std::fs::read(&victim).unwrap(), b"the only copy", "nor through the symlink");
         } else {
-            eprintln!(
-                "NOTE the_staging_open_is_exclusive…: no symlink privilege here, so only the regular-file \
-                 and hard-link forms were verified."
+            // CPE-1717: this is a skip notice, and it spent the whole conversion pass looking like it
+            // was not — it never says "skip", so both the conversion sweep and the first version of
+            // `fsutil`'s scan walked past it. An independent audit found it. `skip_notice!` writes to
+            // the process's stderr handle, which libtest's `print!`-macro capture does not intercept;
+            // the `eprintln!` this replaces reached nobody on a passing run.
+            crate::skip_notice!(
+                "SKIPPED part of the_staging_open_is_exclusive…: no symlink privilege here, so only \
+                 the regular-file and hard-link forms were verified."
             );
         }
 
@@ -3710,7 +3715,7 @@ mod tests {
         // (2) createHardLink(victim, <session>/loot.xlsx) — no elevation, no Developer Mode.
         let loot = session.join("loot.xlsx");
         if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED lock_refuses_a_hard_linked_file_inside_the_session_dir_and_touches_nothing: \
                  this OS/volume refused a hard link. The alias case was NOT verified on this run."
             );
@@ -3763,7 +3768,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &session);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED the_reseal_refuses_a_linked_session_path_on_its_own: this OS/account cannot \
                  create a directory link. The independent re-seal guard was NOT verified on this run."
             );
@@ -4056,7 +4061,7 @@ mod tests {
         watcher.join().unwrap();
 
         if !planted.load(Ordering::SeqCst) {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED an_alias_planted_after_the_alias_guards_is_unlinked_not_shredded_through: the \
                  alias could not be planted inside the window on this run (no hard-link support, or the \
                  lock outran the watcher). The timing form of this attack was NOT verified here — the \
@@ -4096,7 +4101,7 @@ mod tests {
 
         let loot = session.join("nested").join("loot.xlsx");
         if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED the_session_wipe_unlinks_an_alias_instead_of_overwriting_it: this OS/volume \
                  refused a hard link. The wipe's alias case was NOT verified on this run."
             );
@@ -4163,7 +4168,7 @@ mod tests {
         });
 
         if !planted.get() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED an_alias_appearing_during_the_encrypt_walk_is_caught_before_the_blob_is_replaced: \
                  this OS/volume refused a hard link."
             );
@@ -4224,7 +4229,7 @@ mod tests {
         std::fs::write(&victim, b"VICTIM PLAINTEXT - the only copy").unwrap();
         let alias = staging_blob_path_with(&blob, "planted");
         if crate::links::create_hard_link(&victim.to_string_lossy(), &alias.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED the_sweep_leaves_a_hard_link_planted_at_a_staging_name: this OS/volume refused \
                  a hard link."
             );
@@ -4482,7 +4487,7 @@ mod tests {
             // Not a failure: the wipe simply finished before the watcher could plant anything, so this
             // run detected nothing either way. Failing here would red the Windows leg intermittently
             // while blaming junction creation for a missed window (PR #861 audit, finding 4).
-            SwapOutcome::WindowMissed => eprintln!(
+            SwapOutcome::WindowMissed => crate::skip_notice!(
                 "SKIPPED the_wipe_refuses_a_junction_swapped_in_at_a_parent_directory_mid_wipe: the \
                  watcher thread was descheduled past the overwrite phase and the wipe finished first, so \
                  the swap could not be staged. The junction form of the parent swap was NOT verified on \
@@ -4497,12 +4502,12 @@ mod tests {
     fn the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe() {
         match wipe_must_not_write_through_a_swapped_parent(try_symlink_dir, "symlink") {
             SwapOutcome::Swapped => {}
-            SwapOutcome::LinkRefused => eprintln!(
+            SwapOutcome::LinkRefused => crate::skip_notice!(
                 "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: this \
                  OS/account cannot create a directory symlink (on Windows this needs Developer Mode or \
                  admin). The symlink form of the parent swap was NOT verified on this run."
             ),
-            SwapOutcome::WindowMissed => eprintln!(
+            SwapOutcome::WindowMissed => crate::skip_notice!(
                 "SKIPPED the_wipe_refuses_a_symlink_swapped_in_at_a_parent_directory_mid_wipe: the wipe \
                  finished before the watcher could stage the swap. The symlink form of the parent swap \
                  was NOT verified on this run — the deterministic pins still were."
@@ -4585,7 +4590,7 @@ mod tests {
         std::fs::write(&victim, VICTIM_BYTES).unwrap();
         let loot = dir.path().join("loot.xlsx");
         if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED the_overwrite_re_reads_the_link_count_from_the_handle_it_will_write_through: \
                  this OS/volume refused a hard link."
             );
@@ -4621,7 +4626,7 @@ mod tests {
         std::fs::write(&victim, VICTIM_BYTES).unwrap();
         let loot = dir.path().join("loot.xlsx");
         if crate::links::create_hard_link(&victim.to_string_lossy(), &loot.to_string_lossy()).is_err() {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it: this OS/volume \
                  refused a hard link."
             );
@@ -4636,7 +4641,7 @@ mod tests {
         restore(false);
         if open_existing_no_follow(&loot).is_ok() {
             restore(true);
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED an_alias_is_declined_before_a_write_handle_is_ever_taken_on_it: this account can \
                  open a read-only file for writing (running as root?), so the \"declined before opening\" \
                  ordering was NOT verified on this run."
@@ -4710,7 +4715,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &link);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED a_link_is_refused_even_when_there_is_no_identity_to_compare_it_against: this \
                  OS/account cannot create a directory link."
             );
@@ -4746,7 +4751,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &link);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED shred_tree_refuses_a_root_that_is_itself_a_link: this OS/account cannot create \
                  a directory link."
             );
@@ -4787,7 +4792,7 @@ mod tests {
         #[cfg(not(windows))]
         let made = try_symlink_dir(&victim, &planted);
         if !made {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED a_link_planted_inside_the_session_tree_is_never_followed_and_its_target_survives: \
                  this OS/account cannot create a directory link."
             );
@@ -4893,7 +4898,7 @@ mod tests {
         // The destination: a name INSIDE the folder that happens to be a symlink pointing OUT.
         let dest = folder.join("backup.cpevault");
         if !try_symlink_file(&outside, &dest) {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED a_symlinked_destination_inside_the_shredded_folder_never_loses_both_copies: \
                  this OS/account cannot create a file symlink (on Windows this needs Developer Mode or \
                  admin). The sharp end of this finding is Linux/macOS, where it needs neither."
@@ -4957,7 +4962,7 @@ mod tests {
         // The user's linked-in name for it.
         let linked = dir.path().join("linked.cpevault");
         if !try_symlink_file(&real_blob, &linked) {
-            eprintln!(
+            crate::skip_notice!(
                 "SKIPPED a_symlinked_vault_path_is_replaced_by_both_create_and_lock_never_written_through: \
                  this OS/account cannot create a file symlink (on Windows this needs Developer Mode or \
                  admin)."

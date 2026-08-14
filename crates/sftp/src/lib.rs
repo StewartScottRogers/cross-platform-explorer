@@ -1160,8 +1160,15 @@ mod tests {
             std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
 
-        let denied = std::fs::metadata(gp.join("real_dir"))
-            .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound);
+        // CPE-1717: `supported_here = cfg!(unix)` — this is the traversal-deny mechanism, which
+        // `cpe_server::fsutil::deny_dir_traversal` documents as genuinely Unix-only, so Windows keeps
+        // its notice-only skip while a Unix runner that stops honouring mode bits goes red under CI.
+        let denied = cpe_server::fsutil::require_staged(
+            "sftp opendir traversal deny",
+            cfg!(unix),
+            std::fs::metadata(gp.join("real_dir"))
+                .is_err_and(|e| e.kind() != std::io::ErrorKind::NotFound),
+        );
         if !denied {
             use std::io::Write;
             let _ = writeln!(
@@ -1250,7 +1257,14 @@ mod tests {
             std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
 
-        let denied = real_file.try_exists().is_err();
+        // CPE-1717: `supported_here = true` — the target deny is `(F)` on Windows and a parent `chmod`
+        // on Unix, both of which make `try_exists()` fail on every platform CI runs, so a failure here
+        // means the runner changed and must be red rather than a notice in a green log.
+        let denied = cpe_server::fsutil::require_staged(
+            "sftp open target deny",
+            true,
+            real_file.try_exists().is_err(),
+        );
         if !denied {
             use std::io::Write;
             let _ = writeln!(
@@ -1345,7 +1359,12 @@ mod tests {
             std::fs::set_permissions(&gp, std::fs::Permissions::from_mode(0o000)).unwrap();
         }
 
-        let denied = real_file.try_exists().is_err();
+        // CPE-1717: `supported_here = true`, as on the `open` leg above.
+        let denied = cpe_server::fsutil::require_staged(
+            "sftp open-handler target deny",
+            true,
+            real_file.try_exists().is_err(),
+        );
         if !denied {
             use std::io::Write;
             let _ = writeln!(
