@@ -43,7 +43,7 @@ Fold into **CPE-1721** if that ticket is worked first; it is the same root cause
 
 ## 3. The parser's `leaf.is_empty()` marker filter has zero coverage
 
-Disabling it left **164/164 green**. `is_safe_s3_leaf("")` is false, so the marker is caught by the *second*
+**Corrected 2026-08-13 by the PR #896 re-UAT: this is no longer zero coverage.** Round 2's `filtered_count` fix gave it coverage incidentally -- with the marker's empty leaf counted as content, an empty directory becomes undeletable, so disabling `leaf.is_empty()` now reds **two** real tests. What remains unasserted is the **display** symptom below. Originally measured as: disabling it left 164/164 green. `is_safe_s3_leaf("")` is false, so the marker is caught by the *second*
 filter and merely reclassified from "ignored" to "filtered".
 
 That reclassification is not harmless: it would make every `mkdir`-created folder report
@@ -93,3 +93,28 @@ error to act on.
 Related: **CPE-1684** (which introduced the probes), **CPE-1721** (the ureq dot-segment guard),
 **CPE-1722** (the leading-slash collapse), **CPE-1708** (which would surface the spurious count in item 3),
 **CPE-1682** (the missing-vs-denied line these probes must not blur).
+
+## 6. A gateway that both under-fills AND misreports `IsTruncated` is caught by nothing
+
+Measured by the PR #896 re-UAT, on round 3's own terms:
+
+```
+pure under-filler that ADMITS truncation -> delete refused (IsTruncated carries it)
+under-filler that DENIES truncation      -> delete Ok
+```
+
+Round 3 does not claim otherwise — that overstatement was round 2's wording, and it was corrected — so
+nothing in the code is dishonest. But it is an uncovered **non-conforming-server** shape that no
+probe-based check can reach, and it is worth writing down rather than rediscovering.
+
+There may be no proportionate fix. If the conclusion is "a server that lies about both cannot be defended
+against by asking it questions", **say that and close this item** rather than inventing a third belt.
+
+## 7. Nothing here has been measured against a real gateway
+
+Every measurement behind items 1–6, and behind CPE-1684 itself, is in-process (`tiny_http` and raw sockets)
+over `ureq` 2.12.1 on Windows. **No real S3, no MinIO, no QNAP.** Real-gateway pagination behaviour and real
+403/404 policy are unmeasured — which matters most for item 1, whose whole premise is what a particular
+credential configuration does on MinIO/Ceph.
+
+The QNAP on the LAN is the obvious first real target.
