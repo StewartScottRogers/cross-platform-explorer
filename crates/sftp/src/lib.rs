@@ -584,6 +584,11 @@ mod tests {
             //    running the SFTP server to share a folder did not agree to have their symlinks
             //    replaced by whoever connects") describes a server this repo does not ship, and that
             //    absence is what decides it.
+            //    **Bounded precisely (PR #902 review):** "no user's files at the destination" holds
+            //    because no user drives this rig, NOT because the destination is confined — `real()`
+            //    is a bare join with no containment check, so a `..`-shaped path would resolve
+            //    outside the temp root. Nothing sends one today; CPE-1730 tracks closing it. If that
+            //    ever changes before CPE-1730 lands, this reason expires with it.
             // 2. That premise is pinned rather than trusted:
             //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red the
             //    moment this line (or any sibling destructive primitive) moves above the `#[cfg(test)]`
@@ -996,6 +1001,17 @@ mod tests {
     /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
     /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
     /// fail on half the matrix is the failure this ticket family exists to stop.
+    ///
+    /// # What this scan does NOT catch, stated because an earlier draft overstated it
+    /// The `std::fs::` qualification is load-bearing in one direction (it is what keeps
+    /// `self.sftp.remove_file` above from being reported as a local write) and a gap in the other:
+    /// `use std::fs;` followed by `fs::write(..)` or `fs::remove_dir_all(..)` in the shipped half passes
+    /// this scan untouched — and unqualified `fs::` is this repo's prevailing style. Of the eight
+    /// needles only `fs::rename` has a second line of defence, CPE-1710's `clippy.toml` ban, which does
+    /// catch the unqualified spelling. So this is a **backstop against the specific regression CPE-1726
+    /// reasoned about** — the rig being promoted out of `#[cfg(test)]`, which moves these exact
+    /// fully-qualified lines — not a general audit of the shipped half, and it should not be cited as
+    /// one. Widening it to unqualified `fs::` is a fine follow-up; leaving the gap unstated is not.
     #[test]
     fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
         let src = include_str!("lib.rs").replace('\r', "");
@@ -1042,12 +1058,29 @@ mod tests {
     /// *through* it and clobber the target. That is the whole reason the two need different fixes, and
     /// it is asserted rather than trusted.
     ///
-    /// # Platform split (measured on CPE-1716, re-measured here)
-    /// A **live file symlink** cannot be staged on an unprivileged Windows runner at all — a junction is
-    /// directory-only and a hard link reports `is_symlink() == false` — so the live leg declares
-    /// `supported_here = cfg!(unix)`: a legitimate skip on Windows, and red under CI on Unix if the
-    /// runner ever loses the capability. The **dangling** leg runs everywhere, because
-    /// `fsutil::make_dangling_link` has a privilege-free junction fallback.
+    /// # Platform staging — and the CPE-1716 claim this deliberately does *not* repeat
+    /// An earlier draft of this comment said a live file symlink "cannot be staged on an unprivileged
+    /// Windows runner at all". **That is too broad, and `main` already carries the corrected form** (see
+    /// `src-tauri/src/lib.rs`, from PR #899's review) — writing the broad version here would have
+    /// regressed a correction back into the tree. What is true is narrower and mechanism-specific:
+    /// `std::os::windows::fs::symlink_file` passes `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` and
+    /// succeeds unelevated, while PowerShell's `New-Item -ItemType SymbolicLink` does **not** pass that
+    /// flag and fails with "Administrator privilege required". A check run through PowerShell therefore
+    /// says nothing about what Rust can stage. (A junction really is directory-only and a hard link
+    /// really is `is_symlink() == false`; neither substitutes for a live *file* link. That part stands —
+    /// it is the "so Windows cannot do this at all" conclusion that does not follow.)
+    ///
+    /// Measured on this ticket's own CI run (`31800562558`, job `94767293360`, windows-latest): all three
+    /// copies of this test recorded `ok` with **zero** `[CPE-1726] SKIPPED` lines, against a control in
+    /// the same job — `[CPE-1692] SKIPPED sftp opendir…` — proving the absence means "did not skip"
+    /// rather than "notices do not reach this log".
+    ///
+    /// So `supported_here` is **`true`, not `cfg!(unix)`**. Under `cfg!(unix)` a Windows runner that
+    /// later lost the capability would turn leg 1 into a *silent skip* instead of a red — precisely the
+    /// CPE-1717 failure this family exists to stop, and a real regression risk given the capability is
+    /// demonstrably present today. It costs a contributor nothing: `staging_is_strict()` follows `$CI`,
+    /// so an unusual local box still gets the loud skip. Leg 2 runs everywhere regardless, via
+    /// `make_dangling_link`'s privilege-free junction fallback.
     #[test]
     fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
         let (addr, hostkey, root) = spawn_server_returning_root();
@@ -1063,7 +1096,7 @@ mod tests {
         let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
         #[cfg(unix)]
         let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
-        if cpe_server::fsutil::require_staged("live_file_symlink", cfg!(unix), staged) {
+        if cpe_server::fsutil::require_staged("live_file_symlink", true, staged) {
             provider.write("/live-src.txt", b"source bytes").expect("seed the rename source");
             let r = provider.rename("/live-src.txt", "/slot.txt");
             assert_eq!(
@@ -1082,10 +1115,13 @@ mod tests {
             assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "rename reported {r:?}");
         } else {
             cpe_server::skip_notice!(
-                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-sftp's rename test: this machine cannot \
-                 create a file symlink at {} (Windows without Developer Mode or elevation; a junction \
-                 is directory-only and a hard link is not a symlink — measured on CPE-1716). The \
-                 DANGLING leg below runs on this runner and covers the write-through property.",
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-sftp's rename test: could not create a \
+                 file symlink at {}. Rust's `symlink_file` passes ALLOW_UNPRIVILEGED_CREATE and \
+                 normally succeeds unelevated on Windows too, so this is an unusual environment rather \
+                 than the ordinary Windows case — under CI this is a hard red, not this notice. What \
+                 is NOT covered on this run is leg 1's assertions specifically: the live victim's \
+                 bytes and the slot's final contents. The DANGLING leg below still runs and still \
+                 covers the write-through property.",
                 slot.display()
             );
             let _ = std::fs::remove_file(&slot);

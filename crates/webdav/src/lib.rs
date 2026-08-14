@@ -666,6 +666,11 @@ mod tests {
                 //    no third party whose files sit at the destination — the premise the ticket weighed
                 //    ("the client is not the person whose files are there") is simply absent here, and
                 //    that absence is what decides it.
+                //    **Bounded precisely (PR #902 review):** "no user's files at the destination"
+                //    holds because no user drives this rig, NOT because the destination is confined —
+                //    `root.join(..)` here has no containment check, so a `..`-shaped path would
+                //    resolve outside the temp root. Nothing sends one today; CPE-1730 tracks closing
+                //    it. If that ever changes before CPE-1730 lands, this reason expires with it.
                 // 2. That premise is pinned rather than trusted:
                 //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red
                 //    the moment this line (or any sibling destructive primitive) moves above the
@@ -1102,6 +1107,17 @@ mod tests {
     /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
     /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
     /// fail on half the matrix is the failure this ticket family exists to stop.
+    ///
+    /// # What this scan does NOT catch, stated because an earlier draft overstated it
+    /// The needles are **fully `std::fs::`-qualified**, and that is load-bearing in one direction (it is
+    /// what keeps a wire op on the remote from being reported as a local write) and a gap in the other:
+    /// `use std::fs;` followed by `fs::write(..)` or `fs::remove_dir_all(..)` in the shipped half passes
+    /// this scan untouched — and unqualified `fs::` is this repo's prevailing style. Of the eight
+    /// needles only `fs::rename` has a second line of defence, CPE-1710's `clippy.toml` ban, which does
+    /// catch the unqualified spelling. So this is a **backstop against the specific regression CPE-1726
+    /// reasoned about** — the rig being promoted out of `#[cfg(test)]`, which moves these exact
+    /// fully-qualified lines — not a general audit of the shipped half, and it should not be cited as
+    /// one. Widening it to unqualified `fs::` is a fine follow-up; leaving the gap unstated is not.
     #[test]
     fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
         let src = include_str!("lib.rs").replace('\r', "");
@@ -1148,12 +1164,29 @@ mod tests {
     /// target. That is the whole reason the two need different fixes, and it is asserted rather than
     /// trusted.
     ///
-    /// # Platform split (measured on CPE-1716, re-measured here)
-    /// A **live file symlink** cannot be staged on an unprivileged Windows runner at all — a junction is
-    /// directory-only and a hard link reports `is_symlink() == false` — so the live leg declares
-    /// `supported_here = cfg!(unix)`: a legitimate skip on Windows, and red under CI on Unix if the
-    /// runner ever loses the capability. The **dangling** leg runs everywhere, because
-    /// `fsutil::make_dangling_link` has a privilege-free junction fallback.
+    /// # Platform staging — and the CPE-1716 claim this deliberately does *not* repeat
+    /// An earlier draft of this comment said a live file symlink "cannot be staged on an unprivileged
+    /// Windows runner at all". **That is too broad, and `main` already carries the corrected form** (see
+    /// `src-tauri/src/lib.rs`, from PR #899's review) — writing the broad version here would have
+    /// regressed a correction back into the tree. What is true is narrower and mechanism-specific:
+    /// `std::os::windows::fs::symlink_file` passes `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` and
+    /// succeeds unelevated, while PowerShell's `New-Item -ItemType SymbolicLink` does **not** pass that
+    /// flag and fails with "Administrator privilege required". A check run through PowerShell therefore
+    /// says nothing about what Rust can stage. (A junction really is directory-only and a hard link
+    /// really is `is_symlink() == false`; neither substitutes for a live *file* link. That part stands —
+    /// it is the "so Windows cannot do this at all" conclusion that does not follow.)
+    ///
+    /// Measured on this ticket's own CI run (`31800562558`, job `94767293360`, windows-latest): all three
+    /// copies of this test recorded `ok` with **zero** `[CPE-1726] SKIPPED` lines, against a control in
+    /// the same job — `[CPE-1692] SKIPPED sftp opendir…` — proving the absence means "did not skip"
+    /// rather than "notices do not reach this log".
+    ///
+    /// So `supported_here` is **`true`, not `cfg!(unix)`**. Under `cfg!(unix)` a Windows runner that
+    /// later lost the capability would turn leg 1 into a *silent skip* instead of a red — precisely the
+    /// CPE-1717 failure this family exists to stop, and a real regression risk given the capability is
+    /// demonstrably present today. It costs a contributor nothing: `staging_is_strict()` follows `$CI`,
+    /// so an unusual local box still gets the loud skip. Leg 2 runs everywhere regardless, via
+    /// `make_dangling_link`'s privilege-free junction fallback.
     #[test]
     fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
         let (base, root) = spawn_webdav_server_returning_root();
@@ -1167,7 +1200,7 @@ mod tests {
         let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
         #[cfg(unix)]
         let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
-        if cpe_server::fsutil::require_staged("live_file_symlink", cfg!(unix), staged) {
+        if cpe_server::fsutil::require_staged("live_file_symlink", true, staged) {
             provider.write("/live-src.txt", b"source bytes").expect("seed the MOVE source");
             let r = provider.rename("/live-src.txt", "/slot.txt");
             assert_eq!(
@@ -1186,10 +1219,13 @@ mod tests {
             assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "MOVE reported {r:?}");
         } else {
             cpe_server::skip_notice!(
-                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-webdav's MOVE test: this machine cannot \
-                 create a file symlink at {} (Windows without Developer Mode or elevation; a junction \
-                 is directory-only and a hard link is not a symlink — measured on CPE-1716). The \
-                 DANGLING leg below runs on this runner and covers the write-through property.",
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-webdav's MOVE test: could not create a \
+                 file symlink at {}. Rust's `symlink_file` passes ALLOW_UNPRIVILEGED_CREATE and \
+                 normally succeeds unelevated on Windows too, so this is an unusual environment rather \
+                 than the ordinary Windows case — under CI this is a hard red, not this notice. What \
+                 is NOT covered on this run is leg 1's assertions specifically: the live victim's \
+                 bytes and the slot's final contents. The DANGLING leg below still runs and still \
+                 covers the write-through property.",
                 slot.display()
             );
             let _ = std::fs::remove_file(&slot);
@@ -1229,6 +1265,98 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// CPE-1726 blocker from PR #902's round-2 review: the `DELETE` classifier fix was **completely
+    /// unpinned** — the reviewer reverted `symlink_metadata` back to `real.is_dir()` and all 23 tests
+    /// still passed, so a future edit putting the link-following classifier back would have red nothing.
+    ///
+    /// The property is: **`DELETE` never recurses through a link.** `is_dir()` follows the final
+    /// component, so a symlink to a directory answered "directory" and was handed to `remove_dir_all`.
+    ///
+    /// # Why the assertion is on the SLOT and not only on the victim
+    /// Asserting only "the target directory survived" would have been another test that cannot fail:
+    /// pre-fix the target survived anyway, because Rust's own `remove_dir_all` refuses a symlink at the
+    /// top level rather than recursing into it. That is the `MOVE` situation again — the rig was saved
+    /// by the standard library, not by its own logic — and "saved by someone else's guard" is not a
+    /// guard. So the victim assertion below is the invariant (it must hold on every platform, always),
+    /// and the **slot** assertion is what actually distinguishes the two classifiers.
+    ///
+    /// # The slot's fate inverts across platforms, and both directions are pinned
+    /// - **Unix.** Pre-fix: `remove_dir_all(link)` → `ENOTDIR`, so the request failed and the link
+    ///   stayed. Post-fix: `remove_file(link)` unlinks the link itself, which is what every real WebDAV
+    ///   server does. So "the slot is gone" reds pre-fix.
+    /// - **Windows.** Pre-fix: `remove_dir_all` on a directory reparse point removes the reparse point
+    ///   (the post-CVE-2022-21658 behaviour), so the link went away. Post-fix: `remove_file` →
+    ///   `DeleteFile` refuses a directory reparse point, so the request **fails safe** and the link
+    ///   stays. So "the slot is still a link" reds pre-fix.
+    ///
+    /// Failing safe rather than unlinking is a worse answer than Unix's but a safe one, and it is not
+    /// worth platform-specific rig code to equalise — so this asserts what each platform actually does
+    /// rather than asserting a status code neither agrees on (per the round-2 review's warning: do not
+    /// assert 204 on Windows).
+    #[test]
+    fn cpe_1726_delete_never_recurses_through_a_link_to_a_directory() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        // The victim: a real directory with a real file in it, inside the served root.
+        let victim_dir = root.join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("inside.txt"), b"victim bytes").unwrap();
+
+        let slot = root.join("dirlink");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_dir(&victim_dir, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim_dir, &slot).is_ok();
+        // `supported_here = true` for the same reason as the rename test's live leg: this capability is
+        // demonstrably present on every runner in the matrix, so a failure to stage means the runner
+        // changed and must be red under CI rather than a notice in a green log (CPE-1717).
+        if !cpe_server::fsutil::require_staged("live_dir_symlink", true, staged) {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the DELETE-through-a-link test: could not create a directory \
+                 symlink at {}. Rust's `symlink_dir` passes ALLOW_UNPRIVILEGED_CREATE and normally \
+                 succeeds unelevated on Windows too, so this is an unusual environment — under CI this \
+                 is a hard red, not this notice. NOTHING in this test is covered on this run: the \
+                 `symlink_metadata`-not-`is_dir` classifier in the rig's DELETE handler is unverified.",
+                slot.display()
+            );
+            return;
+        }
+
+        let r = provider.delete("/dirlink");
+
+        // The invariant, on every platform: whatever DELETE did, it did not go *through* the link.
+        assert!(
+            victim_dir.join("inside.txt").is_file(),
+            "the link's TARGET directory must still hold its file: pre-fix `real.is_dir()` followed the \
+             link and handed `remove_dir_all` a path into whatever it pointed at (DELETE reported {r:?})"
+        );
+        assert_eq!(
+            std::fs::read(victim_dir.join("inside.txt")).unwrap(),
+            b"victim bytes",
+            "and its bytes must be untouched (DELETE reported {r:?})"
+        );
+
+        // The discriminator: what happened to the slot itself.
+        let slot_now = std::fs::symlink_metadata(&slot);
+        #[cfg(unix)]
+        assert!(
+            slot_now.is_err(),
+            "on Unix the link itself must be UNLINKED — `symlink_metadata` classifies it as not-a-dir \
+             so it goes to `remove_file`, which is what a real WebDAV share does. Pre-fix it went to \
+             `remove_dir_all`, which refuses a symlink with ENOTDIR and left the link sitting there \
+             (DELETE reported {r:?})"
+        );
+        #[cfg(windows)]
+        assert!(
+            slot_now.is_ok_and(|m| m.file_type().is_symlink()),
+            "on Windows the link must still BE a link: `remove_file` cannot delete a directory reparse \
+             point, so the request fails safe. Pre-fix `remove_dir_all` deleted the reparse point \
+             instead, which is why the slot's fate is what distinguishes the two classifiers here \
+             (DELETE reported {r:?})"
+        );
     }
 
     /// CPE-1726, the defect this crate had and its two siblings did not (they get `DELE`/`RMD` and
