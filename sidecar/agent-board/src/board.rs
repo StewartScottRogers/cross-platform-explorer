@@ -402,10 +402,22 @@ pub fn read_sprints(root: &Path) -> Vec<Sprint> {
 /// The rename guards need two probes ([`Path::try_exists`] for occupancy, `symlink_metadata` for a
 /// dangling link) because `try_exists` follows links and so answers `Ok(false)` — genuinely, correctly —
 /// for a dangling one. A *write* slot needs only [`fs::symlink_metadata`], which never follows the final
-/// component and therefore answers the whole three-state question on its own: `Ok` means the name is
-/// taken (by a link or by a real entry), `Err(NotFound)` means it is provably free, and any other `Err`
-/// means we could not tell and must not guess. `try_exists` is not used here at all — it cannot see the
-/// case that motivated the ticket.
+/// component and therefore answers the whole three-state question **about that final component** on its
+/// own: `Ok` means the name is taken (by a link or by a real entry), `Err(NotFound)` means it is provably
+/// free, and any other `Err` means we could not tell and must not guess. `try_exists` is not used here at
+/// all — it cannot see the case that motivated the ticket.
+///
+/// **"Final component" is load-bearing, and the CPE-1719 UAT measured the difference.** Replace the
+/// *column directory* with a junction into the user's own folder and `move_card` returns `Ok`, having
+/// written a ticket inside that folder: `symlink_metadata` said `NotFound` because it only ever looked at
+/// the leaf. That is arguably what a user who redirects a column is asking for — but it is the same
+/// outcome ("a file at a path the user never named") that the dangling-link arm below refuses, reached one
+/// component earlier, and this guard does not address it.
+///
+/// **There is also a TOCTOU window**, and it cannot be closed here: `std` has no `O_NOFOLLOW` write, so
+/// between this stat and the `fs::write` a link can be planted and will be followed. Measured by the UAT
+/// — `write_slot_refusal` returned `None`, a symlink was planted, and the victim was overwritten. Stated
+/// rather than left for "one stat" to be read as complete.
 pub fn write_slot_refusal(target: &Path) -> Option<String> {
     classify_write_slot(&fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
 }
@@ -430,8 +442,10 @@ pub fn classify_write_slot(stat: &std::io::Result<bool>, target: &Path) -> Optio
         )),
         // The stat succeeded and it is not a link, so a real entry holds the name. Overwriting it would
         // silently destroy whatever ticket file is already there.
+        // Says "something", not "a file": a *directory* also lands here, and CPE-1687's lesson is that a
+        // refusal naming the wrong kind of thing sends the user looking for something that is not there.
         Ok(false) => Some(format!(
-            "a file already exists at \"{}\" — nothing was changed rather than overwrite it",
+            "something already exists at \"{}\" — nothing was changed rather than overwrite it",
             target.display()
         )),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -479,11 +493,21 @@ pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, Strin
     // `Done/YYYY/…`) moved to top-level Done: there `from == to == "Done"` but the paths differ, so
     // gating on `from != to` would leave the nested original in place and duplicate the ticket.
     //
-    // `remove_file` on a link removes the LINK, not its target — so where the source card is a link the
-    // user made, their file survives untouched with stale content while the ticket lives on at `dest`.
-    // That is data left orphaned, not data destroyed, and it is the only remaining destructive primitive
-    // in this crate (CPE-1719's enumeration: `fs::write` here, `fs::remove_file` here, and nothing else
-    // outside `#[cfg(test)]`). Recorded rather than refused: a move must remove its source.
+    // `remove_file` on a link removes the LINK, not its target — so where **the source card itself** is a
+    // link the user made, their file survives untouched with stale content while the ticket lives on at
+    // `dest`. Data left orphaned, not destroyed. Recorded rather than refused: a move must remove its
+    // source. This is the only remaining destructive primitive in this crate (CPE-1719's enumeration:
+    // `fs::write` above, `fs::remove_file` here, nothing else outside `#[cfg(test)]`).
+    //
+    // **That reassurance is scoped to the leaf, and the CPE-1719 UAT measured where it stops.** Reach a
+    // card through a junctioned *directory* — `Done/2025` pointing into the user's archive — and this
+    // deletes their **real file**, not a link. It is still a move rather than data loss (the content has
+    // already landed at `dest` above, and the write is ordered before the remove precisely so that holds
+    // even if this fails), but do not read "orphaned, not destroyed" as covering the directory case.
+    //
+    // `let _ =` swallows the error deliberately — the ticket has already arrived at `dest`, so failing the
+    // whole move here would be worse. The cost is that an offline or read-only far end silently leaves a
+    // duplicate. Pre-existing, and worth its own ticket rather than a silent change of contract.
     if src != dest {
         let _ = fs::remove_file(&src);
     }
@@ -974,5 +998,55 @@ mod tests {
         assert_eq!(move_card(root, "CPE-9996", "Doing").unwrap(), "Doing");
         let md = fs::read_to_string(root.join("Ticketing/Tickets/Doing/CPE-9996_x.md")).unwrap();
         assert!(md.contains("status: In Progress"), "the in-place rewrite must still happen");
+    }
+
+    /// **The half of the exemption that shipped undocumented-by-test (CPE-1719 round 2, Foreman).**
+    ///
+    /// `a_no_op_move_still_rewrites_the_status_in_place` above uses an *ordinary file*, so it pins that
+    /// the exemption exists — but not the claim the exemption's comment actually makes, which is about a
+    /// **symlinked** ticket. The round-2 reviewer measured the gap: reversing the exemption's documented
+    /// symlink behaviour left the whole suite green at 27/27. An unread claim sitting on an untested
+    /// path is the exact shape this ticket family keeps filing tickets about, so it is pinned here.
+    ///
+    /// What it holds: a card the user has symlinked in from elsewhere must still be re-droppable on its
+    /// own column. Refusing here would be *worse*, not safer — it would make a symlinked ticket
+    /// permanently unmovable, and the write goes to the file the content was just read from, so nothing
+    /// unrelated is reachable. Note the consequence, deliberately accepted: the far end may be anywhere
+    /// on disk, and the `status:` line there is rewritten. That is the user having filed that file on
+    /// the board.
+    #[cfg(windows)]
+    #[test]
+    fn a_symlinked_ticket_can_still_be_re_dropped_on_its_own_column() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // The real ticket lives outside Ticketing/ entirely; the board sees only a link to it.
+        let far = tmp.path().join("elsewhere");
+        fs::create_dir_all(&far).unwrap();
+        let real = far.join("CPE-9995_x.md");
+        fs::write(&real, "---\nid: CPE-9995\nstatus: Open\n---\n\nbody\n").unwrap();
+
+        let slot = root.join("Ticketing/Tickets/Doing/CPE-9995_x.md");
+        fs::create_dir_all(slot.parent().unwrap()).unwrap();
+        if std::os::windows::fs::symlink_file(&real, &slot).is_err() {
+            // No privilege and no junction equivalent for a *file*; assert nothing rather than pass
+            // vacuously. CPE-1717: a skip notice would not be visible under CI anyway.
+            return;
+        }
+        assert!(fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(), "staging must produce a link");
+
+        assert_eq!(
+            move_card(root, "CPE-9995", "Doing").unwrap(),
+            "Doing",
+            "a symlinked ticket must stay re-droppable on its own column — refusing would make it unmovable"
+        );
+        assert!(
+            fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+            "and the link itself must survive the rewrite"
+        );
+        assert!(
+            fs::read_to_string(&real).unwrap().contains("status: In Progress"),
+            "the rewrite lands on the far end — accepted, and the reason the exemption exists"
+        );
     }
 }
