@@ -3,11 +3,11 @@ id: CPE-1727
 title: Restore delete for a GetObject-holding credential, add the start-after belt, and fix list's bare 403
 type: bug
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-14
-closed:
+closed: 2026-08-14
 ---
 
 All four found by the PR #900 (CPE-1723) UAT, which passed the PR and then went past its brief.
