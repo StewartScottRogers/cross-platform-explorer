@@ -564,17 +564,81 @@ mod tests {
         let _ = req.as_reader().read_to_end(&mut body);
         let real = root.join(url.trim_start_matches('/'));
 
-        /// Drop `.` and empty components so two spellings of the same place compare equal.
+        /// Resolve `.` and `..` lexically so two spellings of the same place compare equal.
         ///
-        /// Deliberately **lexical and `..`-preserving**: it exists so the MOVE handler can ask *"does
-        /// this destination resolve to the served root?"* without enumerating `/`, `//`, `/.`, `/./`,
-        /// `/.//`, `//./`, `/./.` … — a denylist that has been incomplete three rounds running. It is
-        /// **not** a containment check: `..` is left in place precisely so this cannot be mistaken for
-        /// one. Escaping the root is CPE-1730.
+        /// It exists so the MOVE handler can ask *"does this destination resolve to the served
+        /// root?"* without enumerating `/`, `//`, `/.`, `/./`, `/.//`, `//./`, `/./.` … — a denylist
+        /// that was incomplete three rounds running.
+        ///
+        /// **`..` is popped, and that changed in round 4.** Round 4 first *preserved* `..`, reasoning
+        /// that popping it would turn this into a containment check and containment is CPE-1730's
+        /// scope. The UAT showed the reasoning had skipped a case: `/nonexistent/..` escapes nothing
+        /// and needs no knowledge of the server, but lands **exactly on the served root** — so it was
+        /// a destination that resolved to the root, in a guard whose entire subject is destinations
+        /// that resolve to the root, answered `201 Created`. Same for `/sub/..`, `/./sub/../.`, and
+        /// every other spelling of the shape.
+        ///
+        /// So `..` pops a preceding ordinary component. What it does **not** do is claim containment:
+        /// a `..` with nothing to pop is *kept*, so `/../x` normalises to a path still carrying `..`,
+        /// compares unequal to the root, and is allowed through to `fs::rename` — which is the
+        /// documented CPE-1730 escape, unchanged by this. **Lexical `..` resolution is not sound in
+        /// the presence of symlinks** (`a/link/..` need not be `a`); it is used here only to answer
+        /// an equality question about one specific path, never to decide that something is inside the
+        /// root.
         fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
-            p.components()
-                .filter(|c| !matches!(c, std::path::Component::CurDir))
-                .collect()
+            let mut out: Vec<std::path::Component> = Vec::new();
+            for c in p.components() {
+                match c {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        // Pop only an ordinary name. A `..` above a prefix/root — or above another
+                        // surviving `..` — is kept, so this never silently claims containment.
+                        if matches!(out.last(), Some(std::path::Component::Normal(_))) {
+                            out.pop();
+                        } else {
+                            out.push(c);
+                        }
+                    }
+                    _ => out.push(c),
+                }
+            }
+            out.iter().collect()
+        }
+
+        /// Does `dest` name the same place as `root`?
+        ///
+        /// Lexical normalisation alone is not enough on Windows, which the round-4 UAT measured: the
+        /// filesystem matches names **case-insensitively** and **strips trailing dots**, while
+        /// `PathBuf` equality compares `Component::Normal` byte-wise. So a `Destination` naming the
+        /// served root as `...\CPE-WEBDAV-47084` or `...\cpe-webdav-47084.` compared unequal and was
+        /// answered `201 Created` on a rename onto the root.
+        ///
+        /// `canonicalize` answers exactly that question and is the filesystem's own opinion rather
+        /// than a table of its rules — but it requires the path to **exist**, and a MOVE to a
+        /// not-yet-existing name is the ordinary case. So: canonicalize when both sides resolve, fall
+        /// back to the lexical comparison when they do not. The fallback is what handles the common
+        /// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
+        /// **The two halves overlap on Windows, and the guard-neutralisation probes say so plainly:**
+        ///
+        /// | probe | `..` rows | spelling rows |
+        /// |---|---|---|
+        /// | `canonicalize` removed | pass (lexical catches them) | **red** |
+        /// | `..` popping removed | pass (canonicalize catches them) | pass |
+        /// | both removed | **red** | **red** |
+        ///
+        /// So on this platform neither half is *individually* necessary for the `..` family — Windows
+        /// normalises `..` during path processing, so `root\nonexistent\..` opens as `root` and
+        /// `canonicalize` succeeds even though `nonexistent` does not exist. On a system that resolves
+        /// `..` against real directories, that call fails and the lexical pop is the only thing left;
+        /// **that is reasoning, not a measurement — I ran these probes on Windows only**, and CI's
+        /// 3-OS matrix is where the other half gets checked. Recorded rather than smoothed over,
+        /// because "each guard was shown to be load-bearing" would be the tidier sentence and not a
+        /// true one.
+        fn same_place(dest: &std::path::Path, root: &std::path::Path) -> bool {
+            if let (Ok(a), Ok(b)) = (dest.canonicalize(), root.canonicalize()) {
+                return a == b;
+            }
+            normalise_lexically(dest) == normalise_lexically(root)
         }
 
         match method.as_str() {
@@ -670,23 +734,38 @@ mod tests {
                 // the served root itself — a request naming no target still got a live path to rename
                 // onto, and `MOVE /` with no header was answered `201 Created`.
                 //
-                // **Round 2's fix closed one spelling of four, which the UAT measured.** It filtered for
-                // emptiness *before* trimming the leading slashes, so `//`, `///` and `//.` all survived
-                // the filter and then trimmed down to the same empty-or-dot path — `201 Created` again,
-                // the identical outcome. Order matters: **trim first, reject after**, and reject `.`
-                // as well as `""` since both resolve to the served root.
+                // Rounds 2 and 3 each closed a few spellings and left more; round 4 stopped enumerating
+                // and compares the **resolved** destination against the root (see the check below).
                 //
-                // The host is also checked now (RFC 4918 §9.9.4): a `Destination` naming a *different*
+                // The host is also checked (RFC 4918 §9.9.4): a `Destination` naming a *different*
                 // server was previously executed locally — measured landing a file at `root/stolen.txt`
-                // with a `201` — where the RFC says `502 Bad Gateway`. The comparison is skipped when
-                // either side is absent rather than guessed at, so a client that sends no `Host` is not
-                // refused for it.
+                // with a `201` — where the RFC says `502 Bad Gateway`.
+                //
+                // **`split_once`, not `rsplit_once` — that was a real bypass (round-4 UAT).** Splitting
+                // at the *last* `://` reads the authority out of the wrong place whenever the path
+                // contains `://` too, and the path is entirely attacker-chosen:
+                //
+                // ```text
+                // Destination: http://evil.example/p://127.0.0.1:PORT/stolen.txt
+                //   rsplit_once -> authority "127.0.0.1:PORT"  == Host -> local -> 201 Created
+                //   split_once  -> authority "evil.example"    != Host -> 502
+                // ```
+                //
+                // The first form moved the source file and created `stolen.txt` in the served root —
+                // verbatim the thing every row of the table test asserts cannot happen. It misfired in
+                // the other direction too, answering `502` for a legitimately local destination whose
+                // path merely contained `://`.
+                //
+                // This is the **same defect as the destination check it feeds**: a guard testing a proxy
+                // ("the text after the last `://`") rather than the property ("which host does this URL
+                // name"). The authority of an absolute URL is what follows the *first* `://` and runs to
+                // the first `/`; a `://` later in the string is path, by definition.
                 let parsed = req
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("Destination"))
                     .map(|h| h.value.as_str().to_string())
-                    .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.to_string()))
+                    .and_then(|u| u.split_once("://").map(|(_, rest)| rest.to_string()))
                     .and_then(|rest| {
                         rest.split_once('/').map(|(auth, p)| (auth.to_string(), p.to_string()))
                     });
@@ -738,7 +817,7 @@ mod tests {
                 // a not-yet-existing name is the ordinary case. Lexical normalisation is enough here
                 // because the rig's own resolver is lexical; genuine containment (`..` escaping the root)
                 // is CPE-1730's scope, and this is not a substitute for it.
-                if normalise_lexically(&dest_real) == normalise_lexically(root) {
+                if same_place(&dest_real, root) {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
                 }
@@ -1498,7 +1577,36 @@ mod tests {
             (Some("http://{host}/.//"), "400", "`/.//` — a CurDir component then an empty one"),
             (Some("http://{host}//./"), "400", "`//./` — leading empty component before the dot"),
             (Some("http://{host}/./."), "400", "`/./.` — two CurDir components, no trailing slash"),
+            // `..` that lands ON the root rather than escaping it. Round 4 first preserved `..` on the
+            // theory that popping it would stray into CPE-1730's containment scope; these need no
+            // knowledge of the server, escape nothing, and resolve to the served root.
+            (Some("http://{host}/nonexistent/.."), "400", "`..` popping a name that never existed"),
+            (Some("http://{host}/sub/.."), "400", "`..` popping a real subdirectory"),
+            (Some("http://{host}/./sub/../."), "400", "`..` and `.` mixed, still the root"),
             (Some("http://other.example//stolen.txt"), "502", "a Destination on ANOTHER host"),
+            // The authority is what follows the FIRST `://`. `rsplit_once` took the last one, so this
+            // row's real host (`evil.example`) was read as whatever the path's trailing `://` named —
+            // which the attacker chooses. Measured moving the source and creating `stolen.txt` in the
+            // served root under a `201`, against a test asserting exactly that cannot happen.
+            (
+                Some("http://evil.example/p://{host}/stolen.txt"),
+                "502",
+                "a Destination on ANOTHER host whose PATH also contains `://`",
+            ),
+            // The converse misfire: a legitimately local destination whose path contains `://` was
+            // answered 502. A guard that refuses valid requests is still a wrong guard.
+            //
+            // Asserted as **not-502** rather than as a status, because the status is genuinely
+            // platform-dependent and this row is not about the status. Windows forbids `:` in a
+            // filename, so the rename fails and the rig answers 404; on Linux the same request
+            // creates the file and answers 201. Pinning either number would red this row on the
+            // other half of CI's 3-OS matrix. What must hold everywhere is that the *host* check
+            // does not fire: this destination names the server it was sent to.
+            (
+                Some("http://{host}/p://evil.example/ok.txt"),
+                "not:502",
+                "a LOCAL Destination whose path contains `://` — must not be read as cross-host",
+            ),
         ];
 
         for (dest, want, why) in cases {
@@ -1516,12 +1624,15 @@ mod tests {
                 Some(d) => format!("Destination: {}\r\n", d.replace("{host}", &addr)),
                 None => String::new(),
             };
-            // The cross-host row moves a **file**, not `/`. Every row used to send `MOVE /`, which
+            // Rows about the *host* move a **file**, not `/`. Every row used to send `MOVE /`, which
             // 404s before the Destination is ever consulted — so `!stolen.txt.exists()` below could
             // not have fired for any input, and the comment above it described a request the test
-            // never sent. With a real source, a Destination that got executed locally would actually
-            // produce `stolen.txt`, so the assertion can fail. (PR #902 review.)
-            let source = if why.contains("ANOTHER host") { "/readme.txt" } else { "/" };
+            // never sent. With a real source, a Destination that got executed locally actually
+            // produces `stolen.txt`, so the assertion can fail. (PR #902 review.)
+            //
+            // The root-resolution rows keep `MOVE /`: their subject is the destination, and a `/`
+            // source is the shape the original bug was reported in.
+            let source = if *want == "400" { "/" } else { "/readme.txt" };
             let req = format!(
                 "MOVE {source} HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
                  Content-Length: 0\r\n\r\n"
@@ -1530,22 +1641,95 @@ mod tests {
             let mut resp = String::new();
             let _ = sock.read_to_string(&mut resp);
 
-            // Filesystem facts first: whatever the rig answered, the served tree is still there and
-            // nothing landed from the cross-host attempt.
-            assert!(
-                root.join("readme.txt").is_file() && root.join("sub").join("nested.txt").is_file(),
-                "[{why}] the served tree must be intact; the rig invented `root.join(\"\")` — the \
-                 served root itself — rather than refusing (response was {resp:?})"
-            );
+            // Filesystem facts first, and **`stolen.txt` before the tree check** — deliberately.
+            // Commit 3e516401 gave the cross-host row a file source so this assertion "can actually
+            // fail", and the round-4 UAT showed it still could not be the *first* failure: with the
+            // 502 removed, `readme.txt` moves away and the tree-intact assert trips first, reporting
+            // a message written for the root-resolution rows ("the rig invented `root.join(\"\")`")
+            // that misdescribes what happened. An assertion that only ever fires second, behind a
+            // wrong explanation, is not the evidence the commit claimed. Order fixed here.
             assert!(
                 !root.join("stolen.txt").exists(),
                 "[{why}] a Destination naming another host must never be executed against the local \
                  tree (response was {resp:?})"
             );
+            // Only the refusal rows assert the tree is untouched. The `201` row is a *legitimate*
+            // move and is supposed to relocate its source — asserting otherwise would demand the
+            // guard refuse a valid request, which is the failure mode that row exists to catch.
+            if !want.starts_with("not:") {
+                assert!(
+                    root.join("readme.txt").is_file()
+                        && root.join("sub").join("nested.txt").is_file(),
+                    "[{why}] the served tree must be intact; the rig renamed onto the served root \
+                     rather than refusing (response was {resp:?})"
+                );
+            }
+            match want.strip_prefix("not:") {
+                Some(forbidden) => assert!(
+                    !resp.contains(forbidden),
+                    "[{why}] must NOT answer {forbidden}. A destination naming the server it was \
+                     sent to is local, whatever its path happens to contain. Got {resp:?}"
+                ),
+                None => assert!(
+                    resp.contains(want),
+                    "[{why}] expected {want}; a destination that resolves to the served root is a \
+                     refusal, not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
+                ),
+            }
+        }
+    }
+
+    /// The served root spelled in a way **only the filesystem** knows is the same place.
+    ///
+    /// Windows matches names case-insensitively and strips trailing dots, so `...\CPE-WEBDAV-1` and
+    /// `...\cpe-webdav-1.` both name the served root — while `PathBuf` equality compares
+    /// `Component::Normal` byte-wise and calls them different. The round-4 UAT measured both being
+    /// answered `201 Created` on a rename onto the root, past a guard whose whole subject is renames
+    /// onto the root.
+    ///
+    /// This is why the check ends at `canonicalize` rather than at a longer set of lexical rules: the
+    /// filesystem's own answer beats any table of its conventions, and the table would be
+    /// per-platform. The lexical path remains the fallback for destinations that do not exist yet.
+    ///
+    /// **Windows-only, and deliberately so** — it pins behaviour that only differs there. The
+    /// equivalent on a case-sensitive filesystem is that these spellings are genuinely *different*
+    /// places, so there is nothing to catch. It needs the absolute root path, which a real client
+    /// would not have; an absolute `Destination` also replaces the base in `root.join`, which is
+    /// CPE-1730's territory rather than this ticket's.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1726_a_destination_the_filesystem_calls_the_root_is_refused_however_it_is_spelled() {
+        use std::io::{Read as _, Write as _};
+
+        for spell in ["upper-case", "trailing dot"] {
+            let (base, root) = spawn_webdav_server_returning_root();
+            let addr = base.trim_start_matches("http://").to_string();
+            let literal = root.to_string_lossy().to_string();
+            let dest = match spell {
+                "upper-case" => literal.to_uppercase(),
+                _ => format!("{literal}."),
+            };
+
+            let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+            sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+            let req = format!(
+                "MOVE / HTTP/1.1\r\nHost: {addr}\r\nDestination: http://{addr}/{dest}\r\n\
+                 Connection: close\r\nContent-Length: 0\r\n\r\n"
+            );
+            sock.write_all(req.as_bytes()).expect("send the MOVE");
+            let mut resp = String::new();
+            let _ = sock.read_to_string(&mut resp);
+
             assert!(
-                resp.contains(want),
-                "[{why}] expected {want}; a destination that resolves to the served root is a refusal, \
-                 not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
+                root.is_dir() && root.join("readme.txt").is_file(),
+                "[{spell}] the served root must survive a rename onto a different spelling of \
+                 itself (response was {resp:?})"
+            );
+            assert!(
+                resp.contains("400"),
+                "[{spell}] Windows resolves this spelling to the served root, so it is a rename \
+                 onto the root and must be refused — byte-wise path equality does not know that, \
+                 which is why the check consults the filesystem. Got {resp:?}"
             );
         }
     }
