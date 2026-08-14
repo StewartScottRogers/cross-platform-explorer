@@ -167,5 +167,36 @@ a hasty entry here.
 ### Evidence
 
 Guard neutralisation, each break made on its own and restored with `git checkout --` (never a copy — a
-restored backup's older timestamp leaves `cargo` believing the broken build is current). Real output is
-pasted in the PR body.
+restored backup's older timestamp leaves `cargo` believing the broken build is current). The fix was
+committed **before** any probe, so no probe could take uncommitted work with it. Real output is pasted in
+the PR body; the matrix:
+
+| Arm neutralised | Tests red | Tests still green |
+|---|---|---|
+| `Ok(true)` (link) → `None` | `a_live_alias_…`, `a_dangling_link_…`, `the_junction_fallback_…`, `write_slot_classification_…` | `an_ordinary_file_…` |
+| `Ok(false)` (occupied) → `None` | `an_ordinary_file_…`, `write_slot_classification_…` | both link tests |
+| `Err(_)` (unknown) → `None` | `write_slot_classification_…` only | everything else |
+
+The link arm reds four tests because four tests exercise **that one arm** — it is the arm covering both the
+live and the dangling hazard, plus its own pure case and the junction-fixture check. The three arms are
+separable and each is proved load-bearing by a set no other arm's break produces.
+
+The live-alias break reproduced the ticket's measurement exactly, `Symlink` staging on this machine:
+
+```
+assertion `left == right` failed: the user's unrelated file was overwritten through a Symlink at the destination slot
+  left: "---\nid: CPE-9999\ntitle: \"CPE-9999 title\"\ntype: feature\nstatus: In Progress\npriority: low\ntags: [ready]\n---\n\n## Summary\nbody\n"
+ right: "MY NOTES"
+```
+
+Restored, recompiled (`Compiling agent-board` printed — not a stale-binary green), `cargo test` 27/27 and
+`cargo clippy --all-targets -- -D warnings` clean.
+
+### Platform gating — nothing skips
+
+`make_dangling_link`'s junction leg needs no privilege, so `a_dangling_link_…` and
+`the_junction_fallback_…` run on **every** runner and account, and prove the link arm there. `alias_at`
+never skips either: it prefers a symlink and falls back to a hard link, which needs no privilege on NTFS
+and stages the same user-visible hazard (a name for a file the user never mentioned, truncated by
+`fs::write`) — caught by the occupied arm instead of the link arm. Nothing here depends on a skip notice
+being seen; under CI they are invisible anyway (CPE-1717).
