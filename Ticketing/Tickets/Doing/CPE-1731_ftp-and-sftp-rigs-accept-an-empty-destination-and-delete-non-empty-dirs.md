@@ -144,3 +144,30 @@ same naive join, so the two will likely touch the same lines and are worth doing
 - The **source** side of both renames is deliberately left unguarded (`RNFR /` + `RNTO /elsewhere` still
   moves the served root). Recorded at both sites with the reason: it needs CPE-1730's containment check,
   and `cpe-webdav` carries the identical asymmetry.
+
+**2026-08-14 — review + UAT round.**
+
+- **The sibling verb had the identical defect** (reviewer's find): `MKD` and `SSH_FXP_MKDIR` are
+  `mkdir(2)`, and both rigs used `create_dir_all`. Fixed with tests to the same standard. The
+  missing-parent row carries the real filesystem evidence and is guarded against vacuity by proving the
+  *same* path string is creatable once its parent exists.
+- **Making the double honest un-hid a client bug.** `upload_tree` opens with an unconditional
+  `mkdir(&base)?`, so uploading into an existing remote folder now fails — which a real OpenSSH server
+  has always done. Filed **CPE-1741**; deliberately left un-pinned here, since a regression test
+  asserting the current failure would pin the bug in place.
+- FTP's `STOR` keeps its `create_dir_all` — filed **CPE-1742**. The first draft of that site note gave a
+  reason (`upload_tree` needs it) that measurement falsified: removing the call leaves 13/13 green and
+  this crate has no `upload_tree` test. The invented reason is recorded next to the real one rather than
+  quietly swapped.
+- **SFTP's discriminator was weaker than FTP's** (independent UAT): `io_err`'s catch-all also yields
+  `Failure`, so a junction destination failing inside `fs::rename` reported the same
+  `"Failure: Failure"` a guard refusal did. The refusal now carries an `error_message` — a real
+  `SSH_FXP_STATUS` field — reachable from the guard and no other line, giving SFTP what `553` gave FTP
+  by construction.
+- The platform table said "Windows | Linux" while CI runs three OSes; restated as **Windows /
+  non-Windows** with the reason family 3 is unreachable on any POSIX host (the resolver's leading-slash
+  trim, not case folding — macOS is case-insensitive too), and the macOS boundary stated: no
+  neutralisation was run there.
+- The UAT independently confirmed the `..`-pop correction on real Linux (Docker `rust:1-slim`), and
+  recorded `bare_is_err_would_pass = true` for **all three** `..` rows — the trap caught in the first
+  draft was real.

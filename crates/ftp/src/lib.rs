@@ -578,7 +578,8 @@ mod tests {
                 // directory-creating semantics to model at all — a real daemon fails outright when the
                 // parent is missing — so fixing it is not "make the primitive match the verb" but
                 // "remove a capability the wire never had", which changes what a *client* must do
-                // before uploading and needs its own client-side change and tests. Filed as CPE-1741.
+                // before uploading and needs its own client-side change and tests. Filed as CPE-1742
+                // (and it interacts with CPE-1741, `upload_tree`'s unconditional `mkdir(&base)`).
                 "MKD" => match std::fs::create_dir(real_path(&root, &arg)) {
                     Ok(()) => send(&mut ctrl, &format!("257 \"{arg}\" created\r\n")),
                     Err(_) => send(&mut ctrl, "550 Create failed\r\n"),
