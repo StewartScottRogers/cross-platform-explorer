@@ -701,10 +701,15 @@ mod tests {
                     .map(|h| h.value.as_str().to_string())
                     .unwrap_or_default();
                 // `Host` is mandatory in HTTP/1.1, so its absence is a malformed request — **refuse it
-                // rather than skipping the check**. Round 3 skipped when either side was absent, and the
-                // round-3 UAT measured the consequence: a client sending no `Host` had its cross-host
-                // `Destination` executed against the local tree with a `201`, which is the same
-                // "execute what you could not understand" shape the `502` was added to close.
+                // rather than treating "no authority anywhere" as "local"**.
+                //
+                // The check below skips an empty `dest_authority`, and rightly: an authority-less
+                // destination is not evidence of a *different* host, which is what a `502` asserts. But
+                // that leaves `Destination: http:///x` with no `Host` deciding nothing at all — and the
+                // path then resolves against the served root and executes. The test pins exactly that
+                // pair; with this guard removed it reports a moved file against a `201 Created`.
+                // Neither half alone reaches here (a cross-host destination is caught below, a relative
+                // one is rejected by the parser above), which is why the test needs both.
                 if host.is_empty() {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
@@ -1547,12 +1552,35 @@ mod tests {
 
     /// A client that sends **no `Host` header** must be refused, not accommodated.
     ///
-    /// Round 3 checked the cross-host rule as *"if both sides are present and they differ, 502"*, so
-    /// a client that simply omitted `Host` skipped the check entirely and had its cross-host
-    /// `Destination` executed against the local tree with a `201`. That is the same shape the 502 was
-    /// added to close: **executing a request you could not fully understand.** It is kept separate
-    /// from the table above because the table's request builder always sends a `Host`, and a row that
-    /// cannot express the input it names is worse than no row.
+    /// **The exact input matters, and it took two wrong drafts to find it.** Both were caught by
+    /// breaking the guard on its own, per the Evidence Rules, and both are recorded here because the
+    /// wrong ones are more instructive than the right one:
+    ///
+    /// 1. *No `Host`, cross-host `Destination`* (`http://other.example/stolen.txt`). Removing the
+    ///    guard returned **502**, not the execution the draft's doc claimed: `Host` empty and
+    ///    authority `other.example` still differ, so the cross-host check catches it regardless.
+    /// 2. *No `Host`, relative `Destination`* (`/stolen.txt`). Removing the guard returned **400** —
+    ///    the header parser requires `://` and rejects a relative URL long before this guard.
+    ///
+    /// Both drafts passed with the guard removed. They pinned a status code while their docs
+    /// described a move the code could not perform — a test named after a guard that passes without
+    /// it, which is the defect this sprint has now found at four separate sites.
+    ///
+    /// The input that actually reaches the guard needs **both** halves: no `Host` *and* an absolute
+    /// `Destination` whose authority is empty (`http:///stolen.txt`). That parses, so it survives (2);
+    /// its authority is empty, so the cross-host comparison skips it by its own `!is_empty()` guard —
+    /// correctly, since an authority-less destination is not evidence of a *different* host, which is
+    /// what a 502 asserts. Nothing else looks at it, and the path is resolved against the served root
+    /// and executed. With the guard removed this test reports `readme.txt was moved away` against
+    /// `201 Created`.
+    ///
+    /// Which is the point: with no `Host` and no destination authority, **nothing in the request
+    /// establishes that the client meant this server** — "local" is an assumption, not a reading. So
+    /// the same rule the 502 exists for applies: never execute what you could not fully understand.
+    /// `Host` is mandatory in HTTP/1.1 anyway, so refusing costs no legitimate client.
+    ///
+    /// Kept out of the table above because that table's request builder always sends a `Host`, and a
+    /// row that cannot express the input it names is worse than no row.
     #[test]
     fn cpe_1726_a_move_from_a_client_that_sends_no_host_header_is_refused_not_executed() {
         use std::io::{Read as _, Write as _};
@@ -1563,12 +1591,14 @@ mod tests {
         sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
         // HTTP/1.0 so that omitting Host is a well-formed request rather than a protocol error the
         // parser might reject for its own reasons — the refusal under test must be ours.
-        let req = "MOVE /readme.txt HTTP/1.0\r\nDestination: http://other.example/stolen.txt\r\n\
+        let req = "MOVE /readme.txt HTTP/1.0\r\nDestination: http:///stolen.txt\r\n\
                    Connection: close\r\nContent-Length: 0\r\n\r\n";
         sock.write_all(req.as_bytes()).expect("send the MOVE");
         let mut resp = String::new();
         let _ = sock.read_to_string(&mut resp);
 
+        // The filesystem first. These are the assertions that would have caught the original bug;
+        // the status assertion below only describes how it is reported.
         assert!(
             root.join("readme.txt").is_file(),
             "a MOVE from a client with no Host header must not be executed; readme.txt was moved \
@@ -1576,14 +1606,14 @@ mod tests {
         );
         assert!(
             !root.join("stolen.txt").exists(),
-            "a cross-host Destination must never land locally just because Host was absent and the \
-             comparison was therefore skipped (response was {resp:?})"
+            "an authority-less Destination must not be resolved against the served root when there \
+             is no Host to establish that the client meant this server (response was {resp:?})"
         );
         assert!(
             resp.contains("400"),
-            "expected 400: with no Host there is nothing to compare the Destination's authority \
-             against, so the request cannot be understood and must be refused rather than assumed \
-             local. Got {resp:?}"
+            "expected 400: with no Host there is nothing to establish the request's authority, so \
+             an authority-less Destination cannot be confirmed local and must be refused rather \
+             than assumed. Got {resp:?}"
         );
     }
 
