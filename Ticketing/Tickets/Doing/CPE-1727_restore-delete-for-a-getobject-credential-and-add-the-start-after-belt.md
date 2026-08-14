@@ -3,7 +3,7 @@ id: CPE-1727
 title: Restore delete for a GetObject-holding credential, add the start-after belt, and fix list's bare 403
 type: bug
 priority: Medium
-status: Backlog
+status: In Progress
 tags: ready
 estimate: M
 created: 2026-08-14

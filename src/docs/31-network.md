@@ -103,14 +103,25 @@ client, and none of this applies to it yet.
   first. An **empty** folder really is just one key (its marker), so that one is deleted normally.
   Related: because S3 answers "no content" to a delete whether or not the object was ever there, a
   successful delete means *"this key is gone now"* rather than *"something was removed"*.
-- **Deleting needs list permission as well as delete permission.** Because folders aren't real, the only
-  way to tell "one object" from "a folder with things inside it" is to list the prefix first — so a
-  delete asks the store to list before it removes anything. A key that grants `s3:DeleteObject` but not
-  `s3:ListBucket` (a common setup on self-hosted MinIO and Ceph) therefore can't delete, and the app says
-  so plainly: it names the listing request as the thing that was refused, tells you nothing was deleted,
-  and points at the missing permission. It will not fall back to deleting without looking — that's the
-  one path that could report a whole folder removed while everything in it is still there. Reading,
-  writing and getting the details of an object you can name work as normal without list permission.
+- **Deleting a file works without list permission; deleting a folder needs it.** Because folders aren't
+  real, the usual way to tell "one object" from "a folder with things inside it" is to list the prefix
+  first — so a delete asks the store to list before it removes anything. A key that grants
+  `s3:DeleteObject` but not `s3:ListBucket` (a common setup on self-hosted MinIO and Ceph) can't do that.
+  When the listing is refused the app asks a narrower question that needs only read permission: it checks
+  whether an object exists at exactly that key. A folder can never answer yes to that — a folder is just
+  the front of other keys, with nothing stored at its own name — so a real file is deleted normally and a
+  folder is still refused. If neither question can be answered, the delete is refused and the app says so
+  plainly: it names the listing request as the thing that failed, tells you nothing was deleted, and
+  points at the missing permission. It will not fall back to deleting without looking — that's the one
+  path that could report a whole folder removed while everything in it is still there. One oddity worth
+  knowing: a bucket may hold both an object named `photos` and other objects under `photos/`. Without
+  list permission the app deletes the object it can prove exists and leaves everything under the prefix
+  alone, so the "folder" is still there afterwards. Reading, writing and getting the details of an object
+  you can name work as normal without list permission.
+- **Browsing a folder always needs list permission.** Listing is the one operation no per-object
+  permission can substitute for, and it's the first thing you hit when you open a bucket. If it's
+  refused, the message names the operation, the folder you were opening, the prefix it asked the server
+  for, and `s3:ListBucket` as the permission to grant — plus whatever the server itself said.
 - **Uploads are a single request**, so an individual file larger than 5 GB isn't uploadable
   (multi-part upload isn't planned for the first version).
 - **Keys are taken literally in the middle, but the app currently tidies the ends.** A key is an opaque
