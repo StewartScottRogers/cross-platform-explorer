@@ -372,25 +372,53 @@ git rev-parse HEAD:crates      # 644762d648a8b1bd87bdb28a6554c1b1d745a53f
 
 — and a later commit that only edits the ticket, the PR body, or a doc outside that subtree **carries the
 verdict forward unchanged**, provably, without anyone re-reading anything. If the hash differs, the code
-differs and the review genuinely is stale. Name the subtree you hashed; `HEAD:` (the whole tree) defeats
-the purpose, because that is what the sha already tracks.
+differs and the review genuinely is stale.
 
-The same reviewer then caught **its own** waiter making a smaller version of the mistake:
+Name the subtree you hashed. `HEAD:` — the **root tree** — defeats the purpose, though not because "that
+is what the sha already tracks": the sha also moves on an amend, a message edit, or an empty commit, while
+the root tree does not. The real reason is that **tickets and docs live inside the root tree**, so it moves
+for exactly the edits you want to ignore.
+
+**Two limits, or the rule over-promises the way the things it guards against do.**
+
+- **It carries the code verdict, not a licence to skip reading.** A doc-only commit cannot break the build,
+  but it can *misrepresent the review* — PR #901's `a2a010e9` left `crates/` untouched and asserted a
+  verdict nobody had given, caught only because the reviewer read it anyway. Rule 4 closes **stale**
+  approvals; **invented** ones still need eyes. #901 produced one of each.
+- **CI re-runs regardless.** Every push restarts the whole matrix, whatever it touched. Writing up this
+  rule discarded a 40-minute Windows job that was 40 minutes from finishing. Batch doc commits with the
+  code, or accept the restart — but do not expect a green run to survive a typo fix.
+
+### The merge gate is a guard too, and it was wrong three times in one morning
 
 ```sh
-gh pr checks 901 | grep "Server crates" | grep -qv pending   # WRONG
+gh pr checks 901 | grep "Server crates" | grep -qv pending          # 1
+[ "$(gh pr checks 901 | grep -c 'Server crates.*pending')" -eq 0 ]  # 2
+c=$(gh pr checks 901) || exit 1                                     # 3
 ```
 
-`grep -qv pending` succeeds when **any** line is non-pending, not when **all** are — so a run with one
-green leg and two still queued reads as ready to merge. Use a count, not a match:
+| # | what it actually asks | wrong when |
+|---|---|---|
+| 1 | is **any** leg non-pending? | one green, two queued → **opens** |
+| 2 | are **no** legs pending? | `gh` prints nothing → **opens** |
+| 3 | did `gh` succeed? | `gh pr checks` exits non-zero *while pending* → **false alarm** |
+
+Each fixed its predecessor's blind spot and added its own; each tested a **proxy** for the question rather
+than the question. The version that survives all three asks the whole thing — the legs are **present**,
+none pending, none failed — and reads `gh`'s exit code as information about the *checks*, not about `gh`:
 
 ```sh
-[ "$(gh pr checks 901 | grep -c 'Server crates.*pending')" -eq 0 ]
+c=$(gh pr checks 901 2>/dev/null)
+[ -n "$c" ] \
+  && [ "$(grep -c 'Server crates' <<<"$c")" -eq 3 ] \
+  && [ "$(grep -c 'Server crates.*pending' <<<"$c")" -eq 0 ] \
+  && [ "$(grep -cE 'Server crates.*(fail|cancel)' <<<"$c")" -eq 0 ]
 ```
 
-And note the companion trap already recorded elsewhere: **`gh pr checks --watch` exits 0 when the branch
-moves under it**, so an exit-0 spanning a push is not a green signal. When you gate a merge on CI, name
-the **run id** you gated on — a previous run's green does not describe the new head.
+And the companion trap recorded elsewhere: **`gh pr checks --watch` exits 0 when the branch moves under
+it**, so an exit-0 spanning a push is not a green signal. When you gate a merge on CI, name the **run id**
+you gated on — a previous run's green does not describe the new head. Confirming the job's own
+`conclusion`, not just that its steps look finished, is the same distinction one level down.
 
 ---
 

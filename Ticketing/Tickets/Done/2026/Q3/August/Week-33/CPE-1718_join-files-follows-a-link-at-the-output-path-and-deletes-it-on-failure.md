@@ -3,11 +3,11 @@ id: CPE-1718
 title: join_files follows a symlink at the output path — writing through it on success, deleting it on failure
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-14
 ---
 
 Related: **CPE-1710** (the `fs::rename`-destructive slots and the `rename_slot_refusal` pairing) and
