@@ -82,25 +82,40 @@ sends you hunting for a clock or permissions problem that doesn't exist.
 
 ### Honest limits of object storage — how browsing *will* behave
 
-An object store is not a filesystem, and this is where that shows. **Everything in this list describes
-the object-store client that ships alongside the form** (see *Arriving in stages* above) — it is written
-in the future tense on purpose, because none of it is what your build does today if a saved S3 row
-reports an unsupported protocol.
+An object store is not a filesystem, and this is where that shows. **This list describes the
+object-store client that ships alongside the form** (see *Arriving in stages* above) — so if a saved S3
+row still reports an unsupported protocol when you click it, your build has the form but not yet the
+client, and none of this applies to it yet.
 
-- **There will be no rename.** S3 has no atomic rename or move operation. Rather than fake it with a
-  copy-then-delete that can leave you with two copies or none if it fails halfway, renaming an object
-  will be refused outright with an explanation.
+- **There is no rename.** S3 has no atomic rename or move operation. Rather than fake it with a
+  copy-then-delete that can leave you with two copies or none if it fails halfway, renaming an object is
+  refused outright with an explanation. A copy-then-delete would also be slow in proportion to the
+  file's size rather than instant, and would quietly change the object's storage class and metadata
+  along the way.
 - **Directories aren't real.** A bucket is a flat list of keys; what looks like a folder is just the
-  part of a key before a `/`. So "folders" will be a naming convention the app reconstructs as it lists,
-  an empty folder generally can't exist (nothing is there to name it), and creating one will only write
-  a marker object. Deleting a "folder" will mean deleting the objects under that prefix.
-- **Uploads will be a single request**, so an individual file larger than 5 GB won't be uploadable
+  part of a key before a `/`. So "folders" are a naming convention the app reconstructs as it lists, and
+  creating one writes a single zero-byte marker object so the empty folder has something to be. A folder
+  that nobody created explicitly exists only for as long as something is inside it.
+- **Deleting a folder that still has things in it is refused**, not performed. This is the same decision
+  as the rename, for the same reason: S3 can only delete one key per request, so emptying a folder means
+  a request per object with nothing holding them together. A run that failed halfway would leave part of
+  the folder deleted while reporting success — so the app declines and tells you to delete the contents
+  first. An **empty** folder really is just one key (its marker), so that one is deleted normally.
+  Related: because S3 answers "no content" to a delete whether or not the object was ever there, a
+  successful delete means *"this key is gone now"* rather than *"something was removed"*.
+- **Uploads are a single request**, so an individual file larger than 5 GB isn't uploadable
   (multi-part upload isn't planned for the first version).
-- **Keys will be taken literally, including the slashes.** A key is an opaque string to S3, so
-  `report.pdf`, `/report.pdf` and `//report.pdf` are three different objects and the app will treat them
+- **Keys are taken literally, including the slashes.** A key is an opaque string to S3, so
+  `report.pdf`, `/report.pdf` and `//report.pdf` are three different objects and the app treats them
   that way rather than tidying the leading slashes away. A bucket written by a tool that joined paths
   carelessly can genuinely hold all three; quietly collapsing them would mean reading — or overwriting —
   the wrong one.
+- **One shape of key can't be reached yet: a `.` or `..` between the slashes.** A key like
+  `photos/../logo.png` is, to S3, an ordinary object with nothing to do with `logo.png` — but the HTTP
+  library the app uses rewrites those segments away while building the request, so the app would end up
+  asking for a different object than the one it signed for. Rather than silently fetch the wrong object,
+  the app refuses such a key and says why. Keys like this are rare and usually accidental; support for
+  them needs a different HTTP library and is tracked separately.
 - **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
   the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
   is why **Access key** is the only authentication S3 offers.
@@ -222,9 +237,9 @@ there's no NFS client yet, so an NFS row can't be turned into a saved connection
 
 ## Limits
 
-S3 connections **will** carry their own limits — no rename, virtual directories, single-request uploads
-and access-key-only credentials — described in the S3 section above. Today you can save and edit an S3
-connection; the client that browses the bucket ships alongside it, so if a saved S3 row reports an
+S3 connections carry their own limits — no rename, a refusal to delete a folder that still has contents,
+virtual directories, single-request uploads, keys with `.`/`..` segments being unreachable, and
+access-key-only credentials — all described in the S3 section above. If a saved S3 row reports an
 unsupported protocol when you click it, your build has the form but not yet the provider.
 
 Reconnecting after an app restart may ask for your password/passphrase again even if you didn't

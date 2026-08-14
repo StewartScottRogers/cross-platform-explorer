@@ -47,6 +47,29 @@ answer, which is the failure mode this crew keeps writing tickets about.
 - `mkdir` → the conventional zero-byte object whose key ends in `/`. CPE-1683 must not then show it as a
   file; if that ordering slips, the two tickets need to agree on the marker's exact shape.
 
+## MEASURED 2026-08-13: the warning below is TRUE. Read this first, then the hypothesis it replaces
+
+The section immediately below was a hypothesis, explicitly labelled unverified by the reviewer who raised
+it. **It reproduces exactly.** Measured against the real send path with a raw request-line recorder,
+comparing what left the process against `RequestTarget::encoded_path` (the exact string that was signed):
+
+```text
+SIGNED "/test-bucket/a/../b//c%252Fd.txt", SENT "/test-bucket/b//c%252Fd.txt"
+```
+
+`ureq` 2.12.1 parses every URL through the `url` crate (WHATWG URL parsing), which resolves dot segments
+as part of parsing — before `ureq` has any say in it.
+
+**Only dot segments are affected, and that half is measured too, not assumed**: in the same request the
+empty path segment (`//`) and the percent-encoded `%` (`%252F`) both survived byte for byte. So two of the
+three shapes this section asked about are fine, and the third is not.
+
+**What was done about it:** `guard_path_survives_the_client` refuses a key carrying a `.`/`..` segment,
+naming the cause, **before any request is sent** — rather than normalising it (which would silently
+address a different object, the exact failure CPE-1689 exists to prevent) or sending it anyway (which
+produces `SignatureDoesNotMatch` with nothing to say why). The follow-up that would actually make such a
+key reachable is **CPE-1718**, filed from this measurement.
+
 ## Test this first: the HTTP client may rewrite the path you signed (added 2026-08-12)
 
 Flagged by the PR #868 reviewer, and **explicitly labelled by them as unverified** — they were offline and
@@ -237,3 +260,96 @@ what `ureq` actually does, restore) against your own code's real send path befor
 See `crates/s3/src/provider.rs`'s module doc, "The `ureq`-header-drop decision", for the full write-up and
 `guard_header_sendable` for a reusable pattern (kept even though the silent-drop case didn't reproduce, for
 a clearer, byte-naming refusal a beat sooner than `ureq`'s own message).
+
+## Work Log
+
+### 2026-08-13 — implemented, branch `cpe-1684-s3-object-ops`
+
+Everything lands in `crates/s3/src/provider.rs` (plus `src/docs/31-network.md`). No other crate changed:
+`crates/s3` is not yet a dependency of `crates/vfs` (CPE-1685 is still blocked), so this slice is
+self-contained.
+
+**What was built**
+
+- `stat` — `HEAD` on the object key. A 2xx reads `Content-Length`; a **200 with no usable
+  `Content-Length` is refused**, because `size: 0` would be an invented measurement rather than a read
+  one. A 404 falls back to a prefix probe so a virtual directory is reported as a directory instead of
+  as missing; a 403 is reported as a denial and is **never** softened into not-found. The bucket root
+  stats as a directory, but only after a real one-key listing proves the endpoint, addressing and
+  credentials — not by fabricating a success.
+- `read` — `GET`, fixed 64 KiB chunks (`cpe-ftp`'s convention, matched byte for byte), capped at 2 GiB
+  (`cpe-webdav`'s value, matched so the two HTTP backends refuse at the same point). **No end-to-end
+  deadline**, per the ticket and CPE-1706: this is the bulk-transfer call site `signed_get`'s
+  `Option<Duration>` was made for.
+- `write` — `PUT` of the whole body, no deadline (bulk), with a courtesy refusal past 5 GiB.
+- `mkdir` — a zero-byte `PUT` at exactly `provider_path_to_key_prefix(path)`, reusing CPE-1683's function
+  rather than re-deriving the shape.
+- `delete` — exactly one key; see the decision below.
+- `rename` — refused, with `supports_rename = false`. No request of any kind is issued.
+
+**Three findings worth more than the code**
+
+1. **The "test this first" hypothesis is true** — see the MEASURED section at the top of this ticket.
+   `ureq` rewrites `a/../b.txt` to `b.txt` between signing and sending. Guarded, and CPE-1718 filed.
+2. **AC2 as worded is not achievable.** *"`read` of a large object never holds the whole body in memory
+   at once"* cannot be true of any implementation of this trait method: `FileSystemProvider::read`
+   returns `Vec<u8>`, so by the time it returns, it must. What was delivered instead, and what the tests
+   actually assert: no unbounded single allocation (fixed stack buffer), and the cap fires **during** the
+   transfer rather than after it — proven against a server that never stops sending, where a
+   `read_to_end` would grow until the process died. `cpe-ftp` and `cpe-webdav` both already name a
+   streaming `read` at the trait level as the real fix and put it out of scope; this does the same, in
+   writing, on `FileSystemProvider::read`'s doc comment rather than silently.
+3. **`list_with_filtered_count`'s instruction to these ops, read literally, contradicts CPE-1689.** It
+   says not to accept "ANY provider-supplied name as a literal key" without an `is_safe_s3_leaf` check.
+   Applied to a whole path that would split `/a/../b.txt` and refuse the `..` — a key CPE-1689
+   established must be reachable. They reconcile once you notice `is_safe_s3_leaf` decides whether a leaf
+   may be *surfaced as a navigable child*, not whether a key is *addressable*; and a leaf that guard
+   refuses never becomes a `ProviderEntry`, so it cannot be "provider-supplied" here in the first place.
+   Written up on `provider_path_to_object_key`.
+
+**The `delete` decision, and what the user is told**
+
+S3 answers `204` to a `DELETE` of a key that never existed, so a 2xx proves *"this key is absent now"*
+and not *"an object was removed"*. `delete` claims only the former, in its doc and in the module doc. It
+deliberately does **not** add a `HEAD`-before-`DELETE`: that is racy by construction and still could not
+prove the `DELETE` removed anything — paying a round trip for a stronger-sounding claim that is not
+actually stronger.
+
+That is benign for one object and **dangerous for a directory**, which is where the ticket's warning
+bites: a plain single-key `DELETE` of `photos/2024` returns 204 while the entire subtree stays put. So
+one `ListObjectsV2` probe decides the case first:
+
+- real entries under the prefix → **refused**, for the same reason `rename` is. S3 has no atomic
+  multi-key delete; a per-key loop that failed halfway would leave part of the tree gone while reporting
+  success. Recursive delete is out of scope for v1 — the ticket offered this as one of its two options.
+- only the zero-byte marker (an empty directory) → that *is* one key, so it is deleted honestly.
+- nothing under the prefix → an ordinary object; delete the key.
+
+Two subtleties found while building it, both now pinned by tests: the marker key is a strict prefix of
+every key beneath it, so S3's lexicographic order **always** returns it first — `max-keys=1` would make a
+thousand-object directory look empty. And S3 may legally return fewer keys than asked for, so
+`IsTruncated` (not `max-keys`) is the load-bearing half of the check; the probe's doc records which is
+which rather than claiming both are essential.
+
+**Evidence — every new guard broken on its own** (full pasted output in the PR body). Ten probes, each
+restored with `git checkout --` and each re-run confirming `Compiling cpe-s3`: the path guard, the `read`
+chunk cap (two distinct reds, one of them the deadline harness catching what would otherwise hang CI),
+the bodiless-404 arm, the bodiless-403 arm, the `delete` directory refusal, the `IsTruncated` half of the
+probe on its own, the `mkdir` marker key shape, the `rename` refusal (replaced with a working
+copy-then-delete, which the request counter caught), the missing-`Content-Length` refusal, and the
+marker's contribution to `raw_entries`. One probe cost an uncommitted doc edit to `git checkout --` —
+exactly the trap the ground rules name — and it was re-applied and committed before continuing.
+
+`cargo test`: 164 passed. `cargo clippy --all-targets -- -D warnings`: clean. `crates/s3` has no feature
+modes in CI (`.github/workflows/ci.yml:427` runs exactly those two commands).
+
+**One test-rig correction worth recording.** The first version of the missing-`Content-Length` test used
+the `tiny_http` fixture and **passed while measuring nothing**: `tiny_http` always emits a
+`Content-Length` and silently drops a header it cannot parse as one (`response.rs:266-270`), so `stat`
+received `Content-Length: 0` and dutifully reported a zero-byte object. That response shape can only be
+produced over a raw socket, and now is.
+
+**Docs.** `src/docs/31-network.md` already anticipated this work in the future tense and made one promise
+the shipped code deliberately breaks — *"Deleting a 'folder' will mean deleting the objects under that
+prefix"*. Corrected to the refusal, moved to the present tense, and given the two new user-visible facts:
+the 204-proves-nothing semantics of a successful delete, and the unreachable `.`/`..` keys.
