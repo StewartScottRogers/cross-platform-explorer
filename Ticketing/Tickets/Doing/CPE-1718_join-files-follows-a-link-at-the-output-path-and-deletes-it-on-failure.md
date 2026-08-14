@@ -182,6 +182,7 @@ whose allow-list will be long, since `File::create` is legitimate at app-owned p
 `rename` is. Bundled, the cheap decisive one would wait on the expensive exploratory one.
 
 Final: `cargo test` 2144 default / 2192 `--features index`, clippy `-D warnings` clean in both modes.
+
 **Verdicts, with what each was given against** — because the first version of this line simply read
 "Reviewer APPROVE, UAT PASS", and the reviewer caught that it asserted a verdict on code it had not yet
 seen and a CI result that did not exist. In a ticket whose whole subject is not asserting things ahead of
@@ -195,4 +196,7 @@ their evidence, that was worth naming rather than letting pass.
   feature modes against that head rather than carrying the previous verdict forward.
 
 If the head moves again, this line needs re-earning rather than carrying forward.
-Verdicts: Reviewer **APPROVE**, UAT **PASS**.
+
+- **Reviewer APPROVE at `a2a010e9`** — code proven identical to `df28ef7e` by **tree hash**
+  (`crates: 644762d6…` on both), not by eye, so the verdict carried across on proof rather than assumption.
+  That distinction is the whole thread this paragraph exists for.
