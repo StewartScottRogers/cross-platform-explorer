@@ -1,5 +1,5 @@
 ---
-id: CPE-1718
+id: CPE-1721
 title: "ureq normalises dot segments out of a URL, so an S3 key containing `.`/`..` is unreachable"
 type: Bug
 status: Backlog

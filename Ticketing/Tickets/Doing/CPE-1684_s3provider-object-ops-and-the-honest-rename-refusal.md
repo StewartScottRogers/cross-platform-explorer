@@ -68,7 +68,7 @@ three shapes this section asked about are fine, and the third is not.
 naming the cause, **before any request is sent** — rather than normalising it (which would silently
 address a different object, the exact failure CPE-1689 exists to prevent) or sending it anyway (which
 produces `SignatureDoesNotMatch` with nothing to say why). The follow-up that would actually make such a
-key reachable is **CPE-1718**, filed from this measurement.
+key reachable is **CPE-1721**, filed from this measurement.
 
 ## Test this first: the HTTP client may rewrite the path you signed (added 2026-08-12)
 
@@ -290,7 +290,9 @@ self-contained.
 **Three findings worth more than the code**
 
 1. **The "test this first" hypothesis is true** — see the MEASURED section at the top of this ticket.
-   `ureq` rewrites `a/../b.txt` to `b.txt` between signing and sending. Guarded, and CPE-1718 filed.
+   `ureq` rewrites `a/../b.txt` to `b.txt` between signing and sending. Guarded, and CPE-1721 filed
+   (originally filed as CPE-1718; renumbered — that ID was already claimed on an unmerged branch by the
+   CPE-1710 worker's `join_files` follow-up).
 2. **AC2 as worded is not achievable.** *"`read` of a large object never holds the whole body in memory
    at once"* cannot be true of any implementation of this trait method: `FileSystemProvider::read`
    returns `Vec<u8>`, so by the time it returns, it must. What was delivered instead, and what the tests

@@ -453,7 +453,7 @@ fn is_url_dot_segment(segment: &str) -> bool {
 /// So the honest answer is the third one: refuse, and name the cause. The crate's "one construction, so the
 /// URL and the signature cannot disagree" guarantee ends at the crate boundary; this is where it ends, said
 /// out loud. Actually reaching such a key needs an HTTP client that does not normalise URLs, which is
-/// **CPE-1718**, filed from this measurement.
+/// **CPE-1721**, filed from this measurement.
 fn guard_path_survives_the_client(encoded_path: &str) -> Result<(), String> {
     if let Some(segment) = encoded_path.split('/').find(|s| is_url_dot_segment(s)) {
         return Err(format!(
@@ -464,7 +464,7 @@ fn guard_path_survives_the_client(encoded_path: &str) -> Result<(), String> {
              this crate signs it unnormalised on purpose. The request would therefore be signed for one \
              key and sent for another, and the server would answer SignatureDoesNotMatch with nothing in \
              the message to say why. Refusing here and naming the cause instead. Reaching a key with a \
-             dot segment needs an HTTP client that does not normalise URLs — see CPE-1718."
+             dot segment needs an HTTP client that does not normalise URLs — see CPE-1721."
         ));
     }
     Ok(())
@@ -3715,7 +3715,7 @@ mod tests {
             .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
         assert!(err.contains("dot segment"), "the error must name what it found: {err}");
         assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
-        assert!(err.contains("CPE-1718"), "the error must point at the follow-up that would fix it: {err}");
+        assert!(err.contains("CPE-1721"), "the error must point at the follow-up that would fix it: {err}");
         assert_eq!(
             seen.lock().unwrap().len(),
             0,
