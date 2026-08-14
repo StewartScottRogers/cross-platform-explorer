@@ -564,6 +564,154 @@ mod tests {
         let _ = req.as_reader().read_to_end(&mut body);
         let real = root.join(url.trim_start_matches('/'));
 
+        /// Resolve `.` and `..` lexically so two spellings of the same place compare equal.
+        ///
+        /// It exists so the MOVE handler can ask *"does this destination resolve to the served
+        /// root?"* without enumerating `/`, `//`, `/.`, `/./`, `/.//`, `//./`, `/./.` … — a denylist
+        /// that was incomplete three rounds running.
+        ///
+        /// **This function does not close the `/./` family, and an earlier version of this doc
+        /// claimed it did.** `Path::components()` already drops every non-leading `CurDir` before
+        /// anything here runs — probe: `Path::new(r"C:\tmp\rig\.\.").components()` yields
+        /// `[Prefix, RootDir, "tmp", "rig"]`, no `CurDir` at all. Deleting the `CurDir` arm below
+        /// leaves all six tests green; deleting the whole filter at the commit before `..` popping
+        /// was added left all 25 green. The arm is kept as a total match over `Component` rather
+        /// than as load-bearing code, and the `/./` rows do not even reach here now that
+        /// `canonicalize` short-circuits them. Recorded because crediting a function with work the
+        /// standard library had already done is the same over-attribution this PR keeps finding in
+        /// other people's comments. (PR #902 review.)
+        ///
+        /// **`..` is popped, and that changed in round 4.** Round 4 first *preserved* `..`, reasoning
+        /// that popping it would turn this into a containment check and containment is CPE-1730's
+        /// scope. The UAT showed the reasoning had skipped a case: `/nonexistent/..` escapes nothing
+        /// and needs no knowledge of the server, but lands **exactly on the served root** — so it was
+        /// a destination that resolved to the root, in a guard whose entire subject is destinations
+        /// that resolve to the root, answered `201 Created`. Same for `/sub/..`, `/./sub/../.`, and
+        /// every other spelling of the shape.
+        ///
+        /// So `..` pops a preceding ordinary component. What it does **not** do is claim containment:
+        /// a `..` with nothing to pop is *kept*, so `/../x` normalises to a path still carrying `..`,
+        /// compares unequal to the root, and is allowed through to `fs::rename` — which is the
+        /// documented CPE-1730 escape, unchanged by this.
+        ///
+        /// **Lexical `..` resolution is not sound in the presence of symlinks** (`a/link/..` need not
+        /// be `a`) — and the *direction* of that unsoundness is what bounds it. It errs **safe**:
+        ///
+        /// 1. If `canonicalize` succeeds on **both sides**, the filesystem decides and this function
+        ///    never runs.
+        /// 2. So the lexical path runs only when at least one side failed to canonicalize — and a
+        ///    path the OS cannot resolve has no true resolution to disagree with. In particular it
+        ///    cannot have a symlink as its *final* component, because that component does not exist.
+        /// 3. For everything that does reach here, popping only makes the path *shorter*, hence
+        ///    *more* likely to equal the root, hence more likely to **refuse**.
+        ///
+        /// There is no input for which popping makes a root-destination compare unequal. The unsound
+        /// direction refuses a legitimate move; it can never allow one onto the root.
+        ///
+        /// **Step 1 is stated over `canonicalize`'s result, not over "the destination exists", and
+        /// that distinction is load-bearing on Windows.** An earlier draft said "if the destination
+        /// exists" — which is Linux-shaped and false here. Measured:
+        ///
+        /// ```text
+        /// LINUX   canonicalize("nonexistent/..")      -> Err ENOENT
+        /// WINDOWS canonicalize("nonexistent\..")      -> Ok, equals_root = true
+        /// WINDOWS canonicalize("nonexistent\..\..\")  -> Ok, equals_root = false
+        /// ```
+        ///
+        /// Win32 strips `..` during path processing, before the open, so the short-circuit fires for
+        /// a path that does not exist as spelled. That makes the short-circuit set *larger* on
+        /// Windows, hence the residual set smaller — the bound tightens rather than breaking.
+        ///
+        /// And the wider set is **correct**, not merely tolerated, because `fs::rename` goes through
+        /// the same Win32 path processing — `MoveFileExW` performs the identical `..` stripping, so
+        /// `canonicalize`'s answer describes exactly the path the primitive will act on. Measured:
+        ///
+        /// ```text
+        /// rename -> "...\cpe-mv-35248\nonexistent/../landed.txt" = Ok(())
+        /// landed at root/landed.txt = true
+        /// ```
+        ///
+        /// That is the **mechanism** behind the probe table below: on Windows the guard and the
+        /// primitive agree by construction; on Linux `canonicalize` refuses and the lexical pop is
+        /// what agrees with `rename`'s own `ENOENT`. Each half is load-bearing on exactly one
+        /// platform for a reason, not by coincidence. (PR #902 review, which supplied both the
+        /// correction and the measurements.)
+        fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
+            let mut out: Vec<std::path::Component> = Vec::new();
+            for c in p.components() {
+                match c {
+                    std::path::Component::CurDir => {}
+                    std::path::Component::ParentDir => {
+                        // Pop only an ordinary name. A `..` above a prefix/root — or above another
+                        // surviving `..` — is kept, so this never silently claims containment.
+                        if matches!(out.last(), Some(std::path::Component::Normal(_))) {
+                            out.pop();
+                        } else {
+                            out.push(c);
+                        }
+                    }
+                    _ => out.push(c),
+                }
+            }
+            out.iter().collect()
+        }
+
+        /// Does `dest` name the same place as `root`?
+        ///
+        /// Lexical normalisation alone is not enough on Windows, which the round-4 UAT measured: the
+        /// filesystem matches names **case-insensitively** and **strips trailing dots**, while
+        /// `PathBuf` equality compares `Component::Normal` byte-wise. So a `Destination` naming the
+        /// served root as `...\CPE-WEBDAV-47084` or `...\cpe-webdav-47084.` compared unequal and was
+        /// answered `201 Created` on a rename onto the root.
+        ///
+        /// `canonicalize` answers exactly that question and is the filesystem's own opinion rather
+        /// than a table of its rules — but it requires the path to **exist**, and a MOVE to a
+        /// not-yet-existing name is the ordinary case. So: canonicalize when both sides resolve, fall
+        /// back to the lexical comparison when they do not. The fallback is what handles the common
+        /// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
+        ///
+        /// **"When they do not resolve" means any `Err`, not just "does not exist"** — `EACCES` on a
+        /// parent, `ELOOP`, `ENAMETOOLONG`, a Windows sharing violation. In those cases this silently
+        /// becomes the byte-wise comparison, with the case-insensitivity and trailing-dot blind spots
+        /// that motivated `canonicalize` in the first place. That degrade is **kept deliberately**
+        /// (PR #902 review): the tempting alternative — refuse if *either* comparison says
+        /// same-place — is wrong, because for `root/link/..` where `link` leaves the tree
+        /// `canonicalize` is right to say "different place, allow", and OR-ing the lexical answer
+        /// would refuse a legitimate move. The degrade is also narrow: every spelling that *needs*
+        /// `canonicalize` requires the client to know the absolute root path, which is CPE-1730's
+        /// territory rather than this guard's. What was missing was the bound, not a behaviour
+        /// change — an unbounded "falls back when they do not resolve" reads as "when the path does
+        /// not exist", and that is not what the code does.
+        /// **The two halves overlap on Windows, and the guard-neutralisation probes say so plainly:**
+        ///
+        /// **Each half is load-bearing on exactly one platform, and neither is redundant** — measured
+        /// on both, the second column by the round-5 UAT:
+        ///
+        /// | probe | Windows | Linux |
+        /// |---|---|---|
+        /// | `canonicalize` removed | **red** (spelling rows) | pass |
+        /// | `..` popping removed | pass | **red** (`..` rows) |
+        /// | both removed | **red** | **red** |
+        ///
+        /// Windows normalises `..` during path processing, so `root\nonexistent\..` opens as `root`
+        /// and `canonicalize` succeeds even though `nonexistent` does not exist — which is why the
+        /// lexical pop looks redundant there. Linux resolves `..` against real directories, so that
+        /// call fails and the pop is the only thing left. Conversely `canonicalize` is what catches
+        /// the case-insensitive and trailing-dot spellings, which only exist on Windows.
+        ///
+        /// This table was first written with the Linux column as *reasoning* and marked as such; the
+        /// UAT then built a toolchain inside WSL and measured it. One detail the reasoning had wrong:
+        /// with the pop removed, Linux answers the `..` rows **404, not 201** — the guard does not
+        /// fire and the request is stopped only by an errno. The test still goes red, and being saved
+        /// by an errno is not the same as being guarded, which is the distinction this whole file
+        /// keeps turning on.
+        fn same_place(dest: &std::path::Path, root: &std::path::Path) -> bool {
+            if let (Ok(a), Ok(b)) = (dest.canonicalize(), root.canonicalize()) {
+                return a == b;
+            }
+            normalise_lexically(dest) == normalise_lexically(root)
+        }
+
         match method.as_str() {
             "PROPFIND" => match std::fs::metadata(&real) {
                 Ok(meta) => {
@@ -604,6 +752,12 @@ mod tests {
                 if let Some(p) = real.parent() {
                     let _ = std::fs::create_dir_all(p);
                 }
+                // CPE-1726, the sibling primitive (CPE-1719's failure shape, checked here rather than
+                // only `rename`): `fs::write` **follows** a link at the final component and writes
+                // *through* it, so a PUT onto a symlink clobbers the link's target rather than the link.
+                // Left as-is for the same measured reason as MOVE below — this is `#[cfg(test)]`-only,
+                // and a real WebDAV share follows the link too — but recorded so the next sweep does not
+                // have to rediscover which of the two shapes this is.
                 let code = if std::fs::write(&real, &body).is_ok() { 201 } else { 500 };
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
@@ -612,6 +766,29 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
             "DELETE" => {
+                // CPE-1726 round 2 proposed replacing `real.is_dir()` here with a `symlink_metadata`
+                // classifier, on the theory that `is_dir()` follows the final component so a symlink to
+                // a directory would be handed to `remove_dir_all` and recursed *through*. **The UAT
+                // measured that theory and it is false**, so the change was reverted and this comment
+                // exists to stop the next person re-deriving it:
+                //
+                //   remove_dir_all(dir-symlink): Ok(())  target dir exists = true  contents survived
+                //   remove_dir_all(junction):    Ok(())  target dir exists = true  contents survived
+                //
+                // `std::fs::remove_dir_all`'s own documentation says it plainly and platform-
+                // independently: *"This function does not follow symbolic links and it will simply
+                // remove the symbolic link itself."* So `is_dir()` following the link is harmless here —
+                // it routes a link to a primitive that then declines to follow it, and the link is
+                // unlinked with its target intact. That is the correct answer and the code already gave
+                // it.
+                //
+                // The proposed "fix" was strictly worse: `symlink_metadata` reports a Windows directory
+                // symlink as `is_symlink = true, is_dir = false`, routing it to `remove_file`, which
+                // cannot unlink a directory reparse point on Windows — measured `404 Not Found` with the
+                // link still in place, where the current code returns `204` and removes it. No upside on
+                // any platform, a regression on one. `cpe_1726_delete_of_a_link_to_a_directory_...`
+                // below pins the behaviour that is actually correct, so the round-2 mistake cannot be
+                // reintroduced silently.
                 let r = if real.is_dir() {
                     std::fs::remove_dir_all(&real)
                 } else {
@@ -620,17 +797,163 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(if r.is_ok() { 204 } else { 404 }));
             }
             "MOVE" => {
-                // The Destination header is an absolute URL; map its path under `root`.
-                let dest_path = req
+                // The Destination header is an absolute URL (`scheme://authority/path`); map its path
+                // under `root`.
+                //
+                // CPE-1726: this used to end `.unwrap_or_default()`, so an **absent or malformed**
+                // `Destination` collapsed to the empty string and `root.join("")` made the destination
+                // the served root itself — a request naming no target still got a live path to rename
+                // onto, and `MOVE /` with no header was answered `201 Created`.
+                //
+                // Rounds 2 and 3 each closed a few spellings and left more; round 4 stopped enumerating
+                // and compares the **resolved** destination against the root (see the check below).
+                //
+                // The host is also checked (RFC 4918 §9.9.4): a `Destination` naming a *different*
+                // server was previously executed locally — measured landing a file at `root/stolen.txt`
+                // with a `201` — where the RFC says `502 Bad Gateway`.
+                //
+                // **`split_once`, not `rsplit_once` — that was a real bypass (round-4 UAT).** Splitting
+                // at the *last* `://` reads the authority out of the wrong place whenever the path
+                // contains `://` too, and the path is entirely attacker-chosen:
+                //
+                // ```text
+                // Destination: http://evil.example/p://127.0.0.1:PORT/stolen.txt
+                //   rsplit_once -> authority "127.0.0.1:PORT"  == Host -> local -> 201 Created
+                //   split_once  -> authority "evil.example"    != Host -> 502
+                // ```
+                //
+                // The first form moved the source file and created `stolen.txt` in the served root —
+                // verbatim the thing every row of the table test asserts cannot happen. It misfired in
+                // the other direction too, answering `502` for a legitimately local destination whose
+                // path merely contained `://`.
+                //
+                // This is the **same defect as the destination check it feeds**: a guard testing a proxy
+                // ("the text after the last `://`") rather than the property ("which host does this URL
+                // name"). The authority of an absolute URL is what follows the *first* `://` and runs to
+                // the first `/`; a `://` later in the string is path, by definition.
+                //
+                // **Known and accepted** (round-5 UAT): `Destination: http:///x` *with* a valid `Host`
+                // executes locally. The empty authority skips the 502 below by design — an absent
+                // authority is not evidence of a *different* host — and the no-`Host` guard does not
+                // apply because the `Host` is present and did establish which server the client meant.
+                // It is the one input that reaches `fs::rename` with no authority in the `Destination`
+                // at all, so it is named here rather than left to be re-found.
+                //
+                // Also measured and left alone, all failing *safe*: duplicate `Destination` headers
+                // take the **first** where a real server may take the last; and `user@host`, a
+                // trailing dot on the hostname, and `localhost` vs `127.0.0.1` all answer `502` —
+                // over-strict, never falsely local. **Case is the only equivalence the comparison
+                // admits**, and that is the right one — so every other difference errs towards 502
+                // and there is no false-local direction to exploit here. (The earlier wording, "no
+                // two distinct authority strings compare equal under `eq_ignore_ascii_case`", is
+                // literally false: `HOST` and `host` are distinct and do compare equal. That is the
+                // whole point of the call.)
+                let parsed = req
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("Destination"))
                     .map(|h| h.value.as_str().to_string())
-                    .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.split_once('/').map(|(_, p)| format!("/{p}")).unwrap_or_default()))
+                    .and_then(|u| u.split_once("://").map(|(_, rest)| rest.to_string()))
+                    .and_then(|rest| {
+                        rest.split_once('/').map(|(auth, p)| (auth.to_string(), p.to_string()))
+                    });
+                let Some((dest_authority, dest_path)) = parsed else {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                };
+                let host = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Host"))
+                    .map(|h| h.value.as_str().to_string())
                     .unwrap_or_default();
-                let dest_real = root.join(dest_path.trim_start_matches('/'));
-                // CPE-1710: WebDAV MOVE against this server's own sandbox root — the protocol's
-                // semantics (MOVE with Overwrite is defined to replace), not an app-side guard.
+                // `Host` is mandatory in HTTP/1.1, so its absence is a malformed request — **refuse it
+                // rather than treating "no authority anywhere" as "local"**.
+                //
+                // The check below skips an empty `dest_authority`, and rightly: an authority-less
+                // destination is not evidence of a *different* host, which is what a `502` asserts. But
+                // that leaves `Destination: http:///x` with no `Host` deciding nothing at all — and the
+                // path then resolves against the served root and executes. The test pins exactly that
+                // pair; with this guard removed it reports a moved file against a `201 Created`.
+                // Neither half alone reaches here (a cross-host destination is caught below, a relative
+                // one is rejected by the parser above), which is why the test needs both.
+                if host.is_empty() {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                }
+                if !dest_authority.is_empty() && !dest_authority.eq_ignore_ascii_case(&host) {
+                    let _ = req.respond(tiny_http::Response::empty(502));
+                    return;
+                }
+                let dest_rel = dest_path.trim_start_matches('/');
+                let dest_real = root.join(dest_rel);
+                // **Compare the RESOLVED destination against the root — do not enumerate spellings.**
+                //
+                // This check has now been wrong three times, each time by naming shapes instead of the
+                // property. Round 1 rejected nothing; round 2 rejected `""` before trimming, so `//` and
+                // `///` still resolved to the root; round 3 trimmed first and rejected `""` and `"."`,
+                // and the UAT found four more — `/./`, `/.//`, `//./`, `/./.` — because `/./` trims to
+                // `"./"`, which is neither literal. Round 3 also shipped a doc claiming its table was
+                // *"exhaustive over the shapes that resolve to the served root"*, which those four
+                // falsified on the very code that carried the claim.
+                //
+                // A denylist of literals can only ever close the members someone thought of. Asking
+                // whether the destination **resolves to the root** closes the family: every path built
+                // from `.` and `/` components normalises to the same place, and this compares that place.
+                //
+                // `canonicalize` is deliberately not used — it requires the path to exist, and a MOVE to
+                // a not-yet-existing name is the ordinary case. Lexical normalisation is enough here
+                // because the rig's own resolver is lexical; genuine containment (`..` escaping the root)
+                // is CPE-1730's scope, and this is not a substitute for it.
+                if same_place(&dest_real, root) {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                }
+                // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a
+                // category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not
+                // wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
+                //
+                // 1. This entire WebDAV server is `#[cfg(test)]`. `cpe-webdav` ships a *client*
+                //    ([`WebdavProvider`]) and no server, so this line is not compiled into the app. The
+                //    "remote client" supplying the Destination header is a test in this same file, over
+                //    loopback, against a per-test temp root this rig created and seeded itself. There is
+                //    no third party whose files sit at the destination — the premise the ticket weighed
+                //    ("the client is not the person whose files are there") is simply absent here, and
+                //    that absence is what decides it.
+                //    **Bounded precisely (PR #902 review):** "no user's files at the destination"
+                //    holds because no user drives this rig, NOT because the destination is confined —
+                //    `root.join(..)` here has no containment check, so a `..`-shaped path would
+                //    resolve outside the temp root. Nothing sends one today; CPE-1730 tracks closing
+                //    it. If that ever changes before CPE-1730 lands, this reason expires with it.
+                //
+                //    **Three shapes get out, not one** (round-5 UAT). Enumerated because naming only
+                //    `..` would imply the other two are handled:
+                //      a. a `..`-shaped destination — `MOVE /` to `/../x` moved the served root itself
+                //         out to the parent and answered `201`;
+                //      b. an **absolute** destination, since `Path::join` discards the base;
+                //      c. a destination **through a symlinked subdirectory**, which needs neither `..`
+                //         nor an absolute path — measured writing to `/tmp/…/inner/escaped.txt`.
+                //    (c) is not reachable over the wire because nothing in the rig lets a client
+                //    create the link, and (a)/(b) need a client that does not exist. That is why this
+                //    is CPE-1730's scope rather than a blocker here — but the *enumeration* has to be
+                //    right, or the next reader closes `..` and believes the job is done.
+                //
+                //    **`DELETE /` needs none of them.** MOVE now refuses to be renamed onto the root
+                //    while DELETE removes the root outright (`204`, measured). That is arguably
+                //    correct by the wire — WebDAV `DELETE` on a collection deletes the collection —
+                //    but the asymmetry is deliberate-looking and was not deliberate, so it is written
+                //    down here rather than left for round 6 to rediscover.
+                // 2. That premise is pinned rather than trusted:
+                //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red
+                //    the moment this line (or any sibling destructive primitive) moves above the
+                //    `#[cfg(test)]` marker, so promoting the rig to production forces the decision to be
+                //    re-taken rather than silently inherited.
+                // 3. A test double must model the wire, not defend against it. MOVE with the default
+                //    `Overwrite: T` is *defined* to replace the destination; hardening the rig would make
+                //    the client tests pass against a server unlike any Nextcloud the app will ever meet.
+                //
+                // What `fs::rename` does to a link at the destination is pinned, not assumed, by
+                // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
                 #[allow(clippy::disallowed_methods)]
                 let code = if std::fs::rename(&real, &dest_real).is_ok() { 201 } else { 404 };
                 let _ = req.respond(tiny_http::Response::empty(code));
@@ -644,6 +967,14 @@ mod tests {
     /// Spawn the in-process WebDAV server on an ephemeral port; returns its base URL. Seeds a temp root:
     /// `readme.txt` ("hello webdav") + `sub/nested.txt`.
     fn spawn_webdav_server() -> String {
+        spawn_webdav_server_returning_root().0
+    }
+
+    /// Like [`spawn_webdav_server`] but also hands back the server's on-disk root, so a test can stage a
+    /// condition *inside* the served tree (CPE-1726 needs a symlink sitting at a MOVE destination) rather
+    /// than only driving it through the wire. Same seeding, same uniqueness scheme — the root is simply
+    /// not thrown away.
+    fn spawn_webdav_server_returning_root() -> (String, PathBuf) {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
@@ -663,12 +994,13 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("readme.txt"), FILE_BODY).unwrap();
         std::fs::write(root.join("sub").join("nested.txt"), b"deep").unwrap();
+        let root_ret = root.clone();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 handle(req, &root);
             }
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), root_ret)
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1013,6 +1345,576 @@ mod tests {
         provider.rename("/readme.txt", "/renamed.txt").expect("MOVE");
         assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
         assert!(provider.read("/readme.txt").is_err(), "old path should be gone");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1726 — the unguarded `fs::rename` on a remote-supplied path, decided by measurement
+    // ---------------------------------------------------------------------------------------------
+
+    /// Every `std::fs` primitive that can destroy something, as the literal source text a sweep would
+    /// grep for. `fs::copy` and `File::create` are in the list even though this crate has neither: the
+    /// point of a guard is to catch the one that gets added later, and CPE-1719 was missed precisely
+    /// because the sweep looked for `rename` while the bug was a `write`.
+    const CPE_1726_DESTRUCTIVE_CALLS: &[&str] = &[
+        "std::fs::rename(",
+        "std::fs::write(",
+        "std::fs::copy(",
+        "std::fs::remove_file(",
+        "std::fs::remove_dir(",
+        "std::fs::remove_dir_all(",
+        "std::fs::File::create(",
+        "std::fs::OpenOptions",
+    ];
+
+    /// **Catches verbatim promotion of the current rig — not a general audit of the shipped half.**
+    /// (An earlier draft called this "the guard that carries CPE-1726's decision", which the UAT
+    /// showed is too strong: written in this file's own prevailing style — `use std::fs;` at the top,
+    /// then `fs::write(..)` — **seven** of the eight primitives slip past this scan, and clippy's
+    /// CPE-1710 ban catches only one of them, `rename`. See the scope section below.)
+    /// The `#[allow(clippy::disallowed_methods)]` on
+    /// `MOVE` argues that the unguarded rename is safe *because the whole server is a `#[cfg(test)]`
+    /// test double* — no shipped code, no third-party files at the destination. That is a measurement,
+    /// not a category, and this test is what keeps it a measurement: if the rig (or any single
+    /// destructive call in it) is ever promoted above the `#[cfg(test)]` marker, this goes red and the
+    /// decision has to be re-taken rather than inherited from a comment written when it was still true.
+    ///
+    /// A source scan rather than a type-level trick because the property *is* textual — "no destructive
+    /// `std::fs` call exists in the compiled-into-the-app half of this file" is exactly what a reviewer
+    /// or a future sweep would check by hand, and this makes CI check it on every commit instead.
+    /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
+    /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
+    /// fail on half the matrix is the failure this ticket family exists to stop.
+    ///
+    /// # What this scan does NOT catch, stated because an earlier draft overstated it
+    /// The needles are **fully `std::fs::`-qualified**, and that is load-bearing in one direction (it is
+    /// what keeps a wire op on the remote from being reported as a local write) and a gap in the other:
+    /// `use std::fs;` followed by `fs::write(..)` or `fs::remove_dir_all(..)` in the shipped half passes
+    /// this scan untouched — and unqualified `fs::` is this repo's prevailing style. Of the eight
+    /// needles only `fs::rename` has a second line of defence, CPE-1710's `clippy.toml` ban, which does
+    /// catch the unqualified spelling. So this is a **backstop against the specific regression CPE-1726
+    /// reasoned about** — the rig being promoted out of `#[cfg(test)]`, which moves these exact
+    /// fully-qualified lines — not a general audit of the shipped half, and it should not be cited as
+    /// one. Widening it to unqualified `fs::` is a fine follow-up; leaving the gap unstated is not.
+    #[test]
+    fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
+        let src = include_str!("lib.rs").replace('\r', "");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let rig_starts = src.find(marker).expect(
+            "[CPE-1726] this guard finds the test rig by its exact `#[cfg(test)] / mod tests {` header \
+             at column 0. It is missing, so the scan below has no boundary to test against and would \
+             pass vacuously. Fix the needle to match the new header — never delete the guard.",
+        );
+        let mut leaked = Vec::new();
+        for needle in CPE_1726_DESTRUCTIVE_CALLS {
+            let mut from = 0;
+            while let Some(hit) = src[from..].find(needle) {
+                let at = from + hit;
+                if at < rig_starts {
+                    leaked.push(format!("  line {}: {needle}", src[..at].matches('\n').count() + 1));
+                }
+                from = at + needle.len();
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "[CPE-1726] a destructive `std::fs` call now exists in the SHIPPED half of cpe-webdav:\n{}\n\n\
+             CPE-1726 left the `MOVE` rename unguarded on one measured premise: this crate ships a \
+             client and its WebDAV *server* is a `#[cfg(test)]` test double, so no user's files are \
+             ever at a destination it is handed. The call(s) above are outside that rig, so the premise \
+             no longer holds for them and the decision must be re-taken, not inherited:\n\
+             - renaming onto a slot a user or a remote named → `cpe_server::fsutil::rename_into_slot`;\n\
+             - editing a file that may be a link → `cpe_server::fsutil::replace_file_contents`;\n\
+             - claiming a new name → `cpe_server::fsutil::stage_exclusive`.\n\
+             Moving the line back inside the rig is also a fix. Deleting this assertion is not.",
+            leaked.join("\n")
+        );
+    }
+
+    /// CPE-1726 acceptance: what actually happens when a **symlink** sits at the destination of the
+    /// rig's `MOVE`. Both legs assert on the slot and on the victim's bytes and **never on the returned
+    /// `Result`** — every bug in this family (CPE-1710/1716/1719) returned `Ok` while destroying
+    /// something, so the return value is the one witness that has never been reliable.
+    ///
+    /// The property being pinned is the one that separates `rename` from `write`: **`fs::rename` does
+    /// not follow the final component**, so it replaces the link and leaves the link's target alone,
+    /// whereas the `PUT` handler's `fs::write` at the same slot would write *through* it and clobber the
+    /// target. That is the whole reason the two need different fixes, and it is asserted rather than
+    /// trusted.
+    ///
+    /// # Platform staging — and the CPE-1716 claim this deliberately does *not* repeat
+    /// An earlier draft of this comment said a live file symlink "cannot be staged on an unprivileged
+    /// Windows runner at all". **That is too broad, and `main` already carries the corrected form** (see
+    /// `src-tauri/src/lib.rs`, from PR #899's review) — writing the broad version here would have
+    /// regressed a correction back into the tree. What is true is narrower and mechanism-specific:
+    /// `std::os::windows::fs::symlink_file` passes `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` and
+    /// succeeds unelevated, while PowerShell's `New-Item -ItemType SymbolicLink` does **not** pass that
+    /// flag and fails with "Administrator privilege required". A check run through PowerShell therefore
+    /// says nothing about what Rust can stage. (A junction really is directory-only and a hard link
+    /// really is `is_symlink() == false`; neither substitutes for a live *file* link. That part stands —
+    /// it is the "so Windows cannot do this at all" conclusion that does not follow.)
+    ///
+    /// Measured on this ticket's own CI run (`31800562558`, job `94767293360`, windows-latest): all three
+    /// copies of this test recorded `ok` with **zero** `[CPE-1726] SKIPPED` lines, against a control in
+    /// the same job — `[CPE-1692] SKIPPED sftp opendir…` — proving the absence means "did not skip"
+    /// rather than "notices do not reach this log".
+    ///
+    /// So `supported_here` is **`true`, not `cfg!(unix)`**. Under `cfg!(unix)` a Windows runner that
+    /// later lost the capability would turn leg 1 into a *silent skip* instead of a red — precisely the
+    /// CPE-1717 failure this family exists to stop, and a real regression risk given the capability is
+    /// demonstrably present today. It costs a contributor nothing: `staging_is_strict()` follows `$CI`,
+    /// so an unusual local box still gets the loud skip. Leg 2 runs everywhere regardless, via
+    /// `make_dangling_link`'s privilege-free junction fallback.
+    #[test]
+    fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        // ── Leg 1: a LIVE link at the destination, pointing at a victim with known bytes.
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"victim bytes").unwrap();
+        let slot = root.join("slot.txt");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
+        if cpe_server::fsutil::require_staged("live_file_symlink", true, staged) {
+            provider.write("/live-src.txt", b"source bytes").expect("seed the MOVE source");
+            let r = provider.rename("/live-src.txt", "/slot.txt");
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"victim bytes",
+                "the link's TARGET must be untouched — `fs::rename` does not follow the final \
+                 component, so a write-through here would mean the rig had stopped using `rename` \
+                 (MOVE reported {r:?})"
+            );
+            assert!(
+                !std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+                "and the link itself must be GONE, replaced by the moved file: that is the silent \
+                 destruction CPE-1726 weighed and deliberately accepted for a `#[cfg(test)]` rig \
+                 (MOVE reported {r:?})"
+            );
+            assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "MOVE reported {r:?}");
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-webdav's MOVE test: could not create a \
+                 file symlink at {}. Rust's `symlink_file` passes ALLOW_UNPRIVILEGED_CREATE and \
+                 normally succeeds unelevated on Windows too, so this is an unusual environment rather \
+                 than the ordinary Windows case — under CI this is a hard red, not this notice. What \
+                 is NOT covered on this run is leg 1's assertions specifically: the live victim's \
+                 bytes and the slot's final contents. The DANGLING leg below still runs and still \
+                 covers the write-through property.",
+                slot.display()
+            );
+            let _ = std::fs::remove_file(&slot);
+        }
+
+        // ── Leg 2: a DANGLING link. Runs on every platform (junction fallback), and it is the leg that
+        // proves the write-through property without needing a live target: if the rig ever wrote
+        // *through* the link instead of replacing it, the link's non-existent target would spring into
+        // existence. It never may.
+        let dangling = root.join("dangling.txt");
+        if cpe_server::fsutil::make_dangling_link(&dangling) {
+            let never = root.join("dangling.txt-target-that-does-not-exist");
+            provider.write("/dangling-src.txt", b"dangling source").expect("seed the MOVE source");
+            let r = provider.rename("/dangling-src.txt", "/dangling.txt");
+            assert!(
+                !matches!(never.try_exists(), Ok(true)),
+                "the dangling link's target must NEVER be created: it existing means the rig wrote \
+                 THROUGH the link (the CPE-1719 shape) instead of replacing it (MOVE reported {r:?})"
+            );
+            // Outcome consistency, so a rig that reports success without moving anything is red rather
+            // than green. Not an assertion *on* the `Result` — it is an assertion on the slot, selected
+            // by what the rig claimed.
+            let link_now = std::fs::symlink_metadata(&dangling).map(|m| m.file_type().is_symlink());
+            if r.is_ok() {
+                assert_eq!(
+                    std::fs::read(&dangling).ok().as_deref(),
+                    Some(&b"dangling source"[..]),
+                    "MOVE reported success, so the slot must now hold the moved file's bytes; it holds \
+                     something else (is_symlink = {link_now:?})"
+                );
+            } else {
+                assert_eq!(
+                    link_now.ok(),
+                    Some(true),
+                    "MOVE reported failure ({r:?}), so it must have left the link alone — a failed \
+                     rename that still destroyed the destination is the worst of both outcomes"
+                );
+            }
+        }
+    }
+
+    /// **This test exists because round 2 of this PR shipped a wrong "fix" here, and it is the guard
+    /// that would have caught it.**
+    ///
+    /// Round 2 replaced `DELETE`'s `real.is_dir()` classifier with `symlink_metadata`, reasoning that
+    /// `is_dir()` follows the final component so a symlink to a directory would be handed to
+    /// `remove_dir_all` and recursed *through*. **The UAT measured the primitive and the premise is
+    /// false** — `remove_dir_all` does not follow a symlink at the top level, on any platform, and its
+    /// own docs say so — so the original code was already correct and the change was reverted.
+    ///
+    /// The change was not merely unnecessary, it was a **Windows regression**: `symlink_metadata`
+    /// reports a Windows directory symlink as `is_dir = false`, routing it to `remove_file`, which
+    /// cannot unlink a directory reparse point — `404` with the link still sitting there, where the
+    /// correct code returns `204` and removes it.
+    ///
+    /// So what is pinned here is the **behaviour that is right**, uniform across platforms:
+    ///
+    /// - the link's target directory and its contents survive (nothing recursed through the link), and
+    /// - the link itself is gone (a `DELETE` of a link removes the link — what a real share does).
+    ///
+    /// Reintroducing the round-2 classifier reds the second assertion on Windows. It would *not* red on
+    /// Unix, where `remove_file` unlinks a symlink regardless of target type and the change is a no-op —
+    /// stated rather than glossed, because a guard whose coverage is platform-partial should say so.
+    #[test]
+    fn cpe_1726_delete_of_a_link_to_a_directory_removes_the_link_and_spares_its_target() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        // The victim: a real directory with a real file in it, inside the served root.
+        let victim_dir = root.join("victim-dir");
+        std::fs::create_dir_all(&victim_dir).unwrap();
+        std::fs::write(victim_dir.join("inside.txt"), b"victim bytes").unwrap();
+
+        let slot = root.join("dirlink");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_dir(&victim_dir, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim_dir, &slot).is_ok();
+        // `supported_here = true` for the same reason as the rename test's live leg: this capability is
+        // demonstrably present on every runner in the matrix, so a failure to stage means the runner
+        // changed and must be red under CI rather than a notice in a green log (CPE-1717).
+        if !cpe_server::fsutil::require_staged("live_dir_symlink", true, staged) {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the DELETE-through-a-link test: could not create a directory \
+                 symlink at {}. Rust's `symlink_dir` passes ALLOW_UNPRIVILEGED_CREATE and normally \
+                 succeeds unelevated on Windows too, so this is an unusual environment — under CI this \
+                 is a hard red, not this notice. NOTHING in this test is covered on this run: the \
+                 behaviour this pins — DELETE of a link removes the LINK and spares its target — is unverified.",
+                slot.display()
+            );
+            return;
+        }
+
+        let r = provider.delete("/dirlink");
+
+        // The invariant, on every platform: whatever DELETE did, it did not go *through* the link.
+        assert!(
+            victim_dir.join("inside.txt").is_file(),
+            "the link's TARGET directory must still hold its file: pre-fix `real.is_dir()` followed the \
+             link and handed `remove_dir_all` a path into whatever it pointed at (DELETE reported {r:?})"
+        );
+        assert_eq!(
+            std::fs::read(victim_dir.join("inside.txt")).unwrap(),
+            b"victim bytes",
+            "and its bytes must be untouched (DELETE reported {r:?})"
+        );
+
+        // And the link itself must be gone — the same answer on every platform.
+        assert!(
+            std::fs::symlink_metadata(&slot).is_err(),
+            "the link itself must be REMOVED: a DELETE of a link removes the link, which is what a real \
+             WebDAV share does and what `is_dir()` + `remove_dir_all` correctly produces here. This is \
+             the assertion that reds if round 2's `symlink_metadata` classifier is reintroduced — on \
+             Windows it routes a directory symlink to `remove_file`, which cannot unlink a reparse \
+             point, leaving the link in place and answering 404 (DELETE reported {r:?})"
+        );
+    }
+
+    /// CPE-1726: the rig's `MOVE`
+    /// derived its destination with `.unwrap_or_default()`, so a request whose `Destination` header was
+    /// **absent or malformed** collapsed to the empty string and `root.join("")` handed `fs::rename` the
+    /// **server root itself** as a live destination.
+    ///
+    /// **This is not a WebDAV-only defect, and an earlier draft of this PR wrongly said it was.** The
+    /// claim was that FTP and SFTP are structurally immune because they take source and destination
+    /// from the same resolver in one message. The UAT falsified it by making both rigs express exactly
+    /// this shape — `RNFR /` followed by an `RNTO` carrying **no argument at all** is answered
+    /// `250 Renamed`, and `rename("/", "")` / `rename("/", ".")` both return `Ok(())` — because both
+    /// resolvers map empty and `/` to the served root just as this one did. **CPE-1731 tracks the FTP
+    /// and SFTP halves**; do not re-derive the immunity claim from this crate being the one that got
+    /// fixed first.
+    ///
+    /// Driven over the real wire with a raw request rather than through `WebdavProvider`, because the
+    /// provider always sets the header — the bug is only reachable by a client that does not, which is
+    /// exactly the "obeying a remote instruction" case CPE-1726 is about.
+    ///
+    /// **The request is `MOVE /`, and that choice is the evidence.** On any other path the invented
+    /// destination was *latent* rather than damaging: `fs::rename(some_file, root)` fails anyway,
+    /// because the seeded root is a non-empty directory, so the rig was saved by the OS rather than by
+    /// its own logic. `MOVE /` is the case where source and destination are both the served root, and
+    /// POSIX `rename` (and Windows) succeed on a same-file rename — so pre-fix a request that named
+    /// **no destination at all** got a `201 Created`. Being saved by an errno is not a guard, and a rig
+    /// that reports success for a request it could not understand cannot be trusted to model the wire.
+    /// Asserts on the tree still being there as well as on the refusal, never on the status alone.
+    ///
+    /// # Four spellings, not one — round 2 closed only the first, and the UAT caught it
+    /// Round 2's fix filtered the path for emptiness **before** trimming its leading slashes, so `//`,
+    /// `///` and `//.` all survived the filter and then trimmed down to the same empty-or-dot path.
+    /// Measured on that supposedly-fixed code: all three returned `201 Created` — *the identical
+    /// outcome* the fix was presented as closing. The table below is exhaustive over the shapes that
+    /// resolve to the served root, so "I fixed the one I thought of" cannot pass again.
+    ///
+    /// The last row is a different defect the same sweep missed: a `Destination` naming **another
+    /// host** was executed locally (measured landing a file at `root/stolen.txt` with a `201`), where
+    /// RFC 4918 §9.9.4 says `502 Bad Gateway`.
+    #[test]
+    fn cpe_1726_a_move_whose_destination_resolves_to_the_server_root_is_refused() {
+        use std::io::{Read as _, Write as _};
+
+        // (what the client sends as the Destination header, the status it must get back, why)
+        //
+        // These rows are **regression pins, not a specification**. Rounds 1–3 each shipped a table
+        // like this one and each was incomplete, because a table can only hold the spellings someone
+        // thought of. The property is enforced in `handle` by comparing the *resolved* destination
+        // against the root; what follows is the set of spellings that have actually been observed to
+        // slip past a previous round, kept so none of them can come back. Adding a row is cheap and
+        // welcome — but a new row is never the fix. Fixing the comparison is.
+        let cases: &[(Option<&str>, &str, &str)] = &[
+            (None, "400", "no Destination header at all — the round-2 case"),
+            (Some("http://{host}/"), "400", "a bare `/` path — trims to empty"),
+            (Some("http://{host}//"), "400", "two slashes — survived round 2's pre-trim filter"),
+            (Some("http://{host}///"), "400", "three slashes — same evasion"),
+            (Some("http://{host}//."), "400", "slashes then a dot — trims to `.`, still the root"),
+            // The four the round-3 UAT measured returning `201 Created` against the literal denylist
+            // (`""` and `"."`) that round 3 shipped under a doc claiming to be exhaustive. Each trims
+            // to something that is neither literal — `/./` trims to `./` — yet resolves to the root.
+            (Some("http://{host}/./"), "400", "`/./` — trims to `./`, neither denied literal"),
+            (Some("http://{host}/.//"), "400", "`/.//` — a CurDir component then an empty one"),
+            (Some("http://{host}//./"), "400", "`//./` — leading empty component before the dot"),
+            (Some("http://{host}/./."), "400", "`/./.` — two CurDir components, no trailing slash"),
+            // `..` that lands ON the root rather than escaping it. Round 4 first preserved `..` on the
+            // theory that popping it would stray into CPE-1730's containment scope; these need no
+            // knowledge of the server, escape nothing, and resolve to the served root.
+            (Some("http://{host}/nonexistent/.."), "400", "`..` popping a name that never existed"),
+            (Some("http://{host}/sub/.."), "400", "`..` popping a real subdirectory"),
+            (Some("http://{host}/./sub/../."), "400", "`..` and `.` mixed, still the root"),
+            (Some("http://other.example//stolen.txt"), "502", "a Destination on ANOTHER host"),
+            // The authority is what follows the FIRST `://`. `rsplit_once` took the last one, so this
+            // row's real host (`evil.example`) was read as whatever the path's trailing `://` named —
+            // which the attacker chooses. Measured moving the source and creating `stolen.txt` in the
+            // served root under a `201`, against a test asserting exactly that cannot happen.
+            (
+                Some("http://evil.example/p://{host}/stolen.txt"),
+                "502",
+                "a Destination on ANOTHER host whose PATH also contains `://`",
+            ),
+            // The converse misfire: a legitimately local destination whose path contains `://` was
+            // answered 502. A guard that refuses valid requests is still a wrong guard.
+            //
+            // **`404`, and the reason it is not asserted as "not 502" is worth keeping.** This row
+            // first read `not:502`, justified by a platform split: Windows forbids `:` in a filename
+            // so the rename fails, "on Linux the same request creates the file and answers 201", so
+            // no single status could be pinned. The reviewer measured that on real Linux and it is
+            // false — `p:` and `evil.example` are missing intermediate directories and `fs::rename`
+            // does not create parents, so it is `ENOENT` and the rig answers **404 on Linux and
+            // macOS too**. The platform split that justified the negative assertion did not exist.
+            //
+            // That matters beyond the tidiness: `not:502` passes on an **empty** response. Its only
+            // two assertions were `!stolen.txt.exists()` and `!resp.contains("502")`, and the
+            // tree-intact assert is skipped for `not:` rows — so a dead server, a reset connection
+            // or a read timeout satisfied all of it. A row asserting a negative about a string is
+            // satisfied by the absence of the string, which the absence of a *response* also
+            // provides. Pinning `404` requires the server to have actually answered.
+            (
+                Some("http://{host}/p://evil.example/ok.txt"),
+                "404",
+                "a LOCAL Destination whose path contains `://` — must not be read as cross-host",
+            ),
+        ];
+
+        for (dest, want, why) in cases {
+            let (base, root) = spawn_webdav_server_returning_root();
+            let addr = base.trim_start_matches("http://").to_string();
+            let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+            // The **read timeout** is what makes this un-hangable — `Connection: close` alone is not
+            // enough, and the UAT measured that removing the header still passes (at 10.01 s, i.e. on
+            // the timeout). tiny_http speaks HTTP/1.1 keep-alive, so `read_to_string` would otherwise
+            // wait for an EOF the server has no reason to send, and libtest has no per-test timeout —
+            // the test would become a hang rather than a red. Both are kept: the header makes the
+            // ordinary path fast, the timeout makes every path bounded.
+            sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+            let dest_header = match dest {
+                Some(d) => format!("Destination: {}\r\n", d.replace("{host}", &addr)),
+                None => String::new(),
+            };
+            // Rows about the *host* move a **file**, not `/`. Every row used to send `MOVE /`, and
+            // `!stolen.txt.exists()` below could not have fired for any of them — so the comment
+            // above it described a request the test never sent. With a real source, a Destination
+            // that got executed locally actually produces `stolen.txt`, so the assertion can fail.
+            //
+            // The **reason** matters and the first version of this comment got it wrong: it said
+            // `MOVE /` "404s before the Destination is ever consulted". Measured against the rig,
+            // that request answers `502` with the host guard present and `404` with it removed —
+            // and the 404 comes from `fs::rename(root, root/stolen.txt)` failing, which is *after*
+            // the Destination has been parsed, resolved and used. No path through `MOVE` 404s
+            // before reading the Destination. The conclusion held; the mechanism named for it did
+            // not, which is the exact substitution this file exists to stop. (PR #902 review.)
+            //
+            // The root-resolution rows keep `MOVE /`: their subject is the destination, and a `/`
+            // source is the shape the original bug was reported in.
+            //
+            // Selected on the row's **subject**, not on its expected status. The first version read
+            // `if *want == "400" { "/" } else { "/readme.txt" }`, which worked only because both
+            // non-400 rows happened to be host rows — a proxy standing in for a property, in the one
+            // file whose subject is that substitution. It would have silently picked the wrong source
+            // for the first root-resolution row that expected anything but 400. (PR #902 review.)
+            let about_the_host = why.contains("host");
+            let source = if about_the_host { "/readme.txt" } else { "/" };
+            let req = format!(
+                "MOVE {source} HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            sock.write_all(req.as_bytes()).expect("send the MOVE");
+            let mut resp = String::new();
+            let _ = sock.read_to_string(&mut resp);
+
+            // Filesystem facts first, and **`stolen.txt` before the tree check** — deliberately.
+            // Commit 3e516401 gave the cross-host row a file source so this assertion "can actually
+            // fail", and the round-4 UAT showed it still could not be the *first* failure: with the
+            // 502 removed, `readme.txt` moves away and the tree-intact assert trips first, reporting
+            // a message written for the root-resolution rows ("the rig invented `root.join(\"\")`")
+            // that misdescribes what happened. An assertion that only ever fires second, behind a
+            // wrong explanation, is not the evidence the commit claimed. Order fixed here.
+            assert!(
+                !root.join("stolen.txt").exists(),
+                "[{why}] a Destination naming another host must never be executed against the local \
+                 tree (response was {resp:?})"
+            );
+            // Every row here is refused one way or another, so the tree must survive all of them.
+            assert!(
+                root.join("readme.txt").is_file() && root.join("sub").join("nested.txt").is_file(),
+                "[{why}] the served tree must be intact; the rig renamed onto the served root \
+                 rather than refusing (response was {resp:?})"
+            );
+            assert!(
+                resp.contains(want),
+                "[{why}] expected {want}; a destination that resolves to the served root is a \
+                 refusal, not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
+            );
+        }
+    }
+
+    /// The served root spelled in a way **only the filesystem** knows is the same place.
+    ///
+    /// Windows matches names case-insensitively and strips trailing dots, so `...\CPE-WEBDAV-1` and
+    /// `...\cpe-webdav-1.` both name the served root — while `PathBuf` equality compares
+    /// `Component::Normal` byte-wise and calls them different. The round-4 UAT measured both being
+    /// answered `201 Created` on a rename onto the root, past a guard whose whole subject is renames
+    /// onto the root.
+    ///
+    /// This is why the check ends at `canonicalize` rather than at a longer set of lexical rules: the
+    /// filesystem's own answer beats any table of its conventions, and the table would be
+    /// per-platform. The lexical path remains the fallback for destinations that do not exist yet.
+    ///
+    /// **Windows-only, and deliberately so** — it pins behaviour that only differs there. The
+    /// equivalent on a case-sensitive filesystem is that these spellings are genuinely *different*
+    /// places, so there is nothing to catch. It needs the absolute root path, which a real client
+    /// would not have; an absolute `Destination` also replaces the base in `root.join`, which is
+    /// CPE-1730's territory rather than this ticket's.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1726_a_destination_the_filesystem_calls_the_root_is_refused_however_it_is_spelled() {
+        use std::io::{Read as _, Write as _};
+
+        for spell in ["upper-case", "trailing dot"] {
+            let (base, root) = spawn_webdav_server_returning_root();
+            let addr = base.trim_start_matches("http://").to_string();
+            let literal = root.to_string_lossy().to_string();
+            let dest = match spell {
+                "upper-case" => literal.to_uppercase(),
+                _ => format!("{literal}."),
+            };
+
+            let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+            sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+            let req = format!(
+                "MOVE / HTTP/1.1\r\nHost: {addr}\r\nDestination: http://{addr}/{dest}\r\n\
+                 Connection: close\r\nContent-Length: 0\r\n\r\n"
+            );
+            sock.write_all(req.as_bytes()).expect("send the MOVE");
+            let mut resp = String::new();
+            let _ = sock.read_to_string(&mut resp);
+
+            assert!(
+                root.is_dir() && root.join("readme.txt").is_file(),
+                "[{spell}] the served root must survive a rename onto a different spelling of \
+                 itself (response was {resp:?})"
+            );
+            assert!(
+                resp.contains("400"),
+                "[{spell}] Windows resolves this spelling to the served root, so it is a rename \
+                 onto the root and must be refused — byte-wise path equality does not know that, \
+                 which is why the check consults the filesystem. Got {resp:?}"
+            );
+        }
+    }
+
+    /// A client that sends **no `Host` header** must be refused, not accommodated.
+    ///
+    /// **The exact input matters, and it took two wrong drafts to find it.** Both were caught by
+    /// breaking the guard on its own, per the Evidence Rules, and both are recorded here because the
+    /// wrong ones are more instructive than the right one:
+    ///
+    /// 1. *No `Host`, cross-host `Destination`* (`http://other.example/stolen.txt`). Removing the
+    ///    guard returned **502**, not the execution the draft's doc claimed: `Host` empty and
+    ///    authority `other.example` still differ, so the cross-host check catches it regardless.
+    /// 2. *No `Host`, relative `Destination`* (`/stolen.txt`). Removing the guard returned **400** —
+    ///    the header parser requires `://` and rejects a relative URL long before this guard.
+    ///
+    /// Both drafts passed with the guard removed. They pinned a status code while their docs
+    /// described a move the code could not perform — a test named after a guard that passes without
+    /// it, which is the defect this sprint has now found at four separate sites.
+    ///
+    /// The input that actually reaches the guard needs **both** halves: no `Host` *and* an absolute
+    /// `Destination` whose authority is empty (`http:///stolen.txt`). That parses, so it survives (2);
+    /// its authority is empty, so the cross-host comparison skips it by its own `!is_empty()` guard —
+    /// correctly, since an authority-less destination is not evidence of a *different* host, which is
+    /// what a 502 asserts. Nothing else looks at it, and the path is resolved against the served root
+    /// and executed. With the guard removed this test reports `readme.txt was moved away` against
+    /// `201 Created`.
+    ///
+    /// Which is the point: with no `Host` and no destination authority, **nothing in the request
+    /// establishes that the client meant this server** — "local" is an assumption, not a reading. So
+    /// the same rule the 502 exists for applies: never execute what you could not fully understand.
+    /// `Host` is mandatory in HTTP/1.1 anyway, so refusing costs no legitimate client.
+    ///
+    /// Kept out of the table above because that table's request builder always sends a `Host`, and a
+    /// row that cannot express the input it names is worse than no row.
+    #[test]
+    fn cpe_1726_a_move_from_a_client_that_sends_no_host_header_is_refused_not_executed() {
+        use std::io::{Read as _, Write as _};
+
+        let (base, root) = spawn_webdav_server_returning_root();
+        let addr = base.trim_start_matches("http://").to_string();
+        let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+        sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+        // HTTP/1.0 so that omitting Host is a well-formed request rather than a protocol error the
+        // parser might reject for its own reasons — the refusal under test must be ours.
+        let req = "MOVE /readme.txt HTTP/1.0\r\nDestination: http:///stolen.txt\r\n\
+                   Connection: close\r\nContent-Length: 0\r\n\r\n";
+        sock.write_all(req.as_bytes()).expect("send the MOVE");
+        let mut resp = String::new();
+        let _ = sock.read_to_string(&mut resp);
+
+        // The filesystem first. These are the assertions that would have caught the original bug;
+        // the status assertion below only describes how it is reported.
+        assert!(
+            root.join("readme.txt").is_file(),
+            "a MOVE from a client with no Host header must not be executed; readme.txt was moved \
+             away (response was {resp:?})"
+        );
+        assert!(
+            !root.join("stolen.txt").exists(),
+            "an authority-less Destination must not be resolved against the served root when there \
+             is no Host to establish that the client meant this server (response was {resp:?})"
+        );
+        assert!(
+            resp.contains("400"),
+            "expected 400: with no Host there is nothing to establish the request's authority, so \
+             an authority-less Destination cannot be confirmed local and must be refused rather \
+             than assumed. Got {resp:?}"
+        );
     }
 
     #[test]

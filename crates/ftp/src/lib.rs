@@ -525,6 +525,12 @@ mod tests {
                         if let Some(p) = path.parent() {
                             let _ = std::fs::create_dir_all(p);
                         }
+                        // CPE-1726, the sibling primitive (CPE-1719's failure shape, checked here rather
+                        // than only `rename`): `fs::write` **follows** a link at the final component and
+                        // writes *through* it, so a STOR onto a symlink clobbers the link's target rather
+                        // than the link. Left as-is for the same measured reason as RNTO below — this is
+                        // `#[cfg(test)]`-only, and a real FTP daemon follows the link too — but recorded
+                        // so the next sweep does not have to rediscover which of the two shapes this is.
                         let _ = std::fs::write(&path, &buf);
                     }
                     send(&mut ctrl, "226 Transfer complete\r\n");
@@ -547,9 +553,34 @@ mod tests {
                 }
                 "RNTO" => match rename_from.take() {
                     Some(from) => {
-                        // CPE-1710: this is an FTP server implementing RNFR/RNTO against its own sandbox
-                        // root — the wire protocol's rename semantics, not an app-side destination guard.
-                        // A test rig; the client, not this crate, decides what may be replaced.
+                        // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of
+                        // a category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED —
+                        // do not wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
+                        //
+                        // 1. This entire FTP server is `#[cfg(test)]`. `cpe-ftp` ships a *client*
+                        //    ([`FtpProvider`]) and no server, so this line is not compiled into the app.
+                        //    The "remote client" supplying `arg` is a test in this same file, over
+                        //    loopback, against a per-test temp root this rig created and seeded itself.
+                        //    There is no third party whose files sit at the destination — the premise the
+                        //    ticket weighed ("the client is not the person whose files are there") is
+                        //    simply absent here, and that absence is what decides it.
+                        //    **Bounded precisely (PR #902 review):** "no user's files at the
+                        //    destination" holds because no user drives this rig, NOT because the
+                        //    destination is confined — `real_path` is a bare join with no containment
+                        //    check, so a `..`-shaped path would resolve outside the temp root. Nothing
+                        //    sends one today; CPE-1730 tracks closing it. If that ever changes before
+                        //    CPE-1730 lands, this reason expires with it.
+                        // 2. That premise is pinned rather than trusted:
+                        //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig`
+                        //    goes red the moment this line (or any sibling destructive primitive) moves
+                        //    above the `#[cfg(test)]` marker, so promoting the rig to production forces
+                        //    the decision to be re-taken rather than silently inherited.
+                        // 3. A test double must model the wire, not defend against it. A real FTP daemon's
+                        //    RNTO renames *onto* the destination; hardening the rig would make the client
+                        //    tests pass against a server unlike any the app will ever meet.
+                        //
+                        // What `fs::rename` does to a link at the destination is pinned, not assumed, by
+                        // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
                         #[allow(clippy::disallowed_methods)]
                         match std::fs::rename(real_path(&root, &from), real_path(&root, &arg)) {
                             Ok(()) => send(&mut ctrl, "250 Renamed\r\n"),
@@ -641,6 +672,203 @@ mod tests {
         assert!(provider.stat("/renamed.txt").is_err(), "file should be gone");
         provider.delete("/newdir").expect("delete dir");
         assert!(provider.stat("/newdir").is_err(), "dir should be gone");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1726 — the unguarded `fs::rename` on a remote-supplied path, decided by measurement
+    // ---------------------------------------------------------------------------------------------
+
+    /// Every `std::fs` primitive that can destroy something, as the literal source text a sweep would
+    /// grep for. `fs::copy` and `File::create` are in the list even though this crate has neither: the
+    /// point of a guard is to catch the one that gets added later, and CPE-1719 was missed precisely
+    /// because the sweep looked for `rename` while the bug was a `write`.
+    const CPE_1726_DESTRUCTIVE_CALLS: &[&str] = &[
+        "std::fs::rename(",
+        "std::fs::write(",
+        "std::fs::copy(",
+        "std::fs::remove_file(",
+        "std::fs::remove_dir(",
+        "std::fs::remove_dir_all(",
+        "std::fs::File::create(",
+        "std::fs::OpenOptions",
+    ];
+
+    /// **Catches verbatim promotion of the current rig — not a general audit of the shipped half.**
+    /// (An earlier draft called this "the guard that carries CPE-1726's decision", which the UAT
+    /// showed is too strong: written in this file's own prevailing style — `use std::fs;` at the top,
+    /// then `fs::write(..)` — **seven** of the eight primitives slip past this scan, and clippy's
+    /// CPE-1710 ban catches only one of them, `rename`. See the scope section below.)
+    /// The `#[allow(clippy::disallowed_methods)]` on
+    /// `RNTO` argues that the unguarded rename is safe *because the whole server is a `#[cfg(test)]`
+    /// test double* — no shipped code, no third-party files at the destination. That is a measurement,
+    /// not a category, and this test is what keeps it a measurement: if the rig (or any single
+    /// destructive call in it) is ever promoted above the `#[cfg(test)]` marker, this goes red and the
+    /// decision has to be re-taken rather than inherited from a comment written when it was still true.
+    ///
+    /// A source scan rather than a type-level trick because the property *is* textual — "no destructive
+    /// `std::fs` call exists in the compiled-into-the-app half of this file" is exactly what a reviewer
+    /// or a future sweep would check by hand, and this makes CI check it on every commit instead.
+    /// `\r` is stripped first: the working tree is CRLF on Windows and LF on the Linux/macOS runners,
+    /// and a needle containing `\n` would silently match nothing on one of them — a guard that cannot
+    /// fail on half the matrix is the failure this ticket family exists to stop.
+    ///
+    /// # What this scan does NOT catch, stated because an earlier draft overstated it
+    /// The needles are **fully `std::fs::`-qualified**, and that is load-bearing in one direction (it is
+    /// what keeps a wire op on the remote from being reported as a local write) and a gap in the other:
+    /// `use std::fs;` followed by `fs::write(..)` or `fs::remove_dir_all(..)` in the shipped half passes
+    /// this scan untouched — and unqualified `fs::` is this repo's prevailing style. Of the eight
+    /// needles only `fs::rename` has a second line of defence, CPE-1710's `clippy.toml` ban, which does
+    /// catch the unqualified spelling. So this is a **backstop against the specific regression CPE-1726
+    /// reasoned about** — the rig being promoted out of `#[cfg(test)]`, which moves these exact
+    /// fully-qualified lines — not a general audit of the shipped half, and it should not be cited as
+    /// one. Widening it to unqualified `fs::` is a fine follow-up; leaving the gap unstated is not.
+    #[test]
+    fn cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig() {
+        let src = include_str!("lib.rs").replace('\r', "");
+        let marker = "\n#[cfg(test)]\nmod tests {";
+        let rig_starts = src.find(marker).expect(
+            "[CPE-1726] this guard finds the test rig by its exact `#[cfg(test)] / mod tests {` header \
+             at column 0. It is missing, so the scan below has no boundary to test against and would \
+             pass vacuously. Fix the needle to match the new header — never delete the guard.",
+        );
+        let mut leaked = Vec::new();
+        for needle in CPE_1726_DESTRUCTIVE_CALLS {
+            let mut from = 0;
+            while let Some(hit) = src[from..].find(needle) {
+                let at = from + hit;
+                if at < rig_starts {
+                    leaked.push(format!("  line {}: {needle}", src[..at].matches('\n').count() + 1));
+                }
+                from = at + needle.len();
+            }
+        }
+        assert!(
+            leaked.is_empty(),
+            "[CPE-1726] a destructive `std::fs` call now exists in the SHIPPED half of cpe-ftp:\n{}\n\n\
+             CPE-1726 left the `RNTO` rename unguarded on one measured premise: this crate ships a \
+             client and its FTP *server* is a `#[cfg(test)]` test double, so no user's files are ever \
+             at a destination it is handed. The call(s) above are outside that rig, so the premise no \
+             longer holds for them and the decision must be re-taken, not inherited:\n\
+             - renaming onto a slot a user or a remote named → `cpe_server::fsutil::rename_into_slot`;\n\
+             - editing a file that may be a link → `cpe_server::fsutil::replace_file_contents`;\n\
+             - claiming a new name → `cpe_server::fsutil::stage_exclusive`.\n\
+             Moving the line back inside the rig is also a fix. Deleting this assertion is not.",
+            leaked.join("\n")
+        );
+    }
+
+    /// CPE-1726 acceptance: what actually happens when a **symlink** sits at the destination of the
+    /// rig's `RNTO`. Both legs assert on the slot and on the victim's bytes and **never on the returned
+    /// `Result`** — every bug in this family (CPE-1710/1716/1719) returned `Ok` while destroying
+    /// something, so the return value is the one witness that has never been reliable.
+    ///
+    /// The property being pinned is the one that separates `rename` from `write`: **`fs::rename` does
+    /// not follow the final component**, so it replaces the link and leaves the link's target alone,
+    /// whereas `fs::write` at the same slot would write *through* it and clobber the target. That is
+    /// the whole reason the two need different fixes, and it is asserted here rather than trusted.
+    ///
+    /// # Platform staging — and the CPE-1716 claim this deliberately does *not* repeat
+    /// An earlier draft of this comment said a live file symlink "cannot be staged on an unprivileged
+    /// Windows runner at all". **That is too broad, and `main` already carries the corrected form** (see
+    /// `src-tauri/src/lib.rs`, from PR #899's review) — writing the broad version here would have
+    /// regressed a correction back into the tree. What is true is narrower and mechanism-specific:
+    /// `std::os::windows::fs::symlink_file` passes `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` and
+    /// succeeds unelevated, while PowerShell's `New-Item -ItemType SymbolicLink` does **not** pass that
+    /// flag and fails with "Administrator privilege required". A check run through PowerShell therefore
+    /// says nothing about what Rust can stage. (A junction really is directory-only and a hard link
+    /// really is `is_symlink() == false`; neither substitutes for a live *file* link. That part stands —
+    /// it is the "so Windows cannot do this at all" conclusion that does not follow.)
+    ///
+    /// Measured on this ticket's own CI run (`31800562558`, job `94767293360`, windows-latest): all three
+    /// copies of this test recorded `ok` with **zero** `[CPE-1726] SKIPPED` lines, against a control in
+    /// the same job — `[CPE-1692] SKIPPED sftp opendir…` — proving the absence means "did not skip"
+    /// rather than "notices do not reach this log".
+    ///
+    /// So `supported_here` is **`true`, not `cfg!(unix)`**. Under `cfg!(unix)` a Windows runner that
+    /// later lost the capability would turn leg 1 into a *silent skip* instead of a red — precisely the
+    /// CPE-1717 failure this family exists to stop, and a real regression risk given the capability is
+    /// demonstrably present today. It costs a contributor nothing: `staging_is_strict()` follows `$CI`,
+    /// so an unusual local box still gets the loud skip. Leg 2 runs everywhere regardless, via
+    /// `make_dangling_link`'s privilege-free junction fallback.
+    #[test]
+    fn cpe_1726_rename_onto_a_link_never_writes_through_it() {
+        let (port, root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        // ── Leg 1: a LIVE link at the destination, pointing at a victim with known bytes.
+        let victim = root.join("victim.txt");
+        std::fs::write(&victim, b"victim bytes").unwrap();
+        let slot = root.join("slot.txt");
+        #[cfg(windows)]
+        let staged = std::os::windows::fs::symlink_file(&victim, &slot).is_ok();
+        #[cfg(unix)]
+        let staged = std::os::unix::fs::symlink(&victim, &slot).is_ok();
+        if cpe_server::fsutil::require_staged("live_file_symlink", true, staged) {
+            provider.write("/live-src.txt", b"source bytes").expect("seed the rename source");
+            let r = provider.rename("/live-src.txt", "/slot.txt");
+            assert_eq!(
+                std::fs::read(&victim).unwrap(),
+                b"victim bytes",
+                "the link's TARGET must be untouched — `fs::rename` does not follow the final \
+                 component, so a write-through here would mean the rig had stopped using `rename` \
+                 (rename reported {r:?})"
+            );
+            assert!(
+                !std::fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+                "and the link itself must be GONE, replaced by the moved file: that is the silent \
+                 destruction CPE-1726 weighed and deliberately accepted for a `#[cfg(test)]` rig \
+                 (rename reported {r:?})"
+            );
+            assert_eq!(std::fs::read(&slot).unwrap(), b"source bytes", "rename reported {r:?}");
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1726] SKIPPED the LIVE-link leg of cpe-ftp's RNTO test: could not create a file \
+                 symlink at {}. Rust's `symlink_file` passes ALLOW_UNPRIVILEGED_CREATE and normally \
+                 succeeds unelevated on Windows too, so this is an unusual environment rather than the \
+                 ordinary Windows case — under CI this is a hard red, not this notice. What is NOT \
+                 covered on this run is leg 1's assertions specifically: the live victim's bytes and \
+                 the slot's final contents. The DANGLING leg below still runs and still covers the \
+                 write-through property.",
+                slot.display()
+            );
+            let _ = std::fs::remove_file(&slot);
+        }
+
+        // ── Leg 2: a DANGLING link. Runs on every platform (junction fallback), and it is the leg that
+        // proves the write-through property without needing a live target: if the rig ever wrote
+        // *through* the link instead of replacing it, the link's non-existent target would spring into
+        // existence. It never may.
+        let dangling = root.join("dangling.txt");
+        if cpe_server::fsutil::make_dangling_link(&dangling) {
+            let never = root.join("dangling.txt-target-that-does-not-exist");
+            provider.write("/dangling-src.txt", b"dangling source").expect("seed the rename source");
+            let r = provider.rename("/dangling-src.txt", "/dangling.txt");
+            assert!(
+                !matches!(never.try_exists(), Ok(true)),
+                "the dangling link's target must NEVER be created: it existing means the rig wrote \
+                 THROUGH the link (the CPE-1719 shape) instead of replacing it (rename reported {r:?})"
+            );
+            // Outcome consistency, so a rig that reports success without moving anything is red rather
+            // than green. Not an assertion *on* the `Result` — it is an assertion on the slot, selected
+            // by what the rig claimed.
+            let link_now = std::fs::symlink_metadata(&dangling).map(|m| m.file_type().is_symlink());
+            if r.is_ok() {
+                assert_eq!(
+                    std::fs::read(&dangling).ok().as_deref(),
+                    Some(&b"dangling source"[..]),
+                    "RNTO reported success, so the slot must now hold the moved file's bytes; it holds \
+                     something else (is_symlink = {link_now:?})"
+                );
+            } else {
+                assert_eq!(
+                    link_now.ok(),
+                    Some(true),
+                    "RNTO reported failure ({r:?}), so it must have left the link alone — a failed \
+                     rename that still destroyed the destination is the worst of both outcomes"
+                );
+            }
+        }
     }
 
     #[test]
