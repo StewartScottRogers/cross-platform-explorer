@@ -595,19 +595,47 @@ mod tests {
         /// documented CPE-1730 escape, unchanged by this.
         ///
         /// **Lexical `..` resolution is not sound in the presence of symlinks** (`a/link/..` need not
-        /// be `a`) — and the *direction* of that unsoundness is what bounds it. It errs **safe**, by
-        /// proof rather than by hope (PR #902 review):
+        /// be `a`) — and the *direction* of that unsoundness is what bounds it. It errs **safe**:
         ///
-        /// 1. If the destination exists, `canonicalize` decides and this function never runs.
-        /// 2. A path that does not exist cannot have a symlink as its *final* component.
-        /// 3. So the only residual case is a `link/..` **mid-path** in a destination that does not
-        ///    exist — and popping makes the path *shorter*, hence *more* likely to equal the root,
-        ///    hence more likely to **refuse**.
+        /// 1. If `canonicalize` succeeds on **both sides**, the filesystem decides and this function
+        ///    never runs.
+        /// 2. So the lexical path runs only when at least one side failed to canonicalize — and a
+        ///    path the OS cannot resolve has no true resolution to disagree with. In particular it
+        ///    cannot have a symlink as its *final* component, because that component does not exist.
+        /// 3. For everything that does reach here, popping only makes the path *shorter*, hence
+        ///    *more* likely to equal the root, hence more likely to **refuse**.
         ///
         /// There is no input for which popping makes a root-destination compare unequal. The unsound
-        /// direction refuses a legitimate move; it can never allow one onto the root. The previous
-        /// wording flagged the unsoundness without saying which way it fell, which is a caveat rather
-        /// than a bound — nothing a reader could act on.
+        /// direction refuses a legitimate move; it can never allow one onto the root.
+        ///
+        /// **Step 1 is stated over `canonicalize`'s result, not over "the destination exists", and
+        /// that distinction is load-bearing on Windows.** An earlier draft said "if the destination
+        /// exists" — which is Linux-shaped and false here. Measured:
+        ///
+        /// ```text
+        /// LINUX   canonicalize("nonexistent/..")      -> Err ENOENT
+        /// WINDOWS canonicalize("nonexistent\..")      -> Ok, equals_root = true
+        /// WINDOWS canonicalize("nonexistent\..\..\")  -> Ok, equals_root = false
+        /// ```
+        ///
+        /// Win32 strips `..` during path processing, before the open, so the short-circuit fires for
+        /// a path that does not exist as spelled. That makes the short-circuit set *larger* on
+        /// Windows, hence the residual set smaller — the bound tightens rather than breaking.
+        ///
+        /// And the wider set is **correct**, not merely tolerated, because `fs::rename` goes through
+        /// the same Win32 path processing — `MoveFileExW` performs the identical `..` stripping, so
+        /// `canonicalize`'s answer describes exactly the path the primitive will act on. Measured:
+        ///
+        /// ```text
+        /// rename -> "...\cpe-mv-35248\nonexistent/../landed.txt" = Ok(())
+        /// landed at root/landed.txt = true
+        /// ```
+        ///
+        /// That is the **mechanism** behind the probe table below: on Windows the guard and the
+        /// primitive agree by construction; on Linux `canonicalize` refuses and the lexical pop is
+        /// what agrees with `rename`'s own `ENOENT`. Each half is load-bearing on exactly one
+        /// platform for a reason, not by coincidence. (PR #902 review, which supplied both the
+        /// correction and the measurements.)
         fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
             let mut out: Vec<std::path::Component> = Vec::new();
             for c in p.components() {
@@ -1725,7 +1753,14 @@ mod tests {
             //
             // The root-resolution rows keep `MOVE /`: their subject is the destination, and a `/`
             // source is the shape the original bug was reported in.
-            let source = if *want == "400" { "/" } else { "/readme.txt" };
+            //
+            // Selected on the row's **subject**, not on its expected status. The first version read
+            // `if *want == "400" { "/" } else { "/readme.txt" }`, which worked only because both
+            // non-400 rows happened to be host rows — a proxy standing in for a property, in the one
+            // file whose subject is that substitution. It would have silently picked the wrong source
+            // for the first root-resolution row that expected anything but 400. (PR #902 review.)
+            let about_the_host = why.contains("host");
+            let source = if about_the_host { "/readme.txt" } else { "/" };
             let req = format!(
                 "MOVE {source} HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
                  Content-Length: 0\r\n\r\n"
