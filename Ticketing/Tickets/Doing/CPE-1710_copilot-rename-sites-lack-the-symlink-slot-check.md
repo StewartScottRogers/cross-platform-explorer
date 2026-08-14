@@ -171,7 +171,7 @@ the UAT's report, and recommended the shape that actually works. Adopted:
 - **`fsutil::rename_into_slot(src, target, occupied)`** does the pairing *and* the rename, carrying the
   single `#[allow]` for the guarded path. All six user-named-slot sites call it.
 - **Every other `fs::rename` carries `#[allow(clippy::disallowed_methods)]` with a one-line reason at the
-  site** — 17 of them, each naming why that destination is not a user-named slot.
+  site** — **25** of them (24 excluding `rename_into_slot`'s own sanctioned one), each naming why that destination is not a user-named slot. The figure was stated as 17 until the round-4 UAT counted them: the same species of unverified number this whole design exists to eliminate.
 
 Why this and not a tighter scan:
 

@@ -14,12 +14,16 @@
 # it. CPE-1710's first round kept that reasoning in a PR description instead, and it was wrong twice — it
 # called `metadata_write`'s destination "a file we own" when it is the user's own media file.
 #
+# THIS CRATE DOES NOT RENAME TODAY. The file is here anyway, because the lint is only useful if it is
+# already in place when someone writes the first rename — this repo has no root `Cargo.toml`, so every
+# crate is an independent workspace root and a missing `clippy.toml` is a silent hole rather than an
+# error. Added by the CPE-1710 round-4 UAT, which measured exactly that: an unguarded `std::fs::rename`
+# appended to `crates/vfs` drew zero diagnostics from its own CI command.
+#
 # Known gaps, both real:
 #   - `disallowed_methods` resolves paths, not `dyn` dispatch. An `impl` body IS covered (which is why
 #     `crates/server`'s `provider.rs` needs its own `#[allow]`); what is NOT covered is a CALLER reaching
-#     rename through a trait object, e.g. `&dyn FileSystemProvider`. The round-4 UAT probed six other
-#     shapes -- alias, re-export, fn value, macro, const fn-pointer, impl body -- and the lint flagged all
-#     six; only the `dyn` caller slipped.
+#     rename through a trait object, e.g. `&dyn FileSystemProvider`.
 #   - The lint is warn-by-default. It only fails a build because CI passes `-D warnings`; a bare local
 #     `cargo clippy` prints a warning that scrolls past.
 disallowed-methods = [
