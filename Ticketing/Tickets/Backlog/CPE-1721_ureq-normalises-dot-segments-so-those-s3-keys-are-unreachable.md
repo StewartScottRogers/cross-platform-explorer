@@ -72,6 +72,24 @@ is a completeness gap, not a correctness one.
 - [ ] If the limitation is accepted: `src/docs/31-network.md`'s bullet loses its "tracked separately"
       hedge and says so plainly.
 
+## Folded in from CPE-1723 item 2 (2026-08-13): a `..` directory is browsable but nothing inside it opens
+
+Same root cause, different symptom, so it belongs here rather than in a second ticket.
+
+`list` puts the prefix in the **query string**, which `ureq`/`url` does not normalise (measured), so
+`list("/a/../b")` works and returns a folder that opens and browses normally. `stat`, `read` and `write`
+put the key in the **path**, which *is* normalised, so every single file inside that folder is refused by
+`guard_path_survives_the_client`.
+
+CPE-1704 filters `..` leaves out of listings, so a user cannot *click* their way into one — but a **typed**
+path still yields a browsable folder in which nothing is openable. Whichever option below is chosen must
+cover this asymmetry too: option 1/2 removes it outright, and option 3 (accept the limitation) must
+additionally decide what `list` should do with a prefix whose children it knows cannot be opened, since
+today it cheerfully shows them.
+
+**Extra acceptance criterion:** whichever option is chosen, the query-string/path asymmetry is resolved or
+documented — a folder must not list children that the same provider will refuse to open.
+
 ## Notes
 
 Filed 2026-08-13 by the CPE-1684 worker, from its own measurement. The ticket it came from
