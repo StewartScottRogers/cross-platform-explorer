@@ -413,8 +413,28 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   atomic-save trade-off (vim, git and every other rename-based writer do the same), and it is *not* the
 ///   CPE-1716 bug — with a hard link the file the user opened does receive the edit. Stated so a future
 ///   reader does not mistake the two.
-/// - **Permissions/ownership of the original are not carried onto the replacement.** Unchanged from the
-///   open-coded save this replaces; noted rather than silently inherited.
+/// - **The file OBJECT is replaced, and everything attached to it is dropped** — a one-line
+///   "permissions/ownership are not carried" until PR #904's UAT measured the whole of it (CPE-1739):
+///
+///   ```text
+///   0600 private:    fs::write -> 0o600 | here -> 0o644   (a private file becomes world-readable)
+///   0755 executable: fs::write -> 0o755 | here -> 0o644   (a script stops being executable)
+///   fs::write: attrs=0x22 (HIDDEN) ADS=Ok("ZoneId=3\r\n")
+///   here:      attrs=0x20 (HIDDEN lost) ADS=Err(NotFound) (Mark of the Web destroyed)
+///   SHARE_READ|WRITE open: fs::write -> Ok(()) | here -> Err("Access is denied. (os error 5)")
+///   ```
+///
+///   One cause, four consequences: a rename swaps in a different object, so mode, ownership, Windows
+///   attributes, alternate data streams and the identity that open handles refer to all stay behind on the
+///   file that gets unlinked. The first is a **security downgrade** and the last is a save that used to
+///   succeed and now fails. Copying attributes onto the staged file would close three of the four and
+///   nothing can be copied to close the last, because the obstacle is the *target's* sharing mode.
+///
+///   **This is why `write_file_text` shares only [`classify_write_target`] with this function and not the
+///   write itself** (CPE-1725): its traffic is ordinary text files, so it would have paid all four to buy
+///   atomicity for the rare interrupted save. `metadata_write` still pays them, deliberately — a media
+///   file half-rewritten is worse — and `src/docs/25-metadata-studio.md` now tells the user so in those
+///   words rather than leaving it silent. **CPE-1739** carries the fix.
 /// - **Durability across a power loss is NOT provided, only atomic visibility** (PR #899 Reviewer). The
 ///   bytes are `sync_all`ed before the rename, so no observer can ever see a half-written file and a
 ///   failed save leaves the original exactly as it was. The **directory entry** the rename creates is a
@@ -424,6 +444,15 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   call here would buy a guarantee this crate cannot state platform-uniformly. The user docs are scoped
 ///   to what is actually provided instead of claiming power-cut safety.
 /// - **TOCTOU.** The link is resolved and then written; nothing is atomic across those two steps.
+/// - **The temp is NOT cleaned up when the process dies** (CPE-1725, PR #904 review). The removals below
+///   sit on the write/sync and rename **error** branches, so they run when the save *fails* and not when
+///   the save is *killed*: force-quit, a crash or a `SIGKILL` between the create and the rename strands a
+///   `<name>.<pid>-<nanos>.cpe-tmp` next to the user's file, and there is no sweeper anywhere in the repo
+///   to collect it later. Harmless — the original is untouched, and the stamped name means the next save
+///   cannot collide with it — but visible in the user's own folder. The stale-temp case is already
+///   anticipated by the stamp comment in [`stage_and_replace`]; this states the consequence rather than
+///   leaving it implied. The user docs say the same thing in the same words. **CPE-1738** tracks whether a
+///   sweeper is wanted; the shipped docs are scoped to what actually happens either way.
 pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
     stage_and_replace(path, bytes)
 }
@@ -570,11 +599,20 @@ pub fn classify_write_target(
         Ok(true) => match resolve() {
             Ok(real) => Ok(real),
             // A dangling link (or a link chain that does not resolve). There is no file to edit, and the
-            // two alternatives — inventing the target, or renaming over the link — are respectively a
-            // surprise and the CPE-1716 bug.
+            // two ways to proceed anyway — invent the file at the far end, or write over the link itself —
+            // are respectively a surprise and the CPE-1716 bug.
+            //
+            // **The wording describes the alternatives, not one caller's history** (CPE-1725, PR #904
+            // UAT). It previously said "editing it would have destroyed the link and left the edit
+            // nowhere", which is what CPE-1716's `fs::rename` did — and is **false** for the other caller
+            // this message now serves: `write_file_text`'s `fs::write` left the link perfectly intact and
+            // conjured the target instead (measured, `Ok(7)` with the target created). A shared message
+            // that narrates one caller's bug tells the other caller's user about a danger that never
+            // applied to them, so it names both hazards and asserts neither happened.
             Err(e) => Err(format!(
                 "\"{}\" is a link and what it points at could not be opened, so nothing was written — \
-                 editing it would have destroyed the link and left the edit nowhere: {e}",
+                 saving would have had to either invent the missing file at the far end of the link or \
+                 write over the link itself, and neither is the file you opened: {e}",
                 path.display()
             )),
         },
@@ -1215,11 +1253,31 @@ pub fn make_dangling_link(link: &Path) -> bool {
     require_staged("make_dangling_link", true, make_dangling_link_inner(link))
 }
 
-fn make_dangling_link_inner(link: &Path) -> bool {
-    let missing = link.with_file_name(format!(
+/// **Where [`make_dangling_link`] points its link — the single derivation** (CPE-1725, PR #904 review).
+///
+/// A test that stages a dangling link and then asserts the save did **not** create its target has to name
+/// that target, and every such assertion is a **negative**. So a caller that derives the name itself and
+/// gets it wrong does not fail: `!wrong_name.exists()` is true *because the name is wrong*, and the leg
+/// passes while covering nothing. The review measured exactly that — with a drifted copy of the literal
+/// and the bug restored, the filesystem assertion stopped asserting and the test only reddened later, on
+/// the `Result`, which is the thing this ticket's whole design says proves nothing.
+///
+/// The literal previously existed in four places: [`make_dangling_link_inner`], an inline copy in
+/// `src-tauri`'s CPE-1716 dangling test, a second copy added by CPE-1725, and `sidecar/agent-board`'s own
+/// test helper. The first three now call this. **The fourth deliberately does not and cannot**: per ADR
+/// 0001 a sidecar depends only on `sidecar-contract`, never on this crate, so `agent-board` keeps its own
+/// construction — and it is safe from this hazard by a different route, because its helper *returns* the
+/// target path instead of re-deriving it, so its callers cannot name a different one. Stated here so the
+/// remaining copy is a recorded exception rather than one this comment quietly overclaims about.
+pub fn dangling_link_target(link: &Path) -> PathBuf {
+    link.with_file_name(format!(
         "{}-target-that-does-not-exist",
         link.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    ))
+}
+
+fn make_dangling_link_inner(link: &Path) -> bool {
+    let missing = dangling_link_target(link);
     #[cfg(windows)]
     {
         if std::os::windows::fs::symlink_file(&missing, link).is_err() {

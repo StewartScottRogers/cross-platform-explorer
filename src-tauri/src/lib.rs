@@ -971,23 +971,62 @@ async fn write_file_text(app: tauri::AppHandle, path: String, contents: String) 
 ///    a save to a name where nothing exists still creates the file, here as before. The refusal is scoped
 ///    to a link that exists and does not resolve, which is a broken thing, not an absent one.
 ///
-/// The mechanism is the point as much as the verdict: both paths call
-/// [`cpe_server::fsutil::replace_file_contents`], so they cannot drift apart again by one of them being
-/// edited. See that function for the live-link and hard-link policy it also settles.
+/// The mechanism is the point as much as the verdict: both paths get the answer from
+/// [`cpe_server::fsutil::resolve_write_target`] — literally the same call, so they cannot drift apart
+/// again by one of them being edited, and the user reads the same sentence from either dialog.
 ///
-/// ## What else changes by routing through it, stated rather than smuggled in
+/// ## What this deliberately does NOT do: change how the bytes are written
 ///
-/// - **The save is now atomic.** `fs::write` truncates first, so an interrupted save (disk full, app
-///   killed, device pulled) left the user's file half-written or empty. Temp-sibling + rename means a
-///   failed save leaves the original exactly as it was. This is *atomic visibility*, not durability across
-///   a power cut — `replace_file_contents` documents that boundary, and `src/docs/03-explorer.md` states
-///   it to the user in those terms.
-/// - **A hard link is no longer preserved.** The file the user opened receives the edit; the other name
-///   for it keeps the old bytes, because the save writes a new file and moves it into place. Standard for
-///   every rename-based writer (vim, git); already true of `metadata_write`; called out in the user docs.
-/// - **Permissions/ownership are not carried onto the replacement**, same as `metadata_write`.
-/// - **A live link is still followed**, unchanged: `fs::write` followed one to its target and so does
-///   this. Nothing about the working case moves.
+/// **The obvious implementation was to route this through [`cpe_server::fsutil::replace_file_contents`]**,
+/// which bundles the dangling-link decision *and* CPE-1716's atomic temp-sibling + rename write. PR #904
+/// shipped that, and the independent UAT measured what it cost on the **ordinary** path — files with no
+/// link anywhere near them, which is essentially all of this command's traffic. Same file, same run,
+/// pre-fix `fs::write` versus the rename-based save:
+///
+/// ```text
+/// 0600 private:    pre -> 0o600 | post -> 0o644     (a private file becomes world-readable)
+/// 0755 executable: pre -> 0o755 | post -> 0o644     (a script silently stops being executable)
+/// pre:  attrs=0x22 (HIDDEN) ADS=Ok("ZoneId=3\r\n")
+/// post: attrs=0x20 (HIDDEN lost) ADS=Err(NotFound)  (Mark of the Web destroyed)
+/// SHARE_READ|WRITE open: pre -> Ok(()) | post -> Err("Access is denied. (os error 5)")
+/// ```
+///
+/// All four have one cause: a rename **replaces the file object**, so everything attached to the object
+/// rather than to the bytes — mode, ownership, Windows attributes, alternate data streams, and the
+/// identity that open handles refer to — is left behind on the file that got unlinked. `fs::write`
+/// truncates the existing object and keeps all of it.
+///
+/// So the trade was: make the **rare** case (an interrupted save) safer, by making the **common** case
+/// worse in four ways, two of them security-relevant and one of them a functional regression — a save
+/// that used to succeed while another program held the file open now fails. That is a bad trade on its
+/// face, and it is also **not what this ticket asked for**: CPE-1725's question is what a dangling link
+/// *means*, and its own acceptance criterion treats the atomicity move as conditional ("**if**
+/// `write_file_text` moves to `replace_file_contents`…"). Widening a decision about broken symlinks into
+/// a permissions change for every text save is the exact blast-radius mistake CPE-1725 was itself filed
+/// to avoid — the ticket exists because CPE-1716 declined to fold this command into *its* fix.
+///
+/// The narrowing keeps the whole point and drops the whole cost: **share the classifier, not the write
+/// strategy.** [`cpe_server::fsutil::resolve_write_target`] is the decision; `fs::write` stays the write.
+/// Parity is if anything stronger, since both commands now call that one entry point directly rather than
+/// one of them reaching it through another function.
+///
+/// **Item 4 is why "just copy the attributes across" was not the answer either.** Mode is easy and
+/// Windows attributes are tractable, but a rename onto a file another process holds open fails regardless
+/// of what has been copied — nothing about the staged file changes the target's sharing mode. So that
+/// route closes three of four at best. **CPE-1739** carries the whole list, including the same collateral
+/// that `metadata_write` has had since CPE-1716 (unchanged by this ticket, and now stated in the Metadata
+/// Studio's user docs rather than left silent).
+///
+/// ## What is therefore true of this command's writes, all of it unchanged from before CPE-1725
+///
+/// - **Not atomic.** A save killed part-way leaves the file part-written. That is a real defect and it is
+///   what CPE-1739 is for; it is not a *regression*, and buying it at the price above is not this
+///   ticket's call to make.
+/// - **Mode, ownership, Windows attributes, alternate data streams and hard links are all preserved**,
+///   because the file object is never replaced. Pinned by
+///   `cpe_1725_an_ordinary_save_keeps_the_same_file_object_and_its_mode`, which reds if anyone re-routes
+///   this to a rename-based writer.
+/// - **A live link is still followed** to its target, which the link keeps pointing at.
 ///
 /// ## The Save-As callers, and the one question this does NOT answer for them
 ///
@@ -1036,9 +1075,21 @@ async fn write_file_text(app: tauri::AppHandle, path: String, contents: String) 
 ///   right shape there, not this function; recorded at that site too.
 fn write_file_text_impl(path: String, contents: String) -> Result<u64, String> {
     cpe_server::fs_route::require_local(&path)?;
-    // NOT `fs::write`: see the decision above. This is the same call `metadata_write_impl` makes, which is
-    // what makes the two answers provably identical rather than coincidentally so.
-    cpe_server::fsutil::replace_file_contents(std::path::Path::new(&path), contents.as_bytes())?;
+    // The dangling-link decision, from the same call `metadata_write_impl` makes — which is what makes the
+    // two answers provably identical rather than coincidentally so. A live link resolves to its target; a
+    // dangling one is refused here, before anything is written.
+    let target = cpe_server::fsutil::resolve_write_target(std::path::Path::new(&path))?;
+    // Still `fs::write`, deliberately — see "What this deliberately does NOT do" above. Truncating the
+    // existing file keeps its mode, ownership, Windows attributes and alternate data streams; a
+    // temp-sibling + rename would silently drop all of them.
+    //
+    // The error names the path, which the bare `e.to_string()` this replaced did not. It matters for the
+    // one construction where the two save paths' messages differ (PR #904 UAT): a link pointing at a
+    // *directory* resolves fine and then fails on the write, and "Access is denied" with no path is not a
+    // diagnosis. `display_path` strips Windows' `\\?\` verbatim prefix, which `canonicalize` puts on every
+    // resolved path and which the user has never seen before.
+    fs::write(&target, contents.as_bytes())
+        .map_err(|e| format!("{}: {e}", cpe_server::fsutil::display_path(&target)))?;
     Ok(contents.len() as u64)
 }
 
@@ -14790,16 +14841,10 @@ overlay / overlay rw,relatime 0 0
         let n = write_file_text_impl(f.to_string_lossy().to_string(), "brand new".to_string()).unwrap();
         assert_eq!(n, 9);
         assert_eq!(fs::read_to_string(&f).unwrap(), "brand new");
-        // CPE-1725: the save now stages a temp sibling and renames it into place. The temp must never be
-        // left behind in the user's own folder — the ordinary-save half of the same check
-        // `cpe_1716_metadata_write_reports_only_what_reached_the_file` makes for the other save path.
-        assert!(
-            !fs::read_dir(&d)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().contains(".cpe-tmp")),
-            "the staging temp must not be left sitting next to the user's file"
-        );
+        // (An earlier round of CPE-1725 added a "no `.cpe-tmp` left behind" assertion here, copied from
+        // `metadata_write`'s test. It was removed when this command was narrowed back to `fs::write`: with
+        // no staging file ever created, that assertion could not fail, and an assertion that cannot fail
+        // is the thing this ticket's evidence rules exist to keep out of the suite.)
         let _ = fs::remove_dir_all(&d);
     }
 
@@ -15791,7 +15836,13 @@ overlay / overlay rw,relatime 0 0
         let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
         #[cfg(unix)]
         let made = std::os::unix::fs::symlink(&real, &link).is_ok();
-        if !made {
+        // CPE-1717, retrofitted in PR #904's review round. This leg predates the mechanism and kept the
+        // pre-CPE-1717 shape — a bare `if !made` whose only consequence was the notice below. Its twin in
+        // `cpe_1725_write_file_text_writes_through_a_live_link_and_keeps_the_link` was found green-with-
+        // zero-coverage under `CPE_STAGING_STRICT=1`; this one had the identical gap, and it guards the
+        // route CPE-1716's actual data loss travelled through. See that twin for why `supported_here` is
+        // `true` and why a contributor machine still gets the skip rather than a red build.
+        if !cpe_server::fsutil::require_staged("live_file_symlink", true, made) {
             let _ = writeln!(
                 std::io::stderr(),
                 "[CPE-1716] SKIPPED the metadata_write LIVE-link leg: this machine cannot create a file \
@@ -15860,7 +15911,10 @@ overlay / overlay rw,relatime 0 0
         assert!(e.contains("is a link"), "and say that it IS a link: {e}");
         assert!(e.contains("nothing was written"), "and that the edit did not happen: {e}");
         assert!(
-            !link.with_file_name("gone.wav-target-that-does-not-exist").exists(),
+            // The helper's own derivation, not a hand-typed literal (CPE-1725, PR #904 review): this is a
+            // negative assertion, so a name that drifted from `make_dangling_link`'s would satisfy it
+            // vacuously and this leg would cover nothing.
+            !cpe_server::fsutil::dangling_link_target(&link).exists(),
             "and refusing must not invent the missing target"
         );
         let _ = fs::remove_dir_all(&d);
@@ -15915,16 +15969,6 @@ overlay / overlay rw,relatime 0 0
     // `require_staged` (CPE-1717) makes a runner that *should* be able to stage but cannot go red rather
     // than announce into a green log.
 
-    /// The name `cpe_server::fsutil::make_dangling_link` points its link at — and therefore the file that
-    /// must **not** appear at the far end of a refused save. Derived the same way the helper derives it, so
-    /// the two cannot drift into testing different names.
-    fn dangling_target_of(link: &std::path::Path) -> PathBuf {
-        link.with_file_name(format!(
-            "{}-target-that-does-not-exist",
-            link.file_name().unwrap_or_default().to_string_lossy()
-        ))
-    }
-
     #[test]
     fn cpe_1725_both_save_paths_refuse_a_dangling_link_and_neither_creates_its_target() {
         use std::io::Write;
@@ -15944,8 +15988,13 @@ overlay / overlay rw,relatime 0 0
             let _ = fs::remove_dir_all(&d);
             return;
         }
-        let text_target = dangling_target_of(&text_link);
-        let meta_target = dangling_target_of(&meta_link);
+        // The names the two assertions below turn on, taken from the ONE derivation rather than re-derived
+        // here (PR #904 review). Both of those assertions are negatives, so a locally-copied literal that
+        // drifted from the helper's would make them pass **vacuously** — measured by the reviewer, who
+        // drifted the copy this replaced and watched the filesystem check stop asserting while the test
+        // still went red, but on the `Result`, which this test exists to not rely on.
+        let text_target = cpe_server::fsutil::dangling_link_target(&text_link);
+        let meta_target = cpe_server::fsutil::dangling_link_target(&meta_link);
 
         let text_r =
             write_file_text_impl(text_link.to_string_lossy().to_string(), "edited!".to_string());
@@ -15979,14 +16028,18 @@ overlay / overlay rw,relatime 0 0
         assert!(meta_e.contains("track.wav"), "the metadata refusal must name the link: {meta_e}");
 
         // The acceptance criterion is not "both refuse somehow" but "both give the SAME answer". Both
-        // messages come from one function, so once each link's own name is substituted out they are the
-        // same string. The trailing OS error is dropped: it is the platform's wording, not ours, and it is
-        // the only part legitimately allowed to differ between two constructions.
-        let sans_os_error = |m: &str| {
-            m.rsplit_once(": ").map(|(head, _)| head.to_string()).unwrap_or_else(|| m.to_string())
-        };
-        let text_norm = sans_os_error(&text_e.replace(&text_link.display().to_string(), "<LINK>"));
-        let meta_norm = sans_os_error(&meta_e.replace(&meta_link.display().to_string(), "<LINK>"));
+        // messages come from one function, so once each link's own name is substituted out they must be
+        // the *whole* same string — including the platform's trailing OS error, because both links are
+        // built by one helper in one directory on one run and therefore fail resolution identically.
+        //
+        // An earlier version normalised that trailing segment away (`rsplit_once(": ")`), which the PR
+        // #904 reviewer flagged: as a guard it would silently swallow a future divergence confined to the
+        // final segment, which is exactly the "a denylist where a property was meant" shape this sprint
+        // keeps finding. Comparing the entire message normalises nothing, so nothing can hide in it. If a
+        // runner ever does produce two different OS errors here the assertion prints both in full, which
+        // is a diagnosable red rather than a silent pass.
+        let text_norm = text_e.replace(&text_link.display().to_string(), "<LINK>");
+        let meta_norm = meta_e.replace(&meta_link.display().to_string(), "<LINK>");
         assert_eq!(
             text_norm, meta_norm,
             "the two save paths must give the SAME answer about a dangling link, not merely both fail"
@@ -16019,7 +16072,16 @@ overlay / overlay rw,relatime 0 0
         let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
         #[cfg(unix)]
         let made = std::os::unix::fs::symlink(&real, &link).is_ok();
-        if !made {
+        // CPE-1717, added in PR #904's review round: routed through `require_staged` rather than a bare
+        // `if !made`. The notice below was the whole consequence, and a notice inside a green run is not
+        // one — measured by the reviewer under CI's own condition (`CPE_STAGING_STRICT=1`, staging forced
+        // to fail): the leg printed its SKIPPED line and still reported `ok`, i.e. green over zero
+        // coverage. `supported_here = true` matches `fsutil`'s `live_file_symlink` precedent and is the
+        // honest value: on Unix `symlink(2)` never needs privilege, and CI's `windows-latest` demonstrably
+        // has it (the CPE-1725 legs all recorded `... ok` there with no SKIPPED line), so a failure means
+        // the runner changed under us. `staging_is_strict` is CI-only, so an unprivileged contributor
+        // machine still gets the loud skip below rather than a red build.
+        if !cpe_server::fsutil::require_staged("live_file_symlink", true, made) {
             let _ = writeln!(
                 std::io::stderr(),
                 "[CPE-1725] SKIPPED the write_file_text LIVE-link leg: this machine cannot create a file \
@@ -16059,13 +16121,70 @@ overlay / overlay rw,relatime 0 0
 
         assert_eq!(fs::read_to_string(&f).unwrap(), "a,b\n1,2\n", "and it must hold the exported bytes");
         assert_eq!(n, 8);
-        assert!(
-            !fs::read_dir(&d)
-                .unwrap()
-                .flatten()
-                .any(|e| e.file_name().to_string_lossy().contains(".cpe-tmp")),
-            "and the staging temp must not be left sitting in the folder the user chose"
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The narrowing, made load-bearing** (PR #904 UAT). CPE-1725's first round routed this command
+    /// through `replace_file_contents`, whose temp-sibling + rename **replaces the file object**. The UAT
+    /// measured what that cost on ordinary files, which are essentially all of this command's traffic: a
+    /// `0600` file became `0644`, a `0755` script became `0644`, Windows `HIDDEN` and the
+    /// `Zone.Identifier` alternate data stream (Mark of the Web) were destroyed, and a save that used to
+    /// succeed while another program held the file open began failing with `Access is denied`.
+    ///
+    /// Every one of those is the same fact wearing four hats — *the file object was replaced* — so this
+    /// asserts the **property** rather than enumerating the four symptoms, which is what makes it a guard
+    /// and not a denylist.
+    ///
+    /// The property is expressed through an **open handle**, which is both the sharpest probe and the
+    /// user-visible consequence in the UAT's own item 4. A handle refers to the file *object*, not to the
+    /// name: if the save truncates in place, a reader holding the file open sees the new bytes; if the
+    /// save renames a new file over the name, that reader is left holding the old, now-unlinked object and
+    /// still sees the old bytes. Re-route this command to any rename-based writer and this reds on every
+    /// runner. (`MetadataExt::file_index` would say the same thing more directly and is still unstable —
+    /// `windows_by_handle`, rust#63010 — so it is not available to a test that must compile on stable.)
+    ///
+    /// The Unix mode assertion is kept **as well**, because a property is only as good as its link to the
+    /// consequence: `0600` staying `0600` is the security-relevant symptom in its own words, on the two
+    /// runners that can express it.
+    #[test]
+    fn cpe_1725_an_ordinary_save_keeps_the_same_file_object_and_its_mode() {
+        use std::io::{Read, Seek};
+        let d = scratch("cpe1725_identity");
+        let f = d.join("secrets.env");
+        fs::write(&f, b"TOKEN=old").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&f, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        // Opened BEFORE the save and held across it — this stands in for the other program that has the
+        // user's file open, and it is what makes the assertion about the object rather than the name.
+        let mut held = fs::File::open(&f).expect("holding the file open must be possible");
+
+        write_file_text_impl(f.to_string_lossy().to_string(), "TOKEN=new".to_string())
+            .expect("an ordinary save must succeed");
+
+        assert_eq!(fs::read_to_string(&f).unwrap(), "TOKEN=new", "the edit must land at the path");
+        let mut through_handle = String::new();
+        held.seek(std::io::SeekFrom::Start(0)).unwrap();
+        held.read_to_string(&mut through_handle).unwrap();
+        assert_eq!(
+            through_handle, "TOKEN=new",
+            "an ordinary save must TRUNCATE the user's file, not replace it with a different object — a \
+             reader holding it open still sees the OLD bytes after a rename-based save, and everything \
+             else attached to the object goes with it (measured: 0600 -> 0644, 0755 -> 0644, HIDDEN lost, \
+             Zone.Identifier destroyed)"
         );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+                0o600,
+                "and a private file must not become world-readable by being saved"
+            );
+        }
         let _ = fs::remove_dir_all(&d);
     }
 

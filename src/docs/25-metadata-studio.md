@@ -38,15 +38,36 @@ pending. Nothing touches disk until you click **Save**:
 
 - **A failed save never damages the original.** Edits are written to a temporary file first and only
   then moved into place, in one step. If the save fails part-way through — the disk fills up, the file
-  is locked by another program, the app is closed — your file is left exactly as it was, never
-  half-rewritten, and the temporary file is cleaned up. (This is about *interrupted saves*, not about
-  power cuts: like most desktop apps, the app doesn't force the change all the way down to the physical
-  disk before reporting success.)
+  is locked by another program — your file is left exactly as it was, never half-rewritten, and the
+  temporary file is cleaned up. (This is about *failed saves*, not about power cuts: like most desktop
+  apps, the app doesn't force the change all the way down to the physical disk before reporting success.)
+- **If the app is killed mid-save, your file is still safe, but a leftover may need deleting.** The
+  original is untouched either way. The cleanup step only runs when the save *fails*, though, not when
+  the app stops running, so an app that is force-quit or crashes during a save can leave a stray file
+  next to yours whose name ends in `.cpe-tmp`. It's the half-written copy, it's safe to delete, and
+  nothing else will ever read it.
+- **What that safety costs, so you can judge it.** Writing a new file and moving it into place means the
+  saved file is a *new* file, and things attached to the old one don't come with it:
+  - **Permissions and ownership are reset** to what a newly created file gets. On Linux and macOS a file
+    you'd made private (`0600`) comes back readable by everyone (`0644`), and an executable file loses its
+    executable bit. On Windows, attributes such as **Hidden** are lost, as are **alternate data streams** —
+    including the `Zone.Identifier` mark that records a file was downloaded from the internet.
+  - **A save can fail where a plain save would have worked**, reporting `Access is denied`, if another
+    program has the file open. Nothing is written or damaged when that happens; close the other program
+    and save again.
+  - **Other hard links to the file keep the old metadata** (see below).
+  - The preview pane's plain-text editor makes the **opposite** trade and keeps all of the above — see
+    **Explorer → Files → Saving an edited file**. The two agree about symlinks, which is the part that
+    could otherwise corrupt something; they differ only in how the bytes are put down.
 
 ## Symlinked files
 
 If the file you opened is a **symlink** — the usual arrangement for a music library organised into
 playlist folders — Metadata Studio edits the file the link points at, and the link stays a link.
+
+Because the save writes a temporary file next to the file it is really editing, that temporary file
+appears in the folder the **link points at** — the library folder, not the playlist folder you're looking
+at. It's cleaned up as part of the save; it only matters if you go looking for it after a crash.
 
 If the link is **broken** (it points at something that isn't there any more), the save is refused and
 tells you which link it was and that nothing was written. The alternative would be to quietly replace
