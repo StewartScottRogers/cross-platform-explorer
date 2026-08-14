@@ -195,8 +195,30 @@ their evidence, that was worth naming rather than letting pass.
 - **Reviewer APPROVE re-earned at `df28ef7e`**, re-running the ordering swap, both sabotage legs and both
   feature modes against that head rather than carrying the previous verdict forward.
 
-If the head moves again, this line needs re-earning rather than carrying forward.
-
 - **Reviewer APPROVE at `a2a010e9`** — code proven identical to `df28ef7e` by **tree hash**
   (`crates: 644762d6…` on both), not by eye, so the verdict carried across on proof rather than assumption.
   That distinction is the whole thread this paragraph exists for.
+- **Reviewer APPROVE at `569c13f5`** — same tree hash again.
+
+### The verdict is pinned to `crates: 644762d648a8b1bd87bdb28a6554c1b1d745a53f`
+
+The sentence this paragraph replaced said *"if the head moves again, this line needs re-earning."* Taken
+literally that has no base case: writing the note moves the head, which invalidates the note, which needs a
+note. Three of this PR's five commits are records *of the record* rather than of the code, and the reviewer
+that noticed proposed the way out —
+
+> **Pin the verdict to the code, not to the commit.** A commit sha changes when a comma moves in a Markdown
+> file; the tree hash changes only when the code does.
+
+So the verdict above is stated against `git rev-parse HEAD:crates`. Any later commit leaving that hash
+unchanged — a ticket edit, a PR-body edit, a doc outside `crates/` — **carries the approval forward
+provably**, and no re-review is owed. If the hash differs, the code differs and the review is genuinely
+stale. This is now Evidence Rule 4 in `Ticketing/wiki.md`, along with the `grep -qv pending` bug the same
+reviewer found in **its own** merge waiter (it succeeds when *any* line is non-pending, not all — so one
+green leg and two queued read as ready).
+
+**Merge gate:** run `31809650506`. `ubuntu-latest` pass (35m39s), `macos-latest` pass (40m19s),
+`windows-latest` still pending at the time of writing — and Windows is the leg that matters most here,
+being the only runner where `a_live_link_at_a_create_slot_is_reported_as_a_link_not_as_already_exists`
+can fail to stage a live file symlink, and therefore the only one where the new `require_staged` gate can
+actually bite.
