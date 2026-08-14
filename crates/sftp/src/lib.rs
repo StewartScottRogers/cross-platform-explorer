@@ -402,14 +402,42 @@ mod tests {
 
     /// The SFTP rig's refusal message for a rename onto the served root (CPE-1731).
     ///
-    /// Its whole job is to be a string **no errno can produce**. `io_err`'s catch-all maps every
+    /// Its whole job is to be a refusal **no errno can produce**. `io_err`'s catch-all maps every
     /// unclassified failure to `StatusCode::Failure`, and russh-sftp renders a bare
     /// `Err(StatusCode::Failure)` as `"Failure: Failure"` — so a test asserting *that* cannot tell a
     /// guard refusal from a `fs::rename` that happened to fail with an unusual errno (the independent
-    /// UAT demonstrated it with a junction pointing at the root). This constant is referenced from
-    /// exactly two places: the guard that emits it and the test that requires it, which is what makes
-    /// `cpe-sftp`'s discriminator as errno-proof as `cpe-ftp`'s `553` is by construction.
+    /// UAT demonstrated it with a junction pointing at the root).
+    ///
+    /// **The guarantee is structural, not statistical — and the UAT found the better statement of it.**
+    /// It is not "this particular 36-character string is unlikely to collide". It is that
+    /// [`io_err`] returns *only* a `StatusCode` and **discards the `io::Error`'s text entirely**, and a
+    /// `Status { .. }` value is constructed in exactly two places in this rig ([`ok_status`] and the
+    /// rename guard). So **no errno path can carry a custom message at all**; the sentinel is
+    /// unreachable except from the guard, by construction rather than by luck. The UAT drove ten errno
+    /// paths through the real wire (russh encode → TCP → decode) and none carried it.
     const CPE_1731_ROOT_DESTINATION_REFUSAL: &str = "rename destination is the served root";
+
+    /// Did the **guard** refuse this rename, as opposed to some errno inside `fs::rename`?
+    ///
+    /// `SftpProvider::rename` formats `"{from} -> {to}: {e}"`, and `{e}` renders as
+    /// `"{status_code}: {error_message}"` — so the whole string mixes server text with
+    /// **caller-supplied paths**. A `contains` test over that is therefore wider than the field the
+    /// guard actually controls, which the UAT demonstrated by putting the sentinel *into a path*:
+    ///
+    /// ```text
+    /// Err("/definitely-missing -> /rename destination is the served root/x: No such file: No such file")
+    ///     contains(SENTINEL) = true   ← guard never fired
+    /// ```
+    ///
+    /// No shipped row was affected — it needs a test author to write the sentinel into a path on
+    /// purpose, where the round-1 weakness needed no cooperation at all. But "reachable from one line"
+    /// was true of the `error_message` **field** and not of the **asserted string**, and that gap is
+    /// worth closing rather than annotating: anchoring at the end pins the sentinel to the position
+    /// only the status can occupy, so an injected path cannot satisfy it.
+    fn cpe_1731_is_guard_refusal(r: &Result<(), String>) -> bool {
+        let want = format!("Failure: {CPE_1731_ROOT_DESTINATION_REFUSAL}");
+        r.as_ref().err().is_some_and(|m| m.ends_with(&want))
+    }
 
     fn ok_status(id: u32) -> Status {
         Status { id, status_code: StatusCode::Ok, error_message: String::new(), language_tag: String::new() }
@@ -679,10 +707,17 @@ mod tests {
         /// No shipped row was affected — all sixteen return `Ok(())` with the guard removed, so every
         /// one of them reds — but that is an assertion which *happens* to discriminate because of
         /// which rows exist today, one step out from the trap this PR already corrected once. So the
-        /// guard now emits [`CPE_1731_ROOT_DESTINATION_REFUSAL`], a string reachable from this line and
-        /// no other: `error_message` is a real `SSH_FXP_STATUS` field that OpenSSH populates too, so
-        /// this is *more* wire-faithful than the bare code, not less. It gives SFTP what `cpe-ftp`'s
-        /// `553` already had by construction — a refusal no errno can spell.
+        /// guard now emits [`CPE_1731_ROOT_DESTINATION_REFUSAL`], reachable from this line and no
+        /// other: `error_message` is a real `SSH_FXP_STATUS` field that OpenSSH populates too, so this
+        /// is *more* wire-faithful than the bare code, not less. It gives SFTP what `cpe-ftp`'s `553`
+        /// already had by construction — a refusal no errno can spell.
+        ///
+        /// **The neutralisation for it is deliberately stronger than deleting the guard** (the UAT
+        /// named this, and it is the part round 1 lacked). Reverting this to
+        /// `Err(StatusCode::Failure)` leaves the guard *firing* and the rename *still refused* — only
+        /// the **evidence** is degraded to a string an errno can also produce — and the tests still
+        /// red. A guard-removal probe only shows the guard does something; this shows the tests can
+        /// still tell *which* thing did it.
         ///
         /// **The SOURCE side is deliberately NOT guarded, and the gap is real:** `rename("/", "/x")`
         /// still moves the served root into a subdirectory. Out of scope by choice, not by oversight —
@@ -1400,9 +1435,8 @@ mod tests {
                 // `"/ -> : Failure: rename destination is the served root"`. If a dependency bump
                 // changes that rendering this goes red with the string in the message, which is the
                 // right way for it to break.
-                let msg = r.as_ref().err().cloned().unwrap_or_default();
                 assert!(
-                    r.is_err() && msg.contains(CPE_1731_ROOT_DESTINATION_REFUSAL),
+                    cpe_1731_is_guard_refusal(&r),
                     "[{why}] a destination that resolves to the served root must be refused BY THE \
                      GUARD — not renamed, and not merely failed by whatever errno `fs::rename` \
                      happened to return. Got {r:?}"
@@ -1460,9 +1494,8 @@ mod tests {
                 "[{spell}] the served tree must survive a rename onto a different spelling of the root \
                  ({why}); rename reported {r:?}"
             );
-            let msg = r.as_ref().err().cloned().unwrap_or_default();
             assert!(
-                r.is_err() && msg.contains(CPE_1731_ROOT_DESTINATION_REFUSAL),
+                cpe_1731_is_guard_refusal(&r),
                 "[{spell}] {why}, so this destination IS the served root and must be refused by the \
                  GUARD, not by an incidental errno (see the table test's note). Byte-wise path \
                  equality does not know these spellings name the root, which is why the check \

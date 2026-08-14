@@ -40,6 +40,48 @@ upload_tree -> /up (existing) = Err("/up: Failure: Failure")
 
 The suite stays green because its one `upload_tree` test uploads to a fresh base.
 
+Reproduced against **both** rigs — CPE-1731 measured SFTP only; the UAT confirmed FTP behaves the same.
+
+## A second symptom: a multi-level remote root, with a different errno
+
+The same line fails a second way, and the ticket's title only names the first. If `remote_root` is
+`/a/b` and `/a` does not exist, `mkdir("/a/b")` is `ENOENT` rather than `EEXIST` — a non-recursive
+`mkdir` cannot create the chain:
+
+```text
+SFTP -> /a/b (missing parent) = Err("/a/b: No such file: No such file")
+FTP  -> /a/b (missing parent) = Err("...550 Create failed")
+```
+
+The FTP row is worth reading twice: `STOR`'s `create_dir_all` (CPE-1742) does **not** rescue it,
+because the failure happens at `mkdir(&base)` before any `STOR` is issued. So a fix that only tolerates
+"already exists" leaves this case broken. Whatever replaces line 744 has to answer *both* "it is
+already there" and "its parents are not there yet".
+
+## A second site: the per-directory `mkdir`, which is a trap for this ticket's own fix
+
+`transfer.rs:761` — inside the walk — does `provider.mkdir(&remote)?` for **every** directory in the
+tree. It is currently *shadowed*: line 744 fails first, so nobody reaches it.
+
+**A fix at 744 alone that tolerates `AlreadyExists` leaves 761 broken for a partially-existing tree**
+— re-uploading a folder where some subdirectories already exist remotely would then fail at the first
+one, and the failure would look like a *new* bug introduced by the fix. Both sites change together, or
+the ticket is not done.
+
+## Scope of the search behind these claims
+
+The UAT swept every caller of the `FileSystemProvider::mkdir` trait method across `crates/`,
+`src-tauri/` and `sidecar/`. The only **shipped** callers are `transfer.rs:744` and `transfer.rs:761`;
+every other call site is inside `#[cfg(test)]`. It also ran `cpe-vfs` (21 passed) as the crate most
+likely to lean on a recursive `mkdir`. So the blast radius really is these two lines — which is why a
+ticket is proportionate here and a regression test is not.
+
+**Premise, stated as a premise:** "a real OpenSSH server answers `SSH_FX_FAILURE` for an existing
+name" and "a real FTP daemon answers `550`" are read from the RFCs and from OpenSSH's `sftp-server.c`,
+**not measured against a live daemon**. They are the reason this is called pre-existing rather than a
+regression introduced by CPE-1731. If they are wrong, that classification is wrong — the QNAP NAS on
+the LAN is the cheapest way to settle it.
+
 ## Scope
 
 `crates/server/src/transfer.rs` — `upload_tree`'s `mkdir(&base)` and the per-directory `mkdir(&remote)`
@@ -64,7 +106,13 @@ client layer instead.
 
 - [ ] `upload_tree` into a remote directory that **already exists** succeeds and lands every file,
       asserted on the remote bytes.
-- [ ] The same for a nested directory inside the tree that already exists remotely (partial re-upload).
+- [ ] `upload_tree` to a **multi-level** `remote_root` whose parents do not exist yet succeeds — the
+      `ENOENT` symptom above, which a tolerate-`AlreadyExists` fix does not address.
+- [ ] The same for a nested directory inside the tree that already exists remotely (partial re-upload)
+      — i.e. **line 761 is fixed too**, not just 744. A fix that leaves 761 alone turns this case into a
+      failure that looks like a new bug.
+- [ ] Both are checked against `cpe-sftp` **and** `cpe-ftp`, since the two rigs reach the failure by
+      different errnos.
 - [ ] The rigs are **not** loosened back to `create_dir_all` to make this pass — the fix is in the
       client. A guard-neutralisation showing the new test red against the current `upload_tree`.
 - [ ] Whatever classification the fix relies on is measured, not assumed: if it distinguishes

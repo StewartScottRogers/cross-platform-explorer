@@ -745,7 +745,12 @@ pub fn upload_tree(
     // to claim.** `mkdir` is `mkdir(2)` on every real backend (`SSH_FXP_MKDIR`, FTP `MKD`), so a `base`
     // that already exists is an *error*, and the `?` aborts the whole upload before a single file is
     // written. Uploading into an existing remote folder fails — measured `FRESH -> Ok(2)`, `EXIST ->
-    // Err("…: Failure: Failure")`.
+    // Err("…: Failure: Failure")`, against both the SFTP and the FTP rig.
+    //
+    // **Two symptoms, not one**, and a fix that closes only the first is incomplete: a `base` whose
+    // *parents* do not exist fails here too, with `ENOENT` rather than `EEXIST` (`/a/b` where `/a` is
+    // missing → `"No such file"` on SFTP, `550` on FTP), because a non-recursive `mkdir` cannot create
+    // the chain either. Tolerating `AlreadyExists` does not address that one.
     //
     // It stayed invisible because the only `mkdir`s this crate's own tests see are idempotent:
     // `LocalProvider::mkdir` and the test `FakeProvider::mkdir` both tolerate an existing directory, as
@@ -773,7 +778,10 @@ pub fn upload_tree(
             if meta.is_dir() {
                 // Same CPE-1741 shape as the `mkdir(&base)` above, one level down: any directory in the
                 // tree that already exists remotely is an error here, so a *partial re-upload* aborts
-                // too. Whatever fixes the base case has to fix this one in the same change.
+                // too. **Currently shadowed** — line 744 fails first, so nobody reaches this — which is
+                // precisely what makes it a trap: a fix up there that only tolerates `AlreadyExists`
+                // leaves this line broken, and the breakage then looks like a *new* bug the fix
+                // introduced. Both sites change together, or CPE-1741 is not done.
                 provider.mkdir(&remote)?;
                 stack.push(local);
             } else {
