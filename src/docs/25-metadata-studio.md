@@ -36,6 +36,23 @@ pending. Nothing touches disk until you click **Save**:
   edits to every selected file instead of just the first. The checkpoint still fires once before the
   whole batch.
 
+- **The save is atomic.** Edits are written to a temporary file alongside the original and then moved
+  into place in one step, so a crash or a power cut part-way through a save can never leave you with a
+  half-written media file.
+
+## Symlinked files
+
+If the file you opened is a **symlink** — the usual arrangement for a music library organised into
+playlist folders — Metadata Studio edits the file the link points at, and the link stays a link.
+
+If the link is **broken** (it points at something that isn't there any more), the save is refused and
+says so. The alternative would be to quietly replace your link with a new file, which is worse than
+an error message.
+
+A **hard link** is a different thing and behaves differently: the file you opened receives the edit as
+normal, but the other name for it keeps the old metadata, because an atomic save writes a new file and
+moves it into place. That's how every rename-based editor behaves.
+
 ## Batch operations
 
 Two buttons appear once more than one writable file is selected, next to **Apply to all**:

@@ -3532,42 +3532,40 @@ async fn metadata_writable(path: String) -> Result<bool, String> {
 /// fields, apply the edit policy, re-serialise with the format's write codec, then write via a temp file +
 /// rename so a mid-write failure never truncates the original. Returns the re-read fields so the studio
 /// refreshes. `Err` for a format with no writer yet.
+///
+/// **CPE-1716:** the save goes through [`cpe_server::fsutil::replace_file_contents`], which resolves a
+/// symlink at `path` and rewrites the file the link points at. `path` comes straight off IPC and is the
+/// user's own media file, so the open-coded `fs::rename` this replaced destroyed a **live** symlink
+/// standing there, wrote the edit to the link's former slot instead of the real file, and still returned
+/// `Ok` with the edited fields echoed back. Both halves are fixed here: the link survives and the edit
+/// reaches the real file, so the fields returned below describe bytes that provably landed — the rename
+/// is the last thing that can fail, and its `Err` propagates instead of being reported as a save.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn metadata_write(
     path: String,
     edits: Vec<cpe_server::media_meta_edit::MetaEdit>,
 ) -> Result<Vec<cpe_server::media_meta_edit::MetaField>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
-        let ext = std::path::Path::new(&path)
-            .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
-        let out = cpe_server::media_meta::write_back(&ext, &bytes, &edits)?;
-        // Atomic save: write a sibling temp file, then rename over the original (same dir → rename is
-        // atomic on all three OSes). A crash mid-write leaves the original intact. The temp name carries a
-        // per-write nanosecond stamp so two concurrent saves (or a stale temp from a prior crash) can't
-        // collide on the same sibling path.
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        let tmp = format!("{path}.{stamp}.cpe-meta-tmp");
-        std::fs::write(&tmp, &out).map_err(|e| e.to_string())?;
-        // CPE-1710 / **CPE-1716 (High, open)**: this is NOT the app's own file. `path` comes straight off
-        // IPC and is the user's own media file, so this rename destroys a symlink standing there — a
-        // **live** one, not merely a dangling one, because there is no occupancy guard here either — and
-        // the edit lands on the link's former target instead of being written through it, while the
-        // command reports success. Left as-is deliberately: fixing it means deciding whether a symlinked
-        // media file should be written *through* rather than replaced, which is CPE-1716's job, not a
-        // silent change inside CPE-1710. The allow is here so the decision is visible at the site.
-        #[allow(clippy::disallowed_methods)]
-        std::fs::rename(&tmp, &path).map_err(|e| {
-            let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on a failed rename
-            e.to_string()
-        })?;
-        Ok(cpe_server::media_meta::read_all(&ext, &out))
-    })
-    .await.map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || metadata_write_impl(&path, &edits))
+        .await.map_err(|e| e.to_string())?
+}
+
+/// The blocking body of [`metadata_write`], split out so the save is reachable from a test without a Tauri
+/// runtime (CPE-1716 — the bug it fixes returned `Ok` throughout, so it can only be caught by a test that
+/// asserts on the *file*, and that test needs to be able to call this).
+///
+/// `std::fs::read` follows a symlink, so `bytes` are already the real file's; the save now writes back to
+/// the same place rather than over the link.
+fn metadata_write_impl(
+    path: &str,
+    edits: &[cpe_server::media_meta_edit::MetaEdit],
+) -> Result<Vec<cpe_server::media_meta_edit::MetaField>, String> {
+    let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
+    let ext = std::path::Path::new(path)
+        .extension().and_then(|e| e.to_str()).unwrap_or("").to_string();
+    let out = cpe_server::media_meta::write_back(&ext, &bytes, edits)?;
+    cpe_server::fsutil::replace_file_contents(std::path::Path::new(path), &out)?;
+    Ok(cpe_server::media_meta::read_all(&ext, &out))
 }
 
 /// Every metadata column the details-view picker can offer (CPE-1145, epic CPE-707): a stable id (for
@@ -15548,6 +15546,140 @@ overlay / overlay rw,relatime 0 0
             tickets.join("Backlog").join(name).is_file(),
             "and the ticket must still be in its original column — a refused move that moved is not a \
              refusal"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1716: the metadata save must edit the file the user opened, not replace their link -------
+    //
+    // The site CPE-1710 classified out of class as "a file we own". It is the user's own media path off
+    // IPC, and it had **no** guard at all, so a *live* symlink was destroyed — not merely a dangling one.
+    // Three failures at once, all silent: the link went, the real file kept its old metadata, and the
+    // command returned `Ok` with the edited field echoed back.
+    //
+    // So these assert on the **file the user opens** and on the **slot still being a link** before they
+    // look at the `Result`. `ok: true` was the pre-fix outcome; a test that trusted it would have passed.
+
+    /// A minimal well-formed WAV (`RIFF`/`fmt `/`data`) — enough for the wav codec to read and rewrite.
+    fn tiny_wav(audio: &[u8]) -> Vec<u8> {
+        let fmt: [u8; 16] = [1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0, 0, 0, 0, 4, 0, 16, 0];
+        let mut body = Vec::new();
+        body.extend_from_slice(b"WAVE");
+        body.extend_from_slice(b"fmt ");
+        body.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        body.extend_from_slice(&fmt);
+        body.extend_from_slice(b"data");
+        body.extend_from_slice(&(audio.len() as u32).to_le_bytes());
+        body.extend_from_slice(audio);
+        if audio.len() % 2 != 0 {
+            body.push(0);
+        }
+        let mut out = Vec::new();
+        out.extend_from_slice(b"RIFF");
+        out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    fn set_title(v: &str) -> cpe_server::media_meta_edit::MetaEdit {
+        cpe_server::media_meta_edit::MetaEdit::Set {
+            group: "wav".into(),
+            key: "Title".into(),
+            value: v.into(),
+        }
+    }
+
+    fn title_on_disk(p: &std::path::Path) -> Option<String> {
+        let bytes = fs::read(p).ok()?;
+        cpe_server::media_meta::read_all("wav", &bytes)
+            .into_iter()
+            .find(|f| f.key == "Title")
+            .map(|f| f.value)
+    }
+
+    /// **The reproduction, inverted.** A live symlink standing in a symlink-organised library: the edit
+    /// must land on the file the link points at, and the link must still be a link afterwards.
+    ///
+    /// Runs for real on Unix always, and on Windows with Developer Mode or elevation. A file symlink is
+    /// the one construction that cannot be faked without privilege — a junction is directory-only, and a
+    /// hard link is not a link as far as `symlink_metadata` is concerned — so where this cannot run, the
+    /// decision it drives is still covered on that runner by `fsutil`'s `classify_write_target` arms and
+    /// by `replace_file_contents`'s dangling-link leg (which the junction fallback stages everywhere).
+    /// That matters because a skip notice printed here is invisible under CI (CPE-1717).
+    #[test]
+    fn cpe_1716_metadata_write_edits_the_file_a_live_link_points_at_and_keeps_the_link() {
+        use std::io::Write;
+        let d = scratch("cpe1716_meta_live_link");
+        let real = d.join("real-track.wav");
+        fs::write(&real, tiny_wav(b"AUDIOAUDIO")).unwrap();
+        let link = d.join("01 - My Track.wav");
+
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&real, &link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&real, &link).is_ok();
+        if !made {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1716] SKIPPED the metadata_write LIVE-link leg: this machine cannot create a file \
+                 symlink at {} (Windows without Developer Mode / admin). The resolution it drives is \
+                 still covered on this runner by fsutil::classify_write_target.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = metadata_write_impl(&link.to_string_lossy(), &[set_title("EDITED")]);
+
+        // The FILE first, then the slot, and only then the result — in that order on purpose. Pre-fix the
+        // result was `Ok` carrying `Title = "EDITED"` while both of these were wrong.
+        assert_eq!(
+            title_on_disk(&real).as_deref(),
+            Some("EDITED"),
+            "the REAL media file the link points at must carry the edit (result was {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "and the user's link must still be a LINK — pre-fix the save replaced it with a regular file \
+             holding the edit, forking the library (result was {r:?})"
+        );
+        let fields = r.expect("and the save itself must succeed");
+        assert_eq!(
+            fields.iter().find(|f| f.key == "Title").map(|f| f.value.as_str()),
+            Some("EDITED"),
+            "and the fields reported back must be the ones now on disk"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The success report must describe bytes that actually landed. Runs on every runner: no link, no
+    /// privilege, just the ordinary save — the returned fields are compared against a **fresh read of the
+    /// file**, which is the check that would have caught the echo-back lie regardless of the symlink.
+    #[test]
+    fn cpe_1716_metadata_write_reports_only_what_reached_the_file() {
+        let d = scratch("cpe1716_meta_plain");
+        let f = d.join("track.wav");
+        fs::write(&f, tiny_wav(b"AUDIOAUDIO")).unwrap();
+
+        let fields = metadata_write_impl(&f.to_string_lossy(), &[set_title("EDITED")])
+            .expect("an ordinary save must succeed");
+
+        assert_eq!(
+            title_on_disk(&f).as_deref(),
+            Some("EDITED"),
+            "the file must actually hold the edit — a report is not a save"
+        );
+        assert_eq!(
+            fields.iter().find(|f| f.key == "Title").map(|f| f.value.as_str()),
+            Some("EDITED"),
+            "and the reported fields must match it"
+        );
+        assert!(
+            !fs::read_dir(&d).unwrap().flatten().any(|e| {
+                e.file_name().to_string_lossy().contains(".cpe-tmp")
+            }),
+            "and the staging temp must not be left sitting in the user's music folder"
         );
         let _ = fs::remove_dir_all(&d);
     }

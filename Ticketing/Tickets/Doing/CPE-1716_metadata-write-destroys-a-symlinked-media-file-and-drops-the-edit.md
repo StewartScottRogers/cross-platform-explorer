@@ -3,7 +3,7 @@ id: CPE-1716
 title: Editing metadata on a symlinked media file destroys the link, drops the edit, and reports success
 type: bug
 priority: High
-status: Backlog
+status: Doing
 tags: ready
 estimate: M
 created: 2026-08-13
