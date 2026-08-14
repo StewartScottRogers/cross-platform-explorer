@@ -1239,8 +1239,16 @@ mod tests {
     ///
     /// Driven over the real wire with a raw request rather than through `WebdavProvider`, because the
     /// provider always sets the header — the bug is only reachable by a client that does not, which is
-    /// exactly the "obeying a remote instruction" case CPE-1726 is about. Asserts on the root still
-    /// being there with its seeded contents, never on the status code alone.
+    /// exactly the "obeying a remote instruction" case CPE-1726 is about.
+    ///
+    /// **The request is `MOVE /`, and that choice is the evidence.** On any other path the invented
+    /// destination was *latent* rather than damaging: `fs::rename(some_file, root)` fails anyway,
+    /// because the seeded root is a non-empty directory, so the rig was saved by the OS rather than by
+    /// its own logic. `MOVE /` is the case where source and destination are both the served root, and
+    /// POSIX `rename` (and Windows) succeed on a same-file rename — so pre-fix a request that named
+    /// **no destination at all** got a `201 Created`. Being saved by an errno is not a guard, and a rig
+    /// that reports success for a request it could not understand cannot be trusted to model the wire.
+    /// Asserts on the tree still being there as well as on the refusal, never on the status alone.
     #[test]
     fn cpe_1726_a_move_with_no_destination_header_never_targets_the_server_root() {
         use std::io::{Read as _, Write as _};
@@ -1255,7 +1263,7 @@ mod tests {
         // above exists for).
         sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
         sock.write_all(
-            b"MOVE /readme.txt HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+            b"MOVE / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
         )
         .expect("send a MOVE with no Destination header");
         let mut resp = String::new();
@@ -1263,9 +1271,9 @@ mod tests {
 
         assert!(
             root.join("readme.txt").is_file(),
-            "the source must still be there: with no Destination the rig had nothing to move it to, and \
-             pre-fix it moved it onto `root.join(\"\")` — the served root — instead of refusing \
-             (response was {resp:?})"
+            "the served tree must still be there: with no Destination the rig had nothing to move \
+             anything to, and pre-fix it invented `root.join(\"\")` — the served root itself — instead \
+             of refusing (response was {resp:?})"
         );
         assert!(
             root.join("sub").join("nested.txt").is_file(),

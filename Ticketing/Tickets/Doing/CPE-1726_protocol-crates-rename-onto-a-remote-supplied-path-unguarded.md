@@ -81,3 +81,64 @@ Related: **CPE-1710** (the pairing and the clippy ban that made these sites visi
 resolve-vs-claim distinction and the Windows staging constraints), **CPE-1719** (the sidecar precedent for
 reimplementing rather than depending across a crate boundary, and the `fs::write`-follows-a-link failure),
 **CPE-1461** (the traversal guard these crates already carry).
+
+## Work Log
+
+**2026-08-14 — the measurement that decided it.** The ticket's framing ("a user running the SFTP server to
+share a folder did not agree to have their symlinks replaced by whoever connects") describes a server this
+repo does not ship. `cpe-ftp`, `cpe-sftp` and `cpe-webdav` are **client-side `FileSystemProvider`
+implementations**. Every `fs::rename` named by this ticket — and every other destructive local primitive in
+all three crates — sits inside `#[cfg(test)] mod tests`, in an in-process fake server that exists to give
+the client something to talk to:
+
+| crate | `#[cfg(test)]` at | rename site | verdict |
+|---|---|---|---|
+| `cpe-ftp` | line 363 | 554 (`RNTO`) | in the rig |
+| `cpe-sftp` | line 377 | 569 (`Handler::rename`) | in the rig |
+| `cpe-webdav` | line 527 | 635 (`MOVE`) | in the rig |
+
+So the third answer the ticket identified — *"I am obeying a remote instruction"* — resolves cleanly here,
+but not by weighing protocol fidelity against the destination owner's consent. The **destination owner does
+not exist**: the "remote client" is a test in the same file, over loopback, against a per-test temp root
+the rig created and seeded itself. With that party absent, the only remaining consideration is fidelity,
+and it points one way: a test double that refuses what every real FTP daemon, OpenSSH `sftp-server` and
+Nextcloud does would make the client tests pass against a server unlike any the app will meet.
+
+**Decision: all three stay unguarded**, with the `#[allow]` reason at each site rewritten to state the
+measurement (not the category), name this ticket, and point at the test that pins it.
+
+**What keeps that a measurement rather than a comment that used to be true:**
+`cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig`, one per crate — a source scan
+asserting no destructive `std::fs` primitive exists above the `#[cfg(test)]` marker. Promote any of these
+rigs to production and the decision is forced open again instead of being inherited.
+
+**Cross-crate boundary (the ticket asked):** CPE-1719's reimplement-rather-than-depend precedent does
+**not** apply. All three crates already carry `cpe-server = { path = "../server" }`, so
+`fsutil::require_staged`, `fsutil::make_dangling_link` and `skip_notice!` were reachable directly.
+
+**Where the three crates genuinely differed** — `cpe-webdav` only, and both are real defects the other two
+are structurally immune to:
+
+1. **`MOVE`'s destination was invented when the client named none.** The header parse ended
+   `.unwrap_or_default()`, so an absent or malformed `Destination` became `""` and `root.join("")` handed
+   `fs::rename` the **served root itself**. Measured: `MOVE /` with no header returned **`201 Created`**.
+   Now a `400`. FTP and SFTP take source and destination from the *same* resolver in the same message, so
+   neither has a second path to get wrong.
+2. **`DELETE` classified dir-vs-file with `real.is_dir()`, which follows the final component** — a symlink
+   to a directory answered "directory" and went to `remove_dir_all`, recursing *through* the link. Now
+   `symlink_metadata`, which never follows, so one stat answers link/dir/file (CPE-1719's finding). FTP
+   (`DELE`/`RMD`) and SFTP (`remove`/`rmdir`) get separate wire verbs and never classify at all.
+
+**Sibling primitives, all crates** (AC 4): `fs::write` in FTP's `STOR` and WebDAV's `PUT`, and
+`OpenOptions::create(true)` in SFTP's `open`, all **follow** a link and write *through* it — CPE-1719's
+shape. Left as-is on the same measured reason, and now recorded at each site so the next sweep does not
+rediscover which shape it is. No `fs::copy` or `File::create` in any of the three.
+
+**Filed:** CPE-1730 — the rigs' path resolvers are bare `root.join(rel)` with no confinement, so a
+`..`-shaped remote path escapes the temp root. Latent (nothing sends one today) but the blast radius is a
+developer's working tree, so it is a ticket rather than a shrug. Deliberately out of scope here.
+
+**Also fixed while building the evidence:** the first version of the new WebDAV raw-socket test omitted
+`Connection: close`, and tiny_http's keep-alive turned it into a **hang** rather than a red — libtest has
+no per-test timeout, so CI would have sat there until the job limit. Caught locally; bounded with the
+header plus a read timeout.
