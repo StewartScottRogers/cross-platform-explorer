@@ -103,6 +103,14 @@ client, and none of this applies to it yet.
   first. An **empty** folder really is just one key (its marker), so that one is deleted normally.
   Related: because S3 answers "no content" to a delete whether or not the object was ever there, a
   successful delete means *"this key is gone now"* rather than *"something was removed"*.
+- **Deleting needs list permission as well as delete permission.** Because folders aren't real, the only
+  way to tell "one object" from "a folder with things inside it" is to list the prefix first — so a
+  delete asks the store to list before it removes anything. A key that grants `s3:DeleteObject` but not
+  `s3:ListBucket` (a common setup on self-hosted MinIO and Ceph) therefore can't delete, and the app says
+  so plainly: it names the listing request as the thing that was refused, tells you nothing was deleted,
+  and points at the missing permission. It will not fall back to deleting without looking — that's the
+  one path that could report a whole folder removed while everything in it is still there. Reading,
+  writing and getting the details of an object you can name work as normal without list permission.
 - **Uploads are a single request**, so an individual file larger than 5 GB isn't uploadable
   (multi-part upload isn't planned for the first version).
 - **Keys are taken literally in the middle, but the app currently tidies the ends.** A key is an opaque
@@ -118,7 +126,10 @@ client, and none of this applies to it yet.
   library the app uses rewrites those segments away while building the request, so the app would end up
   asking for a different object than the one it signed for. Rather than silently fetch the wrong object,
   the app refuses such a key and says why. Keys like this are rare and usually accidental; support for
-  them needs a different HTTP library and is tracked separately.
+  them needs a different HTTP library and is tracked separately. One rough edge while that's outstanding:
+  *listing* such a folder isn't affected by the rewriting, so if you type a path like `/a/../b` you get a
+  folder that opens and browses normally — but every file shown inside it will refuse to open, for the
+  reason above. You can't reach one by clicking; only by typing it.
 - **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
   the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
   is why **Access key** is the only authentication S3 offers.
