@@ -303,3 +303,46 @@ feature modes (default and `--features index`); `src-tauri` clippy clean in both
 - **CPE-1716** (filed by the Foreman from the UAT, High) — `metadata_write` renames onto the user's own
   media path with **no guard at all**, destroying even a **live** symlink and losing the edit while
   reporting success.
+
+## Round 4 (Foreman-applied, from the round-4 UAT + review)
+
+**The lint covered 6 of 17 workspace roots.** Only the ones that rename *today* had a `clippy.toml`.
+There is no root `Cargo.toml`, so every crate is an independent workspace root and a missing file is a
+**silent hole**, not an error. The UAT measured it: an unguarded `std::fs::rename` appended to
+`crates/vfs` drew **zero** diagnostics from that crate's own CI command. `crates/s3`'s rename is a stub
+and `crates/vfs` is the remote-filesystem layer, so the next author in either would have got nothing.
+
+All **17** roots now carry it; the 11 that do not rename today say so and say why the file is there
+anyway. Proved by inverting the UAT's probe: the same appended rename now gives `error: use of a
+disallowed method std::fs::rename` in `crates/vfs`, and `git checkout --` restores it clean with a real
+recompile. The reviewer then broke one `#[allow]` per root and confirmed a real diagnostic in each of the
+six original roots plus both new ones, and checked the other ten new files are byte-identical (SHA-256)
+to the one proven to bite.
+
+**The `dyn` gap was worded so it could be read as "impls do not need guarding".** That is false and errs
+toward complacency. The **impl body IS covered** -- which is exactly why `provider.rs` needs its own
+`#[allow]`; what is uncovered is a **caller** through a trait object. Corrected in all `clippy.toml`
+files and in `rename_into_slot`'s own doc, which was the one place the correction had not reached.
+
+Evasion probes run by both checks, each alone with a real recompile: an **alias**, a **re-export**, a
+**bound-but-uncalled fn value**, a **macro expansion**, a **const fn-pointer field**, and an **impl
+body** -- the lint flagged **all six**. Only the `&dyn` caller escapes.
+
+**The `#[allow]` count was stated as 17; it is 25** (24 excluding `rename_into_slot`'s own sanctioned
+one). Counted by the UAT. That is the same species of unverified figure this design exists to eliminate,
+which is why it is recorded here rather than quietly corrected.
+
+**`disallowed_methods` is warn-by-default.** It only fails a build because CI passes `-D warnings` on
+every invocation; a bare local `cargo clippy` prints the warning and exits 0. Now stated in every
+`clippy.toml` and in the helper's doc.
+
+**Accepted, not fixed:** an `#[allow]` on an `if` **statement** covers its body, so a second unguarded
+rename added inside that block would pass. Measured at `vault_manager.rs:255` (exit 0), and the same
+shape exists at `src-tauri:2445` (8-line body) and `:3085` (7-line body). The reviewer's judgement,
+which I accept: **recommended, not required** -- the aperture is a few lines inside one function whose
+justification sits three lines above, which is not true of a function- or module-scoped allow.
+
+**Filed rather than fixed:** `sidecar/agent-board::move_card` writes **through** a live link with
+`fs::write` and destroys the user's unrelated file while returning `Ok` -- **CPE-1719**, measured. It is
+the sidecar twin of `board_move_impl`, missed because the primitive differs from `fs::rename` *and* its
+root was one of the eleven uncovered.

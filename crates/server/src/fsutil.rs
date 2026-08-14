@@ -260,8 +260,18 @@ pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
 /// instead of in a PR description nobody reads twice. Round 1's lived in a PR description and was wrong
 /// twice.
 ///
-/// **Known gap, stated rather than papered over:** `disallowed_methods` cannot see a rename reached
-/// through a `dyn` trait object, so a `Provider::rename` implementation is not covered by it.
+/// **Known gaps, stated rather than papered over — and the first one was itself stated wrongly once.**
+///
+/// 1. `disallowed_methods` resolves paths, not `dyn` dispatch. An **`impl` body IS covered** — measured:
+///    removing the `#[allow]` at `provider.rs:162` gives `error: use of a disallowed method
+///    std::fs::rename`. What is **not** covered is a **caller** reaching rename through a trait object;
+///    a `fn(p: &mut dyn FileSystemProvider) { p.rename(a, b) }` produces zero diagnostics. An earlier
+///    version of this very comment said the *implementation* was uncovered, which is false and errs
+///    toward complacency about impls. The CPE-1710 round-4 review also probed an alias, a re-export, a
+///    bound-but-uncalled fn value, a macro expansion and a const fn-pointer field — the lint flagged all
+///    of them. The `dyn` caller is the only escape.
+/// 2. `disallowed_methods` is **warn-by-default**. It only fails a build because CI passes `-D warnings`
+///    on every invocation; a bare local `cargo clippy` prints the warning and exits 0.
 pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(), String> {
     if let Some(e) = rename_slot_refusal(target, occupied) {
         return Err(e);
