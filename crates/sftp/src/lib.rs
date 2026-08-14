@@ -1305,10 +1305,25 @@ mod tests {
                     root.join(DIR_NAME).join("nested.txt").is_file(),
                     "[{why}] and the rest of the served tree must be intact (rename reported {r:?})"
                 );
+                // `is_err()` alone is **not enough here, and the Linux measurement is why.** With the
+                // `..` pop neutralised, `/nonexistent/..` stops being caught by the guard and is
+                // stopped instead by `fs::rename`'s `ENOENT` — which `io_err` maps to `NoSuchFile`,
+                // still an `Err`, so a bare `is_err()` would stay green through a broken guard on
+                // exactly the row that guard exists for. Being saved by an errno is not the same as
+                // being guarded, and this is where the two are told apart.
+                //
+                // The two strings are **measured, not guessed** — `SftpProvider::rename` formats
+                // `"{from} -> {to}: {e}"` around russh-sftp's `Display`, which yields
+                // `"/ -> : Failure: Failure"` for the refusal and
+                // `"…: No such file: No such file"` for an `ENOENT`. If a dependency bump changes that
+                // wording this assertion goes red with the strings in the message, which is the right
+                // way for it to break.
+                let msg = r.as_ref().err().cloned().unwrap_or_default();
                 assert!(
-                    r.is_err(),
-                    "[{why}] a destination that resolves to the served root is a refusal, not a \
-                     rename the server reports as done"
+                    r.is_err() && msg.contains("Failure") && !msg.contains("No such file"),
+                    "[{why}] a destination that resolves to the served root is a refusal \
+                     (SSH_FX_FAILURE), not a rename the server reports as done and not an incidental \
+                     ENOENT. Got {r:?}"
                 );
             } else {
                 assert_eq!(
@@ -1363,11 +1378,13 @@ mod tests {
                 "[{spell}] the served tree must survive a rename onto a different spelling of the root \
                  ({why}); rename reported {r:?}"
             );
+            let msg = r.as_ref().err().cloned().unwrap_or_default();
             assert!(
-                r.is_err(),
-                "[{spell}] {why}, so this destination IS the served root and must be refused. \
-                 Byte-wise path equality does not know that, which is why the check consults the \
-                 filesystem"
+                r.is_err() && msg.contains("Failure") && !msg.contains("No such file"),
+                "[{spell}] {why}, so this destination IS the served root and must be refused \
+                 (SSH_FX_FAILURE, not an incidental ENOENT — see the table test's note). Byte-wise \
+                 path equality does not know that, which is why the check consults the filesystem. \
+                 Got {r:?}"
             );
         }
     }

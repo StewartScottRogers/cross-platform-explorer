@@ -812,20 +812,37 @@ fn normalise_lexically(p: &Path) -> PathBuf {
 /// # Each half is load-bearing on exactly one platform
 ///
 /// Measured, not reasoned (CPE-1726 on `cpe-webdav`, re-measured by CPE-1731 through `cpe-ftp`'s and
-/// `cpe-sftp`'s own resolvers — see [`same_place`]'s tests and the ticket's probe output):
+/// `cpe-sftp`'s own resolvers — see this function's tests and the ticket's probe output):
 ///
 /// | probe | Windows | Linux |
 /// |---|---|---|
 /// | `canonicalize` removed | **red** (spelling rows) | pass |
-/// | `..` popping removed | pass | **red** (`..` rows) |
+/// | `..` popping removed | pass | **red** — but only one row, see below |
 /// | both removed | **red** | **red** |
 ///
 /// Windows normalises `..` during path processing, so `root\nonexistent\..` opens as `root` and
 /// `canonicalize` succeeds even though `nonexistent` does not exist — which is why the lexical pop
-/// looks redundant there. Linux resolves `..` against real directories, so that call fails
-/// (`canonicalize("<root>/nonexistent/..") -> Err ENOENT`, measured under WSL) and the pop is the only
-/// thing left. Conversely `canonicalize` is what catches the case-insensitive and trailing-dot
-/// spellings, which only exist on Windows.
+/// looks redundant there. Conversely `canonicalize` is what catches the case-insensitive and
+/// trailing-dot spellings, which only exist on Windows.
+///
+/// **The Linux cell is narrower than CPE-1726's version of this table said, and CPE-1731 measured it
+/// rather than copying it.** Of the three `..` rows, `canonicalize` succeeds on Linux for `/sub/..`
+/// and `/./sub/../.` — `sub` exists, so the whole path resolves — and the pop is therefore *not* what
+/// catches them there either. Only `/nonexistent/..` reaches the lexical fallback
+/// (`canonicalize -> Err ENOENT`), so the pop is load-bearing on Linux for **exactly one row**:
+///
+/// ```text
+/// LINUX, `..` pop REMOVED  (probe output, WSL)
+///   /nonexistent/..  same_place = false -> rename Err(NotFound) -> refused BY AN ERRNO, not by the guard
+///   /sub/..          same_place = true  -> guard fires
+///   /./sub/../.      same_place = true  -> guard fires
+/// ```
+///
+/// That "refused by an errno" is why the callers' tests assert the *specific* refusal — `cpe-ftp` pins
+/// `553` (an `ENOENT` answers `550`) and `cpe-sftp` pins `SSH_FX_FAILURE` and explicitly rejects the
+/// `NoSuchFile` wording. A bare "it returned an error" would have stayed green on Linux through a
+/// neutralised pop, on the one row the pop exists for. Copying the old table's "**red** (`..` rows)"
+/// without re-measuring would have hidden that.
 ///
 /// And the Windows-wide short-circuit is **correct**, not merely tolerated, because `fs::rename` goes
 /// through the same Win32 path processing — `MoveFileExW` performs the identical `..` stripping, so
