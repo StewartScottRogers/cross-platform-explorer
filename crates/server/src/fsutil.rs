@@ -795,9 +795,9 @@ fn normalise_lexically(p: &Path) -> PathBuf {
 ///
 /// `canonicalize` answers exactly that question and is the filesystem's own opinion rather than a table
 /// of its rules — but it requires the path to **exist**, and a rename to a not-yet-existing name is the
-/// ordinary case. So: canonicalize when both sides resolve, fall back to [`normalise_lexically`] when
-/// they do not. The fallback is what handles the common `/`, `/./`, `/sub/..` shapes, none of which
-/// need the filesystem.
+/// ordinary case. So: canonicalize when both sides resolve, fall back to a purely lexical comparison
+/// (`normalise_lexically`, private, below) when they do not. The fallback is what handles the common
+/// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
 ///
 /// **"When they do not resolve" means any `Err`, not just "does not exist"** — `EACCES` on a parent,
 /// `ELOOP`, `ENAMETOOLONG`, a Windows sharing violation. In those cases this silently becomes the
@@ -809,16 +809,32 @@ fn normalise_lexically(p: &Path) -> PathBuf {
 /// spelling that *needs* `canonicalize` requires the client to know the absolute root path, which is
 /// CPE-1730's territory rather than this guard's.
 ///
-/// # Each half is load-bearing on exactly one platform
+/// # Each half is load-bearing on exactly one platform *class*
 ///
 /// Measured, not reasoned (CPE-1726 on `cpe-webdav`, re-measured by CPE-1731 through `cpe-ftp`'s and
 /// `cpe-sftp`'s own resolvers — see this function's tests and the ticket's probe output):
 ///
-/// | probe | Windows | Linux |
+/// | probe | Windows | non-Windows |
 /// |---|---|---|
 /// | `canonicalize` removed | **red** (spelling rows) | pass |
 /// | `..` popping removed | pass | **red** — but only one row, see below |
 /// | both removed | **red** | **red** |
+///
+/// **"non-Windows", not "Linux", and the distinction is not pedantry — CI runs three OSes.** macOS is
+/// the awkward one: HFS+/APFS are case-**insensitive** by default, so the intuition that "family 3 is
+/// a Windows thing because only Windows folds case" is wrong there. What actually makes the column
+/// hold is different and stronger: family 3 needs an **absolute** destination, and both rigs'
+/// resolvers `trim_start_matches('/')` first, so on any POSIX host an absolute path becomes relative
+/// and lands *inside* the root — measured `same_place = false`, independently reproduced by this
+/// ticket's UAT. The spelling is therefore unreachable on macOS for a reason that has nothing to do
+/// with case folding, which is why the column is safe to state over "non-Windows" rather than only
+/// over the one POSIX platform that was probed.
+///
+/// The previous version of this table said "Windows | Linux" and was silently claiming a two-platform
+/// world. Recorded because *this table is the artefact CPE-1731 already had to correct once* for being
+/// broader than its evidence, and the fix for that must not introduce a narrower error in its place.
+/// **Not measured:** no neutralisation run was performed on macOS at all — the column above is
+/// evidenced on Linux and argued to macOS through the resolver, and that is the boundary.
 ///
 /// Windows normalises `..` during path processing, so `root\nonexistent\..` opens as `root` and
 /// `canonicalize` succeeds even though `nonexistent` does not exist — which is why the lexical pop
@@ -2835,7 +2851,7 @@ mod tests {
     /// The served root spelled in a way **only the filesystem** knows is the same place.
     ///
     /// Windows matches names case-insensitively and strips trailing dots, while `PathBuf` equality
-    /// compares `Component::Normal` byte-wise — so this is the row that [`normalise_lexically`] alone
+    /// compares `Component::Normal` byte-wise — so this is the row that `normalise_lexically` alone
     /// cannot answer, and the reason [`same_place`] consults `canonicalize` at all. Removing the
     /// `canonicalize` half turns exactly this test red and leaves the lexical one above green.
     ///

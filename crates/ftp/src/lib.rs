@@ -554,7 +554,32 @@ mod tests {
                     Ok(()) => send(&mut ctrl, "250 Removed\r\n"),
                     Err(_) => send(&mut ctrl, "550 Remove failed\r\n"),
                 },
-                "MKD" => match std::fs::create_dir_all(real_path(&root, &arg)) {
+                // CPE-1731: `create_dir`, **not** `create_dir_all` — the mirror of the `RMD` fix above,
+                // and found by the reviewer applying this PR's own argument to the verb sitting four
+                // lines from it. RFC 959 §4.1.3 `MKD` is `mkdir(2)`: it creates **one** directory, and a
+                // real daemon answers `550` both for a missing parent and for a name that already
+                // exists. `create_dir_all` succeeded in both — inventing the parent chain in the first,
+                // and reporting `257 "…" created` for a directory it did not create in the second. A
+                // test double that succeeds where the wire refuses lets a client test pass against
+                // behaviour no real server has, which is the whole reason `RMD` changed.
+                //
+                // Cost measured before taking the fix: with `create_dir`, `cpe-ftp` is 13/13 and
+                // `cpe-sftp` 28/28 green, so nothing in either suite depended on the recursion or on
+                // `create_dir_all`'s idempotence.
+                //
+                // **The `create_dir_all` in `STOR` above is deliberately left alone (CPE-1741), and the
+                // first draft of this note gave a reason that measurement falsified.** It claimed
+                // `upload_tree`'s round-trip needed it; removing the call leaves this crate **13/13
+                // green**, and `cpe-ftp` has no `upload_tree` test at all — the reason was invented,
+                // which is the exact substitution this ticket family exists to stop, so it is recorded
+                // rather than quietly swapped for a better one.
+                //
+                // The real reason is shape, not cost. It is a **different** defect: `STOR` has no
+                // directory-creating semantics to model at all — a real daemon fails outright when the
+                // parent is missing — so fixing it is not "make the primitive match the verb" but
+                // "remove a capability the wire never had", which changes what a *client* must do
+                // before uploading and needs its own client-side change and tests. Filed as CPE-1741.
+                "MKD" => match std::fs::create_dir(real_path(&root, &arg)) {
                     Ok(()) => send(&mut ctrl, &format!("257 \"{arg}\" created\r\n")),
                     Err(_) => send(&mut ctrl, "550 Create failed\r\n"),
                 },
@@ -1152,6 +1177,65 @@ mod tests {
         provider.mkdir("/emptydir").expect("mkdir");
         provider.delete("/emptydir").expect("RMD must still remove an EMPTY directory");
         assert!(!root.join("emptydir").exists(), "the empty directory must actually be gone");
+    }
+
+    /// CPE-1731 (reviewer's find): `MKD` is `mkdir(2)`, so it creates **one** directory — a missing
+    /// parent is refused rather than invented, and an existing name is refused rather than reported
+    /// created.
+    ///
+    /// Same argument as `cpe_1731_rmd_refuses_a_non_empty_directory_and_leaves_it_intact`, applied to
+    /// the verb four lines away from it in `handle_control`. It was found by the reviewer noticing that
+    /// this PR wrote the argument down and then walked past the sibling.
+    ///
+    /// # The missing-parent row is the one with real filesystem evidence, and it is not vacuous
+    /// `!root.join("nope").exists()` is a **negative** assertion, which passes for free if the path is
+    /// wrong — the trap a reviewer found elsewhere in this sprint. So the same path string is
+    /// independently established as creatable: after `MKD /nope` succeeds, `MKD /nope/deeper` must
+    /// succeed too. That proves the earlier refusal was about the absent parent and not about a name
+    /// the rig could never have created, and it proves `real_path` maps this string where the test
+    /// thinks it does.
+    ///
+    /// # The already-exists row's filesystem assertion cannot fail today, and says so
+    /// `create_dir_all` on an existing directory destroys nothing, so the observable defect there is
+    /// the *reply*: `257 "…" created` for a directory the server did not create. The contents check is
+    /// kept as the cheap thing that goes red if that ever stops being true.
+    #[test]
+    fn cpe_1731_mkd_creates_one_directory_and_refuses_a_missing_parent_or_an_existing_name() {
+        let (port, root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        // ── A missing parent is refused, and NOT invented.
+        let r = provider.mkdir("/nope/deeper");
+        assert!(
+            !root.join("nope").exists(),
+            "`MKD` must not invent the parent chain — RFC 959 gives it one directory (mkdir reported \
+             {r:?})"
+        );
+        assert!(r.is_err(), "and the client must be told so, not handed a 257 for a chain it created");
+
+        // ── …and the very same path is creatable once its parent exists, so the negative above was
+        // about the missing parent rather than about an unmappable name.
+        provider.mkdir("/nope").expect("MKD must create one directory");
+        assert!(root.join("nope").is_dir(), "the parent must now exist on disk");
+        provider.mkdir("/nope/deeper").expect("MKD must succeed once the parent is there");
+        assert!(
+            root.join("nope").join("deeper").is_dir(),
+            "and the child must land exactly where the refused call named"
+        );
+
+        // ── An existing name is refused rather than reported created.
+        let r = provider.mkdir(&format!("/{DIR_NAME}"));
+        assert_eq!(
+            std::fs::read(root.join(DIR_NAME).join("nested.txt")).ok().as_deref(),
+            Some(&b"deep"[..]),
+            "the existing directory's contents must be untouched (mkdir reported {r:?})"
+        );
+        assert!(
+            r.is_err(),
+            "a real daemon answers 550 for a name that already exists; reporting `257 \"…\" created` \
+             for a directory it did not create is the fiction this ticket is about"
+        );
     }
 
     #[test]

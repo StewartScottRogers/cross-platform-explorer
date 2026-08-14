@@ -400,6 +400,17 @@ mod tests {
     const FILE_BODY: &[u8] = b"hello world"; // 11 bytes
     const DIR_NAME: &str = "sub";
 
+    /// The SFTP rig's refusal message for a rename onto the served root (CPE-1731).
+    ///
+    /// Its whole job is to be a string **no errno can produce**. `io_err`'s catch-all maps every
+    /// unclassified failure to `StatusCode::Failure`, and russh-sftp renders a bare
+    /// `Err(StatusCode::Failure)` as `"Failure: Failure"` — so a test asserting *that* cannot tell a
+    /// guard refusal from a `fs::rename` that happened to fail with an unusual errno (the independent
+    /// UAT demonstrated it with a junction pointing at the root). This constant is referenced from
+    /// exactly two places: the guard that emits it and the test that requires it, which is what makes
+    /// `cpe-sftp`'s discriminator as errno-proof as `cpe-ftp`'s `553` is by construction.
+    const CPE_1731_ROOT_DESTINATION_REFUSAL: &str = "rename destination is the served root";
+
     fn ok_status(id: u32) -> Status {
         Status { id, status_code: StatusCode::Ok, error_message: String::new(), language_tag: String::new() }
     }
@@ -556,8 +567,47 @@ mod tests {
             Ok(ok_status(id))
         }
 
+        /// CPE-1731: `create_dir`, **not** `create_dir_all` — the mirror of the [`rmdir`] fix below,
+        /// and found by the reviewer applying this PR's own argument to the verb next to it.
+        /// `SSH_FXP_MKDIR` (OpenSSH's `sftp-server.c` `process_mkdir`) is `mkdir(2)`: it creates **one**
+        /// directory. A real server answers `SSH_FX_NO_SUCH_FILE` for a missing parent and
+        /// `SSH_FX_FAILURE` for a name that already exists; `create_dir_all` succeeded at both,
+        /// inventing the parent chain in the first case and reporting success for a directory it did
+        /// not create in the second.
+        ///
+        /// Both codes fall out of [`io_err`] rather than out of new branches, and both were measured:
+        /// a missing parent is `ErrorKind::NotFound` → `NoSuchFile`, an existing name is
+        /// `ErrorKind::AlreadyExists` → (neither `NotFound` nor `PermissionDenied`) → `Failure`. That
+        /// is exactly the pair OpenSSH returns.
+        ///
+        /// Cost measured before taking the fix: `cpe-sftp` is 28/28 and `cpe-ftp` 13/13 green with
+        /// `create_dir`, so nothing in either suite depended on the recursion or on `create_dir_all`'s
+        /// idempotence.
+        ///
+        /// # It also un-hid a real client bug — CPE-1741
+        ///
+        /// A first draft of this note said `upload_tree` is unaffected "because it already issues a
+        /// `mkdir` per level". Half true, and the missing half is the interesting one: it *does* walk
+        /// parents-before-children, but it also opens with an unconditional
+        /// `provider.mkdir(&base)?` ("ensure the remote root exists"), which `create_dir_all` made
+        /// idempotent and `create_dir` does not. Measured through this rig:
+        ///
+        /// ```text
+        /// mkdir onto the seeded /sub    = Err("/sub: Failure: Failure")
+        /// upload_tree -> /up (new)      = Ok(1)
+        /// upload_tree -> /up (existing) = Err("/up: Failure: Failure")
+        /// ```
+        ///
+        /// **Uploading into a remote folder that already exists fails.** That is not a regression this
+        /// change introduces — a real OpenSSH server answers `SSH_FX_FAILURE` for exactly that
+        /// `SSH_FXP_MKDIR`, so the client has always been broken against one; the recursive double was
+        /// the only reason it looked fine. The suite stays green because its one `upload_tree` test
+        /// uploads to a fresh base. Filed as **CPE-1741** rather than fixed here: the fix is in shipped
+        /// code (`cpe_server::transfer::upload_tree`) and needs a decision — tolerate `AlreadyExists`,
+        /// or stat first — plus its own tests. Left deliberately un-pinned here; a regression test
+        /// asserting the current failure would pin the bug in place.
         async fn mkdir(&mut self, id: u32, path: String, _attrs: FileAttributes) -> Result<Status, Self::Error> {
-            std::fs::create_dir_all(self.real(&path)).map_err(io_err)?;
+            std::fs::create_dir(self.real(&path)).map_err(io_err)?;
             Ok(ok_status(id))
         }
 
@@ -614,6 +664,24 @@ mod tests {
         /// first would keep the headline regression row green with this comparison deleted — masking
         /// exactly the guard the row exists to prove.
         ///
+        /// # Why this returns a `Status` with a message rather than `Err(StatusCode::Failure)`
+        ///
+        /// So the refusal is **distinguishable from an errno**, which the independent UAT showed it
+        /// otherwise is not. `Err(StatusCode)` makes russh-sftp synthesise `error_message` from the
+        /// code itself (`Packet::error` → `code.to_string()`), so the client sees `"Failure: Failure"`
+        /// — and [`io_err`]'s catch-all arm produces that *same* string for any non-ENOENT,
+        /// non-EACCES failure. Measured by the UAT: with this guard neutralised,
+        /// `rename("/", "/link")` where `link` is a junction to the root fails inside `fs::rename` and
+        /// still reports `"Failure: Failure"`, satisfying an assertion meant to prove the guard fired.
+        ///
+        /// No shipped row was affected — all sixteen return `Ok(())` with the guard removed, so every
+        /// one of them reds — but that is an assertion which *happens* to discriminate because of
+        /// which rows exist today, one step out from the trap this PR already corrected once. So the
+        /// guard now emits [`CPE_1731_ROOT_DESTINATION_REFUSAL`], a string reachable from this line and
+        /// no other: `error_message` is a real `SSH_FXP_STATUS` field that OpenSSH populates too, so
+        /// this is *more* wire-faithful than the bare code, not less. It gives SFTP what `cpe-ftp`'s
+        /// `553` already had by construction — a refusal no errno can spell.
+        ///
         /// **The SOURCE side is deliberately NOT guarded, and the gap is real:** `rename("/", "/x")`
         /// still moves the served root into a subdirectory. Out of scope by choice, not by oversight —
         /// this ticket's subject is the destination, `cpe-webdav` has the identical asymmetry recorded
@@ -623,7 +691,12 @@ mod tests {
         async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
             let dest = self.real(&newpath);
             if cpe_server::fsutil::same_place(&dest, &self.root) {
-                return Err(StatusCode::Failure);
+                return Ok(Status {
+                    id,
+                    status_code: StatusCode::Failure,
+                    error_message: CPE_1731_ROOT_DESTINATION_REFUSAL.to_string(),
+                    language_tag: "en-US".to_string(),
+                });
             }
             // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a category
             // ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not wrap this in
@@ -1305,25 +1378,32 @@ mod tests {
                     root.join(DIR_NAME).join("nested.txt").is_file(),
                     "[{why}] and the rest of the served tree must be intact (rename reported {r:?})"
                 );
-                // `is_err()` alone is **not enough here, and the Linux measurement is why.** With the
-                // `..` pop neutralised, `/nonexistent/..` stops being caught by the guard and is
-                // stopped instead by `fs::rename`'s `ENOENT` — which `io_err` maps to `NoSuchFile`,
-                // still an `Err`, so a bare `is_err()` would stay green through a broken guard on
-                // exactly the row that guard exists for. Being saved by an errno is not the same as
-                // being guarded, and this is where the two are told apart.
+                // `is_err()` alone is **not enough here, and two separate measurements say so.**
                 //
-                // The two strings are **measured, not guessed** — `SftpProvider::rename` formats
-                // `"{from} -> {to}: {e}"` around russh-sftp's `Display`, which yields
-                // `"/ -> : Failure: Failure"` for the refusal and
-                // `"…: No such file: No such file"` for an `ENOENT`. If a dependency bump changes that
-                // wording this assertion goes red with the strings in the message, which is the right
-                // way for it to break.
+                // 1. With the `..` pop neutralised, `/nonexistent/..` stops being caught by the guard
+                //    and is stopped instead by `fs::rename`'s `ENOENT` — still an `Err`, so a bare
+                //    `is_err()` stays green through a broken guard on exactly the row that guard
+                //    exists for. Confirmed on real Linux by the independent UAT, which recorded
+                //    `bare_is_err_would_pass = true` for **all three** `..` rows.
+                // 2. The first fix for (1) — `contains("Failure") && !contains("No such file")` — was
+                //    itself insufficient, and the UAT showed why: `io_err`'s catch-all also yields
+                //    `Failure`, and with the guard neutralised a junction destination made
+                //    `fs::rename` fail with a non-ENOENT errno reported as the identical
+                //    `"Failure: Failure"`. It discriminated only because of which rows happen to
+                //    exist — the same trap one step further out.
+                //
+                // So the refusal carries a string **no errno can spell**, emitted from the guard and
+                // nowhere else. `SftpProvider::rename` formats `"{from} -> {to}: {e}"` around
+                // russh-sftp's `Display` (`"{status_code}: {error_message}"`), so a real refusal reads
+                // `"/ -> : Failure: rename destination is the served root"`. If a dependency bump
+                // changes that rendering this goes red with the string in the message, which is the
+                // right way for it to break.
                 let msg = r.as_ref().err().cloned().unwrap_or_default();
                 assert!(
-                    r.is_err() && msg.contains("Failure") && !msg.contains("No such file"),
-                    "[{why}] a destination that resolves to the served root is a refusal \
-                     (SSH_FX_FAILURE), not a rename the server reports as done and not an incidental \
-                     ENOENT. Got {r:?}"
+                    r.is_err() && msg.contains(CPE_1731_ROOT_DESTINATION_REFUSAL),
+                    "[{why}] a destination that resolves to the served root must be refused BY THE \
+                     GUARD — not renamed, and not merely failed by whatever errno `fs::rename` \
+                     happened to return. Got {r:?}"
                 );
             } else {
                 assert_eq!(
@@ -1380,11 +1460,11 @@ mod tests {
             );
             let msg = r.as_ref().err().cloned().unwrap_or_default();
             assert!(
-                r.is_err() && msg.contains("Failure") && !msg.contains("No such file"),
-                "[{spell}] {why}, so this destination IS the served root and must be refused \
-                 (SSH_FX_FAILURE, not an incidental ENOENT — see the table test's note). Byte-wise \
-                 path equality does not know that, which is why the check consults the filesystem. \
-                 Got {r:?}"
+                r.is_err() && msg.contains(CPE_1731_ROOT_DESTINATION_REFUSAL),
+                "[{spell}] {why}, so this destination IS the served root and must be refused by the \
+                 GUARD, not by an incidental errno (see the table test's note). Byte-wise path \
+                 equality does not know these spellings name the root, which is why the check \
+                 consults the filesystem. Got {r:?}"
             );
         }
     }
@@ -1429,6 +1509,66 @@ mod tests {
         provider.mkdir("/emptydir").expect("mkdir");
         provider.delete("/emptydir").expect("rmdir must still remove an EMPTY directory");
         assert!(!root.join("emptydir").exists(), "the empty directory must actually be gone");
+    }
+
+    /// CPE-1731 (reviewer's find): `SSH_FXP_MKDIR` is `mkdir(2)`, so it creates **one** directory — a
+    /// missing parent is refused rather than invented, and an existing name is refused rather than
+    /// reported created.
+    ///
+    /// Same argument as `cpe_1731_rmdir_refuses_a_non_empty_directory_and_leaves_it_intact`, applied to
+    /// the verb next to it. It was found by the reviewer noticing that this PR wrote the argument down
+    /// and then walked past the sibling.
+    ///
+    /// # The missing-parent row is the one with real filesystem evidence, and it is not vacuous
+    /// `!root.join("nope").exists()` is a **negative** assertion, which passes for free if the path is
+    /// wrong — the trap a reviewer found elsewhere in this sprint. So the same path string is
+    /// independently established as creatable: after `mkdir /nope` succeeds, `mkdir /nope/deeper` must
+    /// succeed too. That proves the earlier refusal was about the absent parent rather than about a
+    /// name the rig could never have created.
+    ///
+    /// # The already-exists row's filesystem assertion cannot fail today, and says so
+    /// `create_dir_all` on an existing directory destroys nothing, so the observable defect there is
+    /// the false success. The contents check is kept as the cheap thing that goes red if that ever
+    /// stops being true.
+    #[test]
+    fn cpe_1731_mkdir_creates_one_directory_and_refuses_a_missing_parent_or_an_existing_name() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                .expect("connect");
+
+        // ── A missing parent is refused, and NOT invented.
+        let r = provider.mkdir("/nope/deeper");
+        assert!(
+            !root.join("nope").exists(),
+            "`mkdir` must not invent the parent chain — SSH_FXP_MKDIR creates one directory (mkdir \
+             reported {r:?})"
+        );
+        assert!(r.is_err(), "and the client must be told so, not handed success for a chain it created");
+
+        // ── …and the very same path is creatable once its parent exists, so the negative above was
+        // about the missing parent rather than about an unmappable name.
+        provider.mkdir("/nope").expect("mkdir must create one directory");
+        assert!(root.join("nope").is_dir(), "the parent must now exist on disk");
+        provider.mkdir("/nope/deeper").expect("mkdir must succeed once the parent is there");
+        assert!(
+            root.join("nope").join("deeper").is_dir(),
+            "and the child must land exactly where the refused call named"
+        );
+
+        // ── An existing name is refused rather than reported created.
+        let r = provider.mkdir(&format!("/{DIR_NAME}"));
+        assert_eq!(
+            std::fs::read(root.join(DIR_NAME).join("nested.txt")).ok().as_deref(),
+            Some(&b"deep"[..]),
+            "the existing directory's contents must be untouched (mkdir reported {r:?})"
+        );
+        assert!(
+            r.is_err(),
+            "a real server answers SSH_FX_FAILURE for a name that already exists; reporting success \
+             for a directory it did not create is the fiction this ticket is about"
+        );
     }
 
     #[test]
