@@ -65,6 +65,23 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   **minimap** down the right edge whose highlighted box tracks your scroll position — click or drag the
   minimap to jump. Select-all and copy still yield the whole file as plain text. Above the code, the
   **symbol outline** strip lets you jump straight to a function or class when one is recognised.
+- **Saving an edited file** — the preview editor answers the symlink questions exactly the way Metadata
+  Studio does, so the two never disagree about the same file:
+  - **Symlinks are followed.** If the file you opened is a symlink, the save edits the file the link points
+    at and the link stays a link.
+  - **A broken symlink is refused.** If the link points at something that isn't there any more, the save
+    stops and tells you which link it was and that nothing was written — rather than quietly creating a new
+    file at the far end of a broken link, which is what a plain save would do and is not something you'd
+    ever find again.
+  - **Everything else about your file is kept.** The save rewrites the file in place, so its permissions,
+    its owner, its Windows attributes (including the "downloaded from the internet" mark), any alternate
+    data streams and any hard links to it all survive the edit untouched — and a program that has the file
+    open keeps working. Some editors save by writing a new file and renaming it over yours, which quietly
+    loses all of that; this one doesn't.
+  - **The trade-off: a save that is interrupted can leave the file part-written.** If the app is killed or
+    the disk fills up half-way through writing, you can be left with a truncated file. Metadata Studio
+    makes the opposite trade (see its page) because a media file is harder to retype than a text file. If
+    the file you're editing is precious and unversioned, save early.
 - **Log preview** — `.log` files get their own read-only view: each line is tinted by its detected
   severity (Error/Warn/Info/Debug/Trace, or a plain "Other" for lines with no detectable level), with
   chips to filter the view down to just the levels you want. A big real-world log (an incident's

@@ -478,6 +478,14 @@ fn execute_one(
         ));
     }
 
+    // **CPE-1725 inventoried this site as an `fs::write` sibling of the two whole-file save paths and
+    // found the premise wrong in the safe direction: there is no `fs::write` here at all.** The bytes go
+    // through the handle `open_output_verified` already opened with `O_NOFOLLOW` /
+    // `FILE_FLAG_OPEN_REPARSE_POINT` and then re-verified (`symlink_metadata`, plus the handle's reparse
+    // bit), so **any** link at the output — live or dangling — is refused before a byte is written. That
+    // is stricter than either save path, which *resolve* a link and edit its target; a batch never writes
+    // through one, because its output name is claimed rather than opened by the user. No change was needed
+    // here, and this note is so the next sweep does not have to re-derive that.
     let result = verified.write_all(&output_bytes, &item.output);
     #[cfg(test)]
     trace_mark(|t| t.window_end = Some(std::time::Instant::now()));
