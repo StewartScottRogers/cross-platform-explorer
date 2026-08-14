@@ -314,6 +314,33 @@ Related: the recurring product rule these keep proving — *a confident wrong an
 honest "I don't know"* (CPE-1673, CPE-1678, CPE-1680, CPE-1687). These two rules are that same idea
 applied to our own evidence rather than to the app's error messages.
 
+### 3. A skip must be *consequential*, not merely visible (CPE-1717)
+
+The bullet above about `--nocapture` is true history, and it was then over-generalised into "libtest
+eats a skip notice, full stop". **Measured, with a one-test harness run with no flags at all:**
+
+```text
+running 1 test
+VIA-WRITELN-STDERR: this is the CPE-1705/1710 shape
+VIA-WRITELN-STDOUT: control
+test passing_test_that_announces_a_skip ... ok
+```
+
+The same test's `eprintln!` and `println!` lines are **absent**. libtest's capture is a thread-local
+swap installed *inside* the `print!`/`eprint!` macros, so a direct write to the process's stderr
+handle goes around it. So:
+
+- **`eprintln!` at a skip notice reaches nobody.** Use `cpe_server::skip_notice!(..)` — same arguments,
+  capture-proof. `fsutil`'s `skip_notices_never_use_eprintln` scan fails the build on a new one.
+- **A visible notice is the floor, not the goal.** A *passing* leg with a notice inside a 2,100-test
+  log is a green board over zero coverage, and nobody reads a green log. Where the staging mechanism is
+  supposed to work on that platform, use `cpe_server::fsutil::require_staged(..)` so the leg goes **red
+  under CI** instead. Where it genuinely cannot work — the traversal deny on Windows, an ACL test on
+  Linux — `supported_here = false` keeps the quiet skip, and that distinction is the whole design.
+- **Prove the enforcement, don't assert it.** `CPE_STAGING_SABOTAGE=1` makes every staging attempt
+  report failure; CI's "skip-visibility guard" steps run a filtered `cargo test` under it and **fail if
+  the tests pass**.
+
 ---
 
 ## When to Auto-File a Ticket
