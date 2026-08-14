@@ -127,12 +127,13 @@ client, and none of this applies to it yet.
 - **Two consequences of that which are genuinely surprising, so they're written down rather than left to
   be met.** A bucket can hold both an object named `photos` **and** other objects under `photos/` —
   nothing in S3 stops it, because keys are just strings.
-    - *Without* list permission, deleting `photos` removes the object the app can prove exists and leaves
-      everything under `photos/` alone — so the "folder" is still there afterwards. *With* list
-      permission, the app sees the contents under `photos/` and refuses, which means **the object
-      `photos` cannot be deleted at all by the more privileged key**. Granting a permission makes that one
-      operation impossible. The app can't tell which of the two you meant, and inventing an answer is
-      exactly what it declines to do; a way to say which you meant is on the list.
+    - When you can list, such a bucket shows **two rows both named `photos`** — one file, one folder —
+      because that is genuinely what's in the bucket. Deleting works from the path, and both rows have the
+      same path, so the app can't tell which row you clicked even though you were perfectly clear. It
+      therefore refuses, which means **the object `photos` can't be deleted at all by a key that can
+      list**, while a key that *can't* list deletes it happily (it can only see the object, so there's
+      nothing to be ambiguous about). Granting a permission makes that one operation impossible. Giving
+      the two rows distinguishable paths is on the list, and would fix both halves.
     - Deleting something that **isn't there** also differs: with list permission it reports success
       (S3 treats delete as idempotent, and "that key is gone now" is true), while without it the app
       refuses, because a 404 on the key can't be told apart from a folder it isn't allowed to look

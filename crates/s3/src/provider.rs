@@ -705,17 +705,66 @@ fn directory_with_content_refusal(path: &str) -> String {
 /// What this says instead is what is actually actionable: the parameter that was added to the request.
 /// A gateway that does not implement `start-after` is a real possibility (it is one of the newer
 /// `ListObjectsV2` parameters), and that is a fact about the *server*, not about the credential.
-fn marker_confirmation_failure(path: &str, key_prefix: &str, cause: &str) -> String {
-    format!(
+///
+/// # Why it reads `status`, and the round-2 defect that made it necessary (PR #903 UAT)
+///
+/// Round 2 of this function asserted, unconditionally, *"this is not a permissions problem: the identical
+/// listing … had just succeeded, so `s3:ListBucket` is demonstrably held"*. That is **past evidence
+/// stated as a present fact**, and it is false on a reachable path: the two listings are back to back but
+/// **not atomic**, so a credential's authority can change between them. An **expired STS session token**
+/// is the obvious case — a hard cliff that surfaces as a 403 on whichever request crosses it, and this
+/// belt is *by construction* the second request of a pair — with a revoked or edited bucket policy right
+/// behind it. The UAT built both, and the message contradicted itself inside one paragraph: "not a
+/// permissions problem", four lines above a body reading "the bucket policy or IAM policy denies this
+/// request".
+///
+/// That is round 1's defect mirrored. Round 1 asserted a cause that was provably false at this site;
+/// round 2 asserted the *absence* of a cause, provably false on a 403. **"It is not X" is a claim and
+/// needs the same evidence as "it is X"** — so the category is now decided by the status the server
+/// actually sent, exactly the way [`list_failure`] decides its permission sentence, and on a denial the
+/// message names the thing that really did change: the credential's authority, between two requests.
+///
+/// `status` is `None` when no HTTP status was read at all (transport failure, unparseable body). That is
+/// not a denial either, but it is not evidence of one *not* having happened, so it takes the neutral arm's
+/// wording without the "the server answered N" clause.
+fn marker_confirmation_failure(
+    path: &str,
+    key_prefix: &str,
+    status: Option<u16>,
+    cause: &str,
+) -> String {
+    let preamble = format!(
         "s3: delete {path:?}: nothing has been deleted. The first listing said this prefix holds nothing \
          but its own directory marker, which is the one verdict on which a single key really can be \
          removed — so it is confirmed with a second ListObjectsV2 for the prefix {key_prefix:?}, this one \
-         carrying start-after set to the marker key, and that request failed. This is not a permissions \
-         problem: the identical listing, with the same prefix and the same credential, had just succeeded, \
-         so s3:ListBucket is demonstrably held and granting a permission would change nothing. What the \
-         second request adds is the start-after parameter, so a server that does not implement it — or a \
-         transient failure — is the likelier explanation. Underlying error: {cause}"
-    )
+         carrying start-after set to the marker key, and that request failed."
+    );
+    let diagnosis = match status {
+        // A denial on the SECOND request of a pair whose first was allowed. The interesting fact is not
+        // "you lack a permission" — that was true a moment ago and is not what changed — it is that the
+        // authority itself moved underneath the call.
+        Some(s @ (401 | 403)) => format!(
+            " The server answered HTTP {s}, a denial — and the identical listing, same prefix and same \
+             credential, had succeeded moments earlier. These two requests are back to back but not \
+             atomic, so what this most likely means is that the credential's authority changed **between** \
+             them: an expired session token (an STS token hits its expiry as a cliff, on whichever request \
+             crosses it) or a bucket/IAM policy revoked or edited in between. Re-authenticate, or refresh \
+             the session token, and try again; if the denial persists on a fresh credential, the policy \
+             really has changed."
+        ),
+        // Everything else: a status that is not S3's way of saying "no". Here — and only here — the
+        // permission category can honestly be ruled out, because the server said something other than a
+        // denial rather than because of what it said last time.
+        Some(s) => format!(
+            " The server answered HTTP {s}, which is not a denial, so this is not a permissions problem. \
+             What the second request adds is the start-after parameter, so a server that does not \
+             implement it — or a transient failure — is the likelier explanation."
+        ),
+        None => " No HTTP status was read at all, so the request failed before the server could answer — \
+                 not a permissions problem, and most likely transport or a malformed response."
+            .to_string(),
+    };
+    format!("{preamble}{diagnosis} Underlying error: {cause}")
 }
 
 /// Wrap a failed `ListObjectsV2` from [`S3Provider::list_with_filtered_count`] so the message names **the
@@ -1350,7 +1399,7 @@ impl S3Provider {
     /// `s3:ListBucket` reasoning at this function's two call sites. Standing caveat, not a TODO on this
     /// function.
     fn probe_prefix(&self, key_prefix: &str) -> Result<(usize, usize, bool), String> {
-        self.probe_prefix_after(key_prefix, None)
+        self.probe_prefix_after(key_prefix, None).map_err(|(_, message)| message)
     }
 
     /// [`S3Provider::probe_prefix`] with an optional `start-after`: the same probe, asked only about keys
@@ -1367,12 +1416,28 @@ impl S3Provider {
     /// (`entries.len() + filtered_count`, and `IsTruncated`) and deliberately **not** `raw_entries` — a
     /// server that re-returns the marker itself despite `start-after` would otherwise make every honest
     /// empty-directory delete fail.
+    ///
+    /// # The error carries the HTTP status, and that is load-bearing (PR #903 UAT, round 3)
+    ///
+    /// `Err` is `(Option<u16>, String)`: the status when the server answered one at all, `None` when the
+    /// request never got that far (transport failure, an over-cap body, a body that would not parse).
+    /// [`probe_prefix`] drops it, because its callers already have a wording that fits every cause.
+    ///
+    /// The belt cannot. [`marker_confirmation_failure`] has to distinguish **"the server does not
+    /// implement `start-after`"** from **"this credential's authority changed between the two
+    /// listings"** — an expired STS session token or a revoked policy, which is a genuine 403 on the
+    /// second request of a pair that is not atomic. Without the status the message can only guess, and
+    /// the round-2 version guessed wrong in the safest-sounding direction: it asserted *"this is not a
+    /// permissions problem"* on top of a body reading *"the bucket policy or IAM policy denies this
+    /// request"*. Passing the status is what makes that message an observation instead of an inference
+    /// from what happened a moment earlier.
     fn probe_prefix_after(
         &self,
         key_prefix: &str,
         start_after: Option<&str>,
-    ) -> Result<(usize, usize, bool), String> {
-        let target = self.config.bucket_target()?;
+    ) -> Result<(usize, usize, bool), (Option<u16>, String)> {
+        let no_status = |e: String| (None, e);
+        let target = self.config.bucket_target().map_err(no_status)?;
         let mut query: Vec<(&str, &str)> =
             vec![("list-type", "2"), ("delimiter", "/"), ("max-keys", "2")];
         if !key_prefix.is_empty() {
@@ -1381,13 +1446,19 @@ impl S3Provider {
         if let Some(after) = start_after {
             query.push(("start-after", after));
         }
-        let (status, body) = self.signed_get(&target, &query, Some(self.request_deadline))?;
+        let (status, body) = self
+            .signed_get(&target, &query, Some(self.request_deadline))
+            .map_err(no_status)?;
         if !(200..300).contains(&status) {
-            return Err(map_response_error("GET", status, &body, &format!("{key_prefix:?}")));
+            return Err((
+                Some(status),
+                map_response_error("GET", status, &body, &format!("{key_prefix:?}")),
+            ));
         }
-        let text = std::str::from_utf8(&body)
-            .map_err(|e| format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"))?;
-        let page = parse_list_bucket_result(text, key_prefix)?;
+        let text = std::str::from_utf8(&body).map_err(|e| {
+            (None, format!("s3: probing {key_prefix:?}: response body was not valid UTF-8: {e}"))
+        })?;
+        let page = parse_list_bucket_result(text, key_prefix).map_err(no_status)?;
         // `entries.len() + filtered_count`, NOT `entries.len()` — the round-2 UAT's sharpest finding.
         //
         // `entries` is what `list` would DISPLAY; `filtered_count` is what `is_safe_s3_leaf` refused to
@@ -1940,12 +2011,23 @@ impl FileSystemProvider for S3Provider {
     ///    impossible. `tests::the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object`
     ///    pins both halves. On `origin/main` both were refused, so CPE-1727 creates this divergence.
     ///
-    ///    Deliberately not "fixed" by extending the HEAD proof to the privileged path. That path renders a
-    ///    listing in which `photos` is a **folder**; deleting the object of the same name there would
-    ///    report the row the user clicked as deleted while the folder it names is untouched — the same
-    ///    confident wrong answer, moved. The real fix is a caller that can say which of the two it meant,
-    ///    which is a `FileSystemProvider`-shaped question rather than a `delete`-shaped one, so it is filed
-    ///    (CPE-1735) rather than guessed at here.
+    ///    Deliberately not "fixed" by extending the HEAD proof to the privileged path — but **not for the
+    ///    reason given in round 2 of this PR, which the UAT measured and disproved.** That reason was that
+    ///    the listing renders `photos` as a folder, so deleting the object of the same name would report
+    ///    the clicked row deleted while the folder stands. The listing actually renders `photos`
+    ///    **twice**, a file row and a folder row, which is what real S3 returns and what
+    ///    `tests::a_name_collision_lists_as_two_rows_so_the_user_has_already_said_which_one_they_meant`
+    ///    now pins. So a user who clicks the `is_dir: false` row **has** said which one they meant,
+    ///    unambiguously; refusing that delete because a different row shares its name is simply a wrong
+    ///    answer, with no relocation about it. The relocated-wrong-answer argument holds only for the
+    ///    *folder* row.
+    ///
+    ///    The real obstacle is narrower and structural: the distinguishing bit exists at the **row**, and
+    ///    `delete(path)` never receives it — `ProviderEntry` carries a display `name` and an `is_dir`, and
+    ///    the trait's `delete` takes a path string that is identical for both rows. Nothing inside this
+    ///    function can recover which row was clicked, and inventing an answer is what this crate refuses to
+    ///    do. Carrying that bit through is a `FileSystemProvider`-shaped change touching every backend, so
+    ///    it is filed (CPE-1735) rather than guessed at here.
     ///
     /// 2. **"Nothing was there" is `Ok` for one credential and `Err` for the other.** With `s3:ListBucket`,
     ///    deleting a key that does not exist probes clean, DELETEs, gets S3's idempotent 204, and returns
@@ -2056,9 +2138,13 @@ impl FileSystemProvider for S3Provider {
             let (_, beyond_entries, beyond_more) = self
                 .probe_prefix_after(&key_prefix, Some(&key_prefix))
                 // NOT `probe_failure`: its permission diagnosis is provably false here, because the
-                // identical listing succeeded forty lines ago with the same credential. See
-                // `marker_confirmation_failure` (PR #903 review, blocking finding 1).
-                .map_err(|e| marker_confirmation_failure(path, &key_prefix, &e))?;
+                // identical listing succeeded forty lines ago with the same credential. But the opposite
+                // claim is not free either — the two listings are not atomic, so a 403 here is a real
+                // "the authority changed under us". The status decides which. See
+                // `marker_confirmation_failure` (PR #903 review finding 1, UAT round 3).
+                .map_err(|(status, e)| {
+                    marker_confirmation_failure(path, &key_prefix, status, &e)
+                })?;
             // `beyond_more` is the truncation half: a belt page with no visible rows but `IsTruncated=true`
             // still says there is something past the marker. Exercised by
             // `tests::a_belt_page_with_no_rows_but_is_truncated_still_refuses_the_delete`.
@@ -4773,6 +4859,39 @@ mod tests {
         );
     }
 
+    /// **What the collision actually looks like to a user, measured by the PR #903 UAT round 3** — and the
+    /// correction to an argument this PR made in round 2. `list("/")` over the colliding keyspace returns
+    /// `photos` **twice**: one `is_dir: false` row for the object and one `is_dir: true` row for the
+    /// prefix. That is what real S3 returns (`<Contents>` and `<CommonPrefixes>` are independent), and it
+    /// means a user clicking the file row has *already* said which of the two they meant.
+    ///
+    /// Round 2 argued the privileged path must keep refusing because deleting the object would "report the
+    /// row the user clicked as deleted while the folder stands". That is only true of the folder row. The
+    /// real obstacle is that the bit is lost between the row and the call — see
+    /// [`FileSystemProvider::delete`]'s doc and CPE-1735.
+    ///
+    /// It also records a hazard for any UI keyed on `name`: two entries in one listing share a name and
+    /// differ only in `is_dir`. Filed as CPE-1737.
+    #[test]
+    fn a_name_collision_lists_as_two_rows_so_the_user_has_already_said_which_one_they_meant() {
+        let (base, _keys) = spawn_a_keyspace_server_with_listbucket(&[
+            "photos",
+            "photos/a.jpg",
+            "photos/b.jpg",
+        ]);
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let entries = provider.list("/").expect("listing the bucket root");
+        let rows: Vec<(String, bool)> =
+            entries.iter().map(|e| (e.name.clone(), e.is_dir)).collect();
+        assert_eq!(
+            rows,
+            vec![("photos".to_string(), false), ("photos".to_string(), true)],
+            "the object and the prefix are two independent rows with the same name — so the row carries \
+             the distinction that `delete(path)` then loses"
+        );
+    }
+
     /// **PR #903 UAT finding 3, characterised.** Deleting a key that does not exist answers `Ok` for a
     /// credential that can list (the probe comes back empty, the DELETE gets S3's idempotent 204, and
     /// `delete`'s contract is only *"that key is absent now"*) and `Err` for one that cannot (the HEAD
@@ -5133,6 +5252,93 @@ mod tests {
         assert!(
             err.contains("not a permissions problem"),
             "and it should say so outright, rather than merely omitting the false advice: {err}"
+        );
+    }
+
+    /// **The blocking finding of the PR #903 UAT's third round.** The belt's message used to assert
+    /// *"this is not a permissions problem"* unconditionally, reasoning that the first listing had just
+    /// succeeded with the same credential. The two listings are back to back but **not atomic**, so that
+    /// is past evidence stated as a present fact — and this server is the counter-example: it allows the
+    /// first listing and denies the second with `403 ExpiredToken`, the shape an STS session token
+    /// produces when its expiry falls between two requests.
+    ///
+    /// The round-2 message contradicted itself inside one paragraph — "not a permissions problem", four
+    /// lines above the server's own "the provided token has expired". This pins the fix: on a denial the
+    /// message names **what actually changed** (the credential's authority, between the two requests) and
+    /// says what to do about it, instead of ruling the category out.
+    ///
+    /// A `403` is deliberately paired here with `ExpiredToken` rather than `AccessDenied` because the
+    /// expiry cliff is the *reachable* case — it needs no policy edit and no administrator, only time.
+    #[test]
+    fn a_denial_on_the_belt_names_the_authority_that_changed_instead_of_ruling_permissions_out() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let deletes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let deletes_thread = Arc::clone(&deletes);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let method = req.method().to_string().to_uppercase();
+                let full = req.url().to_string();
+                let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
+                let params = parse_query(raw_query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if !is_list {
+                    if method == "DELETE" {
+                        deletes_thread.lock().unwrap().push(raw_path.to_string());
+                    }
+                    let _ = req.respond(tiny_http::Response::empty(204));
+                    continue;
+                }
+                let ct =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                if params.iter().any(|(k, _)| k == "start-after") {
+                    // The session token expired in the gap between the two listings.
+                    let body = "<?xml version=\"1.0\"?><Error><Code>ExpiredToken</Code>\
+                                <Message>The provided token has expired.</Message></Error>";
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(body).with_header(ct).with_status_code(403),
+                    );
+                    continue;
+                }
+                // The first listing, while the credential was still good: marker only, honest.
+                let body = "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
+                            <Contents><Key>photos/</Key><Size>0</Size></Contents></ListBucketResult>";
+                let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let result = provider.delete("/photos");
+        assert_eq!(
+            deletes.lock().unwrap().clone(),
+            Vec::<String>::new(),
+            "an unconfirmable marker-only verdict must send no DELETE, denial or not"
+        );
+        let err = result.expect_err("the confirmation was denied, so the verdict is unconfirmed");
+
+        assert!(
+            !err.contains("not a permissions problem"),
+            "THE DEFECT: the server said the token expired, and the message denied the category the \
+             server had just named. 'It is not X' is a claim and needs the same evidence as 'it is X': \
+             {err}"
+        );
+        assert!(
+            err.contains("authority changed"),
+            "on a denial the message must name what actually changed — the credential's authority, \
+             between two requests that are not atomic: {err}"
+        );
+        assert!(
+            err.contains("session token"),
+            "and name the reachable cause, since an STS expiry needs no administrator, only time: {err}"
+        );
+        assert!(
+            err.contains("ExpiredToken"),
+            "the server's own diagnosis must survive verbatim: {err}"
+        );
+        assert!(
+            err.contains("nothing has been deleted"),
+            "and the user still needs to know nothing happened: {err}"
         );
     }
 

@@ -45,12 +45,21 @@ So granting a permission makes an operation impossible. Both halves pinned
 `the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object`). On `origin/main`
 both were refused, so CPE-1727 created the divergence.
 
-The fix is **not** to apply the HEAD proof to the privileged path: that path renders a listing in which
-`photos` is a folder, so deleting the object of the same name would report the row the user clicked as
-deleted while the folder it names is untouched — the same confident wrong answer, moved. The real fix is
-a caller that can say *which of the two it meant*, which is a `FileSystemProvider`-shaped change (an
-explicit "this is an object key, not a prefix" affordance) touching every backend. Needs a real gateway
-first only to confirm the collision is reachable in practice; the design work is ours.
+**Corrected after the PR #903 UAT round 3 measured the listing.** An earlier draft of this argued the
+privileged path must keep refusing because the listing renders `photos` as a folder, so deleting the
+object would report the clicked row deleted while the folder stands. That is wrong: the listing renders
+`photos` **twice** — a `is_dir=false, size=4` row and a `is_dir=true` row, which is what real S3 returns
+— so a user clicking the file row **has** already said which one they meant. Refusing that is simply a
+wrong answer. The relocation argument holds only for the folder row.
+
+The real obstacle is narrower and structural: the distinguishing bit lives on the **row**, and
+`delete(path)` never receives it — `crates/vfs`'s `dir_entry_from_provider` builds the child path from
+the name alone, so both rows carry the *same* path string. Nothing inside `delete` can recover which was
+clicked. The fix is to carry that bit — most likely by giving the prefix row a trailing `/` in its URI,
+which is how S3 spells it anyway — and that is a `FileSystemProvider`/`crates/vfs`-shaped change touching
+every backend. **CPE-1737** covers the same duplicate path from the rendering side and is the cheaper
+half; doing them together is likely right, and this item may close with it. A real gateway is needed only
+to confirm the collision is reachable in practice; the design work is ours.
 
 ## 3. "Nothing was there" answers differently per credential
 
