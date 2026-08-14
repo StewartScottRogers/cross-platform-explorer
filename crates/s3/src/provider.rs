@@ -1086,21 +1086,28 @@ impl S3Provider {
     /// `stat` and `delete` need — nothing there, an empty directory holding only its own marker, and a
     /// directory with real content. See [`ListPage::raw_entries`].
     ///
-    /// # `max-keys=2`, and why `1` is the wrong number here
+    /// # The marker always comes back first, which is why one key is not enough to look at
     ///
-    /// This is an existence question, not a listing, so it must not pull a thousand keys to answer. But it
-    /// cannot ask for one: S3 returns keys in **lexicographic order**, and a directory's own marker key
-    /// (`photos/2024/`) is a strict prefix of every key beneath it, so the marker is *always* the first
-    /// entry returned. `max-keys=1` would therefore see nothing but the marker for a directory holding a
-    /// thousand objects, and `delete` would read that as "an empty directory" and cheerfully remove the
-    /// marker while reporting success. Two keys is the smallest number that can ever show a second one.
+    /// S3 returns keys in **lexicographic order**, and a directory's own marker key (`photos/2024/`) is a
+    /// strict prefix of every key beneath it — so the marker is *always* the first entry returned for its
+    /// own prefix. A caller that looked only at the first key would see nothing but the marker for a
+    /// directory holding a thousand objects, conclude "empty", and let `delete` remove the marker and
+    /// report success.
     ///
-    /// # `is_truncated` closes the case `max-keys` alone cannot
+    /// # `IsTruncated` is the load-bearing half; `max-keys=2` is a second, independent belt
     ///
-    /// S3 is explicitly permitted to return **fewer** keys than `max-keys` asks for, so a gateway that
-    /// under-fills could still answer with the marker alone. `IsTruncated=true` says there is more under
-    /// this prefix regardless of how few keys came back, so the caller treats a truncated marker-only page
-    /// as a non-empty directory. Without this, correctness would rest on a server's discretion.
+    /// Stated in that order because it is what was measured, not what reads best. `IsTruncated=true` says
+    /// there is more under this prefix no matter how few keys came back, and a marker-only page that is
+    /// also truncated is therefore treated as a non-empty directory. That alone is sufficient **for a
+    /// conforming server**, and the negative-control probe confirms it: removing the `IsTruncated` term
+    /// reds `tests::a_directory_whose_first_returned_key_is_only_its_marker_is_still_refused_by_delete` on
+    /// its own, while `max-keys` was still 2.
+    ///
+    /// `max-keys=2` is then asked for because S3 is explicitly permitted to return **fewer** keys than
+    /// requested, and a gateway that both under-fills *and* fails to set `IsTruncated` is answering
+    /// non-conformingly — a shape no flag can be trusted to report. Asking for the smallest number that
+    /// can ever show a second key costs nothing and does not depend on the server telling the truth about
+    /// its own pagination. It is not, on its own, what makes the check correct.
     fn probe_prefix(&self, key_prefix: &str) -> Result<(usize, usize, bool), String> {
         let target = self.config.bucket_target()?;
         let mut query: Vec<(&str, &str)> =
