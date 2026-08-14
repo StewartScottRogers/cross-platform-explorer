@@ -157,6 +157,50 @@ different decision and is **not** changed here. `replace_file_contents` now exis
 **Guard neutralisation** (Evidence Rules §1) — three arms broken one at a time, real output in the PR body.
 Every leg ran for real on this machine (Developer Mode is on; no skip notice printed under `--nocapture`).
 
+## Work Log — round 2 (PR #899 UAT + Reviewer, 2026-08-13)
+
+UAT **PASS** (fourteen adversarial link shapes, atomicity measured under a forced mid-save rename
+failure) and Reviewer **APPROVE**. Six corrections landed, one of them user-facing:
+
+- **F3, user-facing.** The refusal was **unreachable from its only caller**: `fs::read` follows a link and
+  failed first, so a dangling link produced `The system cannot find the file specified. (os error 2)` —
+  no path, no mention of a link — while the shipped user docs promised a message naming the link.
+  `metadata_write_impl` now calls `resolve_write_target` **before** the read and reads/writes the resolved
+  path, so the good message actually arrives (and the bytes read and the bytes written provably concern
+  the same file). New test `cpe_1716_metadata_write_refuses_a_dangling_link_with_a_message_that_names_it`
+  runs on **every** runner via the junction fallback.
+- **F1.** The claim that a skip notice is invisible under CI was **wrong**, proved three times (UAT
+  controlled experiment, Reviewer's independent one, and my own probe below). Under a plain `cargo test`
+  libtest swallows `println!`/`eprintln!` for a *passing* test but **not** `writeln!(std::io::stderr())`.
+  Every skip notice here already used the right emitter; only the prose was wrong. Fixed in
+  `fsutil.rs`, `lib.rs` and the PR body.
+- **F2.** Because the notices are visible, their **absence is evidence**: CI run `31772062682` shows both
+  live-link tests passing on `windows-latest` with no `[CPE-1716] SKIPPED` line, so the live-link route
+  ran for real on all three legs. The `classify_write_target` split buys coverage for an unprivileged
+  *contributor* machine, not for CI — stated that way now.
+- **F4.** "`create_new` cannot be tested" was too strong. Pinned at the primitive with an `fs::write`
+  contrast; Probe E below shows `create(true).truncate(true)` following a dangling **junction** and
+  creating the target.
+- **Reviewer doc corrections.** The `rename_into_slot` rationale now matches measurement (on a *live*
+  link the **occupancy** half refuses first and the link half is never reached; and after resolving, the
+  occupancy half still refuses the resolved target — so this is a necessary primitive, not duplication).
+  The `NotFound` arm no longer claims proof of absence: Rust folds `ERROR_BAD_NETPATH`/`BAD_NET_NAME`/
+  `INVALID_DRIVE` into it, so a disconnected UNC reaches it and only `create_new` stops the write.
+- **Docs over-claim ×2, both fixed.** The refusal message is now real (F3), and "a crash or a power cut
+  can never leave you with a half-written file" is scoped to **interrupted saves**: the parent directory
+  is not fsynced, and `vault_manager::sync_parent_dir` shows why a uniform power-loss claim is not
+  available (Unix-only, and explicitly *narrowed not closed* on Windows). Recorded at the site.
+- **Minors.** `display_path` strips the `\\?\` verbatim prefix from user-facing errors; the staging temp
+  landing beside the **resolved** target (required for rename atomicity) is now documented as the
+  behaviour change it is.
+- **Filed CPE-1725** — `write_file_text` returns `Ok` and *creates* the target through a dangling link
+  where `metadata_write` now refuses. Not destruction; the two save paths simply disagree, and the other
+  three `fs::write` siblings share the shape, so it is a four-command decision of its own.
+
+Probes D and E, one at a time, each reddening a **distinct** test (real output in the PR body).
+`crates/ftp` / `crates/sftp` / `crates/webdav` renames: out of scope, filed by the Foreman as CPE-1726,
+untouched.
+
 **Also related, different primitive:** `sidecar/agent-board::move_card` (`board.rs:395`) has no
 destination guard at all — `fs::write(&dest, ..)` then `remove_file(&src)`. It is the twin of the
 `board_move_impl` PR #895 fixes, and the "both board implementations change in lockstep" rule says it
