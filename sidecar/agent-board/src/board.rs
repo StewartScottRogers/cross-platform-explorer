@@ -379,6 +379,73 @@ pub fn read_sprints(root: &Path) -> Vec<Sprint> {
     sprints
 }
 
+/// **The guard for a slot that is about to be [`fs::write`]n** (CPE-1719) — the sidecar twin of
+/// `cpe_server::fsutil::rename_slot_refusal`, which it deliberately does **not** call: a sidecar depends
+/// only on `sidecar-contract`, never on the app or `cpe-server` (ADR 0001).
+///
+/// ## Why a rename guard would not have caught this
+///
+/// CPE-1710 gave every `fs::rename`-destructive site a paired clobber + symlink check, and backed it with
+/// a `clippy.toml` `disallowed-methods` entry for `std::fs::rename`. Neither reaches here, because
+/// [`move_card`]'s destructive primitive is [`fs::write`] and the two primitives fail in *opposite*
+/// directions at the same slot:
+///
+/// - `fs::rename` does **not** follow the final component, so a link at the destination is **destroyed**
+///   and its target is left orphaned. Annoying, recoverable, and loud once guarded.
+/// - `fs::write` **does** follow it, so a link at the destination is **written through**: the file at the
+///   far end — a file the user never named and the board has no business touching — is truncated and
+///   replaced with ticket frontmatter. The link survives, so the board looks healthy, the source card is
+///   deleted, and the call returns `Ok`. Measured end to end by the PR #895 UAT.
+///
+/// ## One stat, not two
+///
+/// The rename guards need two probes ([`Path::try_exists`] for occupancy, `symlink_metadata` for a
+/// dangling link) because `try_exists` follows links and so answers `Ok(false)` — genuinely, correctly —
+/// for a dangling one. A *write* slot needs only [`fs::symlink_metadata`], which never follows the final
+/// component and therefore answers the whole three-state question on its own: `Ok` means the name is
+/// taken (by a link or by a real entry), `Err(NotFound)` means it is provably free, and any other `Err`
+/// means we could not tell and must not guess. `try_exists` is not used here at all — it cannot see the
+/// case that motivated the ticket.
+pub fn write_slot_refusal(target: &Path) -> Option<String> {
+    classify_write_slot(&fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
+}
+
+/// The pure decision behind [`write_slot_refusal`]. `stat` is the [`fs::symlink_metadata`] outcome
+/// reduced to *"is it a link?"*, so **every** arm — including the stat-failure one, which no ordinary
+/// fixture reaches — is unit-testable on every OS and every CI account. Split out for the same reason
+/// `cpe_server::fsutil::classify_symlink_slot` is: that helper's unreachable-looking `Err` arm quietly
+/// accumulated a garbled user-facing message precisely because doing the stat inline made it untestable.
+///
+/// The link verdict comes **first**. `cpe_server::fsutil::rename_slot_refusal` orders the occupancy check
+/// first to preserve the byte-for-byte wording its call sites already shipped; this site has no such
+/// history, and a live link answers "the name is taken" to an occupancy check too — so link-first is what
+/// makes a live link report *that it is a link* rather than a generic collision.
+pub fn classify_write_slot(stat: &std::io::Result<bool>, target: &Path) -> Option<String> {
+    match stat {
+        Ok(true) => Some(format!(
+            "\"{}\" is a link, and writing a ticket there would write straight THROUGH it — the file at \
+             the far end, which is not a ticket, would be overwritten. Nothing was changed; remove the \
+             link first if that is what you meant",
+            target.display()
+        )),
+        // The stat succeeded and it is not a link, so a real entry holds the name. Overwriting it would
+        // silently destroy whatever ticket file is already there.
+        Ok(false) => Some(format!(
+            "a file already exists at \"{}\" — nothing was changed rather than overwrite it",
+            target.display()
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        // Not provably free ⇒ not free. Deliberately avoids the substring "already exists": this is a
+        // refusal to *guess*, not a claim about what is there, and the wrong reading sends the user
+        // looking for a file that was never gone (CPE-1687).
+        Err(e) => Some(format!(
+            "could not check what is at \"{}\", so nothing was written — refusing to guess rather than \
+             risk overwriting it: {e}",
+            target.display()
+        )),
+    }
+}
+
 /// Move card `id` to `to_column`: rewrite its `status:` to match, and move the file into that column's
 /// folder (a no-op move when it's already there — the status is still rewritten). Returns the card's new
 /// column name on success.
@@ -395,11 +462,28 @@ pub fn move_card(root: &Path, id: &str, to_column: &str) -> Result<String, Strin
     fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
     let dest = dest_dir.join(file_name);
 
+    // CPE-1719. Guard the destination BEFORE writing, and only when it is a different path from the
+    // source. `src == dest` is the legitimate no-op move: the card is already in this column and all that
+    // happens is its own `status:` being rewritten in place. That case is exempt on purpose — including
+    // when the ticket file is itself a link, because then the far end IS the ticket, the very bytes
+    // `read_to_string` above just returned, and refusing would make a symlinked ticket unmovable rather
+    // than safer. Every other case is a name the board did not put there.
+    if src != dest {
+        if let Some(e) = write_slot_refusal(&dest) {
+            return Err(e);
+        }
+    }
     fs::write(&dest, updated).map_err(|e| e.to_string())?;
     // Remove the old file whenever we wrote to a DIFFERENT path — only after the new one is written, so
     // the ticket is never lost. This covers a cross-column move AND an archived Done ticket (nested
     // `Done/YYYY/…`) moved to top-level Done: there `from == to == "Done"` but the paths differ, so
     // gating on `from != to` would leave the nested original in place and duplicate the ticket.
+    //
+    // `remove_file` on a link removes the LINK, not its target — so where the source card is a link the
+    // user made, their file survives untouched with stale content while the ticket lives on at `dest`.
+    // That is data left orphaned, not data destroyed, and it is the only remaining destructive primitive
+    // in this crate (CPE-1719's enumeration: `fs::write` here, `fs::remove_file` here, and nothing else
+    // outside `#[cfg(test)]`). Recorded rather than refused: a move must remove its source.
     if src != dest {
         let _ = fs::remove_file(&src);
     }
@@ -641,5 +725,254 @@ mod tests {
         std::fs::create_dir_all(root.join("Ticketing").join("Tickets").join("Backlog")).unwrap();
         assert!(read_epics(root).is_empty());
         assert!(read_sprints(root).is_empty());
+    }
+
+    // ---- CPE-1719: the destination slot of a move is never written through ------------------------
+    //
+    // Every test below asserts on the **bytes of the file that must not change** and on the **slot still
+    // being a link**, never on `move_card`'s `Result`. The bug returned `Ok` throughout: the user's file
+    // was destroyed, the link survived, the source card was deleted, and nothing anywhere said so. A test
+    // that watches the `Result` would have passed against the broken code.
+
+    /// Stage a symlink at `link` pointing at `target`. `false` when the OS refuses — which on Windows
+    /// means no `SeCreateSymbolicLinkPrivilege` (no Developer Mode, not elevated). Unix always succeeds.
+    /// Callers must have a non-skipping fallback; see [`alias_at`].
+    fn make_link_to(target: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(target, link).is_ok();
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(target, link).is_ok();
+        // The premise, asserted rather than assumed.
+        made && fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+    }
+
+    /// Which construction [`alias_at`] managed — reported in the assertion messages so a failure says
+    /// what was actually staged instead of leaving the reader to guess at the runner's privileges.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Alias {
+        Symlink,
+        HardLink,
+    }
+
+    /// Make `slot` a second name for `victim`, by whatever construction this OS and account allow.
+    ///
+    /// **This never skips**, which is the point. A symlink is the reported hazard, but an unprivileged
+    /// Windows runner cannot create one, and a test that quietly degrades into asserting nothing on the
+    /// exact platform the bug was measured on is worse than no test — it reports green forever. A hard
+    /// link needs no privilege on NTFS and stages the *same user-visible hazard*: `slot` is a name for a
+    /// file the user never mentioned, and `fs::write` through it truncates that file's contents. The two
+    /// constructions are caught by different arms of [`classify_write_slot`] (the link arm and the
+    /// occupied arm), so on every runner one real arm is exercised and the victim's bytes are checked.
+    fn alias_at(victim: &Path, slot: &Path) -> Alias {
+        if make_link_to(victim, slot) {
+            return Alias::Symlink;
+        }
+        fs::hard_link(victim, slot).expect("staging the hazard needs a symlink or a hard link; got neither");
+        Alias::HardLink
+    }
+
+    /// Stage a **dangling** link at `link` — a link whose target does not exist — and return that missing
+    /// target's path so the caller can assert it was not conjured into being.
+    ///
+    /// Windows takes two attempts, in order: `symlink_file` (needs the privilege above), then an NTFS
+    /// **junction**, which needs none. `junction::create` canonicalises its target, so the target must
+    /// exist at creation time and is deleted afterwards to leave the reparse point pointing at nothing.
+    /// Rust reports a junction's `file_type().is_symlink()` as `true` — the property the guard reads — so
+    /// the junction stages the identical slot. This is the pattern of `cpe_server::fsutil`'s helper of the
+    /// same name, reimplemented rather than imported: a sidecar may not depend on `cpe-server` (ADR 0001).
+    ///
+    /// Because the junction leg needs no privilege, **this succeeds on every runner**, so the tests that
+    /// use it are unconditional. Nothing here relies on a skip notice being printed — under CI those are
+    /// invisible anyway, since libtest captures stderr for passing tests and a skip is a pass (CPE-1717).
+    fn make_dangling_link(link: &Path) -> PathBuf {
+        let missing = link.with_file_name(format!(
+            "{}-target-that-does-not-exist",
+            link.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        #[cfg(windows)]
+        {
+            if std::os::windows::fs::symlink_file(&missing, link).is_err() {
+                fs::create_dir_all(&missing).expect("staging the junction's temporary target");
+                junction::create(&missing, link).expect("creating a junction needs no privilege");
+                fs::remove_dir_all(&missing).expect("removing it leaves the junction dangling");
+            }
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&missing, link).expect("symlink(2) never resolves its target");
+        }
+        assert!(
+            fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the slot must hold a link for this fixture to mean anything"
+        );
+        assert!(!matches!(link.try_exists(), Ok(true)), "and it must dangle");
+        missing
+    }
+
+    /// The reported bug, reproduced: a live link in the destination column pointing at an unrelated user
+    /// file. Before the guard this returned `Ok("Doing")`, the link survived, the source card was deleted,
+    /// and the victim's bytes became ticket frontmatter.
+    #[test]
+    fn a_live_alias_at_the_destination_never_overwrites_the_users_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_ticket(root, "Backlog", "CPE-9999", "Open");
+        let src = root.join("Ticketing/Tickets/Backlog/CPE-9999_x.md");
+        let src_before = fs::read_to_string(&src).unwrap();
+
+        // The user's unrelated file, and the destination slot aliased onto it.
+        let victim = root.join("MY-NOTES.txt");
+        fs::write(&victim, "MY NOTES").unwrap();
+        let doing = root.join("Ticketing/Tickets/Doing");
+        fs::create_dir_all(&doing).unwrap();
+        let slot = doing.join("CPE-9999_x.md");
+        let how = alias_at(&victim, &slot);
+
+        let result = move_card(root, "CPE-9999", "Doing");
+
+        // THE assertion. Not the `Result` — this was `Ok("Doing")` while the file was being destroyed.
+        assert_eq!(
+            fs::read_to_string(&victim).unwrap(),
+            "MY NOTES",
+            "the user's unrelated file was overwritten through a {how:?} at the destination slot"
+        );
+        // The board must not have quietly eaten the card on the way, either.
+        assert_eq!(fs::read_to_string(&src).unwrap(), src_before, "the source card must survive a refusal");
+        if how == Alias::Symlink {
+            assert!(
+                fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+                "the slot must still be a link — the bug left it a link too, which is why the board looked fine"
+            );
+        }
+        // And the refusal must be the guard's, naming the hazard, not an incidental OS error.
+        let err = result.expect_err("a slot the board did not create must not be written");
+        assert!(
+            err.contains(if how == Alias::Symlink { "is a link" } else { "already exists" }),
+            "the refusal must name what it found; got: {err}"
+        );
+    }
+
+    /// The dangling case, which the ticket asks to be decided explicitly. `fs::write` through a dangling
+    /// link **creates** its target — so the board would materialise a file at a path the user never named,
+    /// anywhere on disk the link points, while the card appeared to be sitting in the column. Decision:
+    /// **refused, same as a live link.** Nothing about "the far end is empty" makes the far end ours.
+    ///
+    /// Unconditional on every OS and account: `make_dangling_link`'s junction leg needs no privilege.
+    #[test]
+    fn a_dangling_link_at_the_destination_is_refused_and_its_target_is_not_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_ticket(root, "Backlog", "CPE-9998", "Open");
+        let src = root.join("Ticketing/Tickets/Backlog/CPE-9998_x.md");
+        let src_before = fs::read_to_string(&src).unwrap();
+
+        let doing = root.join("Ticketing/Tickets/Doing");
+        fs::create_dir_all(&doing).unwrap();
+        let slot = doing.join("CPE-9998_x.md");
+        let would_be_target = make_dangling_link(&slot);
+
+        let result = move_card(root, "CPE-9998", "Doing");
+
+        assert!(
+            !matches!(would_be_target.try_exists(), Ok(true)),
+            "writing through a dangling link CREATES its target — a file at {} the user never named",
+            would_be_target.display()
+        );
+        assert!(
+            fs::symlink_metadata(&slot).unwrap().file_type().is_symlink(),
+            "the slot must still be a link"
+        );
+        assert_eq!(fs::read_to_string(&src).unwrap(), src_before, "the source card must survive a refusal");
+        // The error must come from the guard, not from the OS failing to follow the link — otherwise this
+        // test would pass against unguarded code on any platform where the write happens to error.
+        let err = result.expect_err("a dangling link at the destination must be refused");
+        assert!(err.contains("is a link"), "the refusal must name the link; got: {err}");
+    }
+
+    /// A plain, ordinary file already occupying the destination name — the same clobber class CPE-1705
+    /// fixed for renames, present here too because `fs::write` truncates without asking. Distinct from the
+    /// link tests: this one goes red only if the *occupied* arm is broken.
+    #[test]
+    fn an_ordinary_file_at_the_destination_is_not_overwritten() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_ticket(root, "Backlog", "CPE-9997", "Open");
+        let doing = root.join("Ticketing/Tickets/Doing");
+        fs::create_dir_all(&doing).unwrap();
+        let slot = doing.join("CPE-9997_x.md");
+        fs::write(&slot, "SOMEONE ELSE'S TICKET").unwrap();
+
+        let _ = move_card(root, "CPE-9997", "Doing");
+
+        assert_eq!(
+            fs::read_to_string(&slot).unwrap(),
+            "SOMEONE ELSE'S TICKET",
+            "a file already at the destination name must not be truncated by a move"
+        );
+    }
+
+    /// Every arm of the decision, including the stat-failure one no ordinary fixture reaches. Pure, so it
+    /// runs identically on every OS and every CI account — the reason the classification is split out of
+    /// [`write_slot_refusal`] at all.
+    #[test]
+    fn write_slot_classification_covers_every_arm() {
+        use std::io::{Error, ErrorKind};
+        let p = Path::new("/tmp/slot.md");
+
+        // A link — live or dangling, `symlink_metadata` reports both the same way.
+        let link = classify_write_slot(&Ok(true), p).expect("a link must be refused");
+        assert!(link.contains("is a link"), "got: {link}");
+        assert!(link.contains("THROUGH"), "the message must say what fs::write does to it; got: {link}");
+
+        // A real entry.
+        let occupied = classify_write_slot(&Ok(false), p).expect("an occupied name must be refused");
+        assert!(occupied.contains("already exists"), "got: {occupied}");
+
+        // Provably nothing there: the only answer that means free.
+        assert_eq!(classify_write_slot(&Err(Error::from(ErrorKind::NotFound)), p), None);
+
+        // Could not tell ⇒ not free. And it must NOT claim the file is there.
+        let unknown = classify_write_slot(&Err(Error::from(ErrorKind::PermissionDenied)), p)
+            .expect("an unreadable slot must be refused, not guessed at");
+        assert!(unknown.contains("refusing to guess"), "got: {unknown}");
+        assert!(
+            !unknown.contains("already exists"),
+            "the unknown verdict must not read as a claim that something is there; got: {unknown}"
+        );
+    }
+
+    /// Leg 2 of [`make_dangling_link`], exercised on its own. On a machine with Developer Mode the
+    /// `symlink_file` leg always wins and the junction fallback — the leg unprivileged CI actually takes —
+    /// would never run here. Build one directly and assert the property the guard depends on.
+    #[cfg(windows)]
+    #[test]
+    fn the_junction_fallback_stages_the_same_hazard_as_a_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let link = tmp.path().join("junction-slot");
+        let target = tmp.path().join("junction-target");
+        fs::create_dir_all(&target).unwrap();
+        junction::create(&target, &link).expect("creating a junction needs no privilege");
+        fs::remove_dir_all(&target).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "Rust must report a junction as a link — that is the property the guard reads"
+        );
+        assert!(matches!(link.try_exists(), Ok(false)), "and it must dangle, so try_exists cannot see it");
+        assert!(write_slot_refusal(&link).is_some_and(|e| e.contains("is a link")), "so the guard refuses it");
+    }
+
+    /// The exemption, held to its terms: `src == dest` is a no-op move whose only effect is the in-place
+    /// `status:` rewrite, and it must keep working. Without this, "guard the destination" would silently
+    /// mean "a card can never be re-dropped on its own column".
+    #[test]
+    fn a_no_op_move_still_rewrites_the_status_in_place() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write_ticket(root, "Doing", "CPE-9996", "Open"); // stale status for its folder
+
+        assert_eq!(move_card(root, "CPE-9996", "Doing").unwrap(), "Doing");
+        let md = fs::read_to_string(root.join("Ticketing/Tickets/Doing/CPE-9996_x.md")).unwrap();
+        assert!(md.contains("status: In Progress"), "the in-place rewrite must still happen");
     }
 }

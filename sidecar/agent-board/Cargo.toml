@@ -13,3 +13,12 @@ serde_json = "1"
 
 [dev-dependencies]
 tempfile = "3"
+
+# CPE-1719, tests only. Staging the hazard needs a real link at the destination slot, and an unprivileged
+# Windows runner cannot create a symlink at all (`SeCreateSymbolicLinkPrivilege` = Developer Mode or
+# elevation). An NTFS junction needs no privilege and Rust reports one as `file_type().is_symlink()`, which
+# is exactly the property the guard reads — so it stages the identical slot. Same crate and version
+# `crates/server` already uses for the same job; hand-rolling the DeviceIoControl reparse buffer is not
+# worth it for a dev-dependency. Windows-only, and never linked into the shipped sidecar.
+[target.'cfg(windows)'.dev-dependencies]
+junction = "1"
