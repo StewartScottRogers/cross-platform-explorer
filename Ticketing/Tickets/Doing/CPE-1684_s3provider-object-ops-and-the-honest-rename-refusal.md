@@ -101,8 +101,17 @@ temp directory — the technique `crates/webdav/src/lib.rs` already uses to map 
 ## Acceptance criteria
 
 - [ ] Each of stat/read/write/delete/mkdir round-trips against the fixture, with a test per op.
-- [ ] `read` of a large object never holds the whole body in memory at once — the chunking is asserted, not
-      assumed, and removing it turns a test red.
+- [x] ~~`read` of a large object never holds the whole body in memory at once~~ — **reworded 2026-08-13,
+      because as written this is not achievable by any implementation of this trait method.**
+      `FileSystemProvider::read` returns `Vec<u8>`, so the whole object is in memory by the time it
+      returns, by construction. A genuinely streaming `read` is a trait-level change across all four
+      remote backends; `cpe-ftp` and `cpe-webdav` both already name it as the real fix and scope it out.
+      The achievable criterion, which is what was built and tested: **`read` never makes an unbounded
+      single allocation** (a fixed 64 KiB stack buffer, `cpe-ftp`'s convention, so what the server sends
+      changes the iteration count and never the amount demanded at once), **its cap is enforced during the
+      transfer rather than after it** (checked per chunk before the append — asserted against a server
+      that never stops sending, where a `read_to_end` grows until the process dies), and **an over-cap read
+      is a loud `Err`, never a truncated `Vec`**. Removing the per-chunk cap check reds two distinct tests.
 - [ ] `rename` returns an error naming S3's lack of atomic rename, and `capabilities().supports_rename` is
       `false`. A test asserts no PUT-copy and no DELETE were issued — proving it refused rather than faked.
 - [ ] `stat` on a missing key is not-found; `stat` on a denied key reports the denial. The two are
@@ -338,8 +347,10 @@ restored with `git checkout --` and each re-run confirming `Compiling cpe-s3`: t
 chunk cap (two distinct reds, one of them the deadline harness catching what would otherwise hang CI),
 the bodiless-404 arm, the bodiless-403 arm, the `delete` directory refusal, the `IsTruncated` half of the
 probe on its own, the `mkdir` marker key shape, the `rename` refusal (replaced with a working
-copy-then-delete, which the request counter caught), the missing-`Content-Length` refusal, and the
-marker's contribution to `raw_entries`. One probe cost an uncommitted doc edit to `git checkout --` —
+copy-then-delete — caught by `expect_err`, since a *working* emulation returns `Ok`; the request counter
+is the guard for the dangerous variant instead, where the copy lands and an honest-looking `Err` is then
+returned, leaving two objects), the missing-`Content-Length` refusal, and the marker's contribution to
+`raw_entries`. One probe cost an uncommitted doc edit to `git checkout --` —
 exactly the trap the ground rules name — and it was re-applied and committed before continuing.
 
 `cargo test`: 164 passed. `cargo clippy --all-targets -- -D warnings`: clean. `crates/s3` has no feature

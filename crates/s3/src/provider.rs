@@ -413,23 +413,20 @@ fn guard_header_sendable(label: &str, value: &str) -> Result<(), String> {
 /// Mirrored here rather than simplified, because a guard that only caught the literal forms would let the
 /// encoded ones through and be wrong in the one direction that matters.
 ///
-/// **Corrected after the round-2 UAT: the `%2e` arms are NOT "future-proofing".** An earlier version of
-/// this comment said they were — hedging against a possible future encoder change — which was wrong about
-/// the thing that matters. They are a **live match for measured `ureq` behaviour**: the UAT widened the
-/// wire probe to 20 shapes and recorded `ASK /test-bucket/a/%2e%2e/b.txt` → `SENT /test-bucket/b.txt` and
-/// `ASK /test-bucket/a/%2E/b.txt` → `SENT /test-bucket/a/b.txt`. `ureq` really does resolve them, today.
+/// The `%2e` arms cannot fire from this crate's own encoder today ([`crate::sigv4::encode_path`] leaves `.`
+/// alone as an unreserved character and escapes a literal `%` to `%25`), so they are pure future-proofing
+/// against an encoder change — and they cannot produce a false refusal, because nothing this crate emits
+/// can look like them by accident.
 ///
-/// What *is* true is narrower and worth stating precisely: those arms are **unreachable through this
-/// crate's own encoder**, because [`crate::sigv4::encode_path`] leaves `.` alone as an unreserved
-/// character and escapes a literal `%` to `%25`, so a key containing the text `%2e` travels as `%252e`.
-/// So the guard is exactly as wide as the defect rather than narrower — which is the property to keep —
-/// and it costs nothing, since nothing this crate emits can trip these arms by accident.
-///
-/// The distinction is not pedantry. "Future-proofing against a hypothetical" invites a later reader to
-/// delete the arms as dead weight; "as wide as a defect we measured, currently gated by our own encoder"
-/// tells them what actually breaks if the encoder changes or a pre-encoded path is ever passed in. This
-/// repo's own rule — a wrong comment on a security guard is worse than none — is why this paragraph
-/// exists rather than a one-word edit.
+/// **That unreachability is measured, not assumed** (CPE-1684 round-2 review, recorded here because it was
+/// briefly contested). Driven through `S3Provider`, the key `a/%2e%2e/b.txt` signs
+/// `/test-bucket/a/%252e%252e/b.txt` and goes on the wire byte-identical, with this guard **not** firing —
+/// the `%` is escaped before the path is ever built, so `%2e` cannot reach `ureq` as `%2e` through this
+/// API at all. A separate probe that handed `ureq` a URL containing a literal `%2e` did see it rewritten,
+/// which is true of `ureq` and irrelevant here: that URL is unreachable through `S3Provider`. Only a bare
+/// `.`/`..` can reach the client, which is exactly what [`guard_path_survives_the_client`] refuses on the
+/// evidence of its own measurement. Do not "correct" this paragraph to say the arms match a live defect on
+/// this path — they do not, and that edit was proposed once and withdrawn.
 fn is_url_dot_segment(segment: &str) -> bool {
     let unescaped = segment.to_ascii_lowercase().replace("%2e", ".");
     unescaped == "." || unescaped == ".."
@@ -1132,11 +1129,19 @@ impl S3Provider {
     /// reds `tests::a_directory_whose_first_returned_key_is_only_its_marker_is_still_refused_by_delete` on
     /// its own, while `max-keys` was still 2.
     ///
-    /// `max-keys=2` is then asked for because S3 is explicitly permitted to return **fewer** keys than
-    /// requested, and a gateway that both under-fills *and* fails to set `IsTruncated` is answering
-    /// non-conformingly — a shape no flag can be trusted to report. Asking for the smallest number that
-    /// can ever show a second key costs nothing and does not depend on the server telling the truth about
-    /// its own pagination. It is not, on its own, what makes the check correct.
+    /// `max-keys=2` is the second belt, and it is worth being exact about which failure it actually
+    /// catches — an earlier version of this comment named the wrong one. It is **not** the gateway that
+    /// under-fills: a server that returns one key when asked for two returns one key when asked for one
+    /// too, so asking for more buys nothing against it. What the second key defends against is a gateway
+    /// that **honours `max-keys` and lies about `IsTruncated`** — it hands back both keys it was asked
+    /// for, so the second one is right there in the page, while its `IsTruncated=false` would have made a
+    /// one-key probe conclude the directory was empty. That is precisely the server
+    /// `tests::a_server_that_denies_being_truncated_is_still_seen_as_a_non_empty_directory` stands up, and
+    /// with `max-keys` set to `1` that test — and only that test — reds.
+    ///
+    /// So the two halves cover genuinely different servers: `IsTruncated` covers every conforming one,
+    /// and the second key covers one that reports its own pagination falsely. Neither subsumes the other,
+    /// and neither is decoration.
     fn probe_prefix(&self, key_prefix: &str) -> Result<(usize, usize, bool), String> {
         let target = self.config.bucket_target()?;
         let mut query: Vec<(&str, &str)> =
@@ -1619,7 +1624,15 @@ impl FileSystemProvider for S3Provider {
     ///   for and was never told about.
     ///
     /// No request of any kind is issued: this returns before touching the network, and a test asserts the
-    /// fixture's request counter is still `0` afterwards — proving it refused rather than half-faked.
+    /// fixture's request counter is still `0` afterwards.
+    ///
+    /// **What that counter is actually for**, stated precisely because an earlier description of this got
+    /// it wrong: a *working* copy-then-delete is caught first and more simply by `expect_err`, since it
+    /// returns `Ok`. The counter is load-bearing for the **dangerous** variant — an emulation whose copy
+    /// lands and which then returns an honest-looking `Err` (the delete failed, or a later step did).
+    /// `expect_err` is satisfied by that one, and the user is left with two objects believing they have
+    /// one, which is the precise failure this refusal exists to prevent. Only "zero requests were sent"
+    /// distinguishes "refused" from "half-did it and then reported a problem".
     fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
         Err(format!(
             "s3: rename {from:?} -> {to:?} is not supported: S3 has no rename operation and no atomic \
@@ -3722,13 +3735,17 @@ mod tests {
         );
     }
 
-    /// A server that honours `max-keys` but **always** says `IsTruncated=false`, even when it has just
-    /// under-filled the page. S3 is explicitly permitted to return fewer keys than asked for; a server
-    /// that does so *and* fails to admit there is more is non-conforming, and it is the exact shape
-    /// [`S3Provider::probe_prefix`]'s `max-keys=2` exists to survive. The two rows are a directory's own
-    /// marker followed by one real object, in S3's lexicographic order — the marker always sorts first
-    /// because it is a strict prefix of everything beneath it.
-    fn spawn_a_server_that_underfills_without_admitting_it() -> String {
+    /// A server that **honours `max-keys` faithfully** and then **lies about `IsTruncated`**, always
+    /// reporting `false` even when it has just cut the page short.
+    ///
+    /// That combination, not under-filling, is what [`S3Provider::probe_prefix`]'s `max-keys=2` defends
+    /// against — a gateway that returns fewer keys than asked for returns fewer when asked for one too, so
+    /// asking for more buys nothing against it. Here the second key really is in the page whenever two are
+    /// requested, so the second key is the only thing that can contradict the false `IsTruncated`.
+    ///
+    /// The two rows are a directory's own marker followed by one real object, in S3's lexicographic order
+    /// — the marker always sorts first because it is a strict prefix of everything beneath it.
+    fn spawn_a_server_that_honours_max_keys_but_denies_being_truncated() -> String {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         std::thread::spawn(move || {
@@ -3761,15 +3778,16 @@ mod tests {
     /// Pins the `max-keys=2` half of [`S3Provider::probe_prefix`], which the round-2 UAT correctly noted
     /// was unverified: changing it to `1` left the whole suite green, so a future edit would ship silently.
     ///
-    /// It needs a **non-conforming** server to be observable at all, because on a conforming one the
-    /// `IsTruncated` belt catches the same case first — that is precisely the division of labour the two
-    /// halves have, and why `probe_prefix`'s doc calls `IsTruncated` load-bearing and this a second belt.
-    /// Against a server that under-fills without admitting it, `max-keys=1` returns the marker alone, no
-    /// truncation flag, and `delete` would remove the marker and report success with `photos/a.jpg` still
-    /// there. Asking for two keys is what makes the second one visible.
+    /// It needs a server that **misreports its own pagination** to be observable at all, because on a
+    /// conforming one the `IsTruncated` belt catches the same case first — that is precisely the division
+    /// of labour the two halves have, and why `probe_prefix`'s doc calls `IsTruncated` load-bearing and
+    /// this a second belt. Against a server that honours `max-keys` and denies being truncated,
+    /// `max-keys=1` returns the marker alone with no truncation flag, and `delete` would remove the marker
+    /// and report success with `photos/a.jpg` still there. Asking for two keys is what puts the second one
+    /// in the page where the false flag cannot hide it.
     #[test]
-    fn a_server_that_underfills_without_setting_is_truncated_is_still_seen_as_a_non_empty_directory() {
-        let base = spawn_a_server_that_underfills_without_admitting_it();
+    fn a_server_that_denies_being_truncated_is_still_seen_as_a_non_empty_directory() {
+        let base = spawn_a_server_that_honours_max_keys_but_denies_being_truncated();
         let mut provider = S3Provider::connect(&cfg(&base));
 
         let err = provider.delete("/photos").expect_err(
