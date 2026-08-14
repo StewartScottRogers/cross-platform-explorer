@@ -618,43 +618,89 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
             "DELETE" => {
-                // CPE-1726 (found while sweeping the sibling primitives, and the one place this crate's
-                // rig differed from `cpe-ftp`'s and `cpe-sftp`'s): those two get `DELE`/`RMD` and
-                // `remove`/`rmdir` as *separate wire verbs*, so they never have to classify. WebDAV's
-                // `DELETE` is one verb for both, and the classifier was `real.is_dir()`, which
-                // **follows** the final component — a symlink to a directory answered "directory" and
-                // went to `remove_dir_all`, recursing through the link into whatever it points at.
-                // `symlink_metadata` never follows, so one stat answers link / dir / file on its own
-                // (CPE-1719's measurement); a link is unlinked, never traversed.
-                let r = match std::fs::symlink_metadata(&real).map(|m| m.file_type()) {
-                    Ok(t) if t.is_dir() => std::fs::remove_dir_all(&real),
-                    Ok(_) => std::fs::remove_file(&real),
-                    Err(e) => Err(e),
+                // CPE-1726 round 2 proposed replacing `real.is_dir()` here with a `symlink_metadata`
+                // classifier, on the theory that `is_dir()` follows the final component so a symlink to
+                // a directory would be handed to `remove_dir_all` and recursed *through*. **The UAT
+                // measured that theory and it is false**, so the change was reverted and this comment
+                // exists to stop the next person re-deriving it:
+                //
+                //   remove_dir_all(dir-symlink): Ok(())  target dir exists = true  contents survived
+                //   remove_dir_all(junction):    Ok(())  target dir exists = true  contents survived
+                //
+                // `std::fs::remove_dir_all`'s own documentation says it plainly and platform-
+                // independently: *"This function does not follow symbolic links and it will simply
+                // remove the symbolic link itself."* So `is_dir()` following the link is harmless here —
+                // it routes a link to a primitive that then declines to follow it, and the link is
+                // unlinked with its target intact. That is the correct answer and the code already gave
+                // it.
+                //
+                // The proposed "fix" was strictly worse: `symlink_metadata` reports a Windows directory
+                // symlink as `is_symlink = true, is_dir = false`, routing it to `remove_file`, which
+                // cannot unlink a directory reparse point on Windows — measured `404 Not Found` with the
+                // link still in place, where the current code returns `204` and removes it. No upside on
+                // any platform, a regression on one. `cpe_1726_delete_of_a_link_to_a_directory_...`
+                // below pins the behaviour that is actually correct, so the round-2 mistake cannot be
+                // reintroduced silently.
+                let r = if real.is_dir() {
+                    std::fs::remove_dir_all(&real)
+                } else {
+                    std::fs::remove_file(&real)
                 };
                 let _ = req.respond(tiny_http::Response::empty(if r.is_ok() { 204 } else { 404 }));
             }
             "MOVE" => {
-                // The Destination header is an absolute URL; map its path under `root`.
+                // The Destination header is an absolute URL (`scheme://authority/path`); map its path
+                // under `root`.
                 //
-                // CPE-1726: this used to end `.unwrap_or_default()` and then `root.join(dest_path)`, so
-                // an **absent or malformed** `Destination` collapsed to the empty string and the
-                // destination silently became the server root itself — a request that named no target at
-                // all still got handed a real, live path to rename onto. A `None` here is now a 400,
-                // which is both what RFC 4918 §9.9.4 says and the honest answer: a rig that invents a
-                // destination when the client supplied none cannot be trusted to be modelling the wire.
-                let dest_path = req
+                // CPE-1726: this used to end `.unwrap_or_default()`, so an **absent or malformed**
+                // `Destination` collapsed to the empty string and `root.join("")` made the destination
+                // the served root itself — a request naming no target still got a live path to rename
+                // onto, and `MOVE /` with no header was answered `201 Created`.
+                //
+                // **Round 2's fix closed one spelling of four, which the UAT measured.** It filtered for
+                // emptiness *before* trimming the leading slashes, so `//`, `///` and `//.` all survived
+                // the filter and then trimmed down to the same empty-or-dot path — `201 Created` again,
+                // the identical outcome. Order matters: **trim first, reject after**, and reject `.`
+                // as well as `""` since both resolve to the served root.
+                //
+                // The host is also checked now (RFC 4918 §9.9.4): a `Destination` naming a *different*
+                // server was previously executed locally — measured landing a file at `root/stolen.txt`
+                // with a `201` — where the RFC says `502 Bad Gateway`. The comparison is skipped when
+                // either side is absent rather than guessed at, so a client that sends no `Host` is not
+                // refused for it.
+                let parsed = req
                     .headers()
                     .iter()
                     .find(|h| h.field.equiv("Destination"))
                     .map(|h| h.value.as_str().to_string())
                     .and_then(|u| u.rsplit_once("://").map(|(_, rest)| rest.to_string()))
-                    .and_then(|rest| rest.split_once('/').map(|(_, p)| p.to_string()))
-                    .filter(|p| !p.is_empty());
-                let Some(dest_path) = dest_path else {
+                    .and_then(|rest| {
+                        rest.split_once('/').map(|(auth, p)| (auth.to_string(), p.to_string()))
+                    });
+                let Some((dest_authority, dest_path)) = parsed else {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
                 };
-                let dest_real = root.join(dest_path.trim_start_matches('/'));
+                let host = req
+                    .headers()
+                    .iter()
+                    .find(|h| h.field.equiv("Host"))
+                    .map(|h| h.value.as_str().to_string())
+                    .unwrap_or_default();
+                if !dest_authority.is_empty()
+                    && !host.is_empty()
+                    && !dest_authority.eq_ignore_ascii_case(&host)
+                {
+                    let _ = req.respond(tiny_http::Response::empty(502));
+                    return;
+                }
+                // Trim BEFORE the emptiness check — this is the ordering the UAT caught.
+                let dest_rel = dest_path.trim_start_matches('/');
+                if dest_rel.is_empty() || dest_rel == "." {
+                    let _ = req.respond(tiny_http::Response::empty(400));
+                    return;
+                }
+                let dest_real = root.join(dest_rel);
                 // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a
                 // category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not
                 // wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
@@ -1267,36 +1313,30 @@ mod tests {
         }
     }
 
-    /// CPE-1726 blocker from PR #902's round-2 review: the `DELETE` classifier fix was **completely
-    /// unpinned** — the reviewer reverted `symlink_metadata` back to `real.is_dir()` and all 23 tests
-    /// still passed, so a future edit putting the link-following classifier back would have red nothing.
+    /// **This test exists because round 2 of this PR shipped a wrong "fix" here, and it is the guard
+    /// that would have caught it.**
     ///
-    /// The property is: **`DELETE` never recurses through a link.** `is_dir()` follows the final
-    /// component, so a symlink to a directory answered "directory" and was handed to `remove_dir_all`.
+    /// Round 2 replaced `DELETE`'s `real.is_dir()` classifier with `symlink_metadata`, reasoning that
+    /// `is_dir()` follows the final component so a symlink to a directory would be handed to
+    /// `remove_dir_all` and recursed *through*. **The UAT measured the primitive and the premise is
+    /// false** — `remove_dir_all` does not follow a symlink at the top level, on any platform, and its
+    /// own docs say so — so the original code was already correct and the change was reverted.
     ///
-    /// # Why the assertion is on the SLOT and not only on the victim
-    /// Asserting only "the target directory survived" would have been another test that cannot fail:
-    /// pre-fix the target survived anyway, because Rust's own `remove_dir_all` refuses a symlink at the
-    /// top level rather than recursing into it. That is the `MOVE` situation again — the rig was saved
-    /// by the standard library, not by its own logic — and "saved by someone else's guard" is not a
-    /// guard. So the victim assertion below is the invariant (it must hold on every platform, always),
-    /// and the **slot** assertion is what actually distinguishes the two classifiers.
+    /// The change was not merely unnecessary, it was a **Windows regression**: `symlink_metadata`
+    /// reports a Windows directory symlink as `is_dir = false`, routing it to `remove_file`, which
+    /// cannot unlink a directory reparse point — `404` with the link still sitting there, where the
+    /// correct code returns `204` and removes it.
     ///
-    /// # The slot's fate inverts across platforms, and both directions are pinned
-    /// - **Unix.** Pre-fix: `remove_dir_all(link)` → `ENOTDIR`, so the request failed and the link
-    ///   stayed. Post-fix: `remove_file(link)` unlinks the link itself, which is what every real WebDAV
-    ///   server does. So "the slot is gone" reds pre-fix.
-    /// - **Windows.** Pre-fix: `remove_dir_all` on a directory reparse point removes the reparse point
-    ///   (the post-CVE-2022-21658 behaviour), so the link went away. Post-fix: `remove_file` →
-    ///   `DeleteFile` refuses a directory reparse point, so the request **fails safe** and the link
-    ///   stays. So "the slot is still a link" reds pre-fix.
+    /// So what is pinned here is the **behaviour that is right**, uniform across platforms:
     ///
-    /// Failing safe rather than unlinking is a worse answer than Unix's but a safe one, and it is not
-    /// worth platform-specific rig code to equalise — so this asserts what each platform actually does
-    /// rather than asserting a status code neither agrees on (per the round-2 review's warning: do not
-    /// assert 204 on Windows).
+    /// - the link's target directory and its contents survive (nothing recursed through the link), and
+    /// - the link itself is gone (a `DELETE` of a link removes the link — what a real share does).
+    ///
+    /// Reintroducing the round-2 classifier reds the second assertion on Windows. It would *not* red on
+    /// Unix, where `remove_file` unlinks a symlink regardless of target type and the change is a no-op —
+    /// stated rather than glossed, because a guard whose coverage is platform-partial should say so.
     #[test]
-    fn cpe_1726_delete_never_recurses_through_a_link_to_a_directory() {
+    fn cpe_1726_delete_of_a_link_to_a_directory_removes_the_link_and_spares_its_target() {
         let (base, root) = spawn_webdav_server_returning_root();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
 
@@ -1339,23 +1379,14 @@ mod tests {
             "and its bytes must be untouched (DELETE reported {r:?})"
         );
 
-        // The discriminator: what happened to the slot itself.
-        let slot_now = std::fs::symlink_metadata(&slot);
-        #[cfg(unix)]
+        // And the link itself must be gone — the same answer on every platform.
         assert!(
-            slot_now.is_err(),
-            "on Unix the link itself must be UNLINKED — `symlink_metadata` classifies it as not-a-dir \
-             so it goes to `remove_file`, which is what a real WebDAV share does. Pre-fix it went to \
-             `remove_dir_all`, which refuses a symlink with ENOTDIR and left the link sitting there \
-             (DELETE reported {r:?})"
-        );
-        #[cfg(windows)]
-        assert!(
-            slot_now.is_ok_and(|m| m.file_type().is_symlink()),
-            "on Windows the link must still BE a link: `remove_file` cannot delete a directory reparse \
-             point, so the request fails safe. Pre-fix `remove_dir_all` deleted the reparse point \
-             instead, which is why the slot's fate is what distinguishes the two classifiers here \
-             (DELETE reported {r:?})"
+            std::fs::symlink_metadata(&slot).is_err(),
+            "the link itself must be REMOVED: a DELETE of a link removes the link, which is what a real \
+             WebDAV share does and what `is_dir()` + `remove_dir_all` correctly produces here. This is \
+             the assertion that reds if round 2's `symlink_metadata` classifier is reintroduced — on \
+             Windows it routes a directory symlink to `remove_file`, which cannot unlink a reparse \
+             point, leaving the link in place and answering 404 (DELETE reported {r:?})"
         );
     }
 
@@ -1377,41 +1408,72 @@ mod tests {
     /// **no destination at all** got a `201 Created`. Being saved by an errno is not a guard, and a rig
     /// that reports success for a request it could not understand cannot be trusted to model the wire.
     /// Asserts on the tree still being there as well as on the refusal, never on the status alone.
+    ///
+    /// # Four spellings, not one — round 2 closed only the first, and the UAT caught it
+    /// Round 2's fix filtered the path for emptiness **before** trimming its leading slashes, so `//`,
+    /// `///` and `//.` all survived the filter and then trimmed down to the same empty-or-dot path.
+    /// Measured on that supposedly-fixed code: all three returned `201 Created` — *the identical
+    /// outcome* the fix was presented as closing. The table below is exhaustive over the shapes that
+    /// resolve to the served root, so "I fixed the one I thought of" cannot pass again.
+    ///
+    /// The last row is a different defect the same sweep missed: a `Destination` naming **another
+    /// host** was executed locally (measured landing a file at `root/stolen.txt` with a `201`), where
+    /// RFC 4918 §9.9.4 says `502 Bad Gateway`.
     #[test]
-    fn cpe_1726_a_move_with_no_destination_header_never_targets_the_server_root() {
+    fn cpe_1726_a_move_whose_destination_resolves_to_the_server_root_is_refused() {
         use std::io::{Read as _, Write as _};
-        let (base, root) = spawn_webdav_server_returning_root();
-        let addr = base.trim_start_matches("http://").to_string();
 
-        let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
-        // `Connection: close` and a read timeout are both load-bearing, not tidiness: tiny_http speaks
-        // HTTP/1.1 keep-alive, so without the header `read_to_string` waits for an EOF the server has no
-        // reason to send and the test becomes a **hang** rather than a red — libtest has no per-test
-        // timeout, so CI would sit there until the job's own limit (the same trap `call_with_deadline`
-        // above exists for).
-        sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
-        sock.write_all(
-            b"MOVE / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-        )
-        .expect("send a MOVE with no Destination header");
-        let mut resp = String::new();
-        let _ = sock.read_to_string(&mut resp);
+        // (what the client sends as the Destination header, the status it must get back, why)
+        let cases: &[(Option<&str>, &str, &str)] = &[
+            (None, "400", "no Destination header at all — the round-2 case"),
+            (Some("http://{host}/"), "400", "a bare `/` path — trims to empty"),
+            (Some("http://{host}//"), "400", "two slashes — survived round 2's pre-trim filter"),
+            (Some("http://{host}///"), "400", "three slashes — same evasion"),
+            (Some("http://{host}//."), "400", "slashes then a dot — trims to `.`, still the root"),
+            (Some("http://other.example//stolen.txt"), "502", "a Destination on ANOTHER host"),
+        ];
 
-        assert!(
-            root.join("readme.txt").is_file(),
-            "the served tree must still be there: with no Destination the rig had nothing to move \
-             anything to, and pre-fix it invented `root.join(\"\")` — the served root itself — instead \
-             of refusing (response was {resp:?})"
-        );
-        assert!(
-            root.join("sub").join("nested.txt").is_file(),
-            "and the served tree must be intact (response was {resp:?})"
-        );
-        assert!(
-            resp.contains("400"),
-            "a MOVE with no Destination is a 400 (RFC 4918 §9.9.4), not an invented destination; got \
-             {resp:?}"
-        );
+        for (dest, want, why) in cases {
+            let (base, root) = spawn_webdav_server_returning_root();
+            let addr = base.trim_start_matches("http://").to_string();
+            let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+            // The **read timeout** is what makes this un-hangable — `Connection: close` alone is not
+            // enough, and the UAT measured that removing the header still passes (at 10.01 s, i.e. on
+            // the timeout). tiny_http speaks HTTP/1.1 keep-alive, so `read_to_string` would otherwise
+            // wait for an EOF the server has no reason to send, and libtest has no per-test timeout —
+            // the test would become a hang rather than a red. Both are kept: the header makes the
+            // ordinary path fast, the timeout makes every path bounded.
+            sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+            let dest_header = match dest {
+                Some(d) => format!("Destination: {}\r\n", d.replace("{host}", &addr)),
+                None => String::new(),
+            };
+            let req = format!(
+                "MOVE / HTTP/1.1\r\nHost: {addr}\r\n{dest_header}Connection: close\r\n\
+                 Content-Length: 0\r\n\r\n"
+            );
+            sock.write_all(req.as_bytes()).expect("send the MOVE");
+            let mut resp = String::new();
+            let _ = sock.read_to_string(&mut resp);
+
+            // Filesystem facts first: whatever the rig answered, the served tree is still there and
+            // nothing landed from the cross-host attempt.
+            assert!(
+                root.join("readme.txt").is_file() && root.join("sub").join("nested.txt").is_file(),
+                "[{why}] the served tree must be intact; the rig invented `root.join(\"\")` — the \
+                 served root itself — rather than refusing (response was {resp:?})"
+            );
+            assert!(
+                !root.join("stolen.txt").exists(),
+                "[{why}] a Destination naming another host must never be executed against the local \
+                 tree (response was {resp:?})"
+            );
+            assert!(
+                resp.contains(want),
+                "[{why}] expected {want}; a destination that resolves to the served root is a refusal, \
+                 not an invented target (RFC 4918 §9.9.4). Got {resp:?}"
+            );
+        }
     }
 
     #[test]
