@@ -16,14 +16,22 @@ CPE-1717 routed every staging attempt it could through `cpe_server::fsutil::requ
 that cannot stage its condition on a platform where the mechanism is *supposed* to work goes **red
 under CI** instead of printing a notice into a green log.
 
-Four sites were deliberately **left out**, and they are "Group F" in CPE-1717's enumeration:
+A **44-site** bucket was left out. CPE-1717's "Group F" paragraph originally named three of them —
+the three its author had inspected — and the PR #898 UAT's exhaustive audit put the real population at
+44. That gap is itself an instance of Evidence Rule 1 ("state the scope of a negative result"), so the
+count is recorded here rather than in a ticket that is closing.
+
+The four whose mechanisms are already characterised, and which are the natural first batch:
 
 | Site | Mechanism | Why it was not routed |
 |---|---|---|
 | `crates/server/src/split_join.rs` — `make_unstattable` (notice at ~`:826`) | three fallbacks in order: an `(RA,RD)` ACL deny, a symlink loop, … | the Windows behaviour of the fallbacks is **not measured**; `(RA)` is on the "does not refuse `try_exists`" side of `fsutil::deny_stat_of`'s table, and the symlink-loop fallback needs a privilege an unprivileged runner may not have |
 | `crates/server/src/organize_apply.rs` (~`:291`, `:320`) | live-symlink creation, plus an `exists()`-on-the-link premise check | same: unmeasured on an unprivileged Windows runner, and it creates a *live* link, so `make_dangling_link`'s junction fallback does not apply unchanged |
 | `crates/server/src/vault_crypto.rs` (~`:726`) | creating a **directory** link for the `promote` live-link leg | same |
-| `src-tauri/src/lib.rs` (~`:15792`) | `cpe_1705_rename_entry_refuses_onto_a_dangling_symlink`'s own inline symlink creation | predates `make_dangling_link`; may simply be repointable at it |
+| `src-tauri/src/lib.rs` (~`:15805`) | `cpe_1705_rename_entry_refuses_onto_a_dangling_symlink`'s own inline symlink creation, with **no junction fallback** | its three siblings at 15460/15494/15542 call the routed `make_dangling_link`, which *has* a fallback — so this leg skips on a Windows runner without Developer Mode where they stage. Likely just repointable at the helper |
+| `crates/server/src/copilot.rs:805` | `make_dir_link` — a junction, privilege-free | structurally the same class routed as `supported_here = true`; probably a straight route, but measure rather than assume |
+
+…and **40 further sites** the UAT counted. Batch them; do not attempt all 44 in one change.
 
 **Nothing regresses today.** All four already use the capture-proof `writeln!(std::io::stderr(), ..)`
 emitter, so their notices do reach the CI log — they are simply not *consequential*: the leg still

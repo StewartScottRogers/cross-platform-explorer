@@ -806,8 +806,16 @@ mod tests {
     /// same name, reimplemented rather than imported: a sidecar may not depend on `cpe-server` (ADR 0001).
     ///
     /// Because the junction leg needs no privilege, **this succeeds on every runner**, so the tests that
-    /// use it are unconditional. Nothing here relies on a skip notice being printed — under CI those are
-    /// invisible anyway, since libtest captures stderr for passing tests and a skip is a pass (CPE-1717).
+    /// use it are unconditional and none of them needs a skip notice at all.
+    ///
+    /// **Correction (CPE-1717).** An earlier version of this sentence justified that by saying skip
+    /// notices "are invisible under CI anyway, since libtest captures stderr for passing tests", citing
+    /// CPE-1717. **That is the wrong mechanism and the claim is false.** libtest's capture is installed
+    /// inside the `print!`/`eprint!` macros, so `eprintln!` is swallowed but a direct
+    /// `writeln!(std::io::stderr(), ..)` is **not** — measured on a real Windows runner, where such a
+    /// notice appears in a plain `cargo test` log on a passing test. The reason this function needs no
+    /// notice is the junction fallback above, nothing to do with capture. If a leg here ever does need
+    /// one, write it with `writeln!(std::io::stderr(), ..)`, and prefer making the leg red outright.
     fn make_dangling_link(link: &Path) -> PathBuf {
         let missing = link.with_file_name(format!(
             "{}-target-that-does-not-exist",

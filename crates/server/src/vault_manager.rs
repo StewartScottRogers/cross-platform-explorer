@@ -3651,9 +3651,14 @@ mod tests {
             assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
             assert_eq!(std::fs::read(&victim).unwrap(), b"the only copy", "nor through the symlink");
         } else {
-            eprintln!(
-                "NOTE the_staging_open_is_exclusive…: no symlink privilege here, so only the regular-file \
-                 and hard-link forms were verified."
+            // CPE-1717: this is a skip notice, and it spent the whole conversion pass looking like it
+            // was not — it never says "skip", so both the conversion sweep and the first version of
+            // `fsutil`'s scan walked past it. An independent audit found it. `skip_notice!` writes to
+            // the process's stderr handle, which libtest's `print!`-macro capture does not intercept;
+            // the `eprintln!` this replaces reached nobody on a passing run.
+            crate::skip_notice!(
+                "SKIPPED part of the_staging_open_is_exclusive…: no symlink privilege here, so only \
+                 the regular-file and hard-link forms were verified."
             );
         }
 

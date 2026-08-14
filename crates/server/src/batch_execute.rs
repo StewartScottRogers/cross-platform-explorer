@@ -2222,7 +2222,7 @@ mod tests {
 
         assert!(swapped.get(), "the swap never happened — this test verified NOTHING");
         let landed = fs::read(&outside_name).unwrap();
-        println!(
+        println!( // NOT-A-SKIP-NOTICE: "skipped" here is the batch report's own field; this test asserts unconditionally above and declines nothing
             "SEC-8 report: written={} skipped={:?}; outside file now {} bytes (was {})",
             report.written,
             report.skipped,
@@ -2527,7 +2527,7 @@ mod tests {
         let linked = racer.join().unwrap();
 
         let victim_now = fs::read(&victim).unwrap();
-        println!(
+        println!( // NOT-A-SKIP-NOTICE: "skipped" is the batch report's own field; the security assertion below runs either way
             "SEC-9 report: racer_linked={linked} written={} skipped={:?}; victim {} -> {} bytes",
             report.written,
             report.skipped,
@@ -2548,7 +2548,7 @@ mod tests {
                 "the racer's link landed first, so the item must have been refused, not written"
             );
             assert_eq!(report.skipped.len(), 1, "the refused item must be reported, not silently dropped");
-            println!("SEC-9 defence: the handle check refused a multiply-linked output ({})", report.skipped[0].1);
+            println!("SEC-9 defence: the handle check refused a multiply-linked output ({})", report.skipped[0].1); // NOT-A-SKIP-NOTICE: the PRODUCT skipped an item; this test declined nothing
         } else {
             // The atomic create claimed the name first, so the attack could not be staged at all.
             assert_eq!(report.written, 1, "with the attack impossible, the ordinary write must succeed");

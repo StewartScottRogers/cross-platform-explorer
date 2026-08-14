@@ -458,7 +458,26 @@ pub fn staging_verdict(
 /// the fix has to wait); otherwise it follows `CI`, which GitHub Actions sets to `true` on every
 /// runner.
 pub fn staging_is_strict() -> bool {
-    strict_from(std::env::var("CPE_STAGING_STRICT").ok().as_deref(), std::env::var_os("CI").is_some())
+    strict_from(
+        std::env::var("CPE_STAGING_STRICT").ok().as_deref(),
+        ci_from(std::env::var("CI").ok().as_deref()),
+    )
+}
+
+/// Is this a CI harness? A pure function of `$CI`, because the first version asked
+/// `var_os("CI").is_some()` — under which `CI=false`, `CI=0` and `CI=""` all counted as CI, flatly
+/// contradicting the doc comment that said it "follows `CI`".
+///
+/// **Unlike [`strict_from`], an unrecognised value here is tolerated rather than refused, and the
+/// asymmetry is deliberate.** `CPE_STAGING_STRICT` is *our* knob: a value we do not understand is a
+/// typo by someone reaching for a documented escape hatch, and silently ignoring it hands them a green
+/// run they believe they forced. `CI` is *not ours* — dozens of tools set it to whatever they like —
+/// so anything present and not falsy means CI, which is the convention every other tool uses.
+pub fn ci_from(var: Option<&str>) -> bool {
+    match var {
+        None => false,
+        Some(raw) => !matches!(raw.trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"),
+    }
 }
 
 /// The decision [`staging_is_strict`] makes, as a **pure** function of its two inputs.
@@ -491,15 +510,38 @@ pub fn staging_is_strict() -> bool {
 /// quietly did nothing on a developer's machine and `=false` quietly did nothing on CI.)
 pub fn strict_from(var: Option<&str>, ci: bool) -> bool {
     let Some(raw) = var else { return ci };
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "" => ci,
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        other => panic!(
-            "[CPE-1717] CPE_STAGING_STRICT={other:?} is not a value this understands, and silently \
+    match strict_token(raw) {
+        StrictToken::Unset => ci,
+        StrictToken::On => true,
+        StrictToken::Off => false,
+        StrictToken::Unrecognised => panic!(
+            "[CPE-1717] CPE_STAGING_STRICT={raw:?} is not a value this understands, and silently \
              ignoring it would leave you believing an escape hatch worked when it did nothing. Use \
              one of 1/true/yes/on or 0/false/no/off, or unset it to follow CI."
         ),
+    }
+}
+
+/// How one raw `CPE_STAGING_STRICT` value classifies. Split out so the whole vocabulary is testable
+/// without a `catch_unwind` per spelling — five panics in a test log is noise that trains people to
+/// scroll past panics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StrictToken {
+    /// Empty — treat as though the variable were not set at all.
+    Unset,
+    On,
+    Off,
+    /// Not in the vocabulary. [`strict_from`] refuses this rather than guessing.
+    Unrecognised,
+}
+
+/// Classify one raw value, trimmed and case-folded.
+pub fn strict_token(raw: &str) -> StrictToken {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => StrictToken::Unset,
+        "1" | "true" | "yes" | "on" => StrictToken::On,
+        "0" | "false" | "no" | "off" => StrictToken::Off,
+        _ => StrictToken::Unrecognised,
     }
 }
 
@@ -1026,13 +1068,71 @@ mod tests {
         }
     }
 
+    /// `CI` is read by *other people's* tools, so it is parsed leniently — but `is_some()` was too
+    /// lenient by half: `CI=false` counted as CI, which is not "following `CI`" by any reading.
+    #[test]
+    fn cpe_1717_ci_detection_treats_a_falsy_value_as_not_ci() {
+        for truthy in ["true", "1", "TRUE", "yes", " true ", "azure-pipelines", "woodpecker"] {
+            assert!(ci_from(Some(truthy)), "CI={truthy:?} must read as CI");
+        }
+        for falsy in ["", "0", "false", "FALSE", "no", "off", "  "] {
+            assert!(!ci_from(Some(falsy)), "CI={falsy:?} must NOT read as CI");
+        }
+        assert!(!ci_from(None), "unset is not CI");
+    }
+
     /// An unrecognised value must be **loud**, not silently folded into the default. Folding it in is
     /// the same "unknown quietly treated as the safe answer" shape CPE-1680 is about, and here it
     /// would mean someone reaches for the documented escape hatch, mistypes it, and believes it took.
+    ///
+    /// The spellings below are the ones an independent audit drove through the knob and found
+    /// **silently lenient** in the first version, which matched the literal `1` and nothing else: a
+    /// developer forcing the check got a green run and believed they had run it. That is CPE-1717's
+    /// own bug — a check reporting success without having run — reintroduced inside CPE-1717's own
+    /// knob. `strict` and `2` are not in the vocabulary, so they must be refused, not ignored.
+    #[test]
+    fn cpe_1717_an_unrecognised_strictness_value_is_refused_not_ignored() {
+        // The 19 spellings the independent audit drove through the knob. Under the first version —
+        // which matched the literal `1` and nothing else — every row below that is now `On` was
+        // SILENTLY LENIENT, so forcing the check produced a green run the developer believed they had
+        // forced.
+        use StrictToken::*;
+        let vocabulary = [
+            ("1", On),
+            ("true", On),
+            ("True", On),
+            ("TRUE", On),
+            ("yes", On),
+            ("YES", On),
+            ("on", On),
+            (" 1", On),
+            ("1 ", On),
+            (" true ", On),
+            ("0", Off),
+            ("false", Off),
+            ("False", Off),
+            ("no", Off),
+            ("off", Off),
+            ("", Unset),
+            ("   ", Unset),
+            // Not in the vocabulary — refused, never guessed at.
+            ("strict", Unrecognised),
+            ("2", Unrecognised),
+            ("maybe", Unrecognised),
+            ("enabled", Unrecognised),
+            ("y", Unrecognised),
+        ];
+        for (raw, want) in vocabulary {
+            assert_eq!(strict_token(raw), want, "CPE_STAGING_STRICT={raw:?}");
+        }
+    }
+
+    /// …and `Unrecognised` really does stop the run rather than falling through to the default. This
+    /// is the assertion that makes the vocabulary table above mean something.
     #[test]
     #[should_panic(expected = "CPE_STAGING_STRICT")]
-    fn cpe_1717_an_unrecognised_strictness_value_is_refused_not_ignored() {
-        let _ = strict_from(Some("maybe"), true);
+    fn cpe_1717_an_unrecognised_strictness_value_panics_rather_than_defaulting() {
+        let _ = strict_from(Some("strict"), true);
     }
 
     /// The five spellings the PR #855 audit drove through a consented `apply_backup_plan` and watched
@@ -1475,16 +1575,37 @@ mod tests {
     /// alone and an `eprint!("SKIPPED …\n")` walked straight past it.
     const CAPTURED_MACROS: [&str; 4] = ["eprintln!", "eprint!", "println!", "print!"];
 
-    /// Does `literal_start` — the text from a `"` onwards — mention skipping, however it is cased?
+    /// The vocabulary this tree's skip notices actually use. **A vocabulary, not a semantic check** —
+    /// naming it that way is the point, because the alternative is believing the scan understands
+    /// intent.
+    ///
+    /// `skip` alone was not enough: `vault_manager.rs`'s `the_staging_open_is_exclusive` notice reads
+    /// *"NOTE …: no symlink privilege here, so only the regular-file and hard-link forms were
+    /// verified."* — a genuine, invisible, `eprintln!` skip notice that **never says "skip"**. It
+    /// survived the CPE-1717 conversion pass precisely because that pass and the first scan shared one
+    /// pattern, so they shared one blind spot: the same search cannot audit itself.
+    const SKIP_PHRASES: [&str; 6] = [
+        "skip",
+        "not covered",
+        "were verified",
+        "verified nothing",
+        "nothing to verify",
+        "no symlink privilege",
+    ];
+
+    /// Does `literal_start` — the text from a `"` onwards — read like a notice that a leg did not run?
     ///
     /// **Case-insensitive `contains`, not a prefix match against a list of spellings.** The first
     /// version tested `starts_with("\"SKIP")`/`("\"skipping")`, which missed, in the reviewer's own
     /// counter-examples: `"[CPE-1692] SKIPPED …"` — **the shape 56 sites in this tree actually use**,
     /// and the richer convention a future author will copy — plus sentence-case `"Skipping …"` and a
     /// leading space `" SKIPPED …"`. Three near-misses out of five is not a lint, it is a coin flip.
+    ///
+    /// No length cap: the survivor above puts its phrase well into the message, and a cap is one more
+    /// way for a notice to sit just outside the window.
     fn mentions_skipping(literal_start: &str) -> bool {
-        let end = literal_start.len().min(160);
-        literal_start[..end].to_ascii_lowercase().contains("skip")
+        let lower = literal_start.to_ascii_lowercase();
+        SKIP_PHRASES.iter().any(|p| lower.contains(p))
     }
 
     /// CPE-1717. A skip notice written with a **captured** print macro reaches nobody, and 56 sites in
@@ -1505,8 +1626,12 @@ mod tests {
     /// the cry-wolf failure this file's other scan already had to be corrected for.
     ///
     /// **What it still misses, and this list is deliberately not reassuring:**
-    /// - a notice that never says "skip" — "this environment cannot create a symlink; nothing below is
-    ///   covered" would pass;
+    /// - a notice phrased outside [`SKIP_PHRASES`] — "this environment cannot create a symlink; the
+    ///   assertions below prove less than they look like they do" would pass. This is not
+    ///   hypothetical: exactly one such notice (`vault_manager.rs`'s `the_staging_open_is_exclusive`)
+    ///   survived the CPE-1717 conversion pass **because that pass and this scan's first version
+    ///   shared one pattern**, and it took an independent audit to find. A search cannot audit itself;
+    ///   the vocabulary now names that phrase, and the next one will be outside it too;
     /// - a message built into a variable, or read from a `const`, before printing;
     /// - a `write!(std::io::stdout(), ..)`-shaped notice, which is visible but goes to the wrong
     ///   stream;
@@ -1562,13 +1687,30 @@ mod tests {
                 if code.starts_with("//") {
                     continue; // a comment explaining the rule is not a breach of it
                 }
+                // The scan reads its own source, so its detector strings and the fixtures that prove
+                // it still catches things look exactly like offences. The marker is deliberately ugly
+                // — the same reasoning as `LINK-ONLY:` above — and per-LINE rather than per-file:
+                // exempting all of `fsutil.rs` would make this module the one place a real invisible
+                // notice could hide.
+                if line.contains("SCAN-FIXTURE") {
+                    continue;
+                }
+                // …and the deliberate escape for a real call site whose message merely *mentions*
+                // skipping — a diagnostic dump of a batch report's own `skipped` field, say — rather
+                // than announcing that the test declined to run. Broad matching is the point of this
+                // scan; the price of broad matching is a per-site opt-out that states its reason. A
+                // lint that flags correct code teaches people to ignore it, which is the failure the
+                // sibling scan in this file was already corrected for once.
+                if line.contains("NOT-A-SKIP-NOTICE:") {
+                    continue;
+                }
                 let lineno = start + i + 1;
 
                 // Aliasing the captured macros hides a notice from every check above.
-                if code.contains("use std::eprint")
-                    || code.contains("use ::std::eprint")
-                    || code.contains("use std::print")
-                    || code.contains("use ::std::print")
+                if code.contains("use std::eprint") // SCAN-FIXTURE
+                    || code.contains("use ::std::eprint") // SCAN-FIXTURE
+                    || code.contains("use std::print") // SCAN-FIXTURE
+                    || code.contains("use ::std::print") // SCAN-FIXTURE
                 {
                     offences.push(format!(
                         "{}:{lineno}: aliases a captured print macro, which routes around this scan",
@@ -1650,12 +1792,14 @@ mod tests {
     #[test]
     fn cpe_1717_the_capture_scan_recognises_the_shapes_that_slipped_past_it() {
         for good in [
-            r#"eprintln!("[CPE-1692] SKIPPED the leg: …");"#,
-            r#"eprintln!("Skipping the leg: …");"#,
-            r#"eprintln!(" SKIPPED the leg: …");"#,
-            r#"eprint!("SKIPPED the leg: …\n");"#,
-            r#"println!("skipping the leg");"#,
-            r#"print!("SKIPPED");"#,
+            r#"eprintln!("[CPE-1692] SKIPPED the leg: …");"#, // SCAN-FIXTURE
+            r#"eprintln!("Skipping the leg: …");"#,           // SCAN-FIXTURE
+            r#"eprintln!(" SKIPPED the leg: …");"#,           // SCAN-FIXTURE
+            r#"eprint!("SKIPPED the leg: …\n");"#,            // SCAN-FIXTURE
+            r#"println!("skipping the leg");"#,               // SCAN-FIXTURE
+            r#"print!("SKIPPED");"#,                          // SCAN-FIXTURE
+            // The survivor an independent audit found: a real skip notice that never says "skip".
+            r#"eprintln!("NOTE …: no symlink privilege here, so only the regular-file and hard-link forms were verified.");"#, // SCAN-FIXTURE
         ] {
             let at = find_macro_call(good, "eprintln!")
                 .or_else(|| find_macro_call(good, "eprint!"))

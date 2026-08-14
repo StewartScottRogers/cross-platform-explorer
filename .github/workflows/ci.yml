@@ -428,7 +428,36 @@ jobs:
               fail=1
             fi
           done
-          # …and the documented escape hatch has to work, or the red above could just be an
+          # ── The FOURTH mechanism, `fsutil::deny_dir_traversal`, and the only one whose correct
+          # answer differs by OS. It is `supported_here = cfg!(unix)`, measured genuinely unusable on
+          # Windows (PR #874). So under the same sabotage the SAME test must go red on Linux/macOS and
+          # stay a quiet, passing skip on Windows. That opposite-expectation pair is the only direct
+          # proof that strictness does not turn a legitimately-skipping leg into a false red — the
+          # acceptance criterion this ticket could otherwise only assert.
+          echo "--- sabotaged run of the platform-asymmetric mechanism: link_status (deny_dir_traversal)"
+          if cargo test link_status_does_not_report_broken_for_a_permission_denied_target_not_missing > "$log" 2>&1; then
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "OK: on Windows this mechanism cannot work, so it stayed a passing skip — no false red:"
+              grep -m1 'SKIPPED' "$log" || true
+            else
+              echo "::error::CPE-1717: on $RUNNER_OS the traversal deny IS supposed to work, so a sabotaged run must be red. It passed, which means supported_here is wrong for this site or require_staged is no longer on the path."
+              fail=1
+            fi
+          else
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "::error::CPE-1717: a FALSE RED on Windows — deny_dir_traversal cannot work there, so this leg must skip quietly, not fail. Check its supported_here is cfg!(unix). Full log:"
+              cat "$log"
+              fail=1
+            elif grep -q 'CPE-1717' "$log"; then
+              echo "OK: on $RUNNER_OS it went red, and for the right reason:"
+              grep -m1 -A6 'CPE-1717' "$log"
+            else
+              echo "::error::CPE-1717: red, but not with the require_staged panic. Full log:"
+              cat "$log"
+              fail=1
+            fi
+          fi
+          # …and the documented escape hatch has to work, or every red above could just be an
           # always-strict constant. Same sabotage, `CPE_STAGING_STRICT=0`, must PASS as a loud skip.
           echo "--- sabotaged run with the escape hatch (CPE_STAGING_STRICT=0): must PASS"
           if CPE_STAGING_STRICT=0 cargo test dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing > "$log" 2>&1; then

@@ -159,10 +159,15 @@ that is what decides the verdict; per-site verdicts follow the group.
 parent-`RD` premise and target deny, CPE-1705 `rename_entry`, CPE-1705 `move_exact`, CPE-1692
 `move_exact`) and `crates/sftp/src/lib.rs` ×2 (`open`, `open`'s own handler).
 
-**Group B — Windows-legitimate (3 sites).** `dangling_links_scan.rs:343`, `links.rs:284`,
-`crates/sftp/src/lib.rs` (`opendir`). These are the "ACL test on Linux" case the acceptance criteria
-protect: they must stay quiet skips on Windows and must **not** become false failures there. Covered by
-the `(false, false, true, false) → LegitimateSkip` row of the policy table test.
+**Group B — Windows-legitimate (3 sites), and only two of them are actually "may skip on Windows".**
+`links.rs:284` and `crates/sftp/src/lib.rs` (`opendir`) compile on Windows, run there, and skip
+loudly. `dangling_links_scan.rs:343` sits inside a **`#[cfg(unix)]` test**, so it never compiles on
+Windows at all — it is not a Windows skip, it is a Windows absence, and the first version of this
+table said otherwise. (Corrected out of the PR #898 round-2 review.) These are the "ACL test on Linux"
+case the acceptance criteria protect: they must stay quiet skips where the mechanism cannot work and
+must **not** become false failures there. Covered by the `(false, false, true, false) →
+LegitimateSkip` row of the policy table, and — since round 2 — proved in CI by running `links.rs`'s
+leg sabotaged and requiring **red on Linux/macOS, green on Windows** in the same step.
 
 **Group C — must never skip (8 sites).** `copilot.rs:677,722`; `organize_apply.rs:362`;
 `vault_crypto.rs:667`; `fsutil.rs`'s own `rename_slot_refusal` test; `src-tauri/src/lib.rs`
@@ -190,13 +195,24 @@ enforce and nothing that could become noise.
   staging sabotaged and **fail if the tests pass**, then verify the failure carries `CPE-1717` so a
   failure for some unrelated reason cannot be mistaken for evidence.
 
-### Left open
+### Left open — and the scope of that claim, stated properly
 
-Group F is enumerated but not routed: `split_join::make_unstattable` has three fallbacks whose Windows
-behaviour is not measured, and routing it on a guess would risk exactly the false red this ticket's own
-acceptance criteria forbid. Same for `organize_apply`'s live-symlink leg and `vault_crypto::promote`'s
-directory link. Those want a measurement pass of their own — **filed as CPE-1724**, rather than left as
-prose in a ticket about to close.
+Group F is not routed, and **the first version of this paragraph named three sites when the real
+population is 44**. An independent audit counted every staging site still emitting a notice rather
+than a verdict; "three" was the number I had inspected, not the number that exists, which is precisely
+the unscoped negative Evidence Rule 1 is about. Two the audit called out by name:
+
+- `src-tauri/src/lib.rs:15805` hand-rolls a dangling symlink with **no junction fallback**, while its
+  three siblings at 15460/15494/15542 call the routed `make_dangling_link`, which has one. So on a
+  Windows runner without Developer Mode that one leg skips where its siblings stage — an inconsistency,
+  not a measured decision.
+- `copilot.rs:805` (`make_dir_link`, junction-based, privilege-free) is structurally the class routed
+  as `supported_here = true`.
+
+Routing 44 sites here would be a different, much larger piece of work, and routing any of them on a
+guess risks the false red this ticket's own acceptance criteria forbid. **The whole bucket, with the
+44-site count, is CPE-1724.** Nothing regresses meanwhile: all 44 already use the capture-proof
+emitter, so their notices reach the log — they are simply not yet consequential.
 
 ### 2026-08-13 — round-2 review (PR #898), two blockers fixed
 
