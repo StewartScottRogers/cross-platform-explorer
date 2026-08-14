@@ -1194,14 +1194,30 @@ impl S3Provider {
     ///
     /// A gateway that **under-fills a page AND denies being truncated** defeats both belts at once, and
     /// `tests::an_underfilling_server_that_also_denies_truncation_defeats_both_belts_and_that_is_recorded_not_fixed`
-    /// measures exactly that: the delete goes through. There is deliberately **no third belt**, because
-    /// there is no third question to ask. Every signal this function can consult — the key count, the
-    /// `IsTruncated` flag, the continuation token — is a claim made by the same server, so a server willing
-    /// to misreport two of them can misreport a third just as cheaply. Defending against it would mean not
-    /// asking but *proving*: enumerating the whole prefix, which is unbounded, defeats the one-request
-    /// design, and still ends in the server's own answer. The honest position is that a server which lies
-    /// about its own pagination cannot be caught by asking it more questions, and the belts here are
-    /// scoped to the conforming and the singly-lying server, which is what real gateways are.
+    /// measures exactly that: the delete goes through. There is **no third belt here**, but the reason
+    /// is narrower than the one this comment gave until the CPE-1723 UAT disproved it.
+    ///
+    /// **The withdrawn claim.** This said "there is no third question to ask", reasoning that every signal
+    /// — key count, `IsTruncated`, continuation token — is a claim by the same server, so one willing to
+    /// misreport two can misreport a third as cheaply. **A third question exists.** The UAT built it:
+    /// re-list the same prefix with **`start-after`** set to the marker key, only on the marker-only
+    /// verdict. That is not the same question asked again. Under-filling a page is *legal* S3 latitude, so
+    /// the first lie costs the server nothing; returning **zero keys with `IsTruncated=false` when keys
+    /// exist beyond the marker** is a flat protocol violation. The belt forces a strictly stronger lie
+    /// rather than re-asking a question already answered falsely — which is precisely the move the
+    /// withdrawn reasoning claimed was unavailable. Measured: it catches the liar, and the **full existing
+    /// suite stays green (176 passed)**, so it breaks no conforming case.
+    ///
+    /// **Why an earlier review concluded the opposite, recorded so it is not re-derived.** A naive belt
+    /// counting `raw_entries` gets a false positive from the re-returned marker and reds
+    /// `delete_of_an_empty_directory_removes_its_marker_key_because_that_really_is_one_key` — the honest
+    /// server's empty-directory delete. Counting `entries.len() + filtered_count` instead removes it.
+    /// The fixture below also **ignores `start-after` entirely**, so it cannot exhibit the difference.
+    ///
+    /// **Scoped honestly:** the belt does not catch a server that ignores `start-after`, and no gateway's
+    /// real behaviour has been measured (see item 7). It is deferred to its own ticket rather than added
+    /// here, because it is a new request on a hot path and deserves its own evidence — not because it
+    /// cannot be done.
     ///
     /// # Everything above is measured in-process only (CPE-1723 item 7)
     ///
@@ -1246,7 +1262,7 @@ impl S3Provider {
         // counted. Measured, not reasoned about, by
         // `tests::a_tab_in_a_key_is_a_control_byte_that_really_does_reach_the_filtered_count_unlike_a_nul`,
         // which pins both halves. So the list above is four shapes wide, with the control byte narrowed to
-        // the three that are legal XML rather than dropped. Asking `entries.len()` alone answers
+        // the two that reach the guard (a CR arrives as LF -- XML 1.0 2.11) rather than dropped. Asking `entries.len()` alone answers
         // "what can I show the user here", when the question this function exists to answer is "is there
         // anything here at all". A directory whose only content was a filtered leaf therefore read as
         // empty, and `delete` removed its marker and reported success — on a fully conforming server.
@@ -2506,7 +2522,7 @@ mod tests {
     /// perfectly legal document characters. Rust's `char::is_control` returns `true` for all three. So a
     /// key leaf containing a tab parses cleanly, reaches [`is_safe_s3_leaf`], is refused there, and is
     /// counted into `filtered_count` — exactly the shape item 8 said was unreachable. The reachable-shape
-    /// list is therefore **four** entries wide (`\`, exactly `..`, exactly `.`, and a tab/LF/CR), not three
+    /// list is therefore **four** entries wide (`\`, exactly `..`, exactly `.`, and a tab or LF -- a CR arrives as LF), not three
     /// and not the original unqualified "a control byte".
     ///
     /// Both halves are asserted here so neither claim can rot: the tab is filtered *and counted*, and a
@@ -3951,7 +3967,7 @@ mod tests {
 
     /// **The sharpest bug the round-2 UAT found, and it was mine.** `probe_prefix` reported "real
     /// entries" as `page.entries.len()` — a count taken **after** [`is_safe_s3_leaf`] filtering. That guard
-    /// refuses a leaf containing `\`, exactly `..`/`.`, or a tab/LF/CR (the three control bytes XML 1.0
+    /// refuses a leaf containing `\`, exactly `..`/`.`, or a tab or LF (the control bytes XML 1.0
     /// permits — see [`S3Provider::probe_prefix`] and CPE-1723 item 8), every one of which is a perfectly
     /// legal S3 key. Such an object landed in `raw_entries` but not in `entries`, so `delete`
     /// read a directory holding one as "marker only", deleted the marker, got its `204`, and told the user
