@@ -1,9 +1,9 @@
 ---
-id: CPE-1717
+id: CPE-1718
 title: join_files follows a symlink at the output path — writing through it on success, deleting it on failure
 type: bug
 priority: Medium
-status: Backlog
+status: Doing
 tags: ready
 estimate: S
 created: 2026-08-13
