@@ -103,6 +103,15 @@ client, and none of this applies to it yet.
   first. An **empty** folder really is just one key (its marker), so that one is deleted normally.
   Related: because S3 answers "no content" to a delete whether or not the object was ever there, a
   successful delete means *"this key is gone now"* rather than *"something was removed"*.
+- **Deleting an empty folder asks the store twice.** "Only the marker is here" is the one verdict on
+  which the app deletes a key that could have a whole folder underneath it, so before it does, it lists
+  the folder a second time — this time asking only for keys *after* the marker. A store that has just
+  under-reported the folder has to contradict itself outright to get past that, which is a much harder
+  lie to tell than the first one. The cost: this second listing uses an **optional** part of the S3 API
+  (`start-after`). A store that doesn't implement it will refuse the request, and the app then refuses
+  the delete rather than guessing — so on such a store an empty folder can't be deleted, and the message
+  says the second listing is what failed. Deleting a **file** is unaffected; only the empty-folder case
+  asks twice.
 - **Deleting a file works without list permission; deleting a folder needs it.** Because folders aren't
   real, the usual way to tell "one object" from "a folder with things inside it" is to list the prefix
   first — so a delete asks the store to list before it removes anything. A key that grants
@@ -113,11 +122,21 @@ client, and none of this applies to it yet.
   folder is still refused. If neither question can be answered, the delete is refused and the app says so
   plainly: it names the listing request as the thing that failed, tells you nothing was deleted, and
   points at the missing permission. It will not fall back to deleting without looking — that's the one
-  path that could report a whole folder removed while everything in it is still there. One oddity worth
-  knowing: a bucket may hold both an object named `photos` and other objects under `photos/`. Without
-  list permission the app deletes the object it can prove exists and leaves everything under the prefix
-  alone, so the "folder" is still there afterwards. Reading, writing and getting the details of an object
-  you can name work as normal without list permission.
+  path that could report a whole folder removed while everything in it is still there. Reading, writing
+  and getting the details of an object you can name work as normal without list permission.
+- **Two consequences of that which are genuinely surprising, so they're written down rather than left to
+  be met.** A bucket can hold both an object named `photos` **and** other objects under `photos/` —
+  nothing in S3 stops it, because keys are just strings.
+    - *Without* list permission, deleting `photos` removes the object the app can prove exists and leaves
+      everything under `photos/` alone — so the "folder" is still there afterwards. *With* list
+      permission, the app sees the contents under `photos/` and refuses, which means **the object
+      `photos` cannot be deleted at all by the more privileged key**. Granting a permission makes that one
+      operation impossible. The app can't tell which of the two you meant, and inventing an answer is
+      exactly what it declines to do; a way to say which you meant is on the list.
+    - Deleting something that **isn't there** also differs: with list permission it reports success
+      (S3 treats delete as idempotent, and "that key is gone now" is true), while without it the app
+      refuses, because a 404 on the key can't be told apart from a folder it isn't allowed to look
+      inside.
 - **Browsing a folder always needs list permission.** Listing is the one operation no per-object
   permission can substitute for, and it's the first thing you hit when you open a bucket. If it's
   refused, the message names the operation, the folder you were opening, the prefix it asked the server

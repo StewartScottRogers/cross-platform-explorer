@@ -685,6 +685,39 @@ fn directory_with_content_refusal(path: &str) -> String {
     )
 }
 
+/// The failure message for [`FileSystemProvider::delete`]'s `start-after` belt — deliberately **not**
+/// [`probe_failure`], because that function's permission diagnosis is *provably false* at this call site.
+///
+/// # Why this cannot reuse `probe_failure`
+///
+/// `probe_failure`'s text is unconditional: *"if the credentials carry the per-object permission but not
+/// `s3:ListBucket`, that is the likeliest cause, and granting `s3:ListBucket` is the fix"*. That is fair
+/// where it is used — a probe that failed as the *first* listing of the call, where a missing
+/// `s3:ListBucket` really is the likeliest explanation.
+///
+/// The belt is reachable **only after `probe_prefix` returned `Ok`**: the same `ListObjectsV2`, the same
+/// prefix, the same credential, moments earlier. So `s3:ListBucket` is demonstrably held, and the
+/// "likeliest cause" is the one cause the call has already ruled out. Sending a user to change a bucket
+/// policy that is provably not the problem is the same defect [`list_failure`] gates against by
+/// conditioning its permission sentence on 401/403 — and worse here, because the condition is not merely
+/// unknown but known false. Found by the PR #903 review.
+///
+/// What this says instead is what is actually actionable: the parameter that was added to the request.
+/// A gateway that does not implement `start-after` is a real possibility (it is one of the newer
+/// `ListObjectsV2` parameters), and that is a fact about the *server*, not about the credential.
+fn marker_confirmation_failure(path: &str, key_prefix: &str, cause: &str) -> String {
+    format!(
+        "s3: delete {path:?}: nothing has been deleted. The first listing said this prefix holds nothing \
+         but its own directory marker, which is the one verdict on which a single key really can be \
+         removed — so it is confirmed with a second ListObjectsV2 for the prefix {key_prefix:?}, this one \
+         carrying start-after set to the marker key, and that request failed. This is not a permissions \
+         problem: the identical listing, with the same prefix and the same credential, had just succeeded, \
+         so s3:ListBucket is demonstrably held and granting a permission would change nothing. What the \
+         second request adds is the start-after parameter, so a server that does not implement it — or a \
+         transient failure — is the likelier explanation. Underlying error: {cause}"
+    )
+}
+
 /// Wrap a failed `ListObjectsV2` from [`S3Provider::list_with_filtered_count`] so the message names **the
 /// operation, the path, and — on a denial — the permission** (CPE-1727 item 3).
 ///
@@ -1272,20 +1305,42 @@ impl S3Provider {
     /// counting `raw_entries` gets a false positive from the re-returned marker and reds
     /// `delete_of_an_empty_directory_removes_its_marker_key_because_that_really_is_one_key` — the honest
     /// server's empty-directory delete. Counting `entries.len() + filtered_count` instead removes it, and
-    /// that is what the belt does. The fixture below used to **ignore `start-after` entirely**, so it could
-    /// not exhibit the difference at all; CPE-1727 taught it the parameter first
-    /// (`tests::the_fixture_honours_start_after_so_the_belt_is_not_measured_against_a_server_that_ignores_it`
-    /// pins that), because a belt tested against a fixture that ignores its one new parameter proves
-    /// nothing.
+    /// that is what the belt does. The `std::fs`-backed fixture used to **ignore `start-after` entirely**;
+    /// CPE-1727 taught it the parameter, pinned by
+    /// `tests::the_fixture_honours_start_after_so_the_belt_is_not_measured_against_a_server_that_ignores_it`.
     ///
-    /// **Scoped honestly, and this is the whole remaining hole:** the belt catches a server that
-    /// under-fills, denies truncation, and then **honours `start-after`**
-    /// (`tests::an_underfilling_server_that_denies_truncation_is_caught_by_the_start_after_belt`). It does
-    /// **not** catch one that ignores `start-after` and simply re-serves the same marker-only page — that
+    /// **Be exact about what that teaching buys, because the PR #903 review found the first wording one
+    /// step past its evidence.** The belt's *catch* is measured against a bespoke server that never
+    /// touches `list_page_xml`, so the fixture's support is not what proves the belt works. What it does
+    /// prove is the other half — **no false positive**: `delete_of_an_empty_directory_...` runs through
+    /// the fixture, so with the teaching in place that test really does exercise a server implementing
+    /// `start-after`, instead of one that ignores the parameter and would have said "nothing past the
+    /// marker" for free.
+    ///
+    /// # Scoped honestly — the belt has TWO limits, one permissive and one restrictive
+    ///
+    /// **Permissive.** It catches a server that under-fills, denies truncation, and then **honours
+    /// `start-after`** (`tests::an_underfilling_server_that_denies_truncation_is_caught_by_the_start_after_belt`).
+    /// It does **not** catch one that ignores `start-after` and re-serves the same marker-only page; that
     /// server is still undefended, and
     /// `tests::an_underfilling_server_that_also_denies_truncation_defeats_both_belts_and_that_is_recorded_not_fixed`
-    /// measures it going through. No gateway's real behaviour has been measured (see item 7); everything
-    /// here is `tiny_http` on one developer machine.
+    /// measures it going through. Nor does it run at all on the `raw_entries == 0` verdict — see the gate
+    /// comment in [`FileSystemProvider::delete`] for why that is a deliberate cost trade.
+    ///
+    /// **Restrictive, and this one is new behaviour rather than an unclosed gap — added after the PR #903
+    /// review measured it.** The belt makes an **optional** `ListObjectsV2` parameter into a hard
+    /// dependency of `delete`. A gateway that is fully permissive and entirely honest but simply does not
+    /// implement `start-after` (answering, say, `400 InvalidArgument`) now **refuses an empty-directory
+    /// delete that succeeded before this belt existed**:
+    /// `tests::a_server_that_rejects_start_after_now_refuses_an_empty_directory_delete_it_used_to_allow`
+    /// measures exactly that, on a credential holding every permission. Refusing is the conservative
+    /// call and is kept deliberately — the alternative, treating a failed confirmation as consent, is
+    /// how CPE-1723's original bug is written — but it is a *trade*, not a free belt, and the shape of
+    /// the loss (an entitled operation removed by a new guard) is the very mistake CPE-1727 exists to
+    /// undo, so it is recorded here rather than left to be discovered by a user.
+    ///
+    /// No gateway's real behaviour has been measured (see item 7); everything here is `tiny_http` on one
+    /// developer machine, which is precisely why the `start-after` support question is unresolved.
     ///
     /// # Everything above is measured in-process only (CPE-1723 item 7)
     ///
@@ -1375,6 +1430,14 @@ impl S3Provider {
     /// key at all when the objects are `photos/2024/a.jpg` and `photos/2024/b.jpg` — so a virtual directory
     /// answers 404 (or 403) here and can never answer 200. A 2xx therefore proves the DELETE that follows
     /// removes one object and cannot silently orphan a subtree.
+    ///
+    /// **Scope that claim the way the PR body scopes it.** "A virtual directory can never answer 200" is a
+    /// statement about the keyspace that follows from S3's data model, but as *evidence* it is only as good
+    /// as what has been measured, and what has been measured is the in-process fixture, which 404s a HEAD
+    /// on a directory. **No real S3, MinIO, Ceph or QNAP has been exercised**, so a gateway that
+    /// synthesises a 200 for a prefix — inventing a directory object the way some S3 façades over a real
+    /// filesystem do — would defeat this, and nothing here would notice. That is the first thing to check
+    /// when a real endpoint becomes available (CPE-1518).
     ///
     /// **Only 2xx is `true`.** A 403 is not "probably an object": AWS answers 403 rather than 404 for a
     /// key that does not exist when the caller lacks `s3:ListBucket`, which is precisely the credential
@@ -1864,6 +1927,37 @@ impl FileSystemProvider for S3Provider {
     /// still there. Nothing available to a credential that cannot list can distinguish those two
     /// intentions, and the alternative (refusing) is the CPE-1723 behaviour this ticket exists to undo.
     ///
+    /// # Two asymmetries between credentials, written down because they are surprising
+    ///
+    /// The PR #903 UAT built the mirror of the collision case above and found the divergence in (1). Both
+    /// are recorded rather than designed away, and both are `delete`-only.
+    ///
+    /// 1. **On a name collision, the MORE privileged credential loses.** Over the keyspace
+    ///    `["photos", "photos/a.jpg", "photos/b.jpg"]`, a credential **with** `s3:ListBucket` runs the
+    ///    probe, sees real entries under `photos/`, and refuses — so the object `photos` is **permanently
+    ///    undeletable** by it through this client. A credential **without** `s3:ListBucket` HEADs, gets a
+    ///    200, and deletes that object successfully. Granting a permission therefore makes an operation
+    ///    impossible. `tests::the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object`
+    ///    pins both halves. On `origin/main` both were refused, so CPE-1727 creates this divergence.
+    ///
+    ///    Deliberately not "fixed" by extending the HEAD proof to the privileged path. That path renders a
+    ///    listing in which `photos` is a **folder**; deleting the object of the same name there would
+    ///    report the row the user clicked as deleted while the folder it names is untouched — the same
+    ///    confident wrong answer, moved. The real fix is a caller that can say which of the two it meant,
+    ///    which is a `FileSystemProvider`-shaped question rather than a `delete`-shaped one, so it is filed
+    ///    (CPE-1735) rather than guessed at here.
+    ///
+    /// 2. **"Nothing was there" is `Ok` for one credential and `Err` for the other.** With `s3:ListBucket`,
+    ///    deleting a key that does not exist probes clean, DELETEs, gets S3's idempotent 204, and returns
+    ///    `Ok` — long-standing behaviour, and the reason this doc says a 2xx means *"that key is absent
+    ///    now"*. Without it, the HEAD answers 404, nothing proves object-ness, and the delete is refused.
+    ///    The HEAD path is therefore **stricter** about the identical situation;
+    ///    `tests::deleting_a_key_that_does_not_exist_is_ok_with_listbucket_and_refused_without_it` pins it.
+    ///    Defensible — the un-listable credential genuinely cannot tell "absent" from "a directory I may
+    ///    not enumerate" — but it means the same call on the same bucket answers differently depending on
+    ///    the policy attached to the credential, and a caller that treats `delete` as idempotent must know
+    ///    that.
+    ///
     /// When the HEAD does not prove an object, the delete is **refused, not guessed**, and the message
     /// names the probe as what failed rather than surfacing a bare denial about a prefix the caller never
     /// typed (CPE-1723 item 1). [`probe_failure`] holds the full reasoning.
@@ -1941,21 +2035,33 @@ impl FileSystemProvider for S3Provider {
         // `beyond_entries` (`entries.len() + filtered_count`) and the truncation flag are read; counting
         // `raw_entries` here would take a re-returned marker as content and red every honest
         // empty-directory delete, which is why an earlier review concluded no belt was possible.
+        //
+        // # Why the gate is `raw_entries > 0` and not "always", written down because the PR #903 UAT had
+        // to derive it
+        //
+        // The same doubly-lying server one row lighter — under-filling to ZERO rows, denying truncation,
+        // with `photos/a.jpg` really there and no marker — reaches the `raw_entries == 0` verdict, so the
+        // belt never runs and the delete goes through. Measured by
+        // `tests::a_zero_row_under_filler_reaches_the_object_verdict_where_the_belt_does_not_run`. That
+        // hole is milder by construction (the DELETE goes to `photos`, not `photos/`, so no key that
+        // exists is destroyed — S3 answers 204 for a key that was never there) and it predates this belt.
+        //
+        // The cost of closing it is the reason it stays open: the `raw_entries == 0` verdict is the
+        // **ordinary object delete**, by far the common case, so extending the belt there would add a
+        // second `ListObjectsV2` to every single-file delete a user ever performs — a permanent tax on the
+        // hot path to defend against a server telling two lies at once, in the one shape where its lie
+        // cannot cost a key. The marker-only verdict is different: it is rare, and it is the only verdict
+        // on which a DELETE targets a key that could have a subtree under it.
         if raw_entries > 0 {
             let (_, beyond_entries, beyond_more) = self
                 .probe_prefix_after(&key_prefix, Some(&key_prefix))
-                .map_err(|e| {
-                    probe_failure(
-                        "delete",
-                        path,
-                        &key_prefix,
-                        "nothing has been deleted. The first check said this prefix holds nothing but its \
-                         own directory marker, which is the one verdict on which a single key really can \
-                         be removed — so it is confirmed with a second listing that starts after the \
-                         marker, and that confirmation failed.",
-                        &e,
-                    )
-                })?;
+                // NOT `probe_failure`: its permission diagnosis is provably false here, because the
+                // identical listing succeeded forty lines ago with the same credential. See
+                // `marker_confirmation_failure` (PR #903 review, blocking finding 1).
+                .map_err(|e| marker_confirmation_failure(path, &key_prefix, &e))?;
+            // `beyond_more` is the truncation half: a belt page with no visible rows but `IsTruncated=true`
+            // still says there is something past the marker. Exercised by
+            // `tests::a_belt_page_with_no_rows_but_is_truncated_still_refuses_the_delete`.
             if beyond_entries > 0 || beyond_more {
                 return Err(directory_with_content_refusal(path));
             }
@@ -2180,6 +2286,19 @@ mod tests {
     /// asserts the request carried delimiter=/") — production code always sends it, so this only trips if
     /// that line is ever removed; `tests::the_fixture_rejects_a_listobjectsv2_request_missing_delimiter`
     /// proves the enforcement fires by calling the fixture directly, bypassing `S3Provider`.
+    ///
+    /// # Two limits of this harness, named by the PR #903 UAT rather than left to be rediscovered
+    ///
+    /// Both are **pre-existing** and neither is a defect in what it does test; they bound what any test
+    /// built on it can claim. Filed as CPE-1736.
+    ///
+    /// - **Object paths are never percent-decoded here.** `real` is built from the raw request path, so a
+    ///   key needing encoding (`my photos/x`, `café/x`, `100%pure`) is served under its *encoded* spelling
+    ///   and never round-trips as itself. No test in this crate therefore exercises an encodable object key
+    ///   through this fixture — the encoding is covered separately, at the `sigv4`/`RequestTarget` level.
+    /// - **[`list_page_xml`] interpolates key text into XML unescaped**, so a key containing `&` or `<`
+    ///   produces a document `roxmltree` rejects. That makes those two bytes unreachable end-to-end
+    ///   through the listing path, which is why no delete/belt test uses them.
     ///
     /// `page_cap`, if set, overrides whatever `max-keys` the client asked for with something smaller —
     /// modelling a real gateway's right to truncate a response below the requested `max-keys` at its own
@@ -2414,6 +2533,65 @@ mod tests {
     fn spawn_a_keyspace_server_without_listbucket(
         initial: &[&str],
     ) -> (String, Arc<Mutex<BTreeSet<String>>>) {
+        spawn_a_keyspace_server(initial, false)
+    }
+
+    /// The same keyspace server with `ListObjectsV2` **allowed** and answered honestly — the mirror the
+    /// PR #903 UAT built, and the only way to measure what a credential holding `s3:ListBucket` does with
+    /// the object/prefix name collision (PR #903 UAT finding 1).
+    fn spawn_a_keyspace_server_with_listbucket(
+        initial: &[&str],
+    ) -> (String, Arc<Mutex<BTreeSet<String>>>) {
+        spawn_a_keyspace_server(initial, true)
+    }
+
+    /// One honest `ListObjectsV2` page over a flat key set: `delimiter=/` semantics, `max-keys` honoured,
+    /// `IsTruncated` truthful, `start-after` honoured. A key equal to `prefix` comes back as `<Contents>`
+    /// (the directory-marker convention), exactly as real S3 returns it.
+    fn keyspace_list_xml(
+        keys: &BTreeSet<String>,
+        prefix: &str,
+        max_keys: usize,
+        start_after: Option<&str>,
+    ) -> String {
+        let mut rows: Vec<(String, String)> = Vec::new();
+        let mut seen_prefixes: BTreeSet<String> = BTreeSet::new();
+        for key in keys {
+            let Some(rest) = key.strip_prefix(prefix) else { continue };
+            match rest.split_once('/') {
+                Some((dir, _)) => {
+                    let common = format!("{prefix}{dir}/");
+                    if seen_prefixes.insert(common.clone()) {
+                        rows.push((
+                            common.clone(),
+                            format!("<CommonPrefixes><Prefix>{common}</Prefix></CommonPrefixes>"),
+                        ));
+                    }
+                }
+                None => rows.push((
+                    key.clone(),
+                    format!("<Contents><Key>{key}</Key><Size>4</Size></Contents>"),
+                )),
+            }
+        }
+        rows.sort();
+        if let Some(after) = start_after {
+            rows.retain(|(k, _)| k.as_str() > after);
+        }
+        let total = rows.len();
+        let shown = total.min(max_keys);
+        let is_truncated = shown < total;
+        format!(
+            "<?xml version=\"1.0\"?><ListBucketResult>\
+             <IsTruncated>{is_truncated}</IsTruncated>{}</ListBucketResult>",
+            rows[..shown].iter().map(|(_, x)| x.as_str()).collect::<Vec<_>>().join("")
+        )
+    }
+
+    fn spawn_a_keyspace_server(
+        initial: &[&str],
+        allow_list: bool,
+    ) -> (String, Arc<Mutex<BTreeSet<String>>>) {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let keys: Arc<Mutex<BTreeSet<String>>> =
@@ -2424,8 +2602,26 @@ mod tests {
                 let method = req.method().to_string().to_uppercase();
                 let full = req.url().to_string();
                 let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
-                let is_list =
-                    parse_query(raw_query).iter().any(|(k, v)| k == "list-type" && v == "2");
+                let params = parse_query(raw_query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if is_list && allow_list {
+                    let param = |name: &str| {
+                        params.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str())
+                    };
+                    let xml = keyspace_list_xml(
+                        &keys_thread.lock().unwrap(),
+                        param("prefix").unwrap_or(""),
+                        param("max-keys").and_then(|v| v.parse().ok()).unwrap_or(1000),
+                        param("start-after"),
+                    );
+                    let ct = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/xml"[..],
+                    )
+                    .unwrap();
+                    let _ = req.respond(tiny_http::Response::from_string(xml).with_header(ct));
+                    continue;
+                }
                 if is_list {
                     let body = "<?xml version=\"1.0\"?><Error><Code>AccessDenied</Code>\
                                 <Message>Access Denied.</Message></Error>";
@@ -4543,6 +4739,68 @@ mod tests {
         );
     }
 
+    /// **The mirror of the test above, built by the PR #903 UAT, and the more uncomfortable half.** Same
+    /// keyspace, same call — a credential that **can** list. The probe succeeds, sees `photos/a.jpg` and
+    /// `photos/b.jpg` under the prefix, and refuses. So the object `photos` is deletable by the *weaker*
+    /// credential and **permanently undeletable** by the stronger one: granting `s3:ListBucket` makes an
+    /// operation impossible.
+    ///
+    /// **A characterisation test, not a guard.** On `origin/main` both credentials were refused, so
+    /// CPE-1727 creates this divergence; it is recorded here, in [`FileSystemProvider::delete`]'s doc, and
+    /// in `src/docs/31-network.md` rather than designed away, because the fix is a caller that can say
+    /// whether it meant the object or the folder (CPE-1735) and not a different guess inside `delete`.
+    #[test]
+    fn the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object() {
+        let (base, keys) = spawn_a_keyspace_server_with_listbucket(&[
+            "photos",
+            "photos/a.jpg",
+            "photos/b.jpg",
+        ]);
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider.delete("/photos").expect_err(
+            "the probe sees content under photos/ and refuses — which is right for the folder and wrong \
+             for the object of the same name",
+        );
+        assert!(err.contains("recursive"), "the refusal is the directory refusal: {err}");
+
+        let left: Vec<String> = keys.lock().unwrap().iter().cloned().collect();
+        assert_eq!(
+            left,
+            vec!["photos".to_string(), "photos/a.jpg".to_string(), "photos/b.jpg".to_string()],
+            "nothing was removed — and the object `photos` cannot be removed by this credential at all, \
+             while the credential WITHOUT s3:ListBucket removes it in the test above"
+        );
+    }
+
+    /// **PR #903 UAT finding 3, characterised.** Deleting a key that does not exist answers `Ok` for a
+    /// credential that can list (the probe comes back empty, the DELETE gets S3's idempotent 204, and
+    /// `delete`'s contract is only *"that key is absent now"*) and `Err` for one that cannot (the HEAD
+    /// answers 404, so nothing proves object-ness and the delete is refused).
+    ///
+    /// The HEAD path is the stricter of the two about the identical situation. That is defensible — the
+    /// un-listable credential cannot tell "absent" from "a directory I may not enumerate" — but a caller
+    /// that treats `delete` as idempotent needs to know it depends on the credential's policy.
+    #[test]
+    fn deleting_a_key_that_does_not_exist_is_ok_with_listbucket_and_refused_without_it() {
+        let (with_base, _with_root, _r1) = spawn_s3_fixture();
+        let mut can_list = S3Provider::connect(&cfg(&with_base));
+        can_list.delete("/notes/never.txt").expect(
+            "with s3:ListBucket the probe comes back empty and S3's DELETE is idempotent, so this is the \
+             long-standing Ok",
+        );
+
+        let (without_base, _without_root, _r2) = spawn_s3_fixture_without_listbucket();
+        let mut cannot_list = S3Provider::connect(&cfg(&without_base));
+        let err = cannot_list
+            .delete("/notes/never.txt")
+            .expect_err("without it, nothing proves the key names an object, so the delete is refused");
+        assert!(
+            err.contains("nothing has been deleted"),
+            "the refusal must still tell the user nothing happened: {err}"
+        );
+    }
+
     /// The trap the fix had to avoid. `delete` refuses a directory with content because S3 has no atomic
     /// multi-key delete; the probe is the **only** thing that tells a directory from an object. So a
     /// *denied* probe must not become a licence to do what a *successful* probe forbids — that would make
@@ -4790,6 +5048,200 @@ mod tests {
              photos/a.jpg — so this prefix has content",
         );
         assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
+    }
+
+    /// **The belt's restrictive failure mode, measured after the PR #903 review found it recorded
+    /// nowhere.** Every scoping sentence in the first round of this PR named the *permissive* limit
+    /// ("does not catch a server that ignores `start-after`"). This is the other one: the belt makes an
+    /// **optional** `ListObjectsV2` parameter a hard dependency of `delete`, so a server that is fully
+    /// permissive and entirely honest but simply does not implement `start-after` now **refuses an
+    /// empty-directory delete that succeeded before the belt existed**.
+    ///
+    /// The fixture is deliberately the ordinary filesystem-backed one, wrapped only to reject the new
+    /// parameter with `400 InvalidArgument` — so every permission is held, nothing lies, and the refusal
+    /// is entirely the belt's doing. The marker surviving on disk is the measured loss.
+    ///
+    /// It doubles as the guard on the PR #903 review's blocking finding 1: this is the one path that
+    /// produces the belt's failure message, and the message must not tell a credential that demonstrably
+    /// holds `s3:ListBucket` to go and grant `s3:ListBucket`.
+    ///
+    /// **Refusing is kept deliberately.** Treating a failed confirmation as consent is how CPE-1723's
+    /// original bug reads. But it is a trade, and CPE-1735 carries the question of what to do when a real
+    /// gateway turns out not to support the parameter.
+    #[test]
+    fn a_server_that_rejects_start_after_now_refuses_an_empty_directory_delete_it_used_to_allow() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let root = fixture_root();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_thread = Arc::clone(&requests);
+        let root_for_thread = root.clone();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let full = req.url().to_string();
+                let query = full.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+                let params = parse_query(&query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if is_list && params.iter().any(|(k, _)| k == "start-after") {
+                    // An honest, permissive server that simply does not implement the parameter.
+                    let body = "<?xml version=\"1.0\"?><Error><Code>InvalidArgument</Code>\
+                                <Message>Unsupported parameter: start-after</Message></Error>";
+                    let ct = tiny_http::Header::from_bytes(
+                        &b"Content-Type"[..],
+                        &b"application/xml"[..],
+                    )
+                    .unwrap();
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(body).with_header(ct).with_status_code(400),
+                    );
+                    continue;
+                }
+                handle(req, &root_for_thread, None, &requests_thread);
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
+        assert!(root.join("scratch/.s3marker").is_file(), "precondition: the marker exists");
+
+        let err = provider.delete("/scratch").expect_err(
+            "RECORDED, NOT DESIRED: the belt cannot confirm the marker-only verdict, so it refuses — this \
+             exact delete succeeds on a server that implements start-after",
+        );
+
+        // The measured loss: an entitled operation removed by a new guard.
+        assert!(
+            root.join("scratch/.s3marker").is_file(),
+            "the empty folder is still there — that is the cost this test exists to record"
+        );
+        assert!(
+            err.contains("nothing has been deleted"),
+            "the user must be told nothing happened: {err}"
+        );
+        assert!(
+            err.contains("start-after"),
+            "and told what the second request added, since that is the only actionable part: {err}"
+        );
+        // PR #903 review, blocking finding 1. The belt runs ONLY after the identical listing succeeded
+        // with this same credential, so a permission diagnosis here is not merely unhelpful, it is false.
+        assert!(
+            !err.contains("granting s3:ListBucket is the fix"),
+            "the credential demonstrably HAS s3:ListBucket — the same listing succeeded moments earlier — \
+             so advising the user to grant it sends them to fix the one cause already ruled out: {err}"
+        );
+        assert!(
+            err.contains("not a permissions problem"),
+            "and it should say so outright, rather than merely omitting the false advice: {err}"
+        );
+    }
+
+    /// The `beyond_more` half of the belt's condition, which the PR #903 review correctly noted no test
+    /// reached: a belt page carrying **no rows at all** but `IsTruncated=true` still says there is
+    /// something past the marker, and must refuse.
+    ///
+    /// Unreachable through any fixture that answers honestly, because to get to the belt at all the first
+    /// page must have shown the marker alone — so this server contradicts itself deliberately, which is
+    /// exactly the class of server the belt exists for.
+    #[test]
+    fn a_belt_page_with_no_rows_but_is_truncated_still_refuses_the_delete() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let deletes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let deletes_thread = Arc::clone(&deletes);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let method = req.method().to_string().to_uppercase();
+                let full = req.url().to_string();
+                let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
+                let params = parse_query(raw_query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if !is_list {
+                    if method == "DELETE" {
+                        deletes_thread.lock().unwrap().push(raw_path.to_string());
+                    }
+                    let _ = req.respond(tiny_http::Response::empty(204));
+                    continue;
+                }
+                let body = if params.iter().any(|(k, _)| k == "start-after") {
+                    // No rows, but "there is more" — the only signal left, and it is enough.
+                    "<?xml version=\"1.0\"?><ListBucketResult>\
+                     <IsTruncated>true</IsTruncated></ListBucketResult>"
+                } else {
+                    "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
+                     <Contents><Key>photos/</Key><Size>0</Size></Contents></ListBucketResult>"
+                };
+                let ct =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        let result = provider.delete("/photos");
+        assert_eq!(
+            deletes.lock().unwrap().clone(),
+            Vec::<String>::new(),
+            "a truncated belt page says there is something past the marker, so no DELETE may be sent"
+        );
+        let err = result.expect_err("IsTruncated=true on the belt page means content beyond the marker");
+        assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
+    }
+
+    /// **PR #903 UAT finding 2, characterised.** The same doubly-lying server one row lighter: it
+    /// under-fills to **zero** rows, denies truncation, and `photos/a.jpg` really exists with no marker.
+    /// That reaches the `raw_entries == 0` verdict — an ordinary object — where the belt's gate does not
+    /// fire, so the delete goes through.
+    ///
+    /// **Milder than the marker case by construction**, which is why the gate stays where it is: the
+    /// DELETE goes to `photos`, not `photos/`, and S3 answers 204 for a key that was never there, so no
+    /// key that exists is destroyed. The harm is a false success. The cost of closing it would be a second
+    /// `ListObjectsV2` on **every ordinary single-file delete** — see the gate comment in
+    /// [`FileSystemProvider::delete`]. Predates CPE-1727 (`doomed_key`'s `else { key }` branch is on
+    /// `origin/main`); recorded here so the trade is written down rather than rediscovered.
+    #[test]
+    fn a_zero_row_under_filler_reaches_the_object_verdict_where_the_belt_does_not_run() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let deletes: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let deletes_thread = Arc::clone(&deletes);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let method = req.method().to_string().to_uppercase();
+                let full = req.url().to_string();
+                let (raw_path, raw_query) = full.split_once('?').unwrap_or((full.as_str(), ""));
+                let is_list =
+                    parse_query(raw_query).iter().any(|(k, v)| k == "list-type" && v == "2");
+                if !is_list {
+                    if method == "DELETE" {
+                        deletes_thread.lock().unwrap().push(raw_path.to_string());
+                    }
+                    let _ = req.respond(tiny_http::Response::empty(204));
+                    continue;
+                }
+                // Zero rows, and not truncated — while photos/a.jpg exists. Both lies, one row lighter
+                // than the marker-only liar, and that one row is what moves it out of the belt's reach.
+                let body = "<?xml version=\"1.0\"?><ListBucketResult>\
+                            <IsTruncated>false</IsTruncated></ListBucketResult>";
+                let ct =
+                    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..]).unwrap();
+                let _ = req.respond(tiny_http::Response::from_string(body).with_header(ct));
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        provider.delete("/photos").expect(
+            "if this now fails, the belt's gate has been widened past the marker-only verdict — good, but \
+             the gate comment in `delete` still claims it is not, and must be updated to match",
+        );
+        assert_eq!(
+            deletes.lock().unwrap().clone(),
+            vec!["/test-bucket/photos".to_string()],
+            "the DELETE goes to `photos`, NOT `photos/` — which is why this hole cannot destroy a key that \
+             exists, and why the gate is a defensible trade rather than an oversight"
+        );
     }
 
     /// The same gateway, one lie further: it **ignores `start-after`** and re-serves its marker-only page.
