@@ -1,15 +1,15 @@
----
+﻿---
 id: CPE-1684
-title: "S3Provider object ops — stat/read/write/delete/mkdir, and rename refused honestly rather than faked"
+title: "S3Provider object ops â€” stat/read/write/delete/mkdir, and rename refused honestly rather than faked"
 type: Feature
-status: Doing
+status: Done
 priority: Medium
 component: Backend
 tags: [ready]
 epic: CPE-1503
 estimate: M
 created: 2026-08-12
-closed:
+closed: 2026-08-13
 ---
 
 ## What
@@ -20,7 +20,7 @@ The remaining `FileSystemProvider` ops on `S3Provider`: `stat`, `read`, `write`,
 ## The rename decision, and why it is the interesting part of this ticket
 
 S3 has no rename. The tempting implementation is copy-then-delete, and it is a trap: it is not atomic, it
-is O(size) rather than O(1), it silently rewrites storage class and metadata, and — the part that matters —
+is O(size) rather than O(1), it silently rewrites storage class and metadata, and â€” the part that matters â€”
 if the delete fails after the copy succeeds the user now has two copies and believes they have one, while
 if the copy half-fails on a large object they may have neither.
 
@@ -34,17 +34,17 @@ answer, which is the failure mode this crew keeps writing tickets about.
 
 ## Scope
 
-- `stat` → HEAD on the key; a missing key is a clear not-found, distinct from a permission failure
-  (CPE-1682 already draws that line — do not redraw it here).
-- `read` → GET. Bounded: never buffer an unbounded remote object into memory in one call. `cpe-ftp`
+- `stat` â†’ HEAD on the key; a missing key is a clear not-found, distinct from a permission failure
+  (CPE-1682 already draws that line â€” do not redraw it here).
+- `read` â†’ GET. Bounded: never buffer an unbounded remote object into memory in one call. `cpe-ftp`
   settled the convention with fixed 64 KiB chunks rather than one `read_to_end`; match it.
-- `write` → PUT of the whole body. Multipart upload is explicitly **out of scope** — the trait already
+- `write` â†’ PUT of the whole body. Multipart upload is explicitly **out of scope** â€” the trait already
   hands us a complete `&[u8]`, so the 5 GB single-PUT ceiling is not the binding constraint. Note the
   ceiling in a comment; do not build for it.
-- `delete` → DELETE on the key. Deleting a virtual directory means deleting the keys under that prefix —
+- `delete` â†’ DELETE on the key. Deleting a virtual directory means deleting the keys under that prefix â€”
   decide and document whether that is supported at all in v1 or refused like `rename`; a partial recursive
   delete that reports success would be the same class of bug as the fake rename.
-- `mkdir` → the conventional zero-byte object whose key ends in `/`. CPE-1683 must not then show it as a
+- `mkdir` â†’ the conventional zero-byte object whose key ends in `/`. CPE-1683 must not then show it as a
   file; if that ordering slips, the two tickets need to agree on the marker's exact shape.
 
 ## MEASURED 2026-08-13: the warning below is TRUE. Read this first, then the hypothesis it replaces
@@ -58,25 +58,25 @@ SIGNED "/test-bucket/a/../b//c%252Fd.txt", SENT "/test-bucket/b//c%252Fd.txt"
 ```
 
 `ureq` 2.12.1 parses every URL through the `url` crate (WHATWG URL parsing), which resolves dot segments
-as part of parsing — before `ureq` has any say in it.
+as part of parsing â€” before `ureq` has any say in it.
 
 **Only dot segments are affected, and that half is measured too, not assumed**: in the same request the
 empty path segment (`//`) and the percent-encoded `%` (`%252F`) both survived byte for byte. So two of the
 three shapes this section asked about are fine, and the third is not.
 
 **What was done about it:** `guard_path_survives_the_client` refuses a key carrying a `.`/`..` segment,
-naming the cause, **before any request is sent** — rather than normalising it (which would silently
+naming the cause, **before any request is sent** â€” rather than normalising it (which would silently
 address a different object, the exact failure CPE-1689 exists to prevent) or sending it anyway (which
 produces `SignatureDoesNotMatch` with nothing to say why). The follow-up that would actually make such a
 key reachable is **CPE-1721**, filed from this measurement.
 
 ## Test this first: the HTTP client may rewrite the path you signed (added 2026-08-12)
 
-Flagged by the PR #868 reviewer, and **explicitly labelled by them as unverified** — they were offline and
+Flagged by the PR #868 reviewer, and **explicitly labelled by them as unverified** â€” they were offline and
 could not check `ureq`'s behaviour, so treat this as a thing to test, not a finding to act on.
 
 S3 must **not** normalise dot segments: key `a/../b.txt` is a real, distinct key, and `crates/s3` correctly
-signs the canonical path `/a/../b.txt`. But `ureq` 2 — the client this epic plans to use — is believed to
+signs the canonical path `/a/../b.txt`. But `ureq` 2 â€” the client this epic plans to use â€” is believed to
 resolve dot segments while parsing the URL. If it does, it would put `/b.txt` on the wire while the
 signature covers `/a/../b.txt`, and the server answers `SignatureDoesNotMatch` with nothing in the message
 to say why.
@@ -86,7 +86,7 @@ boundary**. This is the first ticket that crosses it.
 
 So, before building the object operations: send a request whose key contains `..`, `//`, and a percent-
 encoded `%2F`, and check what actually goes on the wire against what was signed. If the client rewrites the
-path, that decides the client — or requires bypassing its URL parsing — and it is much cheaper to know now
+path, that decides the client â€” or requires bypassing its URL parsing â€” and it is much cheaper to know now
 than to debug as an unexplained 403 later. **State what you measured**, per the Evidence Rules in
 `Ticketing/wiki.md`; this note is a hypothesis and should be replaced by a measurement.
 
@@ -95,13 +95,13 @@ Related: **CPE-1689**, which established that leading slashes and dot segments a
 ## Verify (headless)
 
 The same in-process `tiny_http` fixture CPE-1683 stands up, extended to serve HEAD/GET/PUT/DELETE against a
-temp directory — the technique `crates/webdav/src/lib.rs` already uses to map WebDAV methods onto
+temp directory â€” the technique `crates/webdav/src/lib.rs` already uses to map WebDAV methods onto
 `std::fs`.
 
 ## Acceptance criteria
 
 - [ ] Each of stat/read/write/delete/mkdir round-trips against the fixture, with a test per op.
-- [x] ~~`read` of a large object never holds the whole body in memory at once~~ — **reworded 2026-08-13,
+- [x] ~~`read` of a large object never holds the whole body in memory at once~~ â€” **reworded 2026-08-13,
       because as written this is not achievable by any implementation of this trait method.**
       `FileSystemProvider::read` returns `Vec<u8>`, so the whole object is in memory by the time it
       returns, by construction. A genuinely streaming `read` is a trait-level change across all four
@@ -109,28 +109,28 @@ temp directory — the technique `crates/webdav/src/lib.rs` already uses to map 
       The achievable criterion, which is what was built and tested: **`read` never makes an unbounded
       single allocation** (a fixed 64 KiB stack buffer, `cpe-ftp`'s convention, so what the server sends
       changes the iteration count and never the amount demanded at once), **its cap is enforced during the
-      transfer rather than after it** (checked per chunk before the append — asserted against a server
+      transfer rather than after it** (checked per chunk before the append â€” asserted against a server
       that never stops sending, where a `read_to_end` grows until the process dies), and **an over-cap read
       is a loud `Err`, never a truncated `Vec`**. Removing the per-chunk cap check reds two distinct tests.
 - [ ] `rename` returns an error naming S3's lack of atomic rename, and `capabilities().supports_rename` is
-      `false`. A test asserts no PUT-copy and no DELETE were issued — proving it refused rather than faked.
+      `false`. A test asserts no PUT-copy and no DELETE were issued â€” proving it refused rather than faked.
 - [ ] `stat` on a missing key is not-found; `stat` on a denied key reports the denial. The two are
       distinguishable, through CPE-1682's error path.
 - [ ] The `mkdir` marker written here is the exact key shape CPE-1683 filters out, verified by a test that
       does `mkdir` then `list` and sees a directory and no stray file.
 - [ ] `cargo test` green; `cargo clippy --all-targets -D warnings` clean.
 
-## A bodiless HEAD 404 will be your MOST COMMON case — plan for it
+## A bodiless HEAD 404 will be your MOST COMMON case â€” plan for it
 
 Added by the Foreman from the CPE-1682 UAT (PR #879), 2026-08-12, because it lands squarely on this
 ticket's `stat` criterion.
 
 CPE-1682's `map_s3_error(status, body)` is honest but body-driven: with no `<Code>` element to read, it
-returns *"HTTP 404 and the response body could not be read as an S3 error … refusing to guess which cause
+returns *"HTTP 404 and the response body could not be read as an S3 error â€¦ refusing to guess which cause
 applies"*. That is the correct behaviour for a parser.
 
 But **HTTP HEAD responses never carry a body.** Every existence/metadata check this ticket adds is
-HEAD-shaped, so a `stat` on a missing key produces a 404 with nothing to parse — meaning the honest
+HEAD-shaped, so a `stat` on a missing key produces a 404 with nothing to parse â€” meaning the honest
 "could not be read" message would become the *majority* user experience for the single most common
 failure in the whole provider, precisely where the AC demands "a missing key is not-found; a denied key
 reports the denial, and the two are distinguishable".
@@ -138,15 +138,15 @@ reports the denial, and the two are distinguishable".
 So `stat` must not lean on `map_s3_error` alone. Map a **bodiless** response by status **and HTTP
 method**: a bodiless 404 from a HEAD is a genuine not-found; a bodiless 403 from a HEAD is a denial.
 Route to `map_s3_error` when there IS a body. Say in the code which rule you applied and why, and pin
-both bodiless cases with tests — otherwise the "distinguishable" criterion passes in unit tests that
+both bodiless cases with tests â€” otherwise the "distinguishable" criterion passes in unit tests that
 supply a body and fails against every real server.
 
-## Header bytes outside {SP, HTAB} ∪ [0x21,0x7E] — what ureq actually does (measured; read the correction below)
+## Header bytes outside {SP, HTAB} âˆª [0x21,0x7E] â€” what ureq actually does (measured; read the correction below)
 
-**Corrected 2026-08-13 by CPE-1683 — see "Correction to the ureq-header-drop warning above" in Notes,
+**Corrected 2026-08-13 by CPE-1683 â€” see "Correction to the ureq-header-drop warning above" in Notes,
 below, before reading this section as a settled fact.** The heading below originally asserted a silent
 drop; measured against the actual send path `S3Provider::list` uses, that specific claim did not
-reproduce. The traced `unit.rs` mechanism immediately below is still real and still worth knowing — it
+reproduce. The traced `unit.rs` mechanism immediately below is still real and still worth knowing â€” it
 just is not what happens on the path this crate's `GET` requests take. Read this section for the
 mechanism, then the Notes correction for what was actually observed on your own request path before
 deciding anything from it.
@@ -167,20 +167,20 @@ for header in &unit.headers {
 }
 ```
 
-Note the gate applies to **sensitive** headers too — `Authorization` included. A signed `Authorization`
+Note the gate applies to **sensitive** headers too â€” `Authorization` included. A signed `Authorization`
 header carrying a non-conforming byte is dropped by the identical mechanism.
 
 `Header::value()` (`header.rs:99-109`) filters through `is_field_vchar_or_obs_fold`
-(`header.rs:231-237`), which permits only `{SP, HTAB} ∪ [0x21, 0x7E]`. The filter applies to the whole
+(`header.rs:231-237`), which permits only `{SP, HTAB} âˆª [0x21, 0x7E]`. The filter applies to the whole
 `Option<&str>`, so **one** non-conforming byte makes `value()` return `None` and the entire header
-disappears from the outgoing request — silently, with no error.
+disappears from the outgoing request â€” silently, with no error.
 
-Bytes that trigger it include VT (`0x0B`), FF (`0x0C`), and **anything >= 0x80** — which means **NBSP**
+Bytes that trigger it include VT (`0x0B`), FF (`0x0C`), and **anything >= 0x80** â€” which means **NBSP**
 (`0xC2 0xA0`), the character CPE-1695 deliberately decided to *preserve* through canonicalisation because
 S3 does not trim it either.
 
 **Why this is your problem, not CPE-1695's.** A dropped signed header desynchronises what-was-signed from
-what-was-sent — the same opaque `SignatureDoesNotMatch` the S3 slice has been working to eliminate,
+what-was-sent â€” the same opaque `SignatureDoesNotMatch` the S3 slice has been working to eliminate,
 arriving by a different route. CPE-1695 fixed the canonicalisation side correctly; it cannot fix the
 transport side because the transport does not exist yet. **You are the transport.**
 
@@ -194,7 +194,7 @@ Decide, and write the decision down:
 Do **not** assume the bytes reach the wire. A test that signs a header and asserts the signature is
 correct will pass while the header never leaves the process.
 
-## SETTLED (from source, PR #888 review): ureq is LOUD on every send path — the only exposure is middleware
+## SETTLED (from source, PR #888 review): ureq is LOUD on every send path â€” the only exposure is middleware
 
 This warning has now been through three revisions. Read this section and ignore the framing above it; the
 traced `unit.rs` mechanism is real code but **unreachable** for headers you set on a `Request`.
@@ -207,21 +207,21 @@ for h in &self.headers { h.validate()?; }
 ```
 
 `Header::validate` (`header.rs:139-149`) calls `valid_value()` = `value.iter().all(is_field_vchar_or_obs_fold)`
-— **the identical byte predicate** as `Header::value()`'s filter. A non-conforming byte therefore produces
-`ErrorKind::BadHeader` → `Error::Transport("Bad Header: invalid header '<line>'")` **before** anything is
+â€” **the identical byte predicate** as `Header::value()`'s filter. A non-conforming byte therefore produces
+`ErrorKind::BadHeader` â†’ `Error::Transport("Bad Header: invalid header '<line>'")` **before** anything is
 written. Loud, not silent.
 
-**This covers you completely, by construction rather than by luck.** All six send methods — `call`, `send`,
-`send_bytes`, `send_string`, `send_json`, `send_form` (`request.rs:78, 192, 215, 243, 265, 294`) — funnel
+**This covers you completely, by construction rather than by luck.** All six send methods â€” `call`, `send`,
+`send_bytes`, `send_string`, `send_json`, `send_form` (`request.rs:78, 192, 215, 243, 265, 294`) â€” funnel
 through `do_call`. Your PUT / HEAD / DELETE will be loud too. **You do not need to re-run the measurement.**
 
 **The `unit.rs:466-474` silent skip sits downstream of that gate**, so its `None` branch cannot fire for
 anything validation already rejected. The original trace was accurate about the code and wrong about its
-reachability — the reviewer read the write loop without checking the gate above it.
+reachability â€” the reviewer read the write loop without checking the gate above it.
 
 ### The one genuine exception, and it is the thing to actually watch
 
-`do_call` validates at line 115 and runs the **middleware chain at ~line 163 — after**. A header injected by
+`do_call` validates at line 115 and runs the **middleware chain at ~line 163 â€” after**. A header injected by
 middleware calling `request.set()` is **never re-validated**, so for that header the silent skip is live.
 `crates/s3` registers no middleware today, so it is not exposed. **If you add any, that is where this bites.**
 
@@ -237,7 +237,7 @@ Scope: `http_interop` / `http_crate` are feature-gated (`lib.rs:446-452`) and of
 ## Notes
 
 Filed by the sprint PM at the CPE-1503 activation, 2026-08-12. Prereqs: **CPE-1681** and **CPE-1682**.
-Independent of CPE-1683 apart from the shared marker-key convention — agree that shape in whichever lands
+Independent of CPE-1683 apart from the shared marker-key convention â€” agree that shape in whichever lands
 first and make the other's test depend on it.
 
 ### The marker-key shape, settled by CPE-1683 (2026-08-13)
@@ -245,7 +245,7 @@ first and make the other's test depend on it.
 CPE-1683 landed first and settled the shape (PR for CPE-1683): a `/`-rooted provider path like
 `/photos/2024` becomes the key `photos/2024/` (no leading slash, one trailing slash, no other content),
 via the now-`pub` `cpe_s3::provider::provider_path_to_key_prefix`. Reuse that function directly for the
-`mkdir` marker's key rather than re-deriving the shape — `crates/s3/src/provider.rs`'s
+`mkdir` marker's key rather than re-deriving the shape â€” `crates/s3/src/provider.rs`'s
 `parse_list_bucket_result` already filters a `<Contents>` entry whose `<Key>` equals the requested prefix
 exactly, so writing the marker at exactly that key is what makes CPE-1683's own AC4 test
 (`a_zero_byte_prefix_marker_object_does_not_appear_as_a_file_entry`) meaningful for a real marker CPE-1684
@@ -254,15 +254,15 @@ writes, not just a synthetic one the fixture injects for testing.
 ### Correction to the `ureq`-header-drop warning above (measured by CPE-1683, 2026-08-13)
 
 The warning above was traced from `ureq` 2.12.1's source and explicitly labelled "a thing to test, not a
-finding to act on" — CPE-1683 tested it, against the exact code path `S3Provider::list` uses
+finding to act on" â€” CPE-1683 tested it, against the exact code path `S3Provider::list` uses
 (`Agent::get(url).set(name, value).call()`), via the Evidence Rules' guard-negative-control (delete the
 guard, re-run, restore). **It does not reproduce there**: `ureq` itself already refuses a header value
 carrying a disallowed byte, loudly, via `ureq::Error::Transport("Bad Header: invalid header '...'")`,
-before any byte reaches the network — proven by a fixture request counter that stayed at `0`. The
+before any byte reaches the network â€” proven by a fixture request counter that stayed at `0`. The
 silent-drop mechanism traced in `unit.rs`'s write loop is real in `ureq`'s source, but evidently sits
 behind a different internal path than the outbound request-builder API (most likely the one that parses
 headers arriving *off the wire*, not the one writing them going out). **This does not mean the warning is
-moot for CPE-1684** — `stat`/`read`/`write`/`delete`/`mkdir` may build requests differently (a different
+moot for CPE-1684** â€” `stat`/`read`/`write`/`delete`/`mkdir` may build requests differently (a different
 `ureq` entry point, a streamed body, a different header-setting call) and could reach the silent-drop path
 CPE-1683's `GET`-only `list` did not. Re-run the same measurement (delete whatever guard you write, observe
 what `ureq` actually does, restore) against your own code's real send path before assuming either outcome.
@@ -272,7 +272,7 @@ a clearer, byte-naming refusal a beat sooner than `ureq`'s own message).
 
 ## Work Log
 
-### 2026-08-13 — implemented, branch `cpe-1684-s3-object-ops`
+### 2026-08-13 â€” implemented, branch `cpe-1684-s3-object-ops`
 
 Everything lands in `crates/s3/src/provider.rs` (plus `src/docs/31-network.md`). No other crate changed:
 `crates/s3` is not yet a dependency of `crates/vfs` (CPE-1685 is still blocked), so this slice is
@@ -280,39 +280,39 @@ self-contained.
 
 **What was built**
 
-- `stat` — `HEAD` on the object key. A 2xx reads `Content-Length`; a **200 with no usable
+- `stat` â€” `HEAD` on the object key. A 2xx reads `Content-Length`; a **200 with no usable
   `Content-Length` is refused**, because `size: 0` would be an invented measurement rather than a read
   one. A 404 falls back to a prefix probe so a virtual directory is reported as a directory instead of
   as missing; a 403 is reported as a denial and is **never** softened into not-found. The bucket root
   stats as a directory, but only after a real one-key listing proves the endpoint, addressing and
-  credentials — not by fabricating a success.
-- `read` — `GET`, fixed 64 KiB chunks (`cpe-ftp`'s convention, matched byte for byte), capped at 2 GiB
+  credentials â€” not by fabricating a success.
+- `read` â€” `GET`, fixed 64 KiB chunks (`cpe-ftp`'s convention, matched byte for byte), capped at 2 GiB
   (`cpe-webdav`'s value, matched so the two HTTP backends refuse at the same point). **No end-to-end
   deadline**, per the ticket and CPE-1706: this is the bulk-transfer call site `signed_get`'s
   `Option<Duration>` was made for.
-- `write` — `PUT` of the whole body, no deadline (bulk), with a courtesy refusal past 5 GiB.
-- `mkdir` — a zero-byte `PUT` at exactly `provider_path_to_key_prefix(path)`, reusing CPE-1683's function
+- `write` â€” `PUT` of the whole body, no deadline (bulk), with a courtesy refusal past 5 GiB.
+- `mkdir` â€” a zero-byte `PUT` at exactly `provider_path_to_key_prefix(path)`, reusing CPE-1683's function
   rather than re-deriving the shape.
-- `delete` — exactly one key; see the decision below.
-- `rename` — refused, with `supports_rename = false`. No request of any kind is issued.
+- `delete` â€” exactly one key; see the decision below.
+- `rename` â€” refused, with `supports_rename = false`. No request of any kind is issued.
 
 **Three findings worth more than the code**
 
-1. **The "test this first" hypothesis is true** — see the MEASURED section at the top of this ticket.
+1. **The "test this first" hypothesis is true** â€” see the MEASURED section at the top of this ticket.
    `ureq` rewrites `a/../b.txt` to `b.txt` between signing and sending. Guarded, and CPE-1721 filed
-   (originally filed as CPE-1718; renumbered — that ID was already claimed on an unmerged branch by the
+   (originally filed as CPE-1718; renumbered â€” that ID was already claimed on an unmerged branch by the
    CPE-1710 worker's `join_files` follow-up).
 2. **AC2 as worded is not achievable.** *"`read` of a large object never holds the whole body in memory
    at once"* cannot be true of any implementation of this trait method: `FileSystemProvider::read`
    returns `Vec<u8>`, so by the time it returns, it must. What was delivered instead, and what the tests
    actually assert: no unbounded single allocation (fixed stack buffer), and the cap fires **during** the
-   transfer rather than after it — proven against a server that never stops sending, where a
+   transfer rather than after it â€” proven against a server that never stops sending, where a
    `read_to_end` would grow until the process died. `cpe-ftp` and `cpe-webdav` both already name a
    streaming `read` at the trait level as the real fix and put it out of scope; this does the same, in
    writing, on `FileSystemProvider::read`'s doc comment rather than silently.
 3. **`list_with_filtered_count`'s instruction to these ops, read literally, contradicts CPE-1689.** It
    says not to accept "ANY provider-supplied name as a literal key" without an `is_safe_s3_leaf` check.
-   Applied to a whole path that would split `/a/../b.txt` and refuse the `..` — a key CPE-1689
+   Applied to a whole path that would split `/a/../b.txt` and refuse the `..` â€” a key CPE-1689
    established must be reachable. They reconcile once you notice `is_safe_s3_leaf` decides whether a leaf
    may be *surfaced as a navigable child*, not whether a key is *addressable*; and a leaf that guard
    refuses never becomes a `ProviderEntry`, so it cannot be "provider-supplied" here in the first place.
@@ -323,35 +323,35 @@ self-contained.
 S3 answers `204` to a `DELETE` of a key that never existed, so a 2xx proves *"this key is absent now"*
 and not *"an object was removed"*. `delete` claims only the former, in its doc and in the module doc. It
 deliberately does **not** add a `HEAD`-before-`DELETE`: that is racy by construction and still could not
-prove the `DELETE` removed anything — paying a round trip for a stronger-sounding claim that is not
+prove the `DELETE` removed anything â€” paying a round trip for a stronger-sounding claim that is not
 actually stronger.
 
 That is benign for one object and **dangerous for a directory**, which is where the ticket's warning
 bites: a plain single-key `DELETE` of `photos/2024` returns 204 while the entire subtree stays put. So
 one `ListObjectsV2` probe decides the case first:
 
-- real entries under the prefix → **refused**, for the same reason `rename` is. S3 has no atomic
+- real entries under the prefix â†’ **refused**, for the same reason `rename` is. S3 has no atomic
   multi-key delete; a per-key loop that failed halfway would leave part of the tree gone while reporting
-  success. Recursive delete is out of scope for v1 — the ticket offered this as one of its two options.
-- only the zero-byte marker (an empty directory) → that *is* one key, so it is deleted honestly.
-- nothing under the prefix → an ordinary object; delete the key.
+  success. Recursive delete is out of scope for v1 â€” the ticket offered this as one of its two options.
+- only the zero-byte marker (an empty directory) â†’ that *is* one key, so it is deleted honestly.
+- nothing under the prefix â†’ an ordinary object; delete the key.
 
 Two subtleties found while building it, both now pinned by tests: the marker key is a strict prefix of
-every key beneath it, so S3's lexicographic order **always** returns it first — `max-keys=1` would make a
+every key beneath it, so S3's lexicographic order **always** returns it first â€” `max-keys=1` would make a
 thousand-object directory look empty. And S3 may legally return fewer keys than asked for, so
 `IsTruncated` (not `max-keys`) is the load-bearing half of the check; the probe's doc records which is
 which rather than claiming both are essential.
 
-**Evidence — every new guard broken on its own** (full pasted output in the PR body). Ten probes, each
+**Evidence â€” every new guard broken on its own** (full pasted output in the PR body). Ten probes, each
 restored with `git checkout --` and each re-run confirming `Compiling cpe-s3`: the path guard, the `read`
 chunk cap (two distinct reds, one of them the deadline harness catching what would otherwise hang CI),
 the bodiless-404 arm, the bodiless-403 arm, the `delete` directory refusal, the `IsTruncated` half of the
 probe on its own, the `mkdir` marker key shape, the `rename` refusal (replaced with a working
-copy-then-delete — caught by `expect_err`, since a *working* emulation returns `Ok`; the request counter
+copy-then-delete â€” caught by `expect_err`, since a *working* emulation returns `Ok`; the request counter
 is the guard for the dangerous variant instead, where the copy lands and an honest-looking `Err` is then
 returned, leaving two objects), the missing-`Content-Length` refusal, and the marker's contribution to
-`raw_entries`. One probe cost an uncommitted doc edit to `git checkout --` —
-exactly the trap the ground rules name — and it was re-applied and committed before continuing.
+`raw_entries`. One probe cost an uncommitted doc edit to `git checkout --` â€”
+exactly the trap the ground rules name â€” and it was re-applied and committed before continuing.
 
 `cargo test`: 164 passed. `cargo clippy --all-targets -- -D warnings`: clean. `crates/s3` has no feature
 modes in CI (`.github/workflows/ci.yml:427` runs exactly those two commands).
@@ -363,14 +363,14 @@ received `Content-Length: 0` and dutifully reported a zero-byte object. That res
 produced over a raw socket, and now is.
 
 **Docs.** `src/docs/31-network.md` already anticipated this work in the future tense and made one promise
-the shipped code deliberately breaks — *"Deleting a 'folder' will mean deleting the objects under that
+the shipped code deliberately breaks â€” *"Deleting a 'folder' will mean deleting the objects under that
 prefix"*. Corrected to the refusal, moved to the present tense, and given the two new user-visible facts:
 the 204-proves-nothing semantics of a successful delete, and the unreachable `.`/`..` keys.
 
-### 2026-08-13 — round 2, from the UAT
+### 2026-08-13 â€” round 2, from the UAT
 
 **Blocker: `delete` reported success on a non-empty directory and deleted nothing.** The real bug of this
-ticket, and my own. `probe_prefix` reported "real entries" as `page.entries.len()` — a count taken
+ticket, and my own. `probe_prefix` reported "real entries" as `page.entries.len()` â€” a count taken
 **after** `is_safe_s3_leaf` filtering. That guard refuses a leaf containing `\`, a control byte, or a
 literal `..`/`.`, every one of which is a legal S3 key. Such an object landed in `raw_entries` but not in
 `entries`, so `delete` read the directory as marker-only, removed the marker, took S3's `204`, and
@@ -378,24 +378,24 @@ returned `Ok(())`. On a **conforming** server. The marker-present variant is the
 then vanishes from every listing while the object survives underneath it, unreachable through the UI.
 
 Fixed to `page.entries.len() + page.filtered_count`. What makes it worth recording is that
-`is_safe_s3_leaf`'s own doc already said *"A leaf this refuses is a real S3 key"* — the model was written
+`is_safe_s3_leaf`'s own doc already said *"A leaf this refuses is a real S3 key"* â€” the model was written
 down correctly and the probe consulted the wrong number anyway. `filtered_count` is part of "is there
 content here", not a diagnostic sideline.
 
 The suite passed **identically with and without the fix**, so the fix was the easy half. Reaching the case
 at all needed a new fixture sentinel (`.s3unsafe`), because a filesystem-backed fixture cannot hold a file
-named `holiday\2024.jpg` — which is exactly why no existing test covered it. Reproduced red before fixing
+named `holiday\2024.jpg` â€” which is exactly why no existing test covered it. Reproduced red before fixing
 (`Ok(())`), then green, then re-probed after committing: dropping `filtered_count` again reds that one
 test and nothing else.
 
-**Blocker: two doc claims the code did not honour.** The first — *"deleting a folder that still has
-things in it is refused"* — was falsified by the bug above and is true again now the code is fixed. The
+**Blocker: two doc claims the code did not honour.** The first â€” *"deleting a folder that still has
+things in it is refused"* â€” was falsified by the bug above and is true again now the code is fixed. The
 second was real and separate: `provider_path_to_object_key`'s `trim_matches('/')` collapses leading and
 trailing slashes **one layer above** `object_target`, which preserves them exactly as CPE-1689 intended.
-Measured to the wire: `"//a.txt"` → `/test-bucket/a.txt`, so `write("//report.pdf", …)` overwrites
+Measured to the wire: `"//a.txt"` â†’ `/test-bucket/a.txt`, so `write("//report.pdf", â€¦)` overwrites
 `report.pdf`.
 
-Decided: **fix the doc now, file the collapse as CPE-1722** — not fixed inside this ticket, because the
+Decided: **fix the doc now, file the collapse as CPE-1722** â€” not fixed inside this ticket, because the
 sibling `provider_path_to_key_prefix` (merged, CPE-1683) carries the identical trim and feeds
 `list`/`mkdir`, so changing one alone would leave two path grammars inside one provider; and
 trailing-slash insignificance is a cross-backend `FileSystemProvider` contract that `stat`/`delete` rely
@@ -403,27 +403,153 @@ on when they build `format!("{key}/")`. Reachable only by a hand-typed path. The
 `provider_path_to_object_key` as a KNOWN GAP section, so the CPE-1689 citation there no longer implies a
 guarantee this layer does not provide.
 
-**`max-keys=2` had no test** — changing it to `1` left the suite green. It is only observable against a
+**`max-keys=2` had no test** â€” changing it to `1` left the suite green. It is only observable against a
 **non-conforming** server, since on a conforming one the `IsTruncated` belt catches the same case first;
 that is the division of labour between the two halves. Added a server that honours `max-keys` but always
 claims `IsTruncated=false`; `max-keys=1` now reds that test alone.
 
 **Corrected a wrong comment on a security guard.** The `%2e` arms of `is_url_dot_segment` were described
-as "pure future-proofing". The UAT's wider probe measured `ureq` actually rewriting `a/%2e%2e/b.txt` →
-`b.txt` — they are a **live match for real behaviour**, merely unreachable through this crate's own
+as "pure future-proofing". The UAT's wider probe measured `ureq` actually rewriting `a/%2e%2e/b.txt` â†’
+`b.txt` â€” they are a **live match for real behaviour**, merely unreachable through this crate's own
 encoder (which escapes `%` to `%25`). The guard is exactly as wide as the defect, which is the property to
 keep; the old wording invited a later reader to delete the arms as dead weight.
 
 **Fixture sprawl contained, not fixed.** CPE-1693 owns the class. The uniqueness stamp now runs once per
 test-binary run with numbered subdirectories, so a run leaves one top-level `cpe-s3-fixtures-*` entry
-instead of one per spawn site — nothing is deleted, but the count stops being multiplied by the number of
+instead of one per spawn site â€” nothing is deleted, but the count stops being multiplied by the number of
 tests and CPE-1693 gets a single path to remove.
 
 **Verified against PR #895 before and after it merged.** It adds `crates/s3/clippy.toml` banning bare
 `std::fs::rename` under `-D warnings`. `crates/s3/src` has none (its `rename` is a refusal that never
 touches the filesystem). Pre-merge I fetched that exact file from the #895 branch, dropped it in, forced a
 real recompile and re-ran clippy: clean. Post-merge, rebased and re-ran for real: clean. Worth noting that
-changing `clippy.toml` alone does **not** invalidate cargo's cache — the first run reported a cached
+changing `clippy.toml` alone does **not** invalidate cargo's cache â€” the first run reported a cached
 `Finished` and measured nothing.
 
 166 tests pass; `cargo clippy --all-targets -- -D warnings` clean on the merged state.
+
+## Work Log
+
+**Closed 2026-08-13, merged as PR #896 (`c0bc715c`).** Three rounds.
+
+### The ticket said "test this first" and nobody ever had
+
+`ureq` 2.12.1 parses URLs through the `url` crate (WHATWG), which **resolves dot segments before `ureq` has
+any say** â€” so a key containing `a/../b` is *signed* one way and *sent* another, arriving as an opaque
+`SignatureDoesNotMatch`. The worker built a raw request-line recorder:
+
+```
+SIGNED "/test-bucket/a/../b//c%252Fd.txt"
+SENT   "/test-bucket/b//c%252Fd.txt"
+```
+
+The reviewer then hardened the instrument â€” the worker's recorder was `tiny_http`-based and **cannot
+distinguish "ureq rewrote it" from "the test server normalised it"** â€” and re-measured off a bare TCP
+socket, sweeping 42 key shapes: **exactly 9 mismatches, all dot segments, all guarded.** `//`, `%252F`,
+`%00`, `%5C`, `%0A`, `%09`, UTF-8, `~`, `+`, `:`, `[`, `...`, `..a`, `a..`, trailing `.`/`..` all
+byte-identical. The guard is neither too narrow nor dead code.
+
+**Refusing was the right disposition**: normalising would silently address a *different* object (the
+CPE-1689 failure), and sending yields an error naming nothing useful.
+
+### The blocker: `delete` reported success and deleted nothing
+
+Found by the UAT, confirmed independently by the reviewer with a crafted-XML server (Windows cannot hold a
+`\` in a filename, so a filesystem-backed fixture literally cannot reach the shape).
+
+`probe_prefix` returned `page.entries.len()` as "real entries" â€” **a count taken after `is_safe_s3_leaf`
+filtering.** That guard refuses leaves containing `\`, a control byte, or exactly `..`/`.`, all legal S3
+keys. So those objects were counted as nonexistent, `delete` read the directory as holding only its own
+marker, removed the marker, got a 204, and reported success.
+
+```
+BEFORE  stat(/photos) is_dir=Ok(true)   list -> 0 entries, filtered 1
+DELETE  -> Ok(())
+AFTER   stat(/photos) is_dir=Ok(true)   list -> 0 entries, filtered 1
+        the object photos/holiday\2024.jpg was NEVER deleted
+```
+
+**On a conforming server.** The marker-present variant is worse: the marker *is* removed, so the folder
+vanishes from listings while the object survives, unreachable through the UI.
+
+The sting: `is_safe_s3_leaf`'s own doc says *"A leaf this refuses is a real S3 key."* The code documented
+them as real and the probe counted them as nonexistent.
+
+**The fix was verified as correct, not merely as working.** Per page,
+`raw_entries == marker_count + filtered_count + entries.len()`, so `entries.len() + filtered_count` is
+exactly "non-marker keys under this prefix" â€” and truncation cannot affect it, since all three counts are
+per-page. The alternative was measured: `raw_entries` alone makes every `mkdir`-created folder undeletable.
+Both terms of the final condition are independently load-bearing. The reviewer audited every other consumer
+and found **no other site with the same shape**.
+
+Coverage went from **zero in either direction** â€” the suite passed identically with and without the fix â€” to
+two-sided.
+
+### Three ticket claims measured wrong, all reported rather than quietly worked around
+
+1. **AC2 is unachievable as worded.** *"`read` never holds the whole body in memory"* cannot be true of any
+   implementation returning `Vec<u8>`. Delivered instead: a fixed 64 KiB stack buffer and a cap that fires
+   **during** transfer, proven against an endless-stream server. Written on the doc comment, and the ticket
+   reworded rather than quietly ticked off.
+2. **`list_with_filtered_count`'s instruction, read literally, contradicts CPE-1689.** Reconciled on
+   `provider_path_to_object_key`: `is_safe_s3_leaf` decides what may be *surfaced as a navigable child*, not
+   what is *addressable*.
+3. **The `//report.pdf` doc promise was false.** `object_target` preserves the slash exactly as CPE-1689
+   intended, but `provider_path_to_key_prefix`'s `trim_matches('/')` collapses it one layer above. Doc
+   corrected here; the behavioural fix filed as **CPE-1722**, because the trim is shared and trailing-slash
+   trimming is load-bearing for directory addressing.
+
+### The `delete` decision
+
+S3 answers **204 to a DELETE of a key that never existed**, so a 2xx proves *"this key is absent now"*, not
+*"an object was removed"*. `delete` claims only the former, and deliberately does **not** add
+HEAD-before-DELETE â€” racy by construction, and still no proof, so it would be a round trip bought for a
+stronger-sounding claim that isn't stronger.
+
+For a *directory* it refuses when real entries exist: S3 has no atomic multi-key delete, and a per-key loop
+failing halfway leaves part of the tree gone while reporting success â€” the same class as the fake rename.
+
+Two things found while building it: the marker key is a strict prefix of every key beneath it, so S3's
+lexicographic order **always** returns it first, making `max-keys=1` show a thousand-object directory as
+empty; and **`IsTruncated`, not `max-keys`, is the load-bearing half**. The worker had written the opposite
+and the negative control corrected them.
+
+### A retraction, mine
+
+I relayed the UAT's finding that the `%2e` arms are a live match for ureq behaviour and told the worker
+their *"pure future-proofing"* comment was wrong. **The reviewer measured it through the provider's own
+path and found the comment correct** â€” `encode_path` escapes `%`â†’`%25`, so `%2e` cannot reach `ureq` as
+`%2e` at all. The UAT then confirmed against itself: its `%2e` result came from a probe driving **raw
+ureq with hand-built URLs**, bypassing `encode_path`; its provider-level probe that round contained no
+`%2e` key, so it never tested that path. Correcting the comment would have made it **false**.
+
+Reverted, with the measurement now *in* the comment and an explicit line saying the edit was proposed and
+withdrawn â€” "assumed unreachable" became "measured unreachable".
+
+### `rename` refuses, and the guard is subtler than it looks
+
+S3 has no rename; copy-then-delete is not atomic, is O(size), rewrites storage class and metadata, and on a
+half-failure leaves the user with two copies believing they have one, or neither. So `rename` errors and
+`capabilities().supports_rename` is `false`.
+
+A *working* copy-then-delete is caught by `expect_err`. The **request counter** is what catches the
+dangerous variant: the copy lands, then an honest-looking `Err` returns, leaving two objects. Only "zero
+requests sent" separates *refused* from *half-did it and then reported a problem*. The PR's original
+claim ("caught only by a request counter") was imprecise and was corrected in the doc, where it is read.
+
+### One more self-correction worth keeping
+
+Writing the test for the `max-keys=2` belt exposed that its rationale named the **wrong failure entirely** â€”
+a gateway that under-fills returns one key when asked for one, so asking for two buys nothing. The belt
+defends against a gateway that *honours* `max-keys` and *lies* about `IsTruncated`. The test already
+modelled that correctly; only the prose and the **names** were wrong, so the helper and test were renamed
+too: *a test whose name asserts the wrong mechanism is the same defect one layer out.*
+
+Verdicts: Reviewer **APPROVE**, UAT **PASS**. 166 tests, all CI green.
+
+Deferred with tickets: **CPE-1721** (the ureq dot-segment guard's options), **CPE-1722** (the leading-slash
+collapse), **CPE-1723** (delete/stat silently requiring `s3:ListBucket`, plus five smaller gaps).
+
+**Caveat recorded on CPE-1723:** every measurement here is in-process (`tiny_http` + raw sockets) over
+`ureq` 2.12.1 on Windows. No real S3, MinIO or QNAP.
+

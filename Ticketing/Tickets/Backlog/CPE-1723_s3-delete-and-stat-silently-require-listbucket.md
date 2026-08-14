@@ -118,3 +118,13 @@ over `ureq` 2.12.1 on Windows. **No real S3, no MinIO, no QNAP.** Real-gateway p
 credential configuration does on MinIO/Ceph.
 
 The QNAP on the LAN is the obvious first real target.
+## 8. One code comment is over-broad by exactly one case (disclosed by the author)
+
+`probe_prefix`'s comment lists **"a control byte"** among the leaf shapes that reach the counting bug. It
+does not: a raw control character makes the listing non-XML and `roxmltree` rejects the whole document, so
+that case **fails loudly** rather than falsely succeeding. Three reachable shapes (`\`, exactly `..`,
+exactly `.`), not four.
+
+The test itself is sound — its fixture sentinel uses the backslash shape, which is genuinely reachable. The
+author disclosed this rather than push a fourth round for a comment, which was the right call on timing.
+Fix it whenever that file is next touched.
