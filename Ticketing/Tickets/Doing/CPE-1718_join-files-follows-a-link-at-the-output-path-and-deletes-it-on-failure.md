@@ -182,4 +182,17 @@ whose allow-list will be long, since `File::create` is legitimate at app-owned p
 `rename` is. Bundled, the cheap decisive one would wait on the expensive exploratory one.
 
 Final: `cargo test` 2144 default / 2192 `--features index`, clippy `-D warnings` clean in both modes.
+**Verdicts, with what each was given against** — because the first version of this line simply read
+"Reviewer APPROVE, UAT PASS", and the reviewer caught that it asserted a verdict on code it had not yet
+seen and a CI result that did not exist. In a ticket whose whole subject is not asserting things ahead of
+their evidence, that was worth naming rather than letting pass.
+
+- **UAT PASS** — round 1, at `f96abf25`.
+- **Reviewer CHANGES REQUESTED** at `f96abf25` (the ordering, argued for twenty lines and pinned by
+  nothing), then **APPROVE** at `de6fd3a9`, explicitly gated on the `Server crates` jobs — which the next
+  commit then discarded and restarted.
+- **Reviewer APPROVE re-earned at `df28ef7e`**, re-running the ordering swap, both sabotage legs and both
+  feature modes against that head rather than carrying the previous verdict forward.
+
+If the head moves again, this line needs re-earning rather than carrying forward.
 Verdicts: Reviewer **APPROVE**, UAT **PASS**.
