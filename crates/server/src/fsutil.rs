@@ -357,6 +357,25 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   to what is actually provided instead of claiming power-cut safety.
 /// - **TOCTOU.** The link is resolved and then written; nothing is atomic across those two steps.
 pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    stage_and_replace(path, bytes)
+}
+
+/// The staging opener [`replace_file_contents`] uses, extracted **so a test can call the real one**
+/// (PR #899 UAT round 2).
+///
+/// The round-2 test that closed the "`create_new` is untestable" finding built its own
+/// `OpenOptions` closure and never touched this module's call site — so swapping `create_new(true)`
+/// for `create(true).truncate(true)` in production left the whole suite green, **including the test
+/// named after the guard**. It pinned `std::fs`'s semantics, which are the standard library's problem,
+/// not this crate's use of them. That is Evidence Rule 1 — a test that cannot fail is not evidence —
+/// inside the change made to close a finding that was itself about testability.
+///
+/// One line, one caller, no behaviour change; its whole purpose is to be reachable from a test.
+fn stage_exclusive(tmp: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).create_new(true).open(tmp)
+}
+
+fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = resolve_write_target(path)?;
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
     // — cannot collide on the same sibling path.
@@ -372,16 +391,12 @@ pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // `create_new` is `O_CREAT|O_EXCL`, which refuses an existing entry **and does not follow a symlink at
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
-    // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which drives the
-    // primitive directly (the temp name carries pid+nanos, so racing the real one is not the way to
-    // test it) and contrasts it with `fs::write` on the same staged link.
+    // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which calls
+    // [`stage_exclusive`] — **this** function's opener, not a copy of it. The temp name carries
+    // pid+nanos, so racing the real one is not the way to test it; extracting the opener is.
     {
         use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&tmp)
-            .map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        let mut f = stage_exclusive(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
         if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
             drop(f);
             let _ = std::fs::remove_file(&tmp);
@@ -1260,8 +1275,7 @@ mod tests {
     /// that untestable because the temp name carries pid+nanos and cannot be raced — true of the temp
     /// name, and the wrong conclusion: the guarantee belongs to the **primitive**, so the primitive is
     /// what this drives, with `fs::write` on an identically-staged link as the contrast that shows the
-    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for
-    /// `create(true).truncate(true)` leaves the rest of the suite green; it does not leave this green.
+    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`stage_exclusive`] -- that function's own opener -- rather than a copy of it.
     ///
     /// The dangling leg runs on every runner ([`make_dangling_link`]'s junction fallback needs no
     /// privilege). The live leg needs a real file symlink and says so when it cannot have one; no
@@ -1272,9 +1286,11 @@ mod tests {
     fn create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it() {
         use std::io::Write;
         let d = scratch("create-new-link");
-        let staged = |p: &Path| {
-            std::fs::OpenOptions::new().write(true).create_new(true).open(p)
-        };
+        // **`stage_exclusive` is the opener `replace_file_contents` actually uses.** The first version
+        // of this test built its own `OpenOptions` closure here, so swapping `create_new(true)` for
+        // `create(true).truncate(true)` at the call site left this green — a test named after a guard,
+        // passing with the guard removed. Call the real one.
+        let staged = stage_exclusive;
 
         // ---- dangling link in the staging slot: every runner ----
         let dangling = d.join("staging-dangling");
