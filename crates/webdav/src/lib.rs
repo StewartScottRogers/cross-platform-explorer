@@ -599,14 +599,25 @@ mod tests {
         ///
         /// 1. If `canonicalize` succeeds on **both sides**, the filesystem decides and this function
         ///    never runs.
-        /// 2. So the lexical path runs only when at least one side failed to canonicalize — and a
-        ///    path the OS cannot resolve has no true resolution to disagree with. In particular it
-        ///    cannot have a symlink as its *final* component, because that component does not exist.
-        /// 3. For everything that does reach here, popping only makes the path *shorter*, hence
-        ///    *more* likely to equal the root, hence more likely to **refuse**.
+        /// 2. So the lexical path runs only when at least one side failed to canonicalize. When that
+        ///    failure is `ENOENT`, the path has no true resolution to disagree with — in particular
+        ///    it cannot have a symlink as its *final* component, because that component does not
+        ///    exist. **This step covers `ENOENT` only.** For the other failure modes `same_place`
+        ///    enumerates — `EACCES` on a parent, `ELOOP`, `ENAMETOOLONG` — the path may well exist,
+        ///    may have a symlink final component, and does have a true resolution we simply cannot
+        ///    see.
+        /// 3. For everything that reaches here — **for any reason, including those cases** — popping
+        ///    only makes the path *shorter*, hence *more* likely to equal the root, hence more likely
+        ///    to **refuse**. Step 3 holds unconditionally, which is why the bound survives step 2's
+        ///    narrower scope.
         ///
         /// There is no input for which popping makes a root-destination compare unequal. The unsound
         /// direction refuses a legitimate move; it can never allow one onto the root.
+        ///
+        /// Step 2 previously stated its `ENOENT` reasoning over *every* `canonicalize` failure. The
+        /// conclusion was never at risk — it rests on step 3 — but the justification was wider than
+        /// its evidence, which is the exact family this paragraph exists to bound, appearing inside
+        /// the paragraph. It took three passes to see, the third being the reviewer's. (PR #902.)
         ///
         /// **Step 1 is stated over `canonicalize`'s result, not over "the destination exists", and
         /// that distinction is load-bearing on Windows.** An earlier draft said "if the destination

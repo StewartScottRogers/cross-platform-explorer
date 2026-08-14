@@ -3,11 +3,11 @@ id: CPE-1726
 title: The FTP, SFTP and WebDAV crates rename onto a remote-supplied path with no destination guard
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-13
-closed:
+closed: 2026-08-14
 ---
 
 ## Problem
