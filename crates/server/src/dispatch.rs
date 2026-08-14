@@ -310,6 +310,12 @@ mod tests {
     /// filesystem that ignores ACLs and mode bits, leaves the file readable â€” the caller then skips
     /// rather than fails, because a machine that cannot construct a denied path is not evidence of a
     /// bug. CI runs Linux + macOS + Windows, so both branches are exercised somewhere.
+    ///
+    /// `#[track_caller]` for the same reason the three `fsutil` staging helpers carry it (CPE-1717):
+    /// when `require_staged` below turns a failed staging into a panic, the report must name the leg
+    /// that called this, not this function. Harmless today with a single caller in this file — and
+    /// wrong the moment a second one appears, which is exactly when nobody re-reads it.
+    #[track_caller]
     fn deny_read(path: &std::path::Path) -> bool {
         #[cfg(windows)]
         {

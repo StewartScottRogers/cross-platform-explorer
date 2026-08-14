@@ -458,10 +458,48 @@ pub fn staging_verdict(
 /// the fix has to wait); otherwise it follows `CI`, which GitHub Actions sets to `true` on every
 /// runner.
 pub fn staging_is_strict() -> bool {
-    match std::env::var("CPE_STAGING_STRICT").ok().as_deref() {
-        Some("1") => true,
-        Some("0") | Some("") => false,
-        _ => std::env::var_os("CI").is_some(),
+    strict_from(std::env::var("CPE_STAGING_STRICT").ok().as_deref(), std::env::var_os("CI").is_some())
+}
+
+/// The decision [`staging_is_strict`] makes, as a **pure** function of its two inputs.
+///
+/// # Why this is split out, which is a bug this PR shipped and its reviewer caught
+///
+/// The first version left the `match` inline in [`staging_is_strict`] and "tested" it against a
+/// hand-written closure in the test module that duplicated the same `match`. That is not a test: the
+/// reviewer inverted the real function completely — `=0` meaning strict, `=1` meaning lenient, `CI`
+/// negated — and every CPE-1717 test still passed. The subtle break was worse. Changing only the
+/// `None => ci` arm to `None => false`:
+///
+/// - an ordinary CI run (`CI=true`, no override, staging broken) went **green over zero coverage** —
+///   precisely the bug this whole ticket exists to fix; and
+/// - the CI guard step **still reported OK**, because it pinned `CPE_STAGING_STRICT=1` and so routed
+///   around the very arm that had broken.
+///
+/// So the one line connecting this feature to real CI could stop working with nothing in the repo
+/// noticing, including the guard built to notice. Two changes followed: this pure function, table-
+/// tested over every input; and a CI assertion that runs the sabotaged leg with **no override set**,
+/// so the guard exercises the `None => ci` arm rather than stepping past it.
+///
+/// # Values
+///
+/// Accepts the obvious spellings, case-insensitively and after trimming: `1`/`true`/`yes`/`on` enable
+/// strictness, `0`/`false`/`no`/`off` disable it, and an empty or unset value follows `ci`. **An
+/// unrecognised value panics** rather than falling through to the default — an escape hatch that
+/// silently does nothing is worse than no escape hatch, because the person using it believes it
+/// worked. (The first version matched only the digits `1` and `0`, so `CPE_STAGING_STRICT=true`
+/// quietly did nothing on a developer's machine and `=false` quietly did nothing on CI.)
+pub fn strict_from(var: Option<&str>, ci: bool) -> bool {
+    let Some(raw) = var else { return ci };
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" => ci,
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        other => panic!(
+            "[CPE-1717] CPE_STAGING_STRICT={other:?} is not a value this understands, and silently \
+             ignoring it would leave you believing an escape hatch worked when it did nothing. Use \
+             one of 1/true/yes/on or 0/false/no/off, or unset it to follow CI."
+        ),
     }
 }
 
@@ -880,25 +918,37 @@ mod tests {
     #[test]
     fn cpe_1717_staging_policy_only_fails_where_the_mechanism_was_supposed_to_work() {
         use StagingVerdict::*;
+        // **All sixteen rows, not a chosen subset.** The first version listed ten and left out six as
+        // "equivalent by construction" — which is true, and is exactly the argument a table test
+        // exists to stop anyone having to make. With four booleans, exhaustiveness is free, and a
+        // future edit that breaks the equivalence has nowhere to hide.
+        //
         // supported, staged, strict, sabotaged  →  verdict
         let table = [
-            (true, true, true, false, Staged),
-            (true, true, false, false, Staged),
-            (false, true, true, false, Staged),
-            // A platform the mechanism cannot work on is a legitimate skip under EVERY harness — this
-            // is the `deny_dir_traversal`-on-Windows / ACL-test-on-Linux row, and it must never become
-            // a false red just because CI asked for strictness.
-            (false, false, true, false, LegitimateSkip),
+            // ── not supported here: a legitimate skip under EVERY harness. These are the
+            // `deny_dir_traversal`-on-Windows / ACL-test-on-Linux rows, and none of them may become a
+            // false red just because CI asked for strictness.
             (false, false, false, false, LegitimateSkip),
+            (false, false, false, true, LegitimateSkip),
+            (false, false, true, false, LegitimateSkip),
+            (false, false, true, true, LegitimateSkip),
+            (false, true, false, false, Staged),
+            (false, true, false, true, LegitimateSkip),
+            (false, true, true, false, Staged),
             (false, true, true, true, LegitimateSkip),
-            // …and a platform where it IS supposed to work is red under CI, loud-skip locally.
-            (true, false, true, false, Fail),
+            // ── supported here: strictness is what separates a red from a loud skip.
             (true, false, false, false, LegitimateSkip),
-            // Sabotage turns a genuine success into the failure case, which is how CI neutralises this
-            // guard on purpose and proves it still bites.
-            (true, true, true, true, Fail),
+            (true, false, false, true, LegitimateSkip),
+            (true, false, true, false, Fail),
+            (true, false, true, true, Fail),
+            (true, true, false, false, Staged),
             (true, true, false, true, LegitimateSkip),
+            (true, true, true, false, Staged),
+            // Sabotage turns a genuine success into the failure case — how CI neutralises this guard
+            // on purpose and proves it still bites.
+            (true, true, true, true, Fail),
         ];
+        assert_eq!(table.len(), 16, "four booleans have sixteen combinations; list all of them");
         for (supported, staged, strict, sabotaged, want) in table {
             assert_eq!(
                 staging_verdict(supported, staged, strict, sabotaged),
@@ -933,19 +983,56 @@ mod tests {
 
     /// `CPE_STAGING_STRICT` has to override `CI` in both directions, because CI is exactly where the
     /// escape hatch is needed if a runner image regresses before the fix lands.
+    ///
+    /// **This test used to assert against a hand-written closure that duplicated the `match` it was
+    /// meant to check**, so the reviewer could invert the real function entirely and watch every
+    /// CPE-1717 test pass. It now drives [`strict_from`] itself. The two `None` rows are the important
+    /// ones: they are the only connection between this feature and an ordinary CI run, and breaking
+    /// that arm alone was measured to turn a broken-staging CI run green while the guard step —
+    /// which pinned the override — still reported OK.
     #[test]
     fn cpe_1717_strictness_reads_its_overrides() {
-        // Parsed the same way `staging_is_strict` parses it, without touching the process environment.
-        let parse = |v: Option<&str>, ci: bool| match v {
-            Some("1") => true,
-            Some("0") | Some("") => false,
-            _ => ci,
-        };
-        assert!(parse(Some("1"), false), "an explicit 1 is strict even off CI");
-        assert!(!parse(Some("0"), true), "an explicit 0 is lenient even on CI");
-        assert!(!parse(Some(""), true), "an empty value is lenient, not strict-by-accident");
-        assert!(parse(None, true), "unset follows CI");
-        assert!(!parse(None, false), "unset off CI is lenient");
+        // (value, ci) → strict
+        let table = [
+            // The arm that decides an ordinary CI run. Break it and a leg that stages nothing goes
+            // green; nothing else in this file would notice.
+            (None, true, true),
+            (None, false, false),
+            // Explicit overrides, which must win in BOTH directions.
+            (Some("1"), false, true),
+            (Some("0"), true, false),
+            (Some("true"), false, true),
+            (Some("false"), true, false),
+            (Some("yes"), false, true),
+            (Some("no"), true, false),
+            (Some("on"), false, true),
+            (Some("off"), true, false),
+            // Spelling tolerance: a value typed by a human in a hurry still has to work, because an
+            // escape hatch that silently does nothing is worse than no escape hatch.
+            (Some("TRUE"), false, true),
+            (Some("  1  "), false, true),
+            (Some("Off"), true, false),
+            // Empty is treated as unset — a workflow that writes `CPE_STAGING_STRICT: ""` means "leave
+            // it alone", not "turn CI strictness off".
+            (Some(""), true, true),
+            (Some(""), false, false),
+        ];
+        for (value, ci, want) in table {
+            assert_eq!(
+                strict_from(value, ci),
+                want,
+                "strict_from({value:?}, ci={ci}) must be {want}"
+            );
+        }
+    }
+
+    /// An unrecognised value must be **loud**, not silently folded into the default. Folding it in is
+    /// the same "unknown quietly treated as the safe answer" shape CPE-1680 is about, and here it
+    /// would mean someone reaches for the documented escape hatch, mistypes it, and believes it took.
+    #[test]
+    #[should_panic(expected = "CPE_STAGING_STRICT")]
+    fn cpe_1717_an_unrecognised_strictness_value_is_refused_not_ignored() {
+        let _ = strict_from(Some("maybe"), true);
     }
 
     /// The five spellings the PR #855 audit drove through a consented `apply_backup_plan` and watched
@@ -1382,23 +1469,55 @@ mod tests {
         false
     }
 
-    /// Every `.rs` under `dir`, recursively — the scan's file list.
-    /// CPE-1717. A skip notice written with `eprintln!` **reaches nobody**, and 56 sites in this tree
-    /// were written that way while two separate comments elsewhere explained why they must not be.
+    /// The captured print macros. **All four**, not just `eprintln!`: libtest's capture is installed
+    /// in `std::io::_print`/`_eprint`, which every one of these routes through, so `eprint!` hides a
+    /// notice exactly as well as `eprintln!` does. The first version of this scan matched `eprintln!`
+    /// alone and an `eprint!("SKIPPED …\n")` walked straight past it.
+    const CAPTURED_MACROS: [&str; 4] = ["eprintln!", "eprint!", "println!", "print!"];
+
+    /// Does `literal_start` — the text from a `"` onwards — mention skipping, however it is cased?
+    ///
+    /// **Case-insensitive `contains`, not a prefix match against a list of spellings.** The first
+    /// version tested `starts_with("\"SKIP")`/`("\"skipping")`, which missed, in the reviewer's own
+    /// counter-examples: `"[CPE-1692] SKIPPED …"` — **the shape 56 sites in this tree actually use**,
+    /// and the richer convention a future author will copy — plus sentence-case `"Skipping …"` and a
+    /// leading space `" SKIPPED …"`. Three near-misses out of five is not a lint, it is a coin flip.
+    fn mentions_skipping(literal_start: &str) -> bool {
+        let end = literal_start.len().min(160);
+        literal_start[..end].to_ascii_lowercase().contains("skip")
+    }
+
+    /// CPE-1717. A skip notice written with a **captured** print macro reaches nobody, and 56 sites in
+    /// this tree were written that way while two separate comments elsewhere explained why they must
+    /// not be.
     ///
     /// libtest replays a test's captured output only when the test FAILS, and a skip is a pass; CI
     /// runs plain `cargo test` with no `--nocapture`. The capture is installed inside the
     /// `print!`/`eprint!` macros, so `writeln!(std::io::stderr(), ..)` — which [`skip_notice!`] wraps
     /// — goes around it. Measured, not assumed: see that macro's doc comment for the harness output.
     ///
-    /// So this scan fails the build on any `eprintln!` whose message opens with a skip word. It is a
-    /// lint for one recognised-wrong **shape**, not a proof that every skip is visible: a notice
-    /// phrased without those words, or built up in a variable first, slips past. Stating that is the
-    /// point — this family has repeatedly mistaken a green lint for a closed class.
+    /// # Scope, stated because a scan that quietly misses a shape is worse than no scan
+    ///
+    /// **Test code only** — from each file's `mod tests` onwards, plus whole files under a `tests/`
+    /// directory. That boundary is not tidiness: production code legitimately logs about skipping
+    /// (`"cpe: vault-session sweep skipped: …"`, `"[agent-watch] audit dir unavailable, skipping …"`),
+    /// and those are runtime diagnostics on a real stderr, not test notices. Flagging them would be
+    /// the cry-wolf failure this file's other scan already had to be corrected for.
+    ///
+    /// **What it still misses, and this list is deliberately not reassuring:**
+    /// - a notice that never says "skip" — "this environment cannot create a symlink; nothing below is
+    ///   covered" would pass;
+    /// - a message built into a variable, or read from a `const`, before printing;
+    /// - a `write!(std::io::stdout(), ..)`-shaped notice, which is visible but goes to the wrong
+    ///   stream;
+    /// - a test module not literally named `mod tests`.
+    ///
+    /// Aliasing (`use std::eprintln as announce;`) is the one indirection that *is* caught, because
+    /// it is cheap to catch and has no legitimate use here.
     ///
     /// [`skip_notice!`]: crate::skip_notice
     #[test]
-    fn skip_notices_never_use_eprintln() {
+    fn skip_notices_never_use_a_captured_print_macro() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         let mut files = Vec::new();
         for group in ["crates", "sidecar"] {
@@ -1410,6 +1529,7 @@ mod tests {
             }
         }
         collect_rs(&root.join("src-tauri").join("src"), &mut files);
+        collect_rs(&root.join("src-tauri").join("tests"), &mut files);
 
         // Asserted inputs: a scan that reads nothing passes vacuously, which is the exact failure this
         // whole ticket is about.
@@ -1420,47 +1540,141 @@ mod tests {
         );
 
         let mut offences = Vec::new();
+        let mut scanned_test_lines = 0usize;
         for file in &files {
             let Ok(text) = std::fs::read_to_string(file) else { continue };
-            for (i, line) in text.lines().enumerate() {
+            let all: Vec<&str> = text.lines().collect();
+            // A file under `tests/` is test code end to end; a `src/` file's test code starts at
+            // `mod tests`. Production logging about skipping is not this scan's business.
+            let in_tests_dir = file.components().any(|c| c.as_os_str() == "tests");
+            let start = if in_tests_dir {
+                0
+            } else {
+                match all.iter().position(|l| l.trim_start().starts_with("mod tests")) {
+                    Some(n) => n,
+                    None => continue,
+                }
+            };
+            let lines = &all[start..];
+            scanned_test_lines += lines.len();
+            for (i, line) in lines.iter().enumerate() {
                 let code = line.trim_start();
-                if code.starts_with("//") || code.starts_with("///") {
+                if code.starts_with("//") {
                     continue; // a comment explaining the rule is not a breach of it
                 }
-                // `eprintln!(` and the message on the same line, or the message on the next — the two
-                // shapes rustfmt produces.
-                let opens_here = code.contains("eprintln!(\"SKIP")
-                    || code.contains("eprintln!(\"skipping")
-                    || code.contains("eprintln!(\"SKIPPING");
-                let opens_next = code.ends_with("eprintln!(")
-                    && text
-                        .lines()
-                        .nth(i + 1)
-                        .map(str::trim_start)
-                        .is_some_and(|n| {
-                            n.starts_with("\"SKIP") || n.starts_with("\"skipping")
-                        });
-                if opens_here || opens_next {
-                    offences.push(format!("{}:{}", file.display(), i + 1));
+                let lineno = start + i + 1;
+
+                // Aliasing the captured macros hides a notice from every check above.
+                if code.contains("use std::eprint")
+                    || code.contains("use ::std::eprint")
+                    || code.contains("use std::print")
+                    || code.contains("use ::std::print")
+                {
+                    offences.push(format!(
+                        "{}:{lineno}: aliases a captured print macro, which routes around this scan",
+                        file.display()
+                    ));
+                    continue;
+                }
+
+                for mac in CAPTURED_MACROS {
+                    // `print!` is a suffix of `eprint!`; only treat this as a call to `mac` when the
+                    // preceding character cannot be part of an identifier.
+                    let Some(at) = find_macro_call(code, mac) else { continue };
+                    let rest = &code[at + mac.len()..];
+                    // …the message on the same line, or — the other shape rustfmt produces — on the
+                    // next one.
+                    let hit = match rest.strip_prefix('(') {
+                        Some(args) if args.trim_start().starts_with('"') => {
+                            mentions_skipping(args.trim_start())
+                        }
+                        Some(args) if args.trim().is_empty() => lines
+                            .get(i + 1)
+                            .map(|n| n.trim_start())
+                            .is_some_and(|n| n.starts_with('"') && mentions_skipping(n)),
+                        _ => false,
+                    };
+                    if hit {
+                        offences.push(format!(
+                            "{}:{lineno}: `{mac}` skip notice",
+                            file.display()
+                        ));
+                        break;
+                    }
                 }
             }
         }
         assert!(
+            scanned_test_lines > 20_000,
+            "only {scanned_test_lines} lines of test code were scanned — the `mod tests` boundary is \
+             not finding the test modules, so this scan is looking at almost nothing"
+        );
+        assert!(
             offences.is_empty(),
-            "these skip notices use `eprintln!`, whose output libtest swallows for a PASSING test — so \
-             they announce a leg that verified nothing to nobody, on the only harness that matters:\n\
-             {}\n\n\
+            "these skip notices use a print macro whose output libtest SWALLOWS for a passing test — \
+             so they announce a leg that verified nothing to nobody, on the only harness that \
+             matters:\n{}\n\n\
              Fix: `cpe_server::skip_notice!(..)` (or `crate::skip_notice!` inside this crate) — same \
              arguments, writes straight to the process's stderr handle, survives the capture.\n\
              Better still, if the staging mechanism is supposed to work on that platform, use \
              `fsutil::require_staged` and let the leg go RED under CI instead of printing into a green \
              log.\n\n\
-             Not covered by this scan, so a green run is not a proof: a notice phrased without a SKIP \
-             word, one assembled into a variable before printing, or one written with `println!`.",
+             What a green run here does NOT prove: see this test's doc comment. A notice that never \
+             says \"skip\", one assembled into a variable first, or a test module not called \
+             `mod tests`, all still slip past.",
             offences.join("\n")
         );
     }
 
+    /// Byte offset of a call to the macro `mac` in `code`, requiring that the character before it
+    /// cannot continue an identifier — so `eprint!` is not reported as a `print!` call.
+    fn find_macro_call(code: &str, mac: &str) -> Option<usize> {
+        let mut from = 0usize;
+        while let Some(rel) = code[from..].find(mac) {
+            let at = from + rel;
+            let ok = code[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric() && c != '_' && c != ':');
+            if ok {
+                return Some(at);
+            }
+            from = at + mac.len();
+        }
+        None
+    }
+
+    /// The scan's own premise, asserted rather than assumed: it must recognise the shapes the
+    /// reviewer of PR #898 smuggled past its first version, and must **not** flag the visible
+    /// `skip_notice!`/`writeln!(stderr)` form or production logging that happens to mention skipping.
+    #[test]
+    fn cpe_1717_the_capture_scan_recognises_the_shapes_that_slipped_past_it() {
+        for good in [
+            r#"eprintln!("[CPE-1692] SKIPPED the leg: …");"#,
+            r#"eprintln!("Skipping the leg: …");"#,
+            r#"eprintln!(" SKIPPED the leg: …");"#,
+            r#"eprint!("SKIPPED the leg: …\n");"#,
+            r#"println!("skipping the leg");"#,
+            r#"print!("SKIPPED");"#,
+        ] {
+            let at = find_macro_call(good, "eprintln!")
+                .or_else(|| find_macro_call(good, "eprint!"))
+                .or_else(|| find_macro_call(good, "println!"))
+                .or_else(|| find_macro_call(good, "print!"))
+                .unwrap_or_else(|| panic!("no macro call found in {good:?}"));
+            let args = good[at..].split_once('(').unwrap().1;
+            assert!(mentions_skipping(args.trim_start()), "must be caught: {good}");
+        }
+        // `eprint!` must not be mistaken for a `print!` call — that is what makes the four-macro list
+        // safe to widen.
+        assert_eq!(find_macro_call(r#"eprint!("x")"#, "print!"), None);
+        assert!(find_macro_call(r#"eprint!("x")"#, "eprint!").is_some());
+        // …and the visible forms this ticket is steering people towards are not offences.
+        assert!(find_macro_call(r#"crate::skip_notice!("SKIPPED …");"#, "eprintln!").is_none());
+        assert!(!mentions_skipping(r#""a message with no s-word""#));
+    }
+
+    /// Every `.rs` under `dir`, recursively — the scan's file list.
     fn collect_rs(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for entry in entries.flatten() {

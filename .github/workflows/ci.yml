@@ -101,12 +101,14 @@ jobs:
       # staging and the leg must go RED; if it still passes, a runner that quietly lost symlink
       # privilege or ACL denies would report green over zero coverage, which is the whole bug.
       # Nothing recompiles — same profile, same features, one filtered re-run.
+      #
+      # `CPE_STAGING_STRICT` is deliberately unset — see the `crates` job's copy of this step for the
+      # measurement that says why pinning it blinds the guard to the arm it needs to cover.
       - name: skip-visibility guard (CPE-1717)
         working-directory: src-tauri
         shell: bash
         env:
           CPE_STAGING_SABOTAGE: "1"
-          CPE_STAGING_STRICT: "1"
         run: |
           set -u
           log="${RUNNER_TEMP:-/tmp}/cpe1717-sabotage.log"   # outside the checkout: no stray file can dirty a later git-diff guard
@@ -389,25 +391,33 @@ jobs:
       # `require_staged` call from any of those helpers and this step goes red on its own, which is what
       # `Ticketing/wiki.md` → "Evidence Rules" asks of a guard.
       #
+      # **`CPE_STAGING_STRICT` is deliberately NOT set here** (PR #898 review). Pinning it to `1` made
+      # this step route around `staging_is_strict`'s `None => CI` arm — the single line connecting the
+      # whole feature to an ordinary CI run. Measured: breaking that arm alone turned a real run green
+      # over zero coverage while this guard still reported OK. Leaving the override unset means the
+      # runs below depend on `CI`, which GitHub Actions sets, so the arm is exercised rather than
+      # stepped past. Do not "make it explicit" — explicit is what blinded it.
+      #
       # Cheap: same crate, same features, same profile as the step above, so nothing recompiles — it
-      # re-runs two already-built test binaries with a filter.
+      # re-runs already-built test binaries with a filter.
       - name: server — skip-visibility guard (CPE-1717)
         working-directory: crates/server
         shell: bash
         env:
           CPE_STAGING_SABOTAGE: "1"
-          CPE_STAGING_STRICT: "1"
         run: |
           set -u
           log="${RUNNER_TEMP:-/tmp}/cpe1717-sabotage.log"   # outside the checkout: no stray file can dirty a later git-diff guard
           fail=0
-          # One leg per staging mechanism: a denied stat (`fsutil::deny_stat_of`) and a dangling link
-          # (`fsutil::make_dangling_link`). Neither is cfg-gated, so all three OS legs are proved.
+          # One leg per staging mechanism: a denied stat (`fsutil::deny_stat_of`), a dangling link
+          # (`fsutil::make_dangling_link`), and an unreadable-but-stattable file
+          # (`dispatch::deny_read`). None is cfg-gated, so all three OS legs are proved.
           for filter in dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing \
-                        cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name; do
-            echo "--- sabotaged run: $filter"
+                        cpe_1710_execute_never_renames_over_a_dangling_link_at_the_new_name \
+                        text_stats_separates_a_read_failure_from_a_not_text_verdict; do
+            echo "--- sabotaged run (strictness inherited from CI, NOT pinned): $filter"
             if cargo test "$filter" > "$log" 2>&1; then
-              echo "::error::CPE-1717 regression: '$filter' PASSED while staging was sabotaged. A leg that could not stage its condition is reporting green, which is the exact silent-coverage-loss this guard exists to stop. Check that fsutil::require_staged is still called on this path."
+              echo "::error::CPE-1717 regression: '$filter' PASSED while staging was sabotaged. A leg that could not stage its condition is reporting green, which is the exact silent-coverage-loss this guard exists to stop. Check that fsutil::require_staged is still called on this path, and that staging_is_strict still follows CI when no override is set."
               fail=1
             elif grep -q 'CPE-1717' "$log"; then
               echo "OK: '$filter' went red, and for the right reason:"
@@ -418,6 +428,17 @@ jobs:
               fail=1
             fi
           done
+          # …and the documented escape hatch has to work, or the red above could just be an
+          # always-strict constant. Same sabotage, `CPE_STAGING_STRICT=0`, must PASS as a loud skip.
+          echo "--- sabotaged run with the escape hatch (CPE_STAGING_STRICT=0): must PASS"
+          if CPE_STAGING_STRICT=0 cargo test dir_size_reports_the_real_cause_for_a_permission_denied_path_not_missing > "$log" 2>&1; then
+            echo "OK: the escape hatch still degrades to a loud skip:"
+            grep -m1 'SKIPPED' "$log" || true
+          else
+            echo "::error::CPE-1717: CPE_STAGING_STRICT=0 did not restore the loud-skip behaviour, so the advertised escape hatch does not work and a runner-image regression would block every PR with no way out. Full log:"
+            cat "$log"
+            fail=1
+          fi
           exit $fail
 
       - name: net — clippy + test

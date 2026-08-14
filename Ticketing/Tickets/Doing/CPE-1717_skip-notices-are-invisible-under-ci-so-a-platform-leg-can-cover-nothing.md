@@ -195,4 +195,29 @@ enforce and nothing that could become noise.
 Group F is enumerated but not routed: `split_join::make_unstattable` has three fallbacks whose Windows
 behaviour is not measured, and routing it on a guess would risk exactly the false red this ticket's own
 acceptance criteria forbid. Same for `organize_apply`'s live-symlink leg and `vault_crypto::promote`'s
-directory link. Those want a measurement pass of their own.
+directory link. Those want a measurement pass of their own — **filed as CPE-1724**, rather than left as
+prose in a ticket about to close.
+
+### 2026-08-13 — round-2 review (PR #898), two blockers fixed
+
+The reviewer reproduced the central finding independently (its own `rustc --test` harness, then a real
+Windows runner's raw logs) and then found the ticket's own disease in the fix:
+
+1. **`staging_is_strict` was tested against a hand-written copy of its own `match`.** The reviewer
+   inverted the real function completely and every CPE-1717 test still passed. Worse, breaking only
+   the `_ => var_os("CI")` arm turned an ordinary broken-staging CI run **green over zero coverage**
+   while the guard step still reported OK — because the step pinned `CPE_STAGING_STRICT=1` and routed
+   around the very arm that had broken. Fixed by extracting the pure `fsutil::strict_from(var, ci)`
+   and table-testing *it* (the `None` rows included), and by **removing** the pinned override from both
+   CI guard steps so they now depend on `CI` the way a real run does.
+2. **The `eprintln!` scan missed the tree's dominant notice shape.** `eprintln!("[CPE-1692] SKIPPED …")`
+   — 56 sites use it — plus sentence-case `"Skipping"`, a leading space, an aliased macro, and
+   `eprint!` entirely. Fixed: case-insensitive `contains("skip")` on the literal, all four captured
+   macros, an alias check, scoped to test code so production logging that mentions skipping is not
+   cry-wolf flagged. The stated caveat now matches what it actually misses.
+
+Also: the `staging_verdict` table is now all 16 rows rather than 10; `CPE_STAGING_STRICT` accepts
+`true`/`false`/`yes`/`no`/`on`/`off` and **panics** on an unrecognised value instead of silently
+falling through; `dispatch::deny_read` gained the `#[track_caller]` its three siblings had; and the
+`wiki.md` edit gained a forward pointer from rule 2's `--nocapture` bullet to §3 and a scoped
+statement of what the scan does not catch.

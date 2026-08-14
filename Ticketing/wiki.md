@@ -296,7 +296,9 @@ own subject was that failure:
   not find (CPE-1687).
 - A skip-notice was verified with `cargo test -- --nocapture` and a comment written asserting the CI log
   would show it. CI runs plain `cargo test`; libtest captures output for *passing* tests, and a skip is a
-  pass. The notice reached nobody.
+  pass. The notice reached nobody. **→ Read §3 below before acting on this bullet.** It is true of that
+  notice, which used `eprintln!`, and it was later over-generalised into "libtest eats every skip
+  notice", which is false and is what produced CPE-1717's premise. §3 has the measurement.
 - The follow-up ticket's acceptance criteria then carried the intent ("the test must announce itself")
   forward **without the mechanism**, which would have handed the next person the same trap.
 
@@ -330,8 +332,14 @@ The same test's `eprintln!` and `println!` lines are **absent**. libtest's captu
 swap installed *inside* the `print!`/`eprint!` macros, so a direct write to the process's stderr
 handle goes around it. So:
 
-- **`eprintln!` at a skip notice reaches nobody.** Use `cpe_server::skip_notice!(..)` — same arguments,
-  capture-proof. `fsutil`'s `skip_notices_never_use_eprintln` scan fails the build on a new one.
+- **`eprintln!` at a skip notice reaches nobody** — nor do `eprint!`, `println!` or `print!`; the
+  capture sits in all four. Use `cpe_server::skip_notice!(..)`: same arguments, capture-proof.
+  `fsutil`'s `skip_notices_never_use_a_captured_print_macro` scan fails the build on **one recognised
+  shape** — a captured macro whose literal mentions "skip", in test code. It does **not** close the
+  class: a notice that never says "skip", one assembled into a variable first, or a test module not
+  called `mod tests`, all still pass it. (Its first version was narrower still and let four shapes
+  through, including `eprintln!("[CPE-1692] SKIPPED …")`, the one 56 sites actually use — an unscoped
+  negative, in the section about scoping negatives.)
 - **A visible notice is the floor, not the goal.** A *passing* leg with a notice inside a 2,100-test
   log is a green board over zero coverage, and nobody reads a green log. Where the staging mechanism is
   supposed to work on that platform, use `cpe_server::fsutil::require_staged(..)` so the leg goes **red
