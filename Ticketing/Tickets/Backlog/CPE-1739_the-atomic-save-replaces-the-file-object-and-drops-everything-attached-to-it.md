@@ -181,3 +181,87 @@ replacement would have a different owner**. Ownership cannot be carried, so a su
 longer means "runs as the original owner" — it means "runs as whoever saved it". That is not preservation,
 it is a quietly re-pointed privilege bit. Not an escalation being prevented (anyone able to replace the
 file could have created such a file anyway) — a misrepresentation being prevented.
+
+**2026-08-15 — review round 1 (PR #913): UAT PASS, Reviewer CHANGES REQUESTED. One blocker, seven
+non-blocking. All addressed.**
+
+**BLOCKER — the staging file was made private one statement too late.** Round 1 created the `.cpe-tmp`
+with `create_new`'s default and narrowed it with an `fchmod` immediately afterwards, before any bytes were
+written, and the doc claimed the bytes were "never even briefly sitting at a world-readable staging name".
+The bytes half was true; the **file object** half was not. POSIX checks permission at `open`, not at
+`read`, so a local process that opens the staging name between the two calls keeps a readable descriptor
+across the narrowing and reads the private bytes written after it — and the pid+nanos name needs no
+guessing, because an inotify/FSEvents watcher is woken by the create itself. `strace` of the real test
+binary, before:
+
+```text
+openat(AT_FDCWD, ".../secrets.env.382-1786791461862651861.cpe-tmp",
+       O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0666) = 3
+fchmod(3, 0600)                                 = 0
+```
+
+Fixed by creating at the right mode instead of correcting to it. `create_exclusive` now delegates to a
+single `create_exclusive_with_mode`, and `stage_and_replace` calls a new `create_staging_file` that asks
+for `STAGING_MODE` (`0600`); `create_exclusive` itself keeps the platform default, because its other
+callers (`split_join`'s joined output and manifest) are *claiming a name for a user's file*, not staging
+one, and making those `0600` would have been an unrelated behaviour change. Both entry points funnel
+through one body, so the crate still has exactly **one** `create_new(true)` and the PR #899 extraction
+argument is unweakened. `strace` after, on the same test — note the ordering is deliberately
+**narrow-then-widen**, the only order with no gap, since the target's mode is unknown until the file
+exists:
+
+```text
+openat(AT_FDCWD, ".../secrets.env.88-1786792604872315786.cpe-tmp",
+       O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0600) = 3
+fchmod(3, 0600)                                 = 0     <- the 0600 target file
+rename(".../secrets.env.88-....cpe-tmp", ".../secrets.env") = 0
+openat(AT_FDCWD, ".../build.sh.88-1786792604878333035.cpe-tmp",
+       O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0600) = 3
+fchmod(3, 0755)                                 = 0     <- widened for the 0755 script
+```
+
+New test `cpe_1739_the_staging_opener_creates_a_file_no_one_else_can_open` drives `create_staging_file` —
+the function `stage_and_replace` calls, one line above its call site. Reverting it to
+`create_exclusive_with_mode(path, None)` reds that test **and nothing else**, reporting the mode as
+`100644` — exactly the reviewer's `0666 & ~umask`. It carries a **umask control**: under a `0077` umask
+the unfixed code would also produce `0600`, so the test first proves an ordinary `File::create` in the
+same directory comes out group/other-readable, and loudly says what went uncovered if it does not. It ran
+for real on Linux with no skip notice.
+
+**Non-blocking, all seven:**
+
+- **F2 (fixed as documentation).** Windows has no equivalent of the create-time mode: the staged
+  `.cpe-tmp` carries the *parent directory's* inherited ACL for the whole write and only acquires the
+  target's at the `ReplaceFileW` swap. Not a regression, and closing it means hand-building a security
+  descriptor onto the staging handle — the `SetFileSecurity`-by-hand route `ReplaceFileW` was chosen over.
+  Now recorded at `carry_protections`' Windows arm instead of being an unstated asymmetry.
+- **F3 (fixed).** `carry_xattrs` now writes through the staged **file descriptor** (`FileExt::set_xattr`,
+  an `fsetxattr`), matching the `fchmod`. The source side stays path-based and says why: no handle is held
+  on the target, and opening one purely to read attributes costs an extra open on every save and fails
+  outright on a file the user can write but not read — for a read whose worst case is copying a stale
+  attribute onto a file about to be replaced anyway. The half worth hardening is the half that writes.
+- **F4 (recorded).** The stat→commit TOCTOU is now in `replace_file_contents`' "What this does NOT do":
+  a target that *appears* in the window is overwritten by the plain-rename branch (silent, but needs the
+  file to have been absent when Save was pressed); one that *vanishes* makes `ReplaceFileW` fail
+  `NotFound` (loud, nothing damaged). Closing them means holding the target open across the save, which is
+  item 4 from the other side.
+- **F5 (fixed).** `src/docs/25-metadata-studio.md` no longer lists extended attributes as an unqualified
+  guarantee — it now says an attribute the OS won't let the app re-apply is dropped without warning, and
+  that this is still far better than losing all of them but is not the guarantee the two entries above it
+  are. The residual must not vanish on the page people actually read.
+- **F6 (fixed).** The read-only-target line quoted both primitives as giving the identical string; measured,
+  `ReplaceFileW` renders as `Access is denied. (0x80070005)` through the `windows` crate's `HRESULT`
+  formatting, not `std::io`'s `os error 5`. Corrected, with the general point that every Windows error out
+  of `commit_replacement` now carries an `0x8007NNNN` code.
+- **F7 (fixed).** The item-4 pin asserted only that the message named the file, which a `classify_carryover`
+  refusal would also satisfy — so the doc's "the error is at least now accurate about the cause" was held
+  by nothing. It now asserts the message contains `0x80070020` (`ERROR_SHARING_VIOLATION`) and does **not**
+  contain the refusal's wording. The HRESULT rather than the prose deliberately: the prose is localised by
+  the OS and would red on a non-English runner for no real reason.
+- **F8 (fixed).** The refusal message is no longer Unix-flavoured ("permissions and security settings, its
+  attributes, and its alternate data streams" / "a file you had made private could come back readable by
+  others") and now ends with a next step: check the file is still there and readable, then save again.
+
+**Left as is on both checkers' advice:** the carry-over refusal itself. Both confirmed `fs::metadata`
+succeeds against a `CreateFileW` handle at `share=0` and against an ACL denial of read-attributes, so it
+cannot be tripped by an application or AV lock — it is far less reachable than the round-1 write-up feared.

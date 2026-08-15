@@ -60,7 +60,11 @@ pending. Nothing touches disk until you click **Save**:
   - **Windows file attributes and alternate data streams**, including **Hidden** and the
     `Zone.Identifier` mark that records a file was downloaded from the internet.
   - **Extended attributes on Linux and macOS** — which is where macOS keeps **Finder tags** and its
-    "downloaded from the internet" quarantine flag.
+    "downloaded from the internet" quarantine flag. One caveat worth knowing: these are copied one at a
+    time and on a best-effort basis, so an attribute the system won't let the app re-apply (a security
+    label managed by the OS itself, for instance) is dropped without a warning. That's still far better
+    than before, when *every* extended attribute was lost on every save, but it isn't a guarantee the way
+    the two entries above are.
   - If any of these can't be read before the save starts, the save is **refused** and nothing is written,
     rather than handing you back a file that is more open than the one you saved.
 

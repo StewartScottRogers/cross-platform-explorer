@@ -452,6 +452,17 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   call here would buy a guarantee this crate cannot state platform-uniformly. The user docs are scoped
 ///   to what is actually provided instead of claiming power-cut safety.
 /// - **TOCTOU.** The link is resolved and then written; nothing is atomic across those two steps.
+/// - **A second TOCTOU, between reading the target and committing** (CPE-1739 review round 1, F4 —
+///   recorded because this function records everything else, not because either branch is dangerous).
+///   [`classify_carryover`]'s stat happens before staging and [`commit_replacement`] happens after the
+///   bytes are written, and the target can change in between. If it **appears** in that window — the name
+///   was free at stat time — the commit takes the plain-`rename` branch and overwrites the newcomer,
+///   destroying exactly the attributes and streams this ticket exists to preserve. If it **vanishes**,
+///   `ReplaceFileW` fails `NotFound` where a rename would have succeeded, so the save reports an error
+///   about a file that is no longer there. Both need someone to create or delete the user's file during
+///   the milliseconds of one save; the first is silent but requires the file to have been absent when the
+///   user pressed Save, and the second is loud and leaves nothing damaged. Closing them means holding the
+///   target open across the whole save, which is item 4's problem from the other side.
 /// - **The temp is not cleaned up at the instant the process dies** (CPE-1725, PR #904 review; decided by
 ///   CPE-1738). The removals below sit on the write/sync and rename **error** branches, so they run when
 ///   the save *fails* and not when the save is *killed*: force-quit, a crash or a `SIGKILL` between the
@@ -503,8 +514,68 @@ pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// bytes off the link's target, and **the refusal** is what makes the failure say *"is a link"* instead
 /// of `The file exists. (os error 80)` about a name `try_exists` reports as free. A site that creates a
 /// file at a user-named path wants both, in that order.
+///
+/// # The mode argument (CPE-1739 review round 1)
+///
+/// This entry point takes the platform default — `0666 & ~umask` on Unix, the parent's inherited ACL on
+/// Windows — which is what a site *claiming a name for a new user file* wants (`split_join`'s joined
+/// output and its manifest are the callers). [`create_staging_file`] is the other entry point and asks
+/// for `0600`, because a staging file holds someone else's private bytes for a moment and is not a file
+/// the user will ever see. Both funnel through this one body, so there is still exactly **one**
+/// `create_new(true)` in the crate and the extraction argument above is unweakened.
 pub fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    create_exclusive_with_mode(path, None)
+}
+
+/// The mode [`create_staging_file`] creates a `.cpe-tmp` at: readable and writable by its owner and by
+/// nobody else, from the instant the file exists.
+///
+/// **Why a constant and not `0644`-and-hope** (CPE-1739 review round 1, the blocker). `create_new`
+/// without an explicit mode is `O_CREAT|O_EXCL, 0666`, so the kernel makes the staging file
+/// `0666 & ~umask` — world-readable under the ordinary `022` umask — and the [`carry_protections`]
+/// `fchmod` that narrows it to the target's real mode runs *afterwards*. **POSIX checks permission at
+/// `open`, not at `read`**, so a local process that opens the staging name inside that window keeps a
+/// readable descriptor across the `fchmod` and goes on to read the private bytes written after it. The
+/// window is small but it is not theoretical and the name does not have to be guessed: an
+/// inotify/FSEvents watcher is woken by the create itself. Measured with `strace` on the real test
+/// binary before the fix:
+///
+/// ```text
+/// openat(AT_FDCWD, ".../secrets.env.382-1786791461862651861.cpe-tmp",
+///        O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0666) = 3
+/// fchmod(3, 0600)                                 = 0
+/// rename(".../secrets.env.382-....cpe-tmp", ".../secrets.env") = 0
+/// ```
+///
+/// With the mode on the `openat` there is no window at all: the file is never, for any instant, more
+/// open than `0600`, and `carry_protections`' `fchmod` only ever *widens* it to whatever the user's own
+/// file actually had. Note this is deliberately **more** restrictive than the eventual mode during
+/// staging rather than equal to it — narrowing first and widening later is the only order that has no
+/// gap, since the target's mode is not known until after the file exists.
+const STAGING_MODE: u32 = 0o600;
+
+/// The staging opener [`stage_and_replace`] actually calls, one line above the call site with nothing
+/// between them — the same "extract it so a test can call the real one" argument as [`create_exclusive`],
+/// which this delegates to. Pinned by `cpe_1739_the_staging_opener_creates_a_file_no_one_else_can_open`
+/// and by `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, both of which
+/// call **this** function rather than a copy of it.
+fn create_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
+    create_exclusive_with_mode(path, Some(STAGING_MODE))
+}
+
+/// The single `create_new(true)` open in this crate. `unix_mode` is the mode the file is **created**
+/// with, not one applied afterwards — see [`STAGING_MODE`] for why that distinction is the whole point.
+/// Ignored on Windows, which has no mode; see [`carry_protections`]'s Windows arm for what that costs.
+fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    let _ = unix_mode; // read on Unix only
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(mode);
+    }
+    opts.open(path)
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -532,16 +603,20 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
     // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which calls
-    // [`create_exclusive`] — **this** function's opener, not a copy of it. The temp name carries
+    // [`create_staging_file`] — **this** function's opener, not a copy of it. The temp name carries
     // pid+nanos, so racing the real one is not the way to test it; extracting the opener is.
     {
         use std::io::Write as _;
-        let mut f = create_exclusive(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
-        // CPE-1739: carry the target's protections onto the staged file while it is still EMPTY — before
-        // the user's bytes ever reach it — so a `0600` file's contents are never momentarily sitting at a
-        // world-readable staging name. On Windows this is a deliberate no-op: `commit_replacement`'s
-        // `ReplaceFileW` carries the attributes, ACL and named streams across at the moment of the swap
-        // instead, which is more than anything copyable onto the staged file could.
+        // CPE-1739: the file is CREATED at 0600 (see `STAGING_MODE`), not created wide and narrowed
+        // afterwards — POSIX checks permission at `open`, so narrowing afterwards leaves a window in
+        // which another local process can take a descriptor it keeps.
+        let mut f = create_staging_file(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        // Then widen/adjust to whatever the user's own file actually carries, while the staged file is
+        // still EMPTY — before the user's bytes ever reach it. On Windows this is a deliberate no-op:
+        // `commit_replacement`'s `ReplaceFileW` carries the attributes, ACL and named streams across at
+        // the moment of the swap instead, which is more than anything copyable onto the staged file
+        // could — but it does mean the Windows staging file carries the *directory's* inherited ACL for
+        // the whole write, which `carry_protections`' Windows arm records.
         if let Some(src) = existing {
             if let Err(e) = carry_protections(&target, src, &f, &tmp) {
                 drop(f);
@@ -602,10 +677,11 @@ fn classify_carryover(err: Option<&std::io::Error>, target: &Path) -> Result<boo
         None => Ok(true),
         Some(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Some(e) => Err(format!(
-            "could not read what \"{}\" currently carries — its permissions, and on Windows its attributes \
-             and alternate data streams — so nothing was written. Saving anyway would replace it with a \
-             brand-new file carrying default permissions, and a private file would come back readable by \
-             everyone: {e}",
+            "could not read what \"{}\" currently carries — its permissions and security settings, its \
+             attributes, and its alternate data streams — so nothing was written. Saving anyway would \
+             replace it with a brand-new file carrying only the defaults, so a file you had made private \
+             could come back readable by others. Check the file is still there and that you can read it, \
+             then save again: {e}",
             display_path(target)
         )),
     }
@@ -634,13 +710,25 @@ fn classify_carryover(err: Option<&std::io::Error>, target: &Path) -> Result<boo
 /// give a file away regardless. The staged file therefore belongs to whoever ran the save, which is what
 /// [`carried_mode`] takes into account.
 ///
-/// # Windows: nothing here, on purpose
+/// # Windows: nothing here, on purpose — and what that costs during the write
 ///
 /// Everything the Windows side loses — the attribute word, the ACL, named streams, the creation time —
 /// belongs to the *destination*, and the OS has a primitive that carries it across at the moment of the
 /// swap. Copying attributes onto the staged file would be a strictly worse imitation of it (it cannot
 /// reach the ACL at all, and enumerating streams needs `FindFirstStreamW`/`FindNextStreamW` by hand). See
 /// [`commit_replacement`], which is where the Windows answer lives.
+///
+/// **The consequence, stated because the Unix side makes a point of not having it** (CPE-1739 review
+/// round 1, F2): the Unix path creates the staging file at [`STAGING_MODE`] so it is never for an instant
+/// readable by anyone else, and Windows has no equivalent here. The staged `.cpe-tmp` is created with the
+/// **parent directory's inherited ACL** and holds the user's bytes under it for the whole write, only
+/// acquiring the target's own ACL when `ReplaceFileW` swaps it in. In a folder whose ACL is wider than the
+/// file's — a shared folder holding one restricted file — the bytes are briefly reachable by whoever the
+/// *folder* lets in. Not a regression (the pre-CPE-1739 rename had the same exposure and did not even
+/// end with the right ACL), and not closed here: closing it means building the target's security
+/// descriptor onto the staging handle by hand, which is the `SetFileSecurity`-by-hand route
+/// [`commit_replacement`] rejects `ReplaceFileW` in favour of. Recorded rather than left as an
+/// unstated asymmetry.
 ///
 /// # Failure fails the save, and that is the point
 ///
@@ -668,7 +756,7 @@ fn carry_protections(
             display_path(source_path)
         )
     })?;
-    carry_xattrs(source_path, staged_path);
+    carry_xattrs(source_path, staged);
     Ok(())
 }
 
@@ -730,14 +818,29 @@ fn carried_mode(source_mode: u32, source_uid: u32, staged_uid: u32) -> u32 {
 ///
 /// **The residual, stated rather than hidden:** an attribute that cannot be re-applied is silently lost,
 /// exactly as it is today. This is strictly better than the status quo (where *all* of them are), and it
-/// is the one gap in this function that a caller cannot see. Filesystems with no xattr support at all
-/// (`listxattr` → `ENOTSUP`) return early and cost one syscall.
+/// is the one gap in this function that a caller cannot see — so `src/docs/25-metadata-studio.md` says so
+/// to the user too, rather than letting the residual disappear on the page people actually read
+/// (CPE-1739 review round 1, F5). Filesystems with no xattr support at all (`listxattr` → `ENOTSUP`)
+/// return early and cost one syscall.
+///
+/// # The staged side goes through the FILE DESCRIPTOR, the source side through the path
+///
+/// The asymmetry is deliberate rather than an oversight (CPE-1739 review round 1, F3, which noticed the
+/// mode was carried by `fd` while xattrs were carried by name on both sides). `staged` is an `&File`
+/// this function already holds, so `FileExt::set_xattr` is a plain `fsetxattr` on that descriptor — no
+/// second path lookup, and nothing can swap an entry in at the staging name between the `fchmod` and the
+/// attribute writes. The **source** side stays path-based because `stage_and_replace` holds no handle to
+/// the target and opening one purely to read attributes would cost an extra open on every save and fail
+/// outright on a file the user can write but not read — for a read whose worst case is copying a stale
+/// attribute onto a file that is about to be replaced anyway. The half worth hardening is the half where
+/// something is written, and that half is now on the descriptor.
 #[cfg(unix)]
-fn carry_xattrs(source: &Path, staged: &Path) {
+fn carry_xattrs(source: &Path, staged: &std::fs::File) {
+    use xattr::FileExt as _;
     let Ok(names) = xattr::list(source) else { return };
     for name in names {
         if let Ok(Some(value)) = xattr::get(source, &name) {
-            let _ = xattr::set(staged, &name, &value);
+            let _ = staged.set_xattr(&name, &value);
         }
     }
 }
@@ -786,9 +889,12 @@ fn carry_xattrs(source: &Path, staged: &Path) {
 /// mode, which only writing in place would sidestep. That is CPE-1739's option 3, and taking it would give
 /// up the atomicity a half-rewritten media file is the whole reason for. Recorded, not closed.
 /// [`replace_file_contents`]'s "What this does NOT do" and `src/docs/25-metadata-studio.md` say the same
-/// thing to the user. **A read-only target is refused too, by both primitives identically** (`fs::rename`
-/// → `Access is denied. (os error 5)`, `ReplaceFileW` → the same), so that is pre-existing behaviour this
-/// change neither fixes nor worsens.
+/// thing to the user. **A read-only target is refused too, by both primitives** — `fs::rename` →
+/// `Access is denied. (os error 5)`, `ReplaceFileW` → `Access is denied. (0x80070005)`, the same refusal
+/// rendered through the `windows` crate's `HRESULT` formatting rather than `std::io`'s (CPE-1739 review
+/// round 1, F6 — an earlier version of this line called the two strings identical, which they are not).
+/// So that is pre-existing behaviour this change neither fixes nor worsens, and every error this function
+/// returns on Windows now carries an `0x8007NNNN` code rather than an `os error N`.
 ///
 /// # No silent fallback to `fs::rename`
 ///
@@ -2881,7 +2987,7 @@ mod tests {
     /// that untestable because the temp name carries pid+nanos and cannot be raced — true of the temp
     /// name, and the wrong conclusion: the guarantee belongs to the **primitive**, so the primitive is
     /// what this drives, with `fs::write` on an identically-staged link as the contrast that shows the
-    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`create_exclusive`] -- that function's own opener -- rather than a copy of it.
+    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`create_staging_file`] -- that function's own opener -- rather than a copy of it.
     ///
     /// The dangling leg runs on every runner ([`make_dangling_link`]'s junction fallback needs no
     /// privilege). The live leg needs a real file symlink and says so when it cannot have one; no
@@ -2892,11 +2998,13 @@ mod tests {
     fn create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it() {
         use std::io::Write;
         let d = scratch("create-new-link");
-        // **`create_exclusive` is the opener `replace_file_contents` actually uses.** The first version
+        // **`create_staging_file` is the opener `replace_file_contents` actually uses.** The first version
         // of this test built its own `OpenOptions` closure here, so swapping `create_new(true)` for
         // `create(true).truncate(true)` at the call site left this green — a test named after a guard,
-        // passing with the guard removed. Call the real one.
-        let staged = create_exclusive;
+        // passing with the guard removed. Call the real one. (CPE-1739 split the opener in two so the
+        // staging path could ask for `0600`; both entry points delegate to the crate's single
+        // `create_new(true)`, so this still drives the production primitive.)
+        let staged = create_staging_file;
 
         // ---- dangling link in the staging slot: every runner ----
         let dangling = d.join("staging-dangling");
@@ -3012,6 +3120,64 @@ mod tests {
             "and an executable script must still be executable after being edited (result was {r:?})"
         );
         r.expect("and that save must succeed too");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739 review round 1, the blocker: the staging file must be born private, not made private.**
+    ///
+    /// The first round created the `.cpe-tmp` with `create_new`'s default `0666` and narrowed it with an
+    /// `fchmod` immediately afterwards, one statement later, before any bytes were written. That is not
+    /// enough, and the doc claimed it was: **POSIX checks permission at `open`, not at `read`**, so a
+    /// local process that opens the staging name between the `openat` and the `fchmod` keeps a readable
+    /// descriptor across the narrowing and reads the private bytes written after it. The name needs no
+    /// guessing — an inotify/FSEvents watcher is woken by the create itself. `strace` of the real test
+    /// binary, pre-fix: `openat(..., O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0666) = 3` then `fchmod(3, 0600)`.
+    ///
+    /// This drives [`create_staging_file`] — **the function `stage_and_replace` calls**, one line above
+    /// its call site with nothing between them, not a copy of it and not the `create_exclusive` entry
+    /// point that deliberately keeps the platform default for `split_join`'s user-facing output files.
+    /// Dropping the mode (`create_exclusive_with_mode(path, None)`) reds this and nothing else.
+    ///
+    /// **The umask control makes the skip loud instead of silent.** Under a `0077` umask the unfixed code
+    /// would produce `0600` too, and this test would pass while proving nothing — so it first checks that
+    /// an ordinary `File::create` in the same directory *does* come out group/other-readable. If the
+    /// umask has already closed those bits, there is nothing here to demonstrate and the test says so
+    /// rather than claiming coverage it does not have.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1739_the_staging_opener_creates_a_file_no_one_else_can_open() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("staging-mode");
+
+        let control = d.join("control");
+        std::fs::File::create(&control).unwrap();
+        let control_mode = std::fs::metadata(&control).unwrap().permissions().mode();
+        if control_mode & 0o077 == 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1739] SKIPPED the staging-mode test: this run's umask already strips every \
+                 group/other bit (an ordinary File::create came out {:04o}), so a staging file created \
+                 WITHOUT an explicit mode would look private too and this test could not tell the fixed \
+                 code from the broken code. NOTHING here covered the staging-mode window on this run.",
+                control_mode & 0o7777
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let staged = d.join("secrets.env.4242-1.cpe-tmp");
+        let f = create_staging_file(&staged).expect("the staging opener must create the file");
+        let mode = std::fs::metadata(&staged).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "the staging file must be created with NO group or other access ({mode:04o}) — narrowing it \
+             one statement later is too late, because POSIX checks permission at open() and a process \
+             that got in first keeps a descriptor that can read the private bytes written afterwards"
+        );
+        assert_ne!(mode & 0o400, 0, "and its owner must still be able to read it back ({mode:04o})");
+        drop(f);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -3148,7 +3314,24 @@ mod tests {
              this now succeeds, fix the doc comments on commit_replacement and replace_file_contents and \
              src/docs/25-metadata-studio.md, which all tell the user it fails",
         );
-        assert!(e.contains("held.wav"), "and the failure must name the file: {e}");
+        assert!(e.contains("held.wav"), "the failure must name the file: {e}");
+        // **Naming the file is not enough** (CPE-1739 review round 1, F7): a `classify_carryover` refusal
+        // names it too, so an assertion that stopped there would pass while the save failed for a
+        // completely different reason and the doc's claim — that the failure is now *accurate about the
+        // cause* — would be held by nothing. `0x80070020` is `ERROR_SHARING_VIOLATION`, and asserting the
+        // code rather than the prose ("...being used by another process.") is deliberate: the prose is
+        // localised by the OS and would red on a non-English runner for no real reason.
+        assert!(
+            e.contains("0x80070020"),
+            "and it must be a SHARING VIOLATION (ERROR_SHARING_VIOLATION, 0x80070020) — the save failing \
+             for some other reason, such as the carry-over refusal, would satisfy a name-only check while \
+             leaving the documented cause unproven: {e}"
+        );
+        assert!(
+            !e.contains("could not read what"),
+            "and specifically NOT the classify_carryover refusal — fs::metadata succeeds against this \
+             handle, which is why the refusal is unreachable here: {e}"
+        );
 
         unsafe { windows::Win32::Foundation::CloseHandle(handle).ok() };
         let _ = std::fs::remove_dir_all(&d);
