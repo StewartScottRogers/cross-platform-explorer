@@ -941,39 +941,58 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// **The round-2 blocking finding, pinned at the SHIPPED values, on the live path.** WebDAV is routed
-    /// through `crates/vfs` today (`cpe_vfs::open` → `remote_dir_entries` → the `list_dir` Tauri command,
-    /// inside `spawn_blocking`), and tokio's default 512-thread blocking pool is not configured smaller —
-    /// so before this fix each attempt against a dribbling share drained one pool thread permanently.
-    /// This runs the real [`WebdavProvider::connect`], no injected `Duration`, and requires `list` to
-    /// come back. It costs [`TIMEOUT_METADATA_REQUEST`] of wall clock per CI job on purpose: the previous
-    /// round proved the mechanism through a seam and shipped values that did not bound this.
+    /// **CPE-1713 (round 3): the wiring check that replaced the round-2 60 s live-fire test.**
+    ///
+    /// Round 2's `a_server_that_dribbles_one_byte_at_a_time_is_cut_off_at_the_shipped_values` ran the real
+    /// [`WebdavProvider::connect`] — no injected `Duration` anywhere — against a dribbling share and waited
+    /// out the full shipped 60 s deadline to prove it. That cost +120 s of CI wall clock per OS × 3 OSes
+    /// (≈6 minutes every run, forever), to prove one narrow thing the other two tests in this file don't:
+    /// that [`WebdavProvider::connect`] actually initialises `metadata_deadline` FROM
+    /// [`TIMEOUT_METADATA_REQUEST`], rather than from some other constant or a stale default.
+    ///
+    /// This is a field assertion, not a live-fire: no socket, no sleep, no thread. It reads the field
+    /// `request_bounded` actually consults, off the exact constructor production calls.
+    ///
+    /// **The three properties CPE-1706 needs pinned, and which test pins which — removing any one turns a
+    /// distinct test red:**
+    /// 1. **Mechanism** — a `metadata_deadline` field actually bounds `list`'s wall clock, driven through
+    ///    the real `request_bounded` → `.timeout(..)` → `.call()`/`.send_string()` path:
+    ///    [`a_dribbling_server_is_cut_off_by_the_per_request_deadline`] (below). Delete the
+    ///    `.timeout(self.metadata_deadline)` call in `request_bounded` and this reds — the 500 ms deadline
+    ///    no longer cuts the call short, so it runs past this test's own 10 s ceiling.
+    /// 2. **Value** — [`TIMEOUT_METADATA_REQUEST`] itself is a sane, finite bound (not 0, not a year):
+    ///    [`the_shipped_timeout_values_are_finite_and_sane`]. Change the constant to something absurd and
+    ///    only that test reds.
+    /// 3. **Wiring** — `connect()`'s real constructor path actually assigns that constant to the field the
+    ///    mechanism above reads: this test,
+    ///    [`connect_installs_the_shipped_metadata_deadline_on_the_field_the_call_site_reads`]. Change
+    ///    `connect_with_timeouts` to assign `metadata_deadline: TIMEOUT_READ` (a different, still-sane
+    ///    `Duration`) instead of `TIMEOUT_METADATA_REQUEST` and only this test reds — (1) and (2) both
+    ///    still pass unchanged, because neither one ever calls the real zero-argument `connect()`.
+    ///
+    /// Verified by hand for this ticket (not committed, to avoid permanently breaking prod): with
+    /// `metadata_deadline: TIMEOUT_METADATA_REQUEST` changed to `metadata_deadline: TIMEOUT_READ` in
+    /// `connect_with_timeouts`, this test reds on the field mismatch while (1) and (2) stay green; with the
+    /// `.timeout(self.metadata_deadline)` call removed from `request_bounded`, (1) reds (it does not
+    /// return inside its 10 s ceiling) while this test and (2) stay green. Together the two breaks are
+    /// exactly "pass a different duration" and "drop the `.timeout()` call" — the two ways CPE-1713 asks
+    /// the replacement to prove it catches a disconnected constant.
     #[test]
-    fn a_server_that_dribbles_one_byte_at_a_time_is_cut_off_at_the_shipped_values() {
-        let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_secs(5));
-        let started = std::time::Instant::now();
-        let err = call_with_deadline(
-            "WebdavProvider::list (SHIPPED values) against a server dribbling one byte every 5 s",
-            Duration::from_secs(150),
-            move || WebdavProvider::connect(&WebdavConfig::new(&base)).list("/"),
-        )
-        .unwrap_err();
-        let elapsed = started.elapsed();
-        assert!(err.starts_with("/:"), "the error must name the path that dribbled: {err}");
-        assert!(
-            elapsed >= TIMEOUT_METADATA_REQUEST,
-            "returning BEFORE the deadline means something else ended this, so it is not evidence about \
-             the deadline: {elapsed:?}"
-        );
-        assert!(
-            elapsed < TIMEOUT_METADATA_REQUEST + Duration::from_secs(30),
-            "the request deadline must be what ended it, but it took {elapsed:?}"
+    fn connect_installs_the_shipped_metadata_deadline_on_the_field_the_call_site_reads() {
+        let provider = WebdavProvider::connect(&WebdavConfig::new("http://127.0.0.1:1"));
+        assert_eq!(
+            provider.metadata_deadline, TIMEOUT_METADATA_REQUEST,
+            "WebdavProvider::connect must install TIMEOUT_METADATA_REQUEST on the field request_bounded \
+             threads into .timeout(..) — a mismatch here means the shipped constant is disconnected from \
+             the real constructor, exactly the class of bug CPE-1706 round 1 shipped undetected"
         );
     }
 
-    /// The fast twin of the shipped-values test above, through the same `request_bounded` →
-    /// `.timeout(..)` path with a short deadline injected, so the guard can be broken and observed in a
-    /// second during iteration.
+    /// Drives the mechanism through the same `request_bounded` → `.timeout(..)` path production uses,
+    /// with a short deadline injected via [`WebdavProvider::with_metadata_deadline`] so the guard can be
+    /// broken and observed in a second rather than a minute. See the wiring test above for how this and
+    /// [`the_shipped_timeout_values_are_finite_and_sane`] combine to cover the same ground the round-2 60 s
+    /// live-fire test did, at a fraction of the cost.
     #[test]
     fn a_dribbling_server_is_cut_off_by_the_per_request_deadline() {
         let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_millis(50));
