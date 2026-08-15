@@ -229,9 +229,9 @@ jobs:
   #                       run 31903995127   run 31906687574
   #                       (head aad21a57)   (head 5f508a8f)
   #   build                    9.58              11.53      (`tauri build` 7.78 / 9.53 of it)
-  #   shard 1  (11 specs)      7.15               8.95
+  #   shard 1  (11 specs)      7.15              10.15
   #   shard 2  (10 specs)     14.27              16.22   <- the long pole (0.87 setup + 13.32 suite in #1)
-  #   shard 3  (10 specs)      6.68              10.15
+  #   shard 3  (10 specs)      6.68               8.93
   #   shard 4  (10 specs)      6.40               6.28
   #   verdict                  0.38               0.35
   #   LONGEST SINGLE JOB      14.27              16.22      vs 41.70 before  ->  -61% to -66%

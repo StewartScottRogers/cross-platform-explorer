@@ -171,9 +171,14 @@ function assertShardId({ shardIndex, shardTotal }: ShardId): void {
  * Picks the spec files this shard owns, deterministically, from the full sorted list.
  *
  * Round-robin over a code-unit-sorted copy (`i % shardTotal === shardIndex - 1`), not contiguous blocks.
- * Two reasons: it needs no per-spec cost model to stay roughly balanced (contiguous blocks would put
- * every alphabetically-adjacent heavy spec in the same shard), and adding one spec file re-deals at most
- * one spec per shard rather than shifting every boundary. Sorted with a plain code-unit comparison rather
+ * The reason is balance without a cost model: contiguous blocks would put every alphabetically-adjacent
+ * heavy spec in the same shard. Adding one spec file changes each shard's SIZE by at most one — but do
+ * not mistake that for stability of the assignment: measured, inserting one spec into the middle of the
+ * sorted list moves 23 of 41 specs to a different shard, where contiguous blocks would move 3. (An
+ * earlier version of this comment claimed the opposite, and the CPE-1753 review measured it.) That churn
+ * is harmless here because nothing is cached per shard and the verdict is reassembled from all of them
+ * every run; it would stop being harmless the moment anything memoises a spec-to-shard mapping.
+ * Sorted with a plain code-unit comparison rather
  * than `localeCompare` so the partition is byte-identical on every runner and locale — a partition that
  * differed between the shard job and the verdict job would put a spec in two shards or none, and "none"
  * is the dangerous direction.

@@ -276,9 +276,9 @@ bucketed it by spec count.
 | min (run 1) | min (run 2) | job |
 |---:|---:|---|
 | 9.58 | 11.53 | build (`tauri build` 7.78 / 9.53 of it — constant, no spec-count term) |
-| 7.15 | 8.95 | shard 1 (11 specs) |
+| 7.15 | 10.15 | shard 1 (11 specs) |
 | **14.27** | **16.22** | **shard 2 (10 specs) — the long pole** (run 1: 0.87 setup + 13.32 suite) |
-| 6.68 | 10.15 | shard 3 (10 specs) |
+| 6.68 | 8.93 | shard 3 (10 specs) |
 | 6.40 | 6.28 | shard 4 (10 specs) |
 | 0.38 | 0.35 | verdict |
 | **14.27** | **16.22** | **longest single job** — vs **41.70** before (−61% to −66%) |
@@ -302,7 +302,11 @@ on the long-pole shard. The old cap had 3.3 minutes and 2–4 spec files.
 
 **How the split is decided.** `lib/shard.ts#assignShardSpecs` deals the spec files out round-robin over a
 code-unit-sorted list (`i % shardTotal === shardIndex - 1`), so every spec lands in **exactly one** shard
-and adding a spec re-deals at most one file per shard. `lib/specFiles.ts` is the single definition of
+and adding a spec changes each shard's **size** by at most one. It does not keep the *assignment* stable:
+measured, inserting one spec into the middle of the sorted list moves 23 of 41 specs to a different shard
+(contiguous blocks would move 3). Harmless today — nothing is cached per shard and the verdict is
+reassembled from all of them every run — but it would stop being harmless the moment anything memoises a
+spec-to-shard mapping. `lib/specFiles.ts` is the single definition of
 "what counts as a spec file", used by `wdio.conf.ts`, the manifest writer and the ratchet alike — a
 partition computed from a different list than the expectation is checked against is how a file ends up
 assigned to nobody. `specs/` must stay **flat**; a subdirectory is refused outright rather than silently
