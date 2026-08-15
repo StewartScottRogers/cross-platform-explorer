@@ -95,3 +95,18 @@ which is why the gate is where it is. Revisit only if a real gateway is ever obs
 Blocked on hardware/an endpoint, not on design. Related: **CPE-1727** (which created items 1–3 and
 recorded item 4), **CPE-1723**, **CPE-1684**, **CPE-1518** (the QNAP, the first real endpoint),
 **CPE-1685** (which makes all of this user-reachable).
+
+**Item 2 re-read after CPE-1737 (per this ticket's own suggestion and CPE-1737's AC4).** CPE-1737 took
+option 1: `crates/vfs/src/connect.rs`'s `dir_entry_from_provider`/`child_uri`/`join_remote` now thread
+`ProviderEntry::is_dir` through so a directory child's URI carries a trailing `/` — S3's own spelling of
+"this is a prefix" — while a same-named file's stays bare. That is exactly the affordance item 2 asked
+for: the distinguishing bit now lives on the row (`DirEntry.path`), so a future `delete(path)` wired to a
+remote command CAN tell the object and the prefix apart by path alone. Item 2's *design* question is
+therefore answered, not merely asymmetric-and-documented.
+
+This does **not** close the ticket: AC1 requires all four items exercised against a real endpoint, and
+items 1/3/4 are still blocked on hardware (CPE-1518). It also does not yet CLOSE item 2's own AC1 slice —
+"confirm the collision is reachable in practice" still needs a real gateway; CPE-1737's fix was proven
+against an in-process fake provider only (`crates/vfs/src/connect.rs`'s
+`a_name_collision_never_produces_two_rows_with_the_same_path`), not a live bucket. Left in Backlog,
+unchanged in scope, with this decision recorded per CPE-1737 AC4.

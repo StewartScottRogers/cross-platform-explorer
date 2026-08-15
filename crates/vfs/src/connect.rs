@@ -220,28 +220,42 @@ fn authority(loc: &Location) -> String {
 }
 
 /// Join a safe leaf `name` onto the remote directory path `dir` (forward-slash, provider convention).
-fn join_remote(dir: &str, name: &str) -> String {
+///
+/// `is_dir` appends S3's own spelling of "this is a prefix, not an object" — a trailing `/` — so a
+/// same-named file and directory (CPE-1737: an S3 object `photos` and a prefix `photos/` are
+/// independent and can coexist) never build the same path. This isn't S3-specific plumbing: every
+/// remote provider in this workspace already tolerates a trailing `/` on a directory path (SFTP/FTP
+/// `stat` trim it; WebDAV's own PROPFIND target always carries one), so appending it here is safe
+/// uniformly, not just for the one backend that can actually collide today.
+fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
     let base = dir.trim_end_matches('/');
+    let suffix = if is_dir { "/" } else { "" };
     if base.is_empty() {
-        format!("/{name}")
+        format!("/{name}{suffix}")
     } else {
-        format!("{base}/{name}")
+        format!("{base}/{name}{suffix}")
     }
 }
 
-/// Build the navigable child URI for `name` under the directory `uri` points at.
-fn child_uri(uri: &str, loc: &Location, name: &str) -> String {
-    format!("{}://{}{}", scheme_word(uri), authority(loc), join_remote(&loc.path, name))
+/// Build the navigable child URI for `name` under the directory `uri` points at. `is_dir` carries the
+/// CPE-1737 fix through to the built URI — see [`join_remote`].
+fn child_uri(uri: &str, loc: &Location, name: &str, is_dir: bool) -> String {
+    format!("{}://{}{}", scheme_word(uri), authority(loc), join_remote(&loc.path, name, is_dir))
 }
 
 /// Map one provider entry (under directory `uri`) into a [`DirEntry`] the frontend renders and can
 /// navigate into. Remote backends don't report a modified time or OS symlink flag, so those are
 /// `None`/`false`; `hidden` follows the POSIX leading-dot convention.
+///
+/// `e.is_dir` is threaded into [`child_uri`] (CPE-1737) so a directory and a same-named file never
+/// build an identical `path` — the collision two independent `ListObjectsV2` result sets (`<Contents>`
+/// vs `<CommonPrefixes>`) can legitimately produce over S3's flat, `/`-free keyspace. See
+/// `cpe_s3::provider::tests::a_name_collision_lists_as_two_rows_so_the_user_has_already_said_which_one_they_meant`.
 fn dir_entry_from_provider(uri: &str, loc: &Location, e: ProviderEntry) -> DirEntry {
     let extension =
         if e.is_dir { String::new() } else { extension_of(std::path::Path::new(&e.name)) };
     DirEntry {
-        path: child_uri(uri, loc, &e.name),
+        path: child_uri(uri, loc, &e.name, e.is_dir),
         hidden: e.name.starts_with('.'),
         extension,
         name: e.name,
@@ -630,9 +644,90 @@ mod tests {
     #[test]
     fn child_uri_preserves_scheme_word_and_authority() {
         let loc = location::parse("davs://u@h:8443/dav");
-        assert_eq!(child_uri("davs://u@h:8443/dav", &loc, "f.txt"), "davs://u@h:8443/dav/f.txt");
+        assert_eq!(child_uri("davs://u@h:8443/dav", &loc, "f.txt", false), "davs://u@h:8443/dav/f.txt");
         // Root path joins without a doubled slash.
         let root = location::parse("sftp://h/");
-        assert_eq!(child_uri("sftp://h/", &root, "x"), "sftp://h/x");
+        assert_eq!(child_uri("sftp://h/", &root, "x", false), "sftp://h/x");
+    }
+
+    /// CPE-1737: a directory child's URI carries a trailing `/` — S3's own spelling for "this is a
+    /// prefix, not an object" — so a same-named file and folder never build the same path.
+    #[test]
+    fn child_uri_marks_a_directory_child_with_a_trailing_slash() {
+        let loc = location::parse("s3://bucket/");
+        assert_eq!(child_uri("s3://bucket/", &loc, "photos", true), "s3://bucket/photos/");
+        assert_eq!(child_uri("s3://bucket/", &loc, "photos", false), "s3://bucket/photos");
+    }
+
+    /// **The bug this ticket exists to close.** An S3 bucket can hold an object named `photos` AND
+    /// objects under the prefix `photos/` — keys are just strings, and `ListObjectsV2` returns the two
+    /// completely independently (`<Contents>` vs `<CommonPrefixes>`; see
+    /// `cpe_s3::provider::tests::a_name_collision_lists_as_two_rows_so_the_user_has_already_said_which_one_they_meant`).
+    /// `dir_entry_from_provider` used to build `path` from `e.name` alone, discarding `is_dir`, so the
+    /// object row and the prefix row collided on an IDENTICAL `path`.
+    ///
+    /// That is not a display oddity: this repo is on `"svelte": "^4"`, and every one of the (at least)
+    /// three components keyed on `entry.path` (`FileList.svelte`, `FolderBrowser.svelte`,
+    /// `DropStackPanel.svelte`) uses a keyed `{#each}`, which **throws** on a duplicate key rather than
+    /// rendering the second row — so the failure mode is the WHOLE listing failing to render, not just
+    /// the colliding pair.
+    #[test]
+    fn a_name_collision_never_produces_two_rows_with_the_same_path() {
+        struct Colliding;
+        impl FileSystemProvider for Colliding {
+            fn list(&self, _p: &str) -> Result<Vec<ProviderEntry>, String> {
+                // Exactly the shape `S3Provider::list` returns over the keyspace
+                // `["photos", "photos/a.jpg", "photos/b.jpg"]` — see the S3 test named above.
+                Ok(vec![
+                    ProviderEntry { name: "photos".into(), is_dir: false, size: 4 },
+                    ProviderEntry { name: "photos".into(), is_dir: true, size: 0 },
+                ])
+            }
+            fn stat(&self, _p: &str) -> Result<ProviderEntry, String> {
+                unreachable!()
+            }
+            fn read(&self, _p: &str) -> Result<Vec<u8>, String> {
+                unreachable!()
+            }
+            fn write(&mut self, _p: &str, _d: &[u8]) -> Result<(), String> {
+                unreachable!()
+            }
+            fn mkdir(&mut self, _p: &str) -> Result<(), String> {
+                unreachable!()
+            }
+            fn delete(&mut self, _p: &str) -> Result<(), String> {
+                unreachable!()
+            }
+            fn rename(&mut self, _f: &str, _t: &str) -> Result<(), String> {
+                unreachable!()
+            }
+        }
+
+        let listing = remote_dir_entries(&Colliding, uri()).expect("listing the colliding keyspace");
+        assert_eq!(listing.entries.len(), 2, "both rows must survive — this is not a filtering concern");
+
+        let paths: Vec<&str> = listing.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_ne!(
+            paths[0], paths[1],
+            "the object row and the prefix row share a path ({:?}) — this is exactly the Svelte \
+             keyed-{{#each}} hazard CPE-1737 exists to close: two rows with an identical key throw \
+             rather than render",
+            paths[0]
+        );
+
+        // The distinguishing bit must land on the directory row specifically, and be S3's own spelling
+        // of "this is a prefix" — a trailing '/' — per CPE-1737's option 1.
+        let dir_row = listing.entries.iter().find(|e| e.is_dir).expect("a directory row");
+        let file_row = listing.entries.iter().find(|e| !e.is_dir).expect("a file row");
+        assert!(
+            dir_row.path.ends_with('/'),
+            "the prefix row's path must carry the trailing '/' that marks it a directory, got {:?}",
+            dir_row.path
+        );
+        assert!(
+            !file_row.path.ends_with('/'),
+            "the object row's path must stay bare (unchanged shape), got {:?}",
+            file_row.path
+        );
     }
 }
