@@ -201,3 +201,49 @@ cheaper to keep true — only cheaper to leave false. So:
 
 Verification: `crates/server` 2163 unit (default) / 2265 (`--all-features`) + all integration green;
 clippy `--all-targets -D warnings` clean in both feature modes and in `src-tauri`.
+
+**2026-08-15 (round 4) — UAT PASS, reviewer CHANGES REQUESTED: four named fixes.**
+
+Two of them were guards that could be deleted with the suite staying green — the same defect this ticket
+keeps finding, now in its own tests.
+
+- **NEW-4: finding 8's guard was untested where it mattered.** `an_unreadable_entry_slot_aborts_...`
+  asserts `entry_slot_action`, which only *re-labels* an already-classified verdict; the decision UAT
+  finding 6 was about — *is this `Err` a link or an unreadable slot?* — lived inside
+  `create_slot_link_verdict`, next to the I/O. The reviewer flipped `_ => Unknown` to `_ => Link`
+  (reinstating the bug exactly) and `cargo test --all-features` still reported 2265 passed. The
+  pure-classifier argument was right and applied one level too low: split out
+  `fsutil::create_slot_link_from_stat(&Result<bool>, &Path)`, leaving `create_slot_link_verdict` as one
+  `symlink_metadata` plus a call, and pinned it with `an_unreadable_slot_is_unknown_never_a_confirmed_link`.
+  Same mutation now:
+
+  ```text
+  assertion `left == right` failed: an lstat that failed with PermissionDenied is an I/O FAILURE, not a
+  confirmed link. Classifying it as `Link` reinstates CPE-1733's UAT finding 6 exactly ...
+    left: "Link"   right: "Unknown"
+  ```
+
+- **NEW-3: row 1's leg covered nothing about two runs in three, and said the opposite.** It predicted the
+  next `EXTRACT_SEQ` value to squat, but that counter is shared with every sibling test that extracts, and
+  cargo runs them in parallel; when the squat was missed, `!landed.starts_with(&squat)` was trivially true
+  and the test passed silently. Its doc claimed the leg "announces rather than passing quietly" — **there
+  was no announce mechanism**. Now it occupies a contiguous block of 64 names (far under
+  `TEMP_TARGET_ATTEMPTS` = 1024), plants the link in every directory it actually created, and reads the
+  landing sequence number: inside the block ⇒ fail, exactly at the end ⇒ walk proven, past the end ⇒
+  nothing proven, retry, and only then a real `skip_notice!`. With `create_dir` → `create_dir_all`, three
+  runs of the module were **3 of 3 red** (previously 1 of 3), always at the victim-bytes assertion.
+
+- **NEW-2:** CPE-1744 still told its future worker the tar/one-shot-ZIP behaviours were "deliberately not
+  pinned by tests" — round 2's stance, reversed in round 3. Corrected, both test names given, and its
+  "What to do" list now says to re-point them (a false statement about coverage, inside the ticket family
+  whose thesis is that an unpinned description is one nobody keeps true).
+
+- **NEW-1:** `archive.rs:332` cited a test name that does not exist
+  (`..._local_safe_segment_rejects` → `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects`).
+
+Also folded in, as ticket text only: CPE-1746's option 1 rewritten to the **pre-call check in the existing
+callback** the reviewer measured (`Ok(ArchiveReport { done: 1, errors: [..] })`, victim intact) with the
+estimate revised M → S, and its checklist widened to `extract_7z_safe` (the one-shot path, also a
+registered Tauri command); CPE-1744 given the two UAT addenda — the docs' "still follows a folder
+shortcut" sentence is false for TAR, and `create_empty_zip` onto a plain existing file still returns a
+bare `"The file exists. (os error 80)"`.

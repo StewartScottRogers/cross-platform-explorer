@@ -5,7 +5,7 @@ type: bug
 priority: High
 status: Backlog
 tags: ready
-estimate: M
+estimate: S
 created: 2026-08-14
 closed:
 ---
@@ -45,15 +45,33 @@ first if only one gets done.
 
 ## What to do
 
-- [ ] The write is inside `sevenz_rust::default_entry_extract_fn`, so the guard cannot go at the write.
-      Two candidate shapes — **measure before choosing**, do not reason about it:
-      1. Replace `default_entry_extract_fn` with our own per-entry writer inside the existing
-         `decompress_file_with_extract_fn` callback (the callback already receives `entry_dest`), which
-         puts a real create site under our control and lets it reuse `fsutil::create_slot_link_verdict` +
-         `archive::entry_slot_action` exactly as rows 15/16 do.
-      2. A pre-extraction sweep of `dest` for links matching the archive's entry names.
-      Option 1 looks strictly better (no TOCTOU window, per-entry, same skip semantics as ZIP) — confirm
-      that `default_entry_extract_fn` has no behaviour we would lose by not calling it.
+- [ ] The write is inside `sevenz_rust::default_entry_extract_fn`, so the guard cannot go at the write —
+      but it does **not** follow that the writer must be replaced. Three shapes, in order of measured
+      preference:
+      1. **A pre-call check inside the existing callback** — the callback already receives `entry_dest`,
+         and the closure already gates on `entry_name_is_safe`, so the link verdict is one more condition
+         in the same place. Measured during PR #906's review: adding
+
+         ```rust
+         let safe = entry_name_is_safe(&name)
+             && !fs::symlink_metadata(entry_dest).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+         ```
+
+         at `crates/server/src/archive.rs:1453-1456` compiles clean and yields
+         `Ok(ArchiveReport { done: 1, errors: [..] })` with the victim intact — i.e. **ZIP's skip
+         semantics, reusing what CPE-1733 already built**. Use `fsutil::create_slot_link_verdict` +
+         `archive::entry_slot_action` rather than the raw `unwrap_or(false)` above so the
+         could-not-read-the-slot case aborts instead of being treated as "not a link" (UAT finding 6).
+      2. Replace `default_entry_extract_fn` with our own per-entry writer. Only if 1 proves insufficient:
+         it means owning decompression details this crate currently gets for free, and it was this
+         ticket's original proposal purely because nobody had measured 1.
+      3. A pre-extraction sweep of `dest` for links matching the archive's entry names — a TOCTOU window
+         and a second traversal; listed for completeness, not recommended.
+- [ ] **Both 7z call sites, not one.** The checklist originally named only
+      `extract_7z_stream`/`extract_archive_streamed`. `extract_7z_safe` — the one-shot path used by
+      `extract_archive`, a registered Tauri command present in `bindings.gen.ts` — has the identical
+      `decompress_file_with_extract_fn` closure and writes through a link identically. Fixing one of the
+      two would leave the divergence CPE-1744 item 3 already documents for ZIP.
 - [ ] Match the ZIP rows' semantics: a confirmed link **skips** the entry and records it in
       `ArchiveReport::errors`; an unreadable slot **aborts** (`EntrySlotAction`, CPE-1733 UAT finding 6).
       Do not invent a third policy.
@@ -67,11 +85,18 @@ first if only one gets done.
 - [ ] Cover **both** link kinds — dangling (`fsutil::make_dangling_link`) and live (`require_staged`,
       CPE-1717) — they are different measured behaviours and a guard can handle one without the other.
 - [ ] Update `archive.rs`'s section-comment table (the "three extractors that are NOT our write loop"
-      block) and `src/docs/explorer-archives.md`, both of which currently state this gap as open.
+      block) and `src/docs/explorer-archives.md`, both of which currently state this gap as open — **and
+      re-point `archive::tests::sevenz_extraction_still_writes_through_a_link_until_cpe_1746`**, the
+      characterization test named after this ticket. It asserts today's hazard (victim clobbered, `Ok`,
+      `errors: []`), so it goes red the moment the guard lands: that red **is** the completion signal.
+      Re-point it at the refusal in the same commit; do not delete it.
 
 ## Notes
 
 Filed by the CPE-1733 worker from that ticket's UAT (finding F3), 2026-08-14, at the UAT's explicit
-request that this one get its own ticket. Related: **CPE-1733** (the enumeration, the link guards, and
+request that this one get its own ticket. **Estimate revised M → S on 2026-08-15**, after PR #906's
+review measured that the pre-call check in the existing callback is sufficient: the original `M` reflected
+the "write our own extractor" shape, which turned out not to be required, and a live High data-loss bug
+should not sit behind an estimate nobody had tested. Related: **CPE-1733** (the enumeration, the link guards, and
 `entry_slot_action`), **CPE-1744** (the rest of the family), **CPE-628** (`entry_name_is_safe`, already
 applied to 7z entry names for traversal), **CPE-1719** (write-through measured).

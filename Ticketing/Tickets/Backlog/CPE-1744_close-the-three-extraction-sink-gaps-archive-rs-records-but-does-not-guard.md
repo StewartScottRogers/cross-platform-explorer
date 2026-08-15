@@ -94,7 +94,18 @@ has its own ticket, **CPE-1746**. The other two land here:
   with **no current Svelte caller**, so this is an API/doc inconsistency rather than a live UI regression —
   but it is a real divergence and the in-app docs can only describe one of them.
 
-Deliberately **not** pinned by tests: pinning behaviour we consider wrong makes it harder to change.
+**Both behaviours ARE pinned by characterization tests** (CPE-1733 round 3 — an earlier draft of this
+ticket said the opposite, which was round 2's stance and is now false):
+
+- `archive::tests::tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it` — asserts the
+  link is replaced by a regular file holding the entry's bytes, with the victim intact and `Ok` returned,
+  on **both** tar paths.
+- `archive::tests::one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` — asserts the
+  whole-run abort (`b.txt` absent is what separates "skipped an entry" from "abandoned the run") and
+  requires the zip crate's *symlink* refusal rather than any I/O error.
+
+Fixing either gap **will turn its test red — that is the intended signal**, the same arrangement item 1
+already uses. Re-point the test at the new behaviour in the same commit as the fix; do not delete it.
 
 ### 4. Row 17's dangling-link wording
 
@@ -123,7 +134,20 @@ rule), so the fix is wording-only and needs to not disturb the live case.
       makes `File::create` fail by itself (`Access is denied`, os error 5, measured for CPE-1733), so an
       `is_err()`-only leg passes straight through a deleted guard.
 - [ ] Update `archive.rs`'s table and `src/docs/explorer-archives.md` in the same change — both currently
-      state these gaps as open.
+      state these gaps as open — **and re-point the two characterization tests named under item 3**
+      (`tar_extraction_destroys_...`, `one_shot_zip_extraction_aborts_...`) plus item 1's
+      `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects`. Those three going red is how you
+      know the fix landed; leaving them red, or deleting them, is how the description drifts from the code
+      again.
+- [ ] **Docs correction owed regardless of the fix** (measured in PR #906's UAT):
+      `src/docs/explorer-archives.md:89-92` tells the user that if the destination "already contains a
+      folder shortcut and an entry is addressed through it, the entry still follows it". That is true for
+      the ZIP paths (item 2) but **false for TAR**, which refuses with *"trying to unpack outside of
+      destination path"*. The sentence is stated for extraction generally, so it currently misdescribes one
+      of the two formats it covers.
+- [ ] **While in `create_empty_zip` for item 4's wording:** row 7's guard reworded only the *link* case.
+      Onto a plain existing file it still returns `Err("The file exists. (os error 80)")` — naming neither
+      the path nor which of the two files is meant, which is the same defect one step over.
 
 ## Notes
 

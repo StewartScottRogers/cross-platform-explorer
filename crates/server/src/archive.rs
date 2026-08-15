@@ -329,7 +329,7 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // visible file at all — the CPE-1709 bug, at a sink CPE-1709 did not cover. The Windows reserved-device
 // and trailing-space/dot shapes are accepted too. **Not fixed here** (this ticket's remit is the link
 // question at these sites, and the fix belongs with the `local_safe_segment` family): tracked as
-// **CPE-1744**, and pinned by `entry_name_is_safe_accepts_shapes_local_safe_segment_rejects` below so the
+// **CPE-1744**, and pinned by `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects` below so the
 // gap is a recorded, CI-enforced absence rather than a sentence.
 //
 // **The link check is LEAF-ONLY.** `entry_name_is_safe("sub/x.txt")` is `true`, and rows 15–16 run
@@ -2360,9 +2360,17 @@ mod tests {
     /// second is an I/O failure, and treating it as a skip dropped a file **silently** and reported the
     /// extraction as a success — while every other I/O failure in the same loop aborts.
     ///
-    /// This is a pure-classifier test on purpose. The `Unknown` arm needs a slot that fails to stat with
-    /// something other than `NotFound`, which cannot be staged on every platform this ships to — so with
-    /// the mapping inline, the one arm that was wrong would again be the one arm nothing could reach.
+    /// **This test covers only half of that fix, and the half it does not cover is the half the finding
+    /// was about** (PR #906 review, round 4). `entry_slot_action` re-labels a verdict that has *already
+    /// been classified*; the choice between "confirmed link" and "could not read it" is made in
+    /// `fsutil::create_slot_link_from_stat`. The review mutated that other seam — `Err(_)` classified as
+    /// `Link` instead of `Unknown`, which reinstates the finding exactly — and the whole suite stayed
+    /// green. Its own leg is `fsutil::tests::an_unreadable_slot_is_unknown_never_a_confirmed_link`; the
+    /// two together are the fix, and neither alone is.
+    ///
+    /// Both are pure-input tests for the same reason: the `Unknown` arm needs a slot that fails to stat
+    /// with something other than `NotFound`, which cannot be staged on every platform this ships to — so
+    /// with either mapping inline, the one arm that was wrong would again be the one arm nothing reaches.
     #[test]
     fn an_unreadable_entry_slot_aborts_rather_than_being_skipped_like_a_link() {
         use crate::fsutil::CreateSlotLink;
@@ -2392,13 +2400,41 @@ mod tests {
     /// The assertion is on **the victim's bytes**, not on the returned path — the bug this replaces
     /// returned a perfectly ordinary-looking `Ok(path)` while destroying a file somewhere else entirely.
     ///
-    /// This drives `temp_extract_target` through the real public API (`extract_archive_entry`), and it has
-    /// to predict the directory name to squat it, which is only possible because `EXTRACT_SEQ` is a
-    /// process-wide counter — so it reads the counter, squats the *next* name, and lets the call race
-    /// nothing. If a concurrent test consumed that sequence number first the squat simply is not hit and
-    /// the leg announces rather than passing quietly.
+    /// This drives `temp_extract_target` through the real public API (`extract_archive_entry`).
+    ///
+    /// # Why it squats a BLOCK of names rather than the next one (PR #906 review, round 4)
+    ///
+    /// The first version read `EXTRACT_SEQ`, squatted that single name, and its doc claimed that a
+    /// concurrent test consuming the number first would make the leg "announce rather than pass quietly".
+    /// **There was no announce mechanism**, and `EXTRACT_SEQ` is shared with every sibling test that
+    /// extracts anything, which cargo runs in parallel — so when the squat was missed, the
+    /// `!landed.starts_with(&squat)` assertion was trivially true and the test passed in silence. With
+    /// row 1's guard fully removed the review measured **two of three runs green**: a confident,
+    /// unmeasured claim about coverage, shipped inside the ticket about confident unmeasured claims.
+    ///
+    /// The fix is to stop predicting one number and instead **occupy a contiguous block wider than any
+    /// plausible parallel width** (`SQUAT_BLOCK`, far under `TEMP_TARGET_ATTEMPTS`), plant the link in
+    /// every directory the test actually created, and then check *where the extraction landed*:
+    ///
+    /// - **Inside the block ⇒ FAIL.** Either it wrote through a planted link (the victim assertion fires,
+    ///   naming the damage) or it claimed a squatted name we did not plant in (the sequence assertion
+    ///   fires). Both are `create_dir_all`'s behaviour and neither is reachable with `create_dir`.
+    /// - **Exactly at the end of the block ⇒ PASS, walk proven.** It started inside and stepped over every
+    ///   occupied name.
+    /// - **Beyond the end ⇒ nothing was proven** (a sibling burned the counter past the block, or a
+    ///   recycled PID left directories there). The leg **retries**, and only if every attempt is raced out
+    ///   does it `skip_notice!` — which is a real announce, unlike the sentence this replaces.
+    ///
+    /// The victim assertion runs on every attempt regardless, before the `Result` is unwrapped, because
+    /// the bug being guarded returns an ordinary-looking `Ok(path)` while destroying a file elsewhere.
     #[test]
     fn row1_a_squatted_temp_directory_is_stepped_over_not_written_into() {
+        /// Wider than any plausible parallel test width, and far under `TEMP_TARGET_ATTEMPTS` (1024) so a
+        /// walked-over block never turns into the "could not claim" error.
+        const SQUAT_BLOCK: u64 = 64;
+        /// Attempts to get a measurement no sibling raced out of.
+        const STAGE_ATTEMPTS: usize = 5;
+
         let d = scratch("cpe1733_row1_squat");
         let src = d.join("a.txt");
         fs::write(&src, b"ARCHIVED A").unwrap();
@@ -2408,50 +2444,82 @@ mod tests {
         let victim = d.join("victim-outside-temp.bin");
         fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
 
-        // The name `temp_extract_target` will try next.
-        let next = EXTRACT_SEQ.load(std::sync::atomic::Ordering::Relaxed);
-        let squat = std::env::temp_dir().join("cpe-archive").join(format!("{}-{}", std::process::id(), next));
-        fs::create_dir_all(&squat).unwrap();
-        let planted = squat.join("a.txt"); // the leaf name is archive-controlled: the attacker knows it
-        let staged = {
-            #[cfg(windows)]
-            {
-                std::os::windows::fs::symlink_file(&victim, &planted).is_ok()
-            }
-            #[cfg(unix)]
-            {
-                std::os::unix::fs::symlink(&victim, &planted).is_ok()
-            }
-        };
-        if !crate::fsutil::require_staged("live_file_symlink", true, staged) {
+        // Probe for symlink privilege away from the block, so "cannot stage" and "raced out" stay
+        // distinguishable (CPE-1717: a runner that *should* stage goes red rather than skipping).
+        if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &d.join("probe"))) {
             crate::skip_notice!(
-                "[CPE-1733] SKIPPED row 1's squat leg: could not plant a link at {}. The CWE-377/CWE-59 \
-                 shape was NOT covered on this run.",
-                planted.display()
+                "[CPE-1733] SKIPPED row 1's squat leg: this machine could not create a file symlink, so \
+                 the CWE-377/CWE-59 shape was NOT covered on this run."
             );
-            let _ = fs::remove_dir_all(&squat);
             let _ = fs::remove_dir_all(&d);
             return;
         }
 
-        let outcome = extract_archive_entry(&zip.to_string_lossy(), "a.txt");
+        let root = std::env::temp_dir().join("cpe-archive");
+        fs::create_dir_all(&root).unwrap();
+        let pid = std::process::id();
 
-        assert_eq!(
-            fs::read(&victim).unwrap(),
-            b"VICTIM ORIGINAL".to_vec(),
-            "row 1: the extraction wrote through a link planted in a SQUATTED temp directory — \
-             `create_dir_all` accepts a directory it did not create, so the leaf was never ours \
-             (outcome was {outcome:?})"
+        for _ in 0..STAGE_ATTEMPTS {
+            let start = EXTRACT_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+            let end = start + SQUAT_BLOCK;
+            // Claim what we can of [start, end). A name we could NOT create is a leftover or a live
+            // sibling — also occupied, so it is walked over too; we simply cannot plant a link in it.
+            let mut ours: Vec<std::path::PathBuf> = Vec::new();
+            for seq in start..end {
+                let dir = root.join(format!("{pid}-{seq}"));
+                if fs::create_dir(&dir).is_ok() {
+                    // The leaf name is archive-controlled: an attacker supplying the archive knows it.
+                    stage_live_link(&victim, &dir.join("a.txt"));
+                    ours.push(dir);
+                }
+            }
+
+            let outcome = extract_archive_entry(&zip.to_string_lossy(), "a.txt");
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "row 1: the extraction wrote through a link planted in a SQUATTED temp directory — \
+                 `create_dir_all` accepts a directory it did not create, so the leaf was never ours \
+                 (outcome was {outcome:?})"
+            );
+            let landed =
+                outcome.expect("row 1: a squatted name must be stepped over, not fail the extraction");
+            let landed_dir = Path::new(&landed).parent().unwrap().to_path_buf();
+            let landed_seq: u64 = landed_dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.rsplit('-').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or_else(|| panic!("row 1: unrecognised extraction directory name {landed_dir:?}"));
+
+            assert!(
+                landed_seq >= end,
+                "row 1: the extraction claimed <pid>-{landed_seq}, INSIDE the squatted block \
+                 [{start}, {end}) — every one of those names was already taken, so exclusive creation \
+                 must have stepped over all of them. Claiming a directory it did not create is what makes \
+                 rows 2–5's leaf reachable by a pre-planted link (landed {landed})"
+            );
+
+            let proven = landed_seq == end;
+            assert_eq!(fs::read(&landed).unwrap(), b"ARCHIVED A".to_vec(), "row 1: and it must still extract");
+            for dir in &ours {
+                let _ = fs::remove_dir_all(dir);
+            }
+            let _ = fs::remove_dir_all(&landed_dir);
+            if proven {
+                let _ = fs::remove_dir_all(&d);
+                return;
+            }
+            // Landed past the block: a sibling consumed the counter, or a recycled PID left directories
+            // beyond it. Nothing about the walk was demonstrated, so measure again rather than pass.
+        }
+
+        crate::skip_notice!(
+            "[CPE-1733] SKIPPED row 1's squat leg: after {STAGE_ATTEMPTS} attempts the extraction always \
+             started past the squatted block, so stepping-over was never exercised. This is the announce \
+             the earlier version of this test claimed to have and did not."
         );
-        let landed = outcome.expect("row 1: a squatted name must be stepped over, not fail the extraction");
-        assert!(
-            !Path::new(&landed).starts_with(&squat),
-            "row 1: the extraction landed INSIDE the squatted directory ({landed}) — exclusive creation \
-             is what makes rows 2-5 unguarded, so this must never be the squatted name"
-        );
-        assert_eq!(fs::read(&landed).unwrap(), b"ARCHIVED A".to_vec(), "row 1: and it must still extract");
-        let _ = fs::remove_dir_all(&squat);
-        let _ = fs::remove_dir_all(Path::new(&landed).parent().unwrap());
         let _ = fs::remove_dir_all(&d);
     }
 
