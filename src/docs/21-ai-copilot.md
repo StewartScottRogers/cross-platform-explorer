@@ -81,6 +81,14 @@ something in it — is refused, because deleting it, renaming it or copying it w
 which is outside the folder and outside what Undo restores. The copilot rearranges what is inside the
 folder you chose; it never touches the folder itself.
 
+The same question is asked **inside** a folder being copied. Copying a folder means copying everything in
+it, and if one of those things is a link leading out of the folder, following it would quietly place a copy
+of a file from elsewhere on your disk *into* the folder you confirmed. Nothing escapes — but you would end
+up with content you never chose, in a folder you might go on to share, sync or back up. So a copy stops
+when it meets a link that does not lead back inside the folder, reports that operation as failed with the
+link named, and leaves the outside file untouched. A link that *does* lead back inside the folder is copied
+normally, as the file it points at.
+
 ## What this is (and isn't)
 
 Like [Checkpoints & Rollback](16-checkpoints), this is the safety-first, palette-driven surface over the

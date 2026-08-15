@@ -1760,7 +1760,8 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///   which is why this is recorded rather than solved. **A real server must not treat this as
 ///   sufficient.** CPE-1730's own callers are single-threaded in-process test rigs where nothing else
 ///   touches the tree; CPE-1750's is not — [`crate::copilot`] runs this against a user's live
-///   filesystem, and repeats the residual on its own `apply_op` so a reader of that path meets it there.
+///   filesystem, and repeats the residual on its own `apply_op` so a reader of that path meets it there,
+///   and again on its recursive-copy walk, which asks this once per link it meets (CPE-1756).
 /// - **It says nothing about what the primitive then does to a link at the final component.** A
 ///   contained path may still *be* a symlink whose target is contained but is written *through* rather
 ///   than replaced — CPE-1719's shape, pinned separately by CPE-1726's tests.
