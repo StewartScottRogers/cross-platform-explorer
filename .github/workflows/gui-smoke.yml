@@ -216,14 +216,15 @@ jobs:
     #      still gets the ratchet's existing, honest `SUITE DID NOT COMPLETE` verdict instead of silence)
     #      — a timeout-value change cannot fix a cancellation triggered by a NEW push, no matter what it's
     #      set to.
-    # The "Run GUI smoke suite" step below now carries its own `timeout-minutes: 32` — tighter than
-    # today's status quo (previously no step-level cap existed at all, only this job-level one, which the
-    # data above shows is never actually the binding constraint) — sized with real margin over the
-    # measured normal suite duration (min 29.7 / median 30.0 / max 30.3 min, n=83) without needing to
-    # touch this job's cap. It is a defense-in-depth tightening, not a load-bearing guarantee: the thing
-    # that actually protects the Ratchet/classify-log/screenshot steps from ANY cancellation — whichever
-    # of the two causes above triggers it, and regardless of the exact minute it lands on — is `if:
-    # always()`, not a timing coincidence between these two numbers.
+    # A step-level cap on "Run GUI smoke suite" was tried during CPE-1728 and REMOVED — see that step's
+    # own comment for the measurement. Short version: suite duration scales with spec count, the usable
+    # window for such a cap is ~2 minutes wide, and one added spec file costs 0.73-1.80 min, so any value
+    # in that window reds every PR within a spec file or two. The thing that actually protects the
+    # Ratchet/classify-log/screenshot steps from ANY cancellation — whichever of the two causes above
+    # triggers it — is `if: always()`, not a timing coincidence between two numbers.
+    # WARNING (CPE-1753): a fully healthy green run measured 41.70 min against this 45-minute cap. At
+    # 0.73-1.80 min per added spec file, 2-4 more specs breach it, and then this job dies mid-suite on
+    # every run with no verdict left for `if: always()` to rescue. Shard before that lands.
     timeout-minutes: 45
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
     # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
@@ -369,19 +370,22 @@ jobs:
       # fail (see its comment and `gui-smoke/lib/ratchet.ts`). This also lets the suite step finish
       # normally (rather than the job aborting) so the JSON reporter output + screenshots below always
       # exist to upload/ratchet, even on a run with failures.
-      # CPE-1728: `timeout-minutes: 32` on THIS step is new (previously only the job-level 45-minute cap
-      # existed, and the comment above shows that one has never actually fired — max observed job
-      # duration across 155 runs was 42.5 min). 32 is sized against the measured normal suite duration
-      # (min 29.7 / median 30.0 / max 30.3 min, n=83 complete runs) — real margin above every observed
-      # normal run, while still catching a genuinely hung suite well before this job's own 45-minute cap
-      # would. This is NOT a claimed guarantee that the Ratchet/classify-log/screenshot steps always get a
-      # fixed reserved window afterwards (an earlier draft of this comment claimed exactly that and a
-      # reviewer caught the arithmetic error: max observed setup-before-this-step is 11.9 min, so
-      # 11.9 + 32 = 43.9, which does not leave a guaranteed fixed reserve under every combination of
-      # max-setup + max-suite). What actually protects those later steps from ANY cancellation, including
-      # this step hitting its own cap, is `if: always()` on the Ratchet step below — this timeout is a
-      # defense-in-depth tightening (a hang dies faster than the job cap would), not the load-bearing
-      # mechanism. `tee`s the full output to `.results/suite-output.log` (on top of the existing
+      # CPE-1728: this step deliberately has NO step-level `timeout-minutes`. A 32-minute cap was tried
+      # and removed after review measured that it had a one-to-two-spec-file fuse. Suite duration scales
+      # with spec count rather than being near-constant: bucketed by the spec count at each run's own head
+      # SHA, 40 specs ran 27.50/28.15/29.25 min (min/median/max, n=6) and 41 specs ran 29.57/29.95/30.42
+      # (n=4) — disjoint ranges, +1.80 min at the median for one added spec, 0.73 min/spec flat-averaged.
+      # Margin under a 32-minute cap was 32 - 30.42 = 1.58 min, i.e. 0.9-2.2 spec files; this repo went
+      # 22 -> 39 -> 41 specs between 2026-08-01 and 08-15. The next spec or two would have reded every PR
+      # with a step timeout plus SUITE DID NOT COMPLETE — which reads exactly like the infrastructure
+      # failure CPE-1728 exists to eliminate. No safe value exists either: the cap must be < 45 - 11.9 =
+      # 33.1 to fire before the job cap and <= ~32.5 to leave the reporting tail room, a window ~2 min
+      # wide, narrower than one spec file's growth. The purchase was ~1.5 min of earlier hang detection.
+      # `if: always()` on the Ratchet step below is the load-bearing mechanism; the job-level 45-minute
+      # cap remains the backstop, and a job-level timeout concludes `cancelled`, never `success`.
+      # SEE CPE-1753: a fully healthy green run already sits at 41.70 of the 45-minute job cap, so 2-4
+      # more spec files breach it with or without this change. Sharding is the only fix that survives.
+      # This step still `tee`s the full output to `.results/suite-output.log` (on top of the existing
       # `.results/*.json` per-spec reports) so the classify-log step below has real evidence to classify,
       # and so it can be uploaded as an artifact (see the screenshot-upload step's CPE-1728 comment) —
       # `gh run view --log` truncates a long job's log around ~4 MB, which has already hidden the tail of
@@ -394,7 +398,6 @@ jobs:
       # this line originally guarded against.
       - name: Run GUI smoke suite (xvfb-run)
         working-directory: gui-smoke
-        timeout-minutes: 32
         run: |
           mkdir -p .results
           (xvfb-run --auto-servernum npm test 2>&1 | tee .results/suite-output.log) || true
