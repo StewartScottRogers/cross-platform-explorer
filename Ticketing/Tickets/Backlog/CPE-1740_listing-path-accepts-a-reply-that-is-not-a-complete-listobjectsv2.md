@@ -75,13 +75,49 @@ transforming proxy, so this is reachable behind a corporate MITM proxy or a CDN.
 
 ## Acceptance criteria
 
-- [ ] `list` refuses a `203` and a `206` reply rather than rendering it as the folder's complete contents,
+- [x] `list` refuses a `203` and a `206` reply rather than rendering it as the folder's complete contents,
       and the message names the status and says a listing must be `200`.
-- [ ] The belt's `203` message no longer claims reading the reply failed, and no longer reports "no
+- [x] The belt's `203` message no longer claims reading the reply failed, and no longer reports "no
       `<Code>` element" about a body that is a listing.
-- [ ] Each guard broken **on its own** turns a **distinct** test red, real output pasted, per the Evidence
+- [x] Each guard broken **on its own** turns a **distinct** test red, real output pasted, per the Evidence
       Rules in `Ticketing/wiki.md`. Assert on the effect (bytes sent / entries rendered) **before** the
       `Result`, so the assertion carrying the harm is reachable.
+
+## Work Log
+
+- 2026-08-14 — Confirmed `S3Provider::probe_prefix` (the non-belt probe the ticket names for `stat` and
+  `delete`'s first question) is a pure delegate to `probe_prefix_after` (`self.probe_prefix_after(key_prefix,
+  None).map_err(...)`), which CPE-1727 already narrowed to `status == 200`. So probe_prefix's half of the
+  ticket was already closed transitively by CPE-1727 — no separate narrowing needed there. Decision: leave
+  `probe_prefix` untouched and spend the pass on `FileSystemProvider::list`'s pagination loop and the two
+  message defects, which were the genuinely open items.
+- 2026-08-14 — Narrowed `list_with_filtered_count`'s per-page status check from `!(200..300).contains(&status)`
+  to `status != 200` (`crates/s3/src/provider.rs`), matching `probe_prefix_after`'s existing rule. A `203`
+  or `206` now refuses the page instead of parsing and rendering it as the folder's contents.
+- 2026-08-14 — Added `is_non_canonical_listing_status`/`non_canonical_listing_status_cause` (a status in
+  `200..300` but not exactly `200`) and routed BOTH `list`'s not-200 branch and `probe_prefix_after`'s
+  not-200 branch through it instead of `error::map_s3_error`/`map_response_error` for that one case — a
+  203/206 body is a listing (or a legitimate fragment of one), never an S3 `<Error>` document, so hunting
+  it for a `<Code>` element was always going to report a false "no <Code> element" absence.
+- 2026-08-14 — Split `marker_confirmation_failure`'s `(200..300)` diagnosis arm into `Some(200)` (a real
+  "reading the reply failed" story — UTF-8/XML parse failure downstream of an actual 200) and a new
+  `is_non_canonical_listing_status` arm ("refused on its status before its body was ever read") — the old
+  single arm asserted "what failed was reading the reply" even when nothing was ever read, because the
+  status check now rejects 203/206 before the body is touched at all.
+- 2026-08-14 — Added 4 tests (`crates/s3/src/provider.rs`, `provider::tests`):
+  `list_refuses_a_203_and_a_206_reply_rather_than_rendering_it_as_the_folders_complete_contents`,
+  `a_non_canonical_2xx_on_list_is_not_routed_through_the_s3_error_parser`,
+  `the_belts_203_message_does_not_claim_a_read_failure_or_hunt_a_listing_for_an_error_code`, and (already
+  present, re-verified as still-passing coverage for the belt's 206 case)
+  `a_partial_content_listing_is_refused_rather_than_read_as_an_empty_one`. Verified each new guard turns a
+  **distinct** test red on its own by manually reverting each of the three edits above one at a time and
+  re-running: reverting `list`'s status check reproduced the exact round-5 measurement
+  (`Ok([ProviderEntry { name: "a.jpg", .. }])`); reverting `list`'s cause selection reproduced the "no
+  <Code> element" defect verbatim in `list`'s own message; reverting `probe_prefix_after`'s message
+  selection reproduced the belt's "no <Code> element" defect verbatim; reverting
+  `marker_confirmation_failure`'s new arm reproduced "what failed was reading the reply" for a 203. Each
+  mutation reddened exactly the test built for it and no other. All reverted back before commit; `cargo
+  test -p cpe-s3` is 192/192 green, `cargo clippy --all-targets -- -D warnings` clean.
 
 ## Notes
 

@@ -624,6 +624,38 @@ fn map_response_error(method: &str, status: u16, body: &[u8], what: &str) -> Str
     }
 }
 
+/// True if `status` is a 2xx HTTP status that is not the exact `200` a `ListObjectsV2` reply requires
+/// (CPE-1740). `203` (RFC 9110 §15.3.4 makes it the standards-legitimate answer from a transforming
+/// proxy — reachable behind a corporate MITM proxy or a CDN) and `206` (a partial/range reply) both
+/// satisfy `(200..300).contains(&status)` while being neither complete nor authoritative: the shape this
+/// whole ticket is about. `ListObjectsV2` has exactly one success status, so anything else in this range
+/// is refused rather than rendered.
+fn is_non_canonical_listing_status(status: u16) -> bool {
+    status != 200 && (200..300).contains(&status)
+}
+
+/// The reason text for a `ListObjectsV2` reply (or the identical request the `start-after` belt sends)
+/// whose status [`is_non_canonical_listing_status`] — deliberately **not** routed through
+/// [`error::map_s3_error`] or [`map_response_error`], because both hunt the body for an S3 `<Error>`
+/// document's `<Code>` element, and a 203/206 body is not an S3 error at all: it is a listing, or (on a
+/// 206) a legitimate fragment of one, that answered successfully by HTTP's own rules while failing the
+/// one rule this client enforces — exactly `200`.
+///
+/// Before this, the not-200 case on both call sites reused the S3-error path, which read a genuine
+/// listing body looking for an error code and reported *"the response body could not be read as an S3
+/// error … refusing to guess which cause applies"* about a body that read perfectly fine and was never an
+/// error to begin with. Measured on the belt at PR #903's round-5 UAT (CPE-1740).
+fn non_canonical_listing_status_cause(status: u16) -> String {
+    format!(
+        "HTTP {status}: ListObjectsV2 has exactly one success status, 200, and this reply answered \
+         {status} instead of it. That is not an S3 error to be parsed — the body may be (or contain a \
+         fragment of) a perfectly well-formed listing — so it is refused rather than rendered as this \
+         path's complete contents. RFC 9110 §15.3.4 makes 203 a standards-legitimate answer from a \
+         transforming proxy; 206 means the reply is a partial/range response, which by definition is not \
+         the whole listing."
+    )
+}
+
 /// Wrap a failed [`S3Provider::probe_prefix`] so the error names **the probe** as the thing that failed,
 /// instead of surfacing a bare access-denied about a prefix the user never typed (CPE-1723 item 1).
 ///
@@ -754,14 +786,31 @@ fn marker_confirmation_failure(
              that the second request differs from the first only by the start-after parameter, so a \
              gateway that signs an unexpected parameter differently lands here too."
         ),
-        // The server answered, and answered *successfully* — the failure was ours, reading what came
-        // back. Round 3 had no such arm, so this fell to `None` and claimed the server never answered
-        // while quoting a parse of its body. It is a distinct diagnosis from both the others: nothing
-        // is known about permissions, and nothing is implied about `start-after` either.
-        Some(s) if (200..300).contains(&s) => format!(
-            " The server answered HTTP {s} — it did reply, and successfully; what failed was reading the \
-             reply. That says nothing about permissions, and nothing about whether start-after is \
-             supported: the response arrived and could not be understood."
+        // The server answered exactly 200, and answered *successfully* — the failure was ours, reading
+        // what came back (bad UTF-8, malformed XML). Round 3 had no such arm, so this fell to `None` and
+        // claimed the server never answered while quoting a parse of its body. It is a distinct diagnosis
+        // from both the others: nothing is known about permissions, and nothing is implied about
+        // `start-after` either.
+        //
+        // `Some(200)` specifically, not `(200..300)`: `probe_prefix_after` now refuses every OTHER status
+        // — including a non-canonical 2xx like 203/206 — on the status check alone, before the body is
+        // ever read. Only a `200` can reach this arm's true story of "the reply arrived and could not be
+        // understood" (CPE-1740).
+        Some(200) => " The server answered HTTP 200 — it did reply, and successfully; what failed was \
+             reading the reply. That says nothing about permissions, and nothing about whether \
+             start-after is supported: the response arrived and could not be understood."
+            .to_string(),
+        // A 2xx that is not 200 — 203 or 206 among them. This is NOT a read failure: the reply was
+        // refused on its status alone, before its body was ever inspected. See
+        // `non_canonical_listing_status_cause`, which is what `cause` carries below on this path — the
+        // wording this replaces claimed "reading … failed" and routed the body through the S3 error
+        // parser, which reported "no <Code> element" about a body that was never an error (CPE-1740, PR
+        // #903 round-5 UAT).
+        Some(s) if is_non_canonical_listing_status(s) => format!(
+            " The server answered HTTP {s} — it did reply, and successfully by HTTP's own rules, but a \
+             listing requires exactly HTTP 200 and this answered {s} instead, so it was refused on its \
+             status before its body was ever read. That says nothing about permissions, and nothing \
+             about whether start-after is supported."
         ),
         // A status that is not S3's way of saying "no". Note the claim is scoped to what the status
         // licenses — the server did not *refuse* this request — rather than to "this is not a
@@ -1514,13 +1563,24 @@ impl S3Provider {
         // A listing that is not whole cannot answer a question about absence.
         //
         // The wider family — any well-formed XML being accepted as a listing, `text/html` included —
-        // is crate-wide, predates the belt, and is CPE-1740. This narrowing is only the belt's half,
-        // taken here because on the belt the consequence is a deletion.
+        // is crate-wide, predates the belt, and was CPE-1740 (`FileSystemProvider::list`'s own pass over
+        // the same hazard).
+        //
+        // A non-canonical 2xx (203/206) is diagnosed by `non_canonical_listing_status_cause`, not
+        // `map_response_error`: the body here is not an S3 error to be parsed, it may well be a genuine
+        // listing, and routing it through the error path produced exactly the wrong complaint — "no
+        // <Code> element was found" about a body that has none because it was never an error (CPE-1740,
+        // PR #903 round-5 UAT).
         if status != 200 {
-            return Err((
-                Some(status),
-                map_response_error("GET", status, &body, &format!("{key_prefix:?}")),
-            ));
+            let message = if is_non_canonical_listing_status(status) {
+                format!(
+                    "s3: probing {key_prefix:?}: {}",
+                    non_canonical_listing_status_cause(status)
+                )
+            } else {
+                map_response_error("GET", status, &body, &format!("{key_prefix:?}"))
+            };
+            return Err((Some(status), message));
         }
         // **`Some(status)`, not `no_status`, from here down** — the server has answered by this point.
         // Round 3 used `no_status` for both, so a 200 whose body failed to parse produced a message
@@ -1704,17 +1764,29 @@ impl S3Provider {
             let (status, body) = self
                 .signed_get(&target, &query, Some(self.request_deadline))
                 .map_err(|(_, m)| m)?;
-            if !(200..300).contains(&status) {
+            // **`200` exactly, not `2xx`** (CPE-1740). This loop used to accept any `2xx`, so a `203`
+            // (a transforming proxy — RFC 9110 §15.3.4 — reachable behind a corporate MITM proxy or a
+            // CDN) or a `206 Partial Content` reply parsed cleanly and rendered as the folder's complete
+            // contents: measured at the PR #903 round-5 UAT as `list under a 203 = Ok(["a.jpg"])`. That is
+            // the identical hazard `probe_prefix_after`'s belt already refuses (CPE-1727 item 2) and
+            // `signed_exchange`'s over-cap guard refuses in its own words, arriving here by status code
+            // instead of by byte count or truncation flag. `ListObjectsV2` has exactly one success status.
+            if status != 200 {
                 // CPE-1683 AC6: every non-2xx response goes through the one shared error path, never an
                 // ad-hoc string built here. CPE-1727 item 3 wraps — not replaces — that shared diagnosis,
                 // so the operation, the path and (on a denial) `s3:ListBucket` are named while everything
                 // `map_s3_error` read out of the body is still there verbatim. See `list_failure`.
-                return Err(list_failure(
-                    path,
-                    &key_prefix,
-                    status,
-                    &error::map_s3_error(status, &body),
-                ));
+                //
+                // A non-canonical 2xx is the one exception: its body is not an S3 error to be parsed (and
+                // may well be a genuine listing), so it gets `non_canonical_listing_status_cause` instead
+                // of being routed through `map_s3_error`, which would hunt it for an `<Error>`'s `<Code>`
+                // and report "no <Code> element" about a body that was never an error.
+                let cause = if is_non_canonical_listing_status(status) {
+                    non_canonical_listing_status_cause(status)
+                } else {
+                    error::map_s3_error(status, &body)
+                };
+                return Err(list_failure(path, &key_prefix, status, &cause));
             }
 
             let text = std::str::from_utf8(&body)
@@ -3469,6 +3541,185 @@ mod tests {
         assert!(
             err.contains("InternalError"),
             "the server's own diagnosis must still be there: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1740: `FileSystemProvider::list`'s pagination loop still accepted any `2xx`, so a `203`
+    // (RFC 9110 §15.3.4's legitimate transforming-proxy answer) or a `206 Partial Content` reply parsed
+    // cleanly and rendered as the folder's COMPLETE contents — measured at the PR #903 round-5 UAT as
+    // `list under a 203 = Ok(["a.jpg"])`. `ListObjectsV2` has exactly one success status, `200`, exactly
+    // the narrowing `probe_prefix_after`'s belt already got from CPE-1727.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Pins AC1: `list` must refuse a `203` and a `206` reply rather than rendering either as the
+    /// folder's complete contents, and the message must name the status and say a listing requires
+    /// exactly `200`.
+    ///
+    /// Each status is its own table row so a guard that only catches one of the two cannot pass by
+    /// accident: `203` was the status actually measured at round 5, `206` is the sibling `probe_prefix`'s
+    /// own guard already covers, and both share the one `status != 200` line this test exists to pin.
+    #[test]
+    fn list_refuses_a_203_and_a_206_reply_rather_than_rendering_it_as_the_folders_complete_contents() {
+        for status in [203u16, 206u16] {
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let addr = server.server_addr().to_ip().unwrap();
+            std::thread::spawn(move || {
+                for req in server.incoming_requests() {
+                    // A REAL, well-formed listing — not truncated, not an error — so the only thing that
+                    // can make this refused is the status. If the guard were dropped this body parses
+                    // cleanly and `list` would answer `Ok(["a.jpg"])`, exactly the round-5 measurement.
+                    let xml = "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
+                                <Contents><Key>photos/a.jpg</Key><Size>7</Size></Contents>\
+                                </ListBucketResult>";
+                    let ct =
+                        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..])
+                            .unwrap();
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(xml).with_header(ct).with_status_code(status),
+                    );
+                }
+            });
+            let base = format!("http://{addr}");
+            let provider = S3Provider::connect(&cfg(&base));
+
+            // Effect before verdict (this sprint's standing rule): capture the raw outcome first, so a
+            // guard that regresses to `Ok(["a.jpg"])` reds THIS assertion with the actual entries printed,
+            // rather than panicking inside `.expect_err()` before the harm can be named.
+            let outcome = provider.list("/photos");
+            assert!(
+                outcome.is_err(),
+                "THE DEFECT: a {status} reply was rendered as the folder's complete contents instead of \
+                 being refused — the round-5 measurement was exactly this shape (`Ok([\"a.jpg\"])`): \
+                 {outcome:?}"
+            );
+            let err = outcome.unwrap_err();
+            assert!(
+                err.contains(&status.to_string()),
+                "[{status}] the message must name the status that caused the refusal: {err}"
+            );
+            assert!(
+                err.contains("200"),
+                "[{status}] and say that a listing requires exactly 200: {err}"
+            );
+        }
+    }
+
+    /// Pins the message half of AC2, on `list`'s own path rather than the belt's: the not-200 case must
+    /// not route a readable listing body through the S3 *error* parser. Before this, `list`'s non-2xx
+    /// branch always called `error::map_s3_error`, which hunts a body for an `<Error>`'s `<Code>` element
+    /// — and a 203/206 body here is a real listing, never an S3 error, so that call reported "no <Code>
+    /// element was found" about a body that has none because it was never an error to begin with.
+    #[test]
+    fn a_non_canonical_2xx_on_list_is_not_routed_through_the_s3_error_parser() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let xml = "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
+                            </ListBucketResult>";
+                let ct = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/xml"[..])
+                    .unwrap();
+                let _ = req.respond(
+                    tiny_http::Response::from_string(xml).with_header(ct).with_status_code(203),
+                );
+            }
+        });
+        let base = format!("http://{addr}");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let err = provider.list("/photos").expect_err("a 203 must be refused, not rendered");
+        assert!(
+            !err.contains("no <Code> element"),
+            "THE DEFECT: a body that is a real listing (never an S3 error) was routed through the S3 \
+             error parser, which reported a missing <Code> element about it: {err}"
+        );
+        assert!(
+            !err.contains("could not be read as an S3 error"),
+            "and must not claim the body could not be read — it read fine, it just was not what a \
+             listing must arrive as: {err}"
+        );
+    }
+
+    /// Pins AC2 on the belt: the reported defect verbatim was
+    ///
+    /// ```text
+    /// The server answered HTTP 203 — it did reply, and successfully; what failed was reading the reply.
+    /// ...
+    /// Underlying error: s3: "scratch/": s3: HTTP 203 and the response body could not be read as an S3
+    /// error (no <Code> element was found in it); refusing to guess which cause applies
+    /// ```
+    ///
+    /// Both halves are wrong: reading the reply did NOT fail (the reply was fully readable and refused on
+    /// its *status*), and the underlying cause hunted a real listing body for an S3 `<Error>`'s `<Code>`
+    /// element that was never going to be there. This fixture is `a_two_hundred_the_belt_cannot_read_...`
+    /// with the status changed from 200 to 203 and a well-formed listing body instead of garbage — the
+    /// message for THIS shape must say the opposite of that test's, because unlike that test's 200 this
+    /// reply was never read at all before being refused.
+    #[test]
+    fn the_belts_203_message_does_not_claim_a_read_failure_or_hunt_a_listing_for_an_error_code() {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let root = fixture_root();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let requests_thread = Arc::clone(&requests);
+        let root_for_thread = root.clone();
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let full = req.url().to_string();
+                let query = full.split_once('?').map(|(_, q)| q.to_string()).unwrap_or_default();
+                let params = parse_query(&query);
+                let is_list = params.iter().any(|(k, v)| k == "list-type" && v == "2");
+                if is_list && params.iter().any(|(k, _)| k == "start-after") {
+                    // A REAL, well-formed, empty listing — not garbage, not an S3 error — under a 203.
+                    let body = "<?xml version=\"1.0\"?><ListBucketResult>\
+                                <IsTruncated>false</IsTruncated></ListBucketResult>";
+                    let _ = req.respond(
+                        tiny_http::Response::from_string(body).with_status_code(203),
+                    );
+                    continue;
+                }
+                handle(req, &root_for_thread, None, &requests_thread);
+            }
+        });
+        let base = format!("http://{addr}");
+        let mut provider = S3Provider::connect(&cfg(&base));
+
+        provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
+
+        // Effect before verdict, same rule as the 206 test beside this one: the DELETE going out on a
+        // wrongly-trusted 203 is the actual harm, not merely a wrong string.
+        let outcome = provider.delete("/scratch");
+        assert!(
+            root.join("scratch/.s3marker").is_file(),
+            "THE HARM: a 203 on the belt was trusted as an empty listing and the marker was deleted \
+             (outcome was {outcome:?})"
+        );
+        let err = outcome.expect_err("a 203 cannot confirm that a prefix holds nothing past the marker");
+
+        assert!(
+            err.contains("203"),
+            "the refusal must name the status that caused it: {err}"
+        );
+        assert!(
+            !err.contains("what failed was reading the reply"),
+            "THE DEFECT (message half 1): nothing failed reading this reply — it was refused on its \
+             status before its body was ever inspected: {err}"
+        );
+        assert!(
+            !err.contains("no <Code> element"),
+            "THE DEFECT (message half 2): the body is a real, well-formed listing, never an S3 error, so \
+             hunting it for an <Error>'s <Code> element and reporting one missing is the wrong complaint: \
+             {err}"
+        );
+        assert!(
+            !err.contains("could not be read as an S3 error"),
+            "and must not claim the body could not be read — it was never read at all, because the \
+             status alone was enough to refuse it: {err}"
+        );
+        assert!(
+            err.contains("200"),
+            "the message must say what a listing actually requires: {err}"
         );
     }
 
