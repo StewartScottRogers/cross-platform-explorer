@@ -68,14 +68,20 @@ the latter. That correction is already in the code comment; the behaviour is not
 
 ### 3. `tar` destroys a link, and one-shot ZIP aborts where streamed ZIP skips
 
-`tar::Archive::unpack`/`Entry::unpack_in`, `zip::ZipArchive::extract` and
-`sevenz_rust::default_entry_extract_fn` create their files **inside those crates**, so `archive.rs` has no
-create site to guard and cannot reach one without reimplementing each crate's extraction.
+`tar::Archive::unpack`/`Entry::unpack_in` and `zip::ZipArchive::extract` create their files **inside those
+crates** and take a destination with no per-entry hook, so `archive.rs` has no create site to guard and
+cannot reach one without reimplementing each crate's extraction.
+
+**`sevenz_rust::default_entry_extract_fn` was listed here too, and that was wrong** — CPE-1746 measured
+that `decompress_file_with_extract_fn` hands our callback the entry's `entry_dest` *before* the write, so
+the rows 15–16 decision fit straight into the closure that was already doing `entry_name_is_safe`. Both 7z
+call sites are guarded as of that ticket (rows 19–20). Read "the write is in another crate" as a statement
+about tar and zip only; for anything else, check for a callback first.
 
 CPE-1733's PR first claimed a pre-existing link "is still followed on the tar, 7z and one-shot-zip paths".
 **That was inference, not measurement, and it is false for two of the three** (its UAT measured all three
-on Windows and Linux; reproduced independently before this ticket was written). The 7z case is real and
-has its own ticket, **CPE-1746**. The other two land here:
+on Windows and Linux; reproduced independently before this ticket was written). The 7z case was real and
+is now **fixed under CPE-1746**. The other two land here:
 
 ```text
 [tar ONE-SHOT and STREAMED]  outcome = Ok(..)   victim bytes = Some("VICTIM ORIGINAL")

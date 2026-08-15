@@ -241,6 +241,8 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 16| `extract_zip_archive_stream`               | `File::create`   | **archive-controlled** name under user dir   | link at the **LEAF ONLY** (skip) + `entry_name_is_safe` |
 // | 17| the four extraction `dest` roots           | `create_dir_all` | **user-named dir**                           | none — see below |
 // | 18| the four per-entry `create_dir_all(&out)` / `(parent)` inside rows 15–16's loops | `create_dir_all` | **archive-controlled** dir name under user dir | none — see below |
+// | 19| `extract_7z_safe`'s callback                | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | link at the **LEAF ONLY** (skip) + `entry_name_is_safe` |
+// | 20| `extract_7z_stream`'s callback              | `File::create` **inside `sevenz-rust`** | **archive-controlled** name under user dir | link at the **LEAF ONLY** (skip, recorded) + `entry_name_is_safe` |
 //
 // **The row count reconciles to the source.** `archive.rs` has 9 `create_dir_all` calls: 1 in row 1 (the
 // shared root), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
@@ -248,6 +250,13 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // `fs::write` and the 1 `create_new`. Row 18 was missing from the first version of this table, which
 // billed itself as the inventory — the count line exists so the next reader can check that claim in one
 // subtraction instead of trusting it (PR #906 review).
+//
+// **Rows 19–20 are deliberately outside that arithmetic**: they own no `File::create` in this file. The
+// write is `sevenz_rust::default_entry_extract_fn`'s, and the guard is a **pre-call check in the callback
+// we already supply**, which is the whole finding of CPE-1746 — "the writer is in another crate" was read
+// as "there is nothing to guard", when the callback receives `entry_dest` one statement earlier. They are
+// in the table because the *destination provenance* is what decides whether a guard is owed, and theirs is
+// the same archive-controlled name under a user directory as rows 15–16.
 //
 // ## The three primitives do NOT behave alike, and each row above was measured, not reasoned about
 //
@@ -305,6 +314,12 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //
 // ## Rows 15–16 — what they cover, and the two things they do NOT
 //
+// **Rows 19–20 (CPE-1746) inherit this section unchanged.** They apply the same two guards to the same
+// kind of destination — an archive-controlled name under a user-named directory — so both caveats below
+// are theirs too: `entry_name_is_safe` is not `is_safe_name`, and the link check is leaf-only. The only
+// difference is where the write happens (inside `sevenz-rust`), which changes nothing about what the
+// checks see. Do not read the "rows 15–16" wording below as scoping either gap away from 7z.
+//
 // **Traversal is answered, and only traversal.** `guarded_join`/`is_safe_name` (CPE-1461,
 // `crate::transfer`) is not in this path and does not need to be added *for traversal*: this module has
 // had [`entry_name_is_safe`] since CPE-628, applied to every archive-controlled name at every site it
@@ -351,7 +366,17 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //
 // `tar`'s `Archive::unpack`/`Entry::unpack_in`, `zip`'s `ZipArchive::extract` and `sevenz_rust`'s
 // `default_entry_extract_fn` create their files **inside those crates**, so this module has no create site
-// to guard and cannot reach one without reimplementing each crate's extraction.
+// to guard.
+//
+// **"No create site to guard" is not the same as "cannot be guarded", and CPE-1746 is where that gap
+// closed.** The sentence here used to add "and cannot reach one without reimplementing each crate's
+// extraction", which was true of `tar` and `zip` — whose extractors take a destination and no per-entry
+// hook — and **false of `sevenz-rust`**, whose `decompress_file_with_extract_fn` hands us the entry and
+// its `entry_dest` *before* the write, in a callback this module was already writing for the
+// `entry_name_is_safe` check. The guard was one more condition in a closure that existed, not a
+// reimplemented extractor. Rows 19–20 below are that condition; the generalisation from "the write is in
+// another crate" to "nothing can be done about it" is the same one-step-too-far move rows 1–5 were
+// corrected for, and it was costing the shipping path real bytes for as long as it stood.
 //
 // **An earlier version of this comment said a pre-existing link in the destination "is therefore still
 // followed on the tar, 7z and one-shot-zip paths". That is false for two of the three, and the UAT for
@@ -379,15 +404,27 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   not even the entries that were fine. Safe, but it also means the one-shot and streamed ZIP paths
 //   behave **oppositely** on the same input (streamed skips the entry and extracts the rest: `done: 1`,
 //   `b.txt extracted = true`). Two shipped paths, one documented behaviour. Tracked in **CPE-1744**.
-// - **7z does follow, and it is the live one.** `Ok`, `errors: []`, and the victim now reads
-//   `"ARCHIVED A"`. `extract_archive_streamed` routes `.7z` to `extract_7z_stream`, which is what
-//   `start_archive_extract` calls, so this is reachable from the shipping UI. Its own ticket:
-//   **CPE-1746**.
+// - **7z followed, and it was the live one — FIXED by CPE-1746 (rows 19–20).** `extract_archive_streamed`
+//   routes `.7z` to `extract_7z_stream`, which is what `start_archive_extract` calls, so the figures above
+//   (`Ok`, `errors: []`, victim reading `"ARCHIVED A"`) were what the shipping UI did. Both 7z callbacks
+//   now run the rows 15–16 decision before handing the entry to `default_entry_extract_fn`, so the same
+//   input gives ZIP's answer: the entry is skipped (recorded in `errors` on the streamed path), the link
+//   and its target are untouched, and the rest of the archive still extracts. Re-measured after the fix:
 //
-// **All four behaviours above are now pinned by tests**, one per extractor:
+//   ```text
+//   [7z ONE-SHOT extract_archive]      outcome = Ok(..)   victim = "VICTIM ORIGINAL"   b.txt = "ARCHIVED B"
+//   [7z STREAMED extract_archive_..]   outcome = Ok(ArchiveReport { done: 1, errors: ["a.txt: \"…\" is a
+//                                                link, and creating a file at a link's name writes …"] })
+//                                      victim = "VICTIM ORIGINAL"   slot is link = true
+//   ```
+//
+// **All four behaviours above are pinned by tests**, one per extractor:
 // `tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it` (both tar paths),
-// `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` and
-// `sevenz_extraction_still_writes_through_a_link_until_cpe_1746`.
+// `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` and — since CPE-1746 —
+// `rows_19_and_20_sevenz_refuse_a_link_at_an_entry_name_and_still_extract_the_rest`, which is the
+// re-pointed `sevenz_extraction_still_writes_through_a_link_until_cpe_1746`. It was written to go red the
+// moment this guard landed, and it did; it now asserts the refusal on both 7z paths and both link kinds
+// instead of the hazard.
 //
 // An earlier round of this comment declined to pin them, on the grounds that pinning behaviour we
 // consider wrong makes it harder to change. That argument does not survive what happened here: the
@@ -928,19 +965,96 @@ pub(crate) fn entry_name_is_safe(name: &str) -> bool {
     !p.is_absolute() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
 }
 
+/// **The link decision for a `sevenz-rust` per-entry callback — rows 19–20** (CPE-1746).
+///
+/// `sevenz_rust::default_entry_extract_fn` writes the file **inside that crate** with a plain
+/// `File::create`, which follows a link at the destination name and lands the archive's bytes in a path
+/// nobody named, returning `Ok`. There is no create site here to guard, but there does not need to be: the
+/// callback is handed `entry_dest` *before* it hands the entry to the writer, so the same
+/// [`entry_slot_action`] decision rows 15–16 make fits in the same place, one condition alongside the
+/// [`entry_name_is_safe`] check that is already there. Replacing the writer — this ticket's original
+/// proposal — would mean owning decompression details this crate gets for free, for no extra coverage.
+///
+/// Two carve-outs, both matching rows 15–16 rather than inventing policy:
+///
+/// - **Files only.** A link at a *directory* entry's name is `create_dir_all` redirection (row 18), a
+///   different hazard with a different fix, tracked in **CPE-1744**. Guarding it here would be a wider
+///   claim than was measured.
+/// - **LEAF ONLY.** A directory link at an intermediate component still redirects, exactly as at rows
+///   15–16 — see the section comment above and CPE-1744.
+///
+/// # Why the abort arm is a captured message, not a `sevenz_rust::Error`
+///
+/// The callback's error type is `sevenz_rust::Error`, so an [`EntrySlotAction::Abort`] surfaced as one has
+/// to survive that crate's `Display` to reach the user — and it does not. `sevenz-rust` 0.6.1 implements
+/// `Display for Error` as `Debug::fmt` (`src/error.rs:74-78`), so `Error::other(msg)` re-emerges from the
+/// call sites' `.map_err(|e| e.to_string())` **debug-quoted and escaped**. Measured on the exact wording
+/// `fsutil::classify_create_slot` produces:
+///
+/// ```text
+/// [CPE-1746 MEASURE] sevenz_rust::Error::other(msg).to_string(), first 160 chars:
+///     Other("\"out\\a.txt\" is a link, and creating a file at a link's name writes THROUGH it — the
+///     bytes would land at the link's target, a path you did not name,
+/// ```
+///
+/// Every `\` in a Windows path doubles, the quotes `fsutil` puts around the path become `\"`, and the
+/// refusal arrives wrapped in `Other(..)`. Rows 6–16 surface that wording **verbatim** — it is what the
+/// user reads and what `row16_…` and `rows_15_and_16_…` pin — so routing 7z's copy through the crate's
+/// error type would make one path report the same refusal differently for no gain. Pinned by
+/// `sevenz_error_display_would_mangle_our_refusal_wording`, so a future `sevenz-rust` that fixes its
+/// `Display` tells us this choice can be revisited.
+///
+/// So the message travels in a captured `Option<String>` and the callback returns the **cooperative
+/// `Ok(false)` stop** the cancel path already uses; the caller converts it to `Err` once
+/// `decompress_file_with_extract_fn` has returned. Byte-identical wording, one shared decision, one
+/// `match` per call site.
+///
+/// **And each call site's `abort.is_some()` latch is load-bearing, not belt-and-braces.**
+/// `SevenZReader::for_each_entries` calls its per-block helper as `block_dec.for_each_entries(&mut each)?`
+/// and **discards the `bool` that helper returns** (`sevenz-rust` 0.6.1 `src/reader.rs:1370`), so an
+/// `Ok(false)` ends only the *current* block — a multi-block archive would call us again for the next one
+/// and write the entries after the abort. The latch makes the stop total. The existing cancel check needs
+/// no latch only because it re-reads its `AtomicBool` on every entry.
+fn sevenz_entry_slot_action(entry: &sevenz_rust::SevenZArchiveEntry, entry_dest: &Path) -> EntrySlotAction {
+    if entry.is_directory() {
+        return EntrySlotAction::Write;
+    }
+    entry_slot_action(crate::fsutil::create_slot_link_verdict(entry_dest))
+}
+
 /// Extract a `.7z` into `dest` **safely**: `sevenz-rust` 0.6 doesn't check path traversal, so validate
 /// each entry with [`entry_name_is_safe`] and skip any that isn't a plain relative path (CPE-628).
+///
+/// **Row 19 of the CPE-1733 table** (CPE-1746): it also refuses a **link** already sitting at the entry's
+/// final name, via [`sevenz_entry_slot_action`] — see there for the decision and for why the abort arm is
+/// a captured message. The skip is **silent** here for row 15's reason: this signature predates
+/// `ArchiveReport` and has nowhere to record it. The streamed twin (row 20) records it.
 fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
+    let mut abort: Option<String> = None;
     catch_sevenz_panic(|| {
         sevenz_rust::decompress_file_with_extract_fn(src, dest, |entry, reader, entry_dest| {
-            if entry_name_is_safe(entry.name()) {
-                sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
-            } else {
-                Ok(true) // skip the unsafe entry; keep extracting the rest
+            if abort.is_some() {
+                return Ok(false); // the latch — see `sevenz_entry_slot_action`
             }
+            if !entry_name_is_safe(entry.name()) {
+                return Ok(true); // skip the unsafe entry; keep extracting the rest
+            }
+            match sevenz_entry_slot_action(entry, entry_dest) {
+                EntrySlotAction::Write => {}
+                EntrySlotAction::Skip(_) => return Ok(true), // skip this entry; keep extracting the rest
+                EntrySlotAction::Abort(e) => {
+                    abort = Some(e);
+                    return Ok(false);
+                }
+            }
+            sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest)
         })
         .map_err(|e| e.to_string())
-    })
+    })?;
+    match abort {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
 }
 
 /// Extract an archive into `dest`, which is created if missing (CPE-252). Dispatched by extension. Every
@@ -1426,6 +1540,12 @@ fn extract_tar_stream<R: std::io::Read>(
 /// check `cancel` and emit progress between entries, applying the same [`entry_name_is_safe`] guard
 /// [`extract_7z_safe`] does. Returning `Ok(false)` on a cancel stops the scan cooperatively (no error) —
 /// the same "stop scanning" outcome [`extract_7z_entry`] already uses for its own early-stop case.
+///
+/// **Row 20 of the CPE-1733 table** (CPE-1746) — the streamed twin of row 19, and **the live one**:
+/// `start_archive_extract` → [`extract_archive_streamed`] → here is the path the UI's queued extract
+/// takes, so this is where a pre-planted link in the destination was actually costing users bytes. Same
+/// [`sevenz_entry_slot_action`] decision; unlike row 19 this one has an [`ArchiveReport`] to record the
+/// skip in, so it does — the same `{name}: {reason}` shape row 16 uses.
 fn extract_7z_stream(
     path: &str,
     dest: &Path,
@@ -1441,33 +1561,57 @@ fn extract_7z_stream(
     };
     let mut prog = ArchiveProgress { total_bytes, done_bytes: 0, total_items, done_items: 0, current: String::new() };
     let mut report = ArchiveReport::default();
+    let mut abort: Option<String> = None;
     emit(&prog);
     catch_sevenz_panic(|| {
         sevenz_rust::decompress_file_with_extract_fn(path, dest, |entry, reader, entry_dest| {
+            if abort.is_some() {
+                return Ok(false); // the latch — see `sevenz_entry_slot_action`
+            }
             if cancel.load(Ordering::Relaxed) {
                 report.cancelled = true;
                 return Ok(false); // cooperative stop, not an error
             }
             let name = entry.name().to_string();
             let size = entry.size();
-            let safe = entry_name_is_safe(&name);
             prog.current = name.clone();
-            let outcome =
-                if safe { sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest) } else { Ok(true) };
-            if outcome.is_ok() {
-                if safe {
-                    prog.done_bytes += size;
+            if !entry_name_is_safe(&name) {
+                report.errors.push(format!("{name}: unsafe entry name, skipped"));
+                emit(&prog);
+                return Ok(true);
+            }
+            // Row 20 — the link guard, before the entry reaches `sevenz-rust`'s `File::create`. Recorded in
+            // `errors` and counted as a done *item* (not a done *file*), the same shape row 16 uses, so the
+            // progress bar still reaches its total.
+            match sevenz_entry_slot_action(entry, entry_dest) {
+                EntrySlotAction::Write => {}
+                EntrySlotAction::Skip(e) => {
+                    report.errors.push(format!("{name}: {e}"));
                     prog.done_items += 1;
-                    report.done += 1;
-                } else {
-                    report.errors.push(format!("{name}: unsafe entry name, skipped"));
+                    emit(&prog);
+                    return Ok(true);
                 }
+                // Not skippable — see row 15 (CPE-1733 UAT finding 6). Carried out of the callback rather
+                // than raised as a `sevenz_rust::Error`; the reason is on `sevenz_entry_slot_action`.
+                EntrySlotAction::Abort(e) => {
+                    abort = Some(e);
+                    return Ok(false);
+                }
+            }
+            let outcome = sevenz_rust::default_entry_extract_fn(entry, reader, entry_dest);
+            if outcome.is_ok() {
+                prog.done_bytes += size;
+                prog.done_items += 1;
+                report.done += 1;
                 emit(&prog);
             }
             outcome
         })
         .map_err(|e| e.to_string())
     })?;
+    if let Some(e) = abort {
+        return Err(e);
+    }
     prog.current.clear();
     emit(&prog);
     Ok(report)
@@ -3144,59 +3288,199 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// **7z DOES write through a link, and it is live on the shipping path** (UAT finding 3) — pinned so
-    /// the fix announces itself. Its own ticket: **CPE-1746** (High).
+    // -----------------------------------------------------------------------
+    // CPE-1746 — 7z, the last extractor that followed a link, on both its call sites
+    // -----------------------------------------------------------------------
+
+    /// **Rows 19–20: 7z refuses a link at an entry's name, on BOTH call sites and BOTH link kinds**
+    /// (CPE-1746).
     ///
-    /// `start_archive_extract` → `extract_archive_streamed` → `extract_7z_stream` →
-    /// `sevenz_rust::default_entry_extract_fn`, which is a plain `File::create` inside that crate. The run
-    /// returns `Ok` with `errors: []` and a victim outside the destination now holds the archive's bytes.
+    /// This is the re-pointed `sevenz_extraction_still_writes_through_a_link_until_cpe_1746`. That test
+    /// pinned the hazard — `Ok(ArchiveReport { done: 2, errors: [] })` with a victim *outside* the
+    /// destination holding `"ARCHIVED A"` — precisely so the guard would announce itself, and it did: it
+    /// went red on the victim assertion the moment rows 19–20 landed. Re-pointed rather than deleted, so
+    /// the same name-and-place keeps answering the same question with the opposite expectation.
     ///
-    /// **This test asserts a hazard, on purpose.** The alternative — a paragraph — is what this ticket
-    /// filed itself about: two of this module's three "unguarded" claims were false and nothing caught it
-    /// for four commits. When CPE-1746 lands, this goes red at the exact line describing the old
-    /// behaviour, and the message names the ticket that is allowed to change it. Do not "fix" it here;
-    /// re-point it at the refusal.
+    /// **Four legs, and each dimension is a separate measured behaviour rather than symmetry for its own
+    /// sake:**
+    ///
+    /// - **Row 19 (`extract_archive`) and row 20 (`extract_archive_streamed`)** are two shipped 7z paths
+    ///   with two identical closures. The ticket's checklist originally named only the streamed one; row 19
+    ///   is a registered Tauri command in `bindings.gen.ts`, and fixing one alone would have reproduced the
+    ///   one-shot/streamed ZIP divergence CPE-1744 exists to close.
+    /// - **Dangling and live links** fail differently: a dangling link has no bytes to lose, so it only
+    ///   proves a file was *created* somewhere unnamed, while a live one is the case that *destroys*
+    ///   existing content. A guard can pass one and miss the other (that is what `Ok(true)`-vs-`Err`
+    ///   classification decides), so both run.
+    ///
+    /// **Assertion order is deliberate**: the victim and the link are checked **before** the `Result` is
+    /// unwrapped, because the defect this replaces failed by returning `Ok`. Unwrap first and the
+    /// assertions naming the damage never run.
+    ///
+    /// **The recorded message is pinned on `"writes THROUGH it"`, not `is_err()`.** That phrase occurs only
+    /// in `fsutil::classify_create_slot`'s *confirmed-link* arm, so it separates our refusal from (a) the
+    /// OS's own `Access is denied` on an unprivileged Windows runner staring at a dangling junction —
+    /// measured for CPE-1733 — and (b) the `Unknown` arm's "could not check" wording, which must abort
+    /// rather than skip.
     #[test]
-    fn sevenz_extraction_still_writes_through_a_link_until_cpe_1746() {
-        let d = scratch("cpe1733_7z_link");
-        let sevenz = d.join("in.7z");
-        write_7z_fixture(&sevenz, &[("a.txt", b"ARCHIVED A"), ("b.txt", b"ARCHIVED B")]);
-        let victim = d.join("victim-the-user-never-named.bin");
-        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
-        let dest = d.join("out");
-        fs::create_dir_all(&dest).unwrap();
-        let link = dest.join("a.txt");
-        if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
-            crate::skip_notice!(
-                "[CPE-1733] SKIPPED the 7z leg: could not stage a live link at {}. CPE-1746's recorded \
-                 hazard was NOT checked on this run.",
-                link.display()
-            );
-            let _ = fs::remove_dir_all(&d);
-            return;
+    fn rows_19_and_20_sevenz_refuse_a_link_at_an_entry_name_and_still_extract_the_rest() {
+        // (row, function under test, runs it, does it have somewhere to record the skip?)
+        type Run = fn(&Path, &Path) -> Result<Vec<String>, String>;
+        let rows: &[(u8, &str, Run, bool)] = &[
+            (
+                19,
+                "extract_7z_safe via one-shot extract_archive",
+                |sevenz: &Path, dest: &Path| {
+                    extract_archive(&sevenz.to_string_lossy(), &dest.to_string_lossy()).map(|_| Vec::new())
+                },
+                false, // returns `Result<String, String>`; the skip is silent, exactly as at row 15
+            ),
+            (
+                20,
+                "extract_7z_stream via extract_archive_streamed",
+                |sevenz: &Path, dest: &Path| {
+                    let cancel = AtomicBool::new(false);
+                    extract_archive_streamed(&sevenz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                        .map(|r| r.errors)
+                },
+                true,
+            ),
+        ];
+
+        for (n, label, run, records) in rows {
+            for live in [false, true] {
+                let kind = if live { "live" } else { "dangling" };
+                let d = scratch(&format!("cpe1746_row{n}_{kind}"));
+                let sevenz = d.join("in.7z");
+                write_7z_fixture(&sevenz, &[("a.txt", b"ARCHIVED A"), ("b.txt", b"ARCHIVED B")]);
+                let dest = d.join("out");
+                fs::create_dir_all(&dest).unwrap();
+                let link = dest.join("a.txt");
+
+                // Stage the link, and decide what "the thing outside the destination is untouched" means
+                // for this kind: a live link has bytes that must still read `VICTIM ORIGINAL`; a dangling
+                // one has a target that must still not exist at all.
+                let victim: std::path::PathBuf = if live {
+                    let v = d.join("victim-the-user-never-named.bin");
+                    fs::write(&v, b"VICTIM ORIGINAL").unwrap();
+                    if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&v, &link)) {
+                        crate::skip_notice!(
+                            "[CPE-1746] SKIPPED row {n} ({label}) LIVE-link leg: this machine could not \
+                             create a file symlink at {}. The dangling leg passes under a guard that is \
+                             blind to live links, so nothing covered the case that destroys existing bytes \
+                             on this run.",
+                            link.display()
+                        );
+                        let _ = fs::remove_dir_all(&d);
+                        continue;
+                    }
+                    v
+                } else {
+                    if !crate::fsutil::make_dangling_link(&link) {
+                        crate::skip_notice!(
+                            "[CPE-1746] SKIPPED row {n} ({label}) DANGLING-link leg: could not stage a link \
+                             at {}.",
+                            link.display()
+                        );
+                        let _ = fs::remove_dir_all(&d);
+                        continue;
+                    }
+                    crate::fsutil::dangling_link_target(&link)
+                };
+
+                let outcome = run(&sevenz, &dest);
+
+                // The victim FIRST — the bug this replaces returned `Ok`, so anything after an unwrap
+                // would never run when it regresses.
+                if live {
+                    assert_eq!(
+                        fs::read(&victim).unwrap(),
+                        b"VICTIM ORIGINAL".to_vec(),
+                        "row {n} ({label}, live link): the entry's bytes went THROUGH the link and replaced \
+                         the contents of {}, a file outside the destination that nobody named. That is the \
+                         exact CPE-1746 hazard; if it is back, the guard in the 7z callback is gone \
+                         (outcome was {outcome:?})",
+                        victim.display()
+                    );
+                } else {
+                    assert!(
+                        !victim.exists(),
+                        "row {n} ({label}, dangling link): the entry's bytes went THROUGH the link and \
+                         CREATED {} — a path nobody named (outcome was {outcome:?})",
+                        victim.display()
+                    );
+                }
+                assert!(
+                    fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                    "row {n} ({label}, {kind} link): the link must survive untouched — a guard that deleted \
+                     it and then skipped (tar's behaviour) would pass the assertion above \
+                     (outcome was {outcome:?})"
+                );
+                let errors = outcome.unwrap_or_else(|e| {
+                    panic!(
+                        "row {n} ({label}, {kind} link): a confirmed link SKIPS one entry, it does not abort \
+                         the run — aborting is the `Unknown`/unreadable-slot arm only. Got: {e}"
+                    )
+                });
+                if *records {
+                    assert!(
+                        errors.iter().any(|e| e.starts_with("a.txt: ") && e.contains("writes THROUGH it")),
+                        "row {n} ({label}, {kind} link): the skip must be RECORDED against the entry, in OUR \
+                         link wording rather than whatever the OS happened to say — an `is_err()`/any-error \
+                         check here would stay green through the `Access is denied` an unprivileged Windows \
+                         runner produces on a dangling junction all by itself. Got {errors:?}"
+                    );
+                }
+                assert_eq!(
+                    fs::read(dest.join("b.txt")).unwrap(),
+                    b"ARCHIVED B".to_vec(),
+                    "row {n} ({label}, {kind} link): a skip must cost ONE entry — the rest of the archive \
+                     still extracts. b.txt missing means the run was abandoned, which is the one-shot ZIP \
+                     behaviour CPE-1744 wants aligned, not this one"
+                );
+                let _ = fs::remove_dir_all(&d);
+            }
         }
+    }
 
-        let cancel = AtomicBool::new(false);
-        let outcome = extract_archive_streamed(&sevenz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+    /// **Why rows 19–20's abort arm is a captured `Option<String>` and not a `sevenz_rust::Error`**
+    /// (CPE-1746) — the measurement behind that choice, pinned so it is checkable rather than asserted.
+    ///
+    /// The 7z callbacks must return `Result<bool, sevenz_rust::Error>`, so surfacing
+    /// `EntrySlotAction::Abort` as an error of that type is the obvious shape. It is the wrong one:
+    /// `sevenz-rust` 0.6.1 implements `Display for Error` as `Debug::fmt`, so the refusal comes back out of
+    /// the call sites' `.map_err(|e| e.to_string())` wrapped in `Other(..)` with its quotes and every
+    /// Windows path separator escaped. Rows 6–16 all show that wording verbatim.
+    ///
+    /// This pins the property, not the exact rendering: the message must **not** survive the round trip
+    /// intact. If a future `sevenz-rust` gives `Error` a real `Display`, this goes red — and that is the
+    /// signal that the captured-message indirection at both call sites can be simplified away.
+    #[test]
+    fn sevenz_error_display_would_mangle_our_refusal_wording() {
+        let target = Path::new("out").join("a.txt");
+        let msg = crate::fsutil::create_slot_link_from_stat(&Ok(true), &target);
+        let msg = match msg {
+            crate::fsutil::CreateSlotLink::Link(m) => m,
+            other => panic!("a stat of Ok(true) is a confirmed link, not {other:?}"),
+        };
 
-        let victim_now = fs::read(&victim).unwrap();
-        assert_eq!(
-            victim_now,
-            b"ARCHIVED A".to_vec(),
-            "7z: the recorded hazard is that the write FOLLOWS the link into {} and replaces its \
-             contents. If the victim still reads VICTIM ORIGINAL, the guard CPE-1746 asks for has landed \
-             (or sevenz-rust changed underneath us) — re-point this test at the refusal and update the \
-             section comment, src/docs/explorer-archives.md and CPE-1746 together. Got {victim_now:?}, \
-             outcome was {outcome:?}",
-            victim.display()
+        let round_tripped = sevenz_rust::Error::other(msg.clone()).to_string();
+
+        assert_ne!(
+            round_tripped, msg,
+            "sevenz_rust::Error no longer mangles the message it is handed. Rows 19–20 carry their abort \
+             message out of the callback in an `Option<String>` purely because it did — see \
+             `sevenz_entry_slot_action`. If this crate's Display is now faithful, that indirection can go."
         );
-        let report = outcome.expect("7z: and it reports success — that is what makes this the live one");
         assert!(
-            report.errors.is_empty(),
-            "7z: silently, too — nothing is recorded against the entry that overwrote a file outside the \
-             destination. Got {:?}",
-            report.errors
+            round_tripped.starts_with("Other(\""),
+            "the recorded mangling is `Debug::fmt` (sevenz-rust 0.6.1 src/error.rs:74-78), which debug-quotes \
+             the whole refusal. Got: {round_tripped}"
         );
-        let _ = fs::remove_dir_all(&d);
+        assert!(
+            !round_tripped.contains(&format!("\"{}\"", target.display())),
+            "and the quoted path fsutil puts in the message does not survive it — that is the user-visible \
+             cost, not a cosmetic one. Got: {round_tripped}"
+        );
     }
 }
