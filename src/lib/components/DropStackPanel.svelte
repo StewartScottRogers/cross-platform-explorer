@@ -12,6 +12,7 @@
   // buttons when the CURRENT folder isn't a valid destination, same spirit as the paste menu item greying
   // out — the stack itself might still be perfectly fine to act on later.
   import { dropStackEntries, removeFromDropStack, clearDropStack } from "../dropStack";
+  import { displaySafeName, displaySafePath } from "../filename";
   import Icon from "./Icon.svelte";
   import { createEventDispatcher } from "svelte";
 
@@ -89,12 +90,12 @@
       </div>
       <div class="dsp-pills">
         {#each $dropStackEntries as entry (entry.path)}
-          <span class="dsp-pill" title={entry.path}>
-            <span class="dsp-pill-name">{basename(entry.path)}</span>
+          <span class="dsp-pill" title={displaySafePath(entry.path)}>
+            <span class="dsp-pill-name">{displaySafeName(basename(entry.path))}</span>
             <button
               class="dsp-pill-x"
               title="Remove from Drop Stack"
-              aria-label={`Remove ${basename(entry.path)} from Drop Stack`}
+              aria-label={`Remove ${displaySafeName(basename(entry.path))} from Drop Stack`}
               on:click={() => removeFromDropStack(entry.path)}
             >
               <Icon name="close" size={10} />

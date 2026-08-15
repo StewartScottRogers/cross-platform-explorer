@@ -86,11 +86,12 @@ const WINDOWS_UNSAFE_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 /// `U+202E RIGHT-TO-LEFT OVERRIDE` is the reported case: a remote leaf `\u{202E}gnp.txt` downloads
 /// **byte-intact** and Windows Explorer renders it as `txt.png`, because RLO tells the bidi renderer to
 /// draw everything after it right-to-left. It is Unicode category **Cf** (format), not **Cc**
-/// (control), so `c.is_control()` — the exact predicate every pass here uses — never sees it. The full
-/// set, enumerated rather than stopping at the reported character (this is CPE-1709's own lesson,
-/// stated explicitly in the ticket that opened this constant): the five embeddings/overrides
-/// `U+202A`–`U+202E`, the four isolates `U+2066`–`U+2069`, and the two directional marks
-/// `U+200E`/`U+200F`.
+/// (control), so `c.is_control()` — the exact predicate every pass here uses — never sees it. The FULL
+/// `Bidi_Control=Yes` set, all **twelve** code points, enumerated rather than stopping at the reported
+/// character (this is CPE-1709's own lesson, stated explicitly in the ticket that opened this constant
+/// — and the exact trap round 2 of the CPE-1712 review caught here: the first cut had 11 of 12, missing
+/// `U+061C ARABIC LETTER MARK`): the five embeddings/overrides `U+202A`–`U+202E`, the four isolates
+/// `U+2066`–`U+2069`, the two directional marks `U+200E`/`U+200F`, and `U+061C`.
 ///
 /// **The decision, and why it differs from CPE-1709's:** CPE-1709 rewrote `:`, control characters, a
 /// trailing dot/space, and the reserved device names because the local filesystem or an ordinary Win32
@@ -115,6 +116,7 @@ const WINDOWS_UNSAFE_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 /// sink's, per the ticket's own scoping ("Explorer's behaviour is not ours to fix").
 #[cfg(test)]
 const BIDI_FORMAT_CHARS: &[char] = &[
+    '\u{061C}', // Arabic Letter Mark — the twelfth Bidi_Control code point, missed in round 1
     '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', // embeddings + overrides + pop
     '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
     '\u{200E}', '\u{200F}', // directional marks
@@ -1821,9 +1823,10 @@ mod tests {
     //
     // Decision recorded next to `BIDI_FORMAT_CHARS`: the on-disk/remote name is left UNTOUCHED (unlike
     // CPE-1709's compelled rewrite), because nothing forces a rewrite here — every one of these code
-    // points is legal on every target filesystem — and rewriting would mangle a legitimate Arabic/Hebrew
-    // filename that never exposed anyone to the spoof. The fix lives in this app's own rendering
-    // (`src/lib/filename.ts`'s `displaySafeName`), not in this sink.
+    // points (all twelve of the `Bidi_Control=Yes` set, including `U+061C ARABIC LETTER MARK`) is legal
+    // on every target filesystem — and rewriting would mangle a legitimate Arabic/Hebrew filename that
+    // never exposed anyone to the spoof. The fix lives in this app's own rendering
+    // (`src/lib/filename.ts`'s `displaySafeName`/`displaySafePath`), not in this sink.
     // ---------------------------------------------------------------------------------------------
 
     /// The core decision, asserted directly: not one of the enumerated bidi/format characters is ever
@@ -1856,6 +1859,7 @@ mod tests {
             "מסמך.txt",             // Hebrew: "document.txt"
             "דוח כספי.docx",        // Hebrew: "financial report.docx"
             "דוח\u{200F}.pdf",      // Hebrew name with an explicit RLM right before the extension
+            "تقرير\u{061C}.pdf",    // Arabic name with an explicit ALM right before the extension
         ] {
             assert_eq!(
                 windows_safe_segment(name).as_ref(),

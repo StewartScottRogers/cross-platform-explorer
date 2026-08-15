@@ -10,6 +10,7 @@
   import { unwrap } from "../invoke";
   // Aliased: this component already has a `commands` prop (the command lines to run).
   import { commands as api } from "../bindings.gen"; // typed client (CPE-964)
+  import { displaySafeName, displaySafePath } from "../filename";
   import Icon from "./Icon.svelte";
 
   /** The command's display name. */
@@ -56,17 +57,22 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
       <Icon name="code" size={15} />
-      <h2>Run “{title}”?</h2>
+      <h2>Run “{displaySafeName(title)}”?</h2>
       <button class="x" title="Close" on:click={() => dispatch("close")} disabled={running}><Icon name="close" size={14} /></button>
     </header>
 
     {#if !results}
       <p class="warn">
         This runs <b>{commands.length}</b> external {commands.length === 1 ? "command" : "commands"} on your
-        machine{cwd ? ` in ${cwd}` : ""}. Review before running:
+        machine{cwd ? ` in ${displaySafePath(cwd)}` : ""}. Review before running:
       </p>
       <ul class="cmds">
-        {#each commands as c}<li>{c}</li>{/each}
+        <!-- CPE-1712: this line is the one thing standing between the user and a shell command actually
+             running. If a selected file's name carries a bidi override, the RAW resolved command line
+             could visually lie about what is about to execute — the same class of deception as the
+             filename spoof itself, just relocated into a security confirmation. Escaped for the same
+             reason ArchiveSafetyDialog is. -->
+        {#each commands as c}<li>{displaySafeName(c)}</li>{/each}
         {#if commands.length === 0}<li class="dim">Nothing to run for the current selection.</li>{/if}
       </ul>
       <div class="actions">

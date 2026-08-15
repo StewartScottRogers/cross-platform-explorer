@@ -179,3 +179,78 @@ mutation; full output pasted in the PR body.
 **Docs:** `src/docs/03-explorer.md`'s existing "Files" section gains a bullet on the spoof-flagging
 behaviour, written for a non-technical reader. No new `Section`, so `src/lib/sectionDocs.ts` is
 unchanged — confirmed by `sectionDocs.test.ts` staying green.
+
+**2026-08-15 — round 2 (PR #917 review): three blockers, all closed.**
+
+**Both decisions from round 1 were upheld, not overturned** — the reviewer specifically stress-tested
+decision 1 (on-disk untouched) by looking for a counter-hypothesis where an untransformed name is a
+hazard where it's *used* rather than displayed (shell metacharacters, `open_external`,
+`convertFileSrc`), and found none: these code points are inert everywhere except rendering.
+
+**Blocker 1 — UI coverage was materially incomplete, including inside files already touched.** Round 1
+fixed a name span in several components and left a PATH span, a `title`/`aria-label`/tooltip, or an
+entirely different component sitting right next to it raw — `DetailsPane`'s "Path" row, `TrashView`'s
+tooltip/aria-label/original-location column, `HomeView`'s `.fav-path`/`.qa-sub` spans, and
+`FileNameSearchDialog`'s directory column all shipped a correctly-escaped name beside a raw path. The
+tab strip, `PropertiesDialog`, `ArchiveSafetyDialog` (a security verdict screen rendering
+attacker-supplied archive-entry names raw), `InstantSearch`, `Sidebar`'s Favorites/Network rows,
+`PreviewPane`, `QuickLook`, `RunCommandConfirm` (the confirm-before-launch screen for an external
+process — a spoofed filename here could visually lie about what's about to run), and roughly a dozen
+`baseName(path)`/`basename(path)` renders across content-search/duplicates/disk-space/drop-stack/
+App.svelte dialog text were missed entirely.
+
+**Route chosen: a shared choke point, not 35 hand patches.** `src/lib/filename.ts` gained
+`displaySafePath(path)` alongside `displaySafeName(name)` — a **named** entry point for a path-shaped
+value. Honesty check done on this: the escape is a stateless, position-independent character
+substitution, so `displaySafePath` produces byte-identical output to calling `displaySafeName` on the
+whole path string — there's no algorithmic reason segmentation was needed (an earlier draft of this
+comment claimed a "paragraph scope" justification that doesn't hold once every bidi/format character is
+actually stripped). The reason `displaySafePath` exists as its own name is **discoverability**: giving
+a path-shaped value its own call signals "this also needs escaping" at the site where it's easy to
+forget, which is exactly how the round-1 gaps happened. Both are now wired into: `FileList`,
+`SidebarNode`, `NavToolbar` breadcrumb, `FileNameSearchDialog`, `TrashView` (incl. tooltip/aria-label),
+`HomeView` (incl. all path spans), `FolderBrowser`, `DetailsPane` (incl. Path row), `TabBar` (incl.
+title attribute), `InstantSearch` (incl. search-highlight segments), `Sidebar` (Favorites + Network
+tiers), `PropertiesDialog`, `ArchiveSafetyDialog`, `PreviewPane`, `QuickLook`, `RunCommandConfirm`,
+`ContentSearchDialog`, `DuplicatesDialog`, `DiskSpaceView`, `DropStackPanel`, and ten `App.svelte`
+confirmation/notification strings (delete, vault-unlock, extract-to, AI-console task, shred).
+
+**Deliberately left uncovered, named rather than silently dropped:** `ContentIndexSearchDialog`,
+`DeclutterDialog`, `FileHealthDialog`, `JoinPartsDialog`, `NearDuplicatesDialog`, `SimilarImagesDialog`,
+`SplitFileDialog`, most of `BatchMediaDialog`, `ExplorerPane`'s agent-activity chip, `TerminalPanel`'s
+tab label, `Sidebar`'s agent-session folder chip, and the purely user-typed labels (macro/workspace/
+smart-folder/saved-search/connection names, which are config the user themselves typed, not filesystem
+entries from an untrusted source). This list is now in `src/docs/03-explorer.md` as a one-line "not yet
+covered" note rather than an implied-but-untrue full-coverage claim (Blocker 2).
+
+**Blocker 2 — the doc oversold coverage.** `src/docs/03-explorer.md` rewritten to enumerate the actual
+covered surfaces by name and add the "not yet covered" sentence above, rather than the round-1 wording's
+vague "the file list, the sidebar tree, … search results" that undercounted (six search surfaces, one
+named) and overclaimed (the details pane's Path row wasn't actually covered at the time).
+
+**Blocker 3 — the set was 11 of 12: `U+061C ARABIC LETTER MARK` was missing.** Added to both
+`BIDI_FORMAT_CODES` (`src/lib/filename.ts`) and `BIDI_FORMAT_CHARS` (`crates/server/src/transfer.rs`),
+with a test enumerating all twelve by name (`cases.toHaveLength(12)` in `filename.test.ts`) so this
+specific gap cannot silently recur. ALM is the direct Arabic counterpart of the RLM already covered, and
+gets the identical treatment: shown as `[ALM]`, never rewritten on disk, tested with a real Arabic name
+carrying one before its extension (`تقرير[ALM].pdf`) exactly mirroring the Hebrew RLM case.
+
+**Non-blocking items, both done:** `U+202C POP DIRECTIONAL FORMATTING` is now tagged `[POP]`, not
+`[PDF]` (which read like a format reference next to `[PDI]` two entries away). On dropping the three
+marks (`ALM`/`LRM`/`RLM`) as a noise-reduction measure: **kept, deliberately, as a group** — they carry
+essentially all of this guard's false-positive cost against a real RTL filename and almost none of the
+spoof risk, but the reviewer's position (disclosed to the user beats silently omitted) is followed here;
+if this is ever revisited, the ticket record says to drop all three together, never piecemeal.
+
+**Mutation evidence, re-run after all of the above:** removing `U+202E`/`U+061C` from the TS map reds
+`filename.test.ts` (6 assertions across 3 tests) AND every one of the 5 new component-level coverage
+tests (`FileList`, `DetailsPane`, `TabBar`, `TrashView`, `PropertiesDialog`) simultaneously — 11 failures
+across 6 files, confirming the shared choke point is genuinely shared (one break, many distinct reds).
+Reverted; all 29 tests green again. The two Rust guards from round 1 (encoder-escapes-bidi-chars
+mutation, `displaySafeName` call removed from `FileList.svelte`) were re-confirmed distinct and are
+unchanged by this round.
+
+**Verification, full matrix:** `cargo test` — crates/server (2185 lib tests + integration binaries) and
+src-tauri (182 tests), both green. `cargo clippy --all-targets -- -D warnings` — crates/server (default
++ `--all-features`) and src-tauri (default + `sidecar-platform`), all clean. `npm run check` clean.
+`npx vitest run` (full suite): 309 files / 4018 tests green.

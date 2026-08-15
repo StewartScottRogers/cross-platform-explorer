@@ -179,7 +179,7 @@
   import { friendlyError, splitPath, formatPathsForClipboard } from "./lib/format";
   import { uniqueName, uniqueNameWithExt } from "./lib/naming";
   import { NEW_FILE_TYPE_BY_EXT, type NewFileType } from "./lib/newFileTypes";
-  import { validateFileName } from "./lib/filename";
+  import { validateFileName, displaySafeName } from "./lib/filename";
   import { matchesGlob } from "./lib/glob";
   import PatternSelectDialog from "./lib/components/PatternSelectDialog.svelte";
   import { firstMatchIndex } from "./lib/typeahead";
@@ -1449,7 +1449,7 @@
   function spaceDelete(item: { path: string; name: string }) {
     confirm = {
       title: "Delete to Recycle Bin?",
-      message: `"${item.name}" will be moved to the Recycle Bin. You can undo this.`,
+      message: `"${displaySafeName(item.name)}" will be moved to the Recycle Bin. You can undo this.`,
       label: "Delete",
       onYes: async () => {
         confirm = null;
@@ -1462,7 +1462,7 @@
               undoStack = pushUndo(undoStack, {
                 kind: "delete",
                 moves: restored,
-                label: `Delete "${item.name}"`,
+                label: `Delete "${displaySafeName(item.name)}"`,
               });
             }
           }
@@ -2488,9 +2488,9 @@
     // dialog (clean empty field + refocus + re-armed submit guard), so a wrong-password re-prompt never
     // reuses the stale masked value (CPE-1249 review #3).
     passwordPrompt = {
-      title: `Unlock ${entry.name}`,
+      title: `Unlock ${displaySafeName(entry.name)}`,
       message:
-        `Enter the passphrase to unlock and browse "${entry.name}". While unlocked, its contents are ` +
+        `Enter the passphrase to unlock and browse "${displaySafeName(entry.name)}". While unlocked, its contents are ` +
         `decrypted into a private temporary folder; locking it wipes that folder.`,
       confirmLabel: "Unlock",
       error,
@@ -3938,9 +3938,9 @@
     if (isHome || archive) { openAiConsole(); return; }
     const sel = selectedEntries;
     if (sel.length === 1 && sel[0].is_dir) {
-      openAiConsole({ cwd: sel[0].path, task: `Work in the folder "${sel[0].name}".` });
+      openAiConsole({ cwd: sel[0].path, task: `Work in the folder "${displaySafeName(sel[0].name)}".` });
     } else if (sel.length >= 1) {
-      openAiConsole({ cwd: currentPath, task: `Work on: ${sel.map((e) => e.name).join(", ")}` });
+      openAiConsole({ cwd: currentPath, task: `Work on: ${sel.map((e) => displaySafeName(e.name)).join(", ")}` });
     } else {
       openAiConsole({ cwd: currentPath });
     }
@@ -4191,7 +4191,7 @@
   ) {
     passwordPrompt = {
       title: "Password required",
-      message: `"${entry.name}" is password-protected — enter its password to extract it.`,
+      message: `"${displaySafeName(entry.name)}" is password-protected — enter its password to extract it.`,
       confirmLabel: "Extract",
       error,
       onSubmit: async (password) => {
@@ -4257,7 +4257,7 @@
         directory: true,
         multiple: false,
         defaultPath: dir,
-        title: `Extract "${entry.name}" to…`,
+        title: `Extract "${displaySafeName(entry.name)}" to…`,
       });
     } catch {
       return; // dialog unavailable / errored — no-op
@@ -4265,7 +4265,7 @@
     if (!dest || typeof dest !== "string") return; // cancelled
     const target = dest;
     await extractWithPasswordFallback(entry, target, target, () => {
-      showNotice($t("notice.extractedTo", { entry: entry.name, dest: target }));
+      showNotice($t("notice.extractedTo", { entry: displaySafeName(entry.name), dest: target }));
     });
   }
 
@@ -4284,7 +4284,7 @@
     const { dest, name } = extractHereDest(entry);
     await extractWithPasswordFallback(entry, dest, currentPath, () => {
       pendingSelectPath = dest;
-      showNotice($t("notice.extractedTo", { entry: entry.name, dest: name }));
+      showNotice($t("notice.extractedTo", { entry: displaySafeName(entry.name), dest: name }));
     });
   }
 
@@ -4298,7 +4298,7 @@
         directory: true,
         multiple: false,
         defaultPath: currentPath,
-        title: `Extract "${entry.name}" to…`,
+        title: `Extract "${displaySafeName(entry.name)}" to…`,
       });
     } catch {
       return; // dialog unavailable / errored — no-op
@@ -4482,7 +4482,7 @@
     if ((!inPaneB && blockedInArchive()) || pane.selectedEntries.length === 0) return;
     const target = snapshotConfirmTarget(inPaneB, pane.selectedEntries);
     const n = pane.selectedEntries.length;
-    const what = n === 1 ? `"${pane.selectedEntries[0].name}"` : `${n} items`;
+    const what = n === 1 ? `"${displaySafeName(pane.selectedEntries[0].name)}"` : `${n} items`;
 
     if (!permanent) {
       // Recycle bin is recoverable, so no modal — just do it and say so. (Nothing can change `pane`
@@ -4571,7 +4571,7 @@
     const n = pane.selectedEntries.length;
     shredConfirmFor = {
       paths: pane.selectedEntries.map((e) => e.path),
-      what: n === 1 ? `"${pane.selectedEntries[0].name}"` : `${n} items`,
+      what: n === 1 ? `"${displaySafeName(pane.selectedEntries[0].name)}"` : `${n} items`,
       inPaneB,
       dir,
     };

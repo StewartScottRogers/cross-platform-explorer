@@ -3,7 +3,7 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName } from "../filetypes";
-  import { displaySafeName } from "../filename";
+  import { displaySafeName, displaySafePath } from "../filename";
   import type { DirEntry } from "../types";
 
   /** The current selection: 0, 1, or many. */
@@ -35,7 +35,7 @@
         <span class="meta-k">Date modified</span>
         <span class="meta-v">{formatDate(one.modified) || "—"}</span>
       </div>
-      <div class="meta-row"><span class="meta-k">Path</span><span class="meta-v">{one.path}</span></div>
+      <div class="meta-row"><span class="meta-k">Path</span><span class="meta-v">{displaySafePath(one.path)}</span></div>
     </div>
   {:else if selected.length > 1}
     <div class="hero"><Icon name="copy" size={72} /></div>

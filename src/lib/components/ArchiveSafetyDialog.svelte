@@ -28,6 +28,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { baseName } from "../contentSearch";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { formatSize } from "../format";
   import type { ArchiveSafetyReport } from "../bindings.gen";
 
@@ -75,7 +76,7 @@
     <header>
       <Icon name="archive" size={16} />
       <h2>{$t("arcsafe.title")}</h2>
-      <span class="root" title={path}>{baseName(path)}</span>
+      <span class="root" title={displaySafePath(path)}>{displaySafeName(baseName(path))}</span>
       <button class="x" data-testid="as-close-btn" title={$t("common.close")} on:click={() => dispatch("close")}>
         <Icon name="close" size={14} />
       </button>
@@ -148,9 +149,9 @@
              keeps its own text on one line (never wraps inside the pill). -->
         <div class="pills" data-testid="as-flagged">
           {#each result.report.flagged as f (f.name)}
-            <span class="pill" title={f.name}>
+            <span class="pill" title={displaySafePath(f.name)}>
               <Icon name="archive" size={13} />
-              <span class="pname">{f.name}</span>
+              <span class="pname">{displaySafePath(f.name)}</span>
               <span class="pratio">{ratioLabel(f.ratio)}</span>
             </span>
           {/each}

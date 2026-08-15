@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateFileName, displaySafeName } from "./filename";
+import { validateFileName, displaySafeName, displaySafePath } from "./filename";
 
 // Built from decimal code points, not literal characters or `\uXXXX` string escapes, for the same
 // reason `filename.ts` does it: a literal bidi-override character sitting in THIS test file would
@@ -8,13 +8,14 @@ const RLO = String.fromCharCode(0x202e); // RIGHT-TO-LEFT OVERRIDE — the repor
 const LRO = String.fromCharCode(0x202d);
 const LRE = String.fromCharCode(0x202a);
 const RLE = String.fromCharCode(0x202b);
-const PDF = String.fromCharCode(0x202c);
+const POP = String.fromCharCode(0x202c); // POP DIRECTIONAL FORMATTING — tagged [POP], not [PDF]
 const LRI = String.fromCharCode(0x2066);
 const RLI = String.fromCharCode(0x2067);
 const FSI = String.fromCharCode(0x2068);
 const PDI = String.fromCharCode(0x2069);
 const LRM = String.fromCharCode(0x200e);
 const RLM = String.fromCharCode(0x200f);
+const ALM = String.fromCharCode(0x061c); // ARABIC LETTER MARK — the twelfth Bidi_Control code point
 
 describe("validateFileName", () => {
   it("accepts ordinary names", () => {
@@ -75,15 +76,24 @@ describe("displaySafeName", () => {
     expect(shown).not.toContain("txt.png");
   });
 
-  it("enumerates the full Cf bidi/format set, not only U+202E — the CPE-1709 lesson restated", () => {
+  it("enumerates the full 12-member Bidi_Control=Yes set, not only U+202E — the CPE-1709 lesson restated", () => {
+    // Round 2 of the review caught the first cut at 11 of 12: U+061C ARABIC LETTER MARK, the direct
+    // Arabic counterpart of RLM, was missing. All twelve are asserted here so that gap cannot recur
+    // silently.
     const cases: Array<[string, string]> = [
-      [LRE, "LRE"], [RLE, "RLE"], [PDF, "PDF"], [LRO, "LRO"], [RLO, "RLO"],
-      [LRI, "LRI"], [RLI, "RLI"], [FSI, "FSI"], [PDI, "PDI"],
+      [ALM, "ALM"],
       [LRM, "LRM"], [RLM, "RLM"],
+      [LRE, "LRE"], [RLE, "RLE"], [POP, "POP"], [LRO, "LRO"], [RLO, "RLO"],
+      [LRI, "LRI"], [RLI, "RLI"], [FSI, "FSI"], [PDI, "PDI"],
     ];
+    expect(cases).toHaveLength(12);
     for (const [ch, abbr] of cases) {
       expect(displaySafeName(`a${ch}b`)).toBe(`a[${abbr}]b`);
     }
+  });
+
+  it("tags U+202C as [POP], not [PDF] — a format-reference-looking tag beside [PDI] two entries away", () => {
+    expect(displaySafeName(`report${POP}.doc`)).toBe("report[POP].doc");
   });
 
   it("leaves ordinary ASCII and percent-bearing names byte-identical", () => {
@@ -120,8 +130,63 @@ describe("displaySafeName", () => {
     expect(shown).toContain(".pdf");
   });
 
+  it("a legitimate ALM some real Arabic filenames carry before a Latin extension is shown, not dropped", () => {
+    // "تقرير" ("report") followed by an explicit ALM before the dot — the Arabic mirror of the Hebrew
+    // RLM case above.
+    const nameWithMark = `تقرير${ALM}.pdf`;
+    const shown = displaySafeName(nameWithMark);
+    expect(shown).toBe("تقرير[ALM].pdf");
+    expect(shown).toContain("تقرير");
+    expect(shown).toContain(".pdf");
+  });
+
   it("a name containing several bidi/format characters gets every one flagged, in place", () => {
     const messy = `${LRO}a${RLM}b${PDI}c`;
     expect(displaySafeName(messy)).toBe("[LRO]a[RLM]b[PDI]c");
+  });
+});
+
+// CPE-1712 review round 2: `displaySafePath` is the named entry point for a full path (breadcrumbs,
+// "Path" rows, tooltips, TrashView's original-location column). It produces byte-identical output to
+// calling `displaySafeName` on the whole string — the escape is a stateless, position-independent
+// substitution, so segmenting first changes nothing about the RESULT. The reason it exists as its own
+// name is discoverability: round 1 of this review fixed a name span and left a PATH span sitting right
+// next to it raw in four different components, because nothing at the call site signalled "this is
+// also path-shaped and also needs escaping". See its doc comment in filename.ts for the full account.
+describe("displaySafePath", () => {
+  it("escapes an override anywhere in the path, leaving separators untouched", () => {
+    const p = `C:\\Users\\alice\\${RLO}gnp.txt`;
+    const shown = displaySafePath(p);
+    expect(shown).toBe("C:\\Users\\alice\\[RLO]gnp.txt");
+    expect(shown).not.toContain("txt.png");
+  });
+
+  it("escapes an override sitting in a DIRECTORY segment too, not just the leaf", () => {
+    const p = `/home/${RLO}gnp.txt/notes.md`;
+    const shown = displaySafePath(p);
+    expect(shown).toBe("/home/[RLO]gnp.txt/notes.md");
+    expect(shown).not.toContain("notes.md/gnp.txt");
+  });
+
+  it("produces byte-identical output to displaySafeName on the same string (no algorithmic difference)", () => {
+    for (const p of [`C:\\Users\\${RLO}alice\\notes.md`, `/home/alice/${LRO}report.pdf`, "ordinary/path.txt"]) {
+      expect(displaySafePath(p)).toBe(displaySafeName(p));
+    }
+  });
+
+  it("handles a mix of `/` and `\\` separators (a Windows UNC-ish or mixed remote path)", () => {
+    const p = `\\\\server\\share/${RLO}gnp.txt`;
+    expect(displaySafePath(p)).toBe("\\\\server\\share/[RLO]gnp.txt");
+  });
+
+  it("leaves an ordinary path, and a real Arabic/Hebrew path, byte-identical", () => {
+    for (const ok of [
+      "C:\\Users\\alice\\report.txt",
+      "/home/alice/photos/vacation.jpg",
+      "/home/alice/מסמך.txt",
+      "C:\\Users\\alice\\مستند.pdf",
+    ]) {
+      expect(displaySafePath(ok)).toBe(ok);
+    }
   });
 });

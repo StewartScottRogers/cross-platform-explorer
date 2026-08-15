@@ -12,6 +12,7 @@
   import { squarify, type Tile } from "../treemap";
   import { formatSize } from "../format";
   import { baseName } from "../contentSearch";
+  import { displaySafeName, displaySafePath } from "../filename";
   import Icon from "./Icon.svelte";
   import HelpButton from "./HelpButton.svelte";
 
@@ -142,7 +143,7 @@
       >
         <Icon name="up" size={14} />
       </button>
-      <span class="sp-path" title={cur}>{baseName(cur)}</span>
+      <span class="sp-path" title={displaySafePath(cur)}>{displaySafeName(baseName(cur))}</span>
       <span class="sp-total">{formatSize(total)}{loading ? " · scanning…" : ""}</span>
       <HelpButton section="disk-usage" on:help />
       <button class="sp-close" title="Close" on:click={() => dispatch("close")}>
@@ -168,7 +169,7 @@
                 on:click={() => (c?.is_dir ? drill(c) : dispatch("navigate", cur))}
                 on:keydown={(e) => (e.key === "Enter" && c ? (c.is_dir ? drill(c) : dispatch("navigate", cur)) : null)}
               >
-                <title>{c?.name} — {formatSize(c?.size ?? 0)} ({pct(c?.size ?? 0)}%)</title>
+                <title>{displaySafeName(c?.name ?? "")} — {formatSize(c?.size ?? 0)} ({pct(c?.size ?? 0)}%)</title>
                 <rect
                   x={t.x}
                   y={t.y}
@@ -177,7 +178,7 @@
                   style="fill: color-mix(in srgb, var(--accent, #2f6fed) {Math.round(opacityFor(c) * 100)}%, transparent)"
                 />
                 {#if labelable(t)}
-                  <text x={t.x + 6} y={t.y + 15} class="tl-name">{c?.name}</text>
+                  <text x={t.x + 6} y={t.y + 15} class="tl-name">{displaySafeName(c?.name ?? "")}</text>
                   <text x={t.x + 6} y={t.y + 29} class="tl-size">{formatSize(c?.size ?? 0)}</text>
                 {/if}
               </g>
@@ -193,11 +194,11 @@
             <li class="lg-item">
               <button
                 class="lg-row"
-                title={c.path}
+                title={displaySafePath(c.path)}
                 on:click={() => (c.is_dir ? drill(c) : dispatch("navigate", cur))}
               >
                 <Icon name={c.is_dir ? "folder" : "document"} size={14} />
-                <span class="lg-name">{c.name}</span>
+                <span class="lg-name">{displaySafeName(c.name)}</span>
                 <span class="lg-size">{formatSize(c.size)}</span>
               </button>
               <!-- Reveal / Delete actions (CPE-752). Shown on hover/focus; stopPropagation keeps them
@@ -206,7 +207,7 @@
               <button
                 class="lg-action"
                 title="Reveal in explorer"
-                aria-label={`Reveal ${c.name} in explorer`}
+                aria-label={`Reveal ${displaySafeName(c.name)} in explorer`}
                 on:click|stopPropagation={() => dispatch("reveal", c.path)}
               >
                 <Icon name="forward" size={14} />
@@ -214,7 +215,7 @@
               <button
                 class="lg-action lg-del"
                 title="Delete to Recycle Bin"
-                aria-label={`Delete ${c.name}`}
+                aria-label={`Delete ${displaySafeName(c.name)}`}
                 on:click|stopPropagation={() => dispatch("delete", { path: c.path, name: c.name })}
               >
                 <Icon name="delete" size={14} />

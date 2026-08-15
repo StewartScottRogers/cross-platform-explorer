@@ -21,7 +21,7 @@
   import { formatDate } from "../datetime";
   import { formatSize } from "../format";
   import { iconFor } from "../filetypes";
-  import { displaySafeName } from "../filename";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   // "help" isn't in this dispatcher type — it's never dispatched directly, only forwarded verbatim from
   // HelpButton's own typed `Section` event via the bare `on:help` in the markup below (same convention
@@ -206,15 +206,15 @@
                 checked={selected.has(e.id)}
                 on:click|stopPropagation
                 on:change={() => toggleSelect(e.id)}
-                aria-label={e.name}
+                aria-label={displaySafeName(e.name)}
               />
             </span>
-            <span class="tv-cell tv-name" title={e.name}>
+            <span class="tv-cell tv-name" title={displaySafeName(e.name)}>
               <Icon name={iconFor({ is_dir: false, extension: extOf(e.name) })} size={15} />
               {displaySafeName(e.name)}
               {#if e.size !== null}<span class="tv-size">{formatSize(e.size)}</span>{/if}
             </span>
-            <span class="tv-cell tv-path" title={e.original_path}>{e.original_path}</span>
+            <span class="tv-cell tv-path" title={displaySafePath(e.original_path)}>{displaySafePath(e.original_path)}</span>
             <span class="tv-cell tv-date">{formatDate(e.time_deleted * 1000)}</span>
           </div>
         {/each}
