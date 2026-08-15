@@ -532,6 +532,76 @@ mod tests {
 
     const FILE_BODY: &[u8] = b"hello webdav"; // 12 bytes
 
+    /// The rig's refusal status for a request path that resolves **outside** the served root (CPE-1730).
+    ///
+    /// `403`, and the choice is load-bearing rather than cosmetic:
+    ///
+    /// - It is **not `400`**. `400` belongs to CPE-1726's destination-resolves-to-the-root guard, and
+    ///   that guard's table test asserts `resp.contains("400")` on thirteen rows. A second guard also
+    ///   answering `400` would satisfy those rows with CPE-1726's own comparison deleted, masking
+    ///   exactly the guard they exist to prove. A different code keeps them reddening for the right
+    ///   reason.
+    /// - It is **not a code an errno can produce here**. Every other status this rig sends is either a
+    ///   success (`201`/`204`/`207`), a parse/host refusal (`400`/`502`), an unknown-method `405`, or
+    ///   one of the two an `std::fs` failure maps to (`404` / `500`). Nothing in `handle` answers `403`
+    ///   except the confinement guard, so a test asserting `403` cannot be satisfied by "the operation
+    ///   happened to fail". That is the property the FTP rig gets from a fixed reply *string* and the
+    ///   SFTP rig from a fixed `error_message`; here the status code carries it, because the rig's
+    ///   responses have no body.
+    const CPE_1730_ESCAPED_ROOT_STATUS: u16 = 403;
+
+    /// The rig's refusal status for a `MOVE` whose **source** is the served root itself.
+    ///
+    /// Distinct from [`CPE_1730_ESCAPED_ROOT_STATUS`] and from CPE-1726's `400` because the three
+    /// guards answer three different questions and a test has to be able to say which one fired.
+    /// `409 Conflict` is otherwise unused by this rig, so it is unreachable from an errno for the same
+    /// reason `403` is.
+    ///
+    /// It is **not** closed by containment: the served root is contained in itself by design (a
+    /// resolver must map `/` somewhere, or `PROPFIND /` cannot work), so
+    /// [`cpe_server::fsutil::confined_to`] allows `MOVE /` and it is
+    /// [`cpe_server::fsutil::same_place`] on the *source* that refuses it.
+    const CPE_1730_ROOT_SOURCE_STATUS: u16 = 409;
+
+    /// Map a request path (`/`-rooted, as it arrives on the wire) onto a real path under `root` — or
+    /// **`None`** when it resolves outside the served root (CPE-1730).
+    ///
+    /// This used to be a bare `root.join(url.trim_start_matches('/'))` inlined in [`handle`], which is
+    /// not a confinement at all. Everything under an escaped path was then a live target for this rig's
+    /// `fs::write`, `create_dir_all`, `remove_file`, `remove_dir_all` and `fs::rename` — and the rig
+    /// runs under `cargo test` on a developer's own checkout, so the blast radius is a working tree.
+    ///
+    /// The property, and why it is *asked* rather than enumerated, is on
+    /// [`cpe_server::fsutil::confined_to`]; read that before changing this. In particular it is **not**
+    /// [`cpe_server::fsutil::contained_under`], which the ticket expected to be reusable and which fails
+    /// *open* on a path that does not exist yet — i.e. on every `PUT`, `MKCOL` and `MOVE` destination
+    /// this rig has.
+    ///
+    /// **Fallible on purpose rather than silently clamping into the root.** A resolver that quietly
+    /// rewrote an escaping path to something inside would answer a request the client never made, and no
+    /// caller could tell a clamped path from an honest one. `None` forces every call site to say what it
+    /// does about a refusal.
+    fn confined_real(root: &Path, url_path: &str) -> Option<PathBuf> {
+        let joined = joined_real(root, url_path);
+        cpe_server::fsutil::confined_to(&joined, root).then_some(joined)
+    }
+
+    /// The **unconfined** join — the whole of what [`handle`]'s `real` used to be, kept as its own
+    /// function for the one caller that needs the joined path even when it escapes.
+    ///
+    /// That caller is `MOVE`'s destination, which must ask CPE-1726's "does this resolve *to* the served
+    /// root?" question **before** CPE-1730's "does it stay *inside* it?" one. The ordering is not
+    /// cosmetic: `<root>/nonexistent/..` is one of CPE-1726's own regression rows, and `canonicalize`
+    /// answers `Err(NotFound)` for it on Linux (measured) while returning the root on Windows — so
+    /// confinement refuses that spelling on one platform while `same_place` calls it the root on both.
+    /// Whichever guard runs first owns the row, and it must stay CPE-1726's `400`, or that ticket's
+    /// thirteen-row table quietly starts passing through this ticket's guard instead.
+    ///
+    /// Nothing else may use this. Escaping *into* it is the defect; the name is the reminder.
+    fn joined_real(root: &Path, url_path: &str) -> PathBuf {
+        root.join(url_path.trim_start_matches('/'))
+    }
+
     /// A `<d:response>` for one resource.
     fn dav_response(href: &str, is_dir: bool, size: u64) -> String {
         let rt = if is_dir { "<d:collection/>" } else { "" };
@@ -562,7 +632,14 @@ mod tests {
             .unwrap_or_else(|| "1".to_string());
         let mut body = Vec::new();
         let _ = req.as_reader().read_to_end(&mut body);
-        let real = root.join(url.trim_start_matches('/'));
+        // CPE-1730: resolved **once**, here, for every verb — before `metadata`, `read`, `write`,
+        // `create_dir_all`, `remove_file`/`remove_dir_all` or `rename` is handed anything. One
+        // resolution point rather than one per handler, because the previous shape (a bare join, then
+        // six independent uses of it) is exactly how a guard added to five of the six goes unnoticed.
+        let Some(real) = confined_real(root, &url) else {
+            let _ = req.respond(tiny_http::Response::empty(CPE_1730_ESCAPED_ROOT_STATUS));
+            return;
+        };
 
         match method.as_str() {
             "PROPFIND" => match std::fs::metadata(&real) {
@@ -737,8 +814,10 @@ mod tests {
                     let _ = req.respond(tiny_http::Response::empty(502));
                     return;
                 }
-                let dest_rel = dest_path.trim_start_matches('/');
-                let dest_real = root.join(dest_rel);
+                // CPE-1730: the **unconfined** join, deliberately — the `same_place` check below is
+                // CPE-1726's and must keep owning its thirteen regression rows. Confinement runs after
+                // it, on the same joined path. See [`joined_real`].
+                let dest_real = joined_real(root, &dest_path);
                 // **Compare the RESOLVED destination against the root — do not enumerate spellings.**
                 //
                 // This check has now been wrong three times, each time by naming shapes instead of the
@@ -766,6 +845,26 @@ mod tests {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
                 }
+                // CPE-1730, in this order and for the reasons on [`joined_real`]:
+                //
+                // 1. the destination must stay **inside** the served root. The source already went
+                //    through `confined_real` at the top of `handle`; the destination is a second,
+                //    separate path taken from the `Destination` header, and nothing above this line has
+                //    looked at where it lands.
+                // 2. the source must not **be** the served root. Containment cannot close that half —
+                //    the root is contained in itself by design — so `same_place` closes it, and the
+                //    two questions get two different statuses so a test can say which one answered.
+                //    This is the `MOVE /` half of the asymmetry recorded below; it is answered here
+                //    rather than at the top of `handle` so CPE-1726's `400` keeps winning the rows
+                //    whose destination resolves to the root.
+                if !cpe_server::fsutil::confined_to(&dest_real, root) {
+                    let _ = req.respond(tiny_http::Response::empty(CPE_1730_ESCAPED_ROOT_STATUS));
+                    return;
+                }
+                if cpe_server::fsutil::same_place(&real, root) {
+                    let _ = req.respond(tiny_http::Response::empty(CPE_1730_ROOT_SOURCE_STATUS));
+                    return;
+                }
                 // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of a
                 // category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED — do not
                 // wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
@@ -778,28 +877,35 @@ mod tests {
                 //    ("the client is not the person whose files are there") is simply absent here, and
                 //    that absence is what decides it.
                 //    **Bounded precisely (PR #902 review):** "no user's files at the destination"
-                //    holds because no user drives this rig, NOT because the destination is confined —
-                //    `root.join(..)` here has no containment check, so a `..`-shaped path would
-                //    resolve outside the temp root. Nothing sends one today; CPE-1730 tracks closing
-                //    it. If that ever changes before CPE-1730 lands, this reason expires with it.
+                //    holds because no user drives this rig, NOT because the destination is confined.
+                //    **CPE-1730 has since confined it** — both the request path and the `Destination`
+                //    path now go through `cpe_server::fsutil::confined_to`, so both paths reaching
+                //    this `rename` are inside the temp root. That is a second, independent reason
+                //    rather than a replacement for reason 1: confinement is not atomic with the
+                //    `rename` (see `confined_to`'s TOCTOU note), so it does not by itself make this
+                //    line safe for a real server.
                 //
-                //    **Three shapes get out, not one** (round-5 UAT). Enumerated because naming only
-                //    `..` would imply the other two are handled:
+                //    **Three shapes got out, not one** (round-5 UAT). Enumerated because naming only
+                //    `..` would imply the other two were handled, and all three are closed by the same
+                //    check above rather than by three separate ones:
                 //      a. a `..`-shaped destination — `MOVE /` to `/../x` moved the served root itself
                 //         out to the parent and answered `201`;
                 //      b. an **absolute** destination, since `Path::join` discards the base;
                 //      c. a destination **through a symlinked subdirectory**, which needs neither `..`
                 //         nor an absolute path — measured writing to `/tmp/…/inner/escaped.txt`.
                 //    (c) is not reachable over the wire because nothing in the rig lets a client
-                //    create the link, and (a)/(b) need a client that does not exist. That is why this
-                //    is CPE-1730's scope rather than a blocker here — but the *enumeration* has to be
-                //    right, or the next reader closes `..` and believes the job is done.
+                //    create the link, which is why it is seeded with `std::fs` in
+                //    `cpe_1730_a_request_path_that_escapes_the_served_root_is_refused`.
                 //
-                //    **`DELETE /` needs none of them.** MOVE now refuses to be renamed onto the root
-                //    while DELETE removes the root outright (`204`, measured). That is arguably
-                //    correct by the wire — WebDAV `DELETE` on a collection deletes the collection —
-                //    but the asymmetry is deliberate-looking and was not deliberate, so it is written
-                //    down here rather than left for round 6 to rediscover.
+                //    **`DELETE /` needs none of them, and containment does not close it either.** MOVE
+                //    refuses to be renamed onto the root (CPE-1726's `400`) and refuses `/` as its
+                //    *source* (CPE-1730's `409`), while DELETE removes the root outright (`204`,
+                //    measured). The served root is *contained in itself*, so no containment check can
+                //    speak to that; it would need a `same_place` guard of its own, exactly like MOVE's
+                //    source. It is arguably correct by the wire — WebDAV `DELETE` on a collection
+                //    deletes the collection — and it destroys only the rig's own temp root, never
+                //    anything outside it, so CPE-1730 leaves it alone deliberately. Written down here
+                //    rather than left for round 7 to rediscover.
                 // 2. That premise is pinned rather than trusted:
                 //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red
                 //    the moment this line (or any sibling destructive primitive) moves above the
@@ -1591,10 +1697,27 @@ mod tests {
             // tree-intact assert is skipped for `not:` rows — so a dead server, a reset connection
             // or a read timeout satisfied all of it. A row asserting a negative about a string is
             // satisfied by the absence of the string, which the absence of a *response* also
-            // provides. Pinning `404` requires the server to have actually answered.
+            // provides. Pinning a status requires the server to have actually answered.
+            //
+            // **CPE-1730 changed this row's answer on Windows, and the reason is a finding rather
+            // than an inconvenience.** The `404` above was an **errno**, not a guard — and on Windows
+            // it was an errno standing in front of a live escape. `p:` is a *Disk prefix* to Rust's
+            // Windows path parser, so `p://evil.example/ok.txt` is an **absolute** path and
+            // `root.join(..)` discards the served root outright (measured on this machine:
+            // `Path::new(r"C:\tmp\root").join("p://evil.example/ok.txt")` -> `"p://evil.example/ok.txt"`,
+            // `is_absolute = true`). This row was therefore escape family (b) — an absolute
+            // destination — sitting inside an existing regression table, refused only because drive
+            // `P:` happens not to exist on the runner. On POSIX `p:` is an ordinary directory name, the
+            // destination stays inside the root at `<root>/p:/evil.example/ok.txt`, `fs::rename` does
+            // not create parents, and the `ENOENT` `404` is still the honest answer.
+            //
+            // So the expectation is platform-split — not to accommodate a difference in the *guard*,
+            // but because the two platforms genuinely resolve this destination to different places.
+            // Both answers keep the row's actual subject intact: neither is `502`, so a `rsplit_once`
+            // regression still reds it.
             (
                 Some("http://{host}/p://evil.example/ok.txt"),
-                "404",
+                if cfg!(windows) { "403" } else { "404" },
                 "a LOCAL Destination whose path contains `://` — must not be read as cross-host",
             ),
         ];
@@ -1792,6 +1915,392 @@ mod tests {
              than assumed. Got {resp:?}"
         );
     }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1730 — the request path that resolves OUTSIDE the served root
+    // ---------------------------------------------------------------------------------------------
+
+    const CPE_1730_VICTIM_BYTES: &[u8] = b"bytes belonging to somebody outside the served root";
+
+    /// A directory **outside** the served root holding a victim file with known bytes, plus the wire
+    /// spelling that reaches it from the root by `..`. Returns `(victim_dir, victim_file, wire_prefix)`.
+    ///
+    /// A real sibling of the rig's own temp root rather than a fabricated string: the point of the
+    /// ticket is that `root.join("../…")` lands on somebody's real files, so the test puts real bytes
+    /// there and reads them back afterwards.
+    fn cpe_1730_seed_victim_outside(root: &Path) -> (PathBuf, PathBuf, String) {
+        let name = format!(
+            "{}-cpe-1730-victim",
+            root.file_name().expect("the rig root has a name").to_string_lossy()
+        );
+        let dir = root.parent().expect("the rig root has a parent").join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the victim directory");
+        let file = dir.join("victim.txt");
+        std::fs::write(&file, CPE_1730_VICTIM_BYTES).expect("seed the victim file");
+        (dir, file, format!("/../{name}"))
+    }
+
+    /// Did a **guard** refuse this, with `status`?
+    ///
+    /// `ends_with`, not `contains`, and anchored deliberately: [`http_err`] formats a non-2xx as
+    /// `"{path}: HTTP {code}"`, so the string mixes server-decided text with the **caller's own path**
+    /// and a `contains` over it is forgeable by naming a file after the sentinel — CPE-1731's UAT did
+    /// exactly that to a sibling assertion. The status is the last thing in that format, so `ends_with`
+    /// pins it to the one position nothing caller-supplied can occupy.
+    fn cpe_1730_refused_with<T: std::fmt::Debug>(r: &Result<T, String>, status: u16) -> bool {
+        let want = format!("HTTP {status}");
+        r.as_ref().err().is_some_and(|m| m.ends_with(&want))
+    }
+
+    /// Send one hand-written request and return the raw response text.
+    ///
+    /// **Raw rather than through [`WebdavProvider`], and that is a measurement rather than a
+    /// preference.** Two separate things destroy an escaping path before it reaches the wire:
+    ///
+    /// 1. `ureq` parses the request URL, so a `..` segment is **normalised away client-side**. Measured:
+    ///    `provider.write("/../<sibling>/victim.txt", …)` arrives at the rig as `/<sibling>/victim.txt`
+    ///    and is answered `201 Created` — a green test that never sent the shape it is named after. The
+    ///    first draft of this test did exactly that and passed the byte assertion for the wrong reason.
+    /// 2. [`WebdavProvider::url_for`] percent-encodes `:` and `\`, so an absolute Windows path arrives
+    ///    as `C%3A%5C…` and lands *inside* the root.
+    ///
+    /// The rig reads the raw request line with no URL parsing at all (stated at `url_for`), so a raw
+    /// socket is the only way to put either shape in front of it — which is also exactly why the shapes
+    /// are latent rather than live: the shipped client cannot express them.
+    ///
+    /// The read timeout is what makes this un-hangable. libtest has no per-test timeout, so without it a
+    /// regression becomes a hang rather than a red.
+    fn cpe_1730_raw(base: &str, request: &str) -> String {
+        use std::io::{Read as _, Write as _};
+        let addr = base.trim_start_matches("http://").to_string();
+        let mut sock = std::net::TcpStream::connect(&addr).expect("connect to the rig");
+        sock.set_read_timeout(Some(Duration::from_secs(10))).expect("set a read timeout");
+        sock.write_all(request.as_bytes()).expect("send the request");
+        let mut resp = String::new();
+        let _ = sock.read_to_string(&mut resp);
+        resp
+    }
+
+    /// Is `resp`'s **status line** exactly `status`?
+    ///
+    /// Anchored at the start of the response rather than `contains`, so nothing in a header or a body —
+    /// including a path the caller chose — can forge it. `contains("403")` would also be satisfied by a
+    /// `Content-Length: 403`.
+    fn cpe_1730_status_is(resp: &str, status: u16) -> bool {
+        resp.starts_with(&format!("HTTP/1.1 {status} "))
+    }
+
+    /// CPE-1730 acceptance: a request path resolving **outside** the served root is refused, and the
+    /// file outside is still there with its bytes.
+    ///
+    /// # The escape shapes, enumerated
+    ///
+    /// Naming only `..` would imply the other two are handled, and they are different mechanisms:
+    /// 1. **`..`-shaped** — `root.join("../x")` walks out of the tree. Every platform; driven here.
+    /// 2. **absolute** — `Path::join` *discards* its base, so an absolute path replaces the root with no
+    ///    `..` anywhere. Windows-only through this rig, because the request path is
+    ///    `trim_start_matches('/')`-ed and a POSIX absolute path therefore lands *inside* the root.
+    ///    Covered by `cpe_1730_an_absolute_request_path_cannot_replace_the_root` — and note it was
+    ///    **already live in this crate's own CPE-1726 table** at the `http://{host}/p://evil.example/…`
+    ///    row: `p:` is a Windows Disk prefix, so that row's destination escaped the served root and was
+    ///    refused by an `ENOENT` rather than by a guard. That row is the reason this family is worth
+    ///    enumerating rather than sampling.
+    /// 3. **through a symlinked intermediate directory** — no `..`, nothing absolute, invisible to any
+    ///    textual check. The last leg seeds the link with `std::fs` (nothing on this wire creates one)
+    ///    and drives an ordinary-looking `/outlink/victim.txt` through it.
+    ///
+    /// # The filesystem is asserted BEFORE the status, every time
+    ///
+    /// The defect's shape is *success reported for an escape that happened*, so an assertion that reads
+    /// the status first is unreachable in exactly the failing case. Each leg reads the victim back first
+    /// and mentions the response only inside the message.
+    ///
+    /// # And the status assertion pins a code no errno can produce
+    ///
+    /// `404` would be satisfied by every ordinary `std::fs` failure this rig maps, and `400` by
+    /// CPE-1726's destination guard. `403` is sent from the confinement guard and from nowhere else in
+    /// `handle` — see [`CPE_1730_ESCAPED_ROOT_STATUS`].
+    #[test]
+    fn cpe_1730_a_request_path_that_escapes_the_served_root_is_refused() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let (victim_dir, victim, out) = cpe_1730_seed_victim_outside(&root);
+        let addr = base.trim_start_matches("http://").to_string();
+        let refused = CPE_1730_ESCAPED_ROOT_STATUS;
+        let victim_text = std::str::from_utf8(CPE_1730_VICTIM_BYTES).expect("the victim bytes are text");
+
+        // ── PUT: the write that would clobber somebody else's file.
+        let put = cpe_1730_raw(
+            &base,
+            &format!(
+                "PUT {out}/victim.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+                 Content-Length: 5\r\n\r\nPWNED"
+            ),
+        );
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "a PUT to {out}/victim.txt must NOT reach a file outside the served root (response was \
+             {put:?})"
+        );
+        assert!(
+            cpe_1730_status_is(&put, refused),
+            "…and it must be refused BY THE GUARD ({refused}), not by whatever errno came back. Got \
+             {put:?}"
+        );
+
+        // ── GET: the leak in the other direction. Asserted on the *bytes in the response*, not on the
+        // status, because a leak that answered `200` with the file in it is the failure being excluded.
+        let get = cpe_1730_raw(
+            &base,
+            &format!("GET {out}/victim.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            !get.contains(victim_text),
+            "a GET must not serve the contents of a file outside the served root. Got {get:?}"
+        );
+        assert!(cpe_1730_status_is(&get, refused), "…refused by the guard. Got {get:?}");
+
+        // ── PROPFIND: metadata about somebody else's tree is a leak too.
+        let propfind = cpe_1730_raw(
+            &base,
+            &format!(
+                "PROPFIND {out}/victim.txt HTTP/1.1\r\nHost: {addr}\r\nDepth: 0\r\nConnection: close\r\n\
+                 Content-Length: 0\r\n\r\n"
+            ),
+        );
+        assert!(cpe_1730_status_is(&propfind, refused), "PROPFIND refused by the guard. Got {propfind:?}");
+
+        // ── DELETE.
+        let del = cpe_1730_raw(
+            &base,
+            &format!("DELETE {out}/victim.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(victim.is_file(), "DELETE must not remove a file outside the served root ({del:?})");
+        assert!(
+            cpe_1730_status_is(&del, refused),
+            "…refused by the guard, not by a `remove_file` errno. Got {del:?}"
+        );
+
+        // ── MKCOL. `create_dir_all` invents the whole parent chain, so an escaping MKCOL plants
+        // directories outside the root rather than merely failing.
+        let mkcol = cpe_1730_raw(
+            &base,
+            &format!("MKCOL {out}/planted HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(!victim_dir.join("planted").exists(), "MKCOL must not create outside the root ({mkcol:?})");
+        assert!(cpe_1730_status_is(&mkcol, refused), "…refused by the guard. Got {mkcol:?}");
+
+        // ── MOVE, destination side: the shape CPE-1726 measured answering `201 Created` while the
+        // served root left the served area. The destination is a SECOND path, taken from a header, and
+        // nothing that guards the request path says anything about it.
+        let mv_dest = cpe_1730_raw(
+            &base,
+            &format!(
+                "MOVE /readme.txt HTTP/1.1\r\nHost: {addr}\r\nDestination: http://{addr}{out}/victim.txt\r\n\
+                 Connection: close\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "MOVE must not land on a file outside the served root (response was {mv_dest:?})"
+        );
+        assert!(root.join("readme.txt").is_file(), "…and the source must be left alone ({mv_dest:?})");
+        assert!(cpe_1730_status_is(&mv_dest, refused), "…refused by the guard. Got {mv_dest:?}");
+
+        // ── MOVE, SOURCE side — an escaping source moves somebody else's file *into* the served tree.
+        let mv_src = cpe_1730_raw(
+            &base,
+            &format!(
+                "MOVE {out}/victim.txt HTTP/1.1\r\nHost: {addr}\r\nDestination: http://{addr}/stolen.txt\r\n\
+                 Connection: close\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert!(victim.is_file(), "MOVE must not move a file INTO the root from outside ({mv_src:?})");
+        assert!(!root.join("stolen.txt").exists(), "…and nothing may appear at the destination ({mv_src:?})");
+        assert!(cpe_1730_status_is(&mv_src, refused), "…refused by the guard. Got {mv_src:?}");
+
+        // ── Escape family 3: a path THROUGH a symlinked subdirectory. `/outlink/victim.txt` — no `..`,
+        // nothing absolute, nothing a textual filter can see. Seeded with `std::fs` because no verb on
+        // this wire creates a link; that is why the shape is latent rather than live, and why it is
+        // still the one a textual guard cannot see.
+        let link = root.join("outlink");
+        if cpe_server::fsutil::make_dir_link(&victim_dir, &link) {
+            let through = cpe_1730_raw(
+                &base,
+                &format!(
+                    "PUT /outlink/victim.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+                     Content-Length: 14\r\n\r\nPWNED VIA LINK"
+                ),
+            );
+            assert_eq!(
+                std::fs::read(&victim).ok().as_deref(),
+                Some(CPE_1730_VICTIM_BYTES),
+                "a PUT through a SYMLINKED subdirectory leaves the served tree with no `..` and no \
+                 absolute component — the shape no textual check can see (response was {through:?})"
+            );
+            assert!(cpe_1730_status_is(&through, refused), "…refused by the guard. Got {through:?}");
+            let del_through = cpe_1730_raw(
+                &base,
+                &format!("DELETE /outlink/victim.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(victim.is_file(), "…and neither may a DELETE ({del_through:?})");
+            assert!(cpe_1730_status_is(&del_through, refused), "…refused by the guard. Got {del_through:?}");
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1730] SKIPPED the symlinked-subdirectory leg of cpe-webdav's confinement test: \
+                 could not create a directory link at {}. What is NOT covered on this run is escape \
+                 family 3 (a path through a symlinked intermediate directory); family 1 (`..`) above \
+                 still ran.",
+                link.display()
+            );
+        }
+
+        // ── The positive control. Without it every refusal above is satisfied by a rig that does
+        // nothing at all — including one whose resolver returns `None` for every path.
+        let ok_put = cpe_1730_raw(
+            &base,
+            &format!(
+                "PUT /ordinary.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+                 Content-Length: 8\r\n\r\nordinary"
+            ),
+        );
+        assert!(cpe_1730_status_is(&ok_put, 201), "an ordinary PUT must still succeed. Got {ok_put:?}");
+        assert_eq!(std::fs::read(root.join("ordinary.txt")).unwrap(), b"ordinary");
+        let ok_get = cpe_1730_raw(
+            &base,
+            &format!("GET /readme.txt HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+        );
+        assert!(
+            ok_get.contains(std::str::from_utf8(FILE_BODY).unwrap()),
+            "an ordinary GET must still serve the file. Got {ok_get:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    /// Escape family 2: an **absolute** request path, which replaces the served root outright because
+    /// `Path::join` discards its base — no `..` anywhere.
+    ///
+    /// **Windows-only, measured rather than assumed.** The rig trims the leading `/` off the request
+    /// path, so on POSIX `/tmp/x/victim.txt` becomes the *relative* `tmp/x/victim.txt` and lands
+    /// **inside** the root; there is nothing to catch there, and a cross-platform version of this test
+    /// would assert a refusal that no platform-independent defect produces. On Windows a `C:/…` path
+    /// survives the trim intact and is absolute, so the join discards the root — measured on this
+    /// machine:
+    ///
+    /// ```text
+    /// Path::new(r"C:\tmp\root").join("p://evil.example/ok.txt")
+    ///   -> "p://evil.example/ok.txt"   is_absolute = true
+    /// ```
+    ///
+    /// # Two legs, because there are two call sites
+    ///
+    /// The `Destination` leg exercises the confinement check on `MOVE`'s **second** path (the one taken
+    /// from a header); the request-line leg exercises the one at the top of `handle`. A single leg would
+    /// leave whichever site it missed unguarded and the test still green.
+    ///
+    /// # Why the request-line leg can skip, and why that is a property of the runner not of the guard
+    ///
+    /// An HTTP request line is space-delimited, so a path containing a space cannot travel in it at all —
+    /// tiny_http answers `400 Bad Request` before the rig sees anything (measured: this developer's temp
+    /// directory is under `C:\Users\Stewart Rogers\…`). The `Destination` leg has no such limit because a
+    /// header value runs to CRLF, which is why it carries the byte assertions and runs unconditionally.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1730_an_absolute_request_path_cannot_replace_the_root() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let (victim_dir, victim, _) = cpe_1730_seed_victim_outside(&root);
+        let addr = base.trim_start_matches("http://").to_string();
+        let refused = CPE_1730_ESCAPED_ROOT_STATUS;
+        // Forward slashes so nothing has to escape a backslash; still drive-prefixed, so still absolute
+        // and still enough to make `Path::join` discard its base.
+        let absolute = victim.to_string_lossy().replace('\\', "/");
+        assert!(
+            Path::new(&absolute).is_absolute() && !absolute.starts_with('/'),
+            "the fixture must be an absolute path that survives `trim_start_matches('/')`, or this \
+             test drives family 1 by accident: {absolute}"
+        );
+
+        // ── Leg 1: an absolute MOVE destination. Runs everywhere on Windows.
+        let mv = cpe_1730_raw(
+            &base,
+            &format!(
+                "MOVE /readme.txt HTTP/1.1\r\nHost: {addr}\r\nDestination: http://{addr}/{absolute}\r\n\
+                 Connection: close\r\nContent-Length: 0\r\n\r\n"
+            ),
+        );
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "an absolute Destination must not replace the served root (response was {mv:?})"
+        );
+        assert!(root.join("readme.txt").is_file(), "…and the source must be left alone ({mv:?})");
+        assert!(
+            cpe_1730_status_is(&mv, refused),
+            "the refusal must be the confinement guard's own status, not an errno's 404. Got {mv:?}"
+        );
+
+        // ── Leg 2: an absolute REQUEST path, when the runner's temp path can travel in a request line.
+        if absolute.contains(' ') {
+            cpe_server::skip_notice!(
+                "[CPE-1730] SKIPPED the absolute-REQUEST-LINE leg of cpe-webdav's family-2 test: this \
+                 runner's temp path contains a space ({absolute}), and an HTTP request line is \
+                 space-delimited, so tiny_http answers 400 before the rig resolves anything. What is \
+                 NOT covered on this run is the confinement check at the top of `handle` against an \
+                 absolute path; leg 1 above still covered the MOVE-destination check against one."
+            );
+        } else {
+            let del = cpe_1730_raw(
+                &base,
+                &format!("DELETE /{absolute} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+            );
+            assert!(victim.is_file(), "…and neither may an absolute DELETE (response was {del:?})");
+            assert!(
+                cpe_1730_status_is(&del, refused),
+                "the refusal must be the confinement guard's own status. Got {del:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    /// `MOVE /` — the **served root itself** as the rename source.
+    ///
+    /// Here in the containment ticket because it is the half containment **cannot** close: the root is
+    /// contained in itself by design (a resolver must map `/` somewhere, or `PROPFIND /` cannot work),
+    /// so `confined_to` allows it and `same_place` on the *source* is what refuses it. Containment is
+    /// not equality, and `MOVE` is where the difference is paid for — it asks both questions, of both
+    /// paths, and gets four answers.
+    ///
+    /// **The tree assertions cannot fail today, and that is stated rather than implied.** Every
+    /// destination confinement still allows is inside the root, and no filesystem renames a directory
+    /// into its own subtree — with the guard removed the rig answers `404` from the `rename` errno and
+    /// the tree survives anyway. What carries this test is the **status**: `409` is sent from this
+    /// guard and nowhere else, so it cannot be produced by an accident of the OS. A test whose
+    /// filesystem assertions are vacuous and whose author has not noticed is the failure mode this
+    /// ticket family keeps rediscovering, so it is named here.
+    ///
+    /// Distinct from CPE-1726's `400`, which is the *destination*-resolves-to-the-root guard: the
+    /// destination here (`/moved-root`) is an ordinary in-tree name, so that guard has nothing to say.
+    #[test]
+    fn cpe_1730_a_move_whose_source_is_the_served_root_is_refused() {
+        let (base, root) = spawn_webdav_server_returning_root();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        let r = provider.rename("/", "/moved-root");
+        assert!(
+            root.join("readme.txt").is_file() && root.join("sub").join("nested.txt").is_file(),
+            "the served root must still be the served root, with its contents (outcome was {r:?})"
+        );
+        assert!(!root.join("moved-root").exists(), "…and nothing may appear at the destination ({r:?})");
+        assert!(
+            cpe_1730_refused_with(&r, CPE_1730_ROOT_SOURCE_STATUS),
+            "the refusal must name the SOURCE guard ({CPE_1730_ROOT_SOURCE_STATUS}). CPE-1726's `400` \
+             would mean the destination guard answered, and a `404` would mean an errno did. Got {r:?}"
+        );
+    }
+
 
     #[test]
     fn generic_transfer_walks_downloads_and_uploads_over_webdav() {
