@@ -54,6 +54,23 @@ describe("spotlightFrecency — recordVisit increments/creates entries (CPE-1216
     recordVisit(before, "/b", 2);
     expect(before).toEqual(snapshot);
   });
+
+  it("CPE-1737 round 2: increments the SAME entry across a trailing-slash spelling change, instead of forking into two", () => {
+    // A remote directory's path now legitimately carries a trailing '/' from its own listing row
+    // (CPE-1737 round 1); a visit recorded via a different route (favourite, typed address) would not
+    // reproduce that shape.
+    const before: Visit[] = [{ path: "sftp://h/srv/sub", count: 1, last_used_s: 1000 }];
+    const after = recordVisit(before, "sftp://h/srv/sub/", 2000);
+    expect(after).toEqual([{ path: "sftp://h/srv/sub", count: 2, last_used_s: 2000 }]);
+  });
+
+  it("CPE-1737 round 2: never rewrites a LOCAL Windows path's separators for a first-time visit", () => {
+    // Regression pin: an earlier round of this fix stored `canonicalPath(path)`, which also normalises
+    // '\' to '/' — corrupting a local Windows path the moment it was recorded, and a ranked hit is fed
+    // straight back into navigation.
+    const after = recordVisit([], "C:\\Users\\me\\docs", 1);
+    expect(after).toEqual([{ path: "C:\\Users\\me\\docs", count: 1, last_used_s: 1 }]);
+  });
 });
 
 describe("spotlightFrecency — decay: stalest entries are pruned once the store overflows (CPE-1216)", () => {

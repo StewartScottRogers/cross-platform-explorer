@@ -113,7 +113,7 @@ mod fixture {
 }
 
 /// Join a leaf/relative `name` onto the provider-relative `root` (forward-slash, provider convention;
-/// mirrors `cpe_vfs::connect::join_remote`, private to that module).
+/// mirrors `cpe_vfs::connect::join_remote(..., is_dir: false)`, private to that module).
 fn remote(root: &str, name: &str) -> String {
     let base = root.trim_end_matches('/');
     if base.is_empty() {
@@ -121,6 +121,18 @@ fn remote(root: &str, name: &str) -> String {
     } else {
         format!("{base}/{name}")
     }
+}
+
+/// The same join as [`remote`], but as a DIRECTORY path — trailing `/` included (mirrors
+/// `cpe_vfs::connect::join_remote(..., is_dir: true)`). CPE-1737 round 2: before this helper existed,
+/// `remote()` was the ONLY path-builder in this suite, and it mirrors the OLD `join_remote` that never
+/// appended a trailing slash regardless of `is_dir` — so this real-server rig never sent a slashed
+/// directory path to OpenSSH/vsftpd/mod_dav, and the one real bug that shape exposed (WebDAV's `delete`
+/// retry-then-escalate guard skipping entirely on an already-slashed path — see `WebdavProvider::delete`)
+/// was caught only by an in-process fake-server test, not by this E2E job.
+/// `assert_slashed_directory_path_round_trips` below is what actually exercises the new shape here.
+fn remote_dir(root: &str, name: &str) -> String {
+    format!("{}/", remote(root, name))
 }
 
 /// A short, collision-resistant tag for scratch paths this run creates — so re-running the suite (or
@@ -148,6 +160,7 @@ fn conformance(provider: &mut dyn FileSystemProvider, root: &str, host_dir: &Pat
     assert_big_binary_read_is_byte_exact(provider, root, host_dir);
     assert_write_read_round_trip_for_hostile_names(provider, root, host_dir);
     assert_mkdir_rename_delete_verified_from_host_disk(provider, root, host_dir);
+    assert_slashed_directory_path_round_trips(provider, root, host_dir);
     assert_missing_path_is_a_clean_error(provider, root);
 }
 
@@ -287,7 +300,41 @@ fn assert_mkdir_rename_delete_verified_from_host_disk(
     );
 }
 
-/// Assertion 6 (error shape): `read`/`stat` of a missing path returns `Err` — not a panic, not an
+/// Assertion 6 (CPE-1737 round 2): `mkdir`/`stat`/`list`/`delete` all accept a directory path built
+/// WITH its trailing slash (`remote_dir`, mirroring the shape a real listing row now hands back for a
+/// directory — CPE-1737 round 1), verified from the HOST disk at the end, not just via the client's own
+/// say-so. This is exactly the shape the in-process WebDAV fake could not have caught the `delete`
+/// retry-guard bug through (an already-slashed path used to skip the guard and silently report success
+/// having deleted nothing) — only a real server proves the fix end-to-end.
+fn assert_slashed_directory_path_round_trips(
+    provider: &mut dyn FileSystemProvider,
+    root: &str,
+    host_dir: &Path,
+) {
+    let tag = unique_tag();
+    let dir_name = format!("slashed-dir-{tag}");
+    let slashed = remote_dir(root, &dir_name);
+
+    provider.mkdir(&slashed).unwrap_or_else(|e| panic!("mkdir {slashed} (trailing-slash form): {e}"));
+    let host_meta = std::fs::metadata(host_dir.join(&dir_name)).unwrap_or_else(|e| {
+        panic!("mkdir (trailing-slash form) did not create a real directory on the host disk: {e}")
+    });
+    assert!(host_meta.is_dir(), "{dir_name} exists on disk but is not a directory");
+
+    let st = provider.stat(&slashed).unwrap_or_else(|e| panic!("stat {slashed} (trailing-slash form): {e}"));
+    assert!(st.is_dir, "stat of the trailing-slash form must still report a directory");
+
+    provider.list(&slashed).unwrap_or_else(|e| panic!("list {slashed} (trailing-slash form): {e}"));
+
+    provider.delete(&slashed).unwrap_or_else(|e| panic!("delete {slashed} (trailing-slash form): {e}"));
+    assert!(
+        std::fs::metadata(host_dir.join(&dir_name)).is_err(),
+        "{dir_name} must be gone from the host disk after a trailing-slash delete — a delete that \
+         silently no-ops on this shape (CPE-1737 round 2's WebDAV bug) would leave it behind"
+    );
+}
+
+/// Assertion 7 (error shape): `read`/`stat` of a missing path returns `Err` — not a panic, not an
 /// empty success.
 fn assert_missing_path_is_a_clean_error(provider: &dyn FileSystemProvider, root: &str) {
     let missing = remote(root, &format!("definitely-does-not-exist-{}.bin", unique_tag()));

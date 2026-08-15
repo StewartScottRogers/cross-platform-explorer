@@ -380,9 +380,14 @@
   $: revealPath(currentPath);
   $: if (selectedPath) revealPath(selectedPath);
 
-  /** A node is highlighted when it is the current folder or the selected one. */
+  /** A node is highlighted when it is the current folder or the selected one. Compares through `norm()`
+   *  (CPE-1737 round 2), like every other path comparison in this file (`isAncestorOrSelf`, `revealPath`)
+   *  — a raw `===` here missed a remote directory's own tree node (`p`, always the listing-row spelling,
+   *  trailing '/' included for a directory) against `currentPath`/`selectedPath` reached via Up/breadcrumb/
+   *  favourite/session-restore (never slashed): the highlight would light up on first entry, then vanish
+   *  the moment you left and came back by any other route. */
   const isMarked = (p: string) =>
-    !isHome && (p === currentPath || (selectedPath !== "" && p === selectedPath));
+    !isHome && (norm(p) === norm(currentPath) || (selectedPath !== "" && norm(p) === norm(selectedPath)));
 </script>
 
 <div class="navigation-pane" role="region" aria-label="Navigation" class:compact={density === "compact"}>

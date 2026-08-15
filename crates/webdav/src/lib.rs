@@ -347,7 +347,26 @@ impl FileSystemProvider for WebdavProvider {
         // never deletes a directory, only a file) stayed GREEN, proving the rig can fail and that a
         // same-author fake server cannot catch this class of bug. See the CPE-1659 Work Log for both
         // run URLs.
-        if (300..400).contains(&resp.status()) && !path.ends_with('/') {
+        //
+        // CPE-1737 round 2 fix: this used to gate the WHOLE block on `!path.ends_with('/')` — i.e. off
+        // the ORIGINAL path's own spelling. Since a remote directory's `path` can now legitimately
+        // arrive HERE already carrying a trailing '/' (CPE-1737 round 1 gave a listing row that shape),
+        // an already-slashed directory delete that hit a 3xx would skip this entire block and fall
+        // through to `Ok(())` below having deleted nothing — the exact silent-success mode this guard
+        // exists to close, reached by a path that started slashed rather than one whose retry ended up
+        // slashed. The condition below is keyed off whether THIS ATTEMPT already used the slashed
+        // form, not off the path's spelling: a bare path gets the one well-defined retry (RFC 4918
+        // §8.3's canonical collection URL, never a server-chosen `Location` — CPE-1461); a path that
+        // already used that form has no further fallback left, so a 3xx there escalates immediately.
+        if (300..400).contains(&resp.status()) {
+            if path.ends_with('/') {
+                return Err(format!(
+                    "{path}: DELETE returned HTTP {} (not deleted) — this request already used the \
+                     trailing-slash collection form (RFC 4918 §8.3), so there is no further fallback \
+                     left to retry",
+                    resp.status()
+                ));
+            }
             let with_slash = format!("{}/", path.trim_end_matches('/'));
             let retry = self.request_bounded("DELETE", &with_slash).call().map_err(|e| http_err(path, e))?;
             // CPE-1673 follow-up: the retry is subject to the exact same `.call()`-only-errors-on->=400
@@ -1870,6 +1889,26 @@ mod tests {
         let err = provider
             .delete("/dir")
             .expect_err("a retry that ALSO comes back 3xx must not silently report Ok(()) — nothing was deleted");
+        assert!(err.contains("dir"), "error should reference the path being deleted; got: {err}");
+    }
+
+    /// CPE-1737 round 2: the retry-then-escalate guard above used to key off the path's OWN spelling
+    /// (`!path.ends_with('/')`), so a path that already carried a trailing slash on its FIRST attempt
+    /// skipped the whole block and fell through to `Ok(())` on a 3xx — deleting nothing while reporting
+    /// success. A remote directory's own path can now legitimately arrive here already slashed (a
+    /// listing row's shape, post-CPE-1737 round 1), so this must be held to the same standard as the
+    /// bare-path case above: no silent `Ok` on an unresolved 3xx, regardless of which form got there
+    /// first.
+    #[test]
+    fn delete_of_an_already_slashed_directory_that_redirects_is_reported_as_an_error_not_ok() {
+        let base = spawn_always_redirecting_delete_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+        let err = provider
+            .delete("/dir/")
+            .expect_err(
+                "an already-slashed path that comes back 3xx must not silently report Ok(()) — nothing \
+                 was deleted",
+            );
         assert!(err.contains("dir"), "error should reference the path being deleted; got: {err}");
     }
 

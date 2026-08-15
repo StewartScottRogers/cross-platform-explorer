@@ -128,12 +128,14 @@ client, and none of this applies to it yet.
   be met.** A bucket can hold both an object named `photos` **and** other objects under `photos/` —
   nothing in S3 stops it, because keys are just strings.
     - When you can list, such a bucket shows **two rows both named `photos`** — one file, one folder —
-      because that is genuinely what's in the bucket. Deleting works from the path, and both rows have the
-      same path, so the app can't tell which row you clicked even though you were perfectly clear. It
-      therefore refuses, which means **the object `photos` can't be deleted at all by a key that can
-      list**, while a key that *can't* list deletes it happily (it can only see the object, so there's
-      nothing to be ambiguous about). Granting a permission makes that one operation impossible. Giving
-      the two rows distinguishable paths is on the list, and would fix both halves.
+      because that is genuinely what's in the bucket. The two rows get **distinguishable paths**: the
+      folder row's path ends in a trailing `/` — S3's own spelling for "this is a prefix, not an
+      object" — while the file row's stays bare, so the two are never mistaken for the same target and
+      clicking one says exactly which of the two you meant. Delete/move/copy/rename aren't wired up to
+      a remote location yet — browsing a saved connection is currently read-only in the app — so this
+      mainly matters for what that future remote delete/write can build on: the row already carries the
+      bit it needs to tell the object and the folder apart, rather than having to guess from a shared
+      path.
     - Deleting something that **isn't there** also differs: with list permission it reports success
       (S3 treats delete as idempotent, and "that key is gone now" is true), while without it the app
       refuses, because a 404 on the key can't be told apart from a folder it isn't allowed to look

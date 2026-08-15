@@ -42,6 +42,31 @@ describe("tags helpers (CPE-636)", () => {
     expect(entryFor({}, "/a/one")).toEqual({ tags: [], label: "" });
   });
 
+  describe("entryFor — CPE-1737 round 2 (trailing-slash fallback)", () => {
+    it("falls back to a canonical-path match when the exact key misses", () => {
+      // `set_tags` has no `require_local`, so a remote folder is genuinely taggable. A directory's
+      // listing-row path now legitimately carries a trailing '/' (CPE-1737 round 1); a lookup from a
+      // different route (toolbar/sidebar) would not reproduce that shape.
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "blue" } };
+      expect(entryFor(remoteStore, "sftp://h/srv/sub/")).toEqual({ tags: ["x"], label: "blue" });
+    });
+
+    it("prefers an exact match over the fallback scan when both could apply", () => {
+      const remoteStore: TagStore = {
+        "sftp://h/srv/sub": { tags: ["bare"], label: "" },
+        "sftp://h/srv/sub/": { tags: ["slashed"], label: "" },
+      };
+      expect(entryFor(remoteStore, "sftp://h/srv/sub")).toEqual({ tags: ["bare"], label: "" });
+      expect(entryFor(remoteStore, "sftp://h/srv/sub/")).toEqual({ tags: ["slashed"], label: "" });
+    });
+
+    it("never mutates the store's own keys — only the LOOKUP is canonicalised", () => {
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      entryFor(remoteStore, "sftp://h/srv/sub/");
+      expect(Object.keys(remoteStore)).toEqual(["sftp://h/srv/sub"]);
+    });
+  });
+
   it("hasTag reports membership per path", () => {
     expect(hasTag(store, "/a/one", "urgent")).toBe(true);
     expect(hasTag(store, "/a/one", "home")).toBe(false);

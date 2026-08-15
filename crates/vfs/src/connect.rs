@@ -223,10 +223,25 @@ fn authority(loc: &Location) -> String {
 ///
 /// `is_dir` appends S3's own spelling of "this is a prefix, not an object" — a trailing `/` — so a
 /// same-named file and directory (CPE-1737: an S3 object `photos` and a prefix `photos/` are
-/// independent and can coexist) never build the same path. This isn't S3-specific plumbing: every
-/// remote provider in this workspace already tolerates a trailing `/` on a directory path (SFTP/FTP
-/// `stat` trim it; WebDAV's own PROPFIND target always carries one), so appending it here is safe
-/// uniformly, not just for the one backend that can actually collide today.
+/// independent and can coexist) never build the same path. This is done here, in the shared
+/// `cpe-vfs::connect` layer, so every remote backend gets it, not just S3 — the one backend that can
+/// actually collide today (S3 isn't user-reachable yet: `cpe_vfs::open` has no `s3` arm, CPE-1685).
+///
+/// A trailing `/` on a directory path is a near-universal convention (POSIX treats `dir` and `dir/`
+/// identically; WebDAV's own collection-URL convention, RFC 4918 §8.3, IS the trailing slash), so
+/// applying it uniformly is expected to be safe for the three backends that ARE reachable today — but
+/// it is not uniformly TRUE that every operation on every backend already trims/tolerates it, and an
+/// earlier version of this comment overclaimed that it was. `stat` trims a trailing slash when
+/// computing the display NAME on SFTP/FTP/WebDAV (`sftp/src/lib.rs`, `ftp/src/lib.rs`,
+/// `webdav/src/lib.rs`), but `list`/`mkdir`/`delete`/`rename` send the path VERBATIM on every backend —
+/// and one of those was a real, live bug: WebDAV's `delete` retry-then-escalate guard used to key off
+/// the INPUT path's own spelling, so an already-slashed directory path skipped the guard entirely on a
+/// 3xx response and silently reported `Ok(())` having deleted nothing (fixed alongside this comment —
+/// see [`FileSystemProvider::delete`]'s WebDAV impl and
+/// `delete_of_an_already_slashed_directory_that_redirects_is_reported_as_an_error_not_ok`).
+/// `crates/vfs/tests/real_server_conformance.rs`'s `remote()` helper mirrors this function so the
+/// real-server-rig E2E job (OpenSSH/vsftpd/mod_dav) actually exercises the new shape end-to-end, rather
+/// than leaving it unverified beyond the in-process fakes.
 fn join_remote(dir: &str, name: &str, is_dir: bool) -> String {
     let base = dir.trim_end_matches('/');
     let suffix = if is_dir { "/" } else { "" };
@@ -308,15 +323,27 @@ pub fn remote_dir_entries(
     Ok(RemoteListing { entries, filtered })
 }
 
+/// Normalise `uri`'s trailing slash to match `is_dir` — a directory's URI always ends `/`, a file's
+/// never does. `remote_stat` (below) uses this so the `path` it returns follows the SAME convention
+/// [`dir_entry_from_provider`]'s listing rows use (CPE-1737), regardless of which spelling the caller
+/// used to reach this exact path (a favourite, a typed address, a listing row — non-blocking cleanup
+/// from CPE-1737 round 2's review; see `src/lib/paths.ts`'s `canonicalPath` for the frontend's mirror of
+/// the same idea, going the other direction).
+fn with_dir_suffix(uri: &str, is_dir: bool) -> String {
+    let base = uri.trim_end_matches('/');
+    if is_dir { format!("{base}/") } else { base.to_string() }
+}
+
 /// Stat the remote path `uri` into a single [`DirEntry`].
 pub fn remote_stat(provider: &dyn FileSystemProvider, uri: &str) -> Result<DirEntry, String> {
     let loc = location::parse(uri);
     let e = provider.stat(&loc.path)?;
-    // `stat` targets the path itself, so the row's URI is the input URI (not a joined child).
+    // `stat` targets the path itself, so the row's URI is (a normalised form of) the input URI, not a
+    // joined child.
     let extension =
         if e.is_dir { String::new() } else { extension_of(std::path::Path::new(&e.name)) };
     Ok(DirEntry {
-        path: uri.to_string(),
+        path: with_dir_suffix(uri, e.is_dir),
         hidden: e.name.starts_with('.'),
         extension,
         name: e.name,
@@ -487,7 +514,13 @@ mod tests {
         assert_eq!(readme.extension, "txt");
         assert!(!readme.is_dir);
         assert!(rows.iter().find(|r| r.name == ".hidden").unwrap().hidden);
-        assert!(rows.iter().find(|r| r.name == "sub").unwrap().is_dir);
+        let sub = rows.iter().find(|r| r.name == "sub").unwrap();
+        assert!(sub.is_dir);
+        // CPE-1737 round 2 (review finding): nothing here pinned a DIRECTORY row's own path through the
+        // real `remote_dir_entries` channel — only the file row above was ever asserted, so a directory
+        // path regression here was invisible to this test even though it exercises the exact function
+        // (`dir_entry_from_provider`) both rows are built by.
+        assert_eq!(sub.path, "sftp://me@host.example.com:2222/srv/sub/");
 
         // stat + read route to the same provider.
         let st = remote_stat(&**provider.lock().unwrap(), "sftp://me@host.example.com:2222/srv/readme.txt").unwrap();

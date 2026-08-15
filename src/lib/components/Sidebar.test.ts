@@ -90,6 +90,51 @@ describe("Sidebar Agents section (CPE-397)", () => {
   });
 });
 
+describe("Sidebar current-folder highlight (CPE-1737 round 2)", () => {
+  // A remote directory's own path can now legitimately carry a trailing '/' (CPE-1737 round 1). A
+  // favourite's stored path and `currentPath` can each independently be slashed or not depending on
+  // which route produced them (a listing row vs. Up/breadcrumb/typed-address/session-restore) — the
+  // highlight must agree regardless of which side carries the slash.
+  it("highlights a favourited folder as current even when currentPath is un-slashed and the favourite is slashed", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [{ path: "sftp://h/srv/sub/", name: "sub", is_dir: true }],
+      sessions: [],
+      currentPath: "sftp://h/srv/sub",
+    });
+    const row = container.querySelector(".fav-item") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.classList.contains("active")).toBe(true);
+  });
+
+  it("highlights a favourited folder as current even when currentPath is slashed and the favourite is un-slashed", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [{ path: "sftp://h/srv/sub", name: "sub", is_dir: true }],
+      sessions: [],
+      currentPath: "sftp://h/srv/sub/",
+    });
+    const row = container.querySelector(".fav-item") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.classList.contains("active")).toBe(true);
+  });
+
+  it("does NOT highlight an unrelated favourite", () => {
+    const { container } = render(Sidebar, {
+      places: [],
+      drives: [],
+      favorites: [{ path: "sftp://h/srv/other", name: "other", is_dir: true }],
+      sessions: [],
+      currentPath: "sftp://h/srv/sub/",
+    });
+    const row = container.querySelector(".fav-item") as HTMLElement;
+    expect(row).toBeTruthy();
+    expect(row.classList.contains("active")).toBe(false);
+  });
+});
+
 describe("Sidebar Saved Searches section (CPE-1229)", () => {
   const savedSearch = (over: Partial<SavedSearch> = {}): SavedSearch => ({
     id: "ss1",

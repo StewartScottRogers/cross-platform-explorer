@@ -7,6 +7,7 @@
  */
 import { commands } from "./bindings.gen";
 import type { Visit, SpotSection, SpotResult } from "./bindings.gen";
+import { samePath } from "./paths";
 
 /** Hard cap on how many paths the frecency store remembers. Beyond this, the STALEST entries (oldest
  *  `last_used_s`) are pruned first when a new visit is recorded — a lightweight decay so years of use
@@ -50,7 +51,13 @@ export function serializeFrecent(list: Visit[]): string {
  * When the store grows past `MAX_FRECENT_ENTRIES`, the stalest entries are dropped first.
  */
 export function recordVisit(list: Visit[], path: string, nowS: number = Math.floor(Date.now() / 1000)): Visit[] {
-  const i = list.findIndex((v) => v.path === path);
+  // Compared by canonicalPath (CPE-1737 round 2): a remote directory's `path` legitimately carries a
+  // trailing '/' from a listing row, which a visit recorded via a different route (favourite, typed
+  // address) would not — without this, the same real folder would fork into two frecency entries
+  // instead of one building count/recency together. `path` is stored exactly as given (never rewritten
+  // through `canonicalPath`, which also normalises `\`→`/`): a ranked hit is fed straight back into
+  // navigation, so a LOCAL Windows path's separators must round-trip untouched.
+  const i = list.findIndex((v) => samePath(v.path, path));
   let next: Visit[];
   if (i === -1) {
     next = [...list, { path, count: 1, last_used_s: nowS }];

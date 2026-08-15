@@ -7,6 +7,7 @@
 import { writable, get, type Readable } from "svelte/store";
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { unwrap } from "./invoke";
+import { canonicalPath } from "./paths";
 
 /** One path's tags plus its single colour label (mirror of the Rust `TagEntry`). */
 export interface TagEntry {
@@ -37,10 +38,29 @@ export function labelColor(label: string): string {
   return LABEL_COLORS[label] ?? "";
 }
 
+const EMPTY_ENTRY: TagEntry = { tags: [], label: "" };
+
 /** The entry for a path, or an empty entry if the path is untagged (or the store is empty/absent).
-    Pure (never mutates the store). */
+ *  Pure (never mutates the store).
+ *
+ *  Falls back to a canonicalPath scan (CPE-1737 round 2) ONLY when the exact key misses: `set_tags` has
+ *  no `require_local`, so a remote folder is genuinely taggable, and its listing row's `path`
+ *  legitimately carries a trailing '/' that a lookup from a different route (the toolbar's "tag this
+ *  folder", the sidebar) would not reproduce. The store's OWN keys are left exactly as the backend
+ *  returned them — this only widens what a lookup will MATCH, it never rewrites what gets sent to
+ *  `setTags`/stored as a key, so a LOCAL Windows path's separators are never at risk of the
+ *  backslash-corruption `canonicalPath` would cause if used to build a literal value (see
+ *  settings.ts's comment on the same class of bug). The store is small (opt-in — only tagged paths
+ *  appear at all), so the O(n) fallback scan costs nothing in practice. */
 export function entryFor(store: TagStore, path: string): TagEntry {
-  return store?.[path] ?? { tags: [], label: "" };
+  if (!store) return EMPTY_ENTRY;
+  const exact = store[path];
+  if (exact) return exact;
+  const key = canonicalPath(path);
+  for (const k of Object.keys(store)) {
+    if (canonicalPath(k) === key) return store[k];
+  }
+  return EMPTY_ENTRY;
 }
 
 /** Whether `path` currently carries `tag`. Pure. */
@@ -73,7 +93,9 @@ export async function initTags(): Promise<void> {
   store.set(s ?? {});
 }
 
-/** Replace one path's tags + label; the store is updated from the returned whole store. */
+/** Replace one path's tags + label; the store is updated from the returned whole store. `path` is sent
+ *  exactly as given — never rewritten through `canonicalPath` (see `entryFor`'s doc for why storing/
+ *  sending the canonicalised form is unsafe for a local path). */
 export async function setEntryTags(path: string, tags: string[], label: string): Promise<void> {
   const updated = unwrap(await commands.setTags(path, tags, label)) as TagStore;
   store.set(updated ?? {});

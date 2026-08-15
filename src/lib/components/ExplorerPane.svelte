@@ -30,6 +30,7 @@
   import type { AvailableColumn, MetadataCell } from "../bindings.gen";
   import { commands } from "../bindings.gen"; // typed client (CPE-964) — the non-streamed collect variant
   import { metaColumnCatalog, ensureMetaColumnCatalog } from "../metaColumnCatalog";
+  import { canonicalPath } from "../paths";
 
   /** True when the Home screen should show (App: `isHome && !smartFolder`). */
   export let inHome = false;
@@ -291,14 +292,23 @@
   let loadGen = 0;
   const dirCache = new Map<string, DirEntry[]>(); // insertion order == LRU recency
   const DIR_CACHE_MAX = 48;
+  // Keyed by canonicalPath (CPE-1737 round 2), NOT the raw path: a remote directory row's `path`
+  // legitimately carries a trailing '/' that navigating to the SAME folder via Up/breadcrumb/typed
+  // address/favourite does not reproduce. Without this, the two spellings would occupy two separate LRU
+  // slots — a post-mutation `useCache=false` reload invalidating one spelling would leave the other
+  // stale, so the pane could keep showing pre-mutation rows depending on which route got you there. The
+  // VALUES (the listing itself) are untouched — each row keeps its own real `path`, trailing slash
+  // included for a directory, so FileList's keyed `{#each}` still sees the distinct paths it needs.
   function cacheGet(path: string): DirEntry[] | undefined {
-    const v = dirCache.get(path);
-    if (v) { dirCache.delete(path); dirCache.set(path, v); }
+    const key = canonicalPath(path);
+    const v = dirCache.get(key);
+    if (v) { dirCache.delete(key); dirCache.set(key, v); }
     return v;
   }
   function cachePut(path: string, list: DirEntry[]): void {
-    dirCache.delete(path);
-    dirCache.set(path, list);
+    const key = canonicalPath(path);
+    dirCache.delete(key);
+    dirCache.set(key, list);
     while (dirCache.size > DIR_CACHE_MAX) dirCache.delete(dirCache.keys().next().value as string);
   }
   const sameListing = (a: DirEntry[], b: DirEntry[]): boolean =>

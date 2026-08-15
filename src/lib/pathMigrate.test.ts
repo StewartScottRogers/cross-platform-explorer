@@ -40,6 +40,26 @@ describe("migratedPath — pure path rewrite (CPE-1224)", () => {
     expect(migratedPath("/a/b", "/a/b", "/a/b")).toBeNull();
     expect(migratedPath("/a/b", "", "/new")).toBeNull();
   });
+
+  describe("CPE-1737 round 2: from/to already carrying a trailing separator", () => {
+    // A remote directory's own path can now legitimately arrive here already slashed (CPE-1737 round
+    // 1). Before stripping it, `underSlash`/`underBack` built a DOUBLED separator ("…/sub//") that no
+    // real descendant path ever starts with — so a slashed folder's rename/move migrated the folder
+    // itself (the exact-match branch, unaffected) but silently left every descendant behind, un-rekeyed.
+    it("still re-keys a subtree entry when `from` carries a trailing slash", () => {
+      expect(migratedPath("sftp://h/srv/sub/child.txt", "sftp://h/srv/sub/", "sftp://h/srv/renamed"))
+        .toBe("sftp://h/srv/renamed/child.txt");
+    });
+
+    it("does not build a doubled separator in the OUTPUT when `to` also carries a trailing slash", () => {
+      expect(migratedPath("sftp://h/srv/sub/child.txt", "sftp://h/srv/sub", "sftp://h/srv/renamed/"))
+        .toBe("sftp://h/srv/renamed/child.txt");
+    });
+
+    it("still re-keys the exact match itself when `from` is slashed (unaffected branch, kept green)", () => {
+      expect(migratedPath("sftp://h/srv/sub/", "sftp://h/srv/sub/", "sftp://h/srv/renamed")).toBe("sftp://h/srv/renamed");
+    });
+  });
 });
 
 describe("migratePathList — array re-keying for the three real stores (CPE-1224)", () => {
