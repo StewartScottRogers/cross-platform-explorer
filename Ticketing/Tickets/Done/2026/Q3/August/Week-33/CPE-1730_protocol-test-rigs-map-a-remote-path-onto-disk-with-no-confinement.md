@@ -3,11 +3,11 @@ id: CPE-1730
 title: The FTP, SFTP and WebDAV test rigs map a remote path onto disk with no confinement to their root
 type: bug
 priority: Low
-status: In Progress
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-14
 ---
 
 ## Problem
