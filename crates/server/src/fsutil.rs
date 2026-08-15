@@ -1657,6 +1657,15 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 /// to `fs::write`/`remove_file`/`remove_dir_all`/`fs::rename` with **no containment check at all**
 /// (CPE-1730).
 ///
+/// **It is also the AI Copilot's guard** ([`crate::copilot`]'s `apply_op`, CPE-1750) — and that caller,
+/// unlike the rigs, is the shipped app running `fs::rename`/`fs::copy`/`create_dir_all`/`trash::delete`
+/// on a real user's files. It arrived here by deleting a fourth, weaker copy of this walk: a
+/// `parent_confined` that inspected only the path's *parent* chain and treated a dangling link's
+/// `NotFound` as "this name does not exist yet", so it answered *confined* for `root/dangling`,
+/// `root/dangling/x.txt` and `root/live` while this function answers *not confined* for all three. If a
+/// fifth copy is ever proposed, that measurement is the reason not to write one: containment has one
+/// answer in this crate, and it is here. **Extend this; do not fork it.**
+///
 /// # Containment is not equality, and the difference is the whole ticket
 ///
 /// [`same_place`] answers *"does this destination resolve **to** the served root?"* — CPE-1726/CPE-1731's
@@ -1747,9 +1756,11 @@ const CONFINEMENT_STEP_BUDGET: usize = 4096;
 ///
 /// - **It is not atomic with the primitive.** Between this check and the caller's `fs::rename`, a
 ///   component could be replaced by a symlink pointing out of the tree (a TOCTOU swap). Closing that
-///   needs `openat2(RESOLVE_BENEATH)` on Linux or an `O_NOFOLLOW` walk, neither of which `std` offers;
-///   the callers are single-threaded in-process test rigs where nothing else touches the tree, which is
-///   why this is recorded rather than solved. **A real server must not treat this as sufficient.**
+///   needs `openat2(RESOLVE_BENEATH)` on Linux or an `O_NOFOLLOW` walk, neither of which `std` offers,
+///   which is why this is recorded rather than solved. **A real server must not treat this as
+///   sufficient.** CPE-1730's own callers are single-threaded in-process test rigs where nothing else
+///   touches the tree; CPE-1750's is not — [`crate::copilot`] runs this against a user's live
+///   filesystem, and repeats the residual on its own `apply_op` so a reader of that path meets it there.
 /// - **It says nothing about what the primitive then does to a link at the final component.** A
 ///   contained path may still *be* a symlink whose target is contained but is written *through* rather
 ///   than replaced — CPE-1719's shape, pinned separately by CPE-1726's tests.

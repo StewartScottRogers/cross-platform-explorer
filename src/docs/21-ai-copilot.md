@@ -59,6 +59,28 @@ rather than aborting the rest. Afterwards you see:
 Any deletes the plan made went to the OS trash / Recycle Bin, not permanent deletion — mentioned right in
 the results — so even without using Undo, a mistaken delete is recoverable the normal way.
 
+### Links and shortcuts that lead out of the folder
+
+A folder can contain a symbolic link, an NTFS junction, or a OneDrive-style redirect whose name looks
+completely ordinary but whose *real* location is somewhere else on the disk — often outside the folder you
+confirmed. Copying or creating through one of those would put files somewhere you never approved, and
+because the checkpoint only covers the confirmed folder, **Undo could not bring them back**.
+
+So before each operation runs, the copilot resolves its paths the way the operating system would, and
+**refuses any operation that lands outside the confirmed folder** — whether the link is a folder along the
+way or the very last part of the name, and whether it currently points at something real or at a location
+that does not exist yet. The refusal appears as a failed operation with its reason, and the rest of the
+plan carries on. If the copilot cannot work out where a path leads at all (a file the OS will not let it
+read, for instance), it refuses that operation too and says so, rather than guessing.
+
+This is why an operation can be refused even though the path you see starts inside your folder: what
+matters is where it *ends up*.
+
+The confirmed folder **itself** is off limits too. An operation naming the folder you picked — rather than
+something in it — is refused, because deleting it, renaming it or copying it would act in its *parent*,
+which is outside the folder and outside what Undo restores. The copilot rearranges what is inside the
+folder you chose; it never touches the folder itself.
+
 ## What this is (and isn't)
 
 Like [Checkpoints & Rollback](16-checkpoints), this is the safety-first, palette-driven surface over the
