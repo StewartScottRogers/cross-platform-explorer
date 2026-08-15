@@ -45,8 +45,10 @@ pending. Nothing touches disk until you click **Save**:
   original is untouched either way. An app that is force-quit or crashes during a save can leave a stray
   file next to yours whose name ends in `.cpe-tmp` — it's the half-written copy, and nothing else will
   ever read it. You don't need to delete it by hand: the next time that same file is saved, the app
-  notices it's stale and removes it automatically. (It only lingers if that particular file is never
-  saved again.)
+  notices it's stale and removes it automatically. (It lingers if that particular file is never saved
+  again. It can also linger in a folder holding a very large number of files — the app only checks part
+  of such a folder on each save, so it may never look at that leftover. It is harmless either way, and
+  safe to delete by hand.)
 - **What that safety costs, so you can judge it.** Writing a new file and moving it into place means the
   saved file is a *new* file, and things attached to the old one don't come with it:
   - **Permissions and ownership are reset** to what a newly created file gets. On Linux and macOS a file

@@ -187,6 +187,12 @@ FINDINGS**, all three independently converging on the same root cause. Fixed in 
   removed → 2 (the dedicated no-suffix test, plus the flagship test flipping to "not swept at all" because
   the malformed remainder then fails stamp validation too); client-clock reversion → 1
   (`sweep_stale_temp_siblings_uses_the_filesystems_own_clock_not_the_clients`).
-- Re-read `src/docs/25-metadata-studio.md` after the fix: still accurate — Blocker 1's hazard (a REAL file
-  the user kept surviving vs. being destroyed) is exactly what "cleans itself up" now correctly means, so
-  no further doc change was needed.
+- Re-read `src/docs/25-metadata-studio.md` after the fix. Blocker 1's hazard (a REAL file the user kept
+  surviving vs. being destroyed) is exactly what "cleans itself up" now correctly means. **But that
+  re-read missed the cap landed in the same round**: the page stated a closed list of one exception ("it
+  only lingers if that particular file is never saved again"), while `SWEEP_SCAN_CAP` adds a second that
+  *dominates* in a large folder — measured, a genuine orphan in a 20,000-entry directory is not swept and
+  the save still reports success. Caught by the round-2 review (New Finding B) and fixed by the Foreman
+  before merge: the page now names the folder-size exception too, and repeats that the leftover is safe to
+  delete by hand. Recorded because CPE-1738 exists precisely because this page over-claimed cleanup once
+  already; shipping a narrower version of the same over-claim would have closed the loop badly.
