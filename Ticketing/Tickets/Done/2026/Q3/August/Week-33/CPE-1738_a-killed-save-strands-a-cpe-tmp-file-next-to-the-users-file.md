@@ -3,11 +3,11 @@ id: CPE-1738
 title: A killed save strands a .cpe-tmp file next to the user's file, and nothing ever collects it
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
