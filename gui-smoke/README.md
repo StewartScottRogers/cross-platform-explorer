@@ -366,9 +366,23 @@ gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>
 ```
 
 (or `-n gui-smoke-screenshots-windows` for the Windows leg, when it runs). `<run-id>` is in the run's
-URL or `gh run list --workflow=gui-smoke.yml`. This is what lets a reviewer — human or, per CPE-1148
-Part B, a Visual-Critic sub-agent — judge a PR's rendered UI directly from the CI artifact, without a
-Foreman running a local `tauri build` by hand first.
+URL or `gh run list --workflow=gui-smoke.yml`. The PNGs land **flat at `<dir>`** — `<dir>/*.png` matches
+them. This is what lets a reviewer — human or, per CPE-1148 Part B, a Visual-Critic sub-agent — judge a
+PR's rendered UI directly from the CI artifact, without a Foreman running a local `tauri build` by hand
+first.
+
+The full suite log is a **separate** artifact (CPE-1728):
+
+```
+gh run download <run-id> -n gui-smoke-suite-log-ubuntu -D <dir>
+```
+
+It is separate on purpose. `upload-artifact@v4` roots an artifact at the least common ancestor of
+everything it matches, so putting the log in the screenshot artifact rerooted it and pushed all 82 PNGs
+down into a **dot-prefixed** `.screenshots/` subdirectory — where a `<dir>/*.png` glob matches nothing
+and a Visual Critic reports "no screenshots produced" instead of failing loudly. Keep the two uploads
+apart. Reach for the log when `gh run view --log` truncates (it cuts off around ~4 MB, which a long
+suite run exceeds) or when auditing what the classify-log step decided.
 
 **Two ordering/config details that PR #801's first live run got wrong and had to fix — worth knowing if
 this step ever looks broken again:**

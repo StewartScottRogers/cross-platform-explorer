@@ -483,14 +483,32 @@ jobs:
       # AC2 ("a reader should not have to grep the raw log by hand") actually delivered — without it,
       # nobody (human or the classify-log step's own reviewer) can audit a classification after the fact
       # on a run long enough to get truncated.
-      - name: Upload gui-smoke screenshots + suite log
+      #
+      # The log goes in its OWN artifact, deliberately. `upload-artifact@v4` roots an artifact at the
+      # least common ancestor of everything it matches, so listing both paths here rerooted the artifact
+      # at `gui-smoke/` and moved all 82 PNGs from the artifact root into `.screenshots/` — measured by
+      # downloading both artifacts and comparing (round 1: 82 PNGs at root, 0 nested; round 2: 0 at root,
+      # 82 nested). That directory is DOT-PREFIXED, so a Visual Critic told to download to `<dir>` and
+      # read the screenshots globs `<dir>/*.png`, matches nothing (default globbing skips dotfiles) and
+      # reports "no screenshots produced" — a silent failure of the visual leg, which is the exact shape
+      # of defect this ticket exists to eliminate. Two artifacts keep the gallery flat at its root and
+      # need no README or Visual-Critic-instruction edit to stay true.
+      - name: Upload gui-smoke screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gui-smoke-screenshots-ubuntu
-          path: |
-            gui-smoke/.screenshots/**
-            gui-smoke/.results/suite-output.log
+          path: gui-smoke/.screenshots/**
+          retention-days: 14
+          if-no-files-found: warn
+          include-hidden-files: true
+
+      - name: Upload gui-smoke suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-suite-log-ubuntu
+          path: gui-smoke/.results/suite-output.log
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true
