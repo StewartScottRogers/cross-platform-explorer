@@ -155,6 +155,54 @@ rule), so the fix is wording-only and needs to not disturb the live case.
       Onto a plain existing file it still returns `Err("The file exists. (os error 80)")` — naming neither
       the path nor which of the two files is meant, which is the same defect one step over.
 
+## Work Log
+
+**2026-08-15 — landed as a split, deliberately.** The ticket carried four items from three different guard
+families; one PR closing all four would have been a half-guard on each. What shipped, and what moved:
+
+**Closed here:**
+
+- **Item 2 — the intermediate-directory escape, the largest of the three gaps by blast radius.** Re-measured
+  first, one entry named `sub/leaf.txt` with `dest/sub` a live directory link. **Five of the seven shipping
+  extraction paths returned `Ok` with the bytes outside the folder the user chose, and none of them said
+  anything** (`Ok(ArchiveReport { done: 1, failed: 0, errors: [] })` on the streamed ones): streamed ZIP,
+  `extract_zip_encrypted`, `extract_zip_encrypted_streamed`, one-shot 7z, streamed 7z. One-shot ZIP and both
+  tar paths already refused. Rows 15/16/18/19/20 now resolve **every intermediate component** via
+  `fsutil::confined_to` — `entry_sink_action` for a file entry, `entry_dir_action` for a directory one —
+  *before* the `create_dir_all(parent)`, so an escaping entry cannot build its folders outside `dest` on the
+  way to being refused. The leaf-link check runs **first**, so CPE-1733's link wording is not relabelled by
+  the new guard.
+- **Item 4 — row 17's dangling-link wording**, at all four extraction `dest` roots, via
+  `extraction_dest_error`. Wording only: a **live** link at `dest` is still followed on purpose, pinned by
+  its own leg so an over-fix cannot pass the suite.
+- **The `create_empty_zip` addendum** — onto a plain existing file it returned `Err("The file exists. (os
+  error 80)")`, naming neither the path nor which file. It now names both.
+- **The docs correction owed regardless of the fix** — `src/docs/explorer-archives.md`'s "an entry addressed
+  through a folder shortcut still follows it" was already false for TAR and is now false for every format.
+
+**Moved out, with the reason recorded at the code and in each ticket:**
+
+- **Item 1** (`entry_name_is_safe` ⊄ `is_safe_name`: the ADS / reserved-device / leading-`..` shapes) →
+  **CPE-1758**. It is `guarded_join`'s *per-segment name* half — a question about what a name may be, shared
+  with the `local_safe_segment` family — not its containment half, which is what landed here.
+- **Item 3** (tar destroys a link; the one-shot vs streamed ZIP divergence) → **CPE-1759**. tar's streamed
+  path has a per-entry hook and its one-shot path does not, so a half-fix would manufacture a fresh
+  divergence in the course of fixing one; and the ZIP alignment can only run one way, into a loop that does
+  **not** restore unix permission bits or materialise symlink entries the way `zip::ZipArchive::extract`
+  does — a measurement this ticket added rather than inherited.
+- All three characterization tests therefore stay **green**, and were **re-aimed rather than re-pointed**:
+  their ticket references now name CPE-1758/CPE-1759, so no test points at a closed ticket.
+
+**Mutation results** (each guard broken on its own, restored after):
+
+| guard broken | distinct test red |
+|---|---|
+| `entry_sink_action`'s containment check | `rows_15_to_20_refuse_a_file_entry_addressed_through_a_symlinked_intermediate_directory` |
+| `entry_dir_action`'s containment check | `row18_refuses_a_directory_entry_that_would_be_created_outside_the_extraction_folder` |
+| `extraction_dest_error`'s link arm | `row17_a_dangling_link_at_the_extraction_destination_is_reported_as_a_link` |
+| `create_empty_zip`'s `AlreadyExists` arm | `row7_create_empty_zip_names_the_path_when_a_plain_file_already_holds_the_name` |
+| the **leaf-link** half of `entry_sink_action` | `row15_…`, `row16_…`, `rows_19_and_20_…` — and the two new containment tests stayed **green**, which is the proof the two guards are independent rather than one standing in for the other |
+
 ## Notes
 
 Filed by the CPE-1733 worker from the PR #906 review, 2026-08-14. Related: **CPE-1733** (the enumeration
