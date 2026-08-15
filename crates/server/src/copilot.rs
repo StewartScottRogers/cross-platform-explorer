@@ -16,7 +16,16 @@
 //!
 //! Two layers of recoverability back a delete: the pre-execute checkpoint AND the trash. The op set is a
 //! closed whitelist by construction ([`crate::op_plan::FileOp`]) — there is no shell/free-form escape — so a
-//! plan is always inspectable, and validate + re-validate guarantee no path escapes `root`.
+//! plan is always inspectable, and validate + re-validate keep every path **textually** under `root`.
+//!
+//! Textual is not enough, and that is [`crate::fsutil::confined_to`]'s job: a component under `root` that
+//! is a symlink or an NTFS junction can resolve *out* of it while spelling the path exactly like an
+//! in-root one. Every path field of every op is put through that one primitive in [`apply_op`] before any
+//! mutation. **CPE-1750** rewrote this paragraph: it used to be a local `parent_confined` that inspected
+//! only the *parent* chain, walked *past* a dangling link, and therefore answered "confined" for
+//! `root/dangling` and `root/dangling/x.txt` — while `create_dir_all`/`fs::copy` follow that link and act
+//! at its target. The guard is now the same function the protocol rigs use, and there is one answer to
+//! "is this inside the folder?" in this crate rather than three.
 //!
 //! The [`crate::copilot_planner::LlmPlanner`] and [`TrashBin`] are seams, so the whole chain is tested with
 //! a [`crate::copilot_planner::FakePlanner`] + a fake trash — no network, no real recycle bin.
@@ -125,8 +134,8 @@ pub fn plan_with(
 ///
 /// # Scope: breadth vs. traversal
 /// `root` is **caller-supplied**. [`op_plan::validate`]'s textual check confines every path *under* `root`,
-/// and the per-op [`parent_confined`] check below defends against a symlink/junction component **resolving
-/// out** of `root` at kernel time (the data-loss guard). What the backend can NOT floor is the *breadth* of
+/// and the per-op [`crate::fsutil::confined_to`] check in [`apply_op`] defends against a symlink/junction
+/// component **resolving out** of `root` at kernel time (the data-loss guard). What the backend can NOT floor is the *breadth* of
 /// `root` itself — a compromised frontend could pass `root = C:\`. The human-confirm step (the UI previews
 /// the folder + the plan before execute is ever called) is the guard on that: a person is choosing which
 /// folder the copilot may touch. This is documented, deliberate, and mirrors every other folder-scoped
@@ -142,7 +151,7 @@ pub fn execute_with(
         // Never trust a stale/tampered plan: refuse without checkpointing or touching disk.
         return Ok(CopilotExecuteResult { checkpoint: None, results: Vec::new(), violations });
     }
-    // Resolve the real root ONCE so the per-op confinement check ([`parent_confined`]) can compare each
+    // Resolve the real root ONCE so the per-op confinement check ([`apply_op`]) can compare each
     // op's kernel-resolved parent against it. A root that can't be canonicalized (missing/unreadable) is a
     // hard error — nothing runs, nothing is checkpointed.
     let canonical_root = std::fs::canonicalize(root)
@@ -154,8 +163,11 @@ pub fn execute_with(
 }
 
 /// The path-typed fields of an op as `(field, value)` pairs — the paths that must be symlink-confined
-/// before the op mutates. `new_name` is deliberately excluded (a bare name; its location is `path`'s
-/// parent, which IS checked). Mirrors `op_plan::FileOp::path_fields` (private there).
+/// before the op mutates. `new_name` is deliberately excluded: it is a bare name, and the slot it names
+/// (`path`'s parent joined with it) is reached only after `path` itself has been confined **in full**
+/// (CPE-1750 — which transitively confines its parent), and is then guarded at the primitive by
+/// [`crate::fsutil::rename_into_slot`], which refuses a link sitting in that slot. Mirrors
+/// `op_plan::FileOp::path_fields` (private there).
 fn op_path_fields(op: &FileOp) -> Vec<(&'static str, &str)> {
     match op {
         FileOp::Move { src, dst } => vec![("src", src), ("dst", dst)],
@@ -166,45 +178,98 @@ fn op_path_fields(op: &FileOp) -> Vec<(&'static str, &str)> {
     }
 }
 
-/// Is `path`'s parent directory, **after kernel symlink/junction resolution**, still within
-/// `canonical_root`? This is the traversal guard [`op_plan::validate`] (purely textual — no filesystem
-/// access) cannot provide: an intermediate component under `root` that is a symlink/junction pointing
-/// OUTSIDE (common with OneDrive, NTFS junctions, `C:\Users\Public`) would let `rename`/`create_dir_all`/
-/// `copy`/`trash::delete` act on a real location outside the confirmed folder — and outside the pre-execute
-/// checkpoint, so undo could not restore it. We canonicalize the **deepest existing ancestor** of `path`'s
-/// parent (the not-yet-created remainder is created UNDER that confined ancestor, so it stays confined) and
-/// require it to start with `canonical_root`. Mirrors `archive.rs`'s zip-slip defence (canonicalize +
-/// canonical-containment). A path with no canonicalizable in-root ancestor is treated as unconfined.
-fn parent_confined(canonical_root: &Path, path: &Path) -> bool {
-    let mut cur = path.parent();
-    while let Some(dir) = cur {
-        if dir.as_os_str().is_empty() {
-            break;
-        }
-        match dir.canonicalize() {
-            Ok(canon) => return canon.starts_with(canonical_root),
-            // This component doesn't exist yet — walk up to the deepest ancestor that does.
-            Err(_) => cur = dir.parent(),
-        }
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1750 — there is deliberately NO containment primitive in this file
+//
+// This module used to carry its own `parent_confined`. It is gone, and nothing like it may come back:
+// containment has ONE answer in this crate, `fsutil::confined_to`, and every caller asks it.
+// The deleted version was wrong in two independent ways, both measured (CPE-1750, from PR #909's
+// review):
+//
+//   * its `Err(_) => cur = dir.parent()` walked **past a dangling link** — `canonicalize` reports
+//     `NotFound` for one, which reads identically to "this name does not exist yet", so
+//     `root/dangling -> <outside>/soon` looked like an ordinary not-yet-created folder; and
+//   * it only ever inspected `path.parent()`, so a link at the **final component** was invisible to it.
+//
+// Together those made it answer `true` for `root/dangling`, `root/dangling/x.txt` and `root/live`
+// (a live link out of the root) — the exact three inputs `confined_to` answers `false` for, and the
+// exact three where `create_dir_all`/`fs::copy`/`trash::delete` act at the link's target rather than
+// at the name the human confirmed.
+//
+// `fsutil::contained_under` is the other neighbour and is NOT interchangeable: it fails **open** on a
+// path that does not exist yet, which is right for its removal-side callers and wrong for every field
+// here (a `Copy` destination or an `Mkdir` name not existing yet is the ordinary case).
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Say why a path failed [`crate::fsutil::confined_to`] **without over-claiming** (CPE-1750).
+///
+/// `confined_to` answers one bit, and its "no" covers two different truths: the path really does resolve
+/// outside the confirmed folder, **or** the OS would not say where it resolves (`EACCES`, `ELOOP`, a
+/// Windows sharing violation) and the guard fails closed. Refusing is right for both. *Saying* the first
+/// when the truth is the second is the confident-false-statement failure this repo has now filed four
+/// tickets about (CPE-1687, CPE-1705, CPE-1710, CPE-1716) — "it says the file is outside the folder, but
+/// I can see that it isn't" sends a user looking for a problem that does not exist.
+///
+/// So a refusal asks `try_exists` — the same probe [`crate::fsutil::clobber_refusal`] classifies, and
+/// nothing more; no second containment walk is derived here — purely to choose the wording, and the
+/// uncertain case is phrased by [`crate::fsutil::unknown_slot_message`], which exists precisely so the
+/// sites that cannot call `clobber_refusal` wholesale still word the unknown identically.
+fn confinement_refusal(field: &str, path: &Path) -> String {
+    let stat = path.try_exists();
+    if stat.is_err() {
+        return format!("refused: {field} — {}", crate::fsutil::unknown_slot_message(path, &stat));
     }
-    false
+    format!("refused: {field} {path:?} resolves outside the folder (symlink/junction escape)")
 }
 
 /// Apply one whitelisted op, returning its [`OpResult`]. Never all-or-nothing: a failure (locked file,
 /// collision, unreadable source) is a failed result for that op and the caller runs the rest. Move/copy
 /// **refuse to overwrite** an existing destination (a safer default than clobbering); deletes go to trash.
 ///
-/// **Symlink/junction confinement (data-loss guard):** before any mutation, every path field's parent must
-/// resolve within `canonical_root` ([`parent_confined`]). An op that would resolve outside — via a
-/// symlinked intermediate component that passed the textual [`op_plan::validate`] — is **refused** as a
-/// failed result and never executed, so no mutation ever lands outside the confirmed folder.
+/// # Symlink/junction confinement — the data-loss guard
+///
+/// Before any mutation, **every path field, in full — final component included** — must resolve within
+/// `canonical_root` per [`crate::fsutil::confined_to`]. An op that resolves outside (via a symlinked or
+/// junctioned component that passed the purely textual [`op_plan::validate`], or via a link *at* the name
+/// itself) is **refused** as a failed result and never reaches a primitive. That matters here more than
+/// almost anywhere else in the app: a mutation that lands outside the confirmed folder is also outside the
+/// pre-execute checkpoint, so the app's own one-click undo cannot take it back.
+///
+/// `confined_to` fails **closed**: an `EACCES`/`ELOOP`/sharing-violation it cannot resolve is refused, not
+/// waved through. For a guard on a path about to be created or written, "I could not tell" must not mean
+/// "go ahead", and a refused op is a reported failure the human can act on.
+///
+/// # What this does NOT cover — recorded here, where a reader of the Copilot path will hit it
+///
+/// - **It is not atomic with the primitive.** Between this check and the `fs::rename`/`fs::copy`/
+///   `create_dir_all`/`trash::delete` below, another process could replace a component with a link out of
+///   the tree (a TOCTOU swap) and the mutation would follow it. Closing that needs
+///   `openat2(RESOLVE_BENEATH)` on Linux or an `O_NOFOLLOW` walk on each component, neither of which
+///   `std` offers, so it is recorded rather than solved — the same residual [`crate::fsutil::confined_to`]
+///   states about itself. The window is small and the attacker must already have write access inside the
+///   folder the human confirmed; it is nonetheless real, and this is not a security boundary against a
+///   local adversary racing the app.
+/// - **It says nothing about what the primitive then does to a link the path resolves *inside* the root.**
+///   A contained link may still be written *through* or destroyed; that is the separate CPE-1710/CPE-1716
+///   question, answered by [`crate::fsutil::rename_into_slot`]/[`crate::fsutil::rename_slot_refusal`],
+///   which the move/copy/rename arms below call.
+/// - It says nothing about the **breadth** of `root` itself — see [`execute_with`]'s scope note.
+///
+/// # Ordering: this runs BEFORE the slot guards, and that shadows one of their messages
+///
+/// Containment is asked first, because a path that may resolve outside the folder must not be probed,
+/// stat'd or written at all. One consequence, measured by CPE-1705's own copilot leg: a destination the
+/// OS refuses to `stat` used to reach [`crate::fsutil::rename_slot_refusal`] and get its
+/// "could not check what is at …" wording from there. It now stops here instead, because `confined_to`
+/// fails closed on `EACCES`. [`confinement_refusal`] therefore borrows the very same shared wording, so
+/// the user sees no difference and CPE-1705's property still holds at this seam.
 fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResult {
     for (field, value) in op_path_fields(op) {
-        if !parent_confined(canonical_root, Path::new(value)) {
-            return OpResult::err(
-                Path::new(value),
-                format!("refused: {field} {value:?} resolves outside the folder (symlink/junction escape)"),
-            );
+        // Argument order is (path, root) here and (root, path) on the deleted `parent_confined` —
+        // deliberately not aliased behind a local wrapper, so the one primitive is called by name.
+        let p = Path::new(value);
+        if !crate::fsutil::confined_to(p, canonical_root) {
+            return OpResult::err(p, confinement_refusal(field, p));
         }
     }
     match op {
@@ -591,6 +656,14 @@ mod tests {
     /// directory, so the byte loss is not constructible there and the assertion would pass for the wrong
     /// reason. `execute_refuses_to_overwrite_existing_destination` above carries the honest case on all
     /// three CI legs.
+    ///
+    /// **CPE-1750 moved which guard says so, and left the property alone.** The confinement check now
+    /// runs before the slot check and `confined_to` fails closed on the `EACCES` this test stages, so the
+    /// refusal comes from `apply_op`'s guard rather than from `rename_slot_refusal`. `confinement_refusal`
+    /// borrows `fsutil::unknown_slot_message` for exactly that case, so the wording asserted below is
+    /// unchanged — and the extra assertion added here pins the thing that could quietly go wrong: the
+    /// containment guard must not answer an "I could not read it" with a confident "it is outside the
+    /// folder". `rename_slot_refusal`'s own unknown branch keeps its direct coverage in `fsutil`'s tests.
     #[test]
     fn cpe_1705_execute_never_renames_over_a_destination_it_cannot_stat() {
         use std::io::Write;
@@ -651,6 +724,15 @@ mod tests {
             assert!(
                 out.results[0].error.contains("could not check what is at"),
                 "must name the uncertainty rather than claim a collision: {}",
+                out.results[0].error
+            );
+            // CPE-1750: …and must not have swapped one confident false claim for another. The path is
+            // an ordinary file directly inside the confirmed folder; the only true statement about it is
+            // that it could not be read.
+            assert!(
+                !out.results[0].error.contains("resolves outside the folder"),
+                "an unreadable in-root destination must NOT be reported as a containment escape — it is \
+                 a file the user can see sitting in the folder they confirmed: {}",
                 out.results[0].error
             );
         }
@@ -754,42 +836,24 @@ mod tests {
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"NEW CONTENT".to_vec());
     }
 
-    /// Create `link` pointing at directory `target` without needing admin: an NTFS **junction** on Windows
-    /// (no privilege) and a symlink on Unix. Returns whether it was created (some CI/sandbox envs forbid
-    /// even junctions — the pure `parent_confined` unit test still covers the confinement logic there).
-    fn make_dir_link(target: &Path, link: &Path) -> bool {
-        #[cfg(windows)]
-        {
-            junction::create(target, link).is_ok()
-        }
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, link).is_ok()
-        }
-        #[cfg(not(any(windows, unix)))]
-        {
-            let _ = (target, link);
-            false
-        }
-    }
-
-    #[test]
-    fn parent_confined_accepts_in_root_and_rejects_escapes() {
-        let root = scratch("confine");
-        let canon = root.canonicalize().unwrap();
-        // A normal in-root leaf (parent is root).
-        assert!(parent_confined(&canon, &root.join("a.txt")));
-        // A deep not-yet-existing path: the deepest existing ancestor is root → confined.
-        assert!(parent_confined(&canon, &root.join("new/deep/x")));
-        // A sibling entirely outside root.
-        let outside = scratch("confine-out");
-        assert!(!parent_confined(&canon, &outside.join("y")));
-        // Through a symlink/junction to outside → rejected (the core traversal guard).
-        let link = root.join("out");
-        if make_dir_link(&outside, &link) {
+    /// Every op in `plan` was refused, and refused *by the containment guard* rather than by whatever
+    /// the primitive would have said next.
+    ///
+    /// The second half is what makes the guard non-deletable. Several of these inputs also happen to
+    /// make `create_dir_all` fail with `EEXIST`/`ENOENT` on some platforms, so a test asserting only
+    /// "the op failed" would stay green with the guard removed — precisely the shape that shipped a
+    /// deletable guard earlier this sprint. Asserting the *reason* pins the decision at the seam that
+    /// makes it.
+    fn assert_all_refused_for_escaping(results: &[OpResult], plan: &FileOpPlan) {
+        assert_eq!(results.len(), plan.ops.len(), "one result per op: {results:?}");
+        for (r, op) in results.iter().zip(&plan.ops) {
+            assert!(!r.ok, "{op:?} must be refused, not reported successful: {r:?}");
             assert!(
-                !parent_confined(&canon, &link.join("x")),
-                "a path resolving out of root via a symlinked component must be rejected"
+                r.error.contains("resolves outside the folder"),
+                "{op:?} must be refused BY THE CONFINEMENT GUARD — an incidental primitive failure \
+                 (\"File exists\", \"cannot find the path\") means the guard could be deleted with this \
+                 test still green. Got: {}",
+                r.error
             );
         }
     }
@@ -799,36 +863,223 @@ mod tests {
         let root = scratch("symlink-escape");
         let outside = scratch("outside-target");
         fs::write(outside.join("victim.txt"), b"precious").unwrap();
+        fs::write(root.join("a.txt"), b"payload").unwrap();
 
         let link = root.join("link"); // root/link -> outside (junction/symlink, no admin needed)
-        if !make_dir_link(&outside, &link) {
-            crate::skip_notice!("skipping symlink-escape exec test: could not create a link in this environment \
-(the parent_confined unit test still covers the confinement logic)");
+        if !crate::fsutil::make_dir_link(&outside, &link) {
+            crate::skip_notice!(
+                "[CPE-1750] SKIPPED the symlinked-intermediate-component exec leg: this machine could \
+                 not create a directory link at {} (no symlink privilege and no junction). NOTHING on \
+                 this run covered a Copilot op reaching a real primitive THROUGH a link out of the \
+                 confirmed folder.",
+                link.display()
+            );
             return;
         }
         let ctx = ctx_for(&root);
         let trash = FakeTrash::new(scratch("hold-symlink"));
 
-        // Both ops pass the TEXTUAL validate (they start with root) but resolve through the link to OUTSIDE.
+        // Every op passes the TEXTUAL validate (they all start with root) but resolves through the link
+        // to OUTSIDE. Copy and Move are here as well as Delete/Mkdir because they are the arms that call
+        // `create_dir_all` on the destination's parent and then `fs::copy`/`fs::rename` — the three
+        // primitives that would have materialised something out of the folder the human confirmed.
         let plan = FileOpPlan {
             ops: vec![
                 FileOp::Delete { path: root_str(&link.join("victim.txt")) },
                 FileOp::Mkdir { path: root_str(&link.join("newdir")) },
+                FileOp::Copy { src: root_str(&root.join("a.txt")), dst: root_str(&link.join("copied.txt")) },
+                FileOp::Move { src: root_str(&root.join("a.txt")), dst: root_str(&link.join("moved.txt")) },
             ],
         };
-        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
 
-        // Every op refused, with a clear escape reason, and NOTHING outside root was touched.
-        assert_eq!(out.results.len(), 2);
-        assert!(out.results.iter().all(|r| !r.ok), "{:?}", out.results);
+        // The EFFECT first: this family fails by *succeeding*, so anything asserted after an `unwrap()`
+        // is unreachable on a build that has the bug.
         assert!(
-            out.results.iter().all(|r| r.error.contains("symlink") || r.error.contains("outside")),
-            "{:?}",
-            out.results
+            outside.join("victim.txt").exists(),
+            "\"{}\" — a file OUTSIDE the confirmed folder {} — was destroyed by a Copilot Delete that \
+             reached it through the link at {}",
+            outside.join("victim.txt").display(),
+            root.display(),
+            link.display()
         );
-        assert!(outside.join("victim.txt").exists(), "the out-of-root file must NOT be deleted");
-        assert!(!outside.join("newdir").exists(), "no directory must be created out of root");
-        assert_eq!(trash.trashed.lock().unwrap().len(), 0, "nothing was trashed");
+        for escaped in ["newdir", "copied.txt", "moved.txt"] {
+            assert!(
+                !outside.join(escaped).exists(),
+                "\"{}\" was CREATED outside the confirmed folder {} — the Copilot wrote through the link \
+                 at {}, and being outside the folder it is also outside the pre-execute checkpoint, so \
+                 the app's own undo cannot take it back",
+                outside.join(escaped).display(),
+                root.display(),
+                link.display()
+            );
+        }
+        let trashed = trash.trashed.lock().unwrap().clone();
+        assert!(trashed.is_empty(), "the trash seam was handed out-of-root paths: {trashed:?}");
+
+        let out = out.unwrap();
+        assert_all_refused_for_escaping(&out.results, &plan);
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"payload".to_vec(), "the source stayed put");
+    }
+
+    /// CPE-1750, defect **2 of 2**: the old `parent_confined` inspected only `path.parent()`, so a link
+    /// **at the final component** was invisible to it. `Mkdir` then reached `create_dir_all`, which
+    /// follows the link and reports success about a directory outside the confirmed folder, and `Delete`
+    /// reached the [`TrashBin`] seam — `trash::delete` on the user's real filesystem in the shipped app —
+    /// with a path resolving outside it.
+    ///
+    /// The second half of this test is the discrimination check: a link at the leaf that resolves back
+    /// *inside* the root must still be allowed, so the fix is containment and not a blanket "no links".
+    #[test]
+    fn cpe_1750_execute_refuses_an_op_whose_own_final_component_links_out_of_the_root() {
+        let root = scratch("cpe1750-leaf");
+        let outside = scratch("cpe1750-leaf-outside");
+        fs::write(outside.join("victim.txt"), b"precious").unwrap();
+        fs::create_dir_all(root.join("sub")).unwrap();
+
+        let out_link = root.join("outlink"); // root/outlink -> <outside>
+        let in_link = root.join("inlink"); // root/inlink  -> root/sub
+        if !crate::fsutil::make_dir_link(&outside, &out_link)
+            || !crate::fsutil::make_dir_link(&root.join("sub"), &in_link)
+        {
+            crate::skip_notice!(
+                "[CPE-1750] SKIPPED the leaf-link exec leg: this machine could not create a directory \
+                 link at {} (no symlink privilege and no junction). NOTHING on this run covered a \
+                 Copilot op whose OWN final component resolves out of the confirmed folder, nor the \
+                 discrimination check that an in-root link is still allowed.",
+                out_link.display()
+            );
+            return;
+        }
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1750-leaf-hold"));
+
+        let plan = FileOpPlan {
+            ops: vec![
+                FileOp::Mkdir { path: root_str(&out_link) },
+                FileOp::Delete { path: root_str(&out_link) },
+            ],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE UNWRAP. `Delete` here is the one that actually removes something: the trash seam
+        // takes the link away from the confirmed folder while its target sits outside.
+        assert!(
+            fs::symlink_metadata(&out_link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the link at \"{}\" was DESTROYED — the Copilot's Delete reached the trash seam with a path \
+             that resolves to \"{}\", outside the confirmed folder \"{}\", because the guard never looked \
+             at the op path's own final component",
+            out_link.display(),
+            outside.display(),
+            root.display()
+        );
+        let trashed = trash.trashed.lock().unwrap().clone();
+        assert!(
+            trashed.is_empty(),
+            "the trash seam — `trash::delete` on the user's real filesystem in the shipped app — was \
+             handed {trashed:?}, which resolves to \"{}\", outside the confirmed folder \"{}\"",
+            outside.display(),
+            root.display()
+        );
+        assert!(outside.join("victim.txt").exists(), "the out-of-root file must survive");
+
+        let out = out.unwrap();
+        assert_all_refused_for_escaping(&out.results, &plan);
+
+        // …and the discrimination check: same shape, but the link stays inside the root, so containment
+        // has nothing to say about it and the op runs.
+        let inside_plan = FileOpPlan { ops: vec![FileOp::Mkdir { path: root_str(&in_link) }] };
+        let inside = execute_with(&ctx, &trash, &root_str(&root), &inside_plan).unwrap();
+        assert!(
+            inside.results[0].ok,
+            "a leaf link resolving back INSIDE the confirmed folder must not be refused as an escape — \
+             the guard is containment, not a ban on links: {:?}",
+            inside.results[0]
+        );
+    }
+
+    /// CPE-1750, defect **1 of 2**: `canonicalize` reports `NotFound` for a **dangling** link exactly as
+    /// it does for a name that simply is not there, and the old guard's `Err(_) => cur = dir.parent()`
+    /// could not tell those apart — so it walked straight past `root/dangling -> <outside>/soon` and
+    /// called everything under it confined.
+    ///
+    /// Some of these inputs are also refused further down by an incidental `create_dir_all` failure on
+    /// some platforms; that is why [`assert_all_refused_for_escaping`] insists on the containment
+    /// *reason*. The hazard is not hypothetical: `create_dir_all`'s behaviour on a dangling reparse point
+    /// differs between Windows and POSIX, so "some platform happens to stop it" is not a guard.
+    #[test]
+    fn cpe_1750_execute_refuses_ops_under_a_dangling_link_pointing_out_of_the_root() {
+        let root = scratch("cpe1750-dangling");
+        let outside = scratch("cpe1750-dangling-outside");
+        let soon = outside.join("soon"); // exists only long enough to hang the link on
+        fs::create_dir_all(&soon).unwrap();
+        fs::write(root.join("a.txt"), b"payload").unwrap();
+
+        let dangling = root.join("dangling"); // root/dangling -> <outside>/soon, then `soon` is removed
+        if !crate::fsutil::make_dir_link(&soon, &dangling) {
+            crate::skip_notice!(
+                "[CPE-1750] SKIPPED the dangling-link exec leg: this machine could not create a directory \
+                 link at {} (no symlink privilege and no junction). NOTHING on this run covered a Copilot \
+                 op whose path runs through a link that dangles OUT of the confirmed folder.",
+                dangling.display()
+            );
+            return;
+        }
+        fs::remove_dir(&soon).unwrap();
+        assert!(
+            fs::symlink_metadata(&dangling).is_ok_and(|m| m.file_type().is_symlink())
+                && !matches!(dangling.try_exists(), Ok(true)),
+            "staging premise: \"{}\" must be a link, and it must dangle",
+            dangling.display()
+        );
+
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1750-dangling-hold"));
+
+        let plan = FileOpPlan {
+            ops: vec![
+                // The leaf itself…
+                FileOp::Mkdir { path: root_str(&dangling) },
+                FileOp::Delete { path: root_str(&dangling) },
+                // …and the ticket's measured pair, one component deeper.
+                FileOp::Mkdir { path: root_str(&dangling.join("newdir")) },
+                FileOp::Copy { src: root_str(&root.join("a.txt")), dst: root_str(&dangling.join("x.txt")) },
+            ],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE UNWRAP: nothing may have been materialised at the link's target, which is where
+        // `create_dir_all`/`fs::copy` would have acted.
+        assert!(
+            !soon.exists(),
+            "\"{}\" was CREATED outside the confirmed folder \"{}\" — the Copilot followed the dangling \
+             link at \"{}\" and materialised its target, which is also outside the pre-execute \
+             checkpoint, so the app's own undo cannot take it back",
+            soon.display(),
+            root.display(),
+            dangling.display()
+        );
+        for escaped in ["newdir", "x.txt"] {
+            assert!(
+                !soon.join(escaped).exists(),
+                "\"{}\" landed outside the confirmed folder \"{}\" through the dangling link at \"{}\"",
+                soon.join(escaped).display(),
+                root.display(),
+                dangling.display()
+            );
+        }
+        let trashed = trash.trashed.lock().unwrap().clone();
+        assert!(
+            trashed.is_empty(),
+            "the trash seam was handed {trashed:?}, which resolves to \"{}\", outside the confirmed \
+             folder \"{}\"",
+            soon.display(),
+            root.display()
+        );
+
+        let out = out.unwrap();
+        assert_all_refused_for_escaping(&out.results, &plan);
+        assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"payload".to_vec(), "the source stayed put");
     }
 
     #[test]

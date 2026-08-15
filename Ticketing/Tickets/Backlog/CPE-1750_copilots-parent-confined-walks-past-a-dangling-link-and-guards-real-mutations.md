@@ -63,16 +63,98 @@ exists to prevent. Fold it.
 
 ## Acceptance criteria
 
-- [ ] A Copilot `Copy`/`Move`/`Delete`/`mkdir` whose destination is a **dangling** link inside the confirmed
+- [x] A Copilot `Copy`/`Move`/`Delete`/`mkdir` whose destination is a **dangling** link inside the confirmed
       folder is refused, and nothing is created outside that folder.
-- [ ] The same for a **live** link at the leaf, and for a link at an intermediate component.
-- [ ] Breaking the guard turns a **distinct** test red, and the assertion names what landed outside the
+- [x] The same for a **live** link at the leaf, and for a link at an intermediate component.
+- [x] Breaking the guard turns a **distinct** test red, and the assertion names what landed outside the
       confirmed folder — asserted **before** the `Result` is unwrapped, since this defect fails by
       succeeding.
-- [ ] `copilot.rs:198-200`'s claim is either true or rewritten to what actually holds.
-- [ ] `copilot.rs:760`'s private `make_dir_link` is removed in favour of `fsutil::make_dir_link`.
-- [ ] TOCTOU's residual is stated where a reader of the Copilot path will hit it, the way `confined_to`
+- [x] `copilot.rs:198-200`'s claim is either true or rewritten to what actually holds.
+- [x] `copilot.rs:760`'s private `make_dir_link` is removed in favour of `fsutil::make_dir_link`.
+- [x] TOCTOU's residual is stated where a reader of the Copilot path will hit it, the way `confined_to`
       states its own.
+
+## Work log — 2026-08-15
+
+### What changed
+
+`crates/server/src/copilot.rs`
+
+- **`parent_confined` is deleted, not fixed.** `apply_op` now calls `crate::fsutil::confined_to` on each
+  path field. A block comment stands where the function was, recording the two measured defects and why a
+  fifth copy of the walk must not be written. Containment has one answer in this crate again.
+- **`confinement_refusal` (new, small).** `confined_to` returns one bit, and its "no" covers two truths:
+  *resolves outside*, and *the OS would not say where it resolves* (it fails closed on `EACCES`/`ELOOP`).
+  Reporting the first when the truth is the second is the confident-false-statement failure of CPE-1687 /
+  1705 / 1710 / 1716. So a refusal asks `try_exists` — the same probe `clobber_refusal` classifies, nothing
+  re-derived — purely to pick the wording, and borrows `fsutil::unknown_slot_message` for the uncertain
+  case so it is phrased identically to every other site.
+- **The false claim at the old `:198-200` is rewritten**, and `apply_op` now carries a *What this does NOT
+  cover* section: the TOCTOU residual in full (and that this is not a boundary against a local adversary
+  racing the app), that containment says nothing about what a primitive does to a link resolving *inside*
+  the root, and the pointer to `execute_with`'s breadth note. The module header records the same.
+- **The private test `make_dir_link` is gone**; both link-staging tests now call `fsutil::make_dir_link`,
+  which brings the CPE-1717 `require_staged` policy with it — a machine that cannot stage a link now goes
+  red under CI instead of quietly covering nothing.
+
+`crates/server/src/fsutil.rs` — **doc only, no behaviour changed.** `confined_to` now names the Copilot as
+a caller, records the `parent_confined` measurement as the reason not to fork it, and its TOCTOU bullet no
+longer claims "the callers are single-threaded in-process test rigs" — that stopped being true the moment
+the shipped app started calling it.
+
+`src/docs/21-ai-copilot.md` — a plain-language *Links and shortcuts that lead out of the folder* section:
+why an operation can be refused although the path you see starts inside your folder.
+
+### Evidence — the mutation, run both ways
+
+`apply_op`'s call was temporarily replaced with the deleted `parent_confined`, verbatim. Two tests went
+red, and **only** those two — every other copilot test, including the pre-existing intermediate-live-link
+one, stayed green, so the red is distinct and belongs to this ticket:
+
+```
+cpe_1750_execute_refuses_an_op_whose_own_final_component_links_out_of_the_root ... FAILED
+  the link at "…\cpe-copilot-cpe1750-leaf-…\outlink" was DESTROYED — the Copilot's Delete reached the
+  trash seam with a path that resolves to "…\cpe-copilot-cpe1750-leaf-outside-…", outside the confirmed
+  folder "…\cpe-copilot-cpe1750-leaf-…", because the guard never looked at the op path's own final
+  component
+
+cpe_1750_execute_refuses_ops_under_a_dangling_link_pointing_out_of_the_root ... FAILED
+  the trash seam was handed ["…\cpe-copilot-cpe1750-dangling-…\dangling"], which resolves to
+  "…\cpe-copilot-cpe1750-dangling-outside-…\soon", outside the confirmed folder
+  "…\cpe-copilot-cpe1750-dangling-…"
+```
+
+Both panics are on assertions placed **before** the `Result` is unwrapped — this defect fails by
+succeeding, so anything after an `unwrap()` would never have run — and both name what left the confirmed
+folder. Restored: 16/16 copilot tests green.
+
+The guard is also non-deletable in the weaker sense: `assert_all_refused_for_escaping` insists the refusal
+carries the **containment reason**, not merely that the op failed. Several of these inputs also happen to
+make `create_dir_all` fail with `EEXIST`/`ENOENT` on POSIX, so a test asserting only "it failed" would
+have stayed green with the guard removed — the exact shape that shipped a deletable guard earlier this
+sprint. The accidental POSIX stop is not a guard: `create_dir_all`'s behaviour on a dangling reparse point
+differs between Windows and POSIX.
+
+`cpe_1750_…_final_component_…` also carries a discrimination leg: a leaf link resolving back *inside* the
+root must still run. This is containment, not a ban on links.
+
+### One interaction worth knowing about
+
+Containment is now asked **before** the slot guards, which is the right order — a path that might resolve
+outside must not be probed, stat'd or written at all. Consequence, caught by CPE-1705's own copilot leg
+going red on the first run: a destination the OS refuses to `stat` used to reach `rename_slot_refusal` and
+get its *"could not check what is at …"* wording from there. It now stops at the containment guard, which
+fails closed on `EACCES`. `confinement_refusal` borrows the identical shared wording, so the user sees no
+change and CPE-1705's property still holds at this seam; that test keeps its original assertion and gains
+one more — an unreadable in-root destination must **not** be reported as a containment escape. Recorded on
+both the test and `apply_op`.
+
+### Verification
+
+`crates/server`: `cargo build --tests`, `cargo test` (2183 passed / 0 failed), `cargo test --features
+index` (2231 / 0), `cargo test --features copilot` (copilot module 16/16), and `cargo clippy --all-targets
+-- -D warnings` clean in the default, `index` and `copilot` feature modes. `src-tauri`: `cargo clippy
+--all-targets -- -D warnings` clean.
 
 ## Notes
 
