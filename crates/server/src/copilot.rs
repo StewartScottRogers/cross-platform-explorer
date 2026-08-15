@@ -25,6 +25,12 @@
 //! the confirmed folder itself?* — asked via [`crate::fsutil::same_place`], because an op on the folder
 //! acts in the folder's parent.
 //!
+//! Those two questions are asked of the op's own path **fields**. A `Copy` of a folder then walks that
+//! folder's children, and **CPE-1756** added the same question there, per entry that is a link: a child
+//! link out of the folder used to be followed by `fs::copy`, pulling outside content *in* — no mutation
+//! escaped, but the confirmed folder ended up holding a file the human never chose. Which entries need
+//! asking, and why an ordinary link-free tree pays nothing for it, is argued on [`copy_recursive`].
+//!
 //! **CPE-1750** rewrote this paragraph: it used to be a local `parent_confined` that inspected
 //! only the *parent* chain, walked *past* a dangling link, and therefore answered "confined" for
 //! `root/dangling` and `root/dangling/x.txt` — while `create_dir_all`/`fs::copy` follow that link and act
@@ -330,6 +336,12 @@ fn root_itself_refusal(field: &str, path: &Path) -> String {
 ///   A contained link may still be written *through* or destroyed; that is the separate CPE-1710/CPE-1716
 ///   question, answered by [`crate::fsutil::rename_into_slot`]/[`crate::fsutil::rename_slot_refusal`],
 ///   which the move/copy/rename arms below call.
+/// - **It asks about the op's own path fields, not about what lives UNDER them.** A `Copy` whose `src`
+///   is a directory is confined here exactly once, and [`copy_recursive`] then walks its children. That
+///   walk asks its own containment question, per entry, for the reason recorded on it (CPE-1756): a
+///   child that is a link out of the folder was followed by `fs::copy` and pulled outside content *in*.
+///   The answer still comes from the one primitive — see [`copy_recursive`] for the induction that says
+///   which entries need asking.
 /// - It says nothing about the **breadth** of `root` itself — see [`execute_with`]'s scope note.
 ///
 /// # Ordering: this runs BEFORE the slot guards, and that shadows one of their messages
@@ -365,8 +377,8 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
                 Err(e) => OpResult::err(p, e),
             }
         }
-        FileOp::Move { src, dst } => transfer_entry(src, dst, false),
-        FileOp::Copy { src, dst } => transfer_entry(src, dst, true),
+        FileOp::Move { src, dst } => transfer_entry(src, dst, false, canonical_root),
+        FileOp::Copy { src, dst } => transfer_entry(src, dst, true, canonical_root),
         FileOp::Rename { path, new_name } => {
             let p = Path::new(path);
             // The SAME computation the guards above ran on (CPE-1750 attempt 2) — if this were derived
@@ -396,7 +408,11 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
 /// Shared move/copy: ensure `dst`'s parent exists, refuse to overwrite an existing `dst`, then either
 /// `rename` (move) or recursively copy. Move relies on same-volume `rename` (both paths are under one
 /// `root`, so they share a volume); copy handles a file or a whole subtree.
-fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
+///
+/// `canonical_root` is carried through purely for [`copy_recursive`]'s per-entry containment question
+/// (CPE-1756). The **move** branch does not need it: `fs::rename` moves the directory entry itself and
+/// never descends, so a link inside a moved subtree stays a link and nothing is dereferenced.
+fn transfer_entry(src: &str, dst: &str, copy: bool, canonical_root: &Path) -> OpResult {
     let s = Path::new(src);
     let d = Path::new(dst);
     if let Some(parent) = d.parent() {
@@ -418,7 +434,7 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
         return OpResult::err(d, e);
     }
     let outcome = if copy {
-        copy_recursive(s, d).map_err(|e| e.to_string())
+        copy_recursive(s, d, canonical_root).map_err(|e| e.to_string())
     } else {
         // …and the move re-checks inside `rename_into_slot` (CPE-1710 round 3): the guard and the
         // destructive call are one function, so nothing can be inserted between them later.
@@ -430,21 +446,114 @@ fn transfer_entry(src: &str, dst: &str, copy: bool) -> OpResult {
     }
 }
 
-/// Recursively copy `src` to `dst` (a file, or a whole directory tree). Uses `symlink_metadata` so a
-/// symlink is not silently followed into an unbounded copy of its target's tree; a symlink's own bytes are
-/// copied via `fs::copy` (best-effort — good enough for the copilot's in-root file operations).
-fn copy_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+/// Recursively copy `src` to `dst` (a file, or a whole directory tree), **refusing any entry that is a
+/// link resolving outside `canonical_root`** (CPE-1756). Uses `symlink_metadata` so a link to a directory
+/// is not silently followed into an unbounded copy of its target's tree.
+///
+/// # Why the walk asks containment again, and why it asks it ONLY at a link
+///
+/// [`apply_op`] confines the op's own `src` and `dst`, and CPE-1750 made that the single containment
+/// answer in this crate. It says nothing about what lives *under* `src`, and this walk used to descend
+/// un-asked: a child that is a live file link was handed straight to `fs::copy`, which **follows** the
+/// final component, so "tidy up this folder" could deposit a byte-for-byte copy of a file from elsewhere
+/// on the disk inside the folder the human confirmed.
+///
+/// Nothing lands *outside* — the destination side stays contained, because a `read_dir` name is a single
+/// component and [`transfer_entry`]'s `rename_slot_refusal` means `dst` is always freshly created — so
+/// CPE-1750's claim ("a refusal never reaches a primitive", for the op's own fields) was never false.
+/// This is a read **inflow** rather than an escaping mutation. It is still content the user never chose,
+/// now sitting in a folder they may share, sync, back up or hand to someone else.
+///
+/// The question is asked **only of entries that are links**, and that is a soundness argument, not a
+/// saving taken on faith:
+///
+/// - `src` itself is confined — [`apply_op`] asked, before this ran.
+/// - A `read_dir` name is one component: never `.`/`..`, never separator-bearing. So for a child that is
+///   *not* a link, `canonicalize(child) == canonicalize(parent).join(name)`, which `starts_with` the real
+///   root exactly when the parent's does. Its containment is settled by its parent's.
+/// - The walk recurses only where `symlink_metadata().is_dir()` holds, and that is false for every link
+///   (a junction included — Rust reports one as `is_symlink`). Every directory descended into is
+///   therefore a non-link child of a confined directory, and the induction carries.
+///
+/// So a link is the only entry whose containment is not already decided, and a link is the only entry
+/// asked. A link-free tree — the ordinary case — pays **zero** extra `canonicalize` calls, which is
+/// `PURPOSE.md`'s fast/small/predictable tiebreaker honoured rather than traded away; the per-entry
+/// `confined_to` the ticket floated as one option would have paid a full resolve on every node of a deep
+/// tree to re-derive an answer the induction already gives.
+///
+/// # What it refused BEFORE — enumerated, so the change can be checked as additive
+///
+/// Nothing here refused anything *by name*; every stop was an incidental primitive error. Listing them is
+/// CPE-1750's own lesson applied: replacing a check means enumerating what the old one refused, not only
+/// what the new one refuses better.
+///
+/// | entry | before | now |
+/// |---|---|---|
+/// | a **directory** link (`symlink_metadata().is_dir()` is false for one) | not descended into, so no unbounded copy of its target's tree — then `fs::copy` fails on a directory and aborts the whole copy | refused **by name** when it resolves outside; the same incidental abort when it resolves inside |
+/// | a **dangling** link | `fs::copy` fails `NotFound`, aborting the copy | refused by name when the dangle leads outside ([`crate::fsutil::confined_to`] fails closed there); the same `NotFound` when it leads back inside |
+/// | a **live file** link | **followed** — the hole this closes | refused when it resolves outside; still followed when it resolves inside |
+/// | an unreadable `src` or entry | `Err` from `symlink_metadata`/`read_dir` | unchanged |
+///
+/// Every row moves in one direction: something previously allowed is now refused, and nothing previously
+/// refused is now allowed. The `symlink_metadata` call is kept for its own sake and not merely reused —
+/// it is what stops a directory link being *descended*, which is a separate property from this guard.
+///
+/// # What this does NOT cover — recorded here, where a reader of the walk will hit it
+///
+/// - **A link resolving back INSIDE the folder is still dereferenced.** `fs::copy` copies the target's
+///   bytes, so the copy holds a regular file where the original held a link. That is a real difference
+///   from what "copy" might suggest — but the bytes are bytes the user already has inside the folder, and
+///   reproducing the link would need `symlink_file`, which an unprivileged Windows session cannot create;
+///   a copy that fails on Windows is worse than one that flattens. Deliberate, and pinned by CPE-1756's
+///   discrimination leg so it cannot drift into "refuses every link" unnoticed — a guard that refuses
+///   everything looks perfect.
+/// - **A refusal mid-walk leaves the partial copy behind.** The op is reported failed and `dst` holds
+///   whatever was copied before the link was reached — all of it from inside the folder. That is this
+///   function's behaviour for *any* mid-walk error and predates this guard; recorded, not changed.
+/// - **It is not atomic with `fs::copy`.** The TOCTOU residual [`apply_op`] and
+///   [`crate::fsutil::confined_to`] both state applies here too, now once per link: a component could be
+///   swapped between `read_dir` and the copy.
+/// - **The pre-execute checkpoint covers no link either way.** [`crate::snapshot_capture::scan_dir`] uses
+///   `DirEntry::metadata()`, which does not traverse, so a link is neither `is_dir` nor `is_file` there
+///   and is skipped outright — Undo cannot restore one. Established while answering CPE-1756's "does any
+///   other recursive walk share this shape?": `scan_dir` is the Copilot's only other recursive walk of the
+///   user's tree, and skipping links is exactly why it has **no** inflow of this shape. `list_plan_entries`
+///   is one level deep and reads names only. This walk was the only one.
+fn copy_recursive(src: &Path, dst: &Path, canonical_root: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(src)?;
     if meta.is_dir() {
         std::fs::create_dir_all(dst)?;
         for entry in std::fs::read_dir(src)? {
             let entry = entry?;
-            copy_recursive(&entry.path(), &dst.join(entry.file_name()))?;
+            copy_recursive(&entry.path(), &dst.join(entry.file_name()), canonical_root)?;
         }
         Ok(())
     } else {
+        // The one containment primitive, by name, as CPE-1750 requires — not a second local answer.
+        if meta.file_type().is_symlink() && !crate::fsutil::confined_to(src, canonical_root) {
+            return Err(std::io::Error::other(link_inflow_refusal(src)));
+        }
         std::fs::copy(src, dst).map(|_| ())
     }
+}
+
+/// Say why a copy stopped at a **link that leads out of the confirmed folder** (CPE-1756).
+///
+/// A different sentence from [`confinement_refusal`] on purpose, and the difference is not decoration:
+/// that one is about a path the *plan* named, this one about a path the *walk* found, and the user did
+/// not write it down anywhere. So it names the entry, and it says what would have happened — otherwise
+/// "resolves outside the folder" reads as a complaint about the folder the user did choose.
+///
+/// Like [`confinement_refusal`] it deliberately does not claim *where* the link goes. `confined_to` fails
+/// closed, so this sentence is also reached when the OS would not say where the link resolves (`EACCES`,
+/// `ELOOP`, a sharing violation) — and stating a destination the guard never established is the
+/// confident-false-statement failure CPE-1687/1705/1710/1716/1750 have between them filed five tickets
+/// about.
+fn link_inflow_refusal(entry: &Path) -> String {
+    format!(
+        "refused: {entry:?} is a link that does not resolve inside the folder — copying it would follow \
+         the link and bring content from outside the folder you confirmed into it"
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1166,6 +1275,302 @@ mod tests {
         let out = out.unwrap();
         assert_all_refused_for_escaping(&out.results, &plan);
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"payload".to_vec(), "the source stayed put");
+    }
+
+    // -----------------------------------------------------------------------------------------------
+    // CPE-1756 — the walk under a confined `src`, which CPE-1750 deliberately did not close
+    // -----------------------------------------------------------------------------------------------
+
+    /// The bytes staged outside the confirmed folder. A distinctive literal so an assertion can say
+    /// *which* outside content arrived, rather than "something did".
+    const OUTSIDE_BYTES: &[u8] = b"CPE-1756 OUTSIDE-THE-FOLDER SECRET";
+
+    /// Stage a **live file** link at `link` pointing at the existing file `victim`; `false` if this
+    /// machine cannot.
+    ///
+    /// A live *file* link is the one construction this repo cannot fake — a junction is directory-only
+    /// and a hard link answers `is_symlink() == false` (CPE-1716) — and it is the only shape that makes
+    /// `fs::copy` pull a target's **bytes** in. So every caller pairs it with
+    /// [`crate::fsutil::require_staged`], and a runner that is supposed to manage one goes red rather
+    /// than covering nothing quietly (CPE-1717). Same body as `archive.rs`'s `stage_live_link`, which is
+    /// private to that module's own test mod; a third copy in `fsutil` would be a `pub` staging helper
+    /// added for one ticket, and [`crate::fsutil::make_dir_link`]'s doc records why only the
+    /// cross-*crate* helpers earned that.
+    fn stage_live_file_link(victim: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(victim, link).is_ok()
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(victim, link).is_ok()
+        }
+    }
+
+    /// The first path under `dir` whose bytes are exactly `needle`, or `None`. Recurses with
+    /// `symlink_metadata`, so it walks the **copy's own** entries and never wanders out of the tree it is
+    /// inspecting. Returning the path (not a bool) is what lets the caller's assertion name where the
+    /// outside content landed.
+    fn tree_holding(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
+        for entry in fs::read_dir(dir).ok()?.flatten() {
+            let p = entry.path();
+            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            if md.is_dir() {
+                if let Some(hit) = tree_holding(&p, needle) {
+                    return Some(hit);
+                }
+            } else if fs::read(&p).is_ok_and(|b| b == needle) {
+                return Some(p);
+            }
+        }
+        None
+    }
+
+    /// Every op in `results` was refused **by [`copy_recursive`]'s link-inflow guard**, not by the
+    /// containment guard at [`apply_op`] and not by an incidental primitive error.
+    ///
+    /// The reason matters more here than almost anywhere: [`apply_op`] already refuses an op whose own
+    /// `src` escapes, and `fs::copy` already fails on a dangling or directory link. Both would keep a
+    /// "the op failed" assertion green with this guard deleted, which is precisely the shape CPE-1750
+    /// round 2 had to go back and fix.
+    fn assert_all_refused_for_link_inflow(results: &[OpResult], plan: &FileOpPlan) {
+        assert_eq!(results.len(), plan.ops.len(), "one result per op: {results:?}");
+        for (r, op) in results.iter().zip(&plan.ops) {
+            assert!(!r.ok, "{op:?} must be refused, not reported successful: {r:?}");
+            assert!(
+                r.error.contains("is a link that does not resolve inside the folder"),
+                "{op:?} must be refused BY THE LINK-INFLOW GUARD IN `copy_recursive`. The op's own `src` \
+                 is confined, so `apply_op` has nothing to say; and `fs::copy`'s own \"cannot find the \
+                 file\"/\"is a directory\" would keep a failure-only assertion green with the guard \
+                 deleted. Got: {}",
+                r.error
+            );
+        }
+    }
+
+    /// CPE-1756, the hole itself: `src` is confined, so [`apply_op`] passes it, and [`copy_recursive`]
+    /// then descends into a child that is a **live file link out of the folder**. `fs::copy` follows the
+    /// final component, so the outside file's bytes are written into the folder the human confirmed.
+    ///
+    /// Nothing lands *outside* — this is a read **inflow** — which is why CPE-1750's claim stayed true
+    /// and this needed its own ticket. It is still content the user never chose, now sitting in a folder
+    /// they may share, sync or hand on.
+    ///
+    /// Both levels the ticket asks for are here in one plan: a link that is a **direct child** of `src`,
+    /// and one **three levels down**, because "the walk asks at the top" is a plausible half-fix.
+    #[test]
+    fn cpe_1756_copy_refuses_a_child_link_that_would_pull_outside_content_in() {
+        let root = scratch("cpe1756-inflow");
+        let outside = scratch("cpe1756-inflow-outside");
+        let secret = outside.join("secret.txt");
+        fs::write(&secret, OUTSIDE_BYTES).unwrap();
+
+        let flat = root.join("flat"); // the link is a DIRECT child of the copied folder
+        let nest = root.join("nest"); // …and here it is three levels down instead
+        let deep = nest.join("a/b");
+        fs::create_dir_all(&flat).unwrap();
+        fs::create_dir_all(&deep).unwrap();
+        fs::write(flat.join("mine.txt"), b"MINE").unwrap();
+        fs::write(deep.join("mine.txt"), b"MINE").unwrap();
+
+        let flat_link = flat.join("leak.txt");
+        let deep_link = deep.join("leak.txt");
+        let staged =
+            stage_live_file_link(&secret, &flat_link) && stage_live_file_link(&secret, &deep_link);
+        if !crate::fsutil::require_staged("live_file_symlink", true, staged) {
+            crate::skip_notice!(
+                "[CPE-1756] SKIPPED the copy-inflow leg: this machine could not create a live FILE \
+                 symlink at {} (no SeCreateSymbolicLinkPrivilege; a junction is directory-only and \
+                 cannot stage this). NOTHING on this run covered a Copilot recursive copy following a \
+                 child link and pulling content from OUTSIDE the confirmed folder into it.",
+                flat_link.display()
+            );
+            return;
+        }
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1756-inflow-hold"));
+
+        let plan = FileOpPlan {
+            ops: vec![
+                FileOp::Copy {
+                    src: root_str(&flat),
+                    dst: root_str(&root.join("copy-of-flat")),
+                },
+                FileOp::Copy {
+                    src: root_str(&nest),
+                    dst: root_str(&root.join("copy-of-nest")),
+                },
+            ],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE THE UNWRAP. This family fails by *succeeding* — with the guard gone the copy
+        // returns `Ok` and the op is reported green — so anything asserted after `unwrap()` is
+        // unreachable on a build that has the bug.
+        for (dst, where_) in [
+            (root.join("copy-of-flat"), "a DIRECT child of"),
+            (root.join("copy-of-nest"), "three levels below"),
+        ] {
+            let landed = tree_holding(&dst, OUTSIDE_BYTES);
+            assert!(
+                landed.is_none(),
+                "the bytes of \"{}\" — a file OUTSIDE the confirmed folder \"{}\" — were copied INTO \
+                 that folder at \"{}\". `copy_recursive` followed a link {} the copied folder, and \
+                 `fs::copy` dereferences the final component. Nothing landed outside, so CPE-1750's \
+                 guard is intact; this is the inflow it does not cover.",
+                secret.display(),
+                root.display(),
+                landed.as_ref().map(|p| p.display().to_string()).unwrap_or_default(),
+                where_
+            );
+        }
+
+        let out = out.unwrap();
+        assert_all_refused_for_link_inflow(&out.results, &plan);
+        assert_eq!(
+            fs::read(&secret).unwrap(),
+            OUTSIDE_BYTES.to_vec(),
+            "the outside file itself must be untouched — this guard is about reading it, not writing it"
+        );
+    }
+
+    /// CPE-1756, the **dangling** child: `root/src/dangling -> <outside>/soon`, with `soon` removed.
+    ///
+    /// `fs::copy` fails `NotFound` on one, so the op ends up failed either way and an
+    /// effect-only assertion proves nothing — which is exactly why
+    /// [`assert_all_refused_for_link_inflow`] insists on the *reason*. What changes with the guard is
+    /// that the user is told a link leads out of their folder instead of "the system cannot find the
+    /// file specified", and that `confined_to`'s fail-closed handling of a dangling link is the thing
+    /// deciding it rather than the platform's `fs::copy` behaviour — which differs between Windows and
+    /// POSIX for reparse points, so "some platform happens to stop it" is not a guard.
+    ///
+    /// Staged with [`crate::fsutil::make_dir_link`] (junction fallback, no privilege needed), so this
+    /// leg runs on every runner even when the live-file-link leg above must skip.
+    #[test]
+    fn cpe_1756_copy_refuses_a_child_link_that_dangles_out_of_the_folder() {
+        let root = scratch("cpe1756-dangle");
+        let outside = scratch("cpe1756-dangle-outside");
+        let soon = outside.join("soon"); // exists only long enough to hang the link on
+        fs::create_dir_all(&soon).unwrap();
+
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("mine.txt"), b"MINE").unwrap();
+
+        let dangling = src.join("dangling");
+        if !crate::fsutil::make_dir_link(&soon, &dangling) {
+            crate::skip_notice!(
+                "[CPE-1756] SKIPPED the dangling-child leg: this machine could not create a directory \
+                 link at {} (no symlink privilege and no junction). NOTHING on this run covered a \
+                 Copilot recursive copy meeting a child link that dangles OUT of the confirmed folder.",
+                dangling.display()
+            );
+            return;
+        }
+        fs::remove_dir(&soon).unwrap();
+        assert!(
+            fs::symlink_metadata(&dangling).is_ok_and(|m| m.file_type().is_symlink())
+                && !matches!(dangling.try_exists(), Ok(true)),
+            "staging premise: \"{}\" must be a link, and it must dangle",
+            dangling.display()
+        );
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1756-dangle-hold"));
+
+        let dst = root.join("copy-of-src");
+        let plan = FileOpPlan {
+            ops: vec![FileOp::Copy { src: root_str(&src), dst: root_str(&dst) }],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE THE UNWRAP: nothing may have been materialised at the link's target, which is
+        // where a `fs::copy` that dereferenced it would have reached.
+        assert!(
+            !soon.exists(),
+            "\"{}\" was created outside the confirmed folder \"{}\" by way of the dangling child link \
+             at \"{}\"",
+            soon.display(),
+            root.display(),
+            dangling.display()
+        );
+
+        let out = out.unwrap();
+        assert_all_refused_for_link_inflow(&out.results, &plan);
+    }
+
+    /// CPE-1756's discrimination + regression leg, in one test because they answer one question: is the
+    /// guard *containment*, or did it just become "no links, no walking"?
+    ///
+    /// 1. An ordinary tree — real files, real subfolders, no links at all — still copies whole. This is
+    ///    also the leg that would catch a guard implemented as a blanket refusal of anything it could
+    ///    not cheaply prove.
+    /// 2. A child link resolving back **inside** the confirmed folder is still copied. Without this,
+    ///    a guard that refuses every link would look perfect — and its `fs::copy` dereferences the link,
+    ///    which is the documented, deliberate flattening in [`copy_recursive`]'s "does NOT cover" note.
+    #[test]
+    fn cpe_1756_ordinary_copy_and_an_in_root_child_link_still_work() {
+        let root = scratch("cpe1756-ordinary");
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1756-ordinary-hold"));
+
+        let src = root.join("src");
+        fs::create_dir_all(src.join("a/b")).unwrap();
+        fs::write(src.join("top.txt"), b"TOP").unwrap();
+        fs::write(src.join("a/mid.txt"), b"MID").unwrap();
+        fs::write(src.join("a/b/leaf.txt"), b"LEAF").unwrap();
+
+        let dst = root.join("copy-of-src");
+        let plan = FileOpPlan {
+            ops: vec![FileOp::Copy { src: root_str(&src), dst: root_str(&dst) }],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+        assert!(out.results[0].ok, "an ordinary link-free recursive copy must still run: {:?}", out.results[0]);
+        for (rel, bytes) in [("top.txt", &b"TOP"[..]), ("a/mid.txt", &b"MID"[..]), ("a/b/leaf.txt", &b"LEAF"[..])] {
+            assert_eq!(
+                fs::read(dst.join(rel)).unwrap(),
+                bytes.to_vec(),
+                "\"{rel}\" is missing or wrong in the copy — the guard broke ordinary recursion"
+            );
+        }
+
+        // …and the discrimination leg: same shape, but the child link stays inside the confirmed folder,
+        // so containment has nothing to say about it and the copy runs.
+        let inside_target = root.join("inside-target.txt");
+        fs::write(&inside_target, b"INSIDE THE FOLDER").unwrap();
+        let linked_src = root.join("linked-src");
+        fs::create_dir_all(&linked_src).unwrap();
+        let in_link = linked_src.join("inlink.txt");
+        if !crate::fsutil::require_staged(
+            "live_file_symlink",
+            true,
+            stage_live_file_link(&inside_target, &in_link),
+        ) {
+            crate::skip_notice!(
+                "[CPE-1756] SKIPPED the in-root-child-link discrimination leg: this machine could not \
+                 create a live FILE symlink at {}. NOTHING on this run checked that the copy guard is \
+                 containment rather than a blanket ban on links — a guard that refuses everything looks \
+                 perfect without this leg.",
+                in_link.display()
+            );
+            return;
+        }
+        let linked_dst = root.join("copy-of-linked-src");
+        let inside_plan = FileOpPlan {
+            ops: vec![FileOp::Copy { src: root_str(&linked_src), dst: root_str(&linked_dst) }],
+        };
+        let inside = execute_with(&ctx, &trash, &root_str(&root), &inside_plan).unwrap();
+        assert!(
+            inside.results[0].ok,
+            "a child link resolving back INSIDE the confirmed folder must not be refused as an inflow — \
+             the guard is containment, not a ban on links: {:?}",
+            inside.results[0]
+        );
+        assert_eq!(
+            fs::read(linked_dst.join("inlink.txt")).unwrap(),
+            b"INSIDE THE FOLDER".to_vec(),
+            "and `fs::copy` dereferences it, so the copy holds the target's bytes — the documented, \
+             deliberate flattening, pinned here so it cannot change unnoticed"
+        );
     }
 
     /// CPE-1750, **attempt 2, blocker 1** — found by PR #916's reviewer and reproduced against both
