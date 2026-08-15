@@ -26,6 +26,7 @@
   import { formatSize } from "../format";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
   import type { DirEntry } from "../types";
 
   /** The highlighted folder's path — this component peeks INTO it (lists its own contents). */
@@ -135,7 +136,7 @@
           on:keydown={(e) => onRowKeydown(e, entry)}
         >
           <Icon name={iconFor(entry)} size={16} />
-          <span class="fb-name">{entry.name}</span>
+          <span class="fb-name">{displaySafeName(entry.name)}</span>
           {#if !entry.is_dir}<span class="fb-size">{formatSize(entry.size)}</span>{/if}
         </div>
       {/each}

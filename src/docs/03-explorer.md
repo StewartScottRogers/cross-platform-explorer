@@ -58,6 +58,20 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Progressive loading** — folders stream in: the first rows appear almost immediately and the rest fill
   in as they're read, so even a huge or slow (network) folder stays interactive instead of blocking on a
   blank pane. Changing folders mid-load cleanly abandons the previous listing.
+- **A name that tries to disguise its own extension is flagged, not hidden.** A handful of invisible
+  Unicode characters exist purely to control text direction (right-to-left override and its relatives),
+  and they can be used to make a name — an invisible override character followed by `gnp.txt` — *display*
+  as `txt.png` instead: the classic filename-spoofing trick. Windows Explorer has no defense against
+  this; this app does. Anywhere this
+  app shows a name — the file list, the sidebar tree, the address-bar breadcrumb, search results, the
+  details pane, and Trash — one of those characters is shown as a bracketed tag (`[RLO]`, `[LRM]`, …)
+  instead of being allowed to silently reorder the text, so what you read is always the file's real byte
+  order. This is a **display-only** change: the file on disk keeps its exact original name (bidi
+  characters are legal in a filename on every platform this app runs on, so nothing about the file
+  itself is altered), and a name you're actively renaming shows and edits your real characters, not the
+  tagged version. That matters for a genuinely right-to-left filename (Arabic, Hebrew) — those are never
+  touched or "fixed"; only the handful of invisible direction-control characters are ever flagged, never
+  the letters themselves.
 - **Preview** — select a file to see it in the side pane; text is editable in place. Text files (source
   code and plain text alike, e.g. `.txt`) get a richer read view: syntax highlighting when a language is
   recognised, a **line-number gutter**, **fold triangles** on collapsible blocks (click to hide a range,

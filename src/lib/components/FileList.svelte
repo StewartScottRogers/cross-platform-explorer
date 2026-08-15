@@ -9,6 +9,7 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName, hasThumbnail } from "../filetypes";
+  import { displaySafeName } from "../filename";
   import {
     columnsTemplate, resizeColumnTo, boundaryOffsets, COLUMN_DEFAULTS, fullMins,
   } from "../columns";
@@ -788,7 +789,7 @@
               on:blur={(e) => dispatch("commitRename", e.currentTarget.value)}
             />
           {:else}
-            <span class="ellip" style={ruleStyle.color ? `color: ${ruleStyle.color}` : ""}>{entry.name}</span>
+            <span class="ellip" style={ruleStyle.color ? `color: ${ruleStyle.color}` : ""}>{displaySafeName(entry.name)}</span>
           {/if}
           {#if ruleStyle.label && renamingPath !== entry.path}
             <span class="rule-label" style={ruleStyle.color ? `background: ${ruleStyle.color}` : ""}>{ruleStyle.label}</span>

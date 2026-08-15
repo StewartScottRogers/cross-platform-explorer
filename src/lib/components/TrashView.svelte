@@ -21,6 +21,7 @@
   import { formatDate } from "../datetime";
   import { formatSize } from "../format";
   import { iconFor } from "../filetypes";
+  import { displaySafeName } from "../filename";
 
   // "help" isn't in this dispatcher type — it's never dispatched directly, only forwarded verbatim from
   // HelpButton's own typed `Section` event via the bare `on:help` in the markup below (same convention
@@ -210,7 +211,7 @@
             </span>
             <span class="tv-cell tv-name" title={e.name}>
               <Icon name={iconFor({ is_dir: false, extension: extOf(e.name) })} size={15} />
-              {e.name}
+              {displaySafeName(e.name)}
               {#if e.size !== null}<span class="tv-size">{formatSize(e.size)}</span>{/if}
             </span>
             <span class="tv-cell tv-path" title={e.original_path}>{e.original_path}</span>

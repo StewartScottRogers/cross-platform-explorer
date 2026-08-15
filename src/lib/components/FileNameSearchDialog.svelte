@@ -12,6 +12,7 @@
   import { baseName, parentDir, pushRecentSearch } from "../contentSearch";
   import { sortNameMatches, type NameSearchResult, type NameMatch } from "../fileNameSearch";
   import { lsGet, lsSet } from "../persist";
+  import { displaySafeName } from "../filename";
 
   const RECENTS_KEY = "cpe.nameSearchRecents";
   function loadRecents(): string[] {
@@ -130,7 +131,7 @@
         {#each hits as h (h.path)}
           <button class="hit" on:click={() => goTo(h.path)} title={h.path}>
             <Icon name={h.is_dir ? "folder" : "file"} size={14} />
-            <span class="name">{h.name}</span>
+            <span class="name">{displaySafeName(h.name)}</span>
             <span class="dir">{parentDir(h.path)}</span>
           </button>
         {/each}

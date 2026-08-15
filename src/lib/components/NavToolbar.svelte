@@ -4,6 +4,7 @@
   import type { PathSegment } from "../format";
   import type { DensityMode } from "../types";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
 
   export let crumbs: PathSegment[] = [];
   // Row/chrome density (CPE-1526 threaded the prop, CPE-1528 consumes it): "compact" applies the
@@ -148,10 +149,10 @@
     >
       {#each crumbs as crumb, i (crumb.path)}
         {#if i === crumbs.length - 1}
-          <span class="crumb current" aria-current="page">{crumb.name}</span>
+          <span class="crumb current" aria-current="page">{displaySafeName(crumb.name)}</span>
         {:else}
           <button class="crumb" on:click|stopPropagation={() => dispatch("navigate", crumb.path)}>
-            {crumb.name}
+            {displaySafeName(crumb.name)}
           </button>
           <span class="crumb-sep" aria-hidden="true"><Icon name="chev-right" size={12} /></span>
         {/if}
