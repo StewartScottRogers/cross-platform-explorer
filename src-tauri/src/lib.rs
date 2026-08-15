@@ -1013,14 +1013,18 @@ async fn write_file_text(app: tauri::AppHandle, path: String, contents: String) 
 /// **Item 4 is why "just copy the attributes across" was not the answer either.** Mode is easy and
 /// Windows attributes are tractable, but a rename onto a file another process holds open fails regardless
 /// of what has been copied — nothing about the staged file changes the target's sharing mode. So that
-/// route closes three of four at best. **CPE-1739** carries the whole list, including the same collateral
-/// that `metadata_write` has had since CPE-1716 (unchanged by this ticket, and now stated in the Metadata
-/// Studio's user docs rather than left silent).
+/// route closes three of four at best. **That is exactly how CPE-1739 landed**: `metadata_write`'s save
+/// now carries the mode and extended attributes across on Unix and switches to `ReplaceFileW` on Windows
+/// (which preserves the attribute word, the ACL and named streams including `Zone.Identifier`), closing
+/// items 1–3 — while **item 4 stayed open**, measured, because the obstacle is the target's sharing mode
+/// and no amount of care on the replacement file reaches it. So this command stays on `fs::write`: the
+/// acceptance criterion for re-routing it was *all four*, and it is still three.
 ///
 /// ## What is therefore true of this command's writes, all of it unchanged from before CPE-1725
 ///
-/// - **Not atomic.** A save killed part-way leaves the file part-written. That is a real defect and it is
-///   what CPE-1739 is for; it is not a *regression*, and buying it at the price above is not this
+/// - **Not atomic.** A save killed part-way leaves the file part-written. That is a real defect, and it
+///   is still open after CPE-1739: closing it means moving to the rename-based writer, whose remaining
+///   cost (item 4) has not gone away. It is not a *regression*, and buying it at that price is not this
 ///   ticket's call to make.
 /// - **Mode, ownership, Windows attributes, alternate data streams and hard links are all preserved**,
 ///   because the file object is never replaced. Pinned by

@@ -50,18 +50,35 @@ pending. Nothing touches disk until you click **Save**:
   of such a folder on each save, so it may never look at that leftover. It is harmless either way, and
   safe to delete by hand.)
 - **What that safety costs, so you can judge it.** Writing a new file and moving it into place means the
-  saved file is a *new* file, and things attached to the old one don't come with it:
-  - **Permissions and ownership are reset** to what a newly created file gets. On Linux and macOS a file
-    you'd made private (`0600`) comes back readable by everyone (`0644`), and an executable file loses its
-    executable bit. On Windows, attributes such as **Hidden** are lost, as are **alternate data streams** —
-    including the `Zone.Identifier` mark that records a file was downloaded from the internet.
-  - **A save can fail where a plain save would have worked**, reporting `Access is denied`, if another
-    program has the file open. Nothing is written or damaged when that happens; close the other program
-    and save again.
+  saved file is technically a *new* file. Almost everything attached to the old one is now carried across
+  with it — but not quite everything, and the exceptions are listed rather than glossed over.
+
+  Carried across, so you don't lose it:
+
+  - **Permissions.** On Linux and macOS a file you'd made private (`0600`) stays private, and an
+    executable file keeps its executable bit. On Windows the file's security settings come with it too.
+  - **Windows file attributes and alternate data streams**, including **Hidden** and the
+    `Zone.Identifier` mark that records a file was downloaded from the internet.
+  - **Extended attributes on Linux and macOS** — which is where macOS keeps **Finder tags** and its
+    "downloaded from the internet" quarantine flag.
+  - If any of these can't be read before the save starts, the save is **refused** and nothing is written,
+    rather than handing you back a file that is more open than the one you saved.
+
+  Still not carried across:
+
+  - **Ownership on Linux and macOS.** A saved file belongs to whoever saved it. (If that changes the
+    owner, a `setuid`/`setgid` bit is deliberately dropped rather than silently re-pointed at you.)
+  - **A save can still fail where a plain save would have worked** if another program has the file open —
+    on Windows it reports that the file is in use by another process. Nothing is written or damaged when
+    that happens; close the other program and save again.
+  - **A program that had the file open while you saved keeps reading the old contents** until it reopens
+    it. This is inherent to saving safely this way, and is how most editors behave.
   - **Other hard links to the file keep the old metadata** (see below).
-  - The preview pane's plain-text editor makes the **opposite** trade and keeps all of the above — see
-    **Explorer → Files → Saving an edited file**. The two agree about symlinks, which is the part that
-    could otherwise corrupt something; they differ only in how the bytes are put down.
+  - Saving is also a little slower than a plain write, because carrying all of the above across costs a
+    few extra milliseconds. You won't notice it on a single save.
+  - The preview pane's plain-text editor makes the **opposite** trade — see **Explorer → Files → Saving an
+    edited file**. The two agree about symlinks, which is the part that could otherwise corrupt something;
+    they differ only in how the bytes are put down.
 
 ## Symlinked files
 
