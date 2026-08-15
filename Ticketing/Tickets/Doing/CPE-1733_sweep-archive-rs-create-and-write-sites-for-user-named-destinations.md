@@ -128,3 +128,43 @@ long-standing behaviour of these functions.
 Evidence: all 11 guarded sites neutralised **one at a time**, each turning its own named test red, restored
 with `git checkout --` each time. Full `cpe-server` suite (2156 + integration) and `src-tauri` (182) green;
 `cargo clippy --all-targets -D warnings` clean in both feature modes and in `src-tauri`.
+
+**2026-08-14 (round 2) — PR #906 review (3 blockers) + UAT (6 findings). All nine reproduced here before
+being acted on; every fix is in the enumeration, which is what this ticket delivers.**
+
+Corrections to claims this ticket had made wrongly:
+
+- **Rows 1–5 were not "unreachable by the hazard".** `create_dir_all` accepts a pre-existing directory
+  *and* a directory symlink, so it established nothing; what protected them was `%TEMP%` being per-user on
+  Windows. On a shared `/tmp` it is CWE-377 → CWE-59, and the leaf name is archive-controlled.
+  **Hardened**, not deferred: `temp_extract_target` link-checks the shared root and claims its
+  per-extraction directory with an exclusive `fs::create_dir` (`Err(AlreadyExists)` for both squat shapes,
+  measured), retrying the next sequence number. Residuals stated at the site.
+- **"still followed on the tar, 7z and one-shot-zip paths" was false for two of the three.** tar
+  **destroys** the link (writes a regular file over it, silently, returning `Ok`); one-shot zip **aborts**
+  the whole extraction; only 7z follows. The claim was inference that reached four places including the
+  user-facing docs — the exact defect this ticket exists to stop.
+- **`create_dir_all` on a dangling link does not "do nothing at all" — it fails**, with the same
+  misleading "already exists" wording row 7 got a guard for. Row 17's rationale rewritten to one that
+  survives comparison with row 7: `dest` is a folder the user *pointed at*, not a name being *claimed*.
+- **`guarded_join` "not needed" was wider than the search.** True for traversal only; `is_safe_name`
+  additionally fails closed on `:` and a leading `..`, and `entry_name_is_safe` accepts `file:stream`
+  (NTFS ADS — bytes vanish, no visible file), `..evil`, `con`, `" sp "`, `x.`.
+- **The rows 15/16 guard is LEAF-ONLY** — `create_dir_all(parent)` follows a directory link (a junction
+  needs no privilege), and the leaf guard then sees nothing because the leaf does not exist.
+- **Rows 15/16 collapsed "could not check" into "confirmed link"**, dropping an entry silently and
+  returning `Ok`. Split into `fsutil::CreateSlotLink` + `archive::entry_slot_action`: a link skips, an
+  unreadable slot aborts. Pure classifier, because the `Unknown` arm cannot be staged everywhere.
+
+Non-blocking items taken: row 18 added (four per-entry `create_dir_all` calls the table omitted while
+billing itself as the inventory) with a count line reconciling to the source; platform boundaries added to
+the two figures lacking one; the live-link leg now states it walks rows 6–14 only.
+
+Filed: **CPE-1746** (7z write-through, live on the shipping path — its own ticket, High),
+**CPE-1744** (the ADS delta, the leaf-only escape, tar destroying links, the one-shot/streamed ZIP
+divergence, row 17's wording), **CPE-1745** (`note_app_op` records an archive temp path never written).
+
+New guard evidence, each broken on its own and restored with `git checkout --`: row 1's exclusive create
+(victim overwritten with `"ARCHIVED A"`, `Ok` returned with an ordinary-looking path) and F6's three-way
+action (`left: Skip("could not check")` vs `right: Abort(...)`). The recorded-absence test was also proved
+un-rottable: simulating the CPE-1744 fix without updating the table reds it.
