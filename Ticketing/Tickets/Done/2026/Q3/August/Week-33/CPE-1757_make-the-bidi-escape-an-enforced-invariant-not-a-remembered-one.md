@@ -3,11 +3,11 @@ id: CPE-1757
 title: Make the bidi-escape an enforced invariant rather than a remembered one, and close the residual call sites
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-15
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
