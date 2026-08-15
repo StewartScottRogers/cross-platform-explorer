@@ -17,7 +17,7 @@
 // ratchet now works at **case** granularity: the unit of exemption is one `it()` inside one spec file,
 // identified by `spec` + `test` title (see `caseKey`).
 //
-// SEVEN distinct failure modes, each with its own message so a future engineer knows exactly what to do
+// EIGHT distinct failure modes, each with its own message so a future engineer knows exactly what to do
 // without re-deriving the ratchet's rules from scratch:
 //   1. NEW GUI REGRESSION      — a CASE failed that isn't in known-failing.json. This is the clause that
 //      makes a regression inside a partially-failing spec file visible at the gate (CPE-1677).
@@ -54,6 +54,15 @@
 //      permanent break (which `intermittent` is explicitly not for). This cannot prove a case is actually
 //      flaky — only real run history can, and it should not pretend to — but it can and does refuse the
 //      one thing that's structurally checkable: no evidence attached at all.
+//   8. INVALID EXPECTED SPEC COUNT — `expectedSpecCount < 1` (CPE-1728). Closes a vacuous-green hole a
+//      reviewer found while auditing this ticket's other change: with zero results, an empty
+//      known-failing.json, AND `expectedSpecCount === 0`, clause 4's own `reportedSpecCount <
+//      expectedSpecCount` compares `0 < 0` (false) — nothing else fires, and `evaluate()` returns green
+//      for a run that verified NOTHING. Not reachable through the real CI path today (the specs
+//      directory is checked out from git and never empty), but this ticket's OWN change
+//      (`run-ratchet.ts#loadCaseResults` tolerating a missing `.results/` dir instead of throwing) widens
+//      who can reach `evaluate()` with a bad `expectedSpecCount`, so this closes the hole permanently
+//      rather than leaving it merely unreachable today.
 //
 // One narrow escape hatch, `intermittent: true` on an entry (CPE-1677, forced by the evidence): case
 // granularity turns a genuinely FLAKY case into a coin-flip gate — clause 1 reds the runs where it
@@ -147,8 +156,9 @@ export interface EvaluateResult {
   /** `intermittent: true` entries in known-failing.json (as `caseKey` strings) whose `reason`/`ticket`
    *  don't clear the minimum evidence bar — see clause 7 / CPE-1680. */
   unevidencedIntermittent: string[];
-  /** True when fewer spec FILES reported a result than `expectedSpecCount` — a timeout/crash/hang, not
-   *  a clean run. This alone is enough to flip `ok` false, independent of the other clauses. */
+  /** True when fewer spec FILES reported a result than `expectedSpecCount` (a timeout/crash/hang, not a
+   *  clean run) OR `expectedSpecCount < 1` (clause 8, CPE-1728 — an invalid expectation can't certify a
+   *  clean run either). This alone is enough to flip `ok` false, independent of the other clauses. */
   incomplete: boolean;
   /** How many distinct spec files reported at least one case (what `incomplete` compares). */
   reportedSpecCount: number;
@@ -311,8 +321,28 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
 
   const reportedSpecs = new Set(results.map((r) => r.spec));
   const reportedSpecCount = reportedSpecs.size;
-  const incomplete = reportedSpecCount < expectedSpecCount;
-  if (incomplete) {
+  // CPE-1728 (reviewer-found hole): `expectedSpecCount < 1` reds unconditionally, checked BEFORE the
+  // ordinary `reportedSpecCount < expectedSpecCount` comparison below. Without this, `expectedSpecCount
+  // === 0` (a misconfigured/empty `specs/` glob) with zero results and an empty `known-failing.json`
+  // evaluates `0 < 0` as false — `incomplete` stays false, nothing else fires, and `evaluate()` returns a
+  // vacuous green ("0/0 spec file(s) reported ... OK") for a run that proved NOTHING. Not reachable
+  // through the real CI path today (`gui-smoke/specs/` is checked out from git and always non-empty), but
+  // CPE-1728's OWN change widened who can reach `evaluate()` with a caller-supplied `expectedSpecCount` —
+  // `run-ratchet.ts#loadCaseResults` now tolerates a missing `.results/` dir instead of throwing, so a
+  // caller only one bug away from mis-globbing `specs/` (a bad `GUI_SMOKE_SPECS_DIR` override, or a
+  // future refactor) would otherwise land on a green verdict instead of a red one. Same shape as clause 6
+  // (CPE-1680): an "I don't know what was supposed to run" state must never default to green.
+  const expectedSpecCountInvalid = expectedSpecCount < 1;
+  if (expectedSpecCountInvalid) {
+    messages.push(
+      `INVALID EXPECTED SPEC COUNT: expectedSpecCount is ${expectedSpecCount} (must be >= 1). A run that ` +
+        `doesn't know how many spec files it was supposed to execute cannot be certified green — check the ` +
+        `specs glob (\`countExpectedSpecs\`/\`GUI_SMOKE_SPECS_DIR\` in scripts/run-ratchet.ts) rather than ` +
+        `trusting a "0/0 reported ... OK" verdict.`,
+    );
+  }
+  const incomplete = expectedSpecCountInvalid || reportedSpecCount < expectedSpecCount;
+  if (!expectedSpecCountInvalid && reportedSpecCount < expectedSpecCount) {
     messages.push(
       `SUITE DID NOT COMPLETE: expected ${expectedSpecCount} spec file(s) (globbed from specs/*.smoke.ts) ` +
         `but only ${reportedSpecCount} reported any result. A timeout, crash, or hang killed the job before ` +

@@ -82,33 +82,57 @@ It is now worse than CPE-1707's single flaky test, because:
 
 ## Resolution
 
-Fixed at the harness/CI layer only — no app-code change, and the measurement below found no evidence the
-app itself is racing. The observed PR #900 signature (zero `AssertionError`, a flood of WebDriver-level
-`no such element`/`move target out of bounds`/DRI3 noise) is the textbook shape of a WebKitGTK/Xvfb
-renderer not painting fast enough for CI, matching the SAME class of quirk already tracked for
-`network.smoke.ts`/`saved-search.smoke.ts` under CPE-1595/CPE-1507. Nothing here suggested a NEW app
-defect, so no follow-up bug ticket was filed.
+Fixed at the harness/CI layer only — no app-code change. The observed PR #900 signature (zero
+`AssertionError`, a flood of WebDriver-level `no such element`/`move target out of bounds`/DRI3 noise) in
+what was retrievable matches the same class of WebKitGTK/Xvfb-under-CI quirk already tracked for
+`network.smoke.ts`/`saved-search.smoke.ts` under CPE-1595/CPE-1507, not a new app defect — but the raw log
+for that specific run is truncated by `gh run view --log` well before its end (a real limitation found
+during review, not fully worked around: the log is now uploaded as an artifact going forward so this
+doesn't recur, but the ORIGINAL PR #900 run's missing tail cannot be retrieved retroactively). No follow-up
+bug ticket was filed on the strength of the visible ~3/4 of that run plus the broader pattern (every other
+no-verdict run in the sample shows the same WebDriver-level signature, never an `AssertionError`), but that
+conclusion should be read as "nothing suspicious in what could be checked," not "fully confirmed."
 
-Three changes, all in `.github/workflows/gui-smoke.yml` + two new `gui-smoke/lib` modules (workflow/
-harness layer only, per this ticket's scope — no touches to `crates/*`, `src/App.svelte`, or
-`Sidebar.svelte`, which other workers are live in):
+Three changes, all in `.github/workflows/gui-smoke.yml` + `gui-smoke/lib/ratchet.ts` + two new
+`gui-smoke/lib` modules (workflow/harness layer only, per this ticket's scope — no touches to `crates/*`,
+`src/App.svelte`, or `Sidebar.svelte`, which other workers are live in):
 
-1. **Job `timeout-minutes` raised 45 -> 55**, with the "Run GUI smoke suite (xvfb-run)" step itself
-   separately capped at `timeout-minutes: 45` (the OLD full-job ceiling — a genuinely hung suite still
-   dies in the same bounded time as before). This reserves real headroom for the steps that report on the
-   suite, instead of them racing it for whatever's left of one shared 45-minute budget.
-2. **The "Ratchet — no new GUI regressions" step now runs `if: always()`**, and
-   `gui-smoke/scripts/run-ratchet.ts#loadCaseResults` now returns zero results (with a clear log line)
-   instead of throwing when `.results/` is missing entirely. Together these mean ANY cancellation stage —
-   the job's own timeout, or an ordinary CPE-1266 concurrency-supersession landing mid-suite — now lands
-   on `lib/ratchet.ts#evaluate`'s existing, honest `SUITE DID NOT COMPLETE` verdict (clause 4) instead of
-   a bare `##[error]The operation was canceled.` with no verdict at all.
+1. **Job `timeout-minutes` stays 45.** A first draft of this fix raised it to 55 on the belief the job's
+   own cap was the constraint; a review round re-measured (155 completed job runs) and found it has
+   **never fired** (max observed 42.5 min) — raising it would have fixed zero observed incidents while
+   weakening CPE-1266's original "dies in minutes, not hours" rationale. Instead, the "Run GUI smoke suite
+   (xvfb-run)" step now carries its own **new** `timeout-minutes: 32` (previously no step-level cap existed
+   at all), sized with real margin over the measured normal suite duration (min 29.7 / median 30.0 / max
+   30.3 min, n=83) — tighter than the status quo, but explicitly NOT framed as a mathematical guarantee of
+   reserved time for later steps (a first draft claimed exactly that and the arithmetic didn't hold under
+   the measured max setup time of 11.9 min; see the workflow's own CPE-1728 comments for the corrected
+   reasoning).
+2. **The "Ratchet — no new GUI regressions" step now runs `if: always()`** — this is the actual fix, per
+   the reviewer's own assessment. `gui-smoke/scripts/run-ratchet.ts#loadCaseResults` now returns zero
+   results (with a clear log line) instead of throwing when `.results/` is missing entirely. Together
+   these mean ANY cancellation stage — the job's own timeout (never observed to fire), or an ordinary
+   CPE-1266 concurrency-supersession landing mid-suite (the ACTUAL cause behind every one of the 26
+   no-verdict runs measured) — now lands on `lib/ratchet.ts#evaluate`'s existing, honest
+   `SUITE DID NOT COMPLETE` verdict (clause 4) instead of a bare `##[error]The operation was canceled.`
+   with no verdict at all. `evaluate()` also gained **clause 8** (`expectedSpecCount < 1` reds
+   unconditionally) — a reviewer-found vacuous-green hole this change's widened input space could
+   otherwise reach, closed even though not reachable through the real CI path today.
 3. **A new advisory "Classify suite log" step** (`gui-smoke/lib/logSignature.ts` +
    `gui-smoke/scripts/classify-log.ts`, unit-tested in `logSignature.test.ts`), between the suite and the
-   Ratchet gate, reads the suite step's captured output (now `tee`'d to `.results/suite-output.log`) and
-   prints whether a run's failures carry a real `AssertionError` or only environment-signature markers.
-   **Never changes the exit code or the Ratchet's verdict** — advisory only, so it can't hide a real
-   regression behind "looks environmental" (the CPE-1679 concern this ticket explicitly guards against).
+   Ratchet gate, reads the suite step's captured output (now `tee`'d to `.results/suite-output.log`, and
+   **now also uploaded as an artifact** alongside the screenshots — `gh run view --log` truncates a long
+   job's log, which hid part of the exact run investigated for this ticket) and prints whether a run's
+   failures carry a real `AssertionError` or only environment-signature markers. **Never changes the exit
+   code or the Ratchet's verdict** — advisory only, so it can't hide a real regression behind "looks
+   environmental" (the CPE-1679 concern this ticket explicitly guards against).
+
+**Expectation set straight:** this does NOT stop a superseded run from concluding `cancelled` — PR #900's
+check would still show `cancelled` after this change, only the underlying log becomes readable instead of
+misleading. The real cliff is `concurrency.cancel-in-progress` against a ~41-minute job: any second push
+within that window kills the leg's verdict regardless of any timeout value. Sharding the suite (CPE-1266's
+already-tracked long-term direction) is the actual fix for that; `if: always()` here is the correct and
+sufficient mitigation meanwhile, because the harm in PR #900 was a human misreading a cancelled log, not
+the cancellation itself being wrong.
 
 No retry was added anywhere, `mochaOpts.timeout` (90s/test) is unchanged, and `known-failing.json` was
 NOT touched — the PR #900 incident is a single occurrence with no confirmed-recurring case titles to
@@ -123,12 +147,16 @@ argues against.
   CPE-1266 concurrency-supersessions with real timeouts). Findings: a normal GREEN completion already
   regularly consumes 34-42 of the 45-minute budget (median ~40-41) — a 3-11 minute margin on EVERY run.
   Of 85 `pull_request`-triggered runs sampled, 26 (31%) never produced a Ratchet verdict because
-  something cancelled the run before that step ran; 16 of those (19% of all PR runs) had already been
-  running >=15 minutes (real suite work lost, not an instant double-push). PR #900 itself
-  (`cpe-1723-s3-listbucket-and-gaps`, run `31787491058`) is one of those 16: cancelled at 33m48s. Zero of
+  something cancelled the run before that step ran; 15 of those (job duration >=15 min — corrected from
+  an earlier "16" typo-of-rounding) had already been running that long AT THE JOB LEVEL (real work lost,
+  not an instant double-push), though only 10 had the SUITE STEP itself running >=15 min — the earlier
+  draft of this note conflated job runtime with suite runtime, caught in review. PR #900 itself
+  (`cpe-1723-s3-listbucket-and-gaps`, run `31787491058`) is one of those 26: job cancelled at 33m48s with
+  its suite step at 23m09s (~3/4 through a normal ~30-minute suite — genuinely incomplete, not a finished
+  run whose tally got thrown away, corrected from an earlier "tallied all 40 specs" misreading). Zero of
   the 157 gui-smoke-linux job runs inspected showed the job's OWN 45-minute cap firing mid-suite as such
-  (max cancelled-with-no-verdict duration observed: 38.9 min) — the mechanism is more often an ordinary
-  concurrency-group supersession landing badly than the hard timeout itself, but the FIX is the same
+  (max cancelled-with-no-verdict duration observed: 38.9 min) — the mechanism is ALWAYS an ordinary
+  concurrency-group supersession landing badly, never the hard timeout, but the FIX is the same
   either way: the Ratchet step must survive any cancellation, not just avoid one specific trigger.
 - 2026-08-15 — Decided: reserve headroom (job timeout 45 -> 55, suite step separately capped at 45) +
   `if: always()` on Ratchet + a graceful-missing-results path in `run-ratchet.ts`, rather than sharding
@@ -138,9 +166,25 @@ argues against.
   `gui-smoke/scripts/classify-log.ts` for AC2 — a pure, unit-tested classifier distinguishing a real
   `AssertionError` from the WebDriver/DRI3-class environment-signature markers observed in PR #900's own
   log, wired as an advisory (non-gating) step between the suite and the Ratchet gate.
-- 2026-08-15 — Pushed branch `cpe-1728-gui-smoke-load`, opened PR. After-number pending: CI must run this
-  leg for real before a same-sample-size after-number (AC6) can be reported — see the PR body/Foreman
-  follow-up for the observed run.
+- 2026-08-15 — Pushed branch `cpe-1728-gui-smoke-load`, opened PR #912.
+- 2026-08-15 — Review round (attempt 2/3): reviewer independently reproduced the baseline (26/85 = 30.6%
+  vs measured 31%; green durations min 33.6/median 41.2/max 42.5 vs measured 34-42/~40-41; PR #900 at
+  33.82 min) and confirmed `if: always()` + the missing-results path is the correct, sufficient fix — but
+  found the 45->55 job-timeout raise was arithmetically unjustified (re-measured: 0/155 jobs ever reached
+  44 min; all 76 no-verdict jobs sampled were supersession-cancelled at <=38.9 min, never a timeout; the
+  post-suite reporting steps take 0.05-0.50 min, not the 10 min the raise assumed they needed) and three
+  factual errors baked into committed workflow comments (the "40 specs tallied" claim, the `bash
+  -eo pipefail` default-shell claim, and the ">=15 min suite runtime" conflation with job runtime).
+  Corrected all four: reverted the 45->55 raise, added a new-but-honest `timeout-minutes: 32` on the
+  suite step alone (sized against measured normal duration, NOT claimed as a mathematical reserve
+  guarantee), rewrote every affected workflow/README/ticket comment with the corrected numbers and
+  claims, uploaded `.results/suite-output.log` as an artifact (closes the "reader can't retrieve the
+  full log" gap the reviewer hit), and added `lib/ratchet.ts` clause 8
+  (`expectedSpecCount < 1` -> red) per the reviewer's one-line hardening suggestion, with 3 new unit
+  tests. Re-ran `npm run typecheck` (clean) and `npm run test:unit` (88/88 passing, up from 85). Re-verified
+  the ">=15 min" split precisely by re-deriving suite-step-specific durations from the raw API data
+  (confirmed: 15/26 by job duration, 10/26 by suite-step duration — matches the reviewer's own numbers
+  exactly).
 
 ## Notes
 

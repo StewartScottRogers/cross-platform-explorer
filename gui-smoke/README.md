@@ -241,33 +241,52 @@ rather than reusing this one (see the `$comment` above).
 
 PR #900 (CPE-1723) reported failure with "3 specs failed, 37 passed" and then ended with
 `##[error]The operation was canceled.` — a tail that reads as pure infrastructure noise, even though the
-suite had already run every spec and the log was saturated with `libEGL`/DRI3 warnings, `move target out
-of bounds`, and a flood of `no such element` (a renderer not painting/settling in time under CI), with
-**zero `AssertionError`s** anywhere. Measured before changing anything (`gh run list` / `gh api
-.../jobs` across the last ~160 runs of `gui-smoke.yml`): a normal green completion of this leg already
-regularly consumes 34-42 of the old 45-minute job budget, and of 85 `pull_request`-triggered runs in that
-sample, 26 (31%) never produced a Ratchet verdict at all because something cancelled the run first —
-including PR #900's own run. Three changes, none of which touch what passes or fails:
+log was saturated with `libEGL`/DRI3 warnings, `move target out of bounds`, and a flood of
+`no such element` (a renderer not painting/settling in time under CI), with **zero `AssertionError`s**
+anywhere in what was retrievable. Measured before changing anything, then re-measured after a review round
+(`gh run list` / `gh api .../jobs` across ~160 `gui-smoke.yml` runs, reading each job's own STEP-level
+timestamps): a normal green completion of this leg's suite step is remarkably consistent (min 29.7 /
+median 30.0 / max 30.3 min, n=83), setup-before-it is median 10.85 / max 11.9 min, and of 85
+`pull_request`-triggered runs sampled, 26 (31%) never produced a Ratchet verdict because the run was
+cancelled first — including PR #900's own (suite step cancelled at 23m09s, ~3/4 through a normal run;
+that run was genuinely incomplete, not a finished run whose tally got thrown away). **Every one of those
+26 had its suite step `cancelled` or `skipped`** — an ordinary `concurrency.cancel-in-progress`
+supersession (a newer push landing on the same PR), never this job's own 45-minute cap: across 155
+completed job runs measured, that cap has **never** fired (max observed 42.5 min). Three changes, none of
+which touch what passes or fails:
 
-1. **The job's `timeout-minutes` is 55, not 45** — the suite step itself is separately capped at 45 (the
-   OLD full-job ceiling, so a genuinely hung suite still dies in the same bounded time as before), which
-   guarantees the steps that report on it always have their own reserved window.
-2. **The "Ratchet" step now runs `if: always()`**, so a cancellation at ANY stage — the job's own
-   timeout, or an ordinary CPE-1266 concurrency-supersession landing mid-suite — still produces a real
-   verdict instead of being skipped by the default `if: success()` condition. `scripts/run-ratchet.ts`'s
-   `loadCaseResults` also tolerates a completely missing `.results/` dir (0 cases reported) instead of
-   throwing, so even a cancellation before the suite step ever started lands on `evaluate()`'s existing
-   `SUITE DID NOT COMPLETE` message (clause 4) rather than a raw stack trace or silence.
+1. **The job's `timeout-minutes` stays 45** (an earlier draft of this fix raised it to 55 on the mistaken
+   belief the cap was the constraint — the data above shows it never has been, and raising it would only
+   have weakened CPE-1266's original "dies in minutes, not hours" rationale for a genuinely hung run). The
+   suite step now carries its own `timeout-minutes: 32` — new; previously no step-level cap existed —
+   sized with real margin over the measured normal duration above, tighter than the status quo, but not a
+   claimed mathematical guarantee of reserved time afterwards (see the workflow's own CPE-1728 comments
+   for the arithmetic and why that framing was wrong in an earlier draft).
+2. **The "Ratchet" step now runs `if: always()`** — this is the actual fix. A cancellation at any stage,
+   whichever of the two causes above triggers it, now still produces a real verdict instead of being
+   skipped by the default `if: success()` condition. `scripts/run-ratchet.ts`'s `loadCaseResults` also
+   tolerates a completely missing `.results/` dir (0 cases reported) instead of throwing, so even a
+   cancellation before the suite step ever started lands on `evaluate()`'s existing `SUITE DID NOT
+   COMPLETE` message (clause 4) rather than a raw stack trace or silence. `lib/ratchet.ts`'s `evaluate()`
+   also gained clause 8 (`expectedSpecCount < 1` reds unconditionally) to close a vacuous-green hole this
+   widened input space could otherwise reach.
 3. **A new "Classify suite log" step** (also `if: always()`), between the suite and the Ratchet gate,
-   reads the suite step's captured output (now `tee`'d to `.results/suite-output.log`) and prints whether
-   this run's failures carry a real `AssertionError` or only WebDriver/DRI3-class environment noise — see
-   `gui-smoke/lib/logSignature.ts`. **Purely advisory**: it never changes the Ratchet's verdict or the
-   job's exit code, it only labels what kind of red a red already is, so a reader doesn't have to count
-   PASSED/FAILED lines and grep the raw log by hand to work that out.
+   reads the suite step's captured output (now `tee`'d to `.results/suite-output.log`, and — since
+   `gh run view --log` truncates a long job's log well before its end — now also **uploaded as an
+   artifact** alongside the screenshots) and prints whether this run's failures carry a real
+   `AssertionError` or only WebDriver/DRI3-class environment noise — see `gui-smoke/lib/logSignature.ts`.
+   **Purely advisory**: it never changes the Ratchet's verdict or the job's exit code, it only labels what
+   kind of red a red already is, so a reader doesn't have to count PASSED/FAILED lines and grep the raw
+   log by hand to work that out.
 
 None of this adds a retry, raises `mochaOpts.timeout` (still 90s/test), or gives a flaky case more
-chances to pass — see CPE-1679 for why that would defeat the point. It only makes sure the machinery that
-already exists to report a verdict gets the chance to run.
+chances to pass — see CPE-1679 for why that would defeat the point. It also does **not** stop a superseded
+run from concluding `cancelled` at the GitHub UI level (a genuinely obsolete run's verdict should read
+that way) — it makes the underlying log honest instead of misleading once someone opens it. The real fix
+for "a second push within ~41 minutes kills the leg's verdict" is sharding the suite across more, shorter
+jobs (CPE-1266's already-tracked long-term direction); `if: always()` here is the correct and sufficient
+mitigation meanwhile, because the harm in PR #900 was a human misreading a cancelled log, not the
+cancellation itself being wrong.
 
 ### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
 
