@@ -268,6 +268,32 @@ narrower than one spec file's growth. Sharding is the only fix whose margin does
 with the spec count — and at ~10 min per job it also largely defuses the `cancel-in-progress` cliff that
 killed 31% of sampled PR verdicts.
 
+**After, measured** on the first green sharded run (`31903995127`, head `aad21a57`, **the same 41 specs**
+as the 41.70-minute before-run, so it is a like-for-like comparison):
+
+| min | job |
+|---:|---|
+| 9.58 | build (of which `tauri build` 7.78 — constant, no spec-count term) |
+| 7.15 | shard 1 (11 specs) |
+| **14.27** | **shard 2 (10 specs) — the long pole**: 0.87 setup + 13.32 suite |
+| 6.68 | shard 3 (10 specs) |
+| 6.40 | shard 4 (10 specs) |
+| 0.38 | verdict |
+| **25.68** | **whole leg, wall clock** — vs 41.70 (−38%) |
+| **14.27** | **longest single job** — vs 41.70 (−66%) |
+
+The verdict job reported `41/41 spec file(s) reported … manifests received from shard(s): 1, 2, 3, 4` and
+`92 passed, 25 failed, 25 known-failing listed` — the unsharded run's semantics exactly, reassembled from
+four. The merged screenshot artifact downloaded as **82 PNGs flat at the root, zero nested directories**.
+
+**The long pole is one spec file, not the shard count.** Shard 2's 13.32-minute suite against ~5.5–6.2
+for the others is `samples.smoke.ts` (46 cases, roughly 8 of those minutes by itself). No shard count gets
+below that floor — if the long pole ever binds again, the lever is **splitting `samples.smoke.ts`**, not
+adding shards. (Not free: 25 `known-failing.json` entries name it, and `spec` is the exemption key.)
+Headroom under the 30-minute shard cap: 15.73 min, worth roughly 35–87 more spec files averaged over the
+round-robin, or ~8 if every new spec is heavy *and* lands on the long-pole shard. The old cap had 3.3
+minutes and 2–4 spec files.
+
 **How the split is decided.** `lib/shard.ts#assignShardSpecs` deals the spec files out round-robin over a
 code-unit-sorted list (`i % shardTotal === shardIndex - 1`), so every spec lands in **exactly one** shard
 and adding a spec re-deals at most one file per shard. `lib/specFiles.ts` is the single definition of

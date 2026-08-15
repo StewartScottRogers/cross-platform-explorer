@@ -221,6 +221,34 @@ jobs:
   # THE PRIZE IS BIGGER THAN THE CAP. `concurrency: cancel-in-progress` (CPE-1266) means any second push
   # within the run's own wall clock kills the in-flight verdict; 31% of sampled PR runs died that way
   # (CPE-1728's measurement). No timeout value fixes that — only a shorter run does.
+  #
+  # AFTER, measured on this change's own first green run (31903995127, head aad21a57, 41 specs — the
+  # SAME spec count as the 41.70-minute before-run, so this is a like-for-like comparison):
+  #   9.58 min  build            (of which `tauri build --no-bundle` 7.78; constant, no spec-count term)
+  #   7.15 min  shard 1  (11 specs)
+  #  14.27 min  shard 2  (10 specs)   <- the long pole; 0.87 setup + 13.32 suite
+  #   6.68 min  shard 3  (10 specs)
+  #   6.40 min  shard 4  (10 specs)
+  #   0.38 min  verdict
+  #  25.68 min  whole leg, wall clock (19:36:56 -> 20:02:37) vs 41.70 before  -> -38%
+  #  14.27 min  LONGEST SINGLE JOB    vs 41.70 before                          -> -66%
+  # The verdict job reported `41/41 spec file(s) reported ... manifests received from shard(s): 1, 2, 3, 4`
+  # and `92 passed, 25 failed, 25 known-failing listed` — byte-for-byte the semantics of the unsharded
+  # run, reassembled from four.
+  #
+  # THE LONG POLE IS ONE SPEC FILE, NOT THE SHARD COUNT. Shard 2's 13.32-minute suite against ~5.5-6.2 for
+  # the others is `samples.smoke.ts` (46 cases, roughly 8 of those minutes on its own). Raising the shard
+  # count cannot get any shard below that floor — the next real lever, if the long pole ever becomes the
+  # binding constraint again, is SPLITTING `samples.smoke.ts`, not adding shards. (That is a bigger change
+  # than it looks: 25 of `known-failing.json`'s entries name it, and the `spec` field is the exemption
+  # key.)
+  #
+  # HEADROOM, stated honestly in both directions. A new spec file joins ONE shard, and round-robin over a
+  # sorted list rotates which. At 0.73-1.80 min per added spec: averaged over the rotation the long pole
+  # gains 0.18-0.45 min per spec added to the repo, so the 15.73 min between 14.27 and the 30-minute shard
+  # cap absorbs roughly 35-87 more spec files; in the adversarial case where every new spec is heavy AND
+  # lands on the long-pole shard, about 8. Before this change the same margin was 2-4 spec files, full
+  # stop.
   gui-smoke-linux-build:
     name: GUI smoke (ubuntu-latest) — build once for every shard (CPE-1753)
     runs-on: ubuntu-latest
@@ -340,16 +368,20 @@ jobs:
         # against it on every run: add an entry here without bumping it and every manifest reports a
         # `shardTotal` the join does not expect (SHARD PLAN MISMATCH); bump it without adding an entry
         # here and one index never reports (MISSING SHARD). Neither direction can go quietly green.
-        # Four was chosen from the measured numbers: 29.93 min of suite / 4 ≈ 7.5 min plus ~2.5 min of
-        # per-shard setup ≈ 10 min per job. Raising it further buys progressively less (the setup floor
-        # dominates) while multiplying runner slots per push.
+        # Four was chosen from the measured numbers and CONFIRMED by the first real run (see the job-level
+        # AFTER block above): three shards land at 6.40-7.15 min and one — the one holding
+        # `samples.smoke.ts` — at 14.27. Raising the count would not move that long pole, because a single
+        # 46-case spec file cannot be split across shards; it would only shave the already-cheap three
+        # while multiplying runner slots consumed per push. Four it stays until `samples.smoke.ts` itself
+        # is split.
         shard: [1, 2, 3, 4]
-    # CPE-1753: was 45 for the whole unsharded suite, which a green run had crept to 41.70 of. A shard is
-    # ~10 min (see the matrix comment), so 25 is roughly 2.5x the expected duration — and, unlike the old
-    # 45, the headroom is measured in MANY spec files rather than two to four: at 0.73-1.80 min per added
-    # spec divided across 4 shards, a shard gains 0.18-0.45 min per spec added to the repo, so this cap
-    # absorbs another ~30 spec files before it needs looking at again. CPE-1266's original rationale is
-    # unchanged: a genuinely hung WebKitGTK-under-Xvfb session must die in minutes, not hours.
+    # CPE-1753: was 45 for the whole unsharded suite, which a green run had crept to 41.70 of. Measured
+    # after sharding, the shards run 6.40 / 7.15 / 6.68 / 14.27 min — so 30 is ~2.1x the LONG POLE (not
+    # the average, which would flatter it), leaving 15.73 min of headroom worth roughly 35-87 more spec
+    # files averaged over the round-robin, or ~8 in the adversarial case. Compare the old 45: it had 3.3
+    # minutes and 2-4 spec files left. CPE-1266's original rationale is unchanged and is why this is not
+    # simply left at 45: a genuinely hung WebKitGTK-under-Xvfb session must die in minutes, not hours, and
+    # 30 against a 14.27-minute job still means "died in minutes".
     #
     # History of this number, kept because it is the record of what was tried and why it did not work:
     # CPE-1481 raised it 20 -> 35 -> 45 while the suite ran sequentially (35 still left the media-heavy
@@ -361,7 +393,7 @@ jobs:
     # 0.73-1.80 min/spec growth rate, so any value in it would have reded every PR within a spec file or
     # two. `if: always()` on the verdict steps, not a timing coincidence between two numbers, is what
     # protects the verdict from a cancellation — and that is preserved per shard below.
-    timeout-minutes: 25
+    timeout-minutes: 30
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
     # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
     # PR #801's own live run — one of those 7, `network.smoke.ts`, had a stale test selector fixed in
