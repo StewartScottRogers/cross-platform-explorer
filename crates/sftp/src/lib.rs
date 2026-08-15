@@ -387,7 +387,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
     use std::net::SocketAddr;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::Arc;
 
@@ -872,7 +872,6 @@ mod tests {
             //
             // What `fs::rename` does to a link at the destination is pinned, not assumed, by
             // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
-            #[allow(clippy::disallowed_methods)]
             let Some(dest) = self.real(&newpath) else {
                 return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
             };
@@ -885,6 +884,10 @@ mod tests {
             let Some(src) = self.real(&oldpath) else {
                 return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
             };
+            // The `#[allow]` belongs on the `rename` statement itself. It sat on the `let`-else above
+            // in the mid-edit snapshot this branch was resumed from, which left the actual
+            // `std::fs::rename` uncovered — the `disallowed_methods` lint would have fired on it.
+            #[allow(clippy::disallowed_methods)]
             std::fs::rename(src, &dest).map_err(io_err)?;
             Ok(ok_status(id))
         }
