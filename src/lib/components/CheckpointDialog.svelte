@@ -319,7 +319,7 @@
             This overwrites/recreates/deletes files under <strong>{displaySafePath(path)}</strong> to match
             checkpoint <strong>{selected.label || shortId(selected.manifest_id)}</strong>. This cannot be undone.
           {:else}
-            This reverts <strong>{revertOnePath}</strong> alone to checkpoint
+            This reverts <strong>{displaySafePath(revertOnePath)}</strong> alone to checkpoint
             <strong>{selected.label || shortId(selected.manifest_id)}</strong>. This cannot be undone.
           {/if}
         </p>

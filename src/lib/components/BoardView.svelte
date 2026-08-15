@@ -252,7 +252,7 @@
         <input class="board-search" bind:value={boardQuery} on:keydown={onSearchKeydown} placeholder="Filter cards…" spellcheck="false" aria-label="Filter cards" title="Filter cards by id, title, tag, type, or priority (Esc clears)" />
         <button class="board-btn" class:active={viewMode === "board"} on:click={() => (viewMode = "board")} title="Kanban columns">▦ Board</button>
         <button class="board-btn" class:active={viewMode === "epics"} on:click={() => (viewMode = "epics")} title="Organize by epic">◧ Epics</button>
-        <button class="board-btn" on:click={chooseProject} title={"Project: " + boardRoot + "\nChoose a different project folder"}>📁 Project</button>
+        <button class="board-btn" on:click={chooseProject} title={"Project: " + displaySafePath(boardRoot) + "\nChoose a different project folder"}>📁 Project</button>
         <button class="board-btn" on:click={refresh} title="Refresh from the Ticketing/Tickets/ folders">Refresh</button>
         <HelpButton section="agent-board" on:help />
         {#if !windowed}
@@ -270,7 +270,7 @@
       <div class="board-empty board-noproject">
         <p class="np-title">No tickets found here.</p>
         <p class="np-body">The board reads a project's <code>Ticketing/</code> folder, but none was found in:</p>
-        <p class="np-path">{boardRoot}</p>
+        <p class="np-path">{displaySafePath(boardRoot)}</p>
         <button class="board-btn np-choose" on:click={chooseProject}>📁 Choose a project folder…</button>
       </div>
     {:else if viewMode === "epics" && noEpicMatch}

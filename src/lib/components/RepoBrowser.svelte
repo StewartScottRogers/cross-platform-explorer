@@ -157,10 +157,10 @@
     if (!dir || typeof dir !== "string") return;
     const name = r.split("/").pop();
     const target = dir.replace(/[\\/]$/, "") + "/" + name;
-    cloning = true; cloneMsg = `Cloning ${r} → ${target}…`; error = "";
+    cloning = true; cloneMsg = `Cloning ${r} → ${displaySafePath(target)}…`; error = "";
     try {
       unwrap(await commands.forgeClone(provider, r, target, token.trim() || null));
-      cloneMsg = `Cloned to ${target}`;
+      cloneMsg = `Cloned to ${displaySafePath(target)}`;
     } catch (e) {
       cloneMsg = "";
       error = "Clone failed: " + (e instanceof Error ? e.message : String(e));
@@ -222,10 +222,10 @@
   }
 
   async function runGenericClone(host: string, url: string, target: string, tok: string | null): Promise<void> {
-    cloning = true; cloneMsg = `Cloning → ${target}…`; error = "";
+    cloning = true; cloneMsg = `Cloning → ${displaySafePath(target)}…`; error = "";
     try {
       unwrap(await commands.forgeCloneUrl(url, target, tok));
-      cloneMsg = `Cloned to ${target}`;
+      cloneMsg = `Cloned to ${displaySafePath(target)}`;
       // Per-connection credential: remember the token keyed by host (CPE-439/498). Best-effort.
       try {
         if (remember && tok) unwrap(await commands.forgeSetToken(host, tok));

@@ -66,7 +66,7 @@
     busy = true; error = ""; note = "";
     try {
       unwrap(await commands.forgeResolveFile(path, selected, resolution));
-      note = `Staged ${selected}`;
+      note = `Staged ${displaySafePath(selected)}`;
       selected = null;
       await loadState(); // resolved file drops off the list; auto-selects the next
     } catch (e) {

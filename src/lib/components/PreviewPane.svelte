@@ -1063,14 +1063,14 @@
     </div>
   {/if}
   {#if provider.kind === "image" && entry}
-    <img class="preview-img" src={assetUrl(entry.path)} alt={entry.name} />
+    <img class="preview-img" src={assetUrl(entry.path)} alt={displaySafeName(entry.name)} />
   {:else if provider.kind === "decoded-image" && entry}
     {#if imgState === "loading"}
       <p class="preview-note">{$t("pv.loading")}</p>
     {:else if imgState === "error"}
       <p class="preview-note">{$t("pv.cantImage")}</p>
     {:else}
-      <img class="preview-img" src={imgUrl} alt={entry.name} />
+      <img class="preview-img" src={imgUrl} alt={displaySafeName(entry.name)} />
     {/if}
   {:else if provider.kind === "raw-image" && entry}
     {#if rawImgState === "loading"}
@@ -1078,7 +1078,7 @@
     {:else if rawImgState === "error"}
       <slot />
     {:else}
-      <img class="preview-img" src={rawImgUrl} alt={entry.name} />
+      <img class="preview-img" src={rawImgUrl} alt={displaySafeName(entry.name)} />
     {/if}
   {:else if provider.kind === "heic" && entry}
     {#if heicImgState === "loading"}
@@ -1086,7 +1086,7 @@
     {:else if heicImgState === "error"}
       <slot />
     {:else}
-      <img class="preview-img" src={heicImgUrl} alt={entry.name} />
+      <img class="preview-img" src={heicImgUrl} alt={displaySafeName(entry.name)} />
     {/if}
   {:else if provider.kind === "dicom" && entry}
     {#if dicomImgState === "loading"}
@@ -1094,7 +1094,7 @@
     {:else if dicomImgState === "error"}
       <slot />
     {:else}
-      <img class="preview-img" src={dicomImgUrl} alt={entry.name} />
+      <img class="preview-img" src={dicomImgUrl} alt={displaySafeName(entry.name)} />
     {/if}
   {:else if provider.kind === "media" && entry}
     <!-- Temporal media (CPE-1429, epic CPE-720): a native <audio>/<video> element fed by the asset

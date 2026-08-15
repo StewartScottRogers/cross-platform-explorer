@@ -66,6 +66,24 @@ describe("AgentTimeline (CPE-400)", () => {
   });
 });
 
+// CPE-1757 round 2: the main timeline row's name span (`{baseOf(e.path)}`) was raw — `baseOf` is a
+// helper this file defines itself, never named "baseName"/"basename", the exact class of miss the
+// round-1 regex-based guard could not see. Fixed alongside the "Competing renames" row's name span
+// (`{baseOf(rc.path)}`, only its title was escaped in round 1) and the session-history table's row
+// tooltip (`title={row.cwd}`, entirely undisclosed). Asserts on rendered DOM text, not `baseOf`'s or
+// `displaySafeName`'s return value directly, per this repo's Evidence Rule.
+describe("AgentTimeline — bidi/format-character escape on the main timeline row (CPE-1757)", () => {
+  const RLO = String.fromCharCode(0x202e); // RIGHT-TO-LEFT OVERRIDE, built from a code point
+
+  it("escapes an override in the main activity row's name, not just its title tooltip", () => {
+    const spoofed = entry({ path: `Z:/repos/app/${RLO}gnp.txt` });
+    const { container } = render(AgentTimeline, { entries: [spoofed], agentName: "Claude Code" });
+
+    expect(screen.getByText("[RLO]gnp.txt")).toBeTruthy();
+    expect(container.textContent).not.toContain("txt.png");
+  });
+});
+
 describe("AgentTimeline Replay tab (CPE-1094)", () => {
   beforeEach(() => clearDiffs());
   afterEach(() => {
