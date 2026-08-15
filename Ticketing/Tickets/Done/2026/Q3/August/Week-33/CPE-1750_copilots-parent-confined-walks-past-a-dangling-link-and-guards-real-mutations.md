@@ -3,11 +3,11 @@ id: CPE-1750
 title: The Copilot's parent_confined walks past a dangling link, and it guards real production mutations
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
