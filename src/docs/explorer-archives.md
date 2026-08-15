@@ -86,16 +86,28 @@ Three independent protections apply automatically — you don't opt into any of 
   or 7-Zip** extraction the same check applies per entry: an entry that would land on an existing link in
   the destination folder is **skipped** and the rest of the archive still extracts. Overwriting an ordinary
   existing file is unaffected — that stays allowed, because it's a thing you can reasonably mean.
-  **Scope, stated plainly:** during extraction this checks the entry's own final name. It does not yet
-  check a link at a *folder* along the way — if the destination already contains a folder shortcut and an
-  entry is addressed through it, the entry still follows it. Extracting into a **new, empty folder** (what
-  the plain **Extract** action always does) sidesteps that entirely.
+- **Nothing an extraction writes can end up outside the folder you picked — including via a folder
+  shortcut.** This is a second, separate check from the one above, and it covers the case a name-only
+  check cannot see: if the destination already contains a **folder** shortcut (a symlink, or on Windows a
+  junction — which any account can create, no special permission needed) and an archive entry is
+  addressed *through* it, like `sub/report.txt` where `sub` is the shortcut, then writing it normally
+  would put the file wherever the shortcut leads. Every entry's full path is now resolved before anything
+  is written, and an entry that doesn't provably stay inside the folder you chose is **skipped** — with a
+  note in the operations panel saying so — while the rest of the archive still extracts. The archive's own
+  folder entries get the same treatment, so an extraction can't create directories out there either.
+  Extracting into a **new, empty folder** (what the plain **Extract** action always does) has no shortcuts
+  to run into in the first place.
 - **What happens to a link already sitting in the destination differs by format**, and it's worth knowing
   which you're using. Extracting a **ZIP** or a **7-Zip** archive through the normal Extract / Extract to…
   flow skips just that entry, as above, and leaves both the link and the file it points at alone. A **TAR**
   (`.tar`, `.tar.gz`, `.tgz`) behaves differently at the library level: it **replaces the link with a
   regular file** — the file the link pointed at is left alone, but the link itself is gone. If a
   destination folder contains shortcuts you care about, extract into a new empty folder instead.
+  For the *folder*-shortcut case in the bullet above the formats differ again, though every one of them is
+  safe: ZIP and 7-Zip skip the entry and carry on, while **TAR refuses the whole extraction** with
+  *"trying to unpack outside of destination path"* and unpacks nothing at all. (An earlier version of this
+  page said a folder shortcut "is still followed" during extraction. That was never true of TAR, and is no
+  longer true of anything.)
 - **Zip-slip (path traversal) protection.** An archive entry whose name would escape the destination
   folder — an absolute path, or one containing `..` — is **silently skipped** during extraction rather than
   written outside where you asked, for every supported format (zip, tar, 7z, the one-entry-at-a-time RAR
@@ -157,6 +169,12 @@ it or produces separate output.
 - **Corrupt or unrecognised archive** — every reader (zip, tar, 7z, ISO, RAR) fails cleanly with an error
   message rather than crashing the app, including a defensive guard around a known crafted-file crash bug
   in the underlying 7-Zip reader.
+- **"That name is taken" messages name the name.** Two spots used to hand you the operating system's own
+  wording, which is unhelpfully vague: creating a new empty archive over an existing file reported only
+  *"The file exists"* (which file?), and extracting into a folder whose name is held by a **broken
+  shortcut** reported *"Cannot create a file when that file already exists"* — sending you to delete a file
+  that isn't there, when what's actually at that name is the shortcut. Both now name the full path and say
+  which of the two things is meant.
 - **Failed to open while double-clicking to look inside** — a plain notice naming the archive.
 
 ## Worked example
@@ -198,7 +216,9 @@ You've received a `report-archive.zip` from an unfamiliar source and want to che
   destination first, so the same check runs and the entry is skipped. **TAR** gives no such hook: its
   entries go straight to the decoder, which replaces the link with a regular file (see the format bullet
   under *Safety limits*). Extract into a **new, empty folder** (the plain **Extract** action already does
-  exactly that) if you don't trust the archive.
+  exactly that) if you don't trust the archive. This is only about a link at an entry's **own name** — the
+  separate "can't land outside the folder you picked" guarantee above holds for every format, TAR
+  included.
 - **No configurable safety thresholds** — the 100× expansion-ratio limit, the lower ratio that triggers
   decompression verification, and the verification time/byte caps are all fixed.
 - **No entry-count cap on ZIP/TAR listing itself** (unlike RAR/ISO/the safety scanner, which are capped) —
