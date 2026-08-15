@@ -3,11 +3,11 @@ id: CPE-1753
 title: Shard the GUI-smoke suite — it is 3.3 minutes from breaching its own job cap, and no timeout value survives the growth rate
 type: task
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-15
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
