@@ -507,6 +507,14 @@ fn transfer_entry(src: &str, dst: &str, copy: bool, canonical_root: &Path) -> Op
 ///   a copy that fails on Windows is worse than one that flattens. Deliberate, and pinned by CPE-1756's
 ///   discrimination leg so it cannot drift into "refuses every link" unnoticed — a guard that refuses
 ///   everything looks perfect.
+/// - **A HARD link still pulls outside content in, and the op reports success.** Measured by CPE-1756's
+///   review: a hard link inside the folder whose data lives outside it copies those bytes into the folder,
+///   `ok = true`. Not a regression — identical before this guard — and, more interestingly, **not something
+///   the primitive could have answered**: `confined_to` returns `true` for it, because a hard link *is* the
+///   file and has a real directory entry inside the folder; `canonicalize` resolves it to its own in-root
+///   name. So the rejected "ask `confined_to` for every entry" option would not have caught it either, and
+///   narrowing to links loses nothing. Recorded because a reader of this walk would otherwise reasonably
+///   conclude all outside-content inflow is now closed. It is not.
 /// - **A refusal mid-walk leaves the partial copy behind.** The op is reported failed and `dst` holds
 ///   whatever was copied before the link was reached — all of it from inside the folder. That is this
 ///   function's behaviour for *any* mid-walk error and predates this guard; recorded, not changed.
