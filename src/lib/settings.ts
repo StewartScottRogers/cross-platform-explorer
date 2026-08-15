@@ -38,6 +38,7 @@ import { parseJobs, serializeJobs } from "./backup";
 import type { BackupJob } from "./backup";
 import { parseCommands, serializeCommands } from "./userCommands";
 import type { UserCommand } from "./userCommands";
+import { canonicalPath, samePath } from "./paths";
 import { parseBindings, serializeBindings } from "./macroBindings";
 import type { MacroBinding } from "./macroBindings";
 import { defaultKeymap, parseKeymap } from "./keymap";
@@ -484,10 +485,30 @@ const isActiveMetaColumnArray = (v: unknown): v is ActiveMetaColumn[] =>
       (x as ActiveMetaColumn).width > 0,
   );
 
+// CPE-1737 round 3 fix (the round 2 blocker): this map is keyed by the RAW path, exactly like every
+// release before CPE-1737 wrote it — including on Windows, where `currentPath` is a BACKSLASH path.
+// `loadMetaColumnsForFolder` falls back to a canonicalPath scan ONLY when the exact key misses (mirrors
+// tags.ts's `entryFor`), which is what a remote directory's now-legitimately-slashed listing-row path
+// needs (CPE-1737 round 1) without corrupting every pre-existing local Windows key. Round 2's version of
+// this pair wrote `canonicalPath(path)` as the STORED key — canonicalPath normalises `\`→`/`, so it
+// silently rewrote every local Windows folder's key the first time its columns were saved, orphaning
+// every column set a prior release had written under the real (backslash) path with no way back. Never
+// canonicalise a STORED key — see this file's comment above `isFavorite`/`isPinned`/`removeFavorite` for
+// the general rule, and `src/lib/paths.ts`'s module doc for why.
 export const loadMetaColumnsForFolder = (path: string): ActiveMetaColumn[] => {
   const v = state[KEYS.metaColumnsByFolder];
   if (!v || typeof v !== "object") return [];
-  const forFolder = (v as Record<string, unknown>)[path];
+  const map = v as Record<string, unknown>;
+  let forFolder = map[path];
+  if (!isActiveMetaColumnArray(forFolder)) {
+    const key = canonicalPath(path);
+    for (const k of Object.keys(map)) {
+      if (canonicalPath(k) === key && isActiveMetaColumnArray(map[k])) {
+        forFolder = map[k];
+        break;
+      }
+    }
+  }
   if (!isActiveMetaColumnArray(forFolder)) return [];
   // Re-clamp on load (CPE-1140-style guard): a width saved under an older/different clamp rule (or
   // hand-edited) can never paint a too-narrow/absurdly-wide column on restore.
@@ -649,6 +670,37 @@ export function resetSettings(): void {
   schedulePersist();
 }
 
+// The four helpers below all COMPARE by canonicalPath (CPE-1737 round 2). Before this, every one of
+// them compared the raw string: a remote directory row's `entry.path` now legitimately carries a
+// trailing '/' (CPE-1737 round 1) that Up/breadcrumb/typed-address/session-restore never produce, so an
+// exact-`===` compare would silently orphan an existing entry (the star/pin reads unfilled) and toggling
+// would APPEND a duplicate rather than removing the one already there.
+//
+// They deliberately do NOT canonicalise what gets STORED — only the comparison. `canonicalPath` also
+// normalises `\` to `/` (mirroring Sidebar.svelte's `norm()`, which is safe there because it never
+// stores or re-sends the normalised string). Storing the canonicalised form here would rewrite a LOCAL
+// Windows path's separators before it's ever used again as a literal value — breaking every downstream
+// exact-string comparison against the untouched `entries[i].path` a real listing hands back (caught by
+// App.features.test.ts's "Ctrl+D copies the selected item into the current folder" going from expecting
+// `C:\d` to actually receiving `C:/d`). Comparing canonically is enough to self-heal the upgrade: an
+// already-persisted entry from before this fix is already canonical (nothing had a trailing slash
+// pre-CPE-1737), so it keeps matching the current spelling either way, no rewrite required.
+
+/** Whether `path` is already in the favorites list (canonical match — see module doc above). */
+export function isFavorite(favorites: Favorite[], path: string): boolean {
+  return favorites.some((f) => samePath(f.path, path));
+}
+
+/** Whether `path` is already pinned (canonical match — see module doc above). */
+export function isPinned(pins: string[], path: string): boolean {
+  return pins.some((p) => samePath(p, path));
+}
+
+/** Remove `path` from the favorites list if present (canonical match); a no-op otherwise. */
+export function removeFavorite(favorites: Favorite[], path: string): Favorite[] {
+  return favorites.filter((f) => !samePath(f.path, path));
+}
+
 /**
  * Add a file to the recent list: most recent first, de-duplicated by path,
  * capped so it cannot grow without bound.
@@ -658,7 +710,7 @@ export function addRecent(
   entry: { path: string; name: string },
   now: number = Date.now(),
 ): RecentFile[] {
-  const without = list.filter((r) => r.path !== entry.path);
+  const without = list.filter((r) => !samePath(r.path, entry.path));
   return [{ path: entry.path, name: entry.name, opened: now }, ...without].slice(
     0,
     MAX_RECENTS,
@@ -667,13 +719,13 @@ export function addRecent(
 
 /** Drop a single entry from the recent list by path (leaves the rest in order). */
 export function removeRecent(list: RecentFile[], path: string): RecentFile[] {
-  return list.filter((r) => r.path !== path);
+  return list.filter((r) => !samePath(r.path, path));
 }
 
 /** Toggle a folder's pinned state. */
 export function togglePin(pins: string[], path: string): string[] {
-  return pins.includes(path)
-    ? pins.filter((p) => p !== path)
+  return isPinned(pins, path)
+    ? pins.filter((p) => !samePath(p, path))
     : [...pins, path];
 }
 
@@ -685,7 +737,7 @@ export function toggleFavorite(
   favorites: Favorite[],
   entry: { path: string; name: string; is_dir: boolean },
 ): Favorite[] {
-  return favorites.some((f) => f.path === entry.path)
-    ? favorites.filter((f) => f.path !== entry.path)
+  return isFavorite(favorites, entry.path)
+    ? removeFavorite(favorites, entry.path)
     : [...favorites, { path: entry.path, name: entry.name, is_dir: entry.is_dir }];
 }

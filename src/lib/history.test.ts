@@ -51,6 +51,28 @@ describe("history", () => {
     expect(forward(h)).toBe(h);
   });
 
+  describe("CPE-1737 round 2: trailing-slash spelling", () => {
+    it("re-visiting the SAME folder via a differently-slashed spelling is still a no-op", () => {
+      // A remote directory row's path now legitimately carries a trailing '/' (CPE-1737 round 1);
+      // Up/breadcrumb/typed-address never produce that shape. Before comparing canonically, arriving
+      // back at "the folder I'm already on" via the OTHER spelling pushed a spurious duplicate entry —
+      // so Back would then land right back on the same folder instead of the one visited before it.
+      let h = visit(createHistory("sftp://h/srv"), "sftp://h/srv/sub");
+      const before = h;
+      h = visit(h, "sftp://h/srv/sub/");
+      expect(h).toBe(before);
+      expect(h.entries).toEqual(["sftp://h/srv", "sftp://h/srv/sub"]);
+    });
+
+    it("never rewrites a LOCAL Windows path's separators — the stored value is exactly what was passed", () => {
+      // Regression pin: an earlier round of this fix stored `canonicalPath(path)`, which also
+      // normalises '\' to '/' — corrupting a local Windows path's separators the moment it entered
+      // history, breaking `current(h)` for every caller that feeds it straight to a backend command.
+      const h = createHistory("C:\\d");
+      expect(current(h)).toBe("C:\\d");
+    });
+  });
+
   describe("recentPaths (CPE-604)", () => {
     it("lists distinct prior paths, most recent first, excluding the current", () => {
       let h = createHistory("/a");

@@ -353,6 +353,56 @@ describe("FileList rendering", () => {
   });
 });
 
+// CPE-1737: an S3 object and a same-named prefix (`photos` the object, `photos/` the prefix) are two
+// INDEPENDENT rows over S3's flat keyspace — `ListObjectsV2` returns them from separate `<Contents>`/
+// `<CommonPrefixes>` sections. `entry.path` used to be built from the name alone, so both rows collided
+// on an identical path; this repo is on `"svelte": "^4"`, where the `{#each windowed as { entry, i } (entry.path)}`
+// keyed each THROWS on a duplicate key, taking the whole list down with it — not just the colliding pair.
+// The fix (`crates/vfs/src/connect.rs`) gives the directory row a trailing `/`, so this test renders the
+// two rows exactly as the fixed backend now hands them to the frontend.
+describe("FileList name collision (CPE-1737)", () => {
+  it("renders both rows without throwing, and each is independently selectable", () => {
+    const entries = [
+      entry({ name: "photos", path: "s3://bucket/photos", is_dir: false, extension: "", size: 4 }),
+      entry({ name: "photos", path: "s3://bucket/photos/", is_dir: true, extension: "", size: 0 }),
+    ];
+
+    // The keyed {#each} would throw during render (Svelte 4 behaviour on a duplicate key) if the two
+    // paths still collided — reaching this line at all is part of what this test proves.
+    const { container, component } = render(FileList, { ...base, entries });
+
+    const rows = container.querySelectorAll(".row");
+    expect(rows.length).toBe(2);
+
+    const clicked = vi.fn();
+    component.$on("click", (e: CustomEvent<{ index: number; ctrl: boolean; shift: boolean }>) => clicked(e.detail));
+
+    // Each row dispatches its OWN index — the object row and the prefix row are separately clickable,
+    // not aliases of the same selectable target.
+    fireEvent.click(rows[0]);
+    expect(clicked).toHaveBeenLastCalledWith({ index: 0, ctrl: false, shift: false });
+    fireEvent.click(rows[1]);
+    expect(clicked).toHaveBeenLastCalledWith({ index: 1, ctrl: false, shift: false });
+  });
+
+  it("selecting one row leaves the other, same-named row unselected", async () => {
+    const entries = [
+      entry({ name: "photos", path: "s3://bucket/photos", is_dir: false, extension: "" }),
+      entry({ name: "photos", path: "s3://bucket/photos/", is_dir: true, extension: "" }),
+    ];
+    const { container, component } = render(FileList, { ...base, entries, selection: selectOnly(0) });
+
+    let rows = container.querySelectorAll(".row");
+    expect(rows[0].classList.contains("selected")).toBe(true);
+    expect(rows[1].classList.contains("selected")).toBe(false);
+
+    await component.$set({ selection: selectOnly(1) });
+    rows = container.querySelectorAll(".row");
+    expect(rows[0].classList.contains("selected")).toBe(false);
+    expect(rows[1].classList.contains("selected")).toBe(true);
+  });
+});
+
 // CPE-1146 (epic CPE-707): dynamic metadata columns — a header + real value per active column,
 // requesting cells for visible rows lazily, and rendering the dim empty-cell placeholder.
 describe("FileList dynamic metadata columns (CPE-1146)", () => {

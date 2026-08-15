@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { get } from "svelte/store";
 import {
   entryFor,
+  keyToWrite,
   hasTag,
   allTags,
   labelColor,
@@ -40,6 +41,59 @@ describe("tags helpers (CPE-636)", () => {
     // even before the tag store has loaded.
     expect(entryFor(undefined as unknown as TagStore, "/a/one")).toEqual({ tags: [], label: "" });
     expect(entryFor({}, "/a/one")).toEqual({ tags: [], label: "" });
+  });
+
+  describe("entryFor — CPE-1737 round 2 (trailing-slash fallback)", () => {
+    it("falls back to a canonical-path match when the exact key misses", () => {
+      // `set_tags` has no `require_local`, so a remote folder is genuinely taggable. A directory's
+      // listing-row path now legitimately carries a trailing '/' (CPE-1737 round 1); a lookup from a
+      // different route (toolbar/sidebar) would not reproduce that shape.
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "blue" } };
+      expect(entryFor(remoteStore, "sftp://h/srv/sub/")).toEqual({ tags: ["x"], label: "blue" });
+    });
+
+    it("prefers an exact match over the fallback scan when both could apply", () => {
+      const remoteStore: TagStore = {
+        "sftp://h/srv/sub": { tags: ["bare"], label: "" },
+        "sftp://h/srv/sub/": { tags: ["slashed"], label: "" },
+      };
+      expect(entryFor(remoteStore, "sftp://h/srv/sub")).toEqual({ tags: ["bare"], label: "" });
+      expect(entryFor(remoteStore, "sftp://h/srv/sub/")).toEqual({ tags: ["slashed"], label: "" });
+    });
+
+    it("never mutates the store's own keys — only the LOOKUP is canonicalised", () => {
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      entryFor(remoteStore, "sftp://h/srv/sub/");
+      expect(Object.keys(remoteStore)).toEqual(["sftp://h/srv/sub"]);
+    });
+  });
+
+  describe("keyToWrite — CPE-1737 round 3 (the write-side duplicate the round-2 review found)", () => {
+    it("reuses an existing entry's key when the exact path already has one", () => {
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      expect(keyToWrite(remoteStore, "sftp://h/srv/sub")).toBe("sftp://h/srv/sub");
+    });
+
+    it("reuses an existing entry's key found only by canonical match, instead of forking a second key", () => {
+      // entryFor's fallback fixes LOOKUP; without this, tagging the folder again via its listing row
+      // (trailing '/') would write a SECOND key beside the pre-upgrade one, so allTags/tagCounts would
+      // double-count it and reaching the folder any other way would keep showing the stale entry.
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      expect(keyToWrite(remoteStore, "sftp://h/srv/sub/")).toBe("sftp://h/srv/sub");
+    });
+
+    it("falls back to the given path unchanged when nothing already matches (first-time tagging)", () => {
+      expect(keyToWrite({}, "sftp://h/srv/new")).toBe("sftp://h/srv/new");
+      expect(keyToWrite({ "/other": { tags: [], label: "" } }, "sftp://h/srv/new")).toBe("sftp://h/srv/new");
+    });
+
+    it("never rewrites a LOCAL Windows path's separators when nothing matches", () => {
+      expect(keyToWrite({}, "C:\\Users\\me\\docs")).toBe("C:\\Users\\me\\docs");
+    });
+
+    it("is null-safe", () => {
+      expect(keyToWrite(undefined as unknown as TagStore, "/a/one")).toBe("/a/one");
+    });
   });
 
   it("hasTag reports membership per path", () => {

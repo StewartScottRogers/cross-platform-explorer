@@ -8,6 +8,19 @@
 // writable tail. Persistence rides the EXISTING settings.ts settings.json document (a `dropStack` field,
 // see settings.ts's loadDropStack/saveDropStack) rather than a second ad-hoc mechanism — this module
 // never touches localStorage directly.
+//
+// CPE-1737 round 2/3 review: unlike settings.ts's favourites/pins/recents/tags (which compare paths
+// canonically — see paths.ts's module doc), `addEntries`/`removeEntry` below deliberately keep an EXACT
+// `path` comparison, and the stack's `path` values are never rewritten through `canonicalPath`.
+// Deliberately, not an oversight: every entry here is sourced from a LIVE listing selection
+// (`pane.selectedEntries.map(e => e.path)` in App.svelte), never compared against a differently-spelled
+// persisted value — so there is no "orphaned on upgrade" identity-key bug of the kind CPE-1737 round 2
+// closed elsewhere. And `DropStackPanel.svelte:91` keys its `{#each $dropStackEntries as entry
+// (entry.path)}` on the SAME raw path — canonicalising the stored value would make a same-canonical-name
+// object row and prefix row (an S3 object `photos` next to its same-named `photos/` prefix, both
+// legitimately shelved from one listing) collide back down to one entry, silently dropping the other.
+// That is the exact hazard CPE-1737 round 1 exists to prevent, reintroduced one level removed. So: leave
+// this module's comparisons exact, and its stored `path` values untouched.
 
 import { writable, type Readable } from "svelte/store";
 import { loadDropStack, saveDropStack } from "./settings";

@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   addRecent, removeRecent, togglePin, toggleFavorite, mergeLegacy,
+  isFavorite, isPinned, removeFavorite,
   loadAutoRestore, saveAutoRestore, loadLastSession, saveLastSession,
   loadMetaColumnsForFolder, saveMetaColumnsForFolder,
   addNetworkLocation, removeNetworkLocation,
@@ -76,6 +77,28 @@ describe("metaColumnsByFolder (CPE-1146)", () => {
   it("degrades a corrupt entry (wrong shape) to empty rather than crashing", () => {
     saveMetaColumnsForFolder("/bad", [{ bogus: 1 } as unknown as ActiveMetaColumn]);
     expect(loadMetaColumnsForFolder("/bad")).toEqual([]);
+  });
+
+  describe("CPE-1737 round 3 (the round-2 regression: a canonicalised STORED key)", () => {
+    it("a Windows backslash key round-trips untouched — the exact shape a prior release wrote", () => {
+      // Simulates settings.json exactly as every release before CPE-1737 wrote it: keyed on the RAW
+      // (backslash) currentPath, since Windows paths never had any rewrite applied to them. Round 2's
+      // version of this pair wrote `canonicalPath(path)` — which normalises '\' to '/' — as the STORED
+      // key, so this exact key became unreachable with no fallback the moment its columns were re-saved
+      // (and even a bare load never saw it, since the stored key from a prior release was never
+      // canonical to begin with).
+      const cols: ActiveMetaColumn[] = [{ id: "dimensions", width: 110 }];
+      saveMetaColumnsForFolder("C:\\Users\\me\\docs", cols);
+      expect(loadMetaColumnsForFolder("C:\\Users\\me\\docs")).toEqual(cols);
+      saveMetaColumnsForFolder("C:\\Users\\me\\docs", []); // reset
+    });
+
+    it("still falls back to a canonical match for the trailing-slash case (a remote directory's listing-row path)", () => {
+      const cols: ActiveMetaColumn[] = [{ id: "pages", width: 90 }];
+      saveMetaColumnsForFolder("sftp://h/srv/sub", cols);
+      expect(loadMetaColumnsForFolder("sftp://h/srv/sub/")).toEqual(cols);
+      saveMetaColumnsForFolder("sftp://h/srv/sub", []); // reset
+    });
   });
 });
 
@@ -354,6 +377,33 @@ describe("removeRecent (CPE-341)", () => {
     expect(removeRecent(list, "/z.txt")).toEqual(list);
     expect(list.map((x) => x.path)).toEqual(["/a.txt"]);
   });
+
+  it("CPE-1737 round 2: matches a stored entry regardless of trailing-slash spelling", () => {
+    // A remote directory row's path now legitimately carries a trailing '/' (CPE-1737 round 1); an
+    // entry recorded before that fix (or reached via a different route) has none. Both must be treated
+    // as the SAME folder for removal, or the entry orphans instead of being cleared.
+    const list = [r("sftp://h/srv/sub", 1)];
+    expect(removeRecent(list, "sftp://h/srv/sub/")).toEqual([]);
+  });
+});
+
+describe("addRecent — CPE-1737 round 2 (trailing-slash de-dup, no rewrite)", () => {
+  it("de-duplicates across trailing-slash spelling instead of adding a second entry", () => {
+    const list = [r("sftp://h/srv/sub", 1)];
+    const next = addRecent(list, { path: "sftp://h/srv/sub/", name: "sub" }, 300);
+    expect(next).toHaveLength(1);
+    // The NEWLY-recorded spelling wins the single surviving slot (most-recent-first semantics).
+    expect(next[0].path).toBe("sftp://h/srv/sub/");
+    expect(next[0].opened).toBe(300);
+  });
+
+  it("never rewrites a LOCAL Windows path's separators — the stored value is exactly what was passed", () => {
+    // Regression pin: an earlier round of this fix stored `canonicalPath(entry.path)`, which also
+    // normalises '\' to '/' — silently corrupting every local Windows path ever recorded here, breaking
+    // downstream exact-string comparisons against a real listing's own (untouched) `entry.path`.
+    const list = addRecent([], { path: "C:\\Users\\me\\docs", name: "docs" }, 1);
+    expect(list[0].path).toBe("C:\\Users\\me\\docs");
+  });
 });
 
 describe("togglePin", () => {
@@ -369,6 +419,32 @@ describe("togglePin", () => {
     const pins = ["/a"];
     togglePin(pins, "/b");
     expect(pins).toEqual(["/a"]);
+  });
+
+  it("CPE-1737 round 2: toggling off matches regardless of trailing-slash spelling", () => {
+    expect(togglePin(["sftp://h/srv/sub"], "sftp://h/srv/sub/")).toEqual([]);
+  });
+
+  it("CPE-1737 round 2: never rewrites a LOCAL Windows path's separators when adding", () => {
+    expect(togglePin([], "C:\\Users\\me\\docs")).toEqual(["C:\\Users\\me\\docs"]);
+  });
+});
+
+describe("isPinned / isFavorite / removeFavorite (CPE-1737 round 2)", () => {
+  it("isPinned matches regardless of trailing-slash spelling", () => {
+    expect(isPinned(["sftp://h/srv/sub"], "sftp://h/srv/sub/")).toBe(true);
+    expect(isPinned(["sftp://h/srv/sub/"], "sftp://h/srv/sub")).toBe(true);
+    expect(isPinned(["sftp://h/srv/other"], "sftp://h/srv/sub/")).toBe(false);
+  });
+
+  it("isFavorite matches regardless of trailing-slash spelling", () => {
+    const favs: Favorite[] = [{ path: "sftp://h/srv/sub", name: "sub", is_dir: true }];
+    expect(isFavorite(favs, "sftp://h/srv/sub/")).toBe(true);
+  });
+
+  it("removeFavorite drops the matching entry regardless of trailing-slash spelling", () => {
+    const favs: Favorite[] = [{ path: "sftp://h/srv/sub", name: "sub", is_dir: true }];
+    expect(removeFavorite(favs, "sftp://h/srv/sub/")).toEqual([]);
   });
 });
 
@@ -416,5 +492,20 @@ describe("toggleFavorite (CPE-338)", () => {
     const list: Favorite[] = [{ path: "/a.txt", name: "a.txt", is_dir: false }];
     toggleFavorite(list, dir);
     expect(list).toEqual([{ path: "/a.txt", name: "a.txt", is_dir: false }]);
+  });
+
+  it("CPE-1737 round 2: removes an existing favorite even when the new spelling carries a trailing slash", () => {
+    // Pins the actual bug: an S3/SFTP/WebDAV/FTP directory row's path now legitimately ends in '/'
+    // (CPE-1737 round 1). Before comparing canonically, toggling the SAME folder from its listing row
+    // would miss the already-favorited (un-slashed) entry and APPEND a duplicate instead of un-starring
+    // it.
+    const list: Favorite[] = [{ path: "sftp://h/srv/sub", name: "sub", is_dir: true }];
+    const toggled = toggleFavorite(list, { path: "sftp://h/srv/sub/", name: "sub", is_dir: true });
+    expect(toggled).toEqual([]);
+  });
+
+  it("CPE-1737 round 2: never rewrites a LOCAL Windows path's separators when adding", () => {
+    const list = toggleFavorite([], { path: "C:\\Users\\me\\docs", name: "docs", is_dir: true });
+    expect(list).toEqual([{ path: "C:\\Users\\me\\docs", name: "docs", is_dir: true }]);
   });
 });

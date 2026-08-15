@@ -7,6 +7,7 @@
 import { writable, get, type Readable } from "svelte/store";
 import { commands } from "./bindings.gen"; // typed client (CPE-964)
 import { unwrap } from "./invoke";
+import { canonicalPath } from "./paths";
 
 /** One path's tags plus its single colour label (mirror of the Rust `TagEntry`). */
 export interface TagEntry {
@@ -37,10 +38,29 @@ export function labelColor(label: string): string {
   return LABEL_COLORS[label] ?? "";
 }
 
+const EMPTY_ENTRY: TagEntry = { tags: [], label: "" };
+
 /** The entry for a path, or an empty entry if the path is untagged (or the store is empty/absent).
-    Pure (never mutates the store). */
+ *  Pure (never mutates the store).
+ *
+ *  Falls back to a canonicalPath scan (CPE-1737 round 2) ONLY when the exact key misses: `set_tags` has
+ *  no `require_local`, so a remote folder is genuinely taggable, and its listing row's `path`
+ *  legitimately carries a trailing '/' that a lookup from a different route (the toolbar's "tag this
+ *  folder", the sidebar) would not reproduce. The store's OWN keys are left exactly as the backend
+ *  returned them — this only widens what a lookup will MATCH, it never rewrites what gets sent to
+ *  `setTags`/stored as a key, so a LOCAL Windows path's separators are never at risk of the
+ *  backslash-corruption `canonicalPath` would cause if used to build a literal value (see
+ *  settings.ts's comment on the same class of bug). The store is small (opt-in — only tagged paths
+ *  appear at all), so the O(n) fallback scan costs nothing in practice. */
 export function entryFor(store: TagStore, path: string): TagEntry {
-  return store?.[path] ?? { tags: [], label: "" };
+  if (!store) return EMPTY_ENTRY;
+  const exact = store[path];
+  if (exact) return exact;
+  const key = canonicalPath(path);
+  for (const k of Object.keys(store)) {
+    if (canonicalPath(k) === key) return store[k];
+  }
+  return EMPTY_ENTRY;
 }
 
 /** Whether `path` currently carries `tag`. Pure. */
@@ -73,9 +93,50 @@ export async function initTags(): Promise<void> {
   store.set(s ?? {});
 }
 
-/** Replace one path's tags + label; the store is updated from the returned whole store. */
+/** The backend key `setEntryTags` should WRITE under for `path` (CPE-1737 round 3): reuses an existing
+ *  entry's key when one already matches — exactly, or canonically — so editing tags on a remote folder
+ *  reached from a listing row (trailing '/') updates the SAME entry a prior tagging via a different
+ *  route (toolbar/sidebar, un-slashed) already created, instead of forking a second key beside it.
+ *  `entryFor`'s canonical-scan fallback fixes LOOKUP, but a naive `setTags(path, ...)` would still write
+ *  a NEW key every time the caller's spelling differs — leaving two entries for one real folder, so
+ *  `allTags`/`tagCounts` double-count it and reaching the folder by the OTHER spelling shows the STALE
+ *  entry unchanged. Falls back to `path` itself (unrewritten) when nothing already matches — the
+ *  first-time-tagging case. Pure. */
+export function keyToWrite(store: TagStore, path: string): string {
+  if (!store) return path;
+  if (path in store) return path;
+  const key = withoutTrailingSeparator(path);
+  for (const k of Object.keys(store)) {
+    if (withoutTrailingSeparator(k) === key) return k;
+  }
+  return path;
+}
+
+/** Strip ONE trailing `/` or `\`, keeping a bare root (`/`, `C:/`, `C:\`) intact. Deliberately NOT
+ *  `canonicalPath`: this is the only place in the codebase where a normalised form selects the key a
+ *  write LANDS on, so it must collapse the trailing separator and nothing else. `canonicalPath` also
+ *  rewrites `\` to `/`, and on Linux/macOS a backslash is a legal filename character — so a file
+ *  literally named `a\b` and the path `a/b` are two unrelated files that canonicalise to one key, and
+ *  the write would land on whichever the store happened to hold (found by the round-3 review, which
+ *  reproduced it). Elsewhere the same collision only mis-toggles a favourite, which is recoverable;
+ *  here it would silently overwrite another entry's tags. The trailing slash is the ONLY spelling
+ *  difference CPE-1737 introduces, so it is the only one worth collapsing. */
+function withoutTrailingSeparator(p: string): string {
+  if (p.length < 2) return p;
+  const last = p[p.length - 1];
+  if (last !== "/" && last !== "\\") return p;
+  const rest = p.slice(0, -1);
+  // A bare drive root ("C:/") or a POSIX root ("/") keeps its separator — dropping it changes meaning.
+  if (/^[A-Za-z]:$/.test(rest)) return p;
+  return rest;
+}
+
+/** Replace one path's tags + label; the store is updated from the returned whole store. Sends
+ *  `keyToWrite`'s answer, never a value rewritten through `canonicalPath` directly (see `entryFor`'s doc
+ *  for why storing/sending the canonicalised form itself is unsafe for a local path). */
 export async function setEntryTags(path: string, tags: string[], label: string): Promise<void> {
-  const updated = unwrap(await commands.setTags(path, tags, label)) as TagStore;
+  const key = keyToWrite(get(store), path);
+  const updated = unwrap(await commands.setTags(key, tags, label)) as TagStore;
   store.set(updated ?? {});
 }
 

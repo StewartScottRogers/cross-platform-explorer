@@ -3924,7 +3924,7 @@
   function togglePinSelected(entries: DirEntry[] = selectedEntries) {
     const entry = entries[0];
     if (!entry?.is_dir) return;
-    const wasPinned = pins.includes(entry.path);
+    const wasPinned = settings.isPinned(pins, entry.path);
     pins = settings.togglePin(pins, entry.path);
     settings.savePins(pins);
     showNotice(wasPinned ? $t("notice.unpinnedFromHome", { name: entry.name }) : $t("notice.pinnedToHome", { name: entry.name }));
@@ -3951,7 +3951,7 @@
   function toggleFavoriteSelected(entries: DirEntry[] = selectedEntries) {
     const entry = entries[0];
     if (!entry) return;
-    const wasFav = favorites.some((f) => f.path === entry.path);
+    const wasFav = settings.isFavorite(favorites, entry.path);
     favorites = settings.toggleFavorite(favorites, {
       path: entry.path,
       name: entry.name,
@@ -5211,7 +5211,7 @@
    *  the post-delete cleanup. */
   function removeHomePointer(path: string, view: "recent" | "favorites" | "folders" | "shared") {
     if (view === "favorites") {
-      favorites = favorites.filter((f) => f.path !== path);
+      favorites = settings.removeFavorite(favorites, path);
       settings.saveFavorites(favorites);
     } else if (view === "folders") {
       recentFolders = settings.removeRecent(recentFolders, path);
@@ -5228,7 +5228,7 @@
   /** Add the clicked home item to Favorites (cross-view action for Recent/Folders rows). */
   function favoriteHomeItem() {
     if (!homeCtxPath) return;
-    if (favorites.some((f) => f.path === homeCtxPath)) {
+    if (settings.isFavorite(favorites, homeCtxPath)) {
       showNotice($t("notice.alreadyFavorite", { name: homeCtxName }));
       return;
     }
@@ -5240,7 +5240,7 @@
   /** Pin the clicked home folder to Quick access (cross-view action; folders only). */
   function pinHomeItem() {
     if (!homeCtxPath || !homeCtxIsDir) return;
-    const wasPinned = pins.includes(homeCtxPath);
+    const wasPinned = settings.isPinned(pins, homeCtxPath);
     pins = settings.togglePin(pins, homeCtxPath);
     settings.savePins(pins);
     showNotice(wasPinned ? $t("notice.unpinnedHome", { name: homeCtxName }) : $t("notice.pinnedToQuickAccess", { name: homeCtxName }));
@@ -6675,7 +6675,7 @@
       on:openRecent={(e) => openRecent(e.detail)}
       on:homeSelect={(e) => selectHomeEntry(e.detail)}
       on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
-      on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
+      on:unfavorite={(e) => { favorites = settings.removeFavorite(favorites, e.detail); settings.saveFavorites(favorites); }}
       on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
       on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
       on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
@@ -6743,7 +6743,7 @@
         on:openRecent={(e) => openRecent(e.detail)}
         on:homeSelect={(e) => selectHomeEntry(e.detail)}
         on:unpin={(e) => { pins = settings.togglePin(pins, e.detail); settings.savePins(pins); }}
-        on:unfavorite={(e) => { favorites = favorites.filter((f) => f.path !== e.detail); settings.saveFavorites(favorites); }}
+        on:unfavorite={(e) => { favorites = settings.removeFavorite(favorites, e.detail); settings.saveFavorites(favorites); }}
         on:removeRecent={(e) => { recents = settings.removeRecent(recents, e.detail); settings.saveRecents(recents); }}
         on:removeRecentFolder={(e) => { recentFolders = settings.removeRecent(recentFolders, e.detail); settings.saveRecentFolders(recentFolders); }}
         on:clearRecents={() => { recents = []; settings.saveRecents(recents); }}
@@ -6911,8 +6911,8 @@
     folderSelected={ctxPane.selectedEntries.length === 1 && ctxPane.selectedEntries[0]?.is_dir}
     executableSelected={ctxPane.selectedEntries.length === 1 && isExecutable(ctxPane.selectedEntries[0])}
     openIcon={ctxPane.selectedEntries.length === 1 ? iconFor(ctxPane.selectedEntries[0]) : "folder"}
-    pinned={ctxPane.selectedEntries.length === 1 && pins.includes(ctxPane.selectedEntries[0].path)}
-    favorited={ctxPane.selectedEntries.length === 1 && favorites.some((f) => f.path === ctxPane.selectedEntries[0].path)}
+    pinned={ctxPane.selectedEntries.length === 1 && settings.isPinned(pins, ctxPane.selectedEntries[0].path)}
+    favorited={ctxPane.selectedEntries.length === 1 && settings.isFavorite(favorites, ctxPane.selectedEntries[0].path)}
     extractable={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && isExtractable(ctxPane.selectedEntries[0])}
     archiveSafetyEligible={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length === 1 && isArchiveSafetyEligible(ctxPane.selectedEntries[0])}
     compressible={(ctxInPaneB ? paneBPath !== HOME : (!isHome && !archive)) && ctxPane.selectedEntries.length >= 1}
