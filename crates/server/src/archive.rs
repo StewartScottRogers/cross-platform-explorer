@@ -223,11 +223,11 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //
 // | # | Site                                       | Primitive        | Destination provenance                      | Guard |
 // |---|--------------------------------------------|------------------|---------------------------------------------|-------|
-// |  1| `temp_extract_target`                      | `create_dir_all` | app-owned: `%TEMP%/cpe-archive/<pid>-<seq>`  | none — see below |
-// |  2| `extract_archive_entry`                    | `File::create`   | app-owned temp dir + `file_name()` of entry  | none — see below |
-// |  3| `extract_tar_entry`                        | `File::create`   | `out`, always a `temp_extract_target`        | none — see below |
-// |  4| `extract_7z_entry`                         | `File::create`   | `out`, always a `temp_extract_target`        | none — see below |
-// |  5| `extract_rar_entry`                        | `fs::write`      | `out`, always a `temp_extract_target`        | none — see below |
+// |  1| `temp_extract_target`                      | `create_dir_all` + **exclusive `create_dir`** | shared `%TEMP%/cpe-archive` root, then a private `<pid>-<seq>` | link on the root + exclusive create |
+// |  2| `extract_archive_entry`                    | `File::create`   | inside row 1's private dir + `file_name()`   | none — carried by row 1 |
+// |  3| `extract_tar_entry`                        | `File::create`   | `out`, always a `temp_extract_target`        | none — carried by row 1 |
+// |  4| `extract_7z_entry`                         | `File::create`   | `out`, always a `temp_extract_target`        | none — carried by row 1 |
+// |  5| `extract_rar_entry`                        | `fs::write`      | `out`, always a `temp_extract_target`        | none — carried by row 1 |
 // |  6| `compress_to_zip`                          | `File::create`   | **caller-supplied `dest`**                   | link |
 // |  7| `create_empty_zip`                         | `create_new`     | **caller-supplied `dest`**                   | link (+ `create_new`) |
 // |  8| `compress_to_targz`                        | `File::create`   | **caller-supplied `dest`**                   | link |
@@ -237,9 +237,17 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // | 12| `compress_to_zip_encrypted_streamed`       | `File::create`   | **caller-supplied `dest`**                   | link |
 // | 13| `extract_archive` (`.gz` branch)           | `File::create`   | **user-named dir** + stem of the archive name| link |
 // | 14| `extract_archive_streamed` (`.gz` branch)  | `File::create`   | **user-named dir** + stem of the archive name| link |
-// | 15| `extract_zip_encrypted`                    | `File::create`   | **archive-controlled** name under user dir   | link (skip) + `entry_name_is_safe` |
-// | 16| `extract_zip_archive_stream`               | `File::create`   | **archive-controlled** name under user dir   | link (skip) + `entry_name_is_safe` |
-// | 17| the four extraction `dest` roots           | `create_dir_all` | **user-named dir** / archive-controlled dir  | none — see below |
+// | 15| `extract_zip_encrypted`                    | `File::create`   | **archive-controlled** name under user dir   | link at the **LEAF ONLY** (skip) + `entry_name_is_safe` |
+// | 16| `extract_zip_archive_stream`               | `File::create`   | **archive-controlled** name under user dir   | link at the **LEAF ONLY** (skip) + `entry_name_is_safe` |
+// | 17| the four extraction `dest` roots           | `create_dir_all` | **user-named dir**                           | none — see below |
+// | 18| the four per-entry `create_dir_all(&out)` / `(parent)` inside rows 15–16's loops | `create_dir_all` | **archive-controlled** dir name under user dir | none — see below |
+//
+// **The row count reconciles to the source.** `archive.rs` has 9 `create_dir_all` calls: 1 in row 1 (the
+// shared root), 4 in row 17 (the extraction `dest` roots), 4 in row 18 (per-entry, inside the two ZIP
+// loops), plus row 1's one exclusive `fs::create_dir`. Rows 2–16 are the 13 `File::create` calls, the 1
+// `fs::write` and the 1 `create_new`. Row 18 was missing from the first version of this table, which
+// billed itself as the inventory — the count line exists so the next reader can check that claim in one
+// subtraction instead of trusting it (PR #906 review).
 //
 // ## The three primitives do NOT behave alike, and each row above was measured, not reasoned about
 //
@@ -247,10 +255,18 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   ticket, with no guard: on a *dangling* link `File::create` returns `Ok`, creates the link's target,
 //   and leaves the slot a symlink; on a *live* link it returns `Ok` and the link's target is clobbered
 //   (`victim bytes = Some("CLOBBERED")`). This is the CPE-1719 finding, reproduced here.
-// - `create_dir_all` is **not** destructive, and on a dangling link does nothing at all — measured for
-//   CPE-1729 *after the opposite had been assumed*. That is why every `create_dir_all` row above is
-//   unguarded: there is no measured hazard to guard against, and adding a refusal there would be a guard
-//   written from a story rather than from evidence.
+// - `create_dir_all` is **not destructive** — on a dangling link it does nothing at all (measured on
+//   Windows for CPE-1729, *after the opposite had been assumed*). **Not destructive is not the same as
+//   not hazardous, and the first version of this bullet used the former to excuse rows 17–18 as having
+//   "no measured hazard".** Measured on Windows for the PR #906 review: `create_dir_all` returns `Ok`
+//   over a directory that **already exists** *and* over a **directory symlink or junction** standing in
+//   for one, and everything subsequently written beneath that name is **redirected** to wherever the link
+//   points — `landed_outside = true`. Redirection, not destruction. It is still unguarded at rows 17–18,
+//   but now for a stated reason rather than a wrong one: refusing a pre-existing `dest` would break
+//   extracting into a folder you already have, which is the ordinary case, and the leaf-level answer
+//   belongs at rows 15–16 where it is (partially — see below) applied. **Platform boundary:** every
+//   figure in this bullet is Windows 11; the Unix behaviour of these three calls has not been measured
+//   here and is only covered indirectly by CI's Linux and macOS legs.
 // - `create_new` (row 7) is the only site here that was **already** safe, and it is safe by the OS rather
 //   than by us. Measured on Windows: `create_new` on a dangling link fails `AlreadyExists (os error 80)`
 //   and does *not* create the target; on a live link it fails the same way and the target is untouched.
@@ -258,23 +274,65 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   sending the user to delete a file at a name that actually holds a link elsewhere. So row 7's guard is
 //   a **message** fix on top of a working belt, not a new belt, and it is labelled that way at the site.
 //
-// ## Rows 1–5: app-owned, and why that is a conclusion rather than a shrug
+// ## Rows 1–5: app-owned — but that is now earned rather than asserted
 //
-// Every one of them writes under `temp_extract_target`, which is `%TEMP%/cpe-archive/<pid>-<seq>/<leaf>`
-// with `seq` from a process-wide monotonic counter (CPE-1195). The **directory is created by that call
-// and never reused**, so nothing — no user, no archive — can have placed a link at the leaf name before
-// we get there. The leaf is `Path::file_name()` of the entry, so an archive-controlled name cannot carry
-// a directory component out of that directory either. These are not "probably fine": they are
-// unreachable by the hazard, and guarding them would add a stat per extraction for no case.
+// All five write under `temp_extract_target`. The first version of this section claimed they were
+// **unreachable** by the hazard because the directory "is created by that call and never reused". That
+// was wrong, and the PR #906 review measured it: `create_dir_all` silently accepts a pre-existing
+// directory *and* a directory symlink, so it establishes nothing about who got there first, and the leaf
+// name is archive-controlled — an attacker supplying the archive knows exactly what to name a link. What
+// was actually protecting these rows was `%TEMP%` being **per-user on Windows**; on a shared Unix `/tmp`
+// it is CWE-377 into CWE-59.
 //
-// ## Rows 15–16, and what is NOT covered by them — the traversal half is already answered elsewhere
+// `temp_extract_target` now claims its per-extraction directory with an **exclusive `fs::create_dir`**,
+// which bounces both a squatted directory and a directory link (`Err(AlreadyExists)` for each, measured),
+// retrying the next sequence number. Once that returns `Ok`, this process is the only thing that has ever
+// been inside, so rows 2–5's leaf really is unreachable. The full measurement, the residuals it does not
+// close, and why "never reused" was only ever true *within* a process are on `temp_extract_target` itself.
 //
-// `guarded_join`/`is_safe_name` (CPE-1461, `crate::transfer`) is **not** in this path and does not need to
-// be added: this module has had its own equivalent since CPE-628, [`entry_name_is_safe`], applied to every
-// archive-controlled name at every site this module writes itself, plus `extract_archive_entry_any` and
-// `extract_rar_entry` validate `inner` up front. Adding a second traversal guard alongside it would be two
-// guards for one question — the thing this ticket explicitly says to say so about rather than do. The
-// remaining half, a link *inside* the destination at an entry's name, is what rows 15–16 now skip on.
+// ## Rows 15–16 — what they cover, and the two things they do NOT
+//
+// **Traversal is answered, and only traversal.** `guarded_join`/`is_safe_name` (CPE-1461,
+// `crate::transfer`) is not in this path and does not need to be added *for traversal*: this module has
+// had [`entry_name_is_safe`] since CPE-628, applied to every archive-controlled name at every site it
+// writes itself, plus `extract_archive_entry_any`/`extract_rar_entry` validate `inner` up front. A second
+// traversal guard would be two guards for one question.
+//
+// The first version of this paragraph stopped there, and that was wider than the search behind it.
+// `guarded_join` does not only answer traversal: it applies [`crate::transfer::is_safe_name`] per segment
+// (which fails closed on a `:` anywhere and on a leading `..`, CPE-1461/1709) and, on Windows, sanitises
+// each segment through `local_safe_segment`. [`entry_name_is_safe`] has **no equivalent to either**.
+// Measured for the PR #906 review:
+//
+// ```text
+// [M7] entry_name_is_safe("file:stream") = true    entry_name_is_safe("..evil") = true
+//      entry_name_is_safe("con") = true            entry_name_is_safe(" sp ") = true   ("x." = true)
+// [M8 fs::write to "adsbase:stream"] = Ok(())
+//      adsbase_len = Some(4) (unchanged)   a plain file named "adsbase:stream" exists = false
+// ```
+//
+// So a ZIP entry named `file:stream` passes this module's check, reaches rows 15–16's `File::create`, and
+// on NTFS the bytes land in an **alternate data stream** of a neighbouring file, leaving the user no
+// visible file at all — the CPE-1709 bug, at a sink CPE-1709 did not cover. The Windows reserved-device
+// and trailing-space/dot shapes are accepted too. **Not fixed here** (this ticket's remit is the link
+// question at these sites, and the fix belongs with the `local_safe_segment` family): tracked as
+// **CPE-1744**, and pinned by `entry_name_is_safe_accepts_shapes_local_safe_segment_rejects` below so the
+// gap is a recorded, CI-enforced absence rather than a sentence.
+//
+// **The link check is LEAF-ONLY.** `entry_name_is_safe("sub/x.txt")` is `true`, and rows 15–16 run
+// `create_dir_all(parent)` *before* the leaf guard. If a directory symlink or junction already sits at
+// `dest/sub`, everything under it is redirected out of `dest` and the leaf guard never sees a link,
+// because the leaf does not exist yet. Measured:
+//
+// ```text
+// [M9] guard verdict for the LEAF (symlink_metadata of dest/sub/x.txt) = Err(NotFound)  -> no refusal
+// [M9 File::create through a symlinked intermediate dir] = Ok(())   landed_outside = true
+// ```
+//
+// A **junction needs no privilege on Windows**, so this is an ordinary user's folder, not a hardened
+// attacker scenario. Closing it means resolving every intermediate component, not just the leaf — a
+// different guard from the one this ticket measured, so it is **CPE-1744** rather than a widened claim
+// here. The table above says "LEAF ONLY" for exactly this reason.
 //
 // **Not covered, stated rather than implied:** the extractors that are not our own write loop — `tar`'s
 // `Archive::unpack`/`Entry::unpack_in`, `zip`'s `ZipArchive::extract`, and `sevenz_rust`'s
@@ -283,7 +341,8 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // sitting in the destination folder at an entry's name is therefore still followed on the tar, 7z and
 // one-shot-zip paths. That is a real, known gap with a shape of its own (it belongs upstream, or in a
 // pre-extraction sweep of the destination), and it is written down here so the next sweep finds a recorded
-// absence rather than an overlooked one, per CPE-1718.
+// absence rather than an overlooked one, per CPE-1718. **Ticketed as CPE-1744** — the PR #906 review
+// pointed out that a recorded absence with no ticket is a recorded absence nobody is scheduled to fix.
 //
 // ## Why the guard on rows 6–14 is the **link** half only
 //
@@ -319,22 +378,98 @@ fn refuse_link_at_new_file(dest: &Path) -> Result<(), String> {
     }
 }
 
+/// How many `<pid>-<seq>` names [`temp_extract_target`] will try before giving up. Exclusive creation
+/// makes a name that already exists a *retry*, not a failure, and names that already exist are ordinary
+/// here rather than exotic: `EXTRACT_SEQ` restarts at 0 in every process, PIDs are reused by the OS, and
+/// **nothing ever cleans `cpe-archive/`** — CPE-1693 found 145,000 leftover directories on one machine.
+/// So a fresh process with a recycled PID can genuinely walk over a previous run's whole range. The bound
+/// exists so a hostile pre-creation of a large range ends as a clear error instead of an infinite loop.
+const TEMP_TARGET_ATTEMPTS: u64 = 1024;
+
+/// Row 1 of the CPE-1733 table — **and the row the PR #906 review corrected, which is the point of the
+/// enumeration existing at all.**
+///
+/// # What this used to claim, and why it was wrong
+///
+/// The first version of this comment said the directory *"is created by that call and never reused, so
+/// nothing — no user, no archive — can have placed a link at the leaf name before we get there"*, and
+/// concluded rows 1–5 were **unreachable** by the link hazard. `fs::create_dir_all` does not support that
+/// claim. Measured here on Windows:
+///
+/// ```text
+/// [M6] create_dir_all over an EXISTING dir = Ok(())
+/// [M6 File::create at a squatted leaf inside a pre-existing dir] Ok(())
+///       victim bytes = Some("")        <- the victim was TRUNCATED through the link
+/// [M6d] create_dir_all over a DIRECTORY LINK = true
+/// ```
+///
+/// `create_dir_all` succeeds on a directory that already exists **and on a symlink/junction standing in
+/// for one**, so it establishes nothing about who made the directory. What actually protected rows 1–5
+/// was a *platform* fact rather than anything this code did: on Windows `%TEMP%` is per-user. On Linux
+/// `std::env::temp_dir()` is `$TMPDIR` or `/tmp` — world-writable and sticky — where the PID is public,
+/// the sequence restarts at 0, the directory is never cleaned, and the **leaf name is archive-controlled,
+/// so an attacker who supplies the archive already knows what to call the link.** That is CWE-377
+/// (insecure temporary file) into CWE-59 (link following), and "we choose the path" was generalised one
+/// step past its evidence into "nobody can have been there first" — the exact defect shape this ticket
+/// was filed about.
+///
+/// # What it does now
+///
+/// The shared `cpe-archive` root still has to be `create_dir_all`'d (it is shared across processes by
+/// design) and is link-checked before use, but the **per-extraction directory is created exclusively**
+/// with `fs::create_dir`, which is the primitive that actually carries the claim. Measured, same run:
+///
+/// ```text
+/// [M6b] fs::create_dir (exclusive) over the SAME pre-existing dir = Err(kind AlreadyExists)  [os error 183]
+/// [M6d] fs::create_dir over a DIRECTORY LINK                      = Err(AlreadyExists)
+/// [M6c] fs::create_dir at a FRESH name                            = true
+/// ```
+///
+/// Both squatting shapes now bounce, and a bounced name is retried with the next sequence number rather
+/// than failing the extraction. Once `create_dir` returns `Ok`, this process is the only thing that has
+/// ever been inside that directory, so the leaf — and therefore rows 2–5 — really is unreachable by a
+/// pre-placed link. That sentence is now earned rather than assumed.
+///
+/// # Residuals, stated rather than implied
+///
+/// - **The `cpe-archive` root itself is still shared.** On a multi-user `/tmp` another user can create it
+///   first as an ordinary directory. The link check below refuses the symlink case; the ordinary-directory
+///   case is not refused, because that is the normal state of affairs on every second run. The exclusive
+///   subdirectory creation is what makes that safe, not the root.
+/// - **`<pid>-<seq>` is still predictable**, so a hostile local user can pre-create a range and force the
+///   `TEMP_TARGET_ATTEMPTS` error. That is a denial of service, not a redirect — it fails loudly instead
+///   of writing somewhere unintended, which is the trade this module makes everywhere.
+/// - **Nothing here cleans up.** CPE-1693 tracks the 145,000 leftover directories; this change adds one
+///   more directory per extraction just as before.
 fn temp_extract_target(inner: &str) -> Result<std::path::PathBuf, String> {
     let base = Path::new(inner)
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .ok_or_else(|| "invalid entry name".to_string())?;
-    // Per-extraction unique subdir (pid + monotonic seq) so the basename is preserved for the opened
-    // file while concurrent extractions can never collide.
-    let seq = EXTRACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let dir = std::env::temp_dir()
-        .join("cpe-archive")
-        .join(format!("{}-{}", std::process::id(), seq));
-    // Row 1 of the CPE-1733 table: app-owned and unreachable by the link hazard — this call creates the
-    // directory, `<pid>-<seq>` makes it never-reused, so nothing can have put a link at the leaf. No guard,
-    // deliberately; `create_dir_all` is also non-destructive on a link (measured, CPE-1729).
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join(base))
+    let root = std::env::temp_dir().join("cpe-archive");
+    // The shared root is the one directory here we cannot own exclusively. Refuse it if it is a link:
+    // everything below would be redirected wholesale, and unlike a squatted leaf that is not something a
+    // per-extraction guard can catch later.
+    refuse_link_at_new_file(&root)?;
+    fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    for _ in 0..TEMP_TARGET_ATTEMPTS {
+        // Per-extraction unique subdir (pid + monotonic seq) so the basename is preserved for the opened
+        // file while concurrent extractions can never collide (CPE-1195).
+        let seq = EXTRACT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = root.join(format!("{}-{}", std::process::id(), seq));
+        match fs::create_dir(&dir) {
+            // Exclusive: this returning `Ok` is the whole basis for rows 2–5 being unguarded.
+            Ok(()) => return Ok(dir.join(base)),
+            // Occupied by a leftover, a concurrent run, or a squatter — all three want the same answer.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    Err(format!(
+        "could not claim a private extraction directory under \"{}\" after {TEMP_TARGET_ATTEMPTS} attempts — \
+         every name tried was already taken. Nothing was extracted; clearing that folder should fix it",
+        root.display()
+    ))
 }
 
 /// Extract a single entry of a zip to a temp file and return its path (CPE-242). Read-only: the temp
@@ -638,9 +773,10 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
-    // Row 17 of the CPE-1733 table: `dest` is user-named, but `create_dir_all` is not destructive and on a
-    // dangling link does nothing at all — measured for CPE-1729, after the opposite had been assumed. No
-    // guard, because there is no measured hazard here to guard.
+    // Row 17 of the CPE-1733 table: `dest` is user-named and unguarded — NOT because there is no hazard
+    // (a directory link here redirects the whole extraction; measured, see the table's `create_dir_all`
+    // bullet), but because refusing a pre-existing `dest` would break extracting into a folder you already
+    // have. Recorded absence, tracked by CPE-1744.
     fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index_decrypt(i, password.as_bytes()).map_err(|e| e.to_string())?;
@@ -649,6 +785,9 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
             continue; // skip a zip-slip entry, keep extracting the rest
         }
         let out = dest_path.join(&name);
+        // Row 18 of the CPE-1733 table: this and the `create_dir_all(parent)` below create
+        // ARCHIVE-controlled directory names. Unguarded because `create_dir_all` is non-destructive — but
+        // it is not hazard-free, and the leaf-only note further down is the consequence (CPE-1744).
         if entry.is_dir() {
             fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         } else {
@@ -662,6 +801,12 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
             // safe, keep going". **That skip is silent here** — this signature predates `ArchiveReport`
             // and has nowhere to put a per-entry note, the same limitation the unsafe-name `continue`
             // already lives with. Its streamed sibling (row 16) does record it.
+            //
+            // **LEAF ONLY, and the `create_dir_all(parent)` two lines up is why.** If a directory link
+            // already sits at an intermediate component of `name` (`sub` in `sub/x.txt`), the parent
+            // creation follows it, the leaf then does not exist so this check answers "not a link", and
+            // the write lands outside `dest` — measured, `landed_outside = true`. Closing that needs
+            // per-component resolution, which is CPE-1744, not this guard.
             if refuse_link_at_new_file(&out).is_err() {
                 continue;
             }
@@ -710,7 +855,7 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 /// format is guarded against zip-slip: zip via `enclosed_name`, tar via the crate's checked `unpack`, 7z
 /// via [`extract_7z_safe`].
 pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
+    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -1045,7 +1190,7 @@ fn extract_zip_archive_stream(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
+    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let total_items = archive.len() as u64;
     let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items, done_items: 0, current: String::new() };
@@ -1069,6 +1214,7 @@ fn extract_zip_archive_stream(
             continue;
         }
         let out = dest.join(&name);
+        // Row 18 of the CPE-1733 table — same as row 15's, see there and CPE-1744.
         if entry.is_dir() {
             fs::create_dir_all(&out).map_err(|e| e.to_string())?;
         } else {
@@ -1077,7 +1223,8 @@ fn extract_zip_archive_stream(
             }
             // Row 16 of the CPE-1733 table — the streamed twin of row 15, with somewhere to put the note.
             // Recorded in `errors` and counted as a done *item* (not a done *file*), the same shape the
-            // unsafe-name skip above uses, so the progress bar still reaches its total.
+            // unsafe-name skip above uses, so the progress bar still reaches its total. **LEAF ONLY** for
+            // the same measured reason as row 15 — see there, and CPE-1744.
             if let Err(e) = refuse_link_at_new_file(&out) {
                 report.errors.push(format!("{name}: {e}"));
                 prog.done_items += 1;
@@ -1238,7 +1385,7 @@ pub fn extract_archive_streamed(
     cancel: &AtomicBool,
     mut emit: impl FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded: `create_dir_all` is non-destructive (CPE-1729).
+    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -2108,6 +2255,122 @@ mod tests {
     // as non-destructive) and have nothing to assert. Rows 6–14 refuse the whole operation; rows 15–16
     // skip one entry and keep extracting, so they get their own legs below.
 
+    /// **Row 1's hardening: a squatted `<pid>-<seq>` directory must be stepped over, not written into.**
+    ///
+    /// The exact shape the PR #906 review measured against the old `create_dir_all`: pre-create the
+    /// directory `temp_extract_target` is about to claim, plant a link inside it at the archive-controlled
+    /// leaf name pointing at a victim file, and extract. With `create_dir_all` the extraction walked into
+    /// the squatted directory and truncated the victim through the link, returning `Ok`. With the
+    /// exclusive `fs::create_dir` the name is skipped and the next sequence number used.
+    ///
+    /// The assertion is on **the victim's bytes**, not on the returned path — the bug this replaces
+    /// returned a perfectly ordinary-looking `Ok(path)` while destroying a file somewhere else entirely.
+    ///
+    /// This drives `temp_extract_target` through the real public API (`extract_archive_entry`), and it has
+    /// to predict the directory name to squat it, which is only possible because `EXTRACT_SEQ` is a
+    /// process-wide counter — so it reads the counter, squats the *next* name, and lets the call race
+    /// nothing. If a concurrent test consumed that sequence number first the squat simply is not hit and
+    /// the leg announces rather than passing quietly.
+    #[test]
+    fn row1_a_squatted_temp_directory_is_stepped_over_not_written_into() {
+        let d = scratch("cpe1733_row1_squat");
+        let src = d.join("a.txt");
+        fs::write(&src, b"ARCHIVED A").unwrap();
+        let zip = d.join("in.zip");
+        compress_to_zip(&[src.to_string_lossy().to_string()], &zip.to_string_lossy()).unwrap();
+
+        let victim = d.join("victim-outside-temp.bin");
+        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+
+        // The name `temp_extract_target` will try next.
+        let next = EXTRACT_SEQ.load(std::sync::atomic::Ordering::Relaxed);
+        let squat = std::env::temp_dir().join("cpe-archive").join(format!("{}-{}", std::process::id(), next));
+        fs::create_dir_all(&squat).unwrap();
+        let planted = squat.join("a.txt"); // the leaf name is archive-controlled: the attacker knows it
+        let staged = {
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&victim, &planted).is_ok()
+            }
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&victim, &planted).is_ok()
+            }
+        };
+        if !crate::fsutil::require_staged("live_file_symlink", true, staged) {
+            crate::skip_notice!(
+                "[CPE-1733] SKIPPED row 1's squat leg: could not plant a link at {}. The CWE-377/CWE-59 \
+                 shape was NOT covered on this run.",
+                planted.display()
+            );
+            let _ = fs::remove_dir_all(&squat);
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let outcome = extract_archive_entry(&zip.to_string_lossy(), "a.txt");
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "row 1: the extraction wrote through a link planted in a SQUATTED temp directory — \
+             `create_dir_all` accepts a directory it did not create, so the leaf was never ours \
+             (outcome was {outcome:?})"
+        );
+        let landed = outcome.expect("row 1: a squatted name must be stepped over, not fail the extraction");
+        assert!(
+            !Path::new(&landed).starts_with(&squat),
+            "row 1: the extraction landed INSIDE the squatted directory ({landed}) — exclusive creation \
+             is what makes rows 2-5 unguarded, so this must never be the squatted name"
+        );
+        assert_eq!(fs::read(&landed).unwrap(), b"ARCHIVED A".to_vec(), "row 1: and it must still extract");
+        let _ = fs::remove_dir_all(&squat);
+        let _ = fs::remove_dir_all(Path::new(&landed).parent().unwrap());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **A recorded absence, made CI-enforced** (PR #906 review, finding 2).
+    ///
+    /// The table above says `guarded_join`'s traversal answer is already covered here by
+    /// [`entry_name_is_safe`], and that is true *for traversal*. It is not true for the rest of what
+    /// `guarded_join` carries: [`crate::transfer::is_safe_name`] fails closed on a `:` anywhere in a
+    /// segment and on a leading `..`, and this module's check accepts both. A ZIP entry named
+    /// `file:stream` therefore reaches rows 15–16's `File::create` and, on NTFS, disappears into an
+    /// alternate data stream of a neighbouring file — measured: `fs::write("adsbase:stream")` → `Ok`,
+    /// `adsbase` still 4 bytes, no visible file created.
+    ///
+    /// **This test asserts the gap, not the fix.** It exists because a paragraph saying "we do not cover
+    /// `:`" rots the moment someone changes either function, whereas this fails. Fixing it is CPE-1744;
+    /// when that lands, this test is what tells you the delta closed and the wording upstairs is stale.
+    #[test]
+    fn entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects() {
+        // (name, what this module says, what the transfer sink says)
+        let rows: &[(&str, bool, bool)] = &[
+            ("file:stream", true, false), // NTFS alternate data stream — CPE-1709's bug shape
+            ("..evil", true, false),      // leading `..` that is not a traversal component
+            ("..:$DATA", true, false),    // both at once
+            ("a/b.txt", true, false),     // a separator: legal to us (we join it), never a single segment
+            // Agreed rejections, so a change that broke BOTH would still red here rather than pass.
+            ("..", false, false),
+            ("../x", false, false),
+            ("", false, false),
+        ];
+        for (name, ours, theirs) in rows {
+            assert_eq!(
+                entry_name_is_safe(name),
+                *ours,
+                "archive::entry_name_is_safe({name:?}) changed — if this is the CPE-1744 fix, update the \
+                 table in this module's section comment too"
+            );
+            assert_eq!(
+                crate::transfer::is_safe_name(name),
+                *theirs,
+                "transfer::is_safe_name({name:?}) changed — the recorded delta in this module's section \
+                 comment is measured against it and is now stale"
+            );
+        }
+    }
+
     /// Gzip `raw`, so the row-13/14 legs can build a single-file gzip whose extraction leaf lands on the
     /// staged link.
     fn gzip_bytes(raw: &[u8]) -> Vec<u8> {
@@ -2249,6 +2512,13 @@ mod tests {
     /// hard link is `is_symlink() == false` — CPE-1716), so this is one leg for all nine rows rather than
     /// nine skippable ones, and it routes through `require_staged` so a runner that *should* stage goes
     /// red instead of silently covering nothing (CPE-1717).
+    ///
+    /// **Platform boundary** (PR #906 review — every other figure in this ticket states one and this doc
+    /// did not): the `"CLOBBERED"` figure above is Windows 11. The leg itself runs on all three CI OSes.
+    ///
+    /// **Scope:** this walks `GUARDED_ROWS`, which is rows 6–14 only. **Rows 15–16 have no live-link
+    /// leg** — their dangling legs below cover them, and the same `refuse_link_at_new_file` call decides
+    /// all sixteen, so the live arm is exercised by rows 6–14. Said rather than left to inference.
     #[test]
     fn every_guarded_row_refuses_a_live_link_without_touching_its_target() {
         for (n, link_name, run) in GUARDED_ROWS {
