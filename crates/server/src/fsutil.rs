@@ -935,6 +935,168 @@ pub fn same_place(dest: &Path, root: &Path) -> bool {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// CPE-1730 — "is this destination INSIDE the served root?", decided in ONE place
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+/// How many resolution steps [`confined_to`] will take before giving up and refusing.
+///
+/// One step per trailing component that does not exist, plus one per symlink hop. A path with more
+/// than this many components is not a path any of this repo's callers construct, and exhausting the
+/// budget **refuses** — the same direction every other failure in this function takes.
+const CONFINEMENT_STEP_BUDGET: usize = 4096;
+
+/// Does `path` resolve to somewhere **inside** `root` (or to `root` itself)?
+///
+/// The property behind the protocol test rigs' path resolvers (`cpe-ftp`'s `real_path`, `cpe-sftp`'s
+/// `FsSftp::real`, `cpe-webdav`'s `root.join(url)`), each of which used to hand a client-supplied path
+/// to `fs::write`/`remove_file`/`remove_dir_all`/`fs::rename` with **no containment check at all**
+/// (CPE-1730).
+///
+/// # Containment is not equality, and the difference is the whole ticket
+///
+/// [`same_place`] answers *"does this destination resolve **to** the served root?"* — CPE-1726/CPE-1731's
+/// question, and a guard against a rename that reports success while moving nothing. This answers
+/// *"does it stay **within** the served root?"*, which is a strictly harder question and a different
+/// one:
+///
+/// - `same_place` may compare **lexically** when `canonicalize` fails, because for *equality* the
+///   lexical `..` pop is proved to err safe — popping only shortens the path, hence makes it *more*
+///   likely to equal the root, hence more likely to refuse (that proof is on `normalise_lexically`,
+///   and it is sound).
+/// - **That proof does not transfer.** In the containment direction the same pop errs *unsafe*:
+///   `root/link/..` lexically pops to `root` (contained, allow) while the filesystem resolves it to
+///   `link`'s parent, which may be anywhere. A guard that answers containment by popping `..` would
+///   allow the escape it exists to refuse. So this function **never pops `..`** — it asks the
+///   filesystem, and refuses when the filesystem cannot answer.
+///
+/// Do not "simplify" this into `same_place`'s shape on the grounds that `same_place` is the newer,
+/// more-reviewed function. That reasoning — carry the latest shape forward because it is the latest —
+/// is what CPE-1731 recorded as its own closing lesson, having been wrong twice before it was right.
+///
+/// # Why [`contained_under`] could not be reused, though the ticket expected it to
+///
+/// The ticket that filed this said `contained_under` "already returns the right shape". It does not,
+/// **for these callers**, and the reason is written on `contained_under` itself: its documented
+/// precondition is that `joined` is an *existing* target about to be removed, and it therefore returns
+/// `Ok` when `joined` does not canonicalize. Every call site here is the opposite case — a `STOR`
+/// target, a `MKD` name, a rename destination — where not existing yet is the **ordinary** state. Reused
+/// as-is it would have answered "contained" for `root/../evil.txt` (which does not exist, because
+/// nothing has written it yet) and then the rig would have written it. A guard that fails open on
+/// precisely its subject is worse than no guard, because it reads as one. Its own doc says so in as many
+/// words: *"Do not reuse this to validate a create/copy destination."*
+///
+/// # What it does
+///
+/// Walk `path` up to its **deepest existing ancestor**, canonicalise *that*, and require the result to
+/// be inside the canonicalised `root`:
+///
+/// 1. `canonicalize(path)` — if the whole path exists, the filesystem has resolved every symlink in it
+///    and the answer is exact. This is what closes the **symlinked-intermediate-directory** escape
+///    (`root/link/x` where `link` points outside), which needs neither `..` nor an absolute path and is
+///    invisible to any purely textual check.
+/// 2. On `NotFound`, drop the last component and try again. The components dropped this way provably
+///    **do not exist**, so none of them can be a symlink, so nothing about them can redirect the path
+///    elsewhere — which is why appending them back to a contained ancestor is sound without further
+///    checks.
+/// 3. A `..` that survives into that non-existent tail is **refused, not popped** (it arrives here as
+///    `file_name() == None`). Refusing is safe on both platform classes and for different reasons:
+///    on POSIX such a path has no resolution at all, so the caller's primitive would `ENOENT`; on
+///    Windows `canonicalize` normalises `..` *before* step 2 is ever reached (measured below), so the
+///    verdict is decided by the filesystem and this branch is not reached for the same input. See the
+///    measurement table.
+/// 4. A **dangling symlink** is followed by hand (`read_link`, relative targets resolved against the
+///    link's parent) and the walk continues on the target. `canonicalize` reports `NotFound` for a
+///    dangling link, so without this it would look like a plain missing name and be allowed — while
+///    `fs::write` through that link creates its target, wherever that is. Following it rather than
+///    refusing it outright is deliberate: `cpe-webdav`'s dangling-link leg
+///    (`cpe_1726_rename_onto_a_link_never_writes_through_it`) points its link at a sibling *inside* the
+///    root, and a blanket refusal would have quietly turned that leg into a no-op instead of leaving it
+///    proving what it was written to prove.
+///
+/// # Failure policy — every failure REFUSES
+///
+/// Unlike [`contained_under`], which fails open on an unresolvable target because a path that does not
+/// exist cannot be *destroyed*, every unresolved case here fails **closed**: an unresolvable `root`, any
+/// `canonicalize` error other than `NotFound` (`EACCES`, `ELOOP`, `ENAMETOOLONG`, a Windows sharing
+/// violation), a path that exists but will not canonicalise and is not a symlink, a `..` in the
+/// non-existent tail, and exhaustion of [`CONFINEMENT_STEP_BUDGET`]. The asymmetry is the precondition:
+/// this validates a path about to be **created or written**, so "I could not tell" must not mean "go
+/// ahead".
+///
+/// # Measured, not reasoned — Windows and Linux
+///
+/// ```text
+/// probe                                      WINDOWS                      LINUX (WSL)
+/// canonicalize(root/nonexistent/..)          Ok(root)                     Err(NotFound)
+/// canonicalize(<dangling link>)              Err(NotFound)                Err(NotFound)
+/// Path::new("a/..").file_name()              None                         None
+/// Path::new("a/.").file_name()               Some("a")                    Some("a")
+/// ```
+///
+/// The first row is why step 3's Windows leg is unreachable rather than merely safe, and why a
+/// `..`-in-the-tail input can get *different verdicts* on the two platforms (Windows: "it is the root,
+/// contained"; POSIX: "unresolvable, refused"). Both verdicts are safe; they are not the same verdict,
+/// and a caller that needs one answer everywhere must not get it from here.
+///
+/// # What this does NOT cover — stated so the absence is recorded, not overlooked
+///
+/// - **It is not atomic with the primitive.** Between this check and the caller's `fs::rename`, a
+///   component could be replaced by a symlink pointing out of the tree (a TOCTOU swap). Closing that
+///   needs `openat2(RESOLVE_BENEATH)` on Linux or an `O_NOFOLLOW` walk, neither of which `std` offers;
+///   the callers are single-threaded in-process test rigs where nothing else touches the tree, which is
+///   why this is recorded rather than solved. **A real server must not treat this as sufficient.**
+/// - **It says nothing about what the primitive then does to a link at the final component.** A
+///   contained path may still *be* a symlink whose target is contained but is written *through* rather
+///   than replaced — CPE-1719's shape, pinned separately by CPE-1726's tests.
+/// - It answers only about `root`; the caller still decides whether the root **itself** is an
+///   acceptable answer. It is allowed here, because a resolver must map `/` to the served root for
+///   `LIST`/`PROPFIND`/`CWD` to work at all. "Not the root itself" is [`same_place`]'s question, and
+///   the rename sites ask both.
+pub fn confined_to(path: &Path, root: &Path) -> bool {
+    let Ok(real_root) = std::fs::canonicalize(root) else {
+        return false; // an unresolvable root confines nothing
+    };
+    let mut probe = path.to_path_buf();
+    for _ in 0..CONFINEMENT_STEP_BUDGET {
+        match std::fs::canonicalize(&probe) {
+            // `starts_with` is component-wise, so `<root>2` does not start with `<root>`, and it is
+            // true for `real_root` itself — the root is contained in itself, by design (see above).
+            Ok(real) => return real.starts_with(&real_root),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return false, // EACCES / ELOOP / … — cannot tell, so refuse
+        }
+        // `NotFound` is two different situations. A dangling symlink is one of them, and it is the
+        // dangerous one: the name exists, the caller's write will follow it, and its target is
+        // somewhere this function has not looked yet.
+        match std::fs::symlink_metadata(&probe) {
+            Ok(md) if md.file_type().is_symlink() => {
+                let Ok(target) = std::fs::read_link(&probe) else { return false };
+                probe = if target.is_absolute() {
+                    target
+                } else {
+                    match probe.parent() {
+                        Some(parent) => parent.join(target),
+                        None => return false,
+                    }
+                };
+            }
+            // It exists, it is not a symlink, and it still would not canonicalise. Nothing sensible
+            // left to conclude, so refuse.
+            Ok(_) => return false,
+            // It genuinely is not there: drop the last component and ask about its parent. `file_name`
+            // is `None` for a path ending in `..` (and for a bare root/prefix), which is step 3.
+            Err(_) => {
+                let (Some(parent), Some(_name)) = (probe.parent(), probe.file_name()) else {
+                    return false;
+                };
+                probe = parent.to_path_buf();
+            }
+        }
+    }
+    false // budget exhausted — refuse, like every other thing this function cannot resolve
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 // CPE-1717 — what a FAILED staging attempt means, decided in one place
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -1499,9 +1661,54 @@ fn make_dangling_link_inner(link: &Path) -> bool {
         && !matches!(link.try_exists(), Ok(true))
 }
 
+/// Put a **live directory link** at `link` pointing at the existing directory `target`, for the
+/// CPE-1730 tests that drive a request path *through* a symlinked intermediate directory. Returns
+/// whether the slot really holds a link afterwards, so a `false` is a leg that must announce a skip
+/// rather than assert nothing.
+///
+/// The third escape shape needs neither `..` nor an absolute path — `/<link>/victim.txt` looks exactly
+/// like an ordinary request — so it is the one no textual filter can see, and the one whose test cannot
+/// be written without creating a real link.
+///
+/// Same two constructions, in the same order, as [`make_dangling_link`]: a real directory symlink first
+/// (needs `SeCreateSymbolicLinkPrivilege` on Windows), then an NTFS **junction**, which needs no
+/// privilege and which Rust reports as `file_type().is_symlink() == true`. Unix has neither restriction.
+///
+/// **`pub` for the same reason as [`make_dangling_link`]**: the callers are in `cpe-ftp`, `cpe-sftp` and
+/// `cpe-webdav`, none of which depends on `junction`, and the alternative was three inlined copies of
+/// the fallback — which is exactly how `deny_stat_of`'s duplicates ended up needing the same fix applied
+/// three times.
+///
+/// **CPE-1717:** `supported_here = true` — between the symlink and the privilege-free junction there is
+/// no platform CI runs on where this is *expected* to fail, so a failure is the runner changing under
+/// us, not an ordinary skip.
+#[track_caller]
+pub fn make_dir_link(target: &Path, link: &Path) -> bool {
+    require_staged("make_dir_link", true, make_dir_link_inner(target, link))
+}
+
+fn make_dir_link_inner(target: &Path, link: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(target, link).is_err() && junction::create(target, link).is_err() {
+            return false;
+        }
+    }
+    #[cfg(unix)]
+    {
+        if std::os::unix::fs::symlink(target, link).is_err() {
+            return false;
+        }
+    }
+    // The premise, asserted rather than assumed: the slot holds a link, and it leads to `target`.
+    std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+        && std::fs::canonicalize(link).ok() == std::fs::canonicalize(target).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write as _; // the CPE-1717 loud-skip announcements below write to stderr
 
     #[test]
     fn epoch_ms_of_unix_epoch_is_zero() {
@@ -1761,6 +1968,116 @@ mod tests {
         // Target doesn't exist → allow (see the precondition: it cannot be destroyed, and the caller's
         // own remove reports it). This is sound ONLY for a remove target.
         assert!(contained_under(&root.join("never-existed.txt"), &root).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The escape shapes, enumerated** — the three CPE-1730 exists to close, driven through
+    /// [`confined_to`] directly so the property is pinned independently of any rig.
+    ///
+    /// Enumerated rather than sampled because naming only `..` is what makes a reader believe the other
+    /// two are handled: family (b) needs no `..` and family (c) needs neither `..` nor an absolute path,
+    /// so a check built to close (a) alone looks complete and is not.
+    #[test]
+    fn confined_to_refuses_all_three_escape_shapes_and_admits_ordinary_paths() {
+        let d = scratch("confined");
+        let root = d.join("root");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"x").unwrap();
+        let sibling = d.join("sibling");
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("victim.txt"), b"outside").unwrap();
+
+        // Ordinary paths — the check must not break the rigs it is being added to.
+        assert!(confined_to(&root, &root), "the root itself is contained (a resolver must map `/`)");
+        assert!(confined_to(&root.join("a.txt"), &root), "an existing file inside must be allowed");
+        assert!(confined_to(&root.join("sub"), &root), "…and an existing subdirectory");
+        assert!(
+            confined_to(&root.join("not-yet.txt"), &root),
+            "a NOT-YET-EXISTING name inside the root must be allowed — this is the create/STOR case, \
+             and it is exactly where `contained_under` fails open"
+        );
+        assert!(confined_to(&root.join("sub/deep/new.txt"), &root), "…including under missing parents");
+
+        // (a) `..`-shaped.
+        assert!(!confined_to(&root.join("../sibling/victim.txt"), &root), "(a) `..` to a sibling");
+        assert!(!confined_to(&root.join(".."), &root), "(a) `..` to the parent itself");
+        assert!(!confined_to(&root.join("sub/../../sibling"), &root), "(a) `..` through a real subdir");
+
+        // (b) absolute — `Path::join` discards the base, so the destination replaces the root outright.
+        // Spelled as the join the rigs actually perform, so this is the real shape and not a paraphrase.
+        let abs = sibling.join("victim.txt");
+        assert!(abs.is_absolute(), "the fixture must really be absolute or (b) tests nothing");
+        assert!(!confined_to(&root.join(&abs), &root), "(b) an absolute path replaces the root");
+
+        // (c) through a symlinked intermediate directory — neither `..` nor absolute.
+        let link = root.join("outlink");
+        if make_dir_link(&sibling, &link) {
+            assert!(
+                !confined_to(&link.join("victim.txt"), &root),
+                "(c) a path THROUGH a symlinked subdirectory leaves the tree with no `..` and no \
+                 absolute component — the shape no textual check can see"
+            );
+            assert!(
+                !confined_to(&link.join("not-yet.txt"), &root),
+                "(c) …and the same for a name that does not exist yet, which is the write case"
+            );
+        } else {
+            let _ = writeln!(
+                std::io::stderr(),
+                "SKIP: leg (c) — this platform/account cannot create a directory link at {}",
+                link.display()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Every unresolvable case **refuses** — the opposite of [`contained_under`]'s policy, and the
+    /// asymmetry is the precondition (this validates a path about to be created, not one about to be
+    /// destroyed).
+    #[test]
+    fn confined_to_fails_closed_on_everything_it_cannot_resolve() {
+        let d = scratch("confined_io");
+        let root = d.join("root");
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(!confined_to(&root.join("x"), &d.join("no-such-root")), "an unresolvable root confines nothing");
+
+        // A dangling link is `NotFound` to `canonicalize` on both platforms, so without the `read_link`
+        // hop it would look like an ordinary missing name and be allowed — while `fs::write` through it
+        // creates its target OUTSIDE the root.
+        let escaping = root.join("escaping-link");
+        let outside_target = d.join("never-created-outside.txt");
+        #[cfg(unix)]
+        let made = std::os::unix::fs::symlink(&outside_target, &escaping).is_ok();
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_file(&outside_target, &escaping).is_ok();
+        if made {
+            assert!(
+                std::fs::canonicalize(&escaping).is_err(),
+                "the fixture must really be dangling, or this leg proves nothing about the hop"
+            );
+            assert!(
+                !confined_to(&escaping, &root),
+                "a DANGLING link whose target is outside the root must be refused — `canonicalize` \
+                 reports it as merely missing, which is the trap"
+            );
+            let inside_target = root.join("also-never-created.txt");
+            let inward = root.join("inward-link");
+            #[cfg(unix)]
+            let ok = std::os::unix::fs::symlink(&inside_target, &inward).is_ok();
+            #[cfg(windows)]
+            let ok = std::os::windows::fs::symlink_file(&inside_target, &inward).is_ok();
+            if ok {
+                assert!(
+                    confined_to(&inward, &root),
+                    "…but a dangling link pointing INSIDE the root stays allowed: refusing every \
+                     dangling link would silently neuter cpe-webdav's dangling-link leg rather than \
+                     fail it"
+                );
+            }
+        } else {
+            let _ = writeln!(std::io::stderr(), "SKIP: dangling-link legs — no symlink privilege here");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
