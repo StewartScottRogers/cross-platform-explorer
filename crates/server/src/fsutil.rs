@@ -278,8 +278,101 @@ pub fn rename_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
 /// Both are write-through, so both deserve the write-through message. A plain occupied name still gets
 /// the site's own wording: a regular file answers `Ok(false)` to the link question and falls through.
 pub fn create_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
-    classify_create_slot(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
-        .or_else(|| clobber_refusal(target, occupied))
+    create_slot_link_refusal(target).or_else(|| clobber_refusal(target, occupied))
+}
+
+/// **The link half of [`create_slot_refusal`], alone** (CPE-1733) — for a create site whose *occupancy*
+/// answer is legitimately "overwrite it" but whose *link* answer is still "refuse".
+///
+/// This is not a weaker `create_slot_refusal`; it is the other half of a split that CPE-1733's
+/// enumeration of `archive.rs` forced. Every archive-creation destination there (`compress_to_zip` and
+/// its five siblings) writes a whole new archive at a caller-supplied path, and overwriting an existing
+/// archive at that path is a **legitimate, long-standing behaviour** — the app's own compress flow even
+/// depends on re-running onto a name it picked. Wiring `create_slot_refusal` in wholesale would have
+/// changed that contract as a side effect of a link fix, which is the "one step past the evidence"
+/// failure this family keeps filing tickets about. The link hazard is separable and was measured on its
+/// own, so it is guarded on its own.
+///
+/// The link verdict itself is unchanged and shares one implementation with [`create_slot_refusal`]:
+/// both are [`classify_create_slot`] over one [`std::fs::symlink_metadata`], and `create_slot_refusal`
+/// is now literally this function plus [`clobber_refusal`]. A site that also wants the occupancy half
+/// must call [`create_slot_refusal`] — do not stack this with a hand-rolled existence check.
+///
+/// Measured on Windows for CPE-1733, with the guard removed, at a `fs::File::create` destination:
+///
+/// ```text
+/// [M1 File::create on DANGLING file symlink] result = Ok(())
+///       target now exists = true, bytes = Some([78, 69, 87, 32, 66, 89, 84, 69, 83])
+///       slot still a symlink = Ok(true)
+/// [M2 File::create on LIVE file symlink] result = Ok(())
+///       victim bytes = Some("CLOBBERED")
+///       slot still a symlink = Ok(true)
+/// ```
+pub fn create_slot_link_refusal(target: &Path) -> Option<String> {
+    match create_slot_link_verdict(target) {
+        CreateSlotLink::NotALink => None,
+        CreateSlotLink::Link(m) | CreateSlotLink::Unknown(m) => Some(m),
+    }
+}
+
+/// The three answers a create-slot link check can give — **for the callers that must treat "it is a link"
+/// and "I could not tell" differently** (CPE-1733, UAT finding 6).
+///
+/// [`create_slot_link_refusal`] collapses the last two into one `Some(message)`, which is right for a site
+/// that refuses the whole operation either way: both mean "do not write here". It is **wrong** for a site
+/// that *skips and continues*, because the two verdicts differ in what the skip costs the user:
+///
+/// - `Link` is a **policy** decision. We know what is there, we know writing follows it, and dropping that
+///   one entry is the considered answer — the same shape as the zip-slip skip.
+/// - `Unknown` is an **I/O failure**. We could not read the slot at all, so "skip it" silently drops a
+///   file for a reason that has nothing to do with the archive, and reports success. Every other I/O
+///   failure in those loops aborts via `?`; this one was quietly not doing so.
+///
+/// The distinction costs one `match` at the two sites that need it and nothing anywhere else.
+#[derive(Debug)]
+pub enum CreateSlotLink {
+    /// Provably not a link: free, or occupied by a real entry that is the occupancy half's business.
+    NotALink,
+    /// Provably a link, with the refusal wording.
+    Link(String),
+    /// Could not tell, with the refusal wording. Never a licence to carry on.
+    Unknown(String),
+}
+
+/// [`create_slot_link_refusal`]'s verdict before it is flattened: **one `symlink_metadata` and nothing
+/// else**, so that the decision it feeds is a pure function that can be tested on inputs no filesystem
+/// will reliably produce on demand.
+pub fn create_slot_link_verdict(target: &Path) -> CreateSlotLink {
+    create_slot_link_from_stat(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
+}
+
+/// **The decision UAT finding 6 was actually about, as a pure function** (CPE-1733, PR #906 review
+/// round 4).
+///
+/// The first fix for that finding put this `match` inside [`create_slot_link_verdict`], next to the
+/// `symlink_metadata` call, and tested `archive::entry_slot_action` instead — which only re-labels an
+/// **already-classified** verdict. The review's mutation proved the gap: flipping the `Err(_)` arm here
+/// to `CreateSlotLink::Link` reinstates the original bug exactly (an unreadable slot skipped silently,
+/// the run reporting `Ok`) and the whole suite stayed green, because nothing exercised *this* choice.
+/// The reasoning for a pure classifier was right; it was applied one level too low.
+///
+/// Splitting it out costs nothing at runtime and buys the one arm that cannot be staged on demand: a
+/// slot whose `symlink_metadata` fails with something other than `NotFound` needs a permission or I/O
+/// fault that no test can portably arrange, so with the decision inline the arm that was wrong would
+/// again be the arm nothing could reach. Pinned by
+/// `an_unreadable_slot_is_unknown_never_a_confirmed_link`.
+///
+/// [`classify_create_slot`] still owns every message, so there is exactly one copy of each; this adds
+/// only the split of its `Some` into the two verdicts it collapses (a confirmed link, and a stat that
+/// failed for a reason other than `NotFound`).
+pub fn create_slot_link_from_stat(stat: &std::io::Result<bool>, target: &Path) -> CreateSlotLink {
+    match classify_create_slot(stat, target) {
+        None => CreateSlotLink::NotALink,
+        Some(msg) => match stat {
+            Ok(true) => CreateSlotLink::Link(msg),
+            _ => CreateSlotLink::Unknown(msg),
+        },
+    }
 }
 
 /// The pure decision behind [`create_slot_refusal`], split out for the reason
@@ -3556,6 +3649,70 @@ mod tests {
             assert!(
                 msg.contains("could not check whether") && msg.contains("nothing was written"),
                 "the unknown arm must say what it could not determine and that nothing happened: {msg}"
+            );
+        }
+    }
+
+    /// **CPE-1733 UAT finding 6, at the seam where the decision is actually made** (PR #906 review,
+    /// round 4).
+    ///
+    /// The first attempt at this test asserted `archive::entry_slot_action`, which converts an
+    /// already-classified [`CreateSlotLink`] into skip/abort. That is a re-labelling; the choice the UAT
+    /// filed about — *is this `Err` a confirmed link, or a slot I could not read?* — is made here. The
+    /// review proved the difference with a one-word mutation: change the `Err(_)` arm of
+    /// [`create_slot_link_from_stat`] to `CreateSlotLink::Link` and the original bug is back (rows 15–16
+    /// drop the entry silently and return `Ok`), yet **the entire suite stayed green**. This test is what
+    /// that mutation now hits.
+    ///
+    /// It is a pure-input test because the `Unknown` arm needs an `lstat` that fails with something other
+    /// than `NotFound` — a permission or device fault no test can portably stage, which is precisely why
+    /// the arm that was wrong was the arm nothing could reach.
+    #[test]
+    fn an_unreadable_slot_is_unknown_never_a_confirmed_link() {
+        fn arm(v: &CreateSlotLink) -> &'static str {
+            match v {
+                CreateSlotLink::NotALink => "NotALink",
+                CreateSlotLink::Link(_) => "Link",
+                CreateSlotLink::Unknown(_) => "Unknown",
+            }
+        }
+        let p = Path::new("/tmp/slot.bin");
+
+        assert_eq!(
+            arm(&create_slot_link_from_stat(&Ok(true), p)),
+            "Link",
+            "a confirmed link is a POLICY verdict: the skipping sites are entitled to drop that entry"
+        );
+        assert_eq!(
+            arm(&create_slot_link_from_stat(&Ok(false), p)),
+            "NotALink",
+            "a real entry is the occupancy half's business, not this one's"
+        );
+        assert_eq!(
+            arm(&create_slot_link_from_stat(&Err(std::io::Error::from(std::io::ErrorKind::NotFound)), p)),
+            "NotALink",
+            "a free name is the ordinary case — refusing here would break every create in the app"
+        );
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::TimedOut,
+            std::io::ErrorKind::Other,
+        ] {
+            let v = create_slot_link_from_stat(&Err(std::io::Error::new(kind, "Access is denied.")), p);
+            assert_eq!(
+                arm(&v),
+                "Unknown",
+                "an lstat that failed with {kind:?} is an I/O FAILURE, not a confirmed link. Classifying \
+                 it as `Link` reinstates CPE-1733's UAT finding 6 exactly: the per-entry extraction loops \
+                 treat it as a policy skip, drop the file silently, and report the extraction as a \
+                 success — the silent-success shape this whole ticket family is about. `Unknown` is what \
+                 makes those loops abort like every other I/O failure in them."
+            );
+            let CreateSlotLink::Unknown(msg) = v else { unreachable!() };
+            assert!(
+                msg.contains("could not check whether") && msg.contains("nothing was written"),
+                "and it must carry the could-not-check wording, not the link wording — a user told \
+                 \"it is a link\" would go looking for a link that may not be there: {msg}"
             );
         }
     }
