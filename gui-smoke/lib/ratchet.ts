@@ -63,6 +63,21 @@
 //      (`run-ratchet.ts#loadCaseResults` tolerating a missing `.results/` dir instead of throwing) widens
 //      who can reach `evaluate()` with a bad `expectedSpecCount`, so this closes the hole permanently
 //      rather than leaving it merely unreachable today.
+//   9. MISSING SHARD / SHARD PLAN PROBLEM — (CPE-1753) the suite now runs split across N parallel jobs,
+//      so the verdict is assembled from N separate `.results/` directories. A shard that never reported
+//      at all — cancelled, crashed, never scheduled — must be RED, and specifically must NOT be allowed
+//      to lower the bar it is measured against. Two independent mechanisms enforce that, and they fail in
+//      different ways so neither is a single point of trust: (a) `expectedSpecCount` is still globbed live
+//      from the checked-out `specs/` directory, never derived from the downloaded artifacts, so a missing
+//      shard's spec files simply stop reporting and clause 4 fires; and (b) the `shards` input below
+//      carries an `expectedShardTotal` that comes from the WORKFLOW FILE, checked against the set of shard
+//      manifests actually received. The naive aggregation — "count the manifests you found, expect that
+//      many" — is exactly the silently-passing shape CPE-1728 exists to eliminate, which is why the
+//      expectation is passed IN rather than inferred here. The same clause also reds a duplicated or
+//      out-of-range shard index, a manifest whose own `shardTotal` disagrees with the expectation (the
+//      shape shard-count drift takes: matrix bumped but the verdict job's literal not, or vice versa), and
+//      a shard plan that does not cover every live spec file exactly once. Omitted (`shards` undefined)
+//      for an unsharded run and for each shard's own local verdict — see `lib/shard.ts`'s header.
 //
 // One narrow escape hatch, `intermittent: true` on an entry (CPE-1677, forced by the evidence): case
 // granularity turns a genuinely FLAKY case into a coin-flip gate — clause 1 reds the runs where it
@@ -74,6 +89,8 @@
 // entry is exempt in BOTH directions but must still exist (clause 3), and `run-ratchet.ts` prints every
 // one with its observed status on every run so it can't go quiet. It is not a way to silence a test that
 // fails every time — that is a plain entry.
+
+import { compareSpecNames, type ShardManifest } from "./shard.js";
 
 /** A case's outcome as the JSON reporter records it. `skipped`/`pending` are neither a pass nor a
  *  failure: they can't red the job (clause 1) and can't retire an exemption (clause 2), but they DO
@@ -125,13 +142,36 @@ export interface KnownFailingFile {
   cases: KnownFailingCase[];
 }
 
+/** CPE-1753 — what the JOIN job knows about the shard plan, independent of what it downloaded.
+ *
+ *  `expectedShardTotal` and `expectedSpecs` are BOTH supplied by the caller from sources that a failed
+ *  shard cannot influence: the workflow file's `GUI_SMOKE_EXPECT_SHARDS` literal, and a live glob of the
+ *  checked-out `specs/` directory. `manifests` is the only field that comes from the artifacts. Keeping
+ *  that asymmetry explicit in the type is the point — the moment an aggregation derives its expectation
+ *  from the results it received, a missing shard stops being detectable at all. */
+export interface ShardCoverageInput {
+  /** How many shards the workflow says exist. Never `manifests.length`. */
+  expectedShardTotal: number;
+  /** One per shard that actually reported, in any order. */
+  manifests: ShardManifest[];
+  /** Every spec file basename that exists on disk right now, for the "the plan covers every spec exactly
+   *  once" check. Optional: when omitted, the index/total checks still run. */
+  expectedSpecs?: string[];
+}
+
 export interface EvaluateInput {
   /** One entry per test case the suite actually reported a result for, across every spec file. */
   results: CaseResult[];
   knownFailing: KnownFailingFile;
   /** How many spec FILES should have run — derived by globbing `specs/*.smoke.ts`, never hard-coded
-   *  (see `scripts/run-ratchet.ts`), so adding/removing a spec file never needs a matching edit here. */
+   *  (see `scripts/run-ratchet.ts`), so adding/removing a spec file never needs a matching edit here.
+   *  In a SHARD's own local verdict this is that shard's assigned subset size; at the JOIN it is the whole
+   *  directory (CPE-1753) — and at the join it is deliberately globbed from git rather than inferred from
+   *  the downloaded shard results, so a missing shard cannot lower it. */
   expectedSpecCount: number;
+  /** CPE-1753, join-only. Present in the `gui-smoke-linux-verdict` job; `undefined` for an unsharded run
+   *  and for each shard's own local verdict (clause 9 then contributes nothing). */
+  shards?: ShardCoverageInput;
 }
 
 export interface EvaluateResult {
@@ -162,6 +202,13 @@ export interface EvaluateResult {
   incomplete: boolean;
   /** How many distinct spec files reported at least one case (what `incomplete` compares). */
   reportedSpecCount: number;
+  /** CPE-1753 — shard indices the join EXPECTED (`1..expectedShardTotal`) but received no manifest for.
+   *  Non-empty always reds. Empty when `shards` was not supplied. */
+  missingShards: number[];
+  /** CPE-1753 — every other structural problem with the shard plan: a duplicated or out-of-range index, a
+   *  manifest whose `shardTotal` disagrees with the join's expectation, or a spec file covered by no shard
+   *  (or by more than one). Non-empty always reds. */
+  shardPlanProblems: string[];
   /** Human-readable lines, one per problem found, each naming exactly what to do about it. Empty when
    *  `ok` is true. */
   messages: string[];
@@ -308,7 +355,7 @@ export function suggestedKnownFailingEntry(spec: string, test: string): string {
  * or a unit test) decides what to do with the result. See the module header above for the seven failure
  * modes this implements.
  */
-export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateInput): EvaluateResult {
+export function evaluate({ results, knownFailing, expectedSpecCount, shards }: EvaluateInput): EvaluateResult {
   const listed = knownFailing.cases ?? [];
   const messages: string[] = [];
   const newFailures: string[] = [];
@@ -318,6 +365,119 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
   const intermittentListings: { key: string; statuses: CaseStatus[] }[] = [];
   const unknownStates: string[] = [];
   const unevidencedIntermittent: string[] = [];
+  const missingShards: number[] = [];
+  const shardPlanProblems: string[] = [];
+
+  // Clause 9 — MISSING SHARD / SHARD PLAN PROBLEM (CPE-1753). Runs FIRST and reports first, because when
+  // a shard is missing every downstream clause is reasoning about a partial run and its messages ("this
+  // exemption matched no test", "only 31 of 41 spec files reported") are true but misleading about the
+  // cause. Naming the missing shard at the top of the log is what stops a reader from chasing a phantom
+  // stale exemption. Deliberately does NOT suppress the other clauses: an incomplete run's other findings
+  // are still real, and hiding them would be its own kind of dishonesty.
+  if (shards) {
+    const { expectedShardTotal, manifests, expectedSpecs } = shards;
+    if (!Number.isInteger(expectedShardTotal) || expectedShardTotal < 1) {
+      shardPlanProblems.push(`expectedShardTotal=${expectedShardTotal}`);
+      messages.push(
+        `SHARD PLAN INVALID: the join was told to expect ${expectedShardTotal} shard(s) (must be an ` +
+          `integer >= 1). A join that doesn't know how many shards exist cannot certify that they all ` +
+          `reported — check GUI_SMOKE_EXPECT_SHARDS on the gui-smoke-linux-verdict job in ` +
+          `.github/workflows/gui-smoke.yml. Never inferred from the artifacts that happened to download: ` +
+          `that is precisely how a missing shard would lower its own bar and pass.`,
+      );
+    }
+
+    const byIndex = new Map<number, ShardManifest>();
+    for (const manifest of [...manifests].sort((a, b) => a.shardIndex - b.shardIndex)) {
+      if (manifest.shardIndex < 1 || manifest.shardIndex > expectedShardTotal) {
+        shardPlanProblems.push(`out-of-range shard ${manifest.shardIndex}`);
+        messages.push(
+          `SHARD PLAN MISMATCH: a manifest reported shard ${manifest.shardIndex}, which is outside the ` +
+            `expected range 1..${expectedShardTotal}. The matrix in .github/workflows/gui-smoke.yml and the ` +
+            `verdict job's GUI_SMOKE_EXPECT_SHARDS have drifted apart — fix whichever is wrong; do not ` +
+            `"just re-run".`,
+        );
+        continue;
+      }
+      if (byIndex.has(manifest.shardIndex)) {
+        shardPlanProblems.push(`duplicate shard ${manifest.shardIndex}`);
+        messages.push(
+          `SHARD PLAN MISMATCH: shard ${manifest.shardIndex} reported more than one manifest. Two jobs ` +
+            `believe they are the same shard, so some spec files ran twice and others may not have run at ` +
+            `all — this is never a benign duplicate.`,
+        );
+        continue;
+      }
+      if (manifest.shardTotal !== expectedShardTotal) {
+        shardPlanProblems.push(`shard ${manifest.shardIndex} says total=${manifest.shardTotal}`);
+        messages.push(
+          `SHARD PLAN MISMATCH: shard ${manifest.shardIndex} ran as "${manifest.shardIndex} of ` +
+            `${manifest.shardTotal}" but the join expects ${expectedShardTotal} shard(s). The shard jobs take ` +
+            `their total from GitHub's own \`strategy.job-total\` (the matrix size) and the join takes it from ` +
+            `GUI_SMOKE_EXPECT_SHARDS, so this means the matrix was resized without updating that literal (or ` +
+            `the reverse). Every spec file's ownership shifts when the total changes, so the two MUST agree.`,
+        );
+        // Still recorded below: its specs did run, and pretending they didn't would double-report.
+      }
+      byIndex.set(manifest.shardIndex, manifest);
+    }
+
+    for (let index = 1; index <= expectedShardTotal; index += 1) {
+      if (byIndex.has(index)) continue;
+      missingShards.push(index);
+      messages.push(
+        `MISSING SHARD: shard ${index} of ${expectedShardTotal} never reported a manifest. Its spec files ` +
+          `did not run — the shard job was cancelled (a newer push superseding this run), failed before it ` +
+          `could write one, or never started. This is RED, and deliberately NOT "expect fewer spec files": ` +
+          `letting an absent shard shrink the expectation is how a sharded gate silently certifies a ` +
+          `fraction of its suite (see CPE-1728, and lib/shard.ts's header). Open the ` +
+          `"GUI smoke (ubuntu-latest) shard ${index}" job to see what happened to it.`,
+      );
+    }
+
+    if (expectedSpecs) {
+      const coverage = new Map<string, number[]>();
+      for (const [index, manifest] of byIndex) {
+        for (const spec of manifest.specs) {
+          const owners = coverage.get(spec);
+          if (owners) owners.push(index);
+          else coverage.set(spec, [index]);
+        }
+      }
+      const uncovered = [...expectedSpecs].filter((spec) => !coverage.has(spec)).sort(compareSpecNames);
+      if (uncovered.length > 0) {
+        shardPlanProblems.push(`${uncovered.length} spec file(s) covered by no shard`);
+        messages.push(
+          `SHARD PLAN MISMATCH: ${uncovered.length} spec file(s) exist in specs/ but no shard claimed them: ` +
+            `${uncovered.join(", ")}. Either a shard is missing (see above) or the partition in ` +
+            `lib/shard.ts#assignShardSpecs dropped them — an unclaimed spec runs NOWHERE while every shard ` +
+            `still reports a tidy green, so this is always red.`,
+        );
+      }
+      const doubleClaimed = [...coverage.entries()]
+        .filter(([, owners]) => owners.length > 1)
+        .sort((a, b) => compareSpecNames(a[0], b[0]));
+      for (const [spec, owners] of doubleClaimed) {
+        shardPlanProblems.push(`${spec} claimed by shards ${owners.join("+")}`);
+        messages.push(
+          `SHARD PLAN MISMATCH: "${spec}" was claimed by more than one shard (${owners.join(", ")}). The ` +
+            `partition must be disjoint — an overlap means some other spec is going unclaimed and the ` +
+            `wall-clock saving is being spent running the same file twice.`,
+        );
+      }
+      const unknownSpecs = [...coverage.keys()]
+        .filter((spec) => !expectedSpecs.includes(spec))
+        .sort(compareSpecNames);
+      if (unknownSpecs.length > 0) {
+        shardPlanProblems.push(`${unknownSpecs.length} claimed spec file(s) do not exist`);
+        messages.push(
+          `SHARD PLAN MISMATCH: shard(s) claimed spec file(s) that are not in specs/ right now: ` +
+            `${unknownSpecs.join(", ")}. The shard jobs and this join job checked out different commits, or ` +
+            `a spec was deleted mid-run — the verdict cannot be trusted either way.`,
+        );
+      }
+    }
+  }
 
   const reportedSpecs = new Set(results.map((r) => r.spec));
   const reportedSpecCount = reportedSpecs.size;
@@ -502,10 +662,18 @@ export function evaluate({ results, knownFailing, expectedSpecCount }: EvaluateI
     unmatchedListings.length === 0 &&
     duplicateListings.length === 0 &&
     unknownStates.length === 0 &&
-    unevidencedIntermittent.length === 0;
+    unevidencedIntermittent.length === 0 &&
+    // CPE-1753 — a missing shard or a broken shard plan reds unconditionally, on the same footing as
+    // `incomplete`. It is NOT folded into `incomplete` on purpose: the two answer different questions
+    // ("did every job report?" vs "did every spec file report?") and a reader who sees only
+    // `incomplete=true` would look for a hung suite instead of a job that never ran.
+    missingShards.length === 0 &&
+    shardPlanProblems.length === 0;
 
   return {
     ok,
+    missingShards,
+    shardPlanProblems,
     newFailures,
     fixedButStillListed,
     unmatchedListings,

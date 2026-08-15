@@ -131,15 +131,23 @@ npm test
 
 `.github/workflows/gui-smoke.yml` runs this suite in **two** legs:
 
-- **`gui-smoke-linux` (ubuntu-latest, CPE-1171)** — runs on every push + PR to `main`. Builds the
-  frontend, does a `tauri build -- --no-bundle`, installs the Linux WebView build deps
+- **The Linux leg (ubuntu-latest, CPE-1171) — three jobs since CPE-1753.** Runs on every push + PR to
+  `main`, and **this is the BLOCKING gate (CPE-1594)**. It installs the Linux WebView build deps
   (`libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, `librsvg2-dev`, `patchelf` — the same set the
   3-OS `Backend` job in `ci.yml` already builds with) plus `webkit2gtk-driver` (`WebKitWebDriver`,
-  Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and `xvfb`, installs
-  `tauri-driver`, and runs the suite under `xvfb-run` (so GTK/WebKitGTK has a virtual display to
-  initialize against). **This is the BLOCKING gate (CPE-1594)** — see "The ratchet" below for exactly
-  what makes it pass or fail, and "Cancellation always reports a verdict (CPE-1728)" for what happens
-  when the job doesn't get to finish normally.
+  Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and `xvfb`, and runs the suite
+  under `xvfb-run` (so GTK/WebKitGTK has a virtual display to initialize against). The three jobs:
+  - **`gui-smoke-linux-build`** — type-checks, runs the ratchet's unit tests, builds the frontend, does
+    a `tauri build -- --no-bundle` and `cargo install tauri-driver`, then uploads the app binary +
+    `tauri-driver` as one artifact for the shards. Nothing here scales with the spec count.
+  - **`gui-smoke-linux` (matrix, 4 shards)** — each shard downloads that artifact and runs a **disjoint
+    quarter** of `specs/*.smoke.ts`, then ratchets its own subset.
+  - **`gui-smoke-linux-verdict`** — `if: always()`, joins on every shard, merges their `.results/`, and
+    runs the ratchet over the **whole** suite. This is the authoritative verdict.
+
+  See "Sharding (CPE-1753)" below for how to read a sharded run and what makes a missing shard red,
+  "The ratchet" for exactly what makes it pass or fail, and "Cancellation always reports a verdict
+  (CPE-1728)" for what happens when a job doesn't get to finish normally.
 - **`gui-smoke` (windows-latest)** — builds the frontend, does a `tauri build -- --no-bundle`,
   installs `msedgedriver` + `tauri-driver`, then runs this suite. **Non-blocking
   (`continue-on-error: true`) and off the push/PR path (CPE-1594)** — see CPE-1048 below for why. It
@@ -192,6 +200,14 @@ committed, named list — and the unit of exemption is **one test case**, not a 
      the structurally checkable failure mode an internal audit found: an entry with an **empty** `reason`
      and **empty** `ticket`, which would silence a permanently-broken case forever with nothing
      distinguishing it from the real thing.
+  8. **`INVALID EXPECTED SPEC COUNT`** (CPE-1728) — `expectedSpecCount < 1`. A run that doesn't know how
+     many spec files it was supposed to execute cannot be certified green; without this, zero results +
+     an empty list + a zero expectation evaluated as a vacuous "0/0 reported … OK".
+  9. **`MISSING SHARD` / `SHARD PLAN MISMATCH`** (CPE-1753, join job only) — a shard index the workflow
+     says exists uploaded no manifest, or the shard plan is structurally wrong (duplicate index, a
+     manifest whose own `shardTotal` disagrees with the join's expectation, a spec file claimed by no
+     shard or by two). See "Sharding" below — this is the clause that stops a cancelled shard from
+     quietly shrinking the bar the suite is measured against.
 
   A `skipped`/`pending`/`unknown` case is none of the above by itself: none can red the job (clause 1)
   or retire an exemption (clause 2), but each does prove the title still exists (clause 3) — `unknown` is
@@ -236,6 +252,72 @@ apparent session death under rapid repeated same-file opens — not a settle-che
 many attempts the before run could log; the after run comfortably outlasted it with zero settle
 failures). All four entries are removed; if a NEW case ever needs `intermittent`, open a fresh ticket
 rather than reusing this one (see the `$comment` above).
+
+### Sharding (CPE-1753) — the suite runs in four parallel jobs
+
+**Why.** A fully healthy **green** run of the old single job took **41.70 min against its own 45-minute
+cap** (run `31871682587`, head `856dbebc`): 1.30 min checkout/apt/node/frontend, **9.65 min**
+`tauri build --no-bundle`, 0.75 min driver + deps + typecheck + unit tests, **29.93 min suite**, 0.33 min
+verdict/upload tail. Suite duration **scales with spec count** — bucketed by the spec count at each run's
+own head sha, 40 specs ran 27.50/28.15/**29.25** min (n=6) and 41 specs ran **29.57**/29.95/30.42 (n=4);
+the ranges are disjoint, so the marginal cost of one spec file is in **[0.73, 1.80] min**. This repo went
+**22 → 39 → 41 specs between 2026-08-01 and 08-15**. Two to four more spec files would have breached the
+cap, at which point the job dies mid-suite on every PR with **no verdict left for `if: always()` to
+rescue**. A step-level cap was tried in CPE-1728 and removed: the usable window was about two minutes,
+narrower than one spec file's growth. Sharding is the only fix whose margin does not shrink one-for-one
+with the spec count — and at ~10 min per job it also largely defuses the `cancel-in-progress` cliff that
+killed 31% of sampled PR verdicts.
+
+**How the split is decided.** `lib/shard.ts#assignShardSpecs` deals the spec files out round-robin over a
+code-unit-sorted list (`i % shardTotal === shardIndex - 1`), so every spec lands in **exactly one** shard
+and adding a spec re-deals at most one file per shard. `lib/specFiles.ts` is the single definition of
+"what counts as a spec file", used by `wdio.conf.ts`, the manifest writer and the ratchet alike — a
+partition computed from a different list than the expectation is checked against is how a file ends up
+assigned to nobody. `specs/` must stay **flat**; a subdirectory is refused outright rather than silently
+skipped.
+
+**Why a missing shard is RED, not a smaller expectation.** This is the whole risk of sharding, and the
+exact shape of silently-passing check CPE-1728 exists to eliminate. Two independent nets, which fail
+differently on purpose:
+
+1. Every shard writes `.results/shard-manifest-<n>-of-<N>.json` **before** its suite runs, and the join
+   job asserts it received exactly the indices `1..GUI_SMOKE_EXPECT_SHARDS`. **That number comes from the
+   workflow file, never from the artifacts that downloaded** — an expectation inferred from what arrived
+   can never notice what didn't.
+2. The join's `expectedSpecCount` is still globbed live from the **checked-out** `specs/` directory. A
+   missing shard's spec files simply stop reporting, and clause 4 (`SUITE DID NOT COMPLETE`) fires against
+   a git-derived number that the missing shard had no way to influence.
+
+Shard-count drift cannot go quiet either: the shard jobs take their total from GitHub's own
+`strategy.job-total` (literally the matrix size) and record it in their manifest, while the join carries
+the single `GUI_SMOKE_EXPECT_SHARDS` literal. Resize one without the other and you get `SHARD PLAN
+MISMATCH` (matrix grew) or `MISSING SHARD` (literal grew). **When changing the shard count, change both.**
+
+**What each job checks.**
+
+| Job | `known-failing.json` scope | Expectation | Gates? |
+|---|---|---|---|
+| `gui-smoke-linux` shard *n* | only entries naming this shard's spec files | this shard's assigned files | yes — fast, local feedback |
+| `gui-smoke-linux-verdict` | **the whole file** | every spec file + every shard | yes — the authoritative verdict |
+
+A shard **cannot** honestly run the stale-exemption clause over the whole list: an entry for another
+shard's spec would match no test in this job and look stale. So a shard checks only its own slice and
+**says in its log how many entries it did not look at**; "listed but no longer failing anywhere" and
+"listed but matching no test in any shard" are the join's business. Entries naming a spec file that no
+longer exists belong to *no* shard and are caught only at the join.
+
+**Reading a sharded run.** Each shard's log opens with `SHARD MODE — shard n of N: verifying k of M spec
+file(s) [...]`, which is the only place you can see which shard runs a given spec. The join's log opens
+with `JOIN MODE — expecting N shard(s) … manifests received from shard(s): 1, 2, 3, 4`.
+
+**Running one shard locally** (no CI needed):
+
+```bash
+GUI_SMOKE_SHARD_INDEX=2 GUI_SMOKE_SHARD_TOTAL=4 npm test
+GUI_SMOKE_SHARD_INDEX=2 GUI_SMOKE_SHARD_TOTAL=4 npm run ratchet
+```
+
+Setting only one of the two is an **error**, not a default — see `parseShardId`.
 
 ### Cancellation always reports a verdict (CPE-1728)
 
@@ -371,11 +453,26 @@ them. This is what lets a reviewer — human or, per CPE-1148 Part B, a Visual-C
 PR's rendered UI directly from the CI artifact, without a Foreman running a local `tauri build` by hand
 first.
 
-The full suite log is a **separate** artifact (CPE-1728):
+**This command is unchanged by sharding (CPE-1753), on purpose.** Each shard uploads its own quarter as
+`gui-smoke-screenshots-ubuntu-shard-<n>`, and the `gui-smoke-linux-verdict` job downloads all four with
+`merge-multiple: true` and **re-publishes them as one flat `gui-smoke-screenshots-ubuntu`**. Downloading
+the shard artifacts individually would put each one in its own subdirectory, where `<dir>/*.png` matches
+nothing and a Visual Critic reports "no screenshots produced" — the exact silent failure the split below
+was written to prevent. Use the merged artifact; the per-shard copies exist only as a fallback for a run
+whose verdict job was itself cancelled.
+
+The full suite log is a **separate** artifact (CPE-1728), now one per shard (CPE-1753):
 
 ```
-gh run download <run-id> -n gui-smoke-suite-log-ubuntu -D <dir>
+gh run download <run-id> -p 'gui-smoke-suite-log-ubuntu-shard-*' -D <dir>
 ```
+
+Each shard's log lands in its own `<dir>/gui-smoke-suite-log-ubuntu-shard-<n>/suite-output.log`. The
+machine-readable results the verdict job joins on are a third artifact per shard,
+`gui-smoke-results-ubuntu-shard-<n>` (the `wdio-shard-<n>-of-<N>-*.json` reporter chunks plus that
+shard's `shard-manifest-<n>-of-<N>.json`) — download those with `-p 'gui-smoke-results-ubuntu-shard-*'`
+and `npm run ratchet` can be re-run over them locally with `GUI_SMOKE_RESULTS_DIR` and
+`GUI_SMOKE_EXPECT_SHARDS`.
 
 It is separate on purpose. `upload-artifact@v4` roots an artifact at the least common ancestor of
 everything it matches, so putting the log in the screenshot artifact rerooted it and pushed all 82 PNGs

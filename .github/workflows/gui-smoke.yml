@@ -13,8 +13,18 @@ name: GUI smoke
 # `webkitgtk:browserOptions` vs `ms:edgeOptions` split), so no per-OS spec forking was needed.
 # macOS is unsupported by tauri-driver (no WKWebView WebDriver) and stays attended.
 #
-# `npm test` (both legs' "Run GUI smoke suite" step below) discovers every `gui-smoke/specs/*.smoke.ts`
-# automatically via `wdio.conf.ts`'s `specs` glob — no per-spec wiring needed here. CPE-1358 added
+# CPE-1753: the Linux leg is now THREE jobs, not one — `gui-smoke-linux-build` (compiles the app once),
+# `gui-smoke-linux` (a 4-way matrix, each shard running a disjoint quarter of the spec files) and
+# `gui-smoke-linux-verdict` (the join that owns the pass/fail verdict for the whole suite). The old single
+# job had reached 41.70 minutes on a fully healthy GREEN run against its own 45-minute cap, and suite
+# duration scales with spec count at 0.73-1.80 min per added spec file, so 2-4 more specs would have
+# killed it mid-suite on every PR with no verdict left to report. Read `gui-smoke/lib/shard.ts`'s header
+# for the design and `gui-smoke/README.md` "Sharding" for how to read a run — in particular why a MISSING
+# SHARD has to be a red rather than a smaller expectation.
+#
+# `npm test` (each leg's "Run GUI smoke suite" step below) discovers every `gui-smoke/specs/*.smoke.ts`
+# automatically via `wdio.conf.ts` (which enumerates them through `lib/specFiles.ts` and, on a shard job,
+# keeps only that shard's slice) — no per-spec wiring needed here. CPE-1358 added
 # `specs/samples.smoke.ts` this way: it walks EVERY file in the repo's `samples/` tree on the real built
 # app and asserts no crash + a rendered/graceful preview for each, reproducing the CPE-1357 PDF-preview
 # crash as a regression guard (`documents/malformed.pdf`, run last in that spec so a still-open crash
@@ -185,47 +195,173 @@ jobs:
           if-no-files-found: warn
           include-hidden-files: true
 
-  gui-smoke-linux:
-    name: GUI smoke (ubuntu-latest) — tauri-driver + WebdriverIO (CPE-1171)
+  # CPE-1753: the Linux leg is now THREE jobs — build once, fan out to a matrix of shards, join on a
+  # single verdict — instead of one 41.70-minute job. See `gui-smoke/lib/shard.ts`'s header for the full
+  # rationale and `gui-smoke/README.md` "Sharding" for how to read a run.
+  #
+  # WHY, measured. Before this change, a fully healthy GREEN run of the old single job took 41.70 min
+  # against its own 45-minute cap (run 31871682587, head 856dbebc): 1.30 min checkout/apt/node/frontend,
+  # 9.65 min `tauri build --no-bundle`, 0.75 min driver + gui-smoke deps + typecheck + unit tests, 29.93
+  # min suite, 0.33 min verdict/upload tail. Suite duration scales with spec count — bucketed by the spec
+  # count at each run's own head sha, 40 specs ran 27.50/28.15/29.25 min (n=6) and 41 specs ran
+  # 29.57/29.95/30.42 (n=4), disjoint ranges, +1.80 min at the median per added spec and 0.73 min/spec
+  # flat-averaged. The repo went 22 -> 39 -> 41 specs between 2026-08-01 and 08-15, so two to four more
+  # spec files would have breached the cap — and unlike CPE-1728's cancellations, `if: always()` cannot
+  # rescue that, because a job killed at its own cap leaves no verdict to report. A step-level cap was
+  # tried in CPE-1728 and removed: the usable window was [30.4, 32.5], about two minutes, narrower than
+  # one spec file's growth.
+  #
+  # WHY BUILD ONCE rather than a plain matrix. The 9.65-minute release build is 81% of the pre-suite
+  # setup. Four shards each doing their own build would burn ~39 min of extra runner time per run, have
+  # four jobs racing to write the same `swatinem/rust-cache` key, and still leave every shard at ~19 min.
+  # Building once and shipping the binary + `tauri-driver` to the shards as one artifact puts each shard
+  # at roughly 2.5 min of setup plus its slice of the suite, and — the part that matters for the growth
+  # curve — the build job's duration does not depend on the spec count AT ALL, while the shards divide it.
+  #
+  # THE PRIZE IS BIGGER THAN THE CAP. `concurrency: cancel-in-progress` (CPE-1266) means any second push
+  # within the run's own wall clock kills the in-flight verdict; 31% of sampled PR runs died that way
+  # (CPE-1728's measurement). No timeout value fixes that — only a shorter run does.
+  gui-smoke-linux-build:
+    name: GUI smoke (ubuntu-latest) — build once for every shard (CPE-1753)
     runs-on: ubuntu-latest
-    # CPE-1266: hard cap so a hung WebKitGTK-under-Xvfb WebDriver session dies in minutes instead of
-    # holding a concurrency slot for hours.
-    # CPE-1481: raised 20 -> 35 (round 1) -> 45 (round 2), same rationale as the windows leg above —
-    # the CPE-1479 mouse fix made specs actually run; 35 min still left the sequential run's media-heavy
-    # back half (~18 of 39 specs) unrun at the cap. sharding (CPE-1266) is still the real long-term fix.
+    # Constant work: checkout, apt, node, frontend build, release build, driver. Measured ~12 min with a
+    # warm Rust cache. 30 leaves room for a cold cache (the build is the only variable part) while still
+    # honouring CPE-1266's "a genuinely hung job dies in minutes, not hours". Nothing here scales with the
+    # spec count, so this number does not need revisiting as specs are added — that was the whole problem
+    # with the old single job's 45.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # Deliberately the SAME package list as the shard jobs below, not a trimmed build-only subset. The
+      # shards run the binary this job produces, so any divergence between "what it was linked against"
+      # and "what is installed where it runs" surfaces as a runtime loader failure inside xvfb — the
+      # hardest class of CI failure to read. One list, copied verbatim, is worth the ~45 seconds of apt in
+      # each job. See the long CPE-1702 note on the shard job's copy for why the GStreamer codec packages
+      # are deliberately NOT here.
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            webkit2gtk-driver \
+            xvfb
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install gui-smoke dependencies
+        working-directory: gui-smoke
+        run: npm ci
+
+      # CPE-1694 put these on the leg that gates; CPE-1753 moves them to the FRONT of the build job. They
+      # take under a second, they gate (no `continue-on-error`), and running them before the 9.65-minute
+      # release build means a broken ratchet unit test fails the whole leg in about a minute instead of
+      # after a build — while also running ONCE instead of once per shard.
+      - name: Type-check gui-smoke
+        working-directory: gui-smoke
+        run: npm run typecheck
+
+      - name: Run gui-smoke unit tests
+        working-directory: gui-smoke
+        run: npm run test:unit
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      # Same rationale as the Windows leg's identically-named step above: `--no-bundle` skips
+      # installer packaging + signing, not the CLI `build` subcommand that embeds `frontendDist`
+      # (see the CPE-1044 comment on the Windows step and in wdio.conf.ts). No display needed for a
+      # build, so this step does not need `xvfb-run`.
+      - name: Build release binary (tauri build --no-bundle)
+        run: npm run tauri build -- --no-bundle
+
+      # The official WebDriver proxy — version is independent of the Tauri crate version. Locates
+      # `WebKitWebDriver` via PATH on Linux automatically (tauri-driver's own per-OS default), so
+      # `webkit2gtk-driver`'s `/usr/bin/WebKitWebDriver` is all the shards need alongside it.
+      - name: Install tauri-driver
+        run: cargo install tauri-driver --locked
+
+      # The two binaries a shard job needs and cannot cheaply reproduce. `ls -l` is not decoration: it is
+      # the record of what was actually staged, and the file sizes are the first thing to check if a shard
+      # later reports "release binary not found" or a zero-byte driver.
+      - name: Stage the app binary + tauri-driver for the shard jobs
+        run: |
+          mkdir -p gui-smoke/dist-app
+          cp src-tauri/target/release/cross-platform-explorer gui-smoke/dist-app/
+          cp "$HOME/.cargo/bin/tauri-driver" gui-smoke/dist-app/
+          ls -l gui-smoke/dist-app
+
+      # `if-no-files-found: error` — unlike every other upload in this file, which uses `warn`. Those are
+      # evidence (a missing gallery must never mask a verdict); THIS one is an input every shard depends
+      # on, so a silent empty artifact here would turn into four identical, mystifying "release binary not
+      # found" failures ten minutes later. Fail at the source instead.
+      # `retention-days: 1` — it is a build intermediate for this run only, not something anyone downloads
+      # after the fact; the screenshots and suite logs are the artifacts with a 14-day life.
+      - name: Upload the built app for the shard jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-linux-app
+          path: gui-smoke/dist-app/*
+          retention-days: 1
+          if-no-files-found: error
+
+  gui-smoke-linux:
+    name: GUI smoke (ubuntu-latest) shard ${{ matrix.shard }} — tauri-driver + WebdriverIO (CPE-1171)
+    runs-on: ubuntu-latest
+    needs: gui-smoke-linux-build
+    strategy:
+      # LOAD-BEARING. With the default `fail-fast: true`, one shard going red cancels its siblings — and a
+      # cancelled shard never uploads its results, so the verdict job would report MISSING SHARD for
+      # jobs that were healthy and killed. The gate must red for the reason that is actually true, so
+      # every shard runs to completion and reports.
+      fail-fast: false
+      matrix:
+        # The ONE place the shard count is chosen. `strategy.job-total` below derives each shard's total
+        # from the size of this list, so there is no second literal to drift from it here — and the
+        # verdict job's `GUI_SMOKE_EXPECT_SHARDS` (the only other place a number appears) is cross-checked
+        # against it on every run: add an entry here without bumping it and every manifest reports a
+        # `shardTotal` the join does not expect (SHARD PLAN MISMATCH); bump it without adding an entry
+        # here and one index never reports (MISSING SHARD). Neither direction can go quietly green.
+        # Four was chosen from the measured numbers: 29.93 min of suite / 4 ≈ 7.5 min plus ~2.5 min of
+        # per-shard setup ≈ 10 min per job. Raising it further buys progressively less (the setup floor
+        # dominates) while multiplying runner slots per push.
+        shard: [1, 2, 3, 4]
+    # CPE-1753: was 45 for the whole unsharded suite, which a green run had crept to 41.70 of. A shard is
+    # ~10 min (see the matrix comment), so 25 is roughly 2.5x the expected duration — and, unlike the old
+    # 45, the headroom is measured in MANY spec files rather than two to four: at 0.73-1.80 min per added
+    # spec divided across 4 shards, a shard gains 0.18-0.45 min per spec added to the repo, so this cap
+    # absorbs another ~30 spec files before it needs looking at again. CPE-1266's original rationale is
+    # unchanged: a genuinely hung WebKitGTK-under-Xvfb session must die in minutes, not hours.
     #
-    # CPE-1728: left at 45, NOT raised. Measured before changing anything, then re-measured after a
-    # reviewer round that caught an arithmetic error in an earlier draft of this comment (a claimed
-    # 45->55 raise + "guarantees >=10 minutes" reserve that didn't hold under the real max setup time) —
-    # both rounds used `gh run list`/`gh api .../jobs` across the last ~160 runs of this workflow, reading
-    # each job's own STEP-level timestamps (not just the run-level conclusion, which conflates an
-    # ordinary CPE-1266 concurrency-supersession with a genuine hard-timeout). Two separate findings, and
-    # they point at different fixes:
-    #   1. This job's own 45-minute cap has, in the sample measured, NEVER actually fired: 0 of 155
-    #      completed gui-smoke-linux job runs reached 44 minutes (max observed 42.5 min). Raising it would
-    #      have addressed zero observed incidents while weakening CPE-1266's original "dies in minutes,
-    #      not hours" rationale for a run that's genuinely hung. So it stays 45.
-    #   2. What DOES happen often: 26 of 85 `pull_request`-triggered runs sampled (31%) never produced a
-    #      Ratchet verdict, because the run was cancelled first — every single one of those 26 had the
-    #      suite step itself `cancelled` or `skipped`, i.e. an ordinary CPE-1266 concurrency-supersession
-    #      (a newer push landing on the same PR) killing an in-flight run, NEVER this job's own timeout.
-    #      PR #900 (CPE-1723, `cpe-1723-s3-listbucket-and-gaps`, run 31787491058) is one of them: suite
-    #      step cancelled at 23m09s against a normal ~30-minute suite (roughly 3/4 through, genuinely
-    #      incomplete — not a finished run losing its tally, see the "Ratchet" step's comment below). The
-    #      fix for THAT is `if: always()` on the "Ratchet" step below (so a supersession-cancelled run
-    #      still gets the ratchet's existing, honest `SUITE DID NOT COMPLETE` verdict instead of silence)
-    #      — a timeout-value change cannot fix a cancellation triggered by a NEW push, no matter what it's
-    #      set to.
-    # A step-level cap on "Run GUI smoke suite" was tried during CPE-1728 and REMOVED — see that step's
-    # own comment for the measurement. Short version: suite duration scales with spec count, the usable
-    # window for such a cap is ~2 minutes wide, and one added spec file costs 0.73-1.80 min, so any value
-    # in that window reds every PR within a spec file or two. The thing that actually protects the
-    # Ratchet/classify-log/screenshot steps from ANY cancellation — whichever of the two causes above
-    # triggers it — is `if: always()`, not a timing coincidence between two numbers.
-    # WARNING (CPE-1753): a fully healthy green run measured 41.70 min against this 45-minute cap. At
-    # 0.73-1.80 min per added spec file, 2-4 more specs breach it, and then this job dies mid-suite on
-    # every run with no verdict left for `if: always()` to rescue. Shard before that lands.
-    timeout-minutes: 45
+    # History of this number, kept because it is the record of what was tried and why it did not work:
+    # CPE-1481 raised it 20 -> 35 -> 45 while the suite ran sequentially (35 still left the media-heavy
+    # back half unrun); CPE-1728 measured ~160 runs' step-level timestamps and left it at 45, finding
+    # (1) the cap itself had NEVER fired — 0 of 155 completed runs reached 44 min, max observed 42.5 —
+    # and (2) that 26 of 85 sampled `pull_request` runs (31%) produced no verdict at all because a newer
+    # push had cancelled them mid-suite, which no timeout value can fix. CPE-1728 also tried a
+    # STEP-level cap on the suite and removed it on review: the usable window was ~2 min wide against a
+    # 0.73-1.80 min/spec growth rate, so any value in it would have reded every PR within a spec file or
+    # two. `if: always()` on the verdict steps, not a timing coincidence between two numbers, is what
+    # protects the verdict from a cancellation — and that is preserved per shard below.
+    timeout-minutes: 25
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
     # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
     # PR #801's own live run — one of those 7, `network.smoke.ts`, had a stale test selector fixed in
@@ -249,16 +385,16 @@ jobs:
       # sessions (the Tauri docs' "Linux Graphics Issues" page lists this as the last-resort fix for
       # silent crashes under Xvfb). Best-effort — not verified live yet (see PR description).
       WEBKIT_DISABLE_COMPOSITING_MODE: "1"
+      # CPE-1753: which slice of `specs/*.smoke.ts` this job runs. Read by `wdio.conf.ts` (which files to
+      # run), `scripts/write-shard-manifest.ts` (what this shard declares it owes) and
+      # `scripts/run-ratchet.ts` (the shard-local verdict's expectation and known-failing scope) — one
+      # partition function, `gui-smoke/lib/shard.ts#assignShardSpecs`, behind all three.
+      GUI_SMOKE_SHARD_INDEX: ${{ matrix.shard }}
+      # `strategy.job-total` is GitHub's own count of the jobs this matrix expands to, so the total is
+      # LITERALLY the size of `matrix.shard` above rather than a second number that could drift from it.
+      GUI_SMOKE_SHARD_TOTAL: ${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
 
       # Same package set the ubuntu-latest leg of the 3-OS `Backend` job (.github/workflows/ci.yml)
       # already builds `cargo tauri build` with, plus the two packages unique to WebDriver-under-CI:
@@ -313,55 +449,52 @@ jobs:
           node-version: 20
           cache: "npm"
 
-      - name: Install frontend dependencies
-        run: npm ci
+      # CPE-1753: the app binary and `tauri-driver` come from `gui-smoke-linux-build`, which compiled
+      # them ONCE for the whole matrix — that 9.65-minute release build was 81% of this job's old
+      # pre-suite setup, and four shards each repeating it would have wasted ~39 min of runner time per
+      # run for an identical result. There is no Rust toolchain, Rust cache, root `npm ci` or frontend
+      # build in this job at all any more; nothing here compiles.
+      - name: Download the app built by gui-smoke-linux-build
+        uses: actions/download-artifact@v4
+        with:
+          name: gui-smoke-linux-app
+          path: gui-smoke/dist-app
 
-      - name: Build frontend
-        run: npm run build
-
-      # Same rationale as the Windows leg's identically-named step above: `--no-bundle` skips
-      # installer packaging + signing, not the CLI `build` subcommand that embeds `frontendDist`
-      # (see the CPE-1044 comment on the Windows step and in wdio.conf.ts). No display needed for a
-      # build, so this step does not need `xvfb-run`.
-      - name: Build release binary (tauri build --no-bundle)
-        run: npm run tauri build -- --no-bundle
-
-      # The official WebDriver proxy — version is independent of the Tauri crate version. Locates
-      # `WebKitWebDriver` via PATH on Linux automatically (tauri-driver's own per-OS default —
-      # `msedgedriver.exe` on Windows, `WebKitWebDriver` on Linux); no `--native-driver` flag needed
-      # since `webkit2gtk-driver` above already put it at `/usr/bin/WebKitWebDriver`.
-      - name: Install tauri-driver
-        run: cargo install tauri-driver --locked
+      # `install -m 0755`, not `cp`: artifact upload/download does NOT preserve the executable bit, and a
+      # non-executable app binary fails as a bare EACCES from deep inside tauri-driver rather than as
+      # anything that names the cause. The destinations are exactly the two paths `wdio.conf.ts` resolves
+      # (`src-tauri/target/release/<name>` and `~/.cargo/bin/tauri-driver`) — see its APP_BINARY /
+      # TAURI_DRIVER_BIN constants; this job deliberately does not change those, so a local run and a CI
+      # shard resolve the same paths.
+      - name: Restore the app binary + tauri-driver to the paths wdio.conf.ts expects
+        run: |
+          mkdir -p src-tauri/target/release "$HOME/.cargo/bin"
+          install -m 0755 gui-smoke/dist-app/cross-platform-explorer src-tauri/target/release/cross-platform-explorer
+          install -m 0755 gui-smoke/dist-app/tauri-driver "$HOME/.cargo/bin/tauri-driver"
+          ls -l src-tauri/target/release/cross-platform-explorer "$HOME/.cargo/bin/tauri-driver"
 
       - name: Install gui-smoke dependencies
         working-directory: gui-smoke
         run: npm ci
 
-      - name: Type-check gui-smoke
+      # CPE-1753: declares which spec files this shard owes, BEFORE the suite runs. The verdict job
+      # counts these manifests and reds on any missing index — see `gui-smoke/lib/shard.ts` and
+      # `lib/ratchet.ts` clause 9. Written early on purpose: a shard killed mid-suite has still told the
+      # join what it owed (so its missing results read as an incomplete run naming real spec files), and
+      # a mis-set matrix fails here in seconds instead of after the suite. It also prints this shard's
+      # assignment, which is the only place a reader can see which shard runs a given spec.
+      - name: Declare this shard's spec assignment
         working-directory: gui-smoke
-        run: npm run typecheck
+        run: npm run shard-manifest
 
-      # CPE-1694: the ratchet's own unit tests (gui-smoke/lib/*.test.ts — 71 cases, including every
-      # guard CPE-1680/CPE-1698 added) previously ran ONLY when a developer chose to run them locally;
-      # nothing in CI ever executed them. `test:unit`'s glob covers every test file in this repo —
-      # CPE-1680 moved the ratchet's reduction logic (`toCaseStatus`, `reduceResultChunks`) from
-      # `scripts/run-ratchet.ts` into `lib/ratchet.ts`, and no `.test.ts` file lives under
-      # `gui-smoke/scripts/`, so it needed no WIDENING. It DID need narrowing, found while proving this
-      # step gates on real CI (see the PR's Evidence section): `package.json`'s original
-      # `lib/**/*.test.ts` relies on bash's `globstar` option, which is off by default on this job's
-      # `bash -e {0}` step shell AND on `npm`'s own `sh -c` script wrapper (which doesn't support
-      # globstar at all) — a real run failed with "Could not find '.../lib/**/*.test.ts'" unconditionally,
-      # before ever reaching a single test. Narrowed to `lib/*.test.ts`, which every POSIX shell expands
-      # correctly with no special option (every test file sits flat directly under `lib/`, so a
-      # single-level glob is also the semantically correct one, not just the portable one). THIS is the
-      # leg that gates: it runs on every `push`/`pull_request` (this job carries no `if:` skip, unlike the
-      # Windows leg above) and has no `continue-on-error`, so a failing unit test reds the PR the same way
-      # the ratchet step below does. Placed before the ~45-minute real wdio run so a broken unit test
-      # fails in seconds instead of after the full suite.
-      - name: Run gui-smoke unit tests
-        working-directory: gui-smoke
-        run: npm run test:unit
-
+      # CPE-1753: the type-check and the ratchet's own unit tests moved to `gui-smoke-linux-build`, at the
+      # front of that job — they gate exactly as CPE-1694 established, but now run once for the matrix
+      # and fail the whole leg in about a minute rather than once per shard after a build.
+      # CPE-1694 (retained for the history): `test:unit`'s glob is `lib/*.test.ts`, NOT `lib/**/*.test.ts`
+      # — the double-star relies on bash's `globstar`, which is off by default on a `bash -e {0}` step
+      # shell and unsupported by npm's own `sh -c` script wrapper, so the starred form failed with "Could
+      # not find '.../lib/**/*.test.ts'" on every real run before reaching a single test.
+      #
       # `xvfb-run` wraps the whole test command in a fake X display so tauri-driver -> WebKitWebDriver
       # -> the app's GTK/WebKitGTK webview can all initialize headlessly (see the system-deps comment
       # above for why the WHOLE command, not just the app, needs to run under it).
@@ -371,20 +504,13 @@ jobs:
       # normally (rather than the job aborting) so the JSON reporter output + screenshots below always
       # exist to upload/ratchet, even on a run with failures.
       # CPE-1728: this step deliberately has NO step-level `timeout-minutes`. A 32-minute cap was tried
-      # and removed after review measured that it had a one-to-two-spec-file fuse. Suite duration scales
-      # with spec count rather than being near-constant: bucketed by the spec count at each run's own head
-      # SHA, 40 specs ran 27.50/28.15/29.25 min (min/median/max, n=6) and 41 specs ran 29.57/29.95/30.42
-      # (n=4) — disjoint ranges, +1.80 min at the median for one added spec, 0.73 min/spec flat-averaged.
-      # Margin under a 32-minute cap was 32 - 30.42 = 1.58 min, i.e. 0.9-2.2 spec files; this repo went
-      # 22 -> 39 -> 41 specs between 2026-08-01 and 08-15. The next spec or two would have reded every PR
-      # with a step timeout plus SUITE DID NOT COMPLETE — which reads exactly like the infrastructure
-      # failure CPE-1728 exists to eliminate. No safe value exists either: the cap must be < 45 - 11.9 =
-      # 33.1 to fire before the job cap and <= ~32.5 to leave the reporting tail room, a window ~2 min
-      # wide, narrower than one spec file's growth. The purchase was ~1.5 min of earlier hang detection.
-      # `if: always()` on the Ratchet step below is the load-bearing mechanism; the job-level 45-minute
-      # cap remains the backstop, and a job-level timeout concludes `cancelled`, never `success`.
-      # SEE CPE-1753: a fully healthy green run already sits at 41.70 of the 45-minute job cap, so 2-4
-      # more spec files breach it with or without this change. Sharding is the only fix that survives.
+      # and removed after review measured that it had a one-to-two-spec-file fuse against the unsharded
+      # suite. CPE-1753 does not reintroduce one: the reason it was unsafe is unchanged in kind (suite
+      # duration scales with spec count, so any step cap has a fuse measured in spec files), it is only
+      # longer now that each shard carries a quarter of the growth. `if: always()` on the Ratchet step
+      # below remains the load-bearing mechanism, and the job-level cap remains the backstop — a
+      # job-level timeout concludes `cancelled`, never `success`, and the verdict job turns a
+      # cancelled shard into an explicit MISSING SHARD red rather than a quietly smaller expectation.
       # This step still `tee`s the full output to `.results/suite-output.log` (on top of the existing
       # `.results/*.json` per-spec reports) so the classify-log step below has real evidence to classify,
       # and so it can be uploaded as an artifact (see the screenshot-upload step's CPE-1728 comment) —
@@ -452,10 +578,37 @@ jobs:
       # superseded run from concluding `cancelled` at the GitHub UI level — a genuinely obsolete run's
       # verdict SHOULD read that way — it only makes the underlying log honest instead of misleading once
       # someone opens it, which is what PR #900 actually needed.
-      - name: Ratchet — no new GUI regressions
+      # CPE-1753: this is now the SHARD-LOCAL verdict — `GUI_SMOKE_SHARD_INDEX`/`_TOTAL` (set at job level
+      # above) put `run-ratchet.ts` in shard mode, where the expectation is THIS shard's assigned spec
+      # files and `known-failing.json` is narrowed to entries naming them. It gates exactly as before, and
+      # it is fast, local feedback: a new failing case in this shard reds this job by name.
+      # What it deliberately CANNOT see, and says so in its own log rather than implying otherwise: the
+      # exemption entries belonging to other shards, and entries naming a spec file that no longer exists
+      # (which belong to no shard at all). Those, plus "did every shard report?", are the
+      # `gui-smoke-linux-verdict` job's business — a global exemption list cannot honestly be judged from
+      # one quarter of the suite.
+      - name: Ratchet — no new GUI regressions in this shard
         if: always()
         working-directory: gui-smoke
         run: npm run ratchet
+
+      # CPE-1753: the machine-readable half of this shard's output, and the input the verdict job joins on
+      # — the `@wdio/json-reporter` chunks plus the `shard-manifest-*.json` this shard wrote before the
+      # suite. `if: always()` is LOAD-BEARING here in a way it is not for the evidence artifacts below: a
+      # shard whose own ratchet step just reded must STILL hand its results to the join, or the join sees
+      # a missing shard and reports an infrastructure failure instead of the real per-case regression.
+      # Only `*.json` (not the whole dir) so the artifact's root stays flat and the suite log keeps its own
+      # artifact, per the CPE-1728 note below. `include-hidden-files: true` because `.results/` is
+      # dot-prefixed — without it this artifact is silently empty and every run reports MISSING SHARD.
+      - name: Upload gui-smoke shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-results-ubuntu-shard-${{ matrix.shard }}
+          path: gui-smoke/.results/*.json
+          retention-days: 14
+          if-no-files-found: warn
+          include-hidden-files: true
 
       # CPE-1594: unlocks the CPE-1148 Visual Critic in CI — before this, the ~75 `snap()` calls per run
       # wrote to a gitignored dir on an ephemeral runner and were simply discarded, so nothing (human or
@@ -493,22 +646,126 @@ jobs:
       # reports "no screenshots produced" — a silent failure of the visual leg, which is the exact shape
       # of defect this ticket exists to eliminate. Two artifacts keep the gallery flat at its root and
       # need no README or Visual-Critic-instruction edit to stay true.
-      - name: Upload gui-smoke screenshots
+      #
+      # CPE-1753: per-shard names, because artifact names must be unique within a run. These are a
+      # QUARTER of the gallery each — the whole, flat gallery is re-published under the unchanged name
+      # `gui-smoke-screenshots-ubuntu` by the verdict job below, precisely so the Visual Critic's
+      # "download to <dir>, read <dir>/*.png" instruction keeps working without an edit. These per-shard
+      # copies are kept anyway: if the verdict job is itself cancelled, they are the only surviving
+      # evidence, and that is exactly the case where someone needs it.
+      - name: Upload gui-smoke screenshots (this shard)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gui-smoke-screenshots-ubuntu
+          name: gui-smoke-screenshots-ubuntu-shard-${{ matrix.shard }}
           path: gui-smoke/.screenshots/**
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true
 
-      - name: Upload gui-smoke suite log
+      - name: Upload gui-smoke suite log (this shard)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gui-smoke-suite-log-ubuntu
+          name: gui-smoke-suite-log-ubuntu-shard-${{ matrix.shard }}
           path: gui-smoke/.results/suite-output.log
+          retention-days: 14
+          if-no-files-found: warn
+          include-hidden-files: true
+
+  # CPE-1753 — THE GATE. Everything above is a shard's opinion about its own quarter; this job is the only
+  # place the whole suite is judged, and the only place that can tell "every shard reported" from "the
+  # shards that reported were happy".
+  #
+  # `if: always()` + `needs:` every shard is what makes a missing shard visible at all: without it, a
+  # cancelled or failed shard would SKIP this job, and a skipped gate is a green PR. With it, this job
+  # runs after any outcome and `run-ratchet.ts` in JOIN mode reds on:
+  #   - MISSING SHARD — any index in 1..GUI_SMOKE_EXPECT_SHARDS that uploaded no manifest. The
+  #     expectation comes from the literal below (the workflow file), NEVER from the artifacts that
+  #     downloaded, because an expectation inferred from what arrived can never notice what didn't. This
+  #     is the single highest-risk part of sharding and the reason this job exists.
+  #   - SUITE DID NOT COMPLETE — fewer spec files reported than `specs/*.smoke.ts` globs to in THIS job's
+  #     own checkout. A second, independent net under the first: even if the manifest bookkeeping were
+  #     wrong, a missing shard's ten spec files still fail to report against a git-derived expectation.
+  #   - STALE EXEMPTION / RATCHET / every other clause, now over the FULL `known-failing.json` against the
+  #     FULL merged results. `known-failing.json` is global, so "listed but no longer failing anywhere"
+  #     and "listed but matching no test in any shard" are questions only this job can answer.
+  gui-smoke-linux-verdict:
+    name: GUI smoke (ubuntu-latest) — verdict across all shards (CPE-1753)
+    runs-on: ubuntu-latest
+    needs: [gui-smoke-linux-build, gui-smoke-linux]
+    if: always()
+    # Downloads a few MB and runs a pure-TS reduction. Two minutes is a generous real-world estimate; 15
+    # is the "something is genuinely wedged" backstop.
+    timeout-minutes: 15
+    env:
+      # The ONE literal that has to match `gui-smoke-linux`'s `matrix.shard` list, and it cannot drift
+      # silently in either direction: the shards report their own total from `strategy.job-total` (the
+      # matrix size itself), so a mismatch either way reds with SHARD PLAN MISMATCH or MISSING SHARD. When
+      # changing the shard count, change both — the failure if you forget is loud, immediate and named.
+      GUI_SMOKE_EXPECT_SHARDS: "4"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "npm"
+
+      - name: Install gui-smoke dependencies
+        working-directory: gui-smoke
+        run: npm ci
+
+      # `merge-multiple: true` flattens every shard's results into one directory, which is safe only
+      # because each shard's reporter output is name-prefixed with its shard number
+      # (`lib/shard.ts#shardResultFilePrefix` — wdio's worker cids restart at `0-0` in every shard, so
+      # without that prefix this merge would silently keep one shard's `wdio-0-0.json` and drop the rest).
+      #
+      # `continue-on-error: true` — deliberately, and it is not laziness. If NO shard uploaded anything
+      # (every shard cancelled, or the build job failed so none ever ran), this step errors; letting that
+      # abort the job would skip the verdict step below and leave the run with no explanation at all,
+      # which is precisely the CPE-1728 failure this whole design is built to avoid. The verdict step is
+      # `if: always()` and treats an empty download as "no shard reported" — four MISSING SHARD reds and
+      # a SUITE DID NOT COMPLETE. Loud, red, and correct.
+      - name: Download every shard's results
+        id: download-results
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gui-smoke-results-ubuntu-shard-*
+          merge-multiple: true
+          path: gui-smoke/.results
+
+      - name: Ratchet — the gate, across every shard
+        if: always()
+        working-directory: gui-smoke
+        run: npm run ratchet
+
+      # Re-publishes the four per-shard galleries as ONE flat artifact under the name the Visual Critic
+      # and gui-smoke/README.md already use. `merge-multiple: true` is what keeps the PNGs at the artifact
+      # ROOT: without it each shard's files land under a `gui-smoke-screenshots-ubuntu-shard-N/`
+      # subdirectory, and a critic told to glob `<dir>/*.png` finds nothing and reports "no screenshots
+      # produced" — the exact silent failure of the visual leg that CPE-1728's two-artifact split was
+      # written to prevent. Screenshot names are per-surface and each spec runs in exactly one shard, so
+      # the merge has no collisions to resolve.
+      # After the verdict step on purpose (CPE-1594's ordering rule: nothing that can fail may sit between
+      # the results and the verdict), and `if: always()` so a red gate still publishes its evidence.
+      - name: Download every shard's screenshots
+        if: always()
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: gui-smoke-screenshots-ubuntu-shard-*
+          merge-multiple: true
+          path: gui-smoke/.screenshots
+
+      - name: Upload gui-smoke screenshots (whole run, flat)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-screenshots-ubuntu
+          path: gui-smoke/.screenshots/**
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true

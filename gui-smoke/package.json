@@ -9,6 +9,7 @@
     "test:unit": "tsx --test lib/*.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "ratchet": "tsx scripts/run-ratchet.ts",
+    "shard-manifest": "tsx scripts/write-shard-manifest.ts",
     "classify-log": "tsx scripts/classify-log.ts"
   },
   "devDependencies": {

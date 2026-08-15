@@ -24,8 +24,31 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
+import { assignShardSpecs, parseShardId, shardResultFilePrefix } from "./lib/shard.js";
+import { listSpecFiles, specRunPath } from "./lib/specFiles.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// --- CPE-1753: spec sharding -------------------------------------------------------------------
+// A fully healthy green `gui-smoke-linux` run measured 41.70 min against its own 45-minute job cap, and
+// suite duration scales with spec count (0.73-1.80 min per added spec file), so two to four more specs
+// would have breached it. `gui-smoke.yml` now runs the suite as a matrix of shard jobs, each setting
+// GUI_SMOKE_SHARD_INDEX/GUI_SMOKE_SHARD_TOTAL; `assignShardSpecs` deals the spec files out
+// deterministically so every file lands in exactly one shard. Unset (a local `npm test`, the Windows
+// leg) means "run everything", byte-identical to the pre-sharding behaviour.
+//
+// `parseShardId` THROWS if only one of the two env vars is set — see its own comment. A wdio.conf that
+// quietly ran the whole suite in every shard, or one shard's slice while believing it was the whole
+// suite, is exactly the failure this harness cannot afford.
+const SHARD_ID = parseShardId(process.env);
+const SHARD_SPECS = SHARD_ID ? assignShardSpecs(listSpecFiles(path.resolve(__dirname, "specs")), SHARD_ID) : undefined;
+if (SHARD_ID && SHARD_SPECS) {
+  // eslint-disable-next-line no-console
+  console.log(
+    `[gui-smoke] shard ${SHARD_ID.shardIndex} of ${SHARD_ID.shardTotal} — running ${SHARD_SPECS.length} ` +
+      `spec file(s): ${SHARD_SPECS.join(", ")}`,
+  );
+}
 
 // --- CPE-1044 guard --------------------------------------------------------------------------
 // Tauri decides "embed frontendDist" vs "load devUrl" (localhost:1420) at compile time based on
@@ -946,7 +969,12 @@ export const config: WebdriverIO.Config = {
   hostname: "127.0.0.1",
   port: 4444,
   path: "/",
-  specs: ["./specs/**/*.smoke.ts"],
+  // CPE-1753: this shard's assigned subset, or the whole flat `specs/` directory when unsharded. The
+  // list is enumerated (via `lib/specFiles.ts`) rather than left as a `./specs/**/*.smoke.ts` glob so
+  // that wdio, the shard manifest, and the ratchet's expected-spec-count all read the SAME list from the
+  // SAME function — a partition computed from a different list than the expectation is checked against
+  // is how a spec file ends up assigned to nobody and expected by nobody.
+  specs: SHARD_SPECS ? SHARD_SPECS.map(specRunPath) : listSpecFiles(path.resolve(__dirname, "specs")).map(specRunPath),
   maxInstances: 1,
   capabilities: [
     {
@@ -1011,7 +1039,12 @@ export const config: WebdriverIO.Config = {
       "json",
       {
         outputDir: "./.results",
-        outputFileFormat: (opts: { cid: string }) => `wdio-${opts.cid}.json`,
+        // CPE-1753: the shard tag is LOAD-BEARING, not cosmetic. The verdict job downloads every shard's
+        // results artifact with `merge-multiple: true`, flattening them into one directory — and wdio's
+        // worker cids restart at `0-0` in every shard, so without the tag each shard would write a
+        // `wdio-0-0.json` and the merge would keep exactly one of them. Empty string when unsharded, so a
+        // local run's filenames are unchanged. See `lib/shard.ts#shardResultFilePrefix`.
+        outputFileFormat: (opts: { cid: string }) => `wdio-${shardResultFilePrefix(SHARD_ID)}${opts.cid}.json`,
       },
     ],
   ],

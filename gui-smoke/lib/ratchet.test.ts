@@ -23,6 +23,7 @@ import {
   type KnownFailingFile,
   type RawResultChunk,
 } from "./ratchet.js";
+import type { ShardManifest } from "./shard.js";
 
 const SAMPLES = "samples.smoke.ts";
 const SAVED_SEARCH = "saved-search.smoke.ts";
@@ -885,5 +886,217 @@ describe("evaluate — a non-boolean 'intermittent' value is never treated as in
     assert.equal(result.ok, true);
     assert.deepEqual(result.intermittentListings, []);
     assert.deepEqual(result.unevidencedIntermittent, []);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------------
+// CPE-1753 — clause 9. THE tests for this ticket: a sharded suite's verdict is assembled from N separate
+// `.results/` directories, and the one thing that must never happen is a missing shard quietly lowering
+// the bar it is measured against. Every test below is written as "the shard is gone; is it RED?", because
+// the green case proves nothing here — an aggregation that simply counts what it received is green on the
+// happy path AND green when a quarter of the suite never ran.
+// ---------------------------------------------------------------------------------------------------
+
+/** The toy suite's three specs dealt across 2 shards by `assignShardSpecs`'s round-robin over a sorted
+ *  list: shard 1 owns open-dir + saved-search, shard 2 owns samples. */
+const SHARD_1: ShardManifest = { shardIndex: 1, shardTotal: 2, specs: [OPEN_DIR, SAVED_SEARCH] };
+const SHARD_2: ShardManifest = { shardIndex: 2, shardTotal: 2, specs: [SAMPLES] };
+const ALL_SPEC_FILES = [OPEN_DIR, SAMPLES, SAVED_SEARCH];
+
+describe("evaluate — clause 9: MISSING SHARD (CPE-1753, the sharded gate's highest-risk property)", () => {
+  it("is green when every shard reported and the results are the healthy baseline", () => {
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 2, manifests: [SHARD_1, SHARD_2], expectedSpecs: ALL_SPEC_FILES },
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missingShards, []);
+    assert.deepEqual(result.shardPlanProblems, []);
+    assert.deepEqual(result.messages, []);
+  });
+
+  it("REDS when a shard's results are dropped entirely — and does NOT reduce the expectation to match", () => {
+    // The scenario the ticket is about: shard 2 was cancelled by a newer push, so neither its manifest
+    // nor its results exist. The remaining shard is perfectly healthy. A naive aggregation ("expect what
+    // arrived") is green here; this must not be.
+    const shard1Only = mainStateResults().filter((r) => r.spec !== SAMPLES);
+    const result = evaluate({
+      results: shard1Only,
+      knownFailing: KNOWN_FAILING,
+      // Still the live-globbed count from git — NEVER derived from the shards that reported.
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 2, manifests: [SHARD_1], expectedSpecs: ALL_SPEC_FILES },
+    });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missingShards, [2]);
+    assert.match(result.messages.join("\n"), /MISSING SHARD: shard 2 of 2 never reported a manifest/);
+    // The second, independent net: the missing shard's spec file never reported against a git-derived
+    // expectation, so the run is also `incomplete`. Both fire; either alone would be enough.
+    assert.equal(result.incomplete, true);
+    assert.equal(result.reportedSpecCount, 2);
+    assert.match(result.messages.join("\n"), /SUITE DID NOT COMPLETE: expected 3 spec file\(s\)/);
+  });
+
+  it("REDS when NO shard reported at all (the build job failed, or every shard was cancelled)", () => {
+    const result = evaluate({
+      results: [],
+      knownFailing: { cases: [] },
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 4, manifests: [], expectedSpecs: ALL_SPEC_FILES },
+    });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missingShards, [1, 2, 3, 4]);
+    assert.equal(result.incomplete, true);
+  });
+
+  it("REDS when the join is told to expect an invalid number of shards", () => {
+    // Symmetric with clause 8's `expectedSpecCount < 1`: a join that doesn't know how many shards exist
+    // cannot certify that they all reported, and "0 of 0 shards, all present" must never be a verdict.
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 0, manifests: [], expectedSpecs: ALL_SPEC_FILES },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.messages.join("\n"), /SHARD PLAN INVALID/);
+  });
+
+  it("REDS on shard-count drift in EITHER direction", () => {
+    // Matrix resized to 3, verdict job's GUI_SMOKE_EXPECT_SHARDS still 2: the manifests report a total
+    // the join does not expect. Every spec file's ownership shifts when the total changes, so a quiet
+    // acceptance here would silently re-deal the suite.
+    const grown = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: {
+        expectedShardTotal: 2,
+        manifests: [{ ...SHARD_1, shardTotal: 3 }, { ...SHARD_2, shardTotal: 3 }],
+        expectedSpecs: ALL_SPEC_FILES,
+      },
+    });
+    assert.equal(grown.ok, false);
+    assert.match(grown.messages.join("\n"), /SHARD PLAN MISMATCH: shard 1 ran as "1 of 3"/);
+
+    // The other direction: GUI_SMOKE_EXPECT_SHARDS bumped to 3, matrix still 2 entries.
+    const shrunk = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 3, manifests: [SHARD_1, SHARD_2], expectedSpecs: ALL_SPEC_FILES },
+    });
+    assert.equal(shrunk.ok, false);
+    assert.deepEqual(shrunk.missingShards, [3]);
+  });
+
+  it("REDS on a duplicated or out-of-range shard index", () => {
+    const duplicated = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 2, manifests: [SHARD_1, SHARD_1], expectedSpecs: ALL_SPEC_FILES },
+    });
+    assert.equal(duplicated.ok, false);
+    // Two jobs believing they are the same shard means some spec ran twice and another ran not at all.
+    assert.match(duplicated.messages.join("\n"), /shard 1 reported more than one manifest/);
+    assert.deepEqual(duplicated.missingShards, [2]);
+
+    const outOfRange = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: {
+        expectedShardTotal: 2,
+        manifests: [SHARD_1, SHARD_2, { shardIndex: 5, shardTotal: 2, specs: [] }],
+        expectedSpecs: ALL_SPEC_FILES,
+      },
+    });
+    assert.equal(outOfRange.ok, false);
+    assert.match(outOfRange.messages.join("\n"), /outside the expected range 1\.\.2/);
+  });
+
+  it("REDS when the shard plan leaves a spec file unclaimed, naming it", () => {
+    // A partition bug is the one failure sharding introduces that no amount of green shards can reveal:
+    // an unclaimed spec runs NOWHERE, and every shard that did run is perfectly happy.
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: {
+        expectedShardTotal: 2,
+        manifests: [{ ...SHARD_1, specs: [OPEN_DIR] }, SHARD_2],
+        expectedSpecs: ALL_SPEC_FILES,
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.messages.join("\n"), new RegExp(`no shard claimed them: ${SAVED_SEARCH}`));
+  });
+
+  it("REDS when two shards claim the same spec file", () => {
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: {
+        expectedShardTotal: 2,
+        manifests: [SHARD_1, { ...SHARD_2, specs: [SAMPLES, OPEN_DIR] }],
+        expectedSpecs: ALL_SPEC_FILES,
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.messages.join("\n"), /was claimed by more than one shard/);
+  });
+
+  it("REDS when a shard claims a spec file that does not exist in this checkout", () => {
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: {
+        expectedShardTotal: 2,
+        manifests: [SHARD_1, { ...SHARD_2, specs: [SAMPLES, "ghost.smoke.ts"] }],
+        expectedSpecs: ALL_SPEC_FILES,
+      },
+    });
+
+    assert.equal(result.ok, false);
+    assert.match(result.messages.join("\n"), /not in specs\/ right now: ghost\.smoke\.ts/);
+  });
+
+  it("still reports a genuine per-case regression in a shard alongside the shard bookkeeping", () => {
+    // A missing shard must not swallow the other clauses: an incomplete run's real findings are still
+    // real, and hiding them would be its own kind of dishonesty.
+    const broken = withStatus(mainStateResults(), SAMPLES, FONT_CASE, "failed");
+    const result = evaluate({
+      results: broken,
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+      shards: { expectedShardTotal: 3, manifests: [SHARD_1, SHARD_2], expectedSpecs: ALL_SPEC_FILES },
+    });
+
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.missingShards, [3]);
+    assert.deepEqual(result.newFailures, [caseKey(SAMPLES, FONT_CASE)]);
+  });
+
+  it("contributes nothing when `shards` is omitted (an unsharded run, or a shard's own local verdict)", () => {
+    const result = evaluate({
+      results: mainStateResults(),
+      knownFailing: KNOWN_FAILING,
+      expectedSpecCount: EXPECTED_SPECS,
+    });
+
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.missingShards, []);
+    assert.deepEqual(result.shardPlanProblems, []);
   });
 });
