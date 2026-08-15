@@ -73,13 +73,18 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
     stops and tells you which link it was and that nothing was written — rather than quietly creating a new
     file at the far end of a broken link, which is what a plain save would do and is not something you'd
     ever find again.
-  - **Everything else about your file is kept.** The save rewrites the file in place, so its permissions,
-    its owner, its Windows attributes (including the "downloaded from the internet" mark), any alternate
-    data streams and any hard links to it all survive the edit untouched. Some editors save by writing a
-    new file and renaming it over yours, which quietly loses all of that; this one doesn't — and a file
-    another program merely has *open* stays saveable, where the rename approach would refuse it.
-    (A program that has opened the file and asked to keep others from writing still blocks the save, as
-    it always has — that is the file being locked, not the way we save it.)
+  - **Everything else about your file is kept, and it stays the same file.** The save rewrites the file in
+    place, so its permissions, its owner, its Windows attributes (including the "downloaded from the
+    internet" mark), any alternate data streams and any hard links to it all survive the edit untouched.
+    Because it is still the same file, a program that merely has it *open* can keep saving over it and
+    sees the new contents straight away. (A program that has opened the file and asked to keep others from
+    writing still blocks the save, as it always has — that is the file being locked, not the way we save
+    it.)
+
+    Metadata Studio saves the other way, by writing a new file and moving it into place. It now carries
+    almost all of the above across too, but not the file's owner, and not its identity: a program holding
+    that file open keeps reading the old contents, and a program holding it open on Windows can make the
+    save fail. See its page for the full list.
   - **The trade-off: a save that is interrupted can leave the file part-written.** If the app is killed or
     the disk fills up half-way through writing, you can be left with a truncated file. Metadata Studio
     makes the opposite trade (see its page) because a media file is harder to retype than a text file. If

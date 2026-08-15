@@ -506,28 +506,36 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   atomic-save trade-off (vim, git and every other rename-based writer do the same), and it is *not* the
 ///   CPE-1716 bug — with a hard link the file the user opened does receive the edit. Stated so a future
 ///   reader does not mistake the two.
-/// - **The file OBJECT is replaced, and everything attached to it is dropped** — a one-line
-///   "permissions/ownership are not carried" until PR #904's UAT measured the whole of it (CPE-1739):
+/// - **The file OBJECT is still replaced — but what it CARRIES is now carried across with it** (CPE-1739,
+///   from the four losses PR #904's UAT measured). The swap itself is inherent to the atomic-save idiom
+///   and is not going away; what changed is that the things attached to the object no longer stay behind
+///   on the file that gets unlinked:
 ///
-///   ```text
-///   0600 private:    fs::write -> 0o600 | here -> 0o644   (a private file becomes world-readable)
-///   0755 executable: fs::write -> 0o755 | here -> 0o644   (a script stops being executable)
-///   fs::write: attrs=0x22 (HIDDEN) ADS=Ok("ZoneId=3\r\n")
-///   here:      attrs=0x20 (HIDDEN lost) ADS=Err(NotFound) (Mark of the Web destroyed)
-///   SHARE_READ|WRITE open: fs::write -> Ok(()) | here -> Err("Access is denied. (os error 5)")
-///   ```
+///   | What | Before (rename only) | Now |
+///   |---|---|---|
+///   | Unix mode — `0600` private, `0755` executable | `0644`, both | carried exactly ([`carried_mode`]) |
+///   | Unix extended attributes — Finder tags, `com.apple.quarantine` | dropped | carried, best effort ([`carry_xattrs`]) |
+///   | Windows attributes (`HIDDEN`, …), DACL, creation time | dropped | carried by `ReplaceFileW` ([`commit_replacement`]) |
+///   | Windows alternate data streams — `Zone.Identifier`, the Mark of the Web | destroyed | carried by `ReplaceFileW` |
+///   | Unix ownership (uid/gid) | not carried | **still not carried** — `chown` is not in `std`, and an unprivileged process cannot give a file away |
+///   | Open-handle identity — item 4 | see below | **still not fixed** |
 ///
-///   One cause, four consequences: a rename swaps in a different object, so mode, ownership, Windows
-///   attributes, alternate data streams and the identity that open handles refer to all stay behind on the
-///   file that gets unlinked. The first is a **security downgrade** and the last is a save that used to
-///   succeed and now fails. Copying attributes onto the staged file would close three of the four and
-///   nothing can be copied to close the last, because the obstacle is the *target's* sharing mode.
+///   **Item 4 remains open, and it is the one that cannot be bought with care on the replacement file.**
+///   While another program holds the file open with `SHARE_READ|WRITE` — what an ordinary Windows
+///   application holds — the save fails: `fs::rename` said `Access is denied. (os error 5)` and
+///   `ReplaceFileW` says `...being used by another process`. The obstacle is the **target's** sharing
+///   mode, so only writing in place would sidestep it, and that means giving up the atomicity that a
+///   half-rewritten media file is the whole reason for. (Rust's own `File::open` takes
+///   `FILE_SHARE_DELETE` and is unaffected either way — measured `Ok(())`.) A reader holding the file open
+///   across the save likewise still sees the old bytes on every platform, because the object it refers to
+///   is the one that was unlinked. Both are recorded here, in [`commit_replacement`], and in
+///   `src/docs/25-metadata-studio.md`, rather than being quietly hoped away.
 ///
-///   **This is why `write_file_text` shares only [`classify_write_target`] with this function and not the
-///   write itself** (CPE-1725): its traffic is ordinary text files, so it would have paid all four to buy
-///   atomicity for the rare interrupted save. `metadata_write` still pays them, deliberately — a media
-///   file half-rewritten is worse — and `src/docs/25-metadata-studio.md` now tells the user so in those
-///   words rather than leaving it silent. **CPE-1739** carries the fix.
+///   **`write_file_text` still shares only [`classify_write_target`] with this function and not the write
+///   itself** (CPE-1725), and CPE-1739 does not change that: its traffic is ordinary text files, item 4 is
+///   not closed, and the ~6 ms per save `ReplaceFileW` costs (measured, see [`commit_replacement`]) is a
+///   price worth paying for a media file being rewritten in place and not for an ordinary text save that
+///   `fs::write` already does correctly. Re-routing it is a regression until item 4 is closed.
 /// - **Durability across a power loss is NOT provided, only atomic visibility** (PR #899 Reviewer). The
 ///   bytes are `sync_all`ed before the rename, so no observer can ever see a half-written file and a
 ///   failed save leaves the original exactly as it was. The **directory entry** the rename creates is a
@@ -537,6 +545,17 @@ pub fn rename_into_slot(src: &Path, target: &Path, occupied: &str) -> Result<(),
 ///   call here would buy a guarantee this crate cannot state platform-uniformly. The user docs are scoped
 ///   to what is actually provided instead of claiming power-cut safety.
 /// - **TOCTOU.** The link is resolved and then written; nothing is atomic across those two steps.
+/// - **A second TOCTOU, between reading the target and committing** (CPE-1739 review round 1, F4 —
+///   recorded because this function records everything else, not because either branch is dangerous).
+///   [`classify_carryover`]'s stat happens before staging and [`commit_replacement`] happens after the
+///   bytes are written, and the target can change in between. If it **appears** in that window — the name
+///   was free at stat time — the commit takes the plain-`rename` branch and overwrites the newcomer,
+///   destroying exactly the attributes and streams this ticket exists to preserve. If it **vanishes**,
+///   `ReplaceFileW` fails `NotFound` where a rename would have succeeded, so the save reports an error
+///   about a file that is no longer there. Both need someone to create or delete the user's file during
+///   the milliseconds of one save; the first is silent but requires the file to have been absent when the
+///   user pressed Save, and the second is loud and leaves nothing damaged. Closing them means holding the
+///   target open across the whole save, which is item 4's problem from the other side.
 /// - **The temp is not cleaned up at the instant the process dies** (CPE-1725, PR #904 review; decided by
 ///   CPE-1738). The removals below sit on the write/sync and rename **error** branches, so they run when
 ///   the save *fails* and not when the save is *killed*: force-quit, a crash or a `SIGKILL` between the
@@ -588,12 +607,80 @@ pub fn replace_file_contents(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// bytes off the link's target, and **the refusal** is what makes the failure say *"is a link"* instead
 /// of `The file exists. (os error 80)` about a name `try_exists` reports as free. A site that creates a
 /// file at a user-named path wants both, in that order.
+///
+/// # The mode argument (CPE-1739 review round 1)
+///
+/// This entry point takes the platform default — `0666 & ~umask` on Unix, the parent's inherited ACL on
+/// Windows — which is what a site *claiming a name for a new user file* wants (`split_join`'s joined
+/// output and its manifest are the callers). [`create_staging_file`] is the other entry point and asks
+/// for `0600`, because a staging file holds someone else's private bytes for a moment and is not a file
+/// the user will ever see. Both funnel through this one body, so there is still exactly **one**
+/// `create_new(true)` in the crate and the extraction argument above is unweakened.
 pub fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
-    std::fs::OpenOptions::new().write(true).create_new(true).open(path)
+    create_exclusive_with_mode(path, None)
+}
+
+/// The mode [`create_staging_file`] creates a `.cpe-tmp` at: readable and writable by its owner and by
+/// nobody else, from the instant the file exists.
+///
+/// **Why a constant and not `0644`-and-hope** (CPE-1739 review round 1, the blocker). `create_new`
+/// without an explicit mode is `O_CREAT|O_EXCL, 0666`, so the kernel makes the staging file
+/// `0666 & ~umask` — world-readable under the ordinary `022` umask — and the [`carry_protections`]
+/// `fchmod` that narrows it to the target's real mode runs *afterwards*. **POSIX checks permission at
+/// `open`, not at `read`**, so a local process that opens the staging name inside that window keeps a
+/// readable descriptor across the `fchmod` and goes on to read the private bytes written after it. The
+/// window is small but it is not theoretical and the name does not have to be guessed: an
+/// inotify/FSEvents watcher is woken by the create itself. Measured with `strace` on the real test
+/// binary before the fix:
+///
+/// ```text
+/// openat(AT_FDCWD, ".../secrets.env.382-1786791461862651861.cpe-tmp",
+///        O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0666) = 3
+/// fchmod(3, 0600)                                 = 0
+/// rename(".../secrets.env.382-....cpe-tmp", ".../secrets.env") = 0
+/// ```
+///
+/// With the mode on the `openat` there is no window at all: the file is never, for any instant, more
+/// open than `0600`, and `carry_protections`' `fchmod` only ever *widens* it to whatever the user's own
+/// file actually had. Note this is deliberately **more** restrictive than the eventual mode during
+/// staging rather than equal to it — narrowing first and widening later is the only order that has no
+/// gap, since the target's mode is not known until after the file exists.
+const STAGING_MODE: u32 = 0o600;
+
+/// The staging opener [`stage_and_replace`] actually calls, one line above the call site with nothing
+/// between them — the same "extract it so a test can call the real one" argument as [`create_exclusive`],
+/// which this delegates to. Pinned by `cpe_1739_the_staging_opener_creates_a_file_no_one_else_can_open`
+/// and by `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, both of which
+/// call **this** function rather than a copy of it.
+fn create_staging_file(path: &Path) -> std::io::Result<std::fs::File> {
+    create_exclusive_with_mode(path, Some(STAGING_MODE))
+}
+
+/// The single `create_new(true)` open in this crate. `unix_mode` is the mode the file is **created**
+/// with, not one applied afterwards — see [`STAGING_MODE`] for why that distinction is the whole point.
+/// Ignored on Windows, which has no mode; see [`carry_protections`]'s Windows arm for what that costs.
+fn create_exclusive_with_mode(path: &Path, unix_mode: Option<u32>) -> std::io::Result<std::fs::File> {
+    let _ = unix_mode; // read on Unix only
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    if let Some(mode) = unix_mode {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        opts.mode(mode);
+    }
+    opts.open(path)
 }
 
 fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let target = resolve_write_target(path)?;
+    // CPE-1739: what the file the user is editing carries TODAY. Two different things depend on it — the
+    // mode (and extended attributes) [`carry_protections`] copies onto the staged file on Unix, and, on
+    // Windows, whether the target exists at all, which is what picks `ReplaceFileW` over a plain rename in
+    // [`commit_replacement`]. Read once, before anything is staged: a save that cannot find out what it is
+    // about to replace refuses rather than quietly handing back a default-permission file. See
+    // [`classify_carryover`].
+    let source = std::fs::metadata(&target);
+    let existing = if classify_carryover(source.as_ref().err(), &target)? { source.as_ref().ok() } else { None };
     // A per-write pid+nanosecond stamp so two concurrent saves — or a stale temp left by an earlier crash
     // — cannot collide on the same sibling path.
     let stamp = std::time::SystemTime::now()
@@ -609,11 +696,27 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // the final component** — so the temp file cannot be written through a link somebody pre-placed at the
     // (guessable-in-principle) staging name. `fs::write` would follow one. Pinned by
     // `create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it`, which calls
-    // [`create_exclusive`] — **this** function's opener, not a copy of it. The temp name carries
+    // [`create_staging_file`] — **this** function's opener, not a copy of it. The temp name carries
     // pid+nanos, so racing the real one is not the way to test it; extracting the opener is.
     {
         use std::io::Write as _;
-        let mut f = create_exclusive(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        // CPE-1739: the file is CREATED at 0600 (see `STAGING_MODE`), not created wide and narrowed
+        // afterwards — POSIX checks permission at `open`, so narrowing afterwards leaves a window in
+        // which another local process can take a descriptor it keeps.
+        let mut f = create_staging_file(&tmp).map_err(|e| format!("{}: {e}", display_path(&tmp)))?;
+        // Then widen/adjust to whatever the user's own file actually carries, while the staged file is
+        // still EMPTY — before the user's bytes ever reach it. On Windows this is a deliberate no-op:
+        // `commit_replacement`'s `ReplaceFileW` carries the attributes, ACL and named streams across at
+        // the moment of the swap instead, which is more than anything copyable onto the staged file
+        // could — but it does mean the Windows staging file carries the *directory's* inherited ACL for
+        // the whole write, which `carry_protections`' Windows arm records.
+        if let Some(src) = existing {
+            if let Err(e) = carry_protections(&target, src, &f, &tmp) {
+                drop(f);
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
         if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
             drop(f);
             let _ = std::fs::remove_file(&tmp);
@@ -629,10 +732,8 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // would additionally refuse a dangling symlinked path, which `resolve_write_target` has already
     // judged. So this is a genuinely different primitive, not a duplicate: the guard that matters here is
     // that resolution — `target` is a real file, never a link — and it has already run.
-    #[allow(clippy::disallowed_methods)]
-    std::fs::rename(&tmp, &target).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed rename
-        format!("{}: {e}", display_path(&target))
+    commit_replacement(&tmp, &target, existing.is_some()).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp); // never leave the temp behind on a failed commit
     })?;
     // CPE-1738: the save just succeeded, so THIS save's own temp is already gone — it became `target` via
     // the rename above. Sweep for a STALE sibling a DIFFERENT, earlier save of this same file left behind
@@ -641,6 +742,300 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
     // the path a slow save is already blocking on.
     sweep_stale_temp_siblings(&target);
     Ok(())
+}
+
+/// **CPE-1739, the pure decision**: the target's own metadata could not be read — does the save go ahead
+/// anyway, and does it have anything to carry across?
+///
+/// `err` is `None` when the stat succeeded. Three arms, and the middle one is the reason this is a
+/// classifier rather than a `?`:
+///
+/// - **`None` → `Ok(true)`.** The file exists; its mode/attributes are what [`carry_protections`] and
+///   [`commit_replacement`] preserve.
+/// - **`NotFound` → `Ok(false)`.** There is nothing at the name yet. Creating a brand-new file at a free
+///   name is a legitimate use of this function (`resolve_write_target` already admits it deliberately, and
+///   `write_file_text`'s Save-As callers depend on it), and a file that does not exist has no protections
+///   to carry. On Windows this arm is also what routes the save back to a plain rename — `ReplaceFileW`
+///   requires an existing file to replace and answers `NotFound` otherwise (measured, see
+///   [`commit_replacement`]).
+/// - **Anything else → refuse.** This is the arm that makes CPE-1739's item 1 a *fix* rather than a
+///   best-effort improvement. A stat that fails for a reason other than absence means we cannot tell
+///   whether the file we are about to replace is `0600` or `0644`; staging anyway produces a file with
+///   whatever the process umask hands out, so the one case where the answer matters most — an unreadable,
+///   locked-down file — is exactly the case a "carry it if you can" policy would silently downgrade. Same
+///   posture as [`classify_write_target`] and [`classify_create_slot`]: **not provably safe ⇒ do not
+///   write.** The original is untouched and the message says so.
+fn classify_carryover(err: Option<&std::io::Error>, target: &Path) -> Result<bool, String> {
+    match err {
+        None => Ok(true),
+        Some(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Some(e) => Err(format!(
+            "could not read what \"{}\" currently carries — its permissions and security settings, its \
+             attributes, and its alternate data streams — so nothing was written. Saving anyway would \
+             replace it with a brand-new file carrying only the defaults, so a file you had made private \
+             could come back readable by others. Check the file is still there and that you can read it, \
+             then save again: {e}",
+            display_path(target)
+        )),
+    }
+}
+
+/// **CPE-1739**: copy onto the freshly-staged (still empty) file everything that is attached to the
+/// **file object** rather than to its bytes, and that this platform can carry with `std` plus the
+/// dependencies this crate already has.
+///
+/// # Unix: the mode, then the extended attributes
+///
+/// The mode is the whole of CPE-1739's items 1 and 2, measured through `metadata_write` in PR #904's UAT:
+/// a `0600` private file came back `0644` and a `0755` script came back `0644`, both reported as a
+/// successful save. [`std::fs::File::set_permissions`] on the staged handle (an `fchmod`, so no second path
+/// lookup and no TOCTOU against the name) fixes both. [`carried_mode`] decides *which* bits.
+///
+/// Extended attributes are the Unix half of item 3 — the ticket measured the Windows half (alternate data
+/// streams, `Zone.Identifier`) because that is where the UAT ran, but the same "attached to the object"
+/// argument applies verbatim to xattrs, and the stakes here are higher than they look: **this app stores
+/// its own metadata in them.** macOS Finder tags are `com.apple.metadata:_kMDItemUserTags` (CPE-826/829,
+/// the `xattr` dependency in this crate's `Cargo.toml` exists for exactly that), and macOS's own
+/// Mark-of-the-Web equivalent is `com.apple.quarantine`. A Metadata Studio save that dropped them would be
+/// destroying the feature next door.
+///
+/// **Ownership is NOT carried and cannot be**: `chown` is not in `std`, and an unprivileged process cannot
+/// give a file away regardless. The staged file therefore belongs to whoever ran the save, which is what
+/// [`carried_mode`] takes into account.
+///
+/// # Windows: nothing here, on purpose — and what that costs during the write
+///
+/// Everything the Windows side loses — the attribute word, the ACL, named streams, the creation time —
+/// belongs to the *destination*, and the OS has a primitive that carries it across at the moment of the
+/// swap. Copying attributes onto the staged file would be a strictly worse imitation of it (it cannot
+/// reach the ACL at all, and enumerating streams needs `FindFirstStreamW`/`FindNextStreamW` by hand). See
+/// [`commit_replacement`], which is where the Windows answer lives.
+///
+/// **The consequence, stated because the Unix side makes a point of not having it** (CPE-1739 review
+/// round 1, F2): the Unix path creates the staging file at [`STAGING_MODE`] so it is never for an instant
+/// readable by anyone else, and Windows has no equivalent here. The staged `.cpe-tmp` is created with the
+/// **parent directory's inherited ACL** and holds the user's bytes under it for the whole write, only
+/// acquiring the target's own ACL when `ReplaceFileW` swaps it in. In a folder whose ACL is wider than the
+/// file's — a shared folder holding one restricted file — the bytes are briefly reachable by whoever the
+/// *folder* lets in. Not a regression (the pre-CPE-1739 rename had the same exposure and did not even
+/// end with the right ACL), and not closed here: closing it means building the target's security
+/// descriptor onto the staging handle by hand, which is the `SetFileSecurity`-by-hand route
+/// [`commit_replacement`] rejects `ReplaceFileW` in favour of. Recorded rather than left as an
+/// unstated asymmetry.
+///
+/// # Failure fails the save, and that is the point
+///
+/// Both steps that can fail the save do so loudly, with the temp removed and the original untouched.
+/// Continuing past a failed `fchmod` would ship precisely the silent security downgrade this function
+/// exists to close. The xattr copy is the one deliberate exception — see [`carry_xattrs`].
+#[cfg(unix)]
+fn carry_protections(
+    source_path: &Path,
+    source: &std::fs::Metadata,
+    staged: &std::fs::File,
+    staged_path: &Path,
+) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+    let staged_uid = staged
+        .metadata()
+        .map_err(|e| format!("{}: could not stat the staging file, so nothing was written: {e}", display_path(staged_path)))?
+        .uid();
+    let mode = carried_mode(source.mode(), source.uid(), staged_uid);
+    staged.set_permissions(std::fs::Permissions::from_mode(mode)).map_err(|e| {
+        format!(
+            "could not give the replacement for \"{}\" the same permissions the original had ({mode:04o}), \
+             so nothing was written rather than leaving you a file that is more readable than the one you \
+             saved: {e}",
+            display_path(source_path)
+        )
+    })?;
+    carry_xattrs(source_path, staged);
+    Ok(())
+}
+
+/// The Windows half of [`carry_protections`] — deliberately empty; [`commit_replacement`]'s `ReplaceFileW`
+/// is where the Windows answer lives. Kept as a function (rather than `#[cfg]`-ing the call site) so
+/// `stage_and_replace` reads the same on both platforms and the reason is recorded once, above.
+#[cfg(windows)]
+fn carry_protections(
+    _source_path: &Path,
+    _source: &std::fs::Metadata,
+    _staged: &std::fs::File,
+    _staged_path: &Path,
+) -> Result<(), String> {
+    Ok(())
+}
+
+/// **CPE-1739, the pure decision**: which permission bits of `source_mode` the replacement file gets.
+///
+/// Pure `u32` arithmetic, so it compiles and is unit-tested on **every** runner, including the Windows one
+/// that never calls it — a Unix-only policy tested only on Unix legs would be the weaker arrangement, and
+/// the decision here has nothing platform-specific in it.
+///
+/// Two things happen:
+///
+/// 1. **Masked to `0o7777`.** [`std::os::unix::fs::MetadataExt::mode`] returns the whole `st_mode`,
+///    file-type bits (`S_IFREG` and friends) included, and POSIX leaves `chmod`'s behaviour *unspecified*
+///    for bits outside the permission set. Passing them through would be relying on Linux's tolerance and
+///    hoping the other two runners agree.
+/// 2. **`setuid`/`setgid` are dropped when the replacement would have a different owner.** Ownership
+///    cannot be carried (see [`carry_protections`]), so a set-user-ID file replaced by a *different* user
+///    keeps a bit that now means something else entirely: it used to run as the original owner and would
+///    now run as whoever saved it. That is not "preserved", it is a quietly re-pointed privilege bit, and
+///    the honest answer is to drop it and let the ordinary permission bits stand. This is not an
+///    escalation being prevented — anyone who can replace a file in a directory could have created a
+///    set-user-ID-themselves file there anyway — it is a *misrepresentation* being prevented. When the
+///    owner is unchanged (overwhelmingly the common case: your own files) every bit is carried, `setuid`
+///    included, because then the bit still means exactly what it meant before.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn carried_mode(source_mode: u32, source_uid: u32, staged_uid: u32) -> u32 {
+    let mode = source_mode & 0o7777;
+    if source_uid == staged_uid {
+        mode
+    } else {
+        mode & !0o6000 // S_ISUID | S_ISGID
+    }
+}
+
+/// Copy `source`'s extended attributes onto `staged`. **Best effort, per attribute, and never fails the
+/// save** — the one place in [`carry_protections`] where a failure is swallowed, so the reason is worth
+/// stating rather than assuming.
+///
+/// The attributes that matter to a user (and to this app: Finder tags, `com.apple.quarantine`) live in the
+/// `user.`/`com.apple.` namespaces and copy fine. `listxattr` also returns kernel-managed ones —
+/// `security.selinux` on an SELinux system, `system.posix_acl_access` where POSIX ACLs are in use — and an
+/// unprivileged owner frequently *cannot* set `security.*` even though nothing is wrong: the kernel has
+/// already assigned the staged file a context by policy. Refusing the save there would make this app
+/// unable to write files on an ordinary hardened Linux box, to protect a value the kernel re-derives
+/// itself. So each attribute is attempted and a failure skips that one.
+///
+/// **The residual, stated rather than hidden:** an attribute that cannot be re-applied is silently lost,
+/// exactly as it is today. This is strictly better than the status quo (where *all* of them are), and it
+/// is the one gap in this function that a caller cannot see — so `src/docs/25-metadata-studio.md` says so
+/// to the user too, rather than letting the residual disappear on the page people actually read
+/// (CPE-1739 review round 1, F5). Filesystems with no xattr support at all (`listxattr` → `ENOTSUP`)
+/// return early and cost one syscall.
+///
+/// # The staged side goes through the FILE DESCRIPTOR, the source side through the path
+///
+/// The asymmetry is deliberate rather than an oversight (CPE-1739 review round 1, F3, which noticed the
+/// mode was carried by `fd` while xattrs were carried by name on both sides). `staged` is an `&File`
+/// this function already holds, so `FileExt::set_xattr` is a plain `fsetxattr` on that descriptor — no
+/// second path lookup, and nothing can swap an entry in at the staging name between the `fchmod` and the
+/// attribute writes. The **source** side stays path-based because `stage_and_replace` holds no handle to
+/// the target and opening one purely to read attributes would cost an extra open on every save and fail
+/// outright on a file the user can write but not read — for a read whose worst case is copying a stale
+/// attribute onto a file that is about to be replaced anyway. The half worth hardening is the half where
+/// something is written, and that half is now on the descriptor.
+#[cfg(unix)]
+fn carry_xattrs(source: &Path, staged: &std::fs::File) {
+    use xattr::FileExt as _;
+    let Ok(names) = xattr::list(source) else { return };
+    for name in names {
+        if let Ok(Some(value)) = xattr::get(source, &name) {
+            let _ = staged.set_xattr(&name, &value);
+        }
+    }
+}
+
+/// **CPE-1739**: swap the staged file into `target`'s place — with `ReplaceFileW` on Windows when there is
+/// a file there to replace, and with `fs::rename` everywhere else.
+///
+/// # Why Windows gets a different primitive rather than one abstraction
+///
+/// The two platforms lose different things and have different repairs, and pretending otherwise would mean
+/// shipping the weaker one twice. Unix's loss is the mode, and it is repaired *before* the swap, on the
+/// staged file ([`carry_protections`]). Windows' loss — the attribute word, the DACL, named streams — is
+/// attached to the **destination**, and `ReplaceFileW` is the OS primitive built for precisely this job:
+/// it exists because the rename-based save idiom loses them.
+///
+/// Measured on Windows 11 for CPE-1739, same file, same run, `HIDDEN` set and a real `Zone.Identifier`
+/// stream written with `path:stream` syntax:
+///
+/// ```text
+/// before             attrs=0x802 (HIDDEN)      ADS=Ok("[ZoneTransfer]\r\nZoneId=3\r\n")
+/// after fs::rename   attrs=0x820 (HIDDEN lost) ADS=Err(NotFound)    <- CPE-1739 item 3
+/// after ReplaceFileW attrs=0x822 (HIDDEN kept) ADS=Ok("[ZoneTransfer]\r\nZoneId=3\r\n")
+/// ```
+///
+/// `REPLACEFILE_IGNORE_MERGE_ERRORS` is the documented flag for "carry the ACL and attributes across, but
+/// do not fail the whole save if you cannot" — without it a save into a folder where the caller lacks
+/// `WRITE_DAC` would start failing outright, which trades one silent loss for a loud regression on
+/// ordinary files. No backup file is requested (`lpBackupFileName` is null): a backup is the *third*
+/// option CPE-1739 listed, not this one, and asking for one would leave a second stray file next to the
+/// user's on every crash — the thing CPE-1738 just finished cleaning up.
+///
+/// # What this does NOT fix, measured
+///
+/// **CPE-1739 item 4 — a save that used to work still fails while another program holds the file open with
+/// `SHARE_READ|WRITE`** (what an ordinary Windows application holds, and *not* what Rust's own
+/// `File::open` takes, which adds `FILE_SHARE_DELETE` and is unaffected by either primitive):
+///
+/// ```text
+/// foreign SHARE_READ|WRITE handle held:  fs::rename   -> Err("Access is denied. (os error 5)")
+///                                        ReplaceFileW -> Err("...being used by another process.")
+/// std::fs::File::open handle held:       ReplaceFileW -> Ok(())
+/// ```
+///
+/// So the failure is unchanged in kind (the error is at least now accurate about the cause), and it cannot
+/// be fixed by any amount of care on the *replacement* file — the obstacle is the **target's** sharing
+/// mode, which only writing in place would sidestep. That is CPE-1739's option 3, and taking it would give
+/// up the atomicity a half-rewritten media file is the whole reason for. Recorded, not closed.
+/// [`replace_file_contents`]'s "What this does NOT do" and `src/docs/25-metadata-studio.md` say the same
+/// thing to the user. **A read-only target is refused too, by both primitives** — `fs::rename` →
+/// `Access is denied. (os error 5)`, `ReplaceFileW` → `Access is denied. (0x80070005)`, the same refusal
+/// rendered through the `windows` crate's `HRESULT` formatting rather than `std::io`'s (CPE-1739 review
+/// round 1, F6 — an earlier version of this line called the two strings identical, which they are not).
+/// So that is pre-existing behaviour this change neither fixes nor worsens, and every error this function
+/// returns on Windows now carries an `0x8007NNNN` code rather than an `os error N`.
+///
+/// # No silent fallback to `fs::rename`
+///
+/// If `ReplaceFileW` fails, the save fails. Falling back to a rename would restore the exact data loss this
+/// function exists to prevent and do it **invisibly** — a user's Mark of the Web would evaporate only on
+/// whichever filesystems happened not to support the call, which is the least observable place for it to
+/// happen. A failed save is loud, leaves the original byte-for-byte intact (measured above: the target
+/// still read `old bytes` after both failure modes), and can be retried.
+///
+/// # The cost, measured rather than assumed
+///
+/// `ReplaceFileW` is materially more expensive than `MoveFileEx`, because it is doing materially more:
+/// 200 iterations, 64 KiB payload, local NVMe — **~0.22 ms per commit for `fs::rename` versus ~6.2 ms for
+/// `ReplaceFileW`**, plus ~11 µs for the one extra `fs::metadata` [`classify_carryover`] needs. Against
+/// `PURPOSE.md`'s fast/small/predictable tiebreaker that is a real cost, and it is accepted for a bounded
+/// reason: the only caller is `metadata_write`, a user-initiated single save that has already spent far
+/// longer parsing and rewriting a media file, and 6 ms is not perceptible in it. The path that *would*
+/// have made this a general tax — `write_file_text`, the ordinary text save — does not use this function at
+/// all (CPE-1725's narrowing) and pays nothing.
+fn commit_replacement(tmp: &Path, target: &Path, target_exists: bool) -> Result<(), String> {
+    let _ = target_exists; // read on Windows only — see below
+    #[cfg(windows)]
+    if target_exists {
+        use std::os::windows::ffi::OsStrExt as _;
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{ReplaceFileW, REPLACEFILE_IGNORE_MERGE_ERRORS};
+        fn wide(p: &Path) -> Vec<u16> {
+            p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        }
+        let (replaced, replacement) = (wide(target), wide(tmp));
+        // SAFETY: both buffers are NUL-terminated and outlive the call; `lpBackupFileName` is null (no
+        // backup wanted, see above) and both reserved out-parameters are null, as documented.
+        return unsafe {
+            ReplaceFileW(
+                PCWSTR(replaced.as_ptr()),
+                PCWSTR(replacement.as_ptr()),
+                PCWSTR::null(),
+                REPLACEFILE_IGNORE_MERGE_ERRORS,
+                None,
+                None,
+            )
+        }
+        .map_err(|e| format!("{}: {e}", display_path(target)));
+    }
+    // Unix always, and Windows only when there is nothing at the name to replace — `ReplaceFileW` answers
+    // `NotFound` for an absent target (measured), and a brand-new file has nothing to carry across anyway.
+    #[allow(clippy::disallowed_methods)]
+    std::fs::rename(tmp, target).map_err(|e| format!("{}: {e}", display_path(target)))
 }
 
 /// **CPE-1738**: best-effort collection of a `.cpe-tmp` sibling stranded by an EARLIER, DIFFERENT save of
@@ -2238,6 +2633,25 @@ mod tests {
         d
     }
 
+    /// A NUL-terminated wide string for the Win32 calls the CPE-1739 tests make directly. `std` exposes
+    /// *reading* a file's attribute word ([`std::os::windows::fs::MetadataExt::file_attributes`]) but no
+    /// way to set one, and no way to open with a chosen sharing mode — both of which the tests need in
+    /// order to stage the conditions the UAT measured.
+    #[cfg(windows)]
+    fn wide(p: &Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt as _;
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    /// Mark `p` `FILE_ATTRIBUTE_HIDDEN`, the attribute PR #904's UAT watched a rename-based save destroy.
+    #[cfg(windows)]
+    fn set_hidden(p: &Path) {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+        unsafe { SetFileAttributesW(PCWSTR(wide(p).as_ptr()), FILE_ATTRIBUTE_HIDDEN) }
+            .expect("this machine must be able to set FILE_ATTRIBUTE_HIDDEN");
+    }
+
     /// The guarantee, tested as a guarantee: driven with real resolved paths rather than through any
     /// list of spellings, because enumerating spellings is exactly the approach the PR #855 audit
     /// showed cannot work.
@@ -2666,7 +3080,7 @@ mod tests {
     /// that untestable because the temp name carries pid+nanos and cannot be raced — true of the temp
     /// name, and the wrong conclusion: the guarantee belongs to the **primitive**, so the primitive is
     /// what this drives, with `fs::write` on an identically-staged link as the contrast that shows the
-    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`create_exclusive`] -- that function's own opener -- rather than a copy of it.
+    /// choice is load-bearing rather than decorative. Swapping `create_new(true)` for `create(true).truncate(true)` at [`replace_file_contents`]'s call site reds THIS test, because it calls [`create_staging_file`] -- that function's own opener -- rather than a copy of it.
     ///
     /// The dangling leg runs on every runner ([`make_dangling_link`]'s junction fallback needs no
     /// privilege). The live leg needs a real file symlink and says so when it cannot have one; no
@@ -2677,11 +3091,13 @@ mod tests {
     fn create_new_refuses_a_link_at_the_staging_name_where_fs_write_would_follow_it() {
         use std::io::Write;
         let d = scratch("create-new-link");
-        // **`create_exclusive` is the opener `replace_file_contents` actually uses.** The first version
+        // **`create_staging_file` is the opener `replace_file_contents` actually uses.** The first version
         // of this test built its own `OpenOptions` closure here, so swapping `create_new(true)` for
         // `create(true).truncate(true)` at the call site left this green — a test named after a guard,
-        // passing with the guard removed. Call the real one.
-        let staged = create_exclusive;
+        // passing with the guard removed. Call the real one. (CPE-1739 split the opener in two so the
+        // staging path could ask for `0600`; both entry points delegate to the crate's single
+        // `create_new(true)`, so this still drives the production primitive.)
+        let staged = create_staging_file;
 
         // ---- dangling link in the staging slot: every runner ----
         let dangling = d.join("staging-dangling");
@@ -2746,6 +3162,346 @@ mod tests {
              uses create_new instead"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1739: the atomic save must carry across what is attached to the FILE OBJECT ----------
+    //
+    // Measured by PR #904's UAT: `replace_file_contents` turned a `0600` private file into `0644`, a
+    // `0755` script into `0644`, and destroyed the Windows `HIDDEN` attribute and the `Zone.Identifier`
+    // alternate data stream — the Mark of the Web — all while reporting a successful save.
+    //
+    // Every test below asserts on the FILESYSTEM before unwrapping the `Result`, because every one of
+    // these defects fails by returning `Ok`: an assertion placed after an `unwrap` is unreachable in
+    // exactly the run that matters.
+
+    /// **CPE-1739 item 1, the security one, on a real filesystem.** A `0600` file that the user saves must
+    /// not come back readable by everyone, and a `0755` script must not stop being executable.
+    ///
+    /// Unix-only because the mode is a Unix concept — not a silent skip: on Windows the equivalent (the
+    /// DACL) is carried by `ReplaceFileW`, which
+    /// `cpe_1739_windows_a_save_keeps_the_hidden_attribute_and_the_zone_identifier_stream` covers on that
+    /// runner. The *policy* behind which bits are carried is pinned on every runner by
+    /// `cpe_1739_carried_mode_keeps_every_bit_but_drops_setuid_when_the_owner_changes`.
+    ///
+    /// Mutation check: deleting the `set_permissions` call in [`carry_protections`] reds this test and
+    /// nothing else on a Unix runner.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1739_a_save_carries_the_mode_so_a_private_file_stays_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("carry-mode");
+
+        let private = d.join("secrets.env");
+        std::fs::write(&private, b"TOKEN=old").unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let r = replace_file_contents(&private, b"TOKEN=new");
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o7777,
+            0o600,
+            "a 0600 private file must not come back world-readable from a save (result was {r:?})"
+        );
+        r.expect("and the save itself must succeed");
+        assert_eq!(std::fs::read(&private).unwrap(), b"TOKEN=new", "and the bytes must have landed");
+
+        let script = d.join("build.sh");
+        std::fs::write(&script, b"#!/bin/sh\necho old\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = replace_file_contents(&script, b"#!/bin/sh\necho new\n");
+        assert_eq!(
+            std::fs::metadata(&script).unwrap().permissions().mode() & 0o7777,
+            0o755,
+            "and an executable script must still be executable after being edited (result was {r:?})"
+        );
+        r.expect("and that save must succeed too");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739 review round 1, the blocker: the staging file must be born private, not made private.**
+    ///
+    /// The first round created the `.cpe-tmp` with `create_new`'s default `0666` and narrowed it with an
+    /// `fchmod` immediately afterwards, one statement later, before any bytes were written. That is not
+    /// enough, and the doc claimed it was: **POSIX checks permission at `open`, not at `read`**, so a
+    /// local process that opens the staging name between the `openat` and the `fchmod` keeps a readable
+    /// descriptor across the narrowing and reads the private bytes written after it. The name needs no
+    /// guessing — an inotify/FSEvents watcher is woken by the create itself. `strace` of the real test
+    /// binary, pre-fix: `openat(..., O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC, 0666) = 3` then `fchmod(3, 0600)`.
+    ///
+    /// This drives [`create_staging_file`] — **the function `stage_and_replace` calls**, one line above
+    /// its call site with nothing between them, not a copy of it and not the `create_exclusive` entry
+    /// point that deliberately keeps the platform default for `split_join`'s user-facing output files.
+    /// Dropping the mode (`create_exclusive_with_mode(path, None)`) reds this and nothing else.
+    ///
+    /// **The umask control makes the skip loud instead of silent.** Under a `0077` umask the unfixed code
+    /// would produce `0600` too, and this test would pass while proving nothing — so it first checks that
+    /// an ordinary `File::create` in the same directory *does* come out group/other-readable. If the
+    /// umask has already closed those bits, there is nothing here to demonstrate and the test says so
+    /// rather than claiming coverage it does not have.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1739_the_staging_opener_creates_a_file_no_one_else_can_open() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("staging-mode");
+
+        let control = d.join("control");
+        std::fs::File::create(&control).unwrap();
+        let control_mode = std::fs::metadata(&control).unwrap().permissions().mode();
+        if control_mode & 0o077 == 0 {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1739] SKIPPED the staging-mode test: this run's umask already strips every \
+                 group/other bit (an ordinary File::create came out {:04o}), so a staging file created \
+                 WITHOUT an explicit mode would look private too and this test could not tell the fixed \
+                 code from the broken code. NOTHING here covered the staging-mode window on this run.",
+                control_mode & 0o7777
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let staged = d.join("secrets.env.4242-1.cpe-tmp");
+        let f = create_staging_file(&staged).expect("the staging opener must create the file");
+        let mode = std::fs::metadata(&staged).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "the staging file must be created with NO group or other access ({mode:04o}) — narrowing it \
+             one statement later is too late, because POSIX checks permission at open() and a process \
+             that got in first keeps a descriptor that can read the private bytes written afterwards"
+        );
+        assert_ne!(mode & 0o400, 0, "and its owner must still be able to read it back ({mode:04o})");
+        drop(f);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739's Unix half of item 3.** Extended attributes are where this app keeps macOS Finder tags
+    /// (`com.apple.metadata:_kMDItemUserTags`, CPE-826/829) and where macOS keeps its own Mark of the Web
+    /// (`com.apple.quarantine`), so a save that dropped them would be destroying the feature next door.
+    ///
+    /// **The skip is loud and says what went uncovered**, because plenty of real filesystems have no xattr
+    /// support at all (`ENOTSUP`) — notably `tmpfs`, which is where `scratch()` lands on some Linux
+    /// configurations. Seeding is the probe: if the attribute cannot be set on the *source*, this machine
+    /// cannot express the property under test and nothing here is asserted.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1739_a_save_carries_extended_attributes_where_the_filesystem_has_them() {
+        use std::io::Write as _;
+        let d = scratch("carry-xattr");
+        let p = d.join("holiday.jpg");
+        std::fs::write(&p, b"old bytes").unwrap();
+
+        if xattr::set(&p, "user.cpe.test", b"tagged").is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1739] SKIPPED the extended-attribute leg: {} is on a filesystem that will not store \
+                 a user.* xattr (ENOTSUP — tmpfs and several network mounts). NOTHING in this test covered \
+                 xattr carry-over on this run.",
+                d.display()
+            );
+            let _ = std::fs::remove_dir_all(&d);
+            return;
+        }
+
+        let r = replace_file_contents(&p, b"new bytes");
+        assert_eq!(
+            xattr::get(&p, "user.cpe.test").ok().flatten().as_deref(),
+            Some(&b"tagged"[..]),
+            "an extended attribute on the file the user edited must survive the save — this is where \
+             Finder tags and com.apple.quarantine live (result was {r:?})"
+        );
+        r.expect("and the save itself must succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739 items 2 and 3 on Windows, measured the way the UAT measured them**: the attribute word
+    /// read back through [`std::os::windows::fs::MetadataExt::file_attributes`], and a real alternate data
+    /// stream written with `path:stream` syntax.
+    ///
+    /// `Zone.Identifier` is the Mark of the Web — the record that a file came from the internet, which
+    /// other software on the machine acts on. Losing it on save is a security-relevant loss, not a
+    /// cosmetic one, which is why this is a test and not a doc line.
+    ///
+    /// Mutation check: making [`commit_replacement`] take its `fs::rename` branch unconditionally reds
+    /// this test (`attrs=0x820`, `ADS=Err(NotFound)`) and nothing else.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1739_windows_a_save_keeps_the_hidden_attribute_and_the_zone_identifier_stream() {
+        use std::os::windows::fs::MetadataExt as _;
+        let d = scratch("carry-attrs");
+        let p = d.join("downloaded.zip");
+        std::fs::write(&p, b"old bytes").unwrap();
+        // The Mark of the Web, exactly as a browser writes it.
+        std::fs::write(format!("{}:Zone.Identifier", p.display()), b"[ZoneTransfer]\r\nZoneId=3\r\n")
+            .expect("this machine must be able to write an alternate data stream (NTFS)");
+        set_hidden(&p);
+
+        let r = replace_file_contents(&p, b"new bytes");
+
+        const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+        let attrs = std::fs::metadata(&p).unwrap().file_attributes();
+        assert_ne!(
+            attrs & FILE_ATTRIBUTE_HIDDEN,
+            0,
+            "a HIDDEN file must still be hidden after being saved — a rename leaves the attribute behind \
+             on the object it unlinks (attrs=0x{attrs:x}, result was {r:?})"
+        );
+        assert_eq!(
+            std::fs::read(format!("{}:Zone.Identifier", p.display())).ok().as_deref(),
+            Some(&b"[ZoneTransfer]\r\nZoneId=3\r\n"[..]),
+            "and the Zone.Identifier stream — the Mark of the Web — must survive the save (result was {r:?})"
+        );
+        r.expect("and the save itself must succeed");
+        assert_eq!(std::fs::read(&p).unwrap(), b"new bytes", "and the new bytes must have landed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739 item 4, pinned as the gap it still is.** `ReplaceFileW` did not buy this back: while
+    /// another program holds the file open with `SHARE_READ|WRITE` — what an ordinary Windows application
+    /// holds, and *not* what Rust's `File::open` takes — the save still fails, only with an error that now
+    /// names the real cause. What must NOT happen is the file being damaged on the way out.
+    ///
+    /// This exists so the claim in [`commit_replacement`], [`replace_file_contents`] and
+    /// `src/docs/25-metadata-studio.md` stays true rather than becoming folklore: if a future change ever
+    /// makes this save succeed, this test reds and those three places get corrected instead of quietly
+    /// under-promising.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1739_windows_a_foreign_share_read_write_handle_still_blocks_the_save() {
+        use windows::core::PCWSTR;
+        use windows::Win32::Storage::FileSystem::{
+            CreateFileW, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+        };
+        let d = scratch("share-violation");
+        let p = d.join("held.wav");
+        std::fs::write(&p, b"old bytes").unwrap();
+
+        // Exactly the sharing mode an ordinary Windows application takes: readers and writers welcome,
+        // deleters and renamers not. Rust's own `File::open` adds FILE_SHARE_DELETE, which is why it
+        // cannot stage this.
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide(&p).as_ptr()),
+                0x8000_0000, // GENERIC_READ
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAGS_AND_ATTRIBUTES(0),
+                None,
+            )
+        }
+        .expect("opening the user's file the way another application would must be possible");
+
+        let r = replace_file_contents(&p, b"new bytes");
+
+        assert_eq!(
+            std::fs::read(&p).unwrap(),
+            b"old bytes",
+            "whatever happens, the user's file must be exactly as it was (result was {r:?})"
+        );
+        assert!(
+            !std::fs::read_dir(&d).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".cpe-tmp")),
+            "and the staging temp must not be left behind by the failure (result was {r:?})"
+        );
+        let e = r.expect_err(
+            "CPE-1739 item 4 is NOT closed: a foreign SHARE_READ|WRITE handle still blocks the save. If \
+             this now succeeds, fix the doc comments on commit_replacement and replace_file_contents and \
+             src/docs/25-metadata-studio.md, which all tell the user it fails",
+        );
+        assert!(e.contains("held.wav"), "the failure must name the file: {e}");
+        // **Naming the file is not enough** (CPE-1739 review round 1, F7): a `classify_carryover` refusal
+        // names it too, so an assertion that stopped there would pass while the save failed for a
+        // completely different reason and the doc's claim — that the failure is now *accurate about the
+        // cause* — would be held by nothing. `0x80070020` is `ERROR_SHARING_VIOLATION`, and asserting the
+        // code rather than the prose ("...being used by another process.") is deliberate: the prose is
+        // localised by the OS and would red on a non-English runner for no real reason.
+        assert!(
+            e.contains("0x80070020"),
+            "and it must be a SHARING VIOLATION (ERROR_SHARING_VIOLATION, 0x80070020) — the save failing \
+             for some other reason, such as the carry-over refusal, would satisfy a name-only check while \
+             leaving the documented cause unproven: {e}"
+        );
+        assert!(
+            !e.contains("could not read what"),
+            "and specifically NOT the classify_carryover refusal — fs::metadata succeeds against this \
+             handle, which is why the refusal is unreachable here: {e}"
+        );
+
+        unsafe { windows::Win32::Foundation::CloseHandle(handle).ok() };
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **The Save-As shape, and the reason it is a test rather than an assumption.** `ReplaceFileW` needs a
+    /// file to replace and answers `NotFound` when there is none (measured), so routing every Windows save
+    /// through it would break creating a file at a free name — which `resolve_write_target` deliberately
+    /// admits and this function's callers use.
+    ///
+    /// Mutation check: dropping the `if target_exists` condition in [`commit_replacement`] reds this test
+    /// on Windows and nothing else.
+    #[test]
+    fn cpe_1739_a_save_to_a_free_name_still_creates_the_file() {
+        let d = scratch("carry-free-name");
+        let p = d.join("brand-new.json");
+
+        let r = replace_file_contents(&p, b"{\"a\":1}");
+        assert_eq!(
+            std::fs::read(&p).ok().as_deref(),
+            Some(&b"{\"a\":1}"[..]),
+            "a save to a name where nothing exists must still create the file (result was {r:?})"
+        );
+        r.expect("and it must report success");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1739, the pure decision: an unreadable target refuses the save.** This is what makes item 1 a
+    /// fix rather than a best-effort improvement — if we cannot tell whether the file about to be replaced
+    /// is `0600`, saving anyway hands back whatever the umask gives, and the one case where it matters most
+    /// is the one a "carry it if you can" policy would silently downgrade.
+    ///
+    /// A truth table rather than real IO, for the reason [`classify_write_target`] is one: staging a stat
+    /// that fails with something *other* than `NotFound` needs platform-specific permission gymnastics that
+    /// differ on all three runners, and the arm that must not be reached (`NotFound` → refuse) cannot be
+    /// staged by real IO at all. Runs everywhere.
+    #[test]
+    fn cpe_1739_classify_carryover_refuses_a_target_it_cannot_read_but_allows_an_absent_one() {
+        let p = Path::new("/music/track.wav");
+        assert_eq!(classify_carryover(None, p), Ok(true), "a readable target: carry what it has");
+        assert_eq!(
+            classify_carryover(Some(&std::io::Error::from(std::io::ErrorKind::NotFound)), p),
+            Ok(false),
+            "an absent name is a legitimate brand-new file — nothing to carry, and the save proceeds"
+        );
+
+        let msg = classify_carryover(
+            Some(&std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Access is denied.")),
+            p,
+        )
+        .expect_err("a target we cannot read must refuse — saving anyway is the security downgrade");
+        assert!(msg.contains("track.wav"), "the refusal must name the file: {msg}");
+        assert!(msg.contains("nothing was written"), "and say the save did not happen: {msg}");
+        assert!(msg.contains("Access is denied."), "and quote the OS's own cause: {msg}");
+    }
+
+    /// **CPE-1739, the pure decision behind which mode bits travel.** Pure `u32` arithmetic, so this runs
+    /// on all three legs including the Windows one that never calls [`carried_mode`] — a policy tested only
+    /// where it executes would be the weaker arrangement, and there is nothing platform-specific in it.
+    #[test]
+    fn cpe_1739_carried_mode_keeps_every_bit_but_drops_setuid_when_the_owner_changes() {
+        // st_mode as `stat` hands it over: file-type bits included. Only the permission bits may travel —
+        // POSIX leaves `chmod` unspecified for anything else, so passing them through would be relying on
+        // one platform's tolerance and hoping the other two agree.
+        assert_eq!(carried_mode(0o100_600, 1000, 1000), 0o600, "S_IFREG must be masked off");
+        assert_eq!(carried_mode(0o100_755, 1000, 1000), 0o755, "an executable keeps its exec bits");
+        assert_eq!(carried_mode(0o100_644, 1000, 1000), 0o644, "and the ordinary case is unchanged");
+        // Same owner: every bit means exactly what it meant before, setuid/setgid/sticky included.
+        assert_eq!(carried_mode(0o104_755, 1000, 1000), 0o4755, "setuid survives when the owner is the same");
+        assert_eq!(carried_mode(0o102_755, 1000, 1000), 0o2755, "so does setgid");
+        assert_eq!(carried_mode(0o101_777, 1000, 1000), 0o1777, "and the sticky bit is not a privilege bit");
+        // Different owner: ownership cannot be carried, so a surviving setuid bit would no longer mean
+        // "runs as the original owner" — it would mean "runs as whoever saved it". Drop it; keep the rest.
+        assert_eq!(carried_mode(0o104_755, 0, 1000), 0o755, "setuid must NOT be re-pointed at the saving user");
+        assert_eq!(carried_mode(0o102_755, 0, 1000), 0o755, "nor setgid");
+        assert_eq!(carried_mode(0o101_777, 0, 1000), 0o1777, "but the sticky bit still travels");
+        assert_eq!(carried_mode(0o100_600, 0, 1000), 0o600, "and an ordinary private file is untouched by this");
     }
 
     /// **CPE-1738, the pure decision, as a truth table.** Split out from [`sweep_stale_temp_siblings`]
