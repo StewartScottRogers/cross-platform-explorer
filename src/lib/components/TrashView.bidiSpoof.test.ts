@@ -8,7 +8,7 @@
  * flow through that module).
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/svelte";
+import { render, screen, fireEvent, waitFor } from "@testing-library/svelte";
 import TrashView from "./TrashView.svelte";
 
 // Built from a decimal code point, not a literal character — see filename.ts's own doc comment for why.
@@ -19,10 +19,12 @@ interface StreamCall {
   resolve: (v: unknown) => void;
 }
 let streamCalls: StreamCall[] = [];
-const invoke = vi.fn((cmd: string, args?: unknown) => {
+let restoreImpl: ((ids: string[]) => Promise<Array<{ ok: boolean; error: string }>>) | null = null;
+const invoke = vi.fn((cmd: string, args?: any) => {
   if (cmd === "list_trash_stream") {
     return new Promise((resolve) => streamCalls.push({ args: args as StreamCall["args"], resolve }));
   }
+  if (cmd === "restore_trash_items" && restoreImpl) return restoreImpl(args.ids);
   return Promise.reject(new Error("unhandled: " + cmd));
 });
 vi.mock("@tauri-apps/api/core", () => {
@@ -35,6 +37,7 @@ vi.mock("@tauri-apps/api/core", () => {
 beforeEach(() => {
   invoke.mockClear();
   streamCalls = [];
+  restoreImpl = null;
 });
 
 describe("TrashView — tooltip, aria-label, AND the original-location column (CPE-1712 round 2 blocker)", () => {
@@ -58,5 +61,26 @@ describe("TrashView — tooltip, aria-label, AND the original-location column (C
     const pathCell = row?.querySelector(".tv-path");
     expect(pathCell?.textContent).toBe("C:\\Users\\alice\\[RLO]gnp.txt");
     expect(pathCell?.getAttribute("title")).toBe("C:\\Users\\alice\\[RLO]gnp.txt");
+  });
+
+  // CPE-1757 round 2: `f.name` was passed raw into `$t("trash.restoreFailed", { name: f.name, ... })` —
+  // an i18n interpolation PARAMETER, not a template-literal or property-access shape, a class of miss
+  // round 1's guard never considered. Asserts on the rendered banner text, not the i18n call's arguments.
+  it("escapes a bidi override in a restore-failure banner's name (CPE-1757)", async () => {
+    restoreImpl = async () => [{ ok: false, error: "in use" }];
+    const { container } = render(TrashView, {});
+    await Promise.resolve();
+    await Promise.resolve();
+    streamCalls[0].args.onEntry.onmessage([
+      { id: "1", name: `${RLO}gnp.txt`, original_path: `C:\\x\\${RLO}gnp.txt`, size: 10, time_deleted: 0 },
+    ]);
+    await waitFor(() => expect(container.querySelector(".tv-row")).toBeTruthy());
+
+    await fireEvent.click(container.querySelector(".tv-check input") as HTMLInputElement);
+    await fireEvent.click(screen.getByText("Restore selected"));
+
+    await waitFor(() => expect(container.textContent).toContain("Couldn't restore"));
+    expect(container.textContent).not.toContain("txt.png");
+    expect(container.textContent).toContain("[RLO]gnp.txt");
   });
 });

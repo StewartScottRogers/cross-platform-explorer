@@ -21,6 +21,7 @@
   import { unwrap } from "../invoke";
   import * as settings from "../settings";
   import Icon from "./Icon.svelte";
+  import { displaySafePath } from "../filename";
 
   /** The folder the instruction applies to — shown prominently so the scope is never ambiguous. */
   export let root = "";
@@ -162,8 +163,8 @@
         on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </div>
 
-    <div class="scope" data-testid="scope" title={root}>
-      Scope: <strong>{root}</strong>
+    <div class="scope" data-testid="scope" title={displaySafePath(root)}>
+      Scope: <strong>{displaySafePath(root)}</strong>
     </div>
 
     {#if needsConfig}
@@ -229,10 +230,10 @@
               {#each planResult.plan.ops as op, i (i)}
                 <div class="op-row" data-testid="op-row-{i}">
                   <span class="op-kind kind-{opKind(op)}">{opKind(op)}</span>
-                  <span class="op-from" title={opFrom(op)}>{opFrom(op)}</span>
+                  <span class="op-from" title={displaySafePath(opFrom(op))}>{displaySafePath(opFrom(op))}</span>
                   {#if opTo(op)}
                     <span class="op-arrow">→</span>
-                    <span class="op-to" title={opTo(op) ?? ""}>{opTo(op)}</span>
+                    <span class="op-to" title={displaySafePath(opTo(op) ?? "")}>{displaySafePath(opTo(op) ?? "")}</span>
                   {/if}
                 </div>
               {/each}
@@ -275,7 +276,7 @@
               {#each execResult.results as r, i (i)}
                 <div class="op-result" class:failed={!r.ok} data-testid="op-result-{i}">
                   <Icon name={r.ok ? "check" : "close"} size={12} />
-                  <span class="op-result-path" title={r.path}>{r.path}</span>
+                  <span class="op-result-path" title={displaySafePath(r.path)}>{displaySafePath(r.path)}</span>
                   {#if !r.ok}<span class="op-result-err">{r.error}</span>{/if}
                 </div>
               {/each}

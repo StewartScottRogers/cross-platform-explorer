@@ -110,11 +110,7 @@ export function displaySafeName(name: string): string {
  * a second `displaySafeName(...)` call on an unrelated-looking variable does not.
  */
 export function displaySafePath(path: string): string {
-  if (!HAS_BIDI_FORMAT.test(path)) return path;
-  return path
-    .split(/([\\/])/)
-    .map((part, i) => (i % 2 === 0 ? displaySafeName(part) : part))
-    .join("");
+  return displaySafeName(path);
 }
 
 export function validateFileName(name: string): string | null {

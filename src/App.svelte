@@ -1180,7 +1180,7 @@
     // Jump back to a recently-visited folder (CPE-604) — the full path is a keyword so typing any
     // part of it matches, while the label stays the short folder name.
     ...recentPaths(activeTab.history).map((p) => ({
-      id: `recent:${p}`, group: $t("palette.groupRecent"), label: baseName(p) || p, keywords: p, run: () => navigate(p),
+      id: `recent:${p}`, group: $t("palette.groupRecent"), label: displaySafeName(baseName(p) || p), keywords: p, run: () => navigate(p),
     })),
     // Per-section docs jump-links (CPE-764): open Documents straight to any section's page from anywhere.
     ...DOC_SECTIONS.map((s) => ({

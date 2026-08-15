@@ -9,6 +9,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import { agentConsulted } from "../agentActivity";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   const dispatch = createEventDispatcher<{ navigate: string }>();
 
@@ -33,9 +34,9 @@
       <ul class="c-list">
         {#each $agentConsulted as e (e.path)}
           <li>
-            <button class="c-row" title={e.path} on:click={() => dispatch("navigate", dirOf(e.path))}>
+            <button class="c-row" title={displaySafePath(e.path)} on:click={() => dispatch("navigate", dirOf(e.path))}>
               <span class="c-badge">read</span>
-              <span class="c-name">{baseOf(e.path)}</span>
+              <span class="c-name">{displaySafeName(baseOf(e.path))}</span>
               {#if e.count > 1}<span class="c-mult" aria-label="read {e.count} times">×{e.count}</span>{/if}
             </button>
           </li>

@@ -175,7 +175,7 @@
     {#if restoreErrors.length > 0}
       <div class="tv-error-banner">
         {#each restoreErrors as f (f.name)}
-          <div>{$t("trash.restoreFailed", { name: f.name, error: f.error })}</div>
+          <div>{$t("trash.restoreFailed", { name: displaySafeName(f.name), error: f.error })}</div>
         {/each}
         <button class="tv-btn" on:click={() => (restoreErrors = [])}>×</button>
       </div>

@@ -94,7 +94,7 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
       <h2>{$t("search.findByNameTitle")}</h2>
-      <span class="root" title={root}>{baseName(root) || root}</span>
+      <span class="root" title={displaySafePath(root)}>{displaySafeName(baseName(root)) || displaySafePath(root)}</span>
       <button class="docs" title={$t("search.docsTitle")} aria-label={$t("search.docsTitle")} on:click={() => dispatch("help")}><Icon name="book" size={15} /></button>
       <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>

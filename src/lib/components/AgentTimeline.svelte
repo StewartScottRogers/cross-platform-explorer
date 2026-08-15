@@ -37,6 +37,7 @@
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
   import { foldRenameConflicts, renameConflictNote } from "../agentRenameConflicts";
   import { commands } from "../bindings.gen";
+  import { displaySafeName, displaySafePath } from "../filename";
   import type {
     ReplayData,
     Baseline,
@@ -661,13 +662,13 @@
           >
             <button
               class="tl-row"
-              title={diff ? `${e.path} — hover to see what changed` : e.path}
+              title={diff ? `${displaySafePath(e.path)} — hover to see what changed` : displaySafePath(e.path)}
               on:click={() => dispatch("navigate", dirOf(e.path))}
               on:focus={() => { if (diff) openId = e.id; }}
               on:blur={() => { if (openId === e.id) openId = null; }}
             >
               <span class="tl-badge {e.kind}">{KIND_LABEL[e.kind]}</span>
-              <span class="tl-name">{baseOf(e.path)}</span>
+              <span class="tl-name">{displaySafeName(baseOf(e.path))}</span>
               {#if stats}<span class="tl-stat" aria-label="lines added and removed">+{stats.add} −{stats.del}</span>{/if}
               <span class="tl-time">{clock(e.at)}</span>
             </button>
@@ -802,7 +803,7 @@
                 — reverting overwrites that newer work. Review before you revert.
               </div>
               <div class="cp-drift-list">
-                {#each revertPreview.drift_paths as p (p)}<div class="cp-drift-item" title={p}>{p}</div>{/each}
+                {#each revertPreview.drift_paths as p (p)}<div class="cp-drift-item" title={displaySafePath(p)}>{displaySafePath(p)}</div>{/each}
               </div>
             {/if}
           {/if}
@@ -817,7 +818,7 @@
           {#if cpConfirming}
             <div class="cp-confirm" data-testid="checkpoint-confirm-revert">
               <p class="cp-confirm-msg">
-                This overwrites, recreates, and deletes files under <strong>{currentPath}</strong> to match
+                This overwrites, recreates, and deletes files under <strong>{displaySafePath(currentPath)}</strong> to match
                 <strong>{selectedCheckpoint.label || cpShortId(selectedCheckpoint.manifest_id)}</strong>. This cannot be undone.
               </p>
               {#if revertPreview && revertPreview.drift_count > 0}
@@ -849,7 +850,7 @@
       {#if replayCurrent}
         <div class="rp-current">
           <span class="tl-badge {replayCurrent.kind}">{KIND_LABEL[replayCurrent.kind]}</span>
-          <span class="tl-name" title={replayCurrent.path}>{baseOf(replayCurrent.path)}</span>
+          <span class="tl-name" title={displaySafePath(replayCurrent.path)}>{displaySafeName(baseOf(replayCurrent.path))}</span>
           <span class="tl-time">{clock(replayCurrent.at)}</span>
         </div>
         {#if replayMultiplyEdited}
@@ -878,7 +879,7 @@
         <div class="rp-recon">
           <div class="rp-recon-head">
             <span class="rp-recon-title">Reconstruction at scrub time (read-only)</span>
-            {#if currentPath}<span class="rp-recon-path" title={currentPath}>{currentPath}</span>{/if}
+            {#if currentPath}<span class="rp-recon-path" title={displaySafePath(currentPath)}>{displaySafePath(currentPath)}</span>{/if}
             <!-- CPE-1112 (epic CPE-728 slice e): graduate this same reconstruction from the drawer to
                  the main file pane while scrubbing. Off by default; flipping it off (or leaving this
                  tab) restores the live pane on the next tick — see `replayOverlayActive` above. -->
@@ -900,7 +901,7 @@
                 <li>
                   <span class="tl-row rp-row rp-recon-row">
                     <Icon name={re.isDir ? "folder" : "document"} size={14} />
-                    <span class="tl-name" title={re.path}>{re.name}</span>
+                    <span class="tl-name" title={displaySafePath(re.path)}>{displaySafeName(re.name)}</span>
                     <span class="tl-badge {re.kind}">{replayKindLabel(re.kind)}</span>
                     {#if re.kind !== "baseline"}<span class="tl-time">{clock(re.ts)}</span>{/if}
                   </span>
@@ -917,7 +918,7 @@
           <li class:rp-current-row={replayCurrent?.id === e.id}>
             <span class="tl-row rp-row">
               <span class="tl-badge {e.kind}">{KIND_LABEL[e.kind]}</span>
-              <span class="tl-name">{baseOf(e.path)}</span>
+              <span class="tl-name">{displaySafeName(baseOf(e.path))}</span>
               <span class="tl-time">{clock(e.at)}</span>
             </span>
           </li>
@@ -980,10 +981,10 @@
             <li class="rd-item">
               <button
                 class="tl-row rd-row"
-                title={o.path}
+                title={displaySafePath(o.path)}
                 on:click={() => dispatch("navigate", dirOf(o.path))}
               >
-                <span class="tl-name">{baseOf(o.path)}</span>
+                <span class="tl-name">{displaySafeName(baseOf(o.path))}</span>
                 <span class="tl-time">{relativeLabel(o.lastAt, Date.now())}</span>
               </button>
               <div class="rd-actors">
@@ -1008,11 +1009,11 @@
             <li class="rd-item">
               <button
                 class="tl-row rd-row"
-                title={rc.path}
+                title={displaySafePath(rc.path)}
                 on:click={() => dispatch("navigate", dirOf(rc.path))}
               >
                 <span class="rd-kind-badge rd-kind-{rc.kind}">{rc.kind === "divergence" ? "diverged" : "collided"}</span>
-                <span class="tl-name">{baseOf(rc.path)}</span>
+                <span class="tl-name">{displaySafeName(baseOf(rc.path))}</span>
                 <span class="tl-time">{relativeLabel(rc.lastAt, Date.now())}</span>
               </button>
               <div class="rd-actors">
@@ -1137,7 +1138,7 @@
             <tbody>
               {#each historySessionRows as row (row.sessionId)}
                 <tr>
-                  <td class="hd-key" title={row.cwd}>{new Date(row.startedAt).toLocaleString()}</td>
+                  <td class="hd-key" title={displaySafePath(row.cwd)}>{new Date(row.startedAt).toLocaleString()}</td>
                   <td class="hd-key" title={row.agentName || row.agentId}>{row.agentName || row.agentId || "(unknown)"}</td>
                   <td data-testid="history-session-duration">{historyDurationLabel(row)}</td>
                   <td class="hd-status-cell">

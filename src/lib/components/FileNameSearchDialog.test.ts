@@ -254,3 +254,34 @@ describe("FileNameSearchDialog — misc (CPE-603)", () => {
     expect(onClose).toHaveBeenCalled();
   });
 });
+
+// CPE-1757: the header's `root` span (`{baseName(root) || root}`, `title={root}`) was the ONE place
+// still raw while the byte-identical span in ContentSearchDialog/DuplicatesDialog was already fixed in
+// CPE-1712 — the inconsistency the follow-up guard test exists to catch. Asserts on the rendered DOM,
+// not `displaySafeName`'s return value, per the Evidence Rule FileList.bidiSpoof.test.ts established.
+describe("FileNameSearchDialog — bidi/format-character escape on the header root (CPE-1757)", () => {
+  const RLO = String.fromCharCode(0x202e); // RIGHT-TO-LEFT OVERRIDE, built from a code point
+
+  it("escapes an override in the search root's folder name, in both the visible label and its tooltip", () => {
+    const root = `Z:\\repos\\${RLO}gnp.txt`;
+    render(FileNameSearchDialog, { root });
+
+    expect(screen.getByTitle(`Z:\\repos\\[RLO]gnp.txt`)).toBeTruthy();
+    expect(screen.getByText("[RLO]gnp.txt")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("txt.png");
+  });
+
+  it("escapes a bidi override in a streamed hit's name and path", async () => {
+    render(FileNameSearchDialog, { root: "Z:\\repos\\cpe" });
+    await fireEvent.input(input(), { target: { value: "report" } });
+    await fireEvent.click(screen.getByText("Search"));
+    await settle();
+    const spoofedPath = `Z:\\repos\\cpe\\${RLO}gnp.txt`;
+    calls[0].args.onMatch.onmessage([match(spoofedPath, `${RLO}gnp.txt`)]);
+    await settle();
+
+    expect(screen.getByTitle(`Z:\\repos\\cpe\\[RLO]gnp.txt`)).toBeTruthy();
+    expect(screen.getByText("[RLO]gnp.txt")).toBeTruthy();
+    expect(document.body.textContent).not.toContain("txt.png");
+  });
+});

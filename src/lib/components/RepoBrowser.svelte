@@ -90,6 +90,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   interface RepoEntry { name: string; path: string; is_dir: boolean; size: number }
 
@@ -156,10 +157,10 @@
     if (!dir || typeof dir !== "string") return;
     const name = r.split("/").pop();
     const target = dir.replace(/[\\/]$/, "") + "/" + name;
-    cloning = true; cloneMsg = `Cloning ${r} → ${target}…`; error = "";
+    cloning = true; cloneMsg = `Cloning ${r} → ${displaySafePath(target)}…`; error = "";
     try {
       unwrap(await commands.forgeClone(provider, r, target, token.trim() || null));
-      cloneMsg = `Cloned to ${target}`;
+      cloneMsg = `Cloned to ${displaySafePath(target)}`;
     } catch (e) {
       cloneMsg = "";
       error = "Clone failed: " + (e instanceof Error ? e.message : String(e));
@@ -221,10 +222,10 @@
   }
 
   async function runGenericClone(host: string, url: string, target: string, tok: string | null): Promise<void> {
-    cloning = true; cloneMsg = `Cloning → ${target}…`; error = "";
+    cloning = true; cloneMsg = `Cloning → ${displaySafePath(target)}…`; error = "";
     try {
       unwrap(await commands.forgeCloneUrl(url, target, tok));
-      cloneMsg = `Cloned to ${target}`;
+      cloneMsg = `Cloned to ${displaySafePath(target)}`;
       // Per-connection credential: remember the token keyed by host (CPE-439/498). Best-effort.
       try {
         if (remember && tok) unwrap(await commands.forgeSetToken(host, tok));
@@ -333,7 +334,7 @@
     {#if loaded && !error}
       <div class="repo-crumbs">
         <button class="repo-crumb" on:click={() => browse("")}>{repo}</button>
-        {#if path}<span class="repo-crumb-sep">/</span><span class="repo-crumb-cur">{path}</span>{/if}
+        {#if path}<span class="repo-crumb-sep">/</span><span class="repo-crumb-cur">{displaySafePath(path)}</span>{/if}
       </div>
     {/if}
 
@@ -357,9 +358,9 @@
           <button class="repo-row-item" on:click={up}><Icon name="folder" size={16} /> <span class="repo-name">..</span></button>
         {/if}
         {#each entries as e (e.path)}
-          <button class="repo-row-item" class:dir={e.is_dir} on:click={() => open(e)} title={e.path}>
+          <button class="repo-row-item" class:dir={e.is_dir} on:click={() => open(e)} title={displaySafePath(e.path)}>
             <Icon name={e.is_dir ? "folder" : "file"} size={16} />
-            <span class="repo-name">{e.name}</span>
+            <span class="repo-name">{displaySafeName(e.name)}</span>
             {#if !e.is_dir}<span class="repo-size">{fmtSize(e.size)}</span>{/if}
           </button>
         {/each}
@@ -370,7 +371,7 @@
 
     <div class="repo-statusbar">
       <span class="repo-sb-repo">{loaded ? repo : "No repository open"}</span>
-      {#if loaded && path}<span class="repo-sb-path">/ {path}</span>{/if}
+      {#if loaded && path}<span class="repo-sb-path">/ {displaySafePath(path)}</span>{/if}
     </div>
   </div>
 </div>

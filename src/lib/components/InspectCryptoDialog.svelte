@@ -18,6 +18,7 @@
   import Icon from "./Icon.svelte";
   import JwtPreview from "./JwtPreview.svelte";
   import CertPreview from "./CertPreview.svelte";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   /** Full path of the cert/CSR/JWT file to inspect. */
   export let path: string;
@@ -48,7 +49,7 @@
     class="dialog"
     role="dialog"
     aria-modal="true"
-    aria-label="Inspect {fileName}"
+    aria-label="Inspect {displaySafeName(fileName)}"
     tabindex="-1"
     bind:this={dialogEl}
     data-testid="crypto-inspect-dialog"
@@ -57,7 +58,7 @@
     <div class="hd">
       <h2>
         <span class="hd-icon"><Icon name={kind === "jwt" ? "lock" : "certificate"} size={18} /></span>
-        <span class="hd-title" title={path}>{fileName}</span>
+        <span class="hd-title" title={displaySafePath(path)}>{displaySafeName(fileName)}</span>
       </h2>
       <button class="close-x" type="button" aria-label="Close" data-testid="crypto-inspect-close" on:click={() => dispatch("close")}>
         <Icon name="close" size={16} />

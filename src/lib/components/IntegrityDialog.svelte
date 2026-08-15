@@ -10,6 +10,7 @@
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { hasIssues, type ChecksumEntry, type IntegrityReport } from "../integrity";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   /** Folder to check (pre-filled with the current folder by App). */
   export let initialPath = "";
@@ -105,7 +106,7 @@
               <div class="group group-{label}" data-testid="group-{label}">
                 <div class="group-head">{label} ({list.length})</div>
                 {#each list as p (p)}
-                  <div class="item" title={p}>{base(p)}</div>
+                  <div class="item" title={displaySafePath(p)}>{displaySafeName(base(p))}</div>
                 {/each}
               </div>
             {/if}
