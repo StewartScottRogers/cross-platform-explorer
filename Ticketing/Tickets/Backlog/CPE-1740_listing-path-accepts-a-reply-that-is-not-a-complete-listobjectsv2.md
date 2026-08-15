@@ -109,15 +109,72 @@ transforming proxy, so this is reachable behind a corporate MITM proxy or a CDN.
   `a_non_canonical_2xx_on_list_is_not_routed_through_the_s3_error_parser`,
   `the_belts_203_message_does_not_claim_a_read_failure_or_hunt_a_listing_for_an_error_code`, and (already
   present, re-verified as still-passing coverage for the belt's 206 case)
-  `a_partial_content_listing_is_refused_rather_than_read_as_an_empty_one`. Verified each new guard turns a
-  **distinct** test red on its own by manually reverting each of the three edits above one at a time and
+  `a_partial_content_listing_is_refused_rather_than_read_as_an_empty_one`. Verified each guard's own
+  **assertion** reds on its own by manually reverting each of the three edits above one at a time and
   re-running: reverting `list`'s status check reproduced the exact round-5 measurement
   (`Ok([ProviderEntry { name: "a.jpg", .. }])`); reverting `list`'s cause selection reproduced the "no
   <Code> element" defect verbatim in `list`'s own message; reverting `probe_prefix_after`'s message
   selection reproduced the belt's "no <Code> element" defect verbatim; reverting
-  `marker_confirmation_failure`'s new arm reproduced "what failed was reading the reply" for a 203. Each
-  mutation reddened exactly the test built for it and no other. All reverted back before commit; `cargo
-  test -p cpe-s3` is 192/192 green, `cargo clippy --all-targets -- -D warnings` clean.
+  `marker_confirmation_failure`'s new arm reproduced "what failed was reading the reply" for a 203. All
+  reverted back before commit; `cargo test -p cpe-s3` is 192/192 green, `cargo clippy --all-targets -- -D
+  warnings` clean.
+  - **Correction (PR #911 review + UAT, 2026-08-15):** the claim "each guard turns a distinct test red"
+    overstated it two ways. Reverting `list`'s status check ALSO reds
+    `a_non_canonical_2xx_on_list_is_not_routed_through_the_s3_error_parser` (its own `.expect_err(...)`
+    depends on the same refusal), so that mutation reds **two** tests, not one. And reverting
+    `probe_prefix_after`'s message selection vs. reverting `marker_confirmation_failure`'s arm both red
+    the **same** test (`the_belts_203_message_does_not_claim_a_read_failure_or_hunt_a_listing_for_an_error_code`)
+    via two different assertions inside it (message half 2 vs. half 1 respectively), not two distinct
+    tests. The honest claim is "each guard's own assertion reds when that guard alone is broken", not
+    "one test per guard" — the mutation *evidence itself* was accurate (real output pasted, correctly
+    isolated per guard), only the "distinct test" framing overstated the test-file shape.
+
+## Round 2 (PR #911 review — CHANGES REQUESTED; UAT PASS)
+
+- 2026-08-15 — Reviewer confirmed, with evidence (fetched the AWS `ListObjectsV2` contract, enumerated
+  every 2xx, checked MinIO/Ceph/R2/B2), that narrowing to exactly `200` refuses no legitimate reply, and
+  re-verified the `probe_prefix` transitive-fix claim and all four round-1 mutations as honest. Two items
+  to fix, addressed below; kept unchanged: everything from round 1's Work Log above.
+- 2026-08-15 — **BLOCKER (fixed).** `marker_confirmation_failure`'s new "refused on its status before its
+  body was ever read" arm was selected on `status` alone, but `signed_exchange` treats every `2xx` as
+  `ok`, so its OWN body-read failure or over-cap refusal under a non-canonical 2xx (e.g. a `203` whose
+  body is over `MAX_RESPONSE_BODY_BYTES`) returns `Err((Some(203), …))` from `signed_get` — reaching
+  `marker_confirmation_failure` before `probe_prefix_after`'s `status != 200` check ever runs. That
+  produced the mirror image of the original defect: "refused … before its body was ever read" one
+  sentence above an "Underlying error" naming the 8 MiB cap that had just stopped reading it.
+  - **Fix chosen: reviewer's option 1** (a distinguishable signal, not the softened-wording fallback).
+    Introduced `ProbeRefusal { status, refused_before_body_read, message }` as `probe_prefix_after`'s `Err`
+    type (was a bare `(Option<u16>, String)`), replacing every anonymous-tuple `Err` construction in that
+    function. `refused_before_body_read` is `true` ONLY for the function's own explicit `status != 200`
+    short-circuit (the body is fully in hand there and simply never parsed); every error surfacing from
+    `signed_get` — transport, body-read failure, over-cap — sets it `false`, because in every one of those
+    the body was at least attempted. `marker_confirmation_failure` now takes `&ProbeRefusal` and matches
+    on `(status, refused_before_body_read)`, giving the non-canonical-2xx case two distinct arms: one for
+    "refused on status alone, body never inspected" (true) and a new one for "the body was engaged with
+    and reading it is why this failed" (false), which states what actually happened without claiming
+    either "reading failed" (may be over-cap, not merely unreadable) or "never read" (it was, to the cap).
+    Chose option 1 over the softer-wording fallback because the codebase's standing style (every other
+    diagnosis in this file) is to say the precise, evidenced thing rather than a phrase merely true in
+    both sub-cases, and the plumbing turned out to be contained to one function + its one caller
+    (`delete`'s belt) + `probe_prefix`'s one-line forwarder — not the invasive `signed_exchange`-wide
+    change the "option 1 is more work" framing implied.
+  - **New test:** `the_belts_203_message_does_not_claim_an_unread_body_when_it_was_read_to_the_cap_and_refused`
+    — same over-cap-but-still-well-formed-XML shape CPE-1706 pins for `list` (a complete root element
+    followed by megabytes of legal padding), sent under a `203` on the belt. Verified it catches the exact
+    blocker by reverting the new arm's guard back to matching on status alone: reproduced the reviewer's
+    quoted contradiction verbatim (`"...so it was refused on its status before its body was ever
+    inspected... Underlying error: ...the response body exceeded the 8388608-byte cap..."`), reverted back
+    before commit.
+- 2026-08-15 — **REQUIRED (done).** Cited CPE-1749 (filed by the Foreman: `read`/`stat` accept any 2xx too,
+  and an unsolicited `206` is real data loss — `Ok([72, 65, 76, 70])`, a truncated file written to disk) in
+  the PR body, so this ticket's "crate-wide" opening line is backed by a scheduled follow-up. Not
+  implemented here — out of this ticket's scope, per the Foreman.
+- 2026-08-15 — **Non-blocking (fixed).** `non_canonical_listing_status_cause` unconditionally appended both
+  the 203 sentence and the 206 sentence regardless of which status actually arrived. Now `match`es on
+  `status` and includes only the sentence that applies (203 → transforming-proxy; 206 → partial/range,
+  explicitly noting this client never sends `Range`; any other non-canonical 2xx → no over-claimed cause).
+- 2026-08-15 — Re-verified: `cargo test -p cpe-s3` 193/193 green (192 + the new blocker test), `cargo
+  clippy --all-targets -- -D warnings` (crates/s3) clean, `cargo test -p cpe-vfs` 21/21 green.
 
 ## Notes
 
