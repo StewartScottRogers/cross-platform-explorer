@@ -522,6 +522,13 @@ mod tests {
                         let mut buf = Vec::new();
                         let _ = d.read_to_end(&mut buf);
                         let path = real_path(&root, &arg);
+                        // **CPE-1742 — this invents the parent chain, and RFC 959 gives `STOR` no
+                        // licence to.** A real daemon answers `550` when the parent is missing, so a
+                        // client can upload to `/a/b/c.txt` against this rig with no `MKD` at all and
+                        // pass. Same family as the `RMD`/`MKD` fixes below, one verb over; left in
+                        // place because removing it changes what a *client* must do before uploading
+                        // (it interacts with CPE-1741). The full reasoning — including a first draft
+                        // of it that measurement falsified — is in the `MKD` arm below.
                         if let Some(p) = path.parent() {
                             let _ = std::fs::create_dir_all(p);
                         }
@@ -539,11 +546,54 @@ mod tests {
                     Ok(()) => send(&mut ctrl, "250 Deleted\r\n"),
                     Err(_) => send(&mut ctrl, "550 Delete failed\r\n"),
                 },
-                "RMD" => match std::fs::remove_dir_all(real_path(&root, &arg)) {
+                // CPE-1731: `remove_dir`, **not** `remove_dir_all`. RFC 959 §4.1.3 defines `RMD` as
+                // "remove the directory" and every real daemon (vsftpd, ProFTPD, pure-ftpd, IIS)
+                // answers `550` with `ENOTEMPTY` when it is not empty — deleting the subtree instead is
+                // behaviour no server this client will ever meet has. A test double that quietly
+                // succeeds where the wire says "directory not empty" lets a client test pass against a
+                // fiction, which is the same "model the wire, do not defend against it" rule CPE-1726
+                // used to leave the `RNTO` rename unguarded, applied in the other direction.
+                //
+                // Measured rather than assumed (both CI platforms): `remove_dir` on a non-empty
+                // directory is `Err` with `raw_os_error 145`/`ERROR_DIR_NOT_EMPTY` on Windows and `39`/
+                // `ENOTEMPTY` on Linux, and the directory and its contents are untouched afterwards.
+                "RMD" => match std::fs::remove_dir(real_path(&root, &arg)) {
                     Ok(()) => send(&mut ctrl, "250 Removed\r\n"),
                     Err(_) => send(&mut ctrl, "550 Remove failed\r\n"),
                 },
-                "MKD" => match std::fs::create_dir_all(real_path(&root, &arg)) {
+                // CPE-1731: `create_dir`, **not** `create_dir_all` — the mirror of the `RMD` fix above,
+                // and found by the reviewer applying this PR's own argument to the verb sitting four
+                // lines from it. RFC 959 §4.1.3 `MKD` is `mkdir(2)`: it creates **one** directory, and a
+                // real daemon answers `550` both for a missing parent and for a name that already
+                // exists. `create_dir_all` succeeded in both — inventing the parent chain in the first,
+                // and reporting `257 "…" created` for a directory it did not create in the second. A
+                // test double that succeeds where the wire refuses lets a client test pass against
+                // behaviour no real server has, which is the whole reason `RMD` changed.
+                //
+                // Cost measured before taking the fix, when the suites stood at 13 and 28 tests: with
+                // `create_dir`, `cpe-ftp` was 13/13 and `cpe-sftp` 28/28 green, so nothing in either
+                // suite depended on the recursion or on `create_dir_all`'s idempotence. (They are 14
+                // and 29 now — this fix brought its own tests. The figures are left as measured rather
+                // than silently updated to today's, since the point they make is about what the suite
+                // looked like *before* the change.)
+                //
+                // **The `create_dir_all` in `STOR` above is deliberately left alone (CPE-1741), and the
+                // first draft of this note gave a reason that measurement falsified.** It claimed
+                // `upload_tree`'s round-trip needed it; removing the call leaves this crate green, and
+                // `cpe-ftp` has no `upload_tree` test at all — the reason was invented, which is the
+                // exact substitution this ticket family exists to stop, so it is recorded rather than
+                // quietly swapped for a better one. **Re-measured at the current suite size** after the
+                // reviewer pointed out the first figure (13/13) had gone stale: still **14/14 green**
+                // with the call removed, so the "nothing here depends on it" claim is this round's
+                // measurement and not an inherited one.
+                //
+                // The real reason is shape, not cost. It is a **different** defect: `STOR` has no
+                // directory-creating semantics to model at all — a real daemon fails outright when the
+                // parent is missing — so fixing it is not "make the primitive match the verb" but
+                // "remove a capability the wire never had", which changes what a *client* must do
+                // before uploading and needs its own client-side change and tests. Filed as CPE-1742
+                // (and it interacts with CPE-1741, `upload_tree`'s unconditional `mkdir(&base)`).
+                "MKD" => match std::fs::create_dir(real_path(&root, &arg)) {
                     Ok(()) => send(&mut ctrl, &format!("257 \"{arg}\" created\r\n")),
                     Err(_) => send(&mut ctrl, "550 Create failed\r\n"),
                 },
@@ -553,6 +603,50 @@ mod tests {
                 }
                 "RNTO" => match rename_from.take() {
                     Some(from) => {
+                        // **CPE-1731: compare the RESOLVED destination against the served root — do not
+                        // enumerate spellings.** `RNTO` with no argument at all was answered
+                        // `250 Renamed`, in a crate CPE-1726 declared *structurally immune* to that
+                        // defect on the grounds that FTP takes both paths from one resolver rather than
+                        // from a second header. True of the source; false of the destination —
+                        // `real_path` maps an empty path *and* `/` to the root, so the rig expressed the
+                        // identical shape the WebDAV half had just been fixed for.
+                        //
+                        // The property is shared, so the implementation is too:
+                        // `cpe_server::fsutil::same_place` is the one CPE-1726 arrived at after five
+                        // rounds of denylists, and its doc carries the whole argument (why it
+                        // canonicalizes when both sides resolve, why the lexical fallback pops `..`, and
+                        // the proof that the pop errs safe). Read it before changing this line.
+                        //
+                        // **Reused after re-measuring, not inherited** — inheriting a claim across these
+                        // three crates is what produced this ticket. CPE-1731's probe ran *this* rig's
+                        // `real_path` over all three escape families on Windows and Linux; the one
+                        // difference that matters is that a wire path is `/`-separated even on Windows,
+                        // so a resolved destination is mixed-separator (`…\cpe-ftp-srv-0\sub/..`).
+                        // `Path::components()` and `canonicalize` both accept that, and every
+                        // root-resolving row still compares equal. Full findings on `same_place`.
+                        //
+                        // **There is deliberately no separate "argument is empty" branch**, tempting as
+                        // a `501 Syntax error in parameters` would be for wire fidelity. An empty
+                        // argument is a *member* of the family this guard closes, and a second check
+                        // that catches it first would keep the headline regression row
+                        // (`RNTO` with no argument) green with this comparison deleted — masking exactly
+                        // the guard the row exists to prove. One guard, so neutralising it goes red.
+                        //
+                        // **The SOURCE side is deliberately NOT guarded, and the gap is real:**
+                        // `RNFR /` + `RNTO /elsewhere` still renames the served root itself into a
+                        // subdirectory. Out of scope by choice, not by oversight — this ticket's subject
+                        // is the destination, `cpe-webdav` has the identical asymmetry recorded at its
+                        // own MOVE (`DELETE /` removes the root outright there), and a source guard
+                        // needs the containment check CPE-1730 is opening. Recorded here so the next
+                        // sweep reads it as a decision rather than as an absence nobody noticed.
+                        let dest = real_path(&root, &arg);
+                        if cpe_server::fsutil::same_place(&dest, &root) {
+                            // RFC 959 §4.2: `553 Requested action not taken. File name not allowed.` —
+                            // the reply for a destination name a server refuses to accept, and a `5xx`
+                            // so `suppaftp` surfaces it as an error rather than a rename that happened.
+                            send(&mut ctrl, "553 Rename destination is the served root\r\n");
+                            continue;
+                        }
                         // CPE-1726 re-took CPE-1710's classification against a **measurement** instead of
                         // a category ("it is a protocol server" is a category). DELIBERATELY UNGUARDED —
                         // do not wrap this in `cpe_server::fsutil::rename_into_slot`; the measurement is:
@@ -582,7 +676,7 @@ mod tests {
                         // What `fs::rename` does to a link at the destination is pinned, not assumed, by
                         // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
                         #[allow(clippy::disallowed_methods)]
-                        match std::fs::rename(real_path(&root, &from), real_path(&root, &arg)) {
+                        match std::fs::rename(real_path(&root, &from), &dest) {
                             Ok(()) => send(&mut ctrl, "250 Renamed\r\n"),
                             Err(_) => send(&mut ctrl, "550 Rename failed\r\n"),
                         }
@@ -869,6 +963,293 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1731 — the destination that resolves to the served root, and the empty-only verb
+    // ---------------------------------------------------------------------------------------------
+
+    /// Log in over a **raw** control connection and drive one `RNFR`/`RNTO` pair, returning the reply
+    /// to the `RNTO`.
+    ///
+    /// Raw because `suppaftp`'s `rename` takes two `&str`s and always emits `RNTO <arg>` — it cannot
+    /// express the case the bug was reported in, `RNTO` with **no argument at all**. `to: None` sends
+    /// the bare verb; `Some(s)` sends `RNTO s`.
+    ///
+    /// Every step `expect`s or asserts, so a harness that fails to connect, log in or get its `RNFR`
+    /// accepted is a loud panic rather than an empty string that would satisfy a "the tree survived"
+    /// assertion by accident.
+    fn rnfr_rnto(port: u16, from: &str, to: Option<&str>) -> String {
+        let mut sock = TcpStream::connect(("127.0.0.1", port)).expect("connect to the rig");
+        // libtest has no per-test timeout, so a rig that never answers would hang the suite rather
+        // than fail it. Bound every read.
+        sock.set_read_timeout(Some(std::time::Duration::from_secs(10))).expect("set a read timeout");
+        let mut reader = BufReader::new(sock.try_clone().expect("clone the control socket"));
+        let mut reply = |w: &mut TcpStream, send: Option<&str>| -> String {
+            if let Some(s) = send {
+                w.write_all(format!("{s}\r\n").as_bytes()).expect("send a control command");
+            }
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read a control reply");
+            line
+        };
+
+        assert!(reply(&mut sock, None).starts_with("220"), "the rig must greet with 220");
+        assert!(reply(&mut sock, Some("USER user")).starts_with("331"), "USER must ask for a password");
+        assert!(reply(&mut sock, Some("PASS pw")).starts_with("230"), "PASS must log us in");
+        assert!(
+            reply(&mut sock, Some(&format!("RNFR {from}"))).starts_with("350"),
+            "RNFR must be accepted, or the RNTO below tests nothing"
+        );
+        let rnto = match to {
+            Some(t) => reply(&mut sock, Some(&format!("RNTO {t}"))),
+            None => reply(&mut sock, Some("RNTO")),
+        };
+        let _ = reply(&mut sock, Some("QUIT"));
+        rnto
+    }
+
+    /// CPE-1731 acceptance: an `RNTO` whose destination **resolves to the served root** is refused.
+    ///
+    /// The defect this replaces answered `250 Renamed` to an `RNTO` carrying no argument — verbatim the
+    /// WebDAV defect CPE-1726 had just fixed, in the crate that PR declared *structurally immune* to it.
+    ///
+    /// # What the rows are, and what they are not
+    /// **Regression pins, not a specification.** CPE-1726 shipped a table like this three times and the
+    /// UAT falsified each one on the code that carried it; the fix is the resolved comparison in
+    /// `handle_control`, and these record which spellings have actually been observed escaping a
+    /// previous round. The families are here as the cheapest available evidence that the comparison
+    /// closes *families* rather than members:
+    /// 1. `.`-and-`/` spellings (what CPE-1726's round-3 denylist let through);
+    /// 2. `..` landing **on** the root (what its round-4 lexical comparison let through);
+    /// 3. spellings the *filesystem* calls equal — Windows-only, in
+    ///    `cpe_1731_an_rnto_naming_the_root_by_another_spelling_is_refused` below, because on Linux they
+    ///    are genuinely different places *and* unreachable through `real_path`'s leading-`/` trim.
+    ///
+    /// # The source is a column, not a function of the expected status
+    /// Each row carries its own `RNFR` argument. CPE-1726's equivalent table first derived the source
+    /// from the row's expected status (`if want == "400" {…}`), which worked only by coincidence — a
+    /// proxy standing in for a property, in the one file whose subject is that substitution. Here the
+    /// root-resolution rows send `RNFR /` because **that is the shape the bug was reported in**, and it
+    /// is the only source that reproduces it: with the guard deleted and a *file* source, the rig
+    /// answers `550` (renaming a file onto an existing non-empty directory fails) — a red produced by
+    /// an errno rather than by the defect. With `RNFR /` it answers `250 Renamed` for a rename that did
+    /// nothing, which is the defect verbatim. Being saved by an errno is not the same as being guarded.
+    ///
+    /// # The last row is a positive control, and it is load-bearing
+    /// Without it, a harness that silently failed to drive the rig at all would satisfy every refusal
+    /// row. The control asserts `readme.txt`'s **bytes** arrive at the new name and the old name is
+    /// gone — so the refusals above are measured against a connection that demonstrably can rename.
+    ///
+    /// # What the filesystem assertions can and cannot catch here — stated rather than implied
+    /// They **cannot fail today**, and pretending otherwise would be the vacuous-assertion trap this
+    /// sprint keeps finding. A destination that resolves to the root cannot destroy anything: renaming
+    /// the root onto itself is a no-op, and renaming a file onto the populated root fails. So the
+    /// observable defect is the *reply* — a success reported for a rename that never happened, which a
+    /// client will believe and then delete its source. The tree assertions are kept as the cheap thing
+    /// that goes red if a future change ever makes this shape destructive, not as this test's evidence.
+    #[test]
+    fn cpe_1731_an_rnto_whose_destination_resolves_to_the_served_root_is_refused() {
+        // (RNFR argument, RNTO argument as sent on the wire, expected reply prefix, why)
+        let cases: &[(&str, Option<&str>, &str, &str)] = &[
+            ("/", None, "553", "no argument at all — the shape the ticket was filed on"),
+            ("/", Some("/"), "553", "a bare `/` — `real_path` maps it to the root"),
+            ("/", Some("//"), "553", "two slashes — survived CPE-1726's round-2 pre-trim filter"),
+            ("/", Some("///"), "553", "three slashes — same evasion"),
+            ("/", Some("."), "553", "a bare `.`"),
+            // Family 1 — the four the round-3 UAT measured returning success against a literal
+            // denylist of `""` and `"."`. Each trims to something that is neither literal.
+            ("/", Some("/."), "553", "`/.` — trims to `.`"),
+            ("/", Some("/./"), "553", "`/./` — trims to `./`, neither denied literal"),
+            ("/", Some("/.//"), "553", "`/.//` — a CurDir component then an empty one"),
+            ("/", Some("//./"), "553", "`//./` — leading empty component before the dot"),
+            ("/", Some("/./."), "553", "`/./.` — two CurDir components, no trailing slash"),
+            ("/", Some("//."), "553", "`//.` — slashes then a dot"),
+            // Family 2 — `..` landing ON the root rather than escaping it. Round 4 preserved `..` on
+            // the theory that popping it strayed into CPE-1730's containment scope; these escape
+            // nothing, need no knowledge of the server, and resolve to the served root.
+            ("/", Some("/nonexistent/.."), "553", "`..` popping a name that never existed"),
+            ("/", Some("/sub/.."), "553", "`..` popping a real subdirectory"),
+            ("/", Some("/./sub/../."), "553", "`..` and `.` mixed, still the root"),
+            // The positive control (see the doc above).
+            ("/readme.txt", Some("/renamed.txt"), "250", "an ordinary destination must still be renamed"),
+        ];
+
+        for (source, dest, want, why) in cases {
+            let (port, root) = exact_server();
+            let reply = rnfr_rnto(port, source, *dest);
+
+            if *want == "250" {
+                assert_eq!(
+                    std::fs::read(root.join("renamed.txt")).ok().as_deref(),
+                    Some(FILE_BODY),
+                    "[{why}] the control row must actually move the file's bytes, or every refusal \
+                     row above is measured against a rig that renames nothing (reply {reply:?})"
+                );
+                assert!(
+                    !root.join(FILE_NAME).exists(),
+                    "[{why}] and the source name must be gone (reply {reply:?})"
+                );
+            } else {
+                assert_eq!(
+                    std::fs::read(root.join(FILE_NAME)).ok().as_deref(),
+                    Some(FILE_BODY),
+                    "[{why}] the served tree must be intact after a refusal (reply {reply:?})"
+                );
+                assert!(
+                    root.join(DIR_NAME).join("nested.txt").is_file(),
+                    "[{why}] and so must its subdirectory (reply {reply:?})"
+                );
+            }
+            assert!(
+                reply.starts_with(want),
+                "[{why}] expected a {want} reply. A destination that resolves to the served root is a \
+                 refusal, not a rename the server reports as done. Got {reply:?}"
+            );
+        }
+    }
+
+    /// Family 3: the served root spelled in a way **only the filesystem** knows is the same place.
+    ///
+    /// Windows matches names case-insensitively and strips trailing dots, while `PathBuf` equality
+    /// compares `Component::Normal` byte-wise — so this is the row `normalise_lexically` alone cannot
+    /// answer, and the reason `fsutil::same_place` consults `canonicalize`. Removing that half turns
+    /// exactly this test red and leaves the table above green (measured; see the PR body).
+    ///
+    /// **Windows-only, and measured rather than assumed.** `real_path` trims the leading `/` before
+    /// joining, so on Linux an absolute destination becomes a *relative* one and lands inside the root
+    /// (`/tmp/<root>` resolved to `<root>/tmp/<root>`, `same_place = false` — measured under WSL). On a
+    /// case-sensitive filesystem these spellings are genuinely different places anyway. Two independent
+    /// reasons there is nothing to catch there; on Windows a `C:\…` destination survives the trim and
+    /// `Path::join` discards the base, so it arrives as the spelling itself.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1731_an_rnto_naming_the_root_by_another_spelling_is_refused() {
+        for (spell, why) in [
+            ("upper-case", "Windows matches names case-insensitively"),
+            ("trailing dot", "Windows strips a trailing dot during path processing"),
+        ] {
+            let (port, root) = exact_server();
+            let literal = root.to_string_lossy().to_string();
+            let dest = if spell == "upper-case" { literal.to_uppercase() } else { format!("{literal}.") };
+
+            // `RNFR /` for the same reason the table above uses it: it is the source that reproduces
+            // the defect (a `250` for a rename that did nothing) rather than one an errno stops.
+            let reply = rnfr_rnto(port, "/", Some(&dest));
+
+            assert_eq!(
+                std::fs::read(root.join(FILE_NAME)).ok().as_deref(),
+                Some(FILE_BODY),
+                "[{spell}] the served tree must survive a rename onto a different spelling of the root \
+                 ({why}); reply {reply:?}"
+            );
+            assert!(
+                reply.starts_with("553"),
+                "[{spell}] {why}, so this destination IS the served root and must be refused. Byte-wise \
+                 path equality does not know that, which is why the check consults the filesystem. Got \
+                 {reply:?}"
+            );
+        }
+    }
+
+    /// CPE-1731 acceptance: `RMD` is the **empty-directory** verb (RFC 959 §4.1.3), so a non-empty
+    /// directory is refused and its contents survive.
+    ///
+    /// The rig implemented it with `remove_dir_all`, which deleted the tree and answered `250 Removed`
+    /// — behaviour no real daemon has, and the mirror image of CPE-1726's thesis (which had WebDAV as
+    /// the crate that got its verb semantics wrong; WebDAV's `DELETE` is correctly recursive).
+    ///
+    /// **Asserted on the filesystem, and on the exact file the tree seeder created** — not on the reply
+    /// and not on a bare `!exists()`. A negative assertion guarded by a filename typed twice passes
+    /// vacuously the moment the two drift, so `nested.txt`'s **bytes** are what is checked, and the
+    /// positive control below proves `RMD` still works on the case it is defined for. Unlike the rename
+    /// family above, these assertions can and do fail: with `remove_dir_all` restored, the tree is
+    /// genuinely gone.
+    #[test]
+    fn cpe_1731_rmd_refuses_a_non_empty_directory_and_leaves_it_intact() {
+        let (port, root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        // `delete` tries DELE first (fails — it is a directory), then RMD. The seeded `sub` holds
+        // `nested.txt`, so RMD must refuse.
+        let r = provider.delete(&format!("/{DIR_NAME}"));
+        assert!(
+            root.join(DIR_NAME).is_dir(),
+            "the non-empty directory itself must survive an empty-only verb (delete reported {r:?})"
+        );
+        assert_eq!(
+            std::fs::read(root.join(DIR_NAME).join("nested.txt")).ok().as_deref(),
+            Some(&b"deep"[..]),
+            "and its contents must still be there, byte for byte — `RMD` is not a recursive delete \
+             (delete reported {r:?})"
+        );
+        assert!(r.is_err(), "a refusal the client reads as success is the CPE-1726 failure shape");
+
+        // Positive control: `RMD` on the directory it IS defined for still works, so the assertions
+        // above are not measuring a verb that simply stopped functioning.
+        provider.mkdir("/emptydir").expect("mkdir");
+        provider.delete("/emptydir").expect("RMD must still remove an EMPTY directory");
+        assert!(!root.join("emptydir").exists(), "the empty directory must actually be gone");
+    }
+
+    /// CPE-1731 (reviewer's find): `MKD` is `mkdir(2)`, so it creates **one** directory — a missing
+    /// parent is refused rather than invented, and an existing name is refused rather than reported
+    /// created.
+    ///
+    /// Same argument as `cpe_1731_rmd_refuses_a_non_empty_directory_and_leaves_it_intact`, applied to
+    /// the verb four lines away from it in `handle_control`. It was found by the reviewer noticing that
+    /// this PR wrote the argument down and then walked past the sibling.
+    ///
+    /// # The missing-parent row is the one with real filesystem evidence, and it is not vacuous
+    /// `!root.join("nope").exists()` is a **negative** assertion, which passes for free if the path is
+    /// wrong — the trap a reviewer found elsewhere in this sprint. So the same path string is
+    /// independently established as creatable: after `MKD /nope` succeeds, `MKD /nope/deeper` must
+    /// succeed too. That proves the earlier refusal was about the absent parent and not about a name
+    /// the rig could never have created, and it proves `real_path` maps this string where the test
+    /// thinks it does.
+    ///
+    /// # The already-exists row's filesystem assertion cannot fail today, and says so
+    /// `create_dir_all` on an existing directory destroys nothing, so the observable defect there is
+    /// the *reply*: `257 "…" created` for a directory the server did not create. The contents check is
+    /// kept as the cheap thing that goes red if that ever stops being true.
+    #[test]
+    fn cpe_1731_mkd_creates_one_directory_and_refuses_a_missing_parent_or_an_existing_name() {
+        let (port, root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        // ── A missing parent is refused, and NOT invented.
+        let r = provider.mkdir("/nope/deeper");
+        assert!(
+            !root.join("nope").exists(),
+            "`MKD` must not invent the parent chain — RFC 959 gives it one directory (mkdir reported \
+             {r:?})"
+        );
+        assert!(r.is_err(), "and the client must be told so, not handed a 257 for a chain it created");
+
+        // ── …and the very same path is creatable once its parent exists, so the negative above was
+        // about the missing parent rather than about an unmappable name.
+        provider.mkdir("/nope").expect("MKD must create one directory");
+        assert!(root.join("nope").is_dir(), "the parent must now exist on disk");
+        provider.mkdir("/nope/deeper").expect("MKD must succeed once the parent is there");
+        assert!(
+            root.join("nope").join("deeper").is_dir(),
+            "and the child must land exactly where the refused call named"
+        );
+
+        // ── An existing name is refused rather than reported created.
+        let r = provider.mkdir(&format!("/{DIR_NAME}"));
+        assert_eq!(
+            std::fs::read(root.join(DIR_NAME).join("nested.txt")).ok().as_deref(),
+            Some(&b"deep"[..]),
+            "the existing directory's contents must be untouched (mkdir reported {r:?})"
+        );
+        assert!(
+            r.is_err(),
+            "a real daemon answers 550 for a name that already exists; reporting `257 \"…\" created` \
+             for a directory it did not create is the fiction this ticket is about"
+        );
     }
 
     #[test]

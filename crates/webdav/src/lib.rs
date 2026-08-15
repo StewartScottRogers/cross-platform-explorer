@@ -564,165 +564,6 @@ mod tests {
         let _ = req.as_reader().read_to_end(&mut body);
         let real = root.join(url.trim_start_matches('/'));
 
-        /// Resolve `.` and `..` lexically so two spellings of the same place compare equal.
-        ///
-        /// It exists so the MOVE handler can ask *"does this destination resolve to the served
-        /// root?"* without enumerating `/`, `//`, `/.`, `/./`, `/.//`, `//./`, `/./.` … — a denylist
-        /// that was incomplete three rounds running.
-        ///
-        /// **This function does not close the `/./` family, and an earlier version of this doc
-        /// claimed it did.** `Path::components()` already drops every non-leading `CurDir` before
-        /// anything here runs — probe: `Path::new(r"C:\tmp\rig\.\.").components()` yields
-        /// `[Prefix, RootDir, "tmp", "rig"]`, no `CurDir` at all. Deleting the `CurDir` arm below
-        /// leaves all six tests green; deleting the whole filter at the commit before `..` popping
-        /// was added left all 25 green. The arm is kept as a total match over `Component` rather
-        /// than as load-bearing code, and the `/./` rows do not even reach here now that
-        /// `canonicalize` short-circuits them. Recorded because crediting a function with work the
-        /// standard library had already done is the same over-attribution this PR keeps finding in
-        /// other people's comments. (PR #902 review.)
-        ///
-        /// **`..` is popped, and that changed in round 4.** Round 4 first *preserved* `..`, reasoning
-        /// that popping it would turn this into a containment check and containment is CPE-1730's
-        /// scope. The UAT showed the reasoning had skipped a case: `/nonexistent/..` escapes nothing
-        /// and needs no knowledge of the server, but lands **exactly on the served root** — so it was
-        /// a destination that resolved to the root, in a guard whose entire subject is destinations
-        /// that resolve to the root, answered `201 Created`. Same for `/sub/..`, `/./sub/../.`, and
-        /// every other spelling of the shape.
-        ///
-        /// So `..` pops a preceding ordinary component. What it does **not** do is claim containment:
-        /// a `..` with nothing to pop is *kept*, so `/../x` normalises to a path still carrying `..`,
-        /// compares unequal to the root, and is allowed through to `fs::rename` — which is the
-        /// documented CPE-1730 escape, unchanged by this.
-        ///
-        /// **Lexical `..` resolution is not sound in the presence of symlinks** (`a/link/..` need not
-        /// be `a`) — and the *direction* of that unsoundness is what bounds it. It errs **safe**:
-        ///
-        /// 1. If `canonicalize` succeeds on **both sides**, the filesystem decides and this function
-        ///    never runs.
-        /// 2. So the lexical path runs only when at least one side failed to canonicalize. When that
-        ///    failure is `ENOENT`, the path has no true resolution to disagree with — in particular
-        ///    it cannot have a symlink as its *final* component, because that component does not
-        ///    exist. **This step covers `ENOENT` only.** For the other failure modes `same_place`
-        ///    enumerates — `EACCES` on a parent, `ELOOP`, `ENAMETOOLONG` — the path may well exist,
-        ///    may have a symlink final component, and does have a true resolution we simply cannot
-        ///    see.
-        /// 3. For everything that reaches here — **for any reason, including those cases** — popping
-        ///    only makes the path *shorter*, hence *more* likely to equal the root, hence more likely
-        ///    to **refuse**. Step 3 holds unconditionally, which is why the bound survives step 2's
-        ///    narrower scope.
-        ///
-        /// There is no input for which popping makes a root-destination compare unequal. The unsound
-        /// direction refuses a legitimate move; it can never allow one onto the root.
-        ///
-        /// Step 2 previously stated its `ENOENT` reasoning over *every* `canonicalize` failure. The
-        /// conclusion was never at risk — it rests on step 3 — but the justification was wider than
-        /// its evidence, which is the exact family this paragraph exists to bound, appearing inside
-        /// the paragraph. It took three passes to see, the third being the reviewer's. (PR #902.)
-        ///
-        /// **Step 1 is stated over `canonicalize`'s result, not over "the destination exists", and
-        /// that distinction is load-bearing on Windows.** An earlier draft said "if the destination
-        /// exists" — which is Linux-shaped and false here. Measured:
-        ///
-        /// ```text
-        /// LINUX   canonicalize("nonexistent/..")      -> Err ENOENT
-        /// WINDOWS canonicalize("nonexistent\..")      -> Ok, equals_root = true
-        /// WINDOWS canonicalize("nonexistent\..\..\")  -> Ok, equals_root = false
-        /// ```
-        ///
-        /// Win32 strips `..` during path processing, before the open, so the short-circuit fires for
-        /// a path that does not exist as spelled. That makes the short-circuit set *larger* on
-        /// Windows, hence the residual set smaller — the bound tightens rather than breaking.
-        ///
-        /// And the wider set is **correct**, not merely tolerated, because `fs::rename` goes through
-        /// the same Win32 path processing — `MoveFileExW` performs the identical `..` stripping, so
-        /// `canonicalize`'s answer describes exactly the path the primitive will act on. Measured:
-        ///
-        /// ```text
-        /// rename -> "...\cpe-mv-35248\nonexistent/../landed.txt" = Ok(())
-        /// landed at root/landed.txt = true
-        /// ```
-        ///
-        /// That is the **mechanism** behind the probe table below: on Windows the guard and the
-        /// primitive agree by construction; on Linux `canonicalize` refuses and the lexical pop is
-        /// what agrees with `rename`'s own `ENOENT`. Each half is load-bearing on exactly one
-        /// platform for a reason, not by coincidence. (PR #902 review, which supplied both the
-        /// correction and the measurements.)
-        fn normalise_lexically(p: &std::path::Path) -> std::path::PathBuf {
-            let mut out: Vec<std::path::Component> = Vec::new();
-            for c in p.components() {
-                match c {
-                    std::path::Component::CurDir => {}
-                    std::path::Component::ParentDir => {
-                        // Pop only an ordinary name. A `..` above a prefix/root — or above another
-                        // surviving `..` — is kept, so this never silently claims containment.
-                        if matches!(out.last(), Some(std::path::Component::Normal(_))) {
-                            out.pop();
-                        } else {
-                            out.push(c);
-                        }
-                    }
-                    _ => out.push(c),
-                }
-            }
-            out.iter().collect()
-        }
-
-        /// Does `dest` name the same place as `root`?
-        ///
-        /// Lexical normalisation alone is not enough on Windows, which the round-4 UAT measured: the
-        /// filesystem matches names **case-insensitively** and **strips trailing dots**, while
-        /// `PathBuf` equality compares `Component::Normal` byte-wise. So a `Destination` naming the
-        /// served root as `...\CPE-WEBDAV-47084` or `...\cpe-webdav-47084.` compared unequal and was
-        /// answered `201 Created` on a rename onto the root.
-        ///
-        /// `canonicalize` answers exactly that question and is the filesystem's own opinion rather
-        /// than a table of its rules — but it requires the path to **exist**, and a MOVE to a
-        /// not-yet-existing name is the ordinary case. So: canonicalize when both sides resolve, fall
-        /// back to the lexical comparison when they do not. The fallback is what handles the common
-        /// `/`, `/./`, `/sub/..` shapes, none of which need the filesystem.
-        ///
-        /// **"When they do not resolve" means any `Err`, not just "does not exist"** — `EACCES` on a
-        /// parent, `ELOOP`, `ENAMETOOLONG`, a Windows sharing violation. In those cases this silently
-        /// becomes the byte-wise comparison, with the case-insensitivity and trailing-dot blind spots
-        /// that motivated `canonicalize` in the first place. That degrade is **kept deliberately**
-        /// (PR #902 review): the tempting alternative — refuse if *either* comparison says
-        /// same-place — is wrong, because for `root/link/..` where `link` leaves the tree
-        /// `canonicalize` is right to say "different place, allow", and OR-ing the lexical answer
-        /// would refuse a legitimate move. The degrade is also narrow: every spelling that *needs*
-        /// `canonicalize` requires the client to know the absolute root path, which is CPE-1730's
-        /// territory rather than this guard's. What was missing was the bound, not a behaviour
-        /// change — an unbounded "falls back when they do not resolve" reads as "when the path does
-        /// not exist", and that is not what the code does.
-        /// **The two halves overlap on Windows, and the guard-neutralisation probes say so plainly:**
-        ///
-        /// **Each half is load-bearing on exactly one platform, and neither is redundant** — measured
-        /// on both, the second column by the round-5 UAT:
-        ///
-        /// | probe | Windows | Linux |
-        /// |---|---|---|
-        /// | `canonicalize` removed | **red** (spelling rows) | pass |
-        /// | `..` popping removed | pass | **red** (`..` rows) |
-        /// | both removed | **red** | **red** |
-        ///
-        /// Windows normalises `..` during path processing, so `root\nonexistent\..` opens as `root`
-        /// and `canonicalize` succeeds even though `nonexistent` does not exist — which is why the
-        /// lexical pop looks redundant there. Linux resolves `..` against real directories, so that
-        /// call fails and the pop is the only thing left. Conversely `canonicalize` is what catches
-        /// the case-insensitive and trailing-dot spellings, which only exist on Windows.
-        ///
-        /// This table was first written with the Linux column as *reasoning* and marked as such; the
-        /// UAT then built a toolchain inside WSL and measured it. One detail the reasoning had wrong:
-        /// with the pop removed, Linux answers the `..` rows **404, not 201** — the guard does not
-        /// fire and the request is stopped only by an errno. The test still goes red, and being saved
-        /// by an errno is not the same as being guarded, which is the distinction this whole file
-        /// keeps turning on.
-        fn same_place(dest: &std::path::Path, root: &std::path::Path) -> bool {
-            if let (Ok(a), Ok(b)) = (dest.canonicalize(), root.canonicalize()) {
-                return a == b;
-            }
-            normalise_lexically(dest) == normalise_lexically(root)
-        }
-
         match method.as_str() {
             "PROPFIND" => match std::fs::metadata(&real) {
                 Ok(meta) => {
@@ -912,11 +753,16 @@ mod tests {
                 // whether the destination **resolves to the root** closes the family: every path built
                 // from `.` and `/` components normalises to the same place, and this compares that place.
                 //
-                // `canonicalize` is deliberately not used — it requires the path to exist, and a MOVE to
-                // a not-yet-existing name is the ordinary case. Lexical normalisation is enough here
-                // because the rig's own resolver is lexical; genuine containment (`..` escaping the root)
-                // is CPE-1730's scope, and this is not a substitute for it.
-                if same_place(&dest_real, root) {
+                // **`same_place` now lives in `cpe_server::fsutil` (CPE-1731), not in this function.**
+                // Two lines below this one used to say *"`canonicalize` is deliberately not used"* —
+                // stale since round 5 added it, and left behind describing the opposite of what the code
+                // did. It moved because CPE-1731 needed the identical property in `cpe-ftp`'s `RNTO` and
+                // `cpe-sftp`'s `rename`: this ticket family exists because a claim proved about one
+                // crate was assumed to hold for the others, so the three rigs now share one
+                // implementation rather than three copies that can drift. The whole argument — the
+                // `..`-popping safety proof, the per-platform table, why the fallback triggers on any
+                // `canonicalize` error — moved with it, verbatim, and is on `fsutil::same_place`.
+                if cpe_server::fsutil::same_place(&dest_real, root) {
                     let _ = req.respond(tiny_http::Response::empty(400));
                     return;
                 }
