@@ -3,11 +3,11 @@ id: CPE-1737
 title: An S3 object and prefix sharing a name produce two rows with an identical path, which the keyed each cannot render
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 Filed from the CPE-1727 (PR #903) UAT round 3, which measured the listing and found the duplicate. The
