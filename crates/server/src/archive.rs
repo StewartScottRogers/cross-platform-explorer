@@ -384,10 +384,22 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   `start_archive_extract` calls, so this is reachable from the shipping UI. Its own ticket:
 //   **CPE-1746**.
 //
-// Deliberately **not** pinned by tests: pinning behaviour we consider wrong makes it harder to change.
-// Recorded here, with tickets, because CPE-1718 established that an unrecorded absence is
-// indistinguishable from an overlooked one — and the PR #906 review added the corollary that a recorded
-// absence with no ticket is one nobody is scheduled to fix.
+// **All four behaviours above are now pinned by tests**, one per extractor:
+// `tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it` (both tar paths),
+// `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` and
+// `sevenz_extraction_still_writes_through_a_link_until_cpe_1746`.
+//
+// An earlier round of this comment declined to pin them, on the grounds that pinning behaviour we
+// consider wrong makes it harder to change. That argument does not survive what happened here: the
+// sentence these paragraphs replaced was **prose, unpinned, and wrong in two of the three cases it
+// described**, and it survived four commits and reached the user-facing docs. Prose is not cheaper to
+// keep true — it is merely cheaper to leave false. So each behaviour is asserted with a message that
+// names the ticket allowed to change it (CPE-1744 for tar and the ZIP divergence, CPE-1746 for 7z) and
+// says which other places must move in the same commit. A characterization test does not endorse the
+// behaviour; it makes the fix announce itself instead of drifting away from four descriptions of it.
+// CPE-1718 established that an unrecorded absence is indistinguishable from an overlooked one; the
+// PR #906 review added that a recorded absence with no ticket is one nobody is scheduled to fix; this
+// round adds that an unpinned description is one nobody is scheduled to keep true.
 //
 // ## Why the guard on rows 6–14 is the **link** half only
 //
@@ -2630,9 +2642,11 @@ mod tests {
     /// **Platform boundary** (PR #906 review — every other figure in this ticket states one and this doc
     /// did not): the `"CLOBBERED"` figure above is Windows 11. The leg itself runs on all three CI OSes.
     ///
-    /// **Scope:** this walks `GUARDED_ROWS`, which is rows 6–14 only. **Rows 15–16 have no live-link
-    /// leg** — their dangling legs below cover them, and the same `refuse_link_at_new_file` call decides
-    /// all sixteen, so the live arm is exercised by rows 6–14. Said rather than left to inference.
+    /// **Scope:** this walks `GUARDED_ROWS`, which is rows 6–14 — the rows that refuse the whole
+    /// operation. Rows 15–16 skip a single entry instead, so they cannot share this table's
+    /// `expect_err`; their live-link leg is
+    /// `rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest` below, added in the round after the
+    /// PR #906 review pointed out that saying they had none was not the same as giving them one.
     #[test]
     fn every_guarded_row_refuses_a_live_link_without_touching_its_target() {
         for (n, link_name, run) in GUARDED_ROWS {
@@ -2792,6 +2806,328 @@ mod tests {
             fs::read(dest.join("b.txt")).unwrap(),
             b"ARCHIVED B".to_vec(),
             "row 16: the entries that did not hit a link must still extract"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // -----------------------------------------------------------------------
+    // CPE-1733 round 2 — the legs the PR #906 review and UAT found missing
+    // -----------------------------------------------------------------------
+
+    /// Stage a **live** file symlink at `link` pointing at `victim`; `false` if this machine cannot.
+    ///
+    /// A live *file* symlink is the one thing this repo cannot fake (a junction is directory-only and a
+    /// hard link answers `is_symlink() == false`, CPE-1716), so every caller pairs this with
+    /// `fsutil::require_staged` — a runner that *should* be able to stage one goes red rather than
+    /// silently covering nothing (CPE-1717).
+    fn stage_live_link(victim: &Path, link: &Path) -> bool {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(victim, link).is_ok()
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(victim, link).is_ok()
+        }
+    }
+
+    /// `src/a.txt` + `src/b.txt` under `d`, as the source list the compressors take. `a.txt` is the entry
+    /// aimed at the staged link; `b.txt` is the innocent bystander whose fate says whether the run
+    /// **skipped one entry** or **abandoned the archive**.
+    fn two_source_files(d: &Path) -> Vec<String> {
+        let src = d.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("a.txt"), b"ARCHIVED A").unwrap();
+        fs::write(src.join("b.txt"), b"ARCHIVED B").unwrap();
+        vec![
+            src.join("a.txt").to_string_lossy().to_string(),
+            src.join("b.txt").to_string_lossy().to_string(),
+        ]
+    }
+
+    /// **Rows 15–16 against a LIVE link** (PR #906 review, non-blocking finding: "rows 15/16 have no
+    /// live-link leg").
+    ///
+    /// The dangling legs above cannot show the thing that actually costs the user something. A dangling
+    /// link has no target yet, so the worst a missing guard does is *create* a file; a **live** link has
+    /// a victim with bytes in it, and `File::create` through one truncates them — measured for this
+    /// ticket at `victim bytes = Some("CLOBBERED")`. The previous round answered this by writing down
+    /// that the leg walked rows 6–14 only. A stated absence is still an absence: this is the leg.
+    ///
+    /// Ordering is deliberate and is the lesson this ticket family keeps re-learning: **the victim is
+    /// asserted before the `Result` is unwrapped**, because these bugs return `Ok`. Unwrap first and the
+    /// assertion that names the damage never runs.
+    #[test]
+    fn rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest() {
+        // (row, function under test, runs it, does it have somewhere to record the skip?)
+        type Run = fn(&Path, &Path) -> Result<Vec<String>, String>;
+        let rows: &[(u8, &str, Run, bool)] = &[
+            (
+                15,
+                "extract_zip_encrypted",
+                |d: &Path, dest: &Path| {
+                    let zip = d.join("enc.zip");
+                    compress_to_zip_encrypted(&two_source_files(d), &zip.to_string_lossy(), "hunter2")?;
+                    extract_zip_encrypted(&zip.to_string_lossy(), &dest.to_string_lossy(), "hunter2")
+                        .map(|_| Vec::new())
+                },
+                false, // predates `ArchiveReport`; the skip is silent, and the table says so
+            ),
+            (
+                16,
+                "extract_zip_archive_stream",
+                |d: &Path, dest: &Path| {
+                    let zip = d.join("plain.zip");
+                    compress_to_zip(&two_source_files(d), &zip.to_string_lossy())?;
+                    let cancel = AtomicBool::new(false);
+                    extract_archive_streamed(&zip.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {})
+                        .map(|r| r.errors)
+                },
+                true,
+            ),
+        ];
+
+        for (n, label, run, records) in rows {
+            let d = scratch(&format!("cpe1733_row{n}_livelink"));
+            let victim = d.join("victim-the-user-never-named.bin");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let link = dest.join("a.txt");
+            if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+                crate::skip_notice!(
+                    "[CPE-1733] SKIPPED row {n}'s LIVE-link leg: this machine could not create a file \
+                     symlink at {}. The dangling leg passes under a live-link-blind guard, so nothing \
+                     covered the case that destroys existing bytes on this run.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&d);
+                return;
+            }
+
+            let outcome = run(&d, &dest);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "row {n} ({label}): the entry's bytes went THROUGH the link and truncated a file outside \
+                 the destination that nobody named (outcome was {outcome:?})"
+            );
+            assert!(
+                fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+                "row {n} ({label}): the link must survive untouched — a guard that deleted it and then \
+                 skipped would pass the assertion above (outcome was {outcome:?})"
+            );
+            let errors = outcome
+                .unwrap_or_else(|e| panic!("row {n} ({label}): one poisoned entry must not abort the run: {e}"));
+            if *records {
+                assert!(
+                    errors.iter().any(|e| e.contains("a.txt") && e.contains("is a link")),
+                    "row {n} ({label}): the skip must be RECORDED, and recorded as OUR link refusal rather \
+                     than as whatever the OS happened to say — got {errors:?}"
+                );
+            }
+            assert_eq!(
+                fs::read(dest.join("b.txt")).unwrap(),
+                b"ARCHIVED B".to_vec(),
+                "row {n} ({label}): a skip must cost ONE entry — the rest of the archive still extracts"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// **TAR does not follow a link at an entry's name — it DESTROYS it** (UAT finding 1).
+    ///
+    /// This module used to assert, in four places including the user-facing docs, that a pre-existing link
+    /// in the destination "is therefore still followed on the tar, 7z and one-shot-zip paths". That was an
+    /// inference from "we do not guard it", it was never measured, and it is false for two of the three.
+    /// The correction is written up in the section comment; this is the leg that keeps it true. A prose
+    /// correction is exactly as unpinned as the prose it corrected.
+    ///
+    /// **This is a characterization test, not an endorsement.** `tar`'s `Archive::unpack` creates the file
+    /// inside the `tar` crate, so this module has no create site here to guard; the behaviour recorded is
+    /// the crate's: it unlinks the symlink and writes a regular file in its place, silently, returning
+    /// `Ok`. The victim's bytes survive — the *user's link* is what is gone. Tracked as **CPE-1744**; when
+    /// that lands this test is what tells you the behaviour moved, and its message says so.
+    #[test]
+    fn tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it() {
+        type Run = fn(&Path, &Path) -> Result<(), String>;
+        let legs: &[(&str, Run)] = &[
+            ("one-shot extract_archive", |tgz: &Path, dest: &Path| {
+                extract_archive(&tgz.to_string_lossy(), &dest.to_string_lossy()).map(|_| ())
+            }),
+            ("extract_archive_streamed", |tgz: &Path, dest: &Path| {
+                let cancel = AtomicBool::new(false);
+                extract_archive_streamed(&tgz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {}).map(|_| ())
+            }),
+        ];
+
+        for (label, run) in legs {
+            let d = scratch("cpe1733_tar_link");
+            let tgz = d.join("in.tar.gz");
+            compress_to_targz(&two_source_files(&d), &tgz.to_string_lossy()).unwrap();
+            let victim = d.join("victim-the-user-never-named.bin");
+            fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+            let dest = d.join("out");
+            fs::create_dir_all(&dest).unwrap();
+            let link = dest.join("a.txt");
+            if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+                crate::skip_notice!(
+                    "[CPE-1733] SKIPPED the tar leg ({label}): could not stage a live link at {}. The \
+                     recorded tar behaviour was NOT checked on this run.",
+                    link.display()
+                );
+                let _ = fs::remove_dir_all(&d);
+                return;
+            }
+
+            let outcome = run(&tgz, &dest);
+
+            assert_eq!(
+                fs::read(&victim).unwrap(),
+                b"VICTIM ORIGINAL".to_vec(),
+                "tar ({label}): the entry's bytes went THROUGH the link. That is the behaviour this \
+                 module WRONGLY claimed before the CPE-1733 UAT measured it — if tar really has started \
+                 following links, the section comment above and src/docs/explorer-archives.md are now \
+                 wrong too (outcome was {outcome:?})"
+            );
+            let slot = fs::symlink_metadata(&link).expect("tar leaves something at the entry's name");
+            assert!(
+                !slot.file_type().is_symlink() && slot.is_file(),
+                "tar ({label}): the recorded behaviour is that the link is REPLACED by a regular file. \
+                 If the slot is a link again, tar now refuses or follows instead — either way this is the \
+                 CPE-1744 change and the three places describing tar need updating with it \
+                 (outcome was {outcome:?})"
+            );
+            assert_eq!(
+                fs::read(&link).unwrap(),
+                b"ARCHIVED A".to_vec(),
+                "tar ({label}): and the regular file holds the ENTRY's bytes — the link is destroyed, not \
+                 merely detached"
+            );
+            outcome.unwrap_or_else(|e| panic!("tar ({label}): and it reports success while doing it: {e}"));
+            assert_eq!(
+                fs::read(dest.join("b.txt")).unwrap(),
+                b"ARCHIVED B".to_vec(),
+                "tar ({label}): the rest of the archive still extracts"
+            );
+            let _ = fs::remove_dir_all(&d);
+        }
+    }
+
+    /// **One-shot ZIP aborts the WHOLE extraction on a link in the destination — the streamed path skips
+    /// one entry** (UAT findings 1 and 2). Two shipped paths, opposite answers to the same input.
+    ///
+    /// Safe, but not harmless: nothing lands at all, including the entries that were fine, and until the
+    /// UAT measured it `src/docs/explorer-archives.md` described only the streamed behaviour. Pinned here
+    /// because the divergence is the finding — a fix that aligned the two paths without touching the docs
+    /// would otherwise be invisible. Tracked as **CPE-1744**.
+    ///
+    /// `b.txt` is the whole point: it is what separates "skipped that entry" from "abandoned the run".
+    #[test]
+    fn one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link() {
+        let d = scratch("cpe1733_zip_oneshot_link");
+        let zip = d.join("in.zip");
+        compress_to_zip(&two_source_files(&d), &zip.to_string_lossy()).unwrap();
+        let victim = d.join("victim-the-user-never-named.bin");
+        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let link = dest.join("a.txt");
+        if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+            crate::skip_notice!(
+                "[CPE-1733] SKIPPED the one-shot ZIP leg: could not stage a live link at {}. The \
+                 one-shot/streamed divergence was NOT checked on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let outcome = extract_archive(&zip.to_string_lossy(), &dest.to_string_lossy());
+
+        assert_eq!(
+            fs::read(&victim).unwrap(),
+            b"VICTIM ORIGINAL".to_vec(),
+            "one-shot zip: the entry's bytes went THROUGH the link (outcome was {outcome:?})"
+        );
+        assert!(
+            !dest.join("b.txt").exists(),
+            "one-shot zip: the recorded behaviour is that NOTHING is extracted — b.txt appearing means the \
+             one-shot path now skips per-entry like the streamed one. That is the CPE-1744 alignment: \
+             update this test and the format bullet in src/docs/explorer-archives.md together \
+             (outcome was {outcome:?})"
+        );
+        let err = outcome.expect_err(
+            "one-shot zip: the recorded behaviour is a whole-run failure. An Ok here means the run \
+             succeeded while an entry aimed at a link — check what happened to the link before assuming \
+             this is an improvement",
+        );
+        assert!(
+            err.to_lowercase().contains("symlink"),
+            "one-shot zip: the abort must be the zip crate's symlink refusal, not any old I/O error — an \
+             `is_err()`-only assertion here would stay green through a disk-full or permission failure \
+             that proves nothing about links. Got: {err}"
+        );
+        assert!(
+            fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "one-shot zip: and the link itself is untouched (unlike tar, which replaces it)"
+        );
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **7z DOES write through a link, and it is live on the shipping path** (UAT finding 3) — pinned so
+    /// the fix announces itself. Its own ticket: **CPE-1746** (High).
+    ///
+    /// `start_archive_extract` → `extract_archive_streamed` → `extract_7z_stream` →
+    /// `sevenz_rust::default_entry_extract_fn`, which is a plain `File::create` inside that crate. The run
+    /// returns `Ok` with `errors: []` and a victim outside the destination now holds the archive's bytes.
+    ///
+    /// **This test asserts a hazard, on purpose.** The alternative — a paragraph — is what this ticket
+    /// filed itself about: two of this module's three "unguarded" claims were false and nothing caught it
+    /// for four commits. When CPE-1746 lands, this goes red at the exact line describing the old
+    /// behaviour, and the message names the ticket that is allowed to change it. Do not "fix" it here;
+    /// re-point it at the refusal.
+    #[test]
+    fn sevenz_extraction_still_writes_through_a_link_until_cpe_1746() {
+        let d = scratch("cpe1733_7z_link");
+        let sevenz = d.join("in.7z");
+        write_7z_fixture(&sevenz, &[("a.txt", b"ARCHIVED A"), ("b.txt", b"ARCHIVED B")]);
+        let victim = d.join("victim-the-user-never-named.bin");
+        fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let link = dest.join("a.txt");
+        if !crate::fsutil::require_staged("live_file_symlink", true, stage_live_link(&victim, &link)) {
+            crate::skip_notice!(
+                "[CPE-1733] SKIPPED the 7z leg: could not stage a live link at {}. CPE-1746's recorded \
+                 hazard was NOT checked on this run.",
+                link.display()
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+
+        let cancel = AtomicBool::new(false);
+        let outcome = extract_archive_streamed(&sevenz.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        let victim_now = fs::read(&victim).unwrap();
+        assert_eq!(
+            victim_now,
+            b"ARCHIVED A".to_vec(),
+            "7z: the recorded hazard is that the write FOLLOWS the link into {} and replaces its \
+             contents. If the victim still reads VICTIM ORIGINAL, the guard CPE-1746 asks for has landed \
+             (or sevenz-rust changed underneath us) — re-point this test at the refusal and update the \
+             section comment, src/docs/explorer-archives.md and CPE-1746 together. Got {victim_now:?}, \
+             outcome was {outcome:?}",
+            victim.display()
+        );
+        let report = outcome.expect("7z: and it reports success — that is what makes this the live one");
+        assert!(
+            report.errors.is_empty(),
+            "7z: silently, too — nothing is recorded against the entry that overwrote a file outside the \
+             destination. Got {:?}",
+            report.errors
         );
         let _ = fs::remove_dir_all(&d);
     }

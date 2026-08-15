@@ -168,3 +168,36 @@ New guard evidence, each broken on its own and restored with `git checkout --`: 
 (victim overwritten with `"ARCHIVED A"`, `Ok` returned with an ordinary-looking path) and F6's three-way
 action (`left: Skip("could not check")` vs `right: Abort(...)`). The recorded-absence test was also proved
 un-rottable: simulating the CPE-1744 fix without updating the table reds it.
+
+**2026-08-14 (round 3) — the two findings round 2 answered with prose instead of coverage.**
+
+Round 2 corrected the tar/one-shot-zip/7z claims and then declined to pin them ("pinning behaviour we
+consider wrong makes it harder to change"), and answered "rows 15/16 have no live-link leg" by writing
+down that they had none. Both answers left the finding standing: the sentence that was wrong in two of
+three cases was itself prose, and it survived four commits into the user-facing docs. Prose is not
+cheaper to keep true — only cheaper to leave false. So:
+
+- **The three extractors this module does not write itself are now characterization-tested**, one test
+  each, each naming the ticket allowed to change it and the other places that must move in the same
+  commit: `tar_extraction_destroys_a_link_at_an_entry_name_rather_than_following_it` (both tar paths —
+  link replaced by a regular file holding the entry's bytes, victim intact, `Ok` returned),
+  `one_shot_zip_extraction_aborts_everything_when_an_entry_lands_on_a_link` (`b.txt` absent is the
+  assertion that separates "skipped an entry" from "abandoned the run"; the error must be the zip crate's
+  *symlink* refusal, since `is_err()` alone would stay green through any I/O failure), and
+  `sevenz_extraction_still_writes_through_a_link_until_cpe_1746` (asserts the live hazard, so CPE-1746's
+  fix reds at the line describing the old behaviour rather than silently drifting from four descriptions
+  of it).
+- **Rows 15–16 have a live-link leg**: `rows_15_and_16_refuse_a_live_link_and_still_extract_the_rest`.
+  The dangling legs cannot show what the missing guard costs — a dangling link has no bytes to lose. The
+  victim is asserted **before** the `Result` is unwrapped, because these bugs return `Ok`. Broken on its
+  own by making `CreateSlotLink::Link` write anyway:
+
+  ```text
+  row 15 (extract_zip_encrypted): the entry's bytes went THROUGH the link and truncated a file outside
+  the destination that nobody named (outcome was Ok([]))
+    left:  [65, 82, 67, ...]   ("ARCHIVED A")
+    right: [86, 73, 67, ...]   ("VICTIM ORIGINAL")
+  ```
+
+Verification: `crates/server` 2163 unit (default) / 2265 (`--all-features`) + all integration green;
+clippy `--all-targets -D warnings` clean in both feature modes and in `src-tauri`.
