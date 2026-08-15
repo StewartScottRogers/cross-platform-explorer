@@ -3753,47 +3753,58 @@ mod tests {
         format!("http://{addr}")
     }
 
-    /// **The round-2 blocking finding, pinned at the SHIPPED values.** An independent UAT measured a
-    /// one-byte-every-5 s server holding a `list` thread past 100 s with no bound in sight; at 8 MiB and
-    /// one byte per 29 s the theoretical worst case ran to years. This test runs the real
-    /// [`S3Provider::connect`] — no injected `Duration` anywhere — against exactly that server and
-    /// requires it to come back.
+    /// **CPE-1713 (round 3): the wiring check that replaced the round-2 60 s live-fire test.**
     ///
-    /// It costs [`TIMEOUT_LIST_REQUEST`] (60 s) of wall clock per CI job, and that is the point: the
-    /// previous round proved the mechanism through a seam and shipped a configuration that did not
-    /// actually bound this. The fast seam-driven twin below still exists for iteration; this one exists so
-    /// the shipped numbers themselves are evidence. The harness bound is deliberately far above the
-    /// deadline so that a regression is a red at ~150 s, never a hung CI job.
+    /// Round 2's `a_server_that_dribbles_one_byte_at_a_time_is_cut_off_at_the_shipped_values` ran the real
+    /// [`S3Provider::connect`] — no injected `Duration` anywhere — against a dribbling server and waited
+    /// out the full shipped 60 s deadline to prove it. That cost +120 s of CI wall clock per OS × 3 OSes
+    /// (≈6 minutes every run, forever), to prove one narrow thing the other two tests in this file don't:
+    /// that [`S3Provider::connect`] actually initialises `request_deadline` FROM [`TIMEOUT_LIST_REQUEST`],
+    /// rather than from some other constant or a stale default.
+    ///
+    /// This is a field assertion, not a live-fire: no socket, no sleep, no thread. It reads the field the
+    /// dribble guard actually consults, off the exact constructor production calls.
+    ///
+    /// **The three properties CPE-1706 needs pinned, and which test pins which — removing any one turns a
+    /// distinct test red:**
+    /// 1. **Mechanism** — a `request_deadline` field actually bounds `list`'s wall clock, driven through
+    ///    the real `signed_get` → `req.timeout(..)` → `req.call()` path:
+    ///    [`a_dribbling_server_is_cut_off_by_the_per_request_deadline`] (below). Delete the
+    ///    `req = req.timeout(deadline)` line in `signed_request` and this reds — the 500 ms deadline no
+    ///    longer cuts the call short, so it runs past this test's own 10 s ceiling.
+    /// 2. **Value** — [`TIMEOUT_LIST_REQUEST`] itself is a sane, finite bound (not 0, not a year):
+    ///    [`the_shipped_timeout_values_are_finite_and_within_sane_bounds`]. Change the constant to
+    ///    something absurd and only that test reds.
+    /// 3. **Wiring** — `connect()`'s real constructor path actually assigns that constant to the field the
+    ///    mechanism above reads: this test,
+    ///    [`connect_installs_the_shipped_request_deadline_on_the_field_the_call_site_reads`]. Change
+    ///    `connect_with_timeouts` to assign `request_deadline: TIMEOUT_READ` (a different, still-sane
+    ///    `Duration`) instead of `TIMEOUT_LIST_REQUEST` and only this test reds — (1) and (2) both still
+    ///    pass unchanged, because neither one ever calls the real zero-argument `connect()`.
+    ///
+    /// Verified by hand for this ticket (not committed, to avoid permanently breaking prod): with
+    /// `request_deadline: TIMEOUT_LIST_REQUEST` changed to `request_deadline: TIMEOUT_READ` in
+    /// `connect_with_timeouts`, this test reds on the field mismatch while (1) and (2) stay green; with the
+    /// `req = req.timeout(deadline)` line removed from `signed_request`, (1) reds (it does not return
+    /// inside its 10 s ceiling) while this test and (2) stay green. Together the two breaks are exactly
+    /// "pass a different duration" and "drop the `.timeout()` call" — the two ways CPE-1713 asks the
+    /// replacement to prove it catches a disconnected constant.
     #[test]
-    fn a_server_that_dribbles_one_byte_at_a_time_is_cut_off_at_the_shipped_values() {
-        let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_secs(5));
-        let started = Instant::now();
-        let err = call_with_deadline(
-            "S3Provider::list (SHIPPED values) against a server dribbling one byte every 5 s",
-            Duration::from_secs(150),
-            move || S3Provider::connect(&cfg(&base)).list("/"),
-        )
-        .expect_err("a dribbling server must be cut off, not followed forever");
-        let elapsed = started.elapsed();
-        assert!(
-            err.starts_with("s3: http://127.0.0.1"),
-            "the error must name the endpoint that dribbled: {err}"
-        );
-        assert!(
-            elapsed >= TIMEOUT_LIST_REQUEST,
-            "returning BEFORE the deadline means something other than the request deadline ended this, \
-             so the test would not be evidence about the deadline: {elapsed:?}"
-        );
-        assert!(
-            elapsed < TIMEOUT_LIST_REQUEST + Duration::from_secs(30),
-            "the request deadline must be what ended it, but it took {elapsed:?} against a \
-             {TIMEOUT_LIST_REQUEST:?} deadline"
+    fn connect_installs_the_shipped_request_deadline_on_the_field_the_call_site_reads() {
+        let provider = S3Provider::connect(&cfg("http://127.0.0.1:1"));
+        assert_eq!(
+            provider.request_deadline, TIMEOUT_LIST_REQUEST,
+            "S3Provider::connect must install TIMEOUT_LIST_REQUEST on the field signed_get threads into \
+             req.timeout(..) — a mismatch here means the shipped constant is disconnected from the real \
+             constructor, exactly the class of bug CPE-1706 round 1 shipped undetected"
         );
     }
 
-    /// The fast twin of the shipped-values test above, driven through the same
-    /// `signed_get` → `req.timeout(..)` → `req.call()` path with a short deadline injected, so the guard
-    /// can be broken and observed in a second during iteration.
+    /// Drives the mechanism through the same `signed_get` → `req.timeout(..)` → `req.call()` path
+    /// production uses, with a short deadline injected via [`S3Provider::with_request_deadline`] so the
+    /// guard can be broken and observed in a second rather than a minute. See the wiring test above for how
+    /// this and [`the_shipped_timeout_values_are_finite_and_within_sane_bounds`] combine to cover the same
+    /// ground the round-2 60 s live-fire test did, at a fraction of the cost.
     #[test]
     fn a_dribbling_server_is_cut_off_by_the_per_request_deadline() {
         let base = spawn_a_server_that_dribbles_one_byte_at_a_time(Duration::from_millis(50));
