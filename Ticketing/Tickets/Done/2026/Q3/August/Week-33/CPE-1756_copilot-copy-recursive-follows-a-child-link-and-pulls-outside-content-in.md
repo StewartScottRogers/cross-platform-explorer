@@ -3,11 +3,11 @@ id: CPE-1756
 title: The Copilot's recursive copy follows a child link and pulls outside content into the confirmed folder
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-15
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem

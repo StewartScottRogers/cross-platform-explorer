@@ -3,11 +3,11 @@ id: CPE-1744
 title: Close the three extraction-sink gaps archive.rs now records but does not guard
 type: task
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: L
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Why this exists
