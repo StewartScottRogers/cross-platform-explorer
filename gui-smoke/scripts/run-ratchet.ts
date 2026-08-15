@@ -42,16 +42,30 @@ const SPECS_DIR = process.env.GUI_SMOKE_SPECS_DIR ?? path.resolve(process.cwd(),
  *  a `RawResultChunk`, and hands the parsed chunks to `lib/ratchet.ts#reduceResultChunks` for the actual
  *  reduction into `CaseResult[]` (CPE-1680: that reduction — including `toCaseStatus`'s
  *  unknown-state-to-`"unknown"` mapping, finding #1's fix — used to live entirely in this file, where
- *  `test:unit`'s `lib/**\/*.test.ts` glob could never collect a test for it). Throws with a clear message
- *  if the directory is missing (never silently treats "no directory" as "zero results, fine" — that
- *  would defeat the incomplete-run guard). */
+ *  `test:unit`'s `lib/**\/*.test.ts` glob could never collect a test for it).
+ *
+ *  CPE-1728: a MISSING directory returns zero results (with a loud console note) instead of throwing.
+ *  Before this, a run cancelled early enough that the suite never got to write even one spec's JSON
+ *  (e.g. killed mid-`npm ci`/`tauri build`, or — the PR #900 case this ticket exists for — the whole job
+ *  cancelled before this step ever started) meant `npm run ratchet` was either never invoked at all
+ *  (skipped by the job's default step condition) or, if it was, threw a raw stack trace instead of the
+ *  informative "SUITE DID NOT COMPLETE" verdict `evaluate()`'s clause 4 already produces for a run that
+ *  DID start but didn't finish. Returning `[]` here feeds `evaluate()` the same "0 of N spec files
+ *  reported" shape a partial run produces, so `gui-smoke.yml` wiring this step with `if: always()` now
+ *  gives EVERY cancellation stage — before, during, or after the suite — one honest, uniform verdict
+ *  instead of a bare GitHub "operation was canceled" the reader has to guess about. See
+ *  `gui-smoke.yml`'s CPE-1728 comments and `lib/ratchet.ts`'s clause 4. Never silently treated as "zero
+ *  results, fine, green" — `evaluate()`'s `incomplete` flag still fires and still reds the job. */
 function loadCaseResults(resultsDir: string): CaseResult[] {
   if (!fs.existsSync(resultsDir)) {
-    throw new Error(
-      `[gui-smoke ratchet] results directory not found: ${resultsDir}\n` +
-        "Run the suite first (it writes @wdio/json-reporter output there via wdio.conf.ts's `json` " +
-        "reporter config), or point GUI_SMOKE_RESULTS_DIR at a saved/synthetic report directory.",
+    // eslint-disable-next-line no-console
+    console.log(
+      `[gui-smoke ratchet] no results directory at ${resultsDir} — the suite step likely never started or ` +
+        "was killed before writing even one spec's @wdio/json-reporter output. Treating this as zero " +
+        "cases reported (evaluate()'s incomplete-run clause will red the job below, honestly, instead of " +
+        "this script throwing a raw error).",
     );
+    return [];
   }
 
   const files = fs.readdirSync(resultsDir).filter((f) => f.endsWith(".json"));

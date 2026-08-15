@@ -192,8 +192,26 @@ jobs:
     # holding a concurrency slot for hours.
     # CPE-1481: raised 20 -> 35 (round 1) -> 45 (round 2), same rationale as the windows leg above —
     # the CPE-1479 mouse fix made specs actually run; 35 min still left the sequential run's media-heavy
-    # back half (~18 of 39 specs) unrun at the cap. 45 gives margin; sharding (CPE-1266) is the real fix.
-    timeout-minutes: 45
+    # back half (~18 of 39 specs) unrun at the cap. sharding (CPE-1266) is still the real long-term fix.
+    #
+    # CPE-1728: raised 45 -> 55. Measured before changing anything (`gh run list`/`gh api .../jobs`
+    # across the last ~160 runs of this workflow): a normal GREEN completion of this leg already
+    # regularly consumes 34-42 of the old 45-minute budget (median ~40-41) — a 3-11 minute margin on
+    # EVERY run, not just a loaded one. Across 85 `pull_request`-triggered runs in that sample, 26 (31%)
+    # never produced a Ratchet verdict at all because something cancelled the run before that step ran
+    # (16 of those, 19% of all PR runs, after the suite had already been running >=15 min — real work
+    # lost, not an instant double-push); PR #900 (CPE-1723, `cpe-1723-s3-listbucket-and-gaps`, run
+    # 31787491058) is one of those 16, cancelled at 33m48s with the suite apparently already having
+    # tallied all 40 specs. The root defect isn't that the suite is slow — mochaOpts.timeout stays 90s
+    # per test, unchanged, and no retry/extra-slack was added anywhere in this suite (see the "Ratchet"
+    # step's own `if: always()` + the new "Run GUI smoke suite" step timeout below) — it's that this
+    # job's OWN 45-minute cap left ZERO reserved headroom for the Ratchet + classify-log + screenshot
+    # steps that run AFTER the suite, so any cancellation in that window (the job hard-timing-out, OR an
+    # ordinary CPE-1266 concurrency-supersession landing right as the suite finishes) discarded the
+    # verdict along with it. 55 reserves that headroom deliberately: the suite step below is separately
+    # capped at 45 (the OLD full-job ceiling, so a genuinely hung suite still dies in the same bounded
+    # time as before), guaranteeing >=10 minutes are always left for the steps that report on it.
+    timeout-minutes: 55
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
     # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
     # PR #801's own live run — one of those 7, `network.smoke.ts`, had a stale test selector fixed in
@@ -338,9 +356,39 @@ jobs:
       # fail (see its comment and `gui-smoke/lib/ratchet.ts`). This also lets the suite step finish
       # normally (rather than the job aborting) so the JSON reporter output + screenshots below always
       # exist to upload/ratchet, even on a run with failures.
+      # CPE-1728: `timeout-minutes: 45` on THIS step alone (the same number the whole job used to be
+      # capped at) bounds a genuinely hung/dead suite to the same worst case as before, while the job's
+      # own cap is now 55 (see that comment above) — guaranteeing the classify-log + Ratchet + screenshot
+      # steps below always have their own reserved window to run in, instead of racing the suite for
+      # whatever's left of a single shared 45-minute budget. `tee`s the full output to
+      # `.results/suite-output.log` (on top of the existing `.results/*.json` per-spec reports) so the
+      # classify-log step below has real evidence to classify, and so the Ratchet step's own
+      # "SUITE DID NOT COMPLETE" message (clause 4, `lib/ratchet.ts`) is backed by whatever specs DID
+      # finish before a step-timeout or job-cancellation, not silence. `|| true` at the end of the whole
+      # pipeline (not just after `npm test`) matters here: this repo's default `bash -eo pipefail` step
+      # shell would otherwise propagate wdio's own non-zero exit through `tee` and fail this step even on
+      # an EXPECTED known-failing-only run.
       - name: Run GUI smoke suite (xvfb-run)
         working-directory: gui-smoke
-        run: xvfb-run --auto-servernum npm test || true
+        timeout-minutes: 45
+        run: |
+          mkdir -p .results
+          (xvfb-run --auto-servernum npm test 2>&1 | tee .results/suite-output.log) || true
+
+      # CPE-1728: advisory-only, deliberately BETWEEN the suite and the Ratchet gate — reads the log the
+      # suite step above just captured and prints whether this run's failures (if any) carry a real
+      # `AssertionError` or only the WebDriver/DRI3-class noise that PR #900 (CPE-1723) showed is not
+      # evidence about the app (see `gui-smoke/lib/logSignature.ts` for the full rationale and the exact
+      # markers). `if: always()` so it still runs — and still has a log to read — even when the suite step
+      # above hit ITS OWN 45-minute timeout rather than finishing cleanly. Never changes the job's exit
+      # code: the Ratchet step immediately below remains the only thing that gates this job, unchanged by
+      # this step's classification. This is the answer to "distinguish the app being broken from the
+      # runner failing to paint" — printed automatically, not left for a reader to re-derive by counting
+      # PASSED/FAILED lines and grepping the raw log by hand.
+      - name: Classify suite log — app defect vs runner-could-not-paint (CPE-1728)
+        if: always()
+        working-directory: gui-smoke
+        run: npm run classify-log
 
       # CPE-1594: the actual gate, and DELIBERATELY the very next step after the suite — nothing that
       # can fail (like the screenshot upload below) is allowed to sit between the suite finishing and
@@ -356,7 +404,19 @@ jobs:
       # a clean run and a run with a broken case inside an already-listed spec file. See
       # `gui-smoke/lib/ratchet.ts` for the exact rules and `gui-smoke/README.md` for how to retire an
       # entry once its case is fixed.
+      # CPE-1728: `if: always()` is the fix this ticket is actually about. Before this, ANY cancellation
+      # of a prior step (the job hitting its old 45-minute hard cap mid-suite, or an ordinary CPE-1266
+      # concurrency-supersession landing while the suite was still running) skipped this step entirely
+      # under its default `if: success()` condition — throwing away whatever verdict the suite HAD already
+      # earned (PR #900's run had tallied all 40 specs: "3 specs failed, 37 passed") and leaving the log
+      # ending in a bare `##[error]The operation was canceled.` that reads as pure infrastructure noise.
+      # `loadCaseResults` (`scripts/run-ratchet.ts`) now also tolerates a completely missing `.results/`
+      # dir (0 cases reported) instead of throwing, so even a cancellation BEFORE the suite step started
+      # still lands on `evaluate()`'s existing, honest "SUITE DID NOT COMPLETE: expected N spec file(s)
+      # ... but only M reported" message (clause 4) — one uniform, readable verdict for every
+      # cancellation stage, never a raw stack trace and never silence.
       - name: Ratchet — no new GUI regressions
+        if: always()
         working-directory: gui-smoke
         run: npm run ratchet
 

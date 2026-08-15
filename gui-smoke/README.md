@@ -138,7 +138,8 @@ npm test
   Linux's native driver, lands on `PATH` at `/usr/bin/WebKitWebDriver`) and `xvfb`, installs
   `tauri-driver`, and runs the suite under `xvfb-run` (so GTK/WebKitGTK has a virtual display to
   initialize against). **This is the BLOCKING gate (CPE-1594)** — see "The ratchet" below for exactly
-  what makes it pass or fail.
+  what makes it pass or fail, and "Cancellation always reports a verdict (CPE-1728)" for what happens
+  when the job doesn't get to finish normally.
 - **`gui-smoke` (windows-latest)** — builds the frontend, does a `tauri build -- --no-bundle`,
   installs `msedgedriver` + `tauri-driver`, then runs this suite. **Non-blocking
   (`continue-on-error: true`) and off the push/PR path (CPE-1594)** — see CPE-1048 below for why. It
@@ -235,6 +236,38 @@ apparent session death under rapid repeated same-file opens — not a settle-che
 many attempts the before run could log; the after run comfortably outlasted it with zero settle
 failures). All four entries are removed; if a NEW case ever needs `intermittent`, open a fresh ticket
 rather than reusing this one (see the `$comment` above).
+
+### Cancellation always reports a verdict (CPE-1728)
+
+PR #900 (CPE-1723) reported failure with "3 specs failed, 37 passed" and then ended with
+`##[error]The operation was canceled.` — a tail that reads as pure infrastructure noise, even though the
+suite had already run every spec and the log was saturated with `libEGL`/DRI3 warnings, `move target out
+of bounds`, and a flood of `no such element` (a renderer not painting/settling in time under CI), with
+**zero `AssertionError`s** anywhere. Measured before changing anything (`gh run list` / `gh api
+.../jobs` across the last ~160 runs of `gui-smoke.yml`): a normal green completion of this leg already
+regularly consumes 34-42 of the old 45-minute job budget, and of 85 `pull_request`-triggered runs in that
+sample, 26 (31%) never produced a Ratchet verdict at all because something cancelled the run first —
+including PR #900's own run. Three changes, none of which touch what passes or fails:
+
+1. **The job's `timeout-minutes` is 55, not 45** — the suite step itself is separately capped at 45 (the
+   OLD full-job ceiling, so a genuinely hung suite still dies in the same bounded time as before), which
+   guarantees the steps that report on it always have their own reserved window.
+2. **The "Ratchet" step now runs `if: always()`**, so a cancellation at ANY stage — the job's own
+   timeout, or an ordinary CPE-1266 concurrency-supersession landing mid-suite — still produces a real
+   verdict instead of being skipped by the default `if: success()` condition. `scripts/run-ratchet.ts`'s
+   `loadCaseResults` also tolerates a completely missing `.results/` dir (0 cases reported) instead of
+   throwing, so even a cancellation before the suite step ever started lands on `evaluate()`'s existing
+   `SUITE DID NOT COMPLETE` message (clause 4) rather than a raw stack trace or silence.
+3. **A new "Classify suite log" step** (also `if: always()`), between the suite and the Ratchet gate,
+   reads the suite step's captured output (now `tee`'d to `.results/suite-output.log`) and prints whether
+   this run's failures carry a real `AssertionError` or only WebDriver/DRI3-class environment noise — see
+   `gui-smoke/lib/logSignature.ts`. **Purely advisory**: it never changes the Ratchet's verdict or the
+   job's exit code, it only labels what kind of red a red already is, so a reader doesn't have to count
+   PASSED/FAILED lines and grep the raw log by hand to work that out.
+
+None of this adds a retry, raises `mochaOpts.timeout` (still 90s/test), or gives a flaky case more
+chances to pass — see CPE-1679 for why that would defeat the point. It only makes sure the machinery that
+already exists to report a verdict gets the chance to run.
 
 ### The stress-harness "session death" is `mochaOpts.timeout`, not a WebKitGTK/GStreamer leak (CPE-1702)
 
