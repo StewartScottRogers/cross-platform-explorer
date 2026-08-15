@@ -60,6 +60,23 @@ describe("migratedPath — pure path rewrite (CPE-1224)", () => {
       expect(migratedPath("sftp://h/srv/sub/", "sftp://h/srv/sub/", "sftp://h/srv/renamed")).toBe("sftp://h/srv/renamed");
     });
   });
+
+  describe("CPE-1737 round 3: the exact-match check must agree with the subtree check about the trailing slash", () => {
+    it("re-keys a store entry for the folder ITSELF, saved un-slashed, even when `from` arrives slashed", () => {
+      // Round 2 only fixed the subtree (descendant) branch; the exact-match check still compared `p`
+      // only against the raw `from`, so an un-slashed store entry for the renamed folder itself was
+      // skipped whenever `from` showed up slashed — inconsistent with the subtree check two lines below
+      // it, which already tolerated this via `fromBase`.
+      expect(migratedPath("sftp://h/srv/sub", "sftp://h/srv/sub/", "sftp://h/srv/renamed")).toBe("sftp://h/srv/renamed");
+    });
+
+    it("the reverse pairing (`p` slashed, `from` bare) was already correct — the subtree branch's `startsWith` matches an empty remainder", () => {
+      // `p` equals `fromBase + '/'` here, so the SUBTREE check below (not the exact-match check this
+      // fix touches) already handles it, with an empty remainder after the prefix — hence the trailing
+      // '/' in the output. Kept as a no-regression pin alongside the actual fix above.
+      expect(migratedPath("sftp://h/srv/sub/", "sftp://h/srv/sub", "sftp://h/srv/renamed")).toBe("sftp://h/srv/renamed/");
+    });
+  });
 });
 
 describe("migratePathList — array re-keying for the three real stores (CPE-1224)", () => {

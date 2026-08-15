@@ -27,6 +27,15 @@ describe("canonicalPath (CPE-1737 round 2)", () => {
   it("a scheme root ('sftp://host/') is stripped like any other trailing slash — safe because location::parse treats an empty path as '/' either way", () => {
     expect(canonicalPath("sftp://host/")).toBe("sftp://host");
   });
+
+  it("CPE-1737 round 3: a BARE drive letter with no separator at all is left untouched, never promoted into a root", () => {
+    // Regression: an earlier version of this function fired the drive-root guard unconditionally once
+    // `stripped` matched /^[A-Za-z]:$/ — which also matches a bare "C:" that never had a trailing
+    // separator to strip in the first place, rewriting it into "C:/" (the root). That directly
+    // contradicts this file's own doc comment: a bare "C:" and its root are supposed to mean two
+    // different things, not canonicalise into the same value.
+    expect(canonicalPath("C:")).toBe("C:");
+  });
 });
 
 describe("samePath (CPE-1737 round 2)", () => {

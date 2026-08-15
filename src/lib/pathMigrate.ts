@@ -18,15 +18,19 @@
  */
 export function migratedPath(p: string, from: string, to: string): string | null {
   if (from === to || from === "") return null;
-  if (p === from) return to;
-  // Strip a trailing separator before building the "under this folder" prefixes below (CPE-1737 round
-  // 2). A remote directory's own path can now legitimately carry a trailing '/' (S3's own spelling of
-  // "this is a prefix"); without this, `from`/`to` already ending in '/' built a DOUBLED separator
-  // ("…/sub//") that no real descendant path ever starts with, so a slashed folder's rename/move
-  // migrated the folder itself but silently left every descendant behind, un-rekeyed.
+  // Strip a trailing separator before comparing/building the "under this folder" prefixes below
+  // (CPE-1737 round 2/3). A remote directory's own path can now legitimately carry a trailing '/' (S3's
+  // own spelling of "this is a prefix"). The EXACT-match check must agree with the subtree check right
+  // below it about what counts as "this folder": comparing `p` only against the raw `from` (round 2)
+  // meant a store entry for the renamed folder ITSELF, saved un-slashed, was skipped whenever `from`
+  // arrived slashed — while its descendants, checked against `fromBase`, correctly migrated. Comparing
+  // against BOTH forms closes that gap. (Round 2 also fixed the doubled-separator case: `from`/`to`
+  // already ending in '/' used to build "…/sub//", which no real descendant path ever starts with, so a
+  // slashed folder's descendants were silently left behind, un-rekeyed.)
   const fromBase = from.replace(/[\\/]+$/, "");
   const toBase = to.replace(/[\\/]+$/, "");
   if (fromBase === "") return null;
+  if (p === from || p === fromBase) return to;
   const underSlash = `${fromBase}/`;
   const underBack = `${fromBase}\\`;
   if (p.startsWith(underSlash)) return `${toBase}/${p.slice(underSlash.length)}`;

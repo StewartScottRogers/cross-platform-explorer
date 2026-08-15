@@ -93,11 +93,31 @@ export async function initTags(): Promise<void> {
   store.set(s ?? {});
 }
 
-/** Replace one path's tags + label; the store is updated from the returned whole store. `path` is sent
- *  exactly as given — never rewritten through `canonicalPath` (see `entryFor`'s doc for why storing/
- *  sending the canonicalised form is unsafe for a local path). */
+/** The backend key `setEntryTags` should WRITE under for `path` (CPE-1737 round 3): reuses an existing
+ *  entry's key when one already matches — exactly, or canonically — so editing tags on a remote folder
+ *  reached from a listing row (trailing '/') updates the SAME entry a prior tagging via a different
+ *  route (toolbar/sidebar, un-slashed) already created, instead of forking a second key beside it.
+ *  `entryFor`'s canonical-scan fallback fixes LOOKUP, but a naive `setTags(path, ...)` would still write
+ *  a NEW key every time the caller's spelling differs — leaving two entries for one real folder, so
+ *  `allTags`/`tagCounts` double-count it and reaching the folder by the OTHER spelling shows the STALE
+ *  entry unchanged. Falls back to `path` itself (unrewritten) when nothing already matches — the
+ *  first-time-tagging case. Pure. */
+export function keyToWrite(store: TagStore, path: string): string {
+  if (!store) return path;
+  if (path in store) return path;
+  const key = canonicalPath(path);
+  for (const k of Object.keys(store)) {
+    if (canonicalPath(k) === key) return k;
+  }
+  return path;
+}
+
+/** Replace one path's tags + label; the store is updated from the returned whole store. Sends
+ *  `keyToWrite`'s answer, never a value rewritten through `canonicalPath` directly (see `entryFor`'s doc
+ *  for why storing/sending the canonicalised form itself is unsafe for a local path). */
 export async function setEntryTags(path: string, tags: string[], label: string): Promise<void> {
-  const updated = unwrap(await commands.setTags(path, tags, label)) as TagStore;
+  const key = keyToWrite(get(store), path);
+  const updated = unwrap(await commands.setTags(key, tags, label)) as TagStore;
   store.set(updated ?? {});
 }
 

@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { get } from "svelte/store";
 import {
   entryFor,
+  keyToWrite,
   hasTag,
   allTags,
   labelColor,
@@ -64,6 +65,34 @@ describe("tags helpers (CPE-636)", () => {
       const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
       entryFor(remoteStore, "sftp://h/srv/sub/");
       expect(Object.keys(remoteStore)).toEqual(["sftp://h/srv/sub"]);
+    });
+  });
+
+  describe("keyToWrite — CPE-1737 round 3 (the write-side duplicate the round-2 review found)", () => {
+    it("reuses an existing entry's key when the exact path already has one", () => {
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      expect(keyToWrite(remoteStore, "sftp://h/srv/sub")).toBe("sftp://h/srv/sub");
+    });
+
+    it("reuses an existing entry's key found only by canonical match, instead of forking a second key", () => {
+      // entryFor's fallback fixes LOOKUP; without this, tagging the folder again via its listing row
+      // (trailing '/') would write a SECOND key beside the pre-upgrade one, so allTags/tagCounts would
+      // double-count it and reaching the folder any other way would keep showing the stale entry.
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      expect(keyToWrite(remoteStore, "sftp://h/srv/sub/")).toBe("sftp://h/srv/sub");
+    });
+
+    it("falls back to the given path unchanged when nothing already matches (first-time tagging)", () => {
+      expect(keyToWrite({}, "sftp://h/srv/new")).toBe("sftp://h/srv/new");
+      expect(keyToWrite({ "/other": { tags: [], label: "" } }, "sftp://h/srv/new")).toBe("sftp://h/srv/new");
+    });
+
+    it("never rewrites a LOCAL Windows path's separators when nothing matches", () => {
+      expect(keyToWrite({}, "C:\\Users\\me\\docs")).toBe("C:\\Users\\me\\docs");
+    });
+
+    it("is null-safe", () => {
+      expect(keyToWrite(undefined as unknown as TagStore, "/a/one")).toBe("/a/one");
     });
   });
 

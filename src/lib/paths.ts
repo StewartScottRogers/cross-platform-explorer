@@ -18,14 +18,19 @@
 
 /**
  * The canonical form of `p`: backslashes normalise to forward slashes and exactly one trailing
- * separator is stripped. Mirrors `Sidebar.svelte`'s pre-existing local `norm()` (that idiom already
- * existed for parent/child tree comparisons) — factored out here so every path-keyed consumer in the
- * app agrees with the sidebar's own notion of "the same folder".
+ * separator is stripped — but ONLY when `p` actually had one. Mirrors `Sidebar.svelte`'s pre-existing
+ * local `norm()` (that idiom already existed for parent/child tree comparisons) — factored out here so
+ * every path-keyed consumer in the app agrees with the sidebar's own notion of "the same folder".
  *
- * One case is deliberately NOT stripped: a bare Windows drive letter + colon ("C:") means something
- * different from its root ("C:\") to the OS — the process's current *working* directory on that drive,
- * not the root — so a drive root keeps one trailing separator rather than canonicalising into a value
- * that would misnavigate if it were ever used as a literal path again (e.g. a favourited drive root).
+ * A bare Windows drive letter + colon ("C:", no separator at all) is left EXACTLY as given, never
+ * rewritten into a root: it means something different to the OS than its root ("C:\"/"C:/") — the
+ * process's current *working* directory on that drive, not the root — so inventing a trailing separator
+ * for it would itself corrupt the value (CPE-1737 round 3: an earlier version of this function did
+ * exactly that, promoting a bare "C:" into "C:/" because the drive-root guard fired unconditionally,
+ * whenever it was already stripping a REAL trailing separator). An input that genuinely IS a root
+ * ("C:\" or "C:/") keeps its one trailing separator rather than collapsing down to the bare form —
+ * still guarding against a value that would misnavigate if it were ever used as a literal path again
+ * (e.g. a favourited drive root).
  */
 export function canonicalPath(p: string): string {
   const slashed = p.replace(/\\/g, "/");
@@ -33,6 +38,9 @@ export function canonicalPath(p: string): string {
   // "/" down to "" would conflate "the root" with "no path", a different thing everywhere else in this
   // app treats them as (e.g. an empty `currentPath` means Home, not the filesystem root).
   if (slashed === "/" || slashed === "") return slashed;
+  // Nothing to strip: a bare "C:" (or any path with no trailing separator) is returned untouched,
+  // rather than letting the drive-root check below invent a separator that was never there.
+  if (!slashed.endsWith("/")) return slashed;
   const stripped = slashed.replace(/\/+$/, "");
   return /^[A-Za-z]:$/.test(stripped) ? `${stripped}/` : stripped;
 }

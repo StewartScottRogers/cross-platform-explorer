@@ -78,6 +78,28 @@ describe("metaColumnsByFolder (CPE-1146)", () => {
     saveMetaColumnsForFolder("/bad", [{ bogus: 1 } as unknown as ActiveMetaColumn]);
     expect(loadMetaColumnsForFolder("/bad")).toEqual([]);
   });
+
+  describe("CPE-1737 round 3 (the round-2 regression: a canonicalised STORED key)", () => {
+    it("a Windows backslash key round-trips untouched — the exact shape a prior release wrote", () => {
+      // Simulates settings.json exactly as every release before CPE-1737 wrote it: keyed on the RAW
+      // (backslash) currentPath, since Windows paths never had any rewrite applied to them. Round 2's
+      // version of this pair wrote `canonicalPath(path)` — which normalises '\' to '/' — as the STORED
+      // key, so this exact key became unreachable with no fallback the moment its columns were re-saved
+      // (and even a bare load never saw it, since the stored key from a prior release was never
+      // canonical to begin with).
+      const cols: ActiveMetaColumn[] = [{ id: "dimensions", width: 110 }];
+      saveMetaColumnsForFolder("C:\\Users\\me\\docs", cols);
+      expect(loadMetaColumnsForFolder("C:\\Users\\me\\docs")).toEqual(cols);
+      saveMetaColumnsForFolder("C:\\Users\\me\\docs", []); // reset
+    });
+
+    it("still falls back to a canonical match for the trailing-slash case (a remote directory's listing-row path)", () => {
+      const cols: ActiveMetaColumn[] = [{ id: "pages", width: 90 }];
+      saveMetaColumnsForFolder("sftp://h/srv/sub", cols);
+      expect(loadMetaColumnsForFolder("sftp://h/srv/sub/")).toEqual(cols);
+      saveMetaColumnsForFolder("sftp://h/srv/sub", []); // reset
+    });
+  });
 });
 
 // CPE-1177 (epic CPE-717): the native-bridge opt-in that gates TagEditor's native pull/push controls

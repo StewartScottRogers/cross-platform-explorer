@@ -485,14 +485,30 @@ const isActiveMetaColumnArray = (v: unknown): v is ActiveMetaColumn[] =>
       (x as ActiveMetaColumn).width > 0,
   );
 
-// Keyed by canonicalPath (CPE-1737 round 2): a remote directory's wire path now legitimately carries a
-// trailing '/', which is not how this folder was ever addressed before this fix (Up/breadcrumb/typed
-// address/favourite/sidebar all give the un-slashed form) — canonicalising the KEY is what keeps a
-// folder's saved column set reachable regardless of which route the caller navigated in from.
+// CPE-1737 round 3 fix (the round 2 blocker): this map is keyed by the RAW path, exactly like every
+// release before CPE-1737 wrote it — including on Windows, where `currentPath` is a BACKSLASH path.
+// `loadMetaColumnsForFolder` falls back to a canonicalPath scan ONLY when the exact key misses (mirrors
+// tags.ts's `entryFor`), which is what a remote directory's now-legitimately-slashed listing-row path
+// needs (CPE-1737 round 1) without corrupting every pre-existing local Windows key. Round 2's version of
+// this pair wrote `canonicalPath(path)` as the STORED key — canonicalPath normalises `\`→`/`, so it
+// silently rewrote every local Windows folder's key the first time its columns were saved, orphaning
+// every column set a prior release had written under the real (backslash) path with no way back. Never
+// canonicalise a STORED key — see this file's comment above `isFavorite`/`isPinned`/`removeFavorite` for
+// the general rule, and `src/lib/paths.ts`'s module doc for why.
 export const loadMetaColumnsForFolder = (path: string): ActiveMetaColumn[] => {
   const v = state[KEYS.metaColumnsByFolder];
   if (!v || typeof v !== "object") return [];
-  const forFolder = (v as Record<string, unknown>)[canonicalPath(path)];
+  const map = v as Record<string, unknown>;
+  let forFolder = map[path];
+  if (!isActiveMetaColumnArray(forFolder)) {
+    const key = canonicalPath(path);
+    for (const k of Object.keys(map)) {
+      if (canonicalPath(k) === key && isActiveMetaColumnArray(map[k])) {
+        forFolder = map[k];
+        break;
+      }
+    }
+  }
   if (!isActiveMetaColumnArray(forFolder)) return [];
   // Re-clamp on load (CPE-1140-style guard): a width saved under an older/different clamp rule (or
   // hand-edited) can never paint a too-narrow/absurdly-wide column on restore.
@@ -503,12 +519,11 @@ export const loadMetaColumnsForFolder = (path: string): ActiveMetaColumn[] => {
 };
 
 export const saveMetaColumnsForFolder = (path: string, cols: ActiveMetaColumn[]): void => {
-  const key = canonicalPath(path);
   const v = state[KEYS.metaColumnsByFolder];
   const map: Record<string, ActiveMetaColumn[]> =
     v && typeof v === "object" ? { ...(v as Record<string, ActiveMetaColumn[]>) } : {};
-  if (cols.length === 0) delete map[key];
-  else map[key] = cols;
+  if (cols.length === 0) delete map[path];
+  else map[path] = cols;
   write(KEYS.metaColumnsByFolder, map);
 };
 
