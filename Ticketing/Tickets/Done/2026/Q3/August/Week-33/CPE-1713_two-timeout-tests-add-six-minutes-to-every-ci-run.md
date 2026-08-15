@@ -3,11 +3,11 @@ id: CPE-1713
 title: Two timeout tests wait out their real 60s deadline, adding ~6 minutes to every CI run
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-14
 ---
 
 ## Problem
