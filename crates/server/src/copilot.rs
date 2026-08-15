@@ -21,7 +21,11 @@
 //! Textual is not enough, and that is [`crate::fsutil::confined_to`]'s job: a component under `root` that
 //! is a symlink or an NTFS junction can resolve *out* of it while spelling the path exactly like an
 //! in-root one. Every path field of every op is put through that one primitive in [`apply_op`] before any
-//! mutation. **CPE-1750** rewrote this paragraph: it used to be a local `parent_confined` that inspected
+//! mutation, together with a second question `confined_to` deliberately does not answer — *is this path
+//! the confirmed folder itself?* — asked via [`crate::fsutil::same_place`], because an op on the folder
+//! acts in the folder's parent.
+//!
+//! **CPE-1750** rewrote this paragraph: it used to be a local `parent_confined` that inspected
 //! only the *parent* chain, walked *past* a dangling link, and therefore answered "confined" for
 //! `root/dangling` and `root/dangling/x.txt` — while `create_dir_all`/`fs::copy` follow that link and act
 //! at its target. The guard is now the same function the protocol rigs use, and there is one answer to
@@ -30,7 +34,7 @@
 //! The [`crate::copilot_planner::LlmPlanner`] and [`TrashBin`] are seams, so the whole chain is tested with
 //! a [`crate::copilot_planner::FakePlanner`] + a fake trash — no network, no real recycle bin.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -162,19 +166,47 @@ pub fn execute_with(
     Ok(CopilotExecuteResult { checkpoint: Some(checkpoint), results, violations: Vec::new() })
 }
 
-/// The path-typed fields of an op as `(field, value)` pairs — the paths that must be symlink-confined
-/// before the op mutates. `new_name` is deliberately excluded: it is a bare name, and the slot it names
-/// (`path`'s parent joined with it) is reached only after `path` itself has been confined **in full**
-/// (CPE-1750 — which transitively confines its parent), and is then guarded at the primitive by
-/// [`crate::fsutil::rename_into_slot`], which refuses a link sitting in that slot. Mirrors
-/// `op_plan::FileOp::path_fields` (private there).
-fn op_path_fields(op: &FileOp) -> Vec<(&'static str, &str)> {
+/// Where a [`FileOp::Rename`] will actually land: `path`'s lexical parent joined with the bare
+/// `new_name`. `None` when `path` has no parent, which the rename arm reports as its own error.
+///
+/// **One computation, two callers** — [`op_path_fields`] puts the result through the guard and
+/// [`apply_op`]'s rename arm hands the same result to [`crate::fsutil::rename_into_slot`]. Deriving it
+/// twice is how a guard and the call it guards drift apart, which is the shape this file has already
+/// been bitten by three times (CPE-1705, CPE-1710, CPE-1750).
+fn rename_destination(path: &Path, new_name: &str) -> Option<PathBuf> {
+    Some(path.parent()?.join(new_name))
+}
+
+/// Every path an op will act on, as `(field, value)` pairs — the complete list the guards in
+/// [`apply_op`] iterate. Mirrors `op_plan::FileOp::path_fields` (private there), **plus the rename's
+/// computed destination**, which that one does not carry.
+///
+/// # Why the rename destination is in here (CPE-1750, attempt 2)
+///
+/// The first attempt left it out, reasoning that confining `path` transitively confines `path`'s parent
+/// and therefore the slot `parent.join(new_name)` names. **That reasoning is false at exactly one
+/// input, and it is the dangerous one:** when `path` *is* the confirmed root, its parent is outside the
+/// root by definition, so `Rename { path: <root>, new_name: "away" }` computed a destination in the
+/// root's *parent* — and [`crate::fsutil::rename_into_slot`] guards only **what is sitting in the slot**,
+/// never **where the slot is**, so an empty name outside the folder sailed straight through and the
+/// confirmed folder was relocated out of itself. Measured on PR #916 by the reviewer.
+///
+/// `new_name` itself still is not listed: `op_plan::validate` (which `execute_with` re-runs before
+/// anything) rejects it if it is empty, contains `/` or `\`, or is `.`/`..`, so it cannot relocate — it
+/// can only name a slot, and that slot is now what gets guarded.
+fn op_path_fields(op: &FileOp) -> Vec<(&'static str, PathBuf)> {
     match op {
-        FileOp::Move { src, dst } => vec![("src", src), ("dst", dst)],
-        FileOp::Copy { src, dst } => vec![("src", src), ("dst", dst)],
-        FileOp::Rename { path, .. } => vec![("path", path)],
-        FileOp::Delete { path } => vec![("path", path)],
-        FileOp::Mkdir { path } => vec![("path", path)],
+        FileOp::Move { src, dst } => vec![("src", PathBuf::from(src)), ("dst", PathBuf::from(dst))],
+        FileOp::Copy { src, dst } => vec![("src", PathBuf::from(src)), ("dst", PathBuf::from(dst))],
+        FileOp::Rename { path, new_name } => {
+            let p = PathBuf::from(path);
+            let dst = rename_destination(&p, new_name);
+            let mut fields = vec![("path", p)];
+            fields.extend(dst.map(|d| ("dst", d)));
+            fields
+        }
+        FileOp::Delete { path } => vec![("path", PathBuf::from(path))],
+        FileOp::Mkdir { path } => vec![("path", PathBuf::from(path))],
     }
 }
 
@@ -222,22 +254,60 @@ fn confinement_refusal(field: &str, path: &Path) -> String {
     format!("refused: {field} {path:?} resolves outside the folder (symlink/junction escape)")
 }
 
+/// Say why an op was refused for naming **the confirmed folder itself** (CPE-1750, attempt 2).
+///
+/// A different sentence from [`confinement_refusal`] on purpose: this path is *not* outside the folder,
+/// so saying it is would be false, and the user's next question ("which part of my folder is outside my
+/// folder?") has no answer. What is true is that the operation's subject is the folder rather than
+/// something in it, so carrying it out would act at the folder's parent — outside.
+fn root_itself_refusal(field: &str, path: &Path) -> String {
+    format!(
+        "refused: {field} {path:?} IS the folder you confirmed, not something inside it — moving, \
+         renaming or deleting the folder itself would act in its parent, outside the folder, and \
+         outside what Undo can restore"
+    )
+}
+
 /// Apply one whitelisted op, returning its [`OpResult`]. Never all-or-nothing: a failure (locked file,
 /// collision, unreadable source) is a failed result for that op and the caller runs the rest. Move/copy
 /// **refuse to overwrite** an existing destination (a safer default than clobbering); deletes go to trash.
 ///
-/// # Symlink/junction confinement — the data-loss guard
+/// # Two questions, asked about EVERY field in [`op_path_fields`], before anything mutates
 ///
-/// Before any mutation, **every path field, in full — final component included** — must resolve within
-/// `canonical_root` per [`crate::fsutil::confined_to`]. An op that resolves outside (via a symlinked or
-/// junctioned component that passed the purely textual [`op_plan::validate`], or via a link *at* the name
-/// itself) is **refused** as a failed result and never reaches a primitive. That matters here more than
-/// almost anywhere else in the app: a mutation that lands outside the confirmed folder is also outside the
-/// pre-execute checkpoint, so the app's own one-click undo cannot take it back.
+/// **1. Does it stay inside the folder?** Every path field, in full — final component included — must
+/// resolve within `canonical_root` per [`crate::fsutil::confined_to`]. An op that resolves outside (via a
+/// symlinked or junctioned component that passed the purely textual [`op_plan::validate`], or via a link
+/// *at* the name itself) is **refused** as a failed result and never reaches a primitive. That matters
+/// here more than almost anywhere else in the app: a mutation that lands outside the confirmed folder is
+/// also outside the pre-execute checkpoint, so the app's own one-click undo cannot take it back.
 ///
 /// `confined_to` fails **closed**: an `EACCES`/`ELOOP`/sharing-violation it cannot resolve is refused, not
 /// waved through. For a guard on a path about to be created or written, "I could not tell" must not mean
 /// "go ahead", and a refused op is a reported failure the human can act on.
+///
+/// **2. Is it the folder itself?** [`crate::fsutil::confined_to`] answers `true` for `root` — deliberately,
+/// documented on itself, and it explicitly hands this second question back to the caller: *"the caller
+/// still decides whether the root itself is an acceptable answer … 'Not the root itself' is `same_place`'s
+/// question, and the rename sites ask both."* So this asks both, via
+/// [`crate::fsutil::same_place`].
+///
+/// **CPE-1750 attempt 1 asked only the first, and that was a regression**, because the deleted
+/// `parent_confined` had answered the second one by accident: it inspected `path.parent()`, and the root's
+/// parent is outside the root by definition. Measured on PR #916 —
+/// `Delete { path: <root> }` sent the entire confirmed folder to the trash seam and reported the op
+/// **successful**, and `Rename { path: <root>, new_name: X }` relocated the folder to
+/// `<parent-of-root>/X`. `op_plan::validate` does not stop either: its `within_root` is a `>=`-length
+/// prefix test, so it is true for equality.
+///
+/// The refusal is uniform across all five ops rather than a list of "the destructive ones", because
+/// "which arms need it" is the judgement this repo keeps getting wrong (a guard on three of four call
+/// sites). `Mkdir { path: <root> }` was a no-op reported as success and is now an honest refusal; the
+/// others were live hazards, including `Copy { src: <root> }`, which recursed a folder into itself.
+///
+/// The two questions run as **two passes**, containment over every field first. That ordering is not
+/// cosmetic: it is what makes each guard's removal red a *different* test, since an op that trips both
+/// (`Rename { path: <root> }` trips containment on its computed `dst` and identity on its `path`) must
+/// report the stronger, more specific reason.
 ///
 /// # What this does NOT cover — recorded here, where a reader of the Copilot path will hit it
 ///
@@ -264,12 +334,20 @@ fn confinement_refusal(field: &str, path: &Path) -> String {
 /// fails closed on `EACCES`. [`confinement_refusal`] therefore borrows the very same shared wording, so
 /// the user sees no difference and CPE-1705's property still holds at this seam.
 fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResult {
-    for (field, value) in op_path_fields(op) {
-        // Argument order is (path, root) here and (root, path) on the deleted `parent_confined` —
-        // deliberately not aliased behind a local wrapper, so the one primitive is called by name.
-        let p = Path::new(value);
-        if !crate::fsutil::confined_to(p, canonical_root) {
-            return OpResult::err(p, confinement_refusal(field, p));
+    let fields = op_path_fields(op);
+    // Pass 1 — does it stay inside the folder? Argument order is (path, root) here and (root, path) on
+    // the deleted `parent_confined`; deliberately not aliased behind a local wrapper, so the one
+    // primitive is called by name.
+    for (field, value) in &fields {
+        if !crate::fsutil::confined_to(value, canonical_root) {
+            return OpResult::err(value, confinement_refusal(field, value));
+        }
+    }
+    // Pass 2 — is it the folder ITSELF? `confined_to` says yes to the root by design and leaves this to
+    // the caller; a whole pass later so a field that fails both is reported by the more specific reason.
+    for (field, value) in &fields {
+        if crate::fsutil::same_place(value, canonical_root) {
+            return OpResult::err(value, root_itself_refusal(field, value));
         }
     }
     match op {
@@ -284,10 +362,11 @@ fn apply_op(op: &FileOp, canonical_root: &Path, trash: &dyn TrashBin) -> OpResul
         FileOp::Copy { src, dst } => transfer_entry(src, dst, true),
         FileOp::Rename { path, new_name } => {
             let p = Path::new(path);
-            let Some(parent) = p.parent() else {
+            // The SAME computation the guards above ran on (CPE-1750 attempt 2) — if this were derived
+            // separately, the guard and the call could come to disagree about where the rename lands.
+            let Some(dst) = rename_destination(p, new_name) else {
                 return OpResult::err(p, "cannot rename a path with no parent directory");
             };
-            let dst = parent.join(new_name);
             // CPE-1705: was `if dst.exists()` in front of an `fs::rename`, which replaces its
             // destination silently. CPE-1710: and it got only HALF the guard — `clobber_refusal` alone,
             // which follows links, so a **dangling** symlink at `dst` read as a free name and the rename
@@ -1080,6 +1159,139 @@ mod tests {
         let out = out.unwrap();
         assert_all_refused_for_escaping(&out.results, &plan);
         assert_eq!(fs::read(root.join("a.txt")).unwrap(), b"payload".to_vec(), "the source stayed put");
+    }
+
+    /// CPE-1750, **attempt 2, blocker 1** — found by PR #916's reviewer and reproduced against both
+    /// commits before it was fixed.
+    ///
+    /// `confined_to` answers `true` for the root itself, by design, and hands "is it the root?" back to
+    /// the caller. Attempt 1 never asked, so `Delete { path: <root> }` walked past the guard and reached
+    /// the [`TrashBin`] seam — `trash::delete` on the user's real filesystem in the shipped app — with
+    /// the entire confirmed folder as its argument, and reported the op **successful**. The deleted
+    /// `parent_confined` had refused this by accident, because the root's parent is outside the root by
+    /// definition, so the swap made this operation strictly *more* permissive.
+    ///
+    /// `op_plan::validate` is no help: its `within_root` is a `>=`-length prefix test, true for equality.
+    #[test]
+    fn cpe_1750_execute_never_trashes_the_confirmed_folder_itself() {
+        let root = scratch("cpe1750-root-delete");
+        fs::write(root.join("keep.txt"), b"the user's files").unwrap();
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1750-root-delete-hold"));
+
+        let plan = FileOpPlan { ops: vec![FileOp::Delete { path: root_str(&root) }] };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE UNWRAP — the call still returns `Ok` here; this op fails by *succeeding*, so an
+        // assertion below an `unwrap()` would never run on the build that has the bug.
+        let trashed = trash.trashed.lock().unwrap().clone();
+        assert!(
+            trashed.is_empty(),
+            "the trash seam — `trash::delete` on the user's real filesystem in the shipped app — was \
+             handed {trashed:?}, which IS the confirmed folder \"{}\" itself. The whole folder the human \
+             approved went to the Recycle Bin, reported as a successful operation",
+            root.display()
+        );
+        assert!(
+            root.join("keep.txt").exists(),
+            "\"{}\" is gone — the confirmed folder \"{}\" was removed out from under the user's files",
+            root.join("keep.txt").display(),
+            root.display()
+        );
+
+        let out = out.unwrap();
+        assert!(!out.results[0].ok, "the op must be refused, not reported successful: {:?}", out.results[0]);
+        assert!(
+            out.results[0].error.contains("IS the folder you confirmed"),
+            "and it must be refused BY THE ROOT-IDENTITY GUARD, naming the real problem — the path is not \
+             outside the folder, it *is* the folder: {}",
+            out.results[0].error
+        );
+    }
+
+    /// CPE-1750, **attempt 2, blocker 2** — the same reviewer, the same root input, a different route out.
+    ///
+    /// `Rename`'s destination is `path`'s parent joined with `new_name`, and attempt 1 never guarded it,
+    /// reasoning that confining `path` transitively confines its parent. That is false at `path == root`:
+    /// the destination lands in the root's **parent**, and `rename_into_slot` guards only *what is
+    /// sitting in* the slot, never *where the slot is*, so an empty name outside the folder sailed
+    /// through and the confirmed folder was relocated to `<parent-of-root>/away`.
+    ///
+    /// Two guards can now stop this, which is deliberate defence in depth — and it is why the assertion
+    /// below pins the **reason**. Containment runs as a whole pass before identity, so the destination
+    /// guard is what answers here; drop the `dst` field from `op_path_fields` and identity still refuses
+    /// the op, but with the other message, and this test reds. Without that, the destination guard could
+    /// be deleted outright with every test still green.
+    #[test]
+    fn cpe_1750_execute_never_renames_the_confirmed_folder_out_of_itself() {
+        let root = scratch("cpe1750-root-rename");
+        fs::write(root.join("keep.txt"), b"the user's files").unwrap();
+        let away = root.parent().expect("scratch dirs have a parent").join("cpe1750-relocated-root");
+        let _ = fs::remove_dir_all(&away); // a previous run must not decide this one
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1750-root-rename-hold"));
+
+        let plan = FileOpPlan {
+            ops: vec![FileOp::Rename {
+                path: root_str(&root),
+                new_name: "cpe1750-relocated-root".into(),
+            }],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
+
+        // EFFECT BEFORE UNWRAP — same reason as above: this one fails by succeeding.
+        assert!(
+            !away.exists(),
+            "the confirmed folder \"{}\" was RELOCATED to \"{}\" — outside the folder, and outside what \
+             the pre-execute checkpoint took, so the app's own Undo cannot bring it back",
+            root.display(),
+            away.display()
+        );
+        assert!(
+            root.join("keep.txt").exists(),
+            "\"{}\" is gone — the confirmed folder was renamed out from under the user's files",
+            root.join("keep.txt").display()
+        );
+
+        let out = out.unwrap();
+        assert!(!out.results[0].ok, "the op must be refused, not reported successful: {:?}", out.results[0]);
+        assert!(
+            out.results[0].error.contains("resolves outside the folder"),
+            "and it must be refused BY THE DESTINATION-CONFINEMENT GUARD — if identity catches it first, \
+             that guard is unreachable and deletable with every test still green: {}",
+            out.results[0].error
+        );
+    }
+
+    /// The other half of blocker 1: the root-identity refusal must not become a blanket refusal of
+    /// anything *near* the root. Every ordinary op names something **inside** the folder, and the
+    /// pre-existing suite would notice a regression there — but a sibling whose name merely *starts with*
+    /// the root's name is the input that a sloppy `starts_with`/string comparison gets wrong, and it has
+    /// no other coverage here.
+    #[test]
+    fn cpe_1750_root_identity_refusal_does_not_catch_ordinary_in_root_work() {
+        let root = scratch("cpe1750-discriminate");
+        fs::write(root.join("a.txt"), b"payload").unwrap();
+        let ctx = ctx_for(&root);
+        let trash = FakeTrash::new(scratch("cpe1750-discriminate-hold"));
+
+        let plan = FileOpPlan {
+            ops: vec![
+                // A child of the root, and a not-yet-existing one two levels down — the ordinary shapes.
+                FileOp::Mkdir { path: root_str(&root.join("Archive/2026")) },
+                FileOp::Rename { path: root_str(&root.join("a.txt")), new_name: "b.txt".into() },
+            ],
+        };
+        let out = execute_with(&ctx, &trash, &root_str(&root), &plan).unwrap();
+
+        assert!(
+            out.results.iter().all(|r| r.ok),
+            "ordinary in-root work must still run — the guard is 'not the folder itself', not 'nothing \
+             near the folder': {:?}",
+            out.results
+        );
+        assert!(root.join("Archive/2026").is_dir());
+        assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"payload".to_vec());
     }
 
     #[test]

@@ -76,6 +76,11 @@ read, for instance), it refuses that operation too and says so, rather than gues
 This is why an operation can be refused even though the path you see starts inside your folder: what
 matters is where it *ends up*.
 
+The confirmed folder **itself** is off limits too. An operation naming the folder you picked — rather than
+something in it — is refused, because deleting it, renaming it or copying it would act in its *parent*,
+which is outside the folder and outside what Undo restores. The copilot rearranges what is inside the
+folder you chose; it never touches the folder itself.
+
 ## What this is (and isn't)
 
 Like [Checkpoints & Rollback](16-checkpoints), this is the safety-first, palette-driven surface over the
