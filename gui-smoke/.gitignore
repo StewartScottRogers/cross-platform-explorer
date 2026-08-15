@@ -3,6 +3,12 @@ node_modules/
 wdio-logs/
 .screenshots/
 .results/
+# CPE-1753: staging dir the sharded CI workflow copies the built app binary + tauri-driver into, so one
+# build job can hand them to every shard job as a single artifact. Runner-only — never created by a local
+# run, never committed. Deliberately NOT dot-prefixed: `actions/upload-artifact@v4` silently excludes
+# anything under a dot-directory unless `include-hidden-files: true` is set, and a build artifact that
+# vanishes silently would make every shard fail with "release binary not found".
+dist-app/
 # Local msedgedriver.exe fetched to match this machine's installed Edge/WebView2 build (README
 # "Running this locally") — never a checked-in dependency, and the pinned .cargo/bin copy is often a
 # version behind after an Edge auto-update.
