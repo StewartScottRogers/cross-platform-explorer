@@ -3,11 +3,11 @@ id: CPE-1712
 title: A right-to-left override in a remote filename disguises its extension in Explorer
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
