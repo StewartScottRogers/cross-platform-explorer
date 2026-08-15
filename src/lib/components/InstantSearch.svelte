@@ -25,6 +25,7 @@
   import { parentDir, highlightSegments } from "../contentSearch";
   import { moveActive, volumeIdForRoot, resolveBuildRoot, extensionOf } from "../instantSearch";
   import { iconFor } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import Icon from "./Icon.svelte";
 
   /** The current folder (empty when on the Home screen — the component falls back to `homeDir`). */
@@ -214,13 +215,13 @@
               data-i={i}
               role="button"
               tabindex="-1"
-              title={h.path}
+              title={displaySafePath(h.path)}
               on:mousemove={() => (active = i)}
               on:click={() => choose(i)}
             >
               <Icon name={iconFor({ is_dir: h.is_dir, extension: extensionOf(h.name), name: h.name })} size={14} />
-              <span class="is-name">{#each highlightSegments(h.name, query) as seg}{#if seg.match}<mark class="hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}</span>
-              <span class="is-dir">{parentDir(h.path)}</span>
+              <span class="is-name">{#each highlightSegments(h.name, query) as seg}{#if seg.match}<mark class="hl">{displaySafeName(seg.text)}</mark>{:else}{displaySafeName(seg.text)}{/if}{/each}</span>
+              <span class="is-dir">{displaySafePath(parentDir(h.path))}</span>
             </div>
           {/each}
         </div>

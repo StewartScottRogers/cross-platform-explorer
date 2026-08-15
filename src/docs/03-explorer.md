@@ -58,6 +58,26 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
 - **Progressive loading** — folders stream in: the first rows appear almost immediately and the rest fill
   in as they're read, so even a huge or slow (network) folder stays interactive instead of blocking on a
   blank pane. Changing folders mid-load cleanly abandons the previous listing.
+- **A name that tries to disguise its own extension is flagged, not hidden.** Twelve invisible Unicode
+  characters exist purely to control text direction (right-to-left override and its relatives), and they
+  can be used to make a name — an invisible override character followed by `gnp.txt` — *display* as
+  `txt.png` instead: the classic filename-spoofing trick. Windows Explorer has no defense against this;
+  this app does, **in most of the places it draws a name or a path**: the file list, the sidebar folder
+  tree and Favorites, the address-bar breadcrumb, every search surface (instant search, find-by-name,
+  search-in-files), the tab strip (both the visible label and its hover tooltip), the details pane
+  (including its Path row), Properties, Trash (including its tooltip and screen-reader label), Home's
+  Recent/Favorites/Folders/Shared/Quick-access tiles, the preview-pane folder peek, the archive-safety
+  check, and the confirmation dialogs for delete/extract/unlock/run-command. In each of those, one of the
+  twelve characters is shown as a bracketed tag (`[RLO]`, `[LRM]`, …) instead of being allowed to
+  silently reorder the text, so what you read is always the file's real byte order. This is a
+  **display-only** change: the file on disk keeps its exact original name (these characters are legal in
+  a filename on every platform this app runs on, so nothing about the file itself is altered), and a name
+  you're actively renaming shows and edits your real characters, not the tagged version. That matters for
+  a genuinely right-to-left filename (Arabic, Hebrew) — those are never touched or "fixed"; only the
+  handful of invisible direction-control characters are ever flagged, never the letters themselves.
+  **Not yet covered:** a handful of lower-traffic dialogs (several File Health / duplicate-finder /
+  media-batch tabs, the split/join-file dialogs, the terminal tab strip) still draw a name or path
+  without this flag — tracked as a follow-up rather than claimed here.
 - **Preview** — select a file to see it in the side pane; text is editable in place. Text files (source
   code and plain text alike, e.g. `.txt`) get a richer read view: syntax highlighting when a language is
   recognised, a **line-number gutter**, **fold triangles** on collapsible blocks (click to hide a range,

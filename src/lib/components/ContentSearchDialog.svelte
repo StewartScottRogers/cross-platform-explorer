@@ -9,6 +9,7 @@
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
   import { groupMatches, baseName, highlightSegments, pushRecentSearch, type ContentSearchResult, type ContentMatch } from "../contentSearch";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { lsGet, lsSet, lsBool } from "../persist";
 
   const RECENTS_KEY = "cpe.contentSearchRecents";
@@ -107,7 +108,7 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
       <h2>{$t("search.inFilesTitle")}</h2>
-      <span class="root" title={root}>{baseName(root) || root}</span>
+      <span class="root" title={displaySafePath(root)}>{displaySafeName(baseName(root)) || displaySafePath(root)}</span>
       <button class="docs" title={$t("search.docsTitle")} aria-label={$t("search.docsTitle")} on:click={() => dispatch("help")}><Icon name="book" size={15} /></button>
       <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
@@ -156,8 +157,8 @@
           <div class="group">
             <div class="group-head">
               <button class="chev" on:click|stopPropagation={() => toggleFile(g.path)} aria-label={$t("search.toggleFile")} title={collapsedFiles.has(g.path) ? $t("home.expand") : $t("home.collapse")}>{collapsedFiles.has(g.path) ? "▸" : "▾"}</button>
-              <button class="file" on:click={() => goToFile(g.path)} title={g.path}>
-                <Icon name="file" size={13} /> {baseName(g.path)}
+              <button class="file" on:click={() => goToFile(g.path)} title={displaySafePath(g.path)}>
+                <Icon name="file" size={13} /> {displaySafeName(baseName(g.path))}
                 <span class="count">{g.matches.length}</span>
               </button>
             </div>

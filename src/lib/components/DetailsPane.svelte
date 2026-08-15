@@ -3,6 +3,7 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import type { DirEntry } from "../types";
 
   /** The current selection: 0, 1, or many. */
@@ -22,7 +23,7 @@
 <aside class="details">
   {#if one}
     <div class="hero"><Icon name={iconFor(one)} size={72} /></div>
-    <h2>{one.name}</h2>
+    <h2>{displaySafeName(one.name)}</h2>
     <div class="meta">
       <div class="meta-row"><span class="meta-k">Type</span><span class="meta-v">{typeName(one)}</span></div>
       {#if !one.is_dir}
@@ -34,7 +35,7 @@
         <span class="meta-k">Date modified</span>
         <span class="meta-v">{formatDate(one.modified) || "—"}</span>
       </div>
-      <div class="meta-row"><span class="meta-k">Path</span><span class="meta-v">{one.path}</span></div>
+      <div class="meta-row"><span class="meta-k">Path</span><span class="meta-v">{displaySafePath(one.path)}</span></div>
     </div>
   {:else if selected.length > 1}
     <div class="hero"><Icon name="copy" size={72} /></div>
@@ -59,7 +60,7 @@
     </div>
   {:else}
     <div class="hero"><Icon name={folderIcon} size={72} /></div>
-    <h2>{folderName} ({itemCount} item{itemCount === 1 ? "" : "s"})</h2>
+    <h2>{displaySafeName(folderName)} ({itemCount} item{itemCount === 1 ? "" : "s"})</h2>
     <div class="hint">
       <Icon name="info" size={15} />
       <span>Select a single file to get more information.</span>

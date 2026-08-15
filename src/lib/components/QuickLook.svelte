@@ -5,6 +5,7 @@
   import { createEventDispatcher } from "svelte";
   import { convertFileSrc } from "@tauri-apps/api/core";
   import Icon from "./Icon.svelte";
+  import { displaySafeName } from "../filename";
 
   export let images: { path: string; name: string }[] = [];
   export let index = 0;
@@ -25,10 +26,10 @@
   {/if}
   {#if current}
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-    <img class="img" src={convertFileSrc(current.path)} alt={current.name} on:click|stopPropagation />
+    <img class="img" src={convertFileSrc(current.path)} alt={displaySafeName(current.name)} on:click|stopPropagation />
     <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
     <div class="bar" on:click|stopPropagation>
-      <span class="name" title={current.name}>{current.name}</span>
+      <span class="name" title={displaySafeName(current.name)}>{displaySafeName(current.name)}</span>
       {#if images.length > 1}<span class="counter">{index + 1} / {images.length}</span>{/if}
     </div>
   {/if}

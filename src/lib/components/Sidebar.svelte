@@ -5,6 +5,7 @@
   import Icon from "./Icon.svelte";
   import SidebarNode from "./SidebarNode.svelte";
   import { iconFor } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { formatSize, diskUsage } from "../format";
   import { t } from "../i18n";
   import { sessionColor, sessionNum, shortModel } from "../sessionChip";
@@ -479,12 +480,12 @@
           <button
             class="nav-item fav-item"
             class:active={isMarked(f.path)}
-            title={f.path}
+            title={displaySafePath(f.path)}
             on:click={() => dispatch(f.is_dir ? "navigate" : "openFile", f.path)}
           >
             <span class="twisty hidden" />
             <Icon name={f.is_dir ? "folder" : iconFor({ is_dir: false, extension: extOf(f.name) })} />
-            <span class="label">{f.name}</span>
+            <span class="label">{displaySafeName(f.name)}</span>
           </button>
         {/each}
       </div>
@@ -778,13 +779,13 @@
           style="text-align:left"
           on:click={() => dispatch("navigate", place.path)}
         >
-          {place.name}
+          {displaySafeName(place.name)}
         </button>
         {#if isDrive && driveRemovable[place.path]}
           <button
             class="eject-btn"
-            title={`Safely eject ${place.name}`}
-            aria-label={`Safely eject ${place.name}`}
+            title={`Safely eject ${displaySafeName(place.name)}`}
+            aria-label={`Safely eject ${displaySafeName(place.name)}`}
             on:click|stopPropagation={() => dispatch("eject", { path: place.path, name: place.name })}
           >
             <Icon name="eject" size={13} />
@@ -888,18 +889,18 @@
           <span class="twisty hidden" />
           <span class="state-dot state-{state}" aria-hidden="true" />
           <Icon name="globe" />
-          <span class="label">{conn.name}</span>
+          <span class="label">{displaySafeName(conn.name)}</span>
         </button>
       {/each}
       {#each dedupedShares as s (s.path)}
         <button
           class="nav-item fav-item"
-          title={`${s.path} — an OS-discovered network location; manage it from Home's Shared tab`}
+          title={`${displaySafePath(s.path)} — an OS-discovered network location; manage it from Home's Shared tab`}
           on:click={() => dispatch("navigate", s.path)}
         >
           <span class="twisty hidden" />
           <Icon name="drive" />
-          <span class="label">{s.name}</span>
+          <span class="label">{displaySafeName(s.name)}</span>
         </button>
       {/each}
       {#each dedupedDiscovered as s (s.path)}
@@ -916,14 +917,14 @@
           class="nav-item fav-item"
           disabled={!savable}
           title={savable
-            ? `${s.path} — discovered on your network; click to add it as a connection`
-            : `${s.path} — discovered on your network; ${prefill.scheme.toUpperCase()} isn't supported yet`}
+            ? `${displaySafePath(s.path)} — discovered on your network; click to add it as a connection`
+            : `${displaySafePath(s.path)} — discovered on your network; ${prefill.scheme.toUpperCase()} isn't supported yet`}
           on:click={(e) => savable && dispatch("networkAdd", { x: e.clientX, y: e.clientY, prefill })}
         >
           <span class="twisty hidden" />
           <span class="state-dot state-discovered" aria-hidden="true" title="Discovered — not yet added" />
           <Icon name="globe" />
-          <span class="label">{s.name}</span>
+          <span class="label">{displaySafeName(s.name)}</span>
           {#if savable}
             <span class="discover-add-hint" aria-hidden="true"><Icon name="plus" size={11} /></span>
           {/if}

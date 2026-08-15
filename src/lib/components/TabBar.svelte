@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
   import type { DensityMode } from "../types";
 
   export let tabs: { id: number; title: string }[] = [];
@@ -26,10 +27,10 @@
       class:active={tab.id === activeId}
       on:click={() => dispatch("select", tab.id)}
       on:contextmenu|preventDefault={(e) => dispatch("menu", { id: tab.id, x: e.clientX, y: e.clientY })}
-      title={tab.title}
+      title={displaySafeName(tab.title)}
     >
       <Icon name="home" size={15} />
-      <span class="tab-label">{tab.title}</span>
+      <span class="tab-label">{displaySafeName(tab.title)}</span>
       {#if tabs.length > 1}
         <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
         <span

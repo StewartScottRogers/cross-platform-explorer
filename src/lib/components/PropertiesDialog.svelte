@@ -7,6 +7,7 @@
   import { formatSize } from "../format";
   import { formatDate } from "../datetime";
   import { iconFor, typeName, categoryOf, isImage } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { checksumMatches } from "../checksum";
   import type { DirEntry } from "../types";
   import * as settings from "../settings";
@@ -225,11 +226,11 @@
     {:else if single}
       <div class="hero">
         <Icon name={iconFor(single)} size={48} />
-        <span class="fname">{single.name}</span>
+        <span class="fname">{displaySafeName(single.name)}</span>
       </div>
       <dl>
         <div><dt>{$t("prop.type")}</dt><dd>{typeName(single)}</dd></div>
-        <div><dt>{$t("prop.location")}</dt><dd class="path">{single.path}</dd></div>
+        <div><dt>{$t("prop.location")}</dt><dd class="path">{displaySafePath(single.path)}</dd></div>
         {#if single.is_dir}
           <div>
             <dt>{$t("prop.size")}</dt>

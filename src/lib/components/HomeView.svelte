@@ -4,6 +4,7 @@
   import { t } from "../i18n";
   import { formatDate } from "../datetime";
   import { iconFor } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { lsGet, lsSet, lsBool } from "../persist";
   import { onMount } from "svelte";
   import type { Place, RecentFile, Favorite, NetShare } from "../types";
@@ -150,8 +151,8 @@
         >
           <Icon name={place.kind} size={28} />
           <span class="qa-text">
-            <span class="qa-name">{place.name}</span>
-            <span class="qa-sub">{place.path}</span>
+            <span class="qa-name">{displaySafeName(place.name)}</span>
+            <span class="qa-sub">{displaySafePath(place.path)}</span>
           </span>
           {#if pins.includes(place.path)}
             <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
@@ -227,7 +228,7 @@
             >
               <span class="rname">
                 <Icon name={iconFor({ is_dir: false, extension: extOf(r.name) })} />
-                <span class="ellip">{r.name}</span>
+                <span class="ellip">{displaySafeName(r.name)}</span>
               </span>
               <span class="rdate">{formatDate(r.opened)}</span>
               <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
@@ -263,8 +264,8 @@
             >
               <span class="rname">
                 <Icon name={f.is_dir ? "folder" : iconFor({ is_dir: false, extension: extOf(f.name) })} />
-                <span class="ellip">{f.name}</span>
-                <span class="fav-path ellip">{f.path}</span>
+                <span class="ellip">{displaySafeName(f.name)}</span>
+                <span class="fav-path ellip">{displaySafePath(f.path)}</span>
               </span>
               <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
               <span
@@ -298,8 +299,8 @@
             >
               <span class="rname">
                 <Icon name="folder" />
-                <span class="ellip">{d.name}</span>
-                <span class="fav-path ellip">{d.path}</span>
+                <span class="ellip">{displaySafeName(d.name)}</span>
+                <span class="fav-path ellip">{displaySafePath(d.path)}</span>
               </span>
               <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
               <span
@@ -357,8 +358,8 @@
             >
               <span class="rname">
                 <Icon name="people" />
-                <span class="ellip">{s.name}</span>
-                <span class="fav-path ellip">{s.path}</span>
+                <span class="ellip">{displaySafeName(s.name)}</span>
+                <span class="fav-path ellip">{displaySafePath(s.path)}</span>
               </span>
               {#if s.kind === "user"}
                 <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->

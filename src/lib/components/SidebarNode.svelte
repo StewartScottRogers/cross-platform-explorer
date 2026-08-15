@@ -8,6 +8,7 @@
    */
   import Icon from "./Icon.svelte";
   import type { DirEntry } from "../types";
+  import { displaySafeName } from "../filename";
 
   export let node: { path: string; name: string };
   export let expanded: Set<string>;
@@ -42,7 +43,7 @@
     <Icon name="chev-right" size={12} />
   </button>
   <Icon name="folder" />
-  <button class="label" style="text-align:left" on:click={() => onNavigate(node.path)}>{node.name}</button>
+  <button class="label" style="text-align:left" on:click={() => onNavigate(node.path)}>{displaySafeName(node.name)}</button>
 </div>
 
 {#if open}

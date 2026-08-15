@@ -35,6 +35,7 @@
   import FolderBrowser from "./FolderBrowser.svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
   import { formatSize } from "../format";
   import { lsBool, lsSet } from "../persist";
   import { unwrap, invoke as ipcInvoke } from "../invoke";
@@ -1120,7 +1121,7 @@
            timeout + `on:error` handler still catch a valid-looking PDF that hangs the plugin. -->
       <iframe
         class="preview-pdf"
-        title={entry.name}
+        title={displaySafeName(entry.name)}
         src={assetUrl(entry.path)}
         on:load={onPdfIframeLoad}
         on:error={onPdfIframeError}
@@ -1141,7 +1142,7 @@
           <tbody>
             {#each entries as e}
               <tr>
-                <td>{e.name}</td>
+                <td>{displaySafeName(e.name)}</td>
                 <td class="num">{e.is_dir ? "" : formatSize(e.size)}</td>
               </tr>
             {/each}

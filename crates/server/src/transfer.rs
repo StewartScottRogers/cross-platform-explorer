@@ -78,6 +78,50 @@ pub fn is_safe_name(name: &str) -> bool {
 ///   wrongly-diagnosed skip into a correct download.
 const WINDOWS_UNSAFE_CHARS: &[char] = &['<', '>', ':', '"', '|', '?', '*'];
 
+/// Unicode bidi/format control characters (CPE-1712) — **deliberately absent** from
+/// [`WINDOWS_UNSAFE_CHARS`] and from every pass of [`windows_safe_segment`]. Listed here, and covered
+/// by `cpe_1712_bidi_format_chars_are_never_rewritten_on_disk`, so the omission is a recorded decision
+/// rather than an accident waiting to be "fixed" by someone assuming it is another CPE-1709 gap.
+///
+/// `U+202E RIGHT-TO-LEFT OVERRIDE` is the reported case: a remote leaf `\u{202E}gnp.txt` downloads
+/// **byte-intact** and Windows Explorer renders it as `txt.png`, because RLO tells the bidi renderer to
+/// draw everything after it right-to-left. It is Unicode category **Cf** (format), not **Cc**
+/// (control), so `c.is_control()` — the exact predicate every pass here uses — never sees it. The FULL
+/// `Bidi_Control=Yes` set, all **twelve** code points, enumerated rather than stopping at the reported
+/// character (this is CPE-1709's own lesson, stated explicitly in the ticket that opened this constant
+/// — and the exact trap round 2 of the CPE-1712 review caught here: the first cut had 11 of 12, missing
+/// `U+061C ARABIC LETTER MARK`): the five embeddings/overrides `U+202A`–`U+202E`, the four isolates
+/// `U+2066`–`U+2069`, the two directional marks `U+200E`/`U+200F`, and `U+061C`.
+///
+/// **The decision, and why it differs from CPE-1709's:** CPE-1709 rewrote `:`, control characters, a
+/// trailing dot/space, and the reserved device names because the local filesystem or an ordinary Win32
+/// application **could not otherwise hold or open the file** — the transform was *compelled* by a real
+/// write failure or an unreachable name. None of that is true here: every one of these code points is
+/// legal on NTFS, ext4, and APFS; `download_tree` writes them without incident and the file opens fine
+/// by its real name. Nothing forces a rewrite.
+///
+/// Rewriting anyway would trade a display bug for a **data-mangling** one: a real Hebrew or Arabic
+/// filename can legitimately carry `U+200E`/`U+200F` (commonly right before a Latin extension, to keep
+/// it drawing left-to-right inside an otherwise right-to-left name) or the other marks at a
+/// mixed-script boundary — exactly the case this ticket's own text warns against casually mangling.
+/// Escaping them on disk would alter those users' filenames to "fix" a spoof they were never exposed
+/// to, on every platform, forever, for a problem that is really about *rendering* in one specific
+/// application (Windows Explorer) this codebase does not own.
+///
+/// **So the fix lives in the other lever this ticket names: our own rendering**
+/// (`src/lib/filename.ts`'s `displaySafeName`, wired into the listing components), not the bytes on
+/// disk or the remote name. Rendering is a presentation choice, re-evaluated on every redraw and
+/// touching no one's data — the more surgical of the two, and reversible if it ever turns out wrong.
+/// Explorer's own rendering of the on-disk name stays spoofed; that is Explorer's bug, not this app's
+/// sink's, per the ticket's own scoping ("Explorer's behaviour is not ours to fix").
+#[cfg(test)]
+const BIDI_FORMAT_CHARS: &[char] = &[
+    '\u{061C}', // Arabic Letter Mark — the twelfth Bidi_Control code point, missed in round 1
+    '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', // embeddings + overrides + pop
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', // isolates
+    '\u{200E}', '\u{200F}', // directional marks
+];
+
 /// The DOS device names Windows still reserves in every directory (CPE-1709), matched
 /// case-insensitively against the name's stem — Windows reserves `CON.txt` exactly as it reserves `CON`.
 ///
@@ -485,6 +529,15 @@ fn win32_visible_len(path: &Path) -> usize {
 /// symlink"* about a name that has nothing to do with symlinks and everything to do with length. A
 /// confident wrong answer is worse than an honest one (CPE-1673/1678), so the length is measured and
 /// stated when it is the plausible cause. The OS still makes the decision; this only describes it.
+///
+/// **Scoped limitation, recorded rather than left to be rediscovered (PR #894 UAT fold-in):** on an
+/// **astral-plane** name — emoji and other characters outside the Basic Multilingual Plane, where Rust's
+/// `char`/`chars().count()` and Windows' UTF-16-code-unit accounting diverge 1:2 — the length branch
+/// above can fail to fire even though the length limit is the real cause, and the message then degrades
+/// to the raw OS error instead of naming the length. That is an **absent** explanation, not a **wrong**
+/// one: the two properties that actually matter still hold in every case — the transfer still correctly
+/// ends `Err` (never a silent `Ok` over a dropped file), and the message never blames a symlink probe for
+/// an astral-plane name either.
 fn describe_undeliverable(remote: &str, local: &Path, cause: &str) -> String {
     let leaf_len =
         local.file_name().map(|n| n.to_string_lossy().chars().count()).unwrap_or_default();
@@ -633,6 +686,19 @@ pub fn download_tree(
             Ok(a) => a,
             // CPE-1696: an `lstat` that failed for a reason OTHER than absence used to be silently
             // skipped, moving the containment check onto a shallower ancestor. Fail closed instead.
+            //
+            // **Deliberate asymmetry (PR #894 UAT, recorded here per its request rather than left to be
+            // rediscovered): an uninspectable ANCESTOR skips silently and the transfer still ends `Ok`,
+            // while an uninspectable LEAF (below) is pushed into `undelivered` and ends the whole
+            // transfer `Err` (CPE-1709 F1).** Defensible, not an oversight: the leaf is the actual
+            // delivery target — the user asked for THAT file and genuinely did not get it — while an
+            // ancestor is scaffolding on the way there, and "we could not even confirm the containing
+            // directory chain" is closer in kind to the traversal/symlink security refusals just above
+            // (not writing is the correct, safe response) than to a delivery failure. One real
+            // consequence worth naming plainly: a permission-denied leaf `lstat` now FAILS the whole
+            // transfer where it used to be silent — judged an improvement (the old behaviour could report
+            // success for a batch that quietly dropped files), not a defect, but it is a visible
+            // behaviour change for anyone relying on the old silence.
             Err(e) => {
                 eprintln!(
                     "transfer: skipped entry whose existing ancestors could not be inspected ({e}): {}",
@@ -1551,6 +1617,17 @@ mod tests {
     /// A security refusal is **not** a delivery failure: not writing a traversal name or a pre-existing
     /// symlink is the correct outcome, so those must still end `Ok`. Without this the F1 change would
     /// quietly turn every hostile-name transfer into an error and mask real problems behind noise.
+    ///
+    /// **This exercises only the traversal branch of the three security refusals** (PR #894 UAT,
+    /// CPE-1712 fold-in): traversal names, a pre-existing symlink, and an uninspectable ancestor. It is
+    /// not a happy-path assertion — it mixes a refused entry with a deliverable one and pins `n == 1`, so
+    /// it does distinguish the two categories — but a future change that moved
+    /// [`LeafProbe::PreExistingSymlink`] into `undelivered` would still pass THIS test alone, because it
+    /// never exercises that branch. [`cpe_1712_a_preexisting_symlink_refusal_still_reports_ok`] below
+    /// closes that gap (unix-gated: creating a symlink on Windows needs admin/developer-mode). The third
+    /// category, an uninspectable ancestor, is covered at the classifier level by
+    /// [`classify_ancestor_probe`]'s own tests — see `cpe_1696_an_uninspectable_ancestor_level_is_never_
+    /// treated_as_absent`.
     #[test]
     fn cpe_1709_a_security_refusal_still_reports_ok() {
         let base = std::env::temp_dir().join(format!("cpe-1709-refusal-{}", std::process::id()));
@@ -1562,6 +1639,39 @@ mod tests {
         assert_eq!(n, 1, "only the legitimate entry is delivered");
         assert_eq!(std::fs::read(base.join("legit.txt")).unwrap(), b"pwn");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The second of the three security-refusal categories (PR #894 UAT fold-in, closed while touching
+    /// this file for CPE-1712): a pre-existing leaf symlink must be SKIPPED, not delivered and not
+    /// treated as an undelivered failure — `n == 1` (only the legitimate file) with the transfer still
+    /// `Ok` is what proves `LeafProbe::PreExistingSymlink` stayed out of `undelivered`. Unix-gated for
+    /// the same reason `download_tree_does_not_follow_a_preexisting_symlinked_leaf_on_write` is: creating
+    /// a symlink on Windows needs admin/developer-mode privilege this CI runner does not have.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1712_a_preexisting_symlink_refusal_still_reports_ok() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("cpe-1712-symrefusal-{}", std::process::id()));
+        let outside = std::env::temp_dir().join(format!("cpe-1712-symrefusal-outside-{}.txt", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&outside);
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(&outside, b"original").unwrap();
+        // Plant `base/target.txt` as a pre-existing symlink BEFORE the transfer runs — this is the
+        // OneFile provider's only leaf name, so the write attempt hits exactly this guard.
+        symlink(&outside, base.join("target.txt")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&OneFile, "", &base, &cancel)
+            .expect("skipping a pre-existing symlinked leaf is correct behaviour, not a delivery failure");
+        assert_eq!(n, 0, "the symlinked leaf must be skipped, counted as neither delivered nor failed");
+        assert_eq!(
+            std::fs::read(&outside).unwrap(),
+            b"original",
+            "the write must not have followed the symlink and clobbered the outside file"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_file(&outside);
     }
 
     /// **The headline test, ungated so all three CI legs assert something real.** Downloads a key
@@ -1703,6 +1813,84 @@ mod tests {
         assert_eq!(written, n, "the reported count must match what actually landed under the root");
         let _ = std::fs::remove_dir_all(&base);
         let _ = std::fs::remove_file(&sentinel);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1712: `char::is_control()` only matches Unicode category Cc; `U+202E RIGHT-TO-LEFT OVERRIDE`
+    // is category Cf (format), so it passed every guard above untouched. Measured: a remote leaf
+    // `\u{202E}gnp.txt` downloads byte-intact and Windows Explorer renders it as `txt.png` — the bytes
+    // are honest, only the rendering lies.
+    //
+    // Decision recorded next to `BIDI_FORMAT_CHARS`: the on-disk/remote name is left UNTOUCHED (unlike
+    // CPE-1709's compelled rewrite), because nothing forces a rewrite here — every one of these code
+    // points (all twelve of the `Bidi_Control=Yes` set, including `U+061C ARABIC LETTER MARK`) is legal
+    // on every target filesystem — and rewriting would mangle a legitimate Arabic/Hebrew filename that
+    // never exposed anyone to the spoof. The fix lives in this app's own rendering
+    // (`src/lib/filename.ts`'s `displaySafeName`/`displaySafePath`), not in this sink.
+    // ---------------------------------------------------------------------------------------------
+
+    /// The core decision, asserted directly: not one of the enumerated bidi/format characters is ever
+    /// rewritten by `windows_safe_segment`. Ungated — the function is platform-pure (see its own doc
+    /// comment), so this needs no `#[cfg]` to mean something on every CI leg.
+    #[test]
+    fn cpe_1712_bidi_format_chars_are_never_rewritten_on_disk() {
+        for &c in BIDI_FORMAT_CHARS {
+            let name = format!("a{c}b.txt");
+            assert_eq!(
+                windows_safe_segment(&name).as_ref(),
+                name,
+                "U+{:04X} must NOT be rewritten on disk — it is legal on every target filesystem, so \
+                 nothing compels a transform, and rewriting it would mangle a real RTL filename that \
+                 legitimately carries it",
+                c as u32
+            );
+        }
+    }
+
+    /// **"Do not casually mangle real RTL filenames"** — the ticket's own instruction. Real Arabic and
+    /// Hebrew names, with and without an explicit directional mark right before the extension (a common
+    /// real-world shape: an RLM there keeps a Latin extension drawing left-to-right inside otherwise
+    /// right-to-left text), must survive the Windows encoder completely unchanged.
+    #[test]
+    fn cpe_1712_real_arabic_and_hebrew_names_survive_the_windows_encoder_untouched() {
+        for name in [
+            "مستند.pdf",            // Arabic: "document.pdf" — no bidi control char needed at all
+            "تقرير الميزانية.xlsx", // Arabic: "budget report.xlsx"
+            "מסמך.txt",             // Hebrew: "document.txt"
+            "דוח כספי.docx",        // Hebrew: "financial report.docx"
+            "דוח\u{200F}.pdf",      // Hebrew name with an explicit RLM right before the extension
+            "تقرير\u{061C}.pdf",    // Arabic name with an explicit ALM right before the extension
+        ] {
+            assert_eq!(
+                windows_safe_segment(name).as_ref(),
+                name,
+                "a legitimate RTL filename must not be altered: {name:?}"
+            );
+            assert_eq!(local_safe_segment(name).as_ref(), name);
+        }
+    }
+
+    /// End to end through the REAL sink: the ticket's own repro. The write succeeds and the bytes are
+    /// honest — this is a rendering bug, not a data-loss one, and this test pins that distinction: the
+    /// file really is there, byte-intact, under its real (unrewritten) name. Ungated: `:` is a Windows
+    /// peculiarity, but a bidi/format character is legal path text on every target OS, so this is real
+    /// coverage on all three CI legs, not just Windows.
+    #[test]
+    fn cpe_1712_the_reported_spoof_writes_byte_intact_through_the_real_sink() {
+        let out = std::env::temp_dir().join(format!("cpe-1712-rlo-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let leaf = "\u{202E}gnp.txt".to_string(); // the ticket's own repro
+        let provider = HostileNames { names: vec![leaf.clone()] };
+        let cancel = AtomicBool::new(false);
+        let n = download_tree(&provider, "", &out, &cancel).expect("the transfer must not fail");
+        assert_eq!(n, 1, "the file must be delivered, not skipped — this is a display bug, not security");
+        assert_eq!(
+            std::fs::read(out.join(&leaf)).unwrap_or_else(|e| panic!("{leaf:?}: {e}")),
+            b"pwn",
+            "the bytes must arrive intact under the UNREWRITTEN name — proves this is a rendering bug, \
+             not a data-loss one"
+        );
+        let _ = std::fs::remove_dir_all(&out);
     }
 
     /// And the guard still lets a legitimate nested download through — `download_tree`'s happy path is

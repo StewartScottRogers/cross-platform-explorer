@@ -12,6 +12,7 @@
   import { t } from "../i18n";
   import { formatSize } from "../format";
   import { baseName, parentDir } from "../contentSearch";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { redundantPaths, keepsOnePerGroup, pruneGroups } from "../duplicates";
 
   export let root = "";
@@ -104,7 +105,7 @@
   <div class="dialog" role="dialog" aria-modal="true" on:click|stopPropagation>
     <header>
       <h2>{$t("dup.title")}</h2>
-      <span class="root" title={root}>{baseName(root) || root}</span>
+      <span class="root" title={displaySafePath(root)}>{displaySafeName(baseName(root)) || displaySafePath(root)}</span>
       <button class="x" title={$t("common.close")} on:click={() => dispatch("close")}><Icon name="close" size={14} /></button>
     </header>
 
@@ -147,9 +148,9 @@
                 <label class="pick" title={$t("dup.markForBin")}>
                   <input type="checkbox" checked={selected.has(p)} on:change={() => toggle(p)} />
                 </label>
-                <button class="hit" title={p} on:click={() => goToFile(p)}>
-                  <Icon name="file" size={12} /> <span class="name">{baseName(p)}</span>
-                  <span class="loc">{parentDir(p)}</span>
+                <button class="hit" title={displaySafePath(p)} on:click={() => goToFile(p)}>
+                  <Icon name="file" size={12} /> <span class="name">{displaySafeName(baseName(p))}</span>
+                  <span class="loc">{displaySafePath(parentDir(p))}</span>
                 </button>
               </div>
             {/each}
