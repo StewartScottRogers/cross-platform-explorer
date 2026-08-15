@@ -3,11 +3,11 @@ id: CPE-1746
 title: 7z extraction writes through a symlink in the destination, on the path the UI actually uses
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## The defect, measured
