@@ -309,7 +309,50 @@ pub fn create_slot_refusal(target: &Path, occupied: &str) -> Option<String> {
 ///       slot still a symlink = Ok(true)
 /// ```
 pub fn create_slot_link_refusal(target: &Path) -> Option<String> {
-    classify_create_slot(&std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink()), target)
+    match create_slot_link_verdict(target) {
+        CreateSlotLink::NotALink => None,
+        CreateSlotLink::Link(m) | CreateSlotLink::Unknown(m) => Some(m),
+    }
+}
+
+/// The three answers a create-slot link check can give — **for the callers that must treat "it is a link"
+/// and "I could not tell" differently** (CPE-1733, UAT finding 6).
+///
+/// [`create_slot_link_refusal`] collapses the last two into one `Some(message)`, which is right for a site
+/// that refuses the whole operation either way: both mean "do not write here". It is **wrong** for a site
+/// that *skips and continues*, because the two verdicts differ in what the skip costs the user:
+///
+/// - `Link` is a **policy** decision. We know what is there, we know writing follows it, and dropping that
+///   one entry is the considered answer — the same shape as the zip-slip skip.
+/// - `Unknown` is an **I/O failure**. We could not read the slot at all, so "skip it" silently drops a
+///   file for a reason that has nothing to do with the archive, and reports success. Every other I/O
+///   failure in those loops aborts via `?`; this one was quietly not doing so.
+///
+/// The distinction costs one `match` at the two sites that need it and nothing anywhere else.
+#[derive(Debug)]
+pub enum CreateSlotLink {
+    /// Provably not a link: free, or occupied by a real entry that is the occupancy half's business.
+    NotALink,
+    /// Provably a link, with the refusal wording.
+    Link(String),
+    /// Could not tell, with the refusal wording. Never a licence to carry on.
+    Unknown(String),
+}
+
+/// [`create_slot_link_refusal`]'s verdict before it is flattened. One `symlink_metadata`, and the wording
+/// still comes from [`classify_create_slot`] so there is exactly one copy of every message.
+pub fn create_slot_link_verdict(target: &Path) -> CreateSlotLink {
+    let stat = std::fs::symlink_metadata(target).map(|m| m.file_type().is_symlink());
+    match classify_create_slot(&stat, target) {
+        None => CreateSlotLink::NotALink,
+        // `classify_create_slot` returns `Some` on exactly two inputs: a confirmed link, and a stat that
+        // failed with something other than `NotFound`. Re-reading `stat` here splits them without
+        // duplicating either message.
+        Some(msg) => match stat {
+            Ok(true) => CreateSlotLink::Link(msg),
+            _ => CreateSlotLink::Unknown(msg),
+        },
+    }
 }
 
 /// The pure decision behind [`create_slot_refusal`], split out for the reason

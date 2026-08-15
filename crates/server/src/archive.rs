@@ -255,18 +255,31 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //   ticket, with no guard: on a *dangling* link `File::create` returns `Ok`, creates the link's target,
 //   and leaves the slot a symlink; on a *live* link it returns `Ok` and the link's target is clobbered
 //   (`victim bytes = Some("CLOBBERED")`). This is the CPE-1719 finding, reproduced here.
-// - `create_dir_all` is **not destructive** — on a dangling link it does nothing at all (measured on
-//   Windows for CPE-1729, *after the opposite had been assumed*). **Not destructive is not the same as
-//   not hazardous, and the first version of this bullet used the former to excuse rows 17–18 as having
-//   "no measured hazard".** Measured on Windows for the PR #906 review: `create_dir_all` returns `Ok`
-//   over a directory that **already exists** *and* over a **directory symlink or junction** standing in
-//   for one, and everything subsequently written beneath that name is **redirected** to wherever the link
-//   points — `landed_outside = true`. Redirection, not destruction. It is still unguarded at rows 17–18,
-//   but now for a stated reason rather than a wrong one: refusing a pre-existing `dest` would break
-//   extracting into a folder you already have, which is the ordinary case, and the leaf-level answer
-//   belongs at rows 15–16 where it is (partially — see below) applied. **Platform boundary:** every
-//   figure in this bullet is Windows 11; the Unix behaviour of these three calls has not been measured
-//   here and is only covered indirectly by CI's Linux and macOS legs.
+// - `create_dir_all` is **not destructive** (CPE-1729) — but the two things this ticket first inferred
+//   from that were both wrong, and both were measured wrong by its UAT.
+//
+//   **It does not "do nothing at all" on a dangling link — it fails**, and takes the whole extraction
+//   with it: Windows `Err(os error 183, "Cannot create a file when that file already exists.")`, Linux
+//   `Err(os error 17, "File exists")`. That is the *same misleading wording* row 7 got a guard for.
+//
+//   **And on a *live* directory link it succeeds and redirects.** `create_dir_all` returns `Ok` over a
+//   directory that already exists *and* over a directory symlink or junction standing in for one, and
+//   everything written beneath goes wherever the link points — `landed_outside = true`. Redirection, not
+//   destruction; "not destructive" never meant "not hazardous".
+//
+//   Rows 17–18 stay unguarded, and the reason has to survive comparison with row 7 (whose guard was
+//   justified purely on wording), so: **row 17's `dest` is an existing folder the user pointed at, not a
+//   new name being claimed.** `fsutil`'s own rule for the family — *"am I claiming this name, or editing
+//   this thing?"* — says following a link is **correct** when the user pointed at the thing, which is why
+//   `replace_file_contents` follows one too. Refusing would break extracting into a folder the user
+//   deliberately reached through a shortcut. Row 7's guard, by contrast, changed behaviour on **no input
+//   at all** — it only reworded a refusal that already happened. That is the difference, and it is why one
+//   got a guard and the other gets a sentence. The dangling-link wording at row 17 is still poor and is
+//   folded into **CPE-1744**; row 18's redirect (an *archive*-controlled name, so not "pointed at" by
+//   anyone) is the live half of that ticket.
+//
+//   **Platform boundary:** the redirect figures are Windows 11; the `create_dir_all`-on-a-dangling-link
+//   failure was measured on both Windows and Linux (codes above).
 // - `create_new` (row 7) is the only site here that was **already** safe, and it is safe by the OS rather
 //   than by us. Measured on Windows: `create_new` on a dangling link fails `AlreadyExists (os error 80)`
 //   and does *not* create the target; on a live link it fails the same way and the target is untouched.
@@ -334,15 +347,47 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // different guard from the one this ticket measured, so it is **CPE-1744** rather than a widened claim
 // here. The table above says "LEAF ONLY" for exactly this reason.
 //
-// **Not covered, stated rather than implied:** the extractors that are not our own write loop — `tar`'s
-// `Archive::unpack`/`Entry::unpack_in`, `zip`'s `ZipArchive::extract`, and `sevenz_rust`'s
-// `default_entry_extract_fn` — create their files inside those crates, so this module has no create site
-// to guard there and cannot reach one without reimplementing each crate's extraction. A link already
-// sitting in the destination folder at an entry's name is therefore still followed on the tar, 7z and
-// one-shot-zip paths. That is a real, known gap with a shape of its own (it belongs upstream, or in a
-// pre-extraction sweep of the destination), and it is written down here so the next sweep finds a recorded
-// absence rather than an overlooked one, per CPE-1718. **Ticketed as CPE-1744** — the PR #906 review
-// pointed out that a recorded absence with no ticket is a recorded absence nobody is scheduled to fix.
+// ## The three extractors that are NOT our write loop — measured one at a time, because they differ
+//
+// `tar`'s `Archive::unpack`/`Entry::unpack_in`, `zip`'s `ZipArchive::extract` and `sevenz_rust`'s
+// `default_entry_extract_fn` create their files **inside those crates**, so this module has no create site
+// to guard and cannot reach one without reimplementing each crate's extraction.
+//
+// **An earlier version of this comment said a pre-existing link in the destination "is therefore still
+// followed on the tar, 7z and one-shot-zip paths". That is false for two of the three, and the UAT for
+// this ticket measured it on Windows and Linux alike.** The sentence was a reasonable inference from "we
+// do not guard it" and it was never checked — the exact move this ticket exists to stop, shipped inside
+// the ticket about it, in four places including the user-facing docs. Measured here, live link at
+// `dest/a.txt` pointing at a victim outside `dest`:
+//
+// ```text
+// [tar ONE-SHOT and STREAMED]  outcome = Ok(..)   victim bytes = Some("VICTIM ORIGINAL")
+//                              slot is link = Ok(false)   slot is file = Ok(true)
+// [zip ONE-SHOT]               outcome = Err("invalid Zip archive: Invalid symlink target path")
+//                              victim bytes = Some("VICTIM ORIGINAL")   b.txt extracted = false
+// [7z STREAMED]                outcome = Ok(ArchiveReport { done: 2, failed: 0, errors: [] })
+//                              victim bytes = Some("ARCHIVED A")   slot is link = Ok(true)
+// ```
+//
+// So, one behaviour each:
+//
+// - **tar does not follow — it *destroys*.** It unlinks the symlink and writes a regular file in its
+//   place. The victim's bytes are safe; the user's link is gone, silently, with the call reporting
+//   success. That is a genuine hazard of a **different shape** to the one this ticket guards, and it was
+//   recorded nowhere until the UAT measured it. Tracked in **CPE-1744**.
+// - **one-shot zip does not follow either — it aborts the whole extraction**, and nothing is extracted,
+//   not even the entries that were fine. Safe, but it also means the one-shot and streamed ZIP paths
+//   behave **oppositely** on the same input (streamed skips the entry and extracts the rest: `done: 1`,
+//   `b.txt extracted = true`). Two shipped paths, one documented behaviour. Tracked in **CPE-1744**.
+// - **7z does follow, and it is the live one.** `Ok`, `errors: []`, and the victim now reads
+//   `"ARCHIVED A"`. `extract_archive_streamed` routes `.7z` to `extract_7z_stream`, which is what
+//   `start_archive_extract` calls, so this is reachable from the shipping UI. Its own ticket:
+//   **CPE-1746**.
+//
+// Deliberately **not** pinned by tests: pinning behaviour we consider wrong makes it harder to change.
+// Recorded here, with tickets, because CPE-1718 established that an unrecorded absence is
+// indistinguishable from an overlooked one — and the PR #906 review added the corollary that a recorded
+// absence with no ticket is one nobody is scheduled to fix.
 //
 // ## Why the guard on rows 6–14 is the **link** half only
 //
@@ -375,6 +420,37 @@ fn refuse_link_at_new_file(dest: &Path) -> Result<(), String> {
     match crate::fsutil::create_slot_link_refusal(dest) {
         Some(e) => Err(e),
         None => Ok(()),
+    }
+}
+
+/// What a per-entry extraction loop (rows 15–16) should do about the slot it is about to write.
+///
+/// Rows 6–14 refuse the whole operation, so [`refuse_link_at_new_file`]'s flattened `Result` is right for
+/// them. Rows 15–16 *skip and keep going*, and the UAT for this ticket caught them treating the two
+/// refusal reasons as one: `if refuse_link_at_new_file(&out).is_err() { continue; }` dropped an entry
+/// **silently and returned `Ok`** when the slot merely could not be *read* — an I/O failure reported as a
+/// successful extraction with a file quietly missing. Every other I/O failure in those loops aborts.
+#[derive(Debug, PartialEq, Eq)]
+enum EntrySlotAction {
+    /// The slot is provably not a link: write it.
+    Write,
+    /// A confirmed link. Policy skip — carry on with the rest of the archive, recording the reason where
+    /// the caller has somewhere to put it.
+    Skip(String),
+    /// The slot could not be read. Not the archive's fault and not a skippable condition: abort, the same
+    /// way `create_dir_all`/`File::create`/`io::copy` failures in these loops already do.
+    Abort(String),
+}
+
+/// The pure decision behind [`EntrySlotAction`], split from the filesystem probe for the reason
+/// `fsutil`'s classifiers are: **the `Unknown` arm cannot be staged on every platform** (it needs a slot
+/// whose `symlink_metadata` fails with something other than `NotFound`), so with the mapping inline the
+/// one arm this ticket got wrong would again be the one arm no test could reach.
+fn entry_slot_action(verdict: crate::fsutil::CreateSlotLink) -> EntrySlotAction {
+    match verdict {
+        crate::fsutil::CreateSlotLink::NotALink => EntrySlotAction::Write,
+        crate::fsutil::CreateSlotLink::Link(m) => EntrySlotAction::Skip(m),
+        crate::fsutil::CreateSlotLink::Unknown(m) => EntrySlotAction::Abort(m),
     }
 }
 
@@ -773,10 +849,10 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
     let file = fs::File::open(path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
-    // Row 17 of the CPE-1733 table: `dest` is user-named and unguarded — NOT because there is no hazard
-    // (a directory link here redirects the whole extraction; measured, see the table's `create_dir_all`
-    // bullet), but because refusing a pre-existing `dest` would break extracting into a folder you already
-    // have. Recorded absence, tracked by CPE-1744.
+    // Row 17 of the CPE-1733 table: `dest` is a folder the user POINTED AT, not a name being claimed, so
+    // following a link here is the correct answer (`fsutil`'s claiming-vs-editing rule) — unguarded for
+    // that reason, not for lack of a hazard. On a *dangling* link this call fails with the OS's misleading
+    // "already exists" wording; that half is folded into CPE-1744.
     fs::create_dir_all(dest_path).map_err(|e| e.to_string())?;
     for i in 0..archive.len() {
         let mut entry = archive.by_index_decrypt(i, password.as_bytes()).map_err(|e| e.to_string())?;
@@ -807,8 +883,12 @@ pub fn extract_zip_encrypted(path: &str, dest: &str, password: &str) -> Result<S
             // creation follows it, the leaf then does not exist so this check answers "not a link", and
             // the write lands outside `dest` — measured, `landed_outside = true`. Closing that needs
             // per-component resolution, which is CPE-1744, not this guard.
-            if refuse_link_at_new_file(&out).is_err() {
-                continue;
+            match entry_slot_action(crate::fsutil::create_slot_link_verdict(&out)) {
+                EntrySlotAction::Write => {}
+                EntrySlotAction::Skip(_) => continue,
+                // Not skippable: an unreadable slot is an I/O failure, and silently dropping the entry
+                // would report success about a file that is missing (UAT finding 6).
+                EntrySlotAction::Abort(e) => return Err(e),
             }
             let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
@@ -855,7 +935,7 @@ fn extract_7z_safe(src: &Path, dest: &Path) -> Result<(), String> {
 /// format is guarded against zip-slip: zip via `enclosed_name`, tar via the crate's checked `unpack`, 7z
 /// via [`extract_7z_safe`].
 pub fn extract_archive(path: &str, dest: &str) -> Result<String, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
+    // Row 17 of the CPE-1733 table — a folder the user pointed at; unguarded, reasons at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -1190,7 +1270,7 @@ fn extract_zip_archive_stream(
     cancel: &AtomicBool,
     emit: &mut dyn FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
+    // Row 17 of the CPE-1733 table — a folder the user pointed at; unguarded, reasons at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let total_items = archive.len() as u64;
     let mut prog = ArchiveProgress { total_bytes: 0, done_bytes: 0, total_items, done_items: 0, current: String::new() };
@@ -1225,11 +1305,16 @@ fn extract_zip_archive_stream(
             // Recorded in `errors` and counted as a done *item* (not a done *file*), the same shape the
             // unsafe-name skip above uses, so the progress bar still reaches its total. **LEAF ONLY** for
             // the same measured reason as row 15 — see there, and CPE-1744.
-            if let Err(e) = refuse_link_at_new_file(&out) {
-                report.errors.push(format!("{name}: {e}"));
-                prog.done_items += 1;
-                emit(&prog);
-                continue;
+            match entry_slot_action(crate::fsutil::create_slot_link_verdict(&out)) {
+                EntrySlotAction::Write => {}
+                EntrySlotAction::Skip(e) => {
+                    report.errors.push(format!("{name}: {e}"));
+                    prog.done_items += 1;
+                    emit(&prog);
+                    continue;
+                }
+                // Not skippable — see row 15 (UAT finding 6).
+                EntrySlotAction::Abort(e) => return Err(e),
             }
             let mut f = fs::File::create(&out).map_err(|e| e.to_string())?;
             std::io::copy(&mut entry, &mut f).map_err(|e| e.to_string())?;
@@ -1385,7 +1470,7 @@ pub fn extract_archive_streamed(
     cancel: &AtomicBool,
     mut emit: impl FnMut(&ArchiveProgress),
 ) -> Result<ArchiveReport, String> {
-    // Row 17 of the CPE-1733 table — user-named, unguarded; hazard + reason at the table (CPE-1744).
+    // Row 17 of the CPE-1733 table — a folder the user pointed at; unguarded, reasons at the table (CPE-1744).
     fs::create_dir_all(dest).map_err(|e| e.to_string())?;
     let dest_path = Path::new(dest);
     let lower = path.to_lowercase();
@@ -2254,6 +2339,35 @@ mod tests {
     // and 17 are *recorded absences* (app-owned temp paths, and `create_dir_all`, which CPE-1729 measured
     // as non-destructive) and have nothing to assert. Rows 6–14 refuse the whole operation; rows 15–16
     // skip one entry and keep extracting, so they get their own legs below.
+
+    /// **A "could not check" verdict is NOT a skip** (UAT finding 6) — the table, one row per verdict.
+    ///
+    /// Rows 15–16 skip an entry whose slot holds a link and keep extracting. Before this, they reached
+    /// that decision through `refuse_link_at_new_file(..).is_err()`, which is `true` for **two** different
+    /// verdicts: a confirmed link, and a slot whose `symlink_metadata` failed for some other reason. The
+    /// second is an I/O failure, and treating it as a skip dropped a file **silently** and reported the
+    /// extraction as a success — while every other I/O failure in the same loop aborts.
+    ///
+    /// This is a pure-classifier test on purpose. The `Unknown` arm needs a slot that fails to stat with
+    /// something other than `NotFound`, which cannot be staged on every platform this ships to — so with
+    /// the mapping inline, the one arm that was wrong would again be the one arm nothing could reach.
+    #[test]
+    fn an_unreadable_entry_slot_aborts_rather_than_being_skipped_like_a_link() {
+        use crate::fsutil::CreateSlotLink;
+        assert_eq!(entry_slot_action(CreateSlotLink::NotALink), EntrySlotAction::Write);
+        assert_eq!(
+            entry_slot_action(CreateSlotLink::Link("it is a link".into())),
+            EntrySlotAction::Skip("it is a link".into()),
+            "a confirmed link is a policy skip — the rest of the archive must still extract"
+        );
+        assert_eq!(
+            entry_slot_action(CreateSlotLink::Unknown("could not check".into())),
+            EntrySlotAction::Abort("could not check".into()),
+            "an unreadable slot must ABORT. Skipping it drops a file for a reason that has nothing to do \
+             with the archive and still returns Ok — the silent-success shape this whole ticket family is \
+             about"
+        );
+    }
 
     /// **Row 1's hardening: a squatted `<pid>-<seq>` directory must be stepped over, not written into.**
     ///
