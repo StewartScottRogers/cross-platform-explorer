@@ -442,6 +442,18 @@ mod tests {
     fn ok_status(id: u32) -> Status {
         Status { id, status_code: StatusCode::Ok, error_message: String::new(), language_tag: String::new() }
     }
+
+    /// A refusal `Status` carrying `message` — the only construction in this rig, besides [`ok_status`]
+    /// and CPE-1731's root-destination guard, that puts server-authored text on the wire. That is what
+    /// makes both sentinels unforgeable by an errno (see [`CPE_1730_ESCAPED_ROOT_REFUSAL`]).
+    fn refusal(id: u32, message: &str) -> Status {
+        Status {
+            id,
+            status_code: StatusCode::Failure,
+            error_message: message.to_string(),
+            language_tag: "en-US".to_string(),
+        }
+    }
     fn io_err(e: std::io::Error) -> StatusCode {
         match e.kind() {
             std::io::ErrorKind::NotFound => StatusCode::NoSuchFile,
@@ -469,8 +481,46 @@ mod tests {
         fn new(root: PathBuf) -> Self {
             Self { root, dirs_read: HashSet::new() }
         }
-        /// Map an SFTP path (server-absolute, `/`-rooted) to a real path under `root`.
-        fn real(&self, sftp_path: &str) -> PathBuf {
+        /// Map an SFTP path (server-absolute, `/`-rooted) to a real path under `root` — or **`None`**
+        /// when it resolves outside the served root (CPE-1730).
+        ///
+        /// This used to be a bare `self.root.join(rel)`, which is not a confinement: `Path::join`
+        /// discards the base when handed an absolute path, `..` walks out of the tree, and a symlinked
+        /// intermediate directory leaves it needing neither. Everything under the escaped path was then
+        /// a live target for this rig's `OpenOptions::create`, `remove_file`, `remove_dir`, `create_dir`
+        /// and `fs::rename` — and the rig runs under `cargo test` on a developer's own checkout.
+        ///
+        /// The property, and why it is asked rather than enumerated, is on
+        /// [`cpe_server::fsutil::confined_to`]. Note especially that it is **not**
+        /// [`cpe_server::fsutil::contained_under`], which the ticket expected to be reusable: that one
+        /// fails *open* on a path that does not exist yet, i.e. on every create/write/rename destination
+        /// this rig has.
+        ///
+        /// **Fallible rather than silently clamping into the root** — a resolver that quietly rewrote an
+        /// escaping path would answer a request the client never made, and no caller could tell the
+        /// difference. The `Option` makes every call site say what it does, and makes the compiler ask a
+        /// new one. It is an `Option` rather than a `Result<_, StatusCode>` because the *reply* differs
+        /// by handler: the six that return `Handle`/`Data`/`Attrs` can only answer a bare status code,
+        /// while the five that return a `Status` carry [`CPE_1730_ESCAPED_ROOT_REFUSAL`] in its message
+        /// field — a distinction worth keeping visible at each site instead of hiding behind a `?`.
+        fn real(&self, sftp_path: &str) -> Option<PathBuf> {
+            let joined = self.joined(sftp_path);
+            cpe_server::fsutil::confined_to(&joined, &self.root).then_some(joined)
+        }
+
+        /// The **unconfined** join — what `real` used to be, kept for the one caller that needs the
+        /// joined path even when it escapes.
+        ///
+        /// That caller is [`FsSftp::rename`], which must ask CPE-1731's "does this resolve *to* the
+        /// root?" question **before** CPE-1730's "does it stay *inside* the root?" one. Not cosmetic: on
+        /// Linux `canonicalize` fails `NotFound` for `<root>/nonexistent/..` (measured; on Windows it
+        /// succeeds and yields the root), so confinement refuses that spelling while `same_place` calls
+        /// it the root — and it is one of **CPE-1731's own regression rows**. Whichever guard runs first
+        /// owns the row, and it has to stay CPE-1731's or that ticket's neutralisation test starts
+        /// passing through this ticket's guard.
+        ///
+        /// Nothing else may use this.
+        fn joined(&self, sftp_path: &str) -> PathBuf {
             let rel = sftp_path.trim_start_matches('/');
             if rel.is_empty() || rel == "." {
                 self.root.clone()
@@ -479,6 +529,34 @@ mod tests {
             }
         }
     }
+
+    /// The SFTP rig's refusal message for a request path that escapes the served root (CPE-1730).
+    ///
+    /// Carried in the `SSH_FXP_STATUS` `error_message` field for every handler that returns a `Status`,
+    /// for the reason CPE-1731 established for [`CPE_1731_ROOT_DESTINATION_REFUSAL`] and which applies
+    /// unchanged here: [`io_err`] returns only a `StatusCode` and **discards the `io::Error`'s text**, so
+    /// no errno path can put text in that field at all. The sentinel is unreachable except from a
+    /// confinement refusal, by construction rather than by luck.
+    ///
+    /// **The handlers that cannot carry it are named rather than glossed.** `open`, `read`, `stat`,
+    /// `lstat`, `opendir` and `readdir` return `Handle`/`Data`/`Attrs`, so their only refusal channel is
+    /// `Err(StatusCode)` — which russh-sftp renders as `"Failure: Failure"`, exactly what [`io_err`]'s
+    /// catch-all produces for any unclassified errno. **A refusal from those six is not distinguishable
+    /// from an errno**, and no assertion in this crate should pretend otherwise: the tests covering them
+    /// assert on the *filesystem* (the victim's bytes), and the reply-text evidence comes from their
+    /// message-carrying siblings (`remove`, `rmdir`, `mkdir`, `rename`, `write`).
+    const CPE_1730_ESCAPED_ROOT_REFUSAL: &str = "path escapes the served root";
+
+    /// The SFTP rig's refusal message for a `rename` whose **source** is the served root itself —
+    /// CPE-1731's recorded gap, closed here.
+    ///
+    /// Distinct from [`CPE_1730_ESCAPED_ROOT_REFUSAL`] and from
+    /// [`CPE_1731_ROOT_DESTINATION_REFUSAL`] because the three guards answer three different questions
+    /// and a test must be able to say which one fired. In particular this one is **not** closed by
+    /// containment: the root is contained in itself by design (a resolver has to map `/` somewhere or
+    /// `opendir("/")` cannot work), so `confined_to` allows `rename("/", …)` and `same_place` on the
+    /// source is what refuses it.
+    const CPE_1730_ROOT_SOURCE_REFUSAL: &str = "rename source is the served root";
 
     impl russh_sftp::server::Handler for FsSftp {
         type Error = StatusCode;
@@ -503,7 +581,11 @@ mod tests {
             // that didn't. `metadata()` + `io_err` here matches that existing convention: a real stat
             // failure gets its own real cause, and only a *successful* stat of a non-directory is the
             // (still real, still not an absence) type mismatch.
-            let meta = std::fs::metadata(self.real(&path)).map_err(io_err)?;
+            // CPE-1730: `Err(StatusCode::Failure)` is all this handler can say — it returns a
+            // `Handle`, so there is no `error_message` field to put the sentinel in. Recorded rather
+            // than papered over: a refusal from here is NOT distinguishable from an errno.
+            let Some(real) = self.real(&path) else { return Err(StatusCode::Failure) };
+            let meta = std::fs::metadata(real).map_err(io_err)?;
             if !meta.is_dir() {
                 return Err(StatusCode::Failure);
             }
@@ -516,7 +598,8 @@ mod tests {
                 return Err(StatusCode::Eof); // already returned this dir's entries
             }
             let mut files = Vec::new();
-            for entry in std::fs::read_dir(self.real(&handle)).map_err(io_err)?.flatten() {
+            let Some(real) = self.real(&handle) else { return Err(StatusCode::Failure) };
+            for entry in std::fs::read_dir(real).map_err(io_err)?.flatten() {
                 let Ok(meta) = entry.metadata() else { continue };
                 files.push(File::new(entry.file_name().to_string_lossy().to_string(), attrs_of(&meta)));
             }
@@ -528,12 +611,14 @@ mod tests {
         }
 
         async fn stat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-            let meta = std::fs::metadata(self.real(&path)).map_err(io_err)?;
+            let Some(real) = self.real(&path) else { return Err(StatusCode::Failure) };
+            let meta = std::fs::metadata(real).map_err(io_err)?;
             Ok(Attrs { id, attrs: attrs_of(&meta) })
         }
 
         async fn lstat(&mut self, id: u32, path: String) -> Result<Attrs, Self::Error> {
-            let meta = std::fs::symlink_metadata(self.real(&path)).map_err(io_err)?;
+            let Some(real) = self.real(&path) else { return Err(StatusCode::Failure) };
+            let meta = std::fs::symlink_metadata(real).map_err(io_err)?;
             Ok(Attrs { id, attrs: attrs_of(&meta) })
         }
 
@@ -544,7 +629,9 @@ mod tests {
             pflags: OpenFlags,
             _attrs: FileAttributes,
         ) -> Result<Handle, Self::Error> {
-            let real = self.real(&filename);
+            // CPE-1730: refused BEFORE the `create(true)` below, which is the primitive that would
+            // otherwise bring a file into existence outside the served root.
+            let Some(real) = self.real(&filename) else { return Err(StatusCode::Failure) };
             if pflags.contains(OpenFlags::CREATE) {
                 // Create (and truncate if asked) up front; the seek-based write() ops fill it in.
                 //
@@ -577,7 +664,8 @@ mod tests {
         }
 
         async fn read(&mut self, id: u32, handle: String, offset: u64, len: u32) -> Result<Data, Self::Error> {
-            let mut f = std::fs::File::open(self.real(&handle)).map_err(io_err)?;
+            let Some(real) = self.real(&handle) else { return Err(StatusCode::Failure) };
+            let mut f = std::fs::File::open(real).map_err(io_err)?;
             f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
             let mut buf = vec![0u8; len as usize];
             let n = f.read(&mut buf).map_err(io_err)?;
@@ -589,7 +677,10 @@ mod tests {
         }
 
         async fn write(&mut self, id: u32, handle: String, offset: u64, data: Vec<u8>) -> Result<Status, Self::Error> {
-            let mut f = std::fs::OpenOptions::new().write(true).open(self.real(&handle)).map_err(io_err)?;
+            let Some(real) = self.real(&handle) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            let mut f = std::fs::OpenOptions::new().write(true).open(real).map_err(io_err)?;
             f.seek(SeekFrom::Start(offset)).map_err(io_err)?;
             f.write_all(&data).map_err(io_err)?;
             Ok(ok_status(id))
@@ -637,12 +728,18 @@ mod tests {
         /// or stat first — plus its own tests. Left deliberately un-pinned here; a regression test
         /// asserting the current failure would pin the bug in place.
         async fn mkdir(&mut self, id: u32, path: String, _attrs: FileAttributes) -> Result<Status, Self::Error> {
-            std::fs::create_dir(self.real(&path)).map_err(io_err)?;
+            let Some(real) = self.real(&path) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            std::fs::create_dir(real).map_err(io_err)?;
             Ok(ok_status(id))
         }
 
         async fn remove(&mut self, id: u32, filename: String) -> Result<Status, Self::Error> {
-            std::fs::remove_file(self.real(&filename)).map_err(io_err)?;
+            let Some(real) = self.real(&filename) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            std::fs::remove_file(real).map_err(io_err)?;
             Ok(ok_status(id))
         }
 
@@ -665,7 +762,10 @@ mod tests {
         /// `remove_file` or `rmdir`, so a client deleting a populated directory now gets the same
         /// refusal from this rig that a real server would give it.
         async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
-            std::fs::remove_dir(self.real(&path)).map_err(io_err)?;
+            let Some(real) = self.real(&path) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            std::fs::remove_dir(real).map_err(io_err)?;
             Ok(ok_status(id))
         }
 
@@ -719,15 +819,21 @@ mod tests {
         /// red. A guard-removal probe only shows the guard does something; this shows the tests can
         /// still tell *which* thing did it.
         ///
-        /// **The SOURCE side is deliberately NOT guarded, and the gap is real:** `rename("/", "/x")`
-        /// still moves the served root into a subdirectory. Out of scope by choice, not by oversight —
-        /// this ticket's subject is the destination, `cpe-webdav` has the identical asymmetry recorded
-        /// at its own MOVE, and a source guard needs the containment check CPE-1730 is opening.
-        /// Recorded here so the next sweep reads it as a decision rather than as an absence nobody
-        /// noticed.
+        /// **CPE-1730 closes the source gap this note recorded.** It read: *"`rename("/", "/x")` still
+        /// moves the served root into a subdirectory … a source guard needs the containment check
+        /// CPE-1730 is opening."* Both guards are below — and containment turned out **not** to be what
+        /// closes it. The root is contained in itself by design (a resolver must map `/` somewhere, or
+        /// `opendir("/")` cannot work), so `confined_to` allows `rename("/", …)`; it is `same_place` on
+        /// the **source** that refuses it. Containment is not equality, and this is the site that pays
+        /// for the difference: two questions, two paths, four answers.
+        ///
+        /// **Order matters and is measured.** The destination `same_place` check runs FIRST, against the
+        /// *unconfined* join, because `<root>/nonexistent/..` — one of this guard's own regression rows
+        /// — canonicalises to `Err(NotFound)` on Linux and to the root on Windows, so confinement
+        /// refuses it while `same_place` calls it the root. Whichever guard answers first owns the row,
+        /// and it must stay this one's.
         async fn rename(&mut self, id: u32, oldpath: String, newpath: String) -> Result<Status, Self::Error> {
-            let dest = self.real(&newpath);
-            if cpe_server::fsutil::same_place(&dest, &self.root) {
+            if cpe_server::fsutil::same_place(&self.joined(&newpath), &self.root) {
                 return Ok(Status {
                     id,
                     status_code: StatusCode::Failure,
@@ -748,10 +854,13 @@ mod tests {
             //    replaced by whoever connects") describes a server this repo does not ship, and that
             //    absence is what decides it.
             //    **Bounded precisely (PR #902 review):** "no user's files at the destination" holds
-            //    because no user drives this rig, NOT because the destination is confined — `real()`
-            //    is a bare join with no containment check, so a `..`-shaped path would resolve
-            //    outside the temp root. Nothing sends one today; CPE-1730 tracks closing it. If that
-            //    ever changes before CPE-1730 lands, this reason expires with it.
+            //    because no user drives this rig, NOT because the destination is confined.
+            //    **CPE-1730 has since confined it** — `real()` now runs its join through
+            //    `cpe_server::fsutil::confined_to` and returns `None` for a path outside the served
+            //    root, so both paths reaching this `rename` are inside the temp root. A second,
+            //    independent reason rather than a replacement for reason 1: the check is not atomic
+            //    with the `rename` (see `confined_to`'s TOCTOU note), so it does not by itself make
+            //    this line safe for a real server.
             // 2. That premise is pinned rather than trusted:
             //    `cpe_1726_every_destructive_filesystem_call_is_confined_to_the_test_rig` goes red the
             //    moment this line (or any sibling destructive primitive) moves above the `#[cfg(test)]`
@@ -764,7 +873,19 @@ mod tests {
             // What `fs::rename` does to a link at the destination is pinned, not assumed, by
             // `cpe_1726_rename_onto_a_link_never_writes_through_it`.
             #[allow(clippy::disallowed_methods)]
-            std::fs::rename(self.real(&oldpath), &dest).map_err(io_err)?;
+            let Some(dest) = self.real(&newpath) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            // The source, both questions. `same_place` first: `rename("/", …)` is *contained* (the root
+            // is inside itself), so confinement alone would let the served root be renamed away — the
+            // gap CPE-1731 wrote down and this ticket was opened to close.
+            if cpe_server::fsutil::same_place(&self.joined(&oldpath), &self.root) {
+                return Ok(refusal(id, CPE_1730_ROOT_SOURCE_REFUSAL));
+            }
+            let Some(src) = self.real(&oldpath) else {
+                return Ok(refusal(id, CPE_1730_ESCAPED_ROOT_REFUSAL));
+            };
+            std::fs::rename(src, &dest).map_err(io_err)?;
             Ok(ok_status(id))
         }
     }
@@ -1502,6 +1623,248 @@ mod tests {
                  consults the filesystem. Got {r:?}"
             );
         }
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1730 — the request path that resolves OUTSIDE the served root
+    // ---------------------------------------------------------------------------------------------
+
+    const CPE_1730_VICTIM_BYTES: &[u8] = b"bytes belonging to somebody outside the served root";
+
+    /// A directory **outside** the served root holding a victim file with known bytes, plus the wire
+    /// spelling that reaches it from the root by `..`. Returns `(victim_dir, victim_file, wire_prefix)`.
+    ///
+    /// A real sibling of the rig's own temp root, not a fabricated string: the point of the ticket is
+    /// that `root.join("../…")` lands on somebody's real files, so the test puts real bytes there and
+    /// reads them back.
+    fn cpe_1730_seed_victim_outside(root: &Path) -> (PathBuf, PathBuf, String) {
+        let name = format!(
+            "{}-cpe-1730-victim",
+            root.file_name().expect("the rig root has a name").to_string_lossy()
+        );
+        let dir = root.parent().expect("the rig root has a parent").join(&name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the victim directory");
+        let file = dir.join("victim.txt");
+        std::fs::write(&file, CPE_1730_VICTIM_BYTES).expect("seed the victim file");
+        (dir, file, format!("/../{name}"))
+    }
+
+    /// Did **a guard** refuse this, carrying `sentinel`? The generalisation of
+    /// [`cpe_1731_is_guard_refusal`], anchored the same way and for the same measured reason: the
+    /// provider's error string is `"{from} -> {to}: {e}"`, so it mixes server text with **caller-supplied
+    /// paths**, and a `contains` over it can be forged by naming a file after the sentinel (CPE-1731's
+    /// UAT did exactly that). `ends_with` pins the sentinel to the position only the status can occupy.
+    fn cpe_1730_is_guard_refusal(r: &Result<(), String>, sentinel: &str) -> bool {
+        let want = format!("Failure: {sentinel}");
+        r.as_ref().err().is_some_and(|m| m.ends_with(&want))
+    }
+
+    /// CPE-1730 acceptance: a request path resolving **outside** the served root is refused, and the
+    /// file outside is still there with its bytes.
+    ///
+    /// # The escape shapes, enumerated
+    ///
+    /// Naming only `..` would imply the other two are handled, and they are different mechanisms:
+    /// 1. **`..`-shaped** — `root.join("../x")` walks out of the tree. Every platform; driven here.
+    /// 2. **absolute** — `Path::join` *discards* its base, so an absolute path replaces the root with no
+    ///    `..` anywhere. Windows-only through this rig, because [`FsSftp::joined`] trims the leading `/`
+    ///    and a POSIX absolute path therefore lands *inside* the root (measured in Docker `rust:1-slim`
+    ///    and under WSL, and the same reason CPE-1731's family-3 test is `#[cfg(windows)]`). Covered by
+    ///    `cpe_1730_an_absolute_request_path_cannot_replace_the_root`.
+    /// 3. **through a symlinked intermediate directory** — no `..`, nothing absolute, invisible to any
+    ///    textual check. The last leg seeds the link with `std::fs` (no SFTP verb this rig implements
+    ///    creates one) and drives an ordinary-looking path through it.
+    ///
+    /// # The filesystem is asserted BEFORE the outcome, every time
+    ///
+    /// The defect's shape is *success reported for an escape that happened*, so an assertion that
+    /// unwraps the outcome first is unreachable in exactly the failing case. Each leg reads the victim
+    /// back first and mentions the outcome only inside the message.
+    ///
+    /// # Which legs can prove WHICH guard fired, and which cannot
+    ///
+    /// Only the five handlers that return an `SSH_FXP_STATUS` can carry
+    /// [`CPE_1730_ESCAPED_ROOT_REFUSAL`]; `open`/`read`/`stat`/`lstat`/`opendir`/`readdir` return
+    /// `Handle`/`Data`/`Attrs` and can only answer a bare `StatusCode`, which russh-sftp renders as the
+    /// same `"Failure: Failure"` that [`io_err`]'s catch-all produces. So the `delete`/`mkdir`/`rename`
+    /// legs assert the sentinel and the `write`/`read` legs assert only the bytes. Stated rather than
+    /// glossed: an assertion that *looks* like it discriminates and does not is this ticket family's
+    /// most-repeated failure.
+    #[test]
+    fn cpe_1730_a_request_path_that_escapes_the_served_root_is_refused() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let (victim_dir, victim, out) = cpe_1730_seed_victim_outside(&root);
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                .expect("connect");
+
+        // ── write: `open(CREATE)` would bring a file into existence outside the root, or truncate one.
+        let wrote = provider.write(&format!("{out}/victim.txt"), b"PWNED");
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "a write to {out}/victim.txt must NOT reach a file outside the served root (outcome was \
+             {wrote:?})"
+        );
+
+        // ── read: the leak in the other direction.
+        let leaked = provider.read(&format!("{out}/victim.txt"));
+        assert_ne!(
+            leaked.as_deref().ok(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "a read must not serve a file outside the served root"
+        );
+
+        // ── delete: `remove_file`/`rmdir` on an escaped path. Carries the sentinel.
+        let deleted = provider.delete(&format!("{out}/victim.txt"));
+        assert!(victim.is_file(), "delete must not remove a file outside the served root (outcome was {deleted:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&deleted, CPE_1730_ESCAPED_ROOT_REFUSAL),
+            "…and it must be refused BY THE GUARD, not by whatever errno happened to come back. Got \
+             {deleted:?}"
+        );
+
+        // ── mkdir.
+        let made = provider.mkdir(&format!("{out}/planted"));
+        assert!(!victim_dir.join("planted").exists(), "mkdir must not create outside the root ({made:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&made, CPE_1730_ESCAPED_ROOT_REFUSAL),
+            "…refused by the guard, by its own sentinel. Got {made:?}"
+        );
+
+        // ── rename, destination side: the shape CPE-1731's UAT measured answering `Ok(())` while the
+        // served root left the served area.
+        let renamed = provider.rename(&format!("/{FILE_NAME}"), &format!("{out}/victim.txt"));
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "rename must not land on a file outside the served root (outcome was {renamed:?})"
+        );
+        assert!(root.join(FILE_NAME).is_file(), "…and the source must be left alone ({renamed:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&renamed, CPE_1730_ESCAPED_ROOT_REFUSAL),
+            "…refused by the guard, by its own sentinel. Got {renamed:?}"
+        );
+
+        // ── rename, SOURCE side — the half CPE-1731 left open and recorded. An escaping source moves
+        // somebody else's file *into* the served tree.
+        let stolen = provider.rename(&format!("{out}/victim.txt"), "/stolen.txt");
+        assert!(victim.is_file(), "rename must not move a file INTO the root from outside ({stolen:?})");
+        assert!(!root.join("stolen.txt").exists(), "…and nothing may appear at the destination ({stolen:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&stolen, CPE_1730_ESCAPED_ROOT_REFUSAL),
+            "…refused by the guard, by its own sentinel. Got {stolen:?}"
+        );
+
+        // ── Escape family 3: a path THROUGH a symlinked subdirectory. `/outlink/victim.txt` — no `..`,
+        // nothing absolute, nothing a textual filter can see.
+        let link = root.join("outlink");
+        if cpe_server::fsutil::make_dir_link(&victim_dir, &link) {
+            let through = provider.write("/outlink/victim.txt", b"PWNED VIA LINK");
+            assert_eq!(
+                std::fs::read(&victim).ok().as_deref(),
+                Some(CPE_1730_VICTIM_BYTES),
+                "a write through a SYMLINKED subdirectory leaves the served tree without `..` and \
+                 without an absolute path (outcome was {through:?})"
+            );
+            let del_through = provider.delete("/outlink/victim.txt");
+            assert!(victim.is_file(), "…and neither may a delete ({del_through:?})");
+            assert!(
+                cpe_1730_is_guard_refusal(&del_through, CPE_1730_ESCAPED_ROOT_REFUSAL),
+                "…refused by the guard, by its own sentinel. Got {del_through:?}"
+            );
+        } else {
+            cpe_server::skip_notice!(
+                "[CPE-1730] SKIPPED the symlinked-subdirectory leg of cpe-sftp's confinement test: \
+                 could not create a directory link at {}. What is NOT covered on this run is escape \
+                 family 3; family 1 (`..`) above still ran.",
+                link.display()
+            );
+        }
+
+        // ── The positive control. Without it, every refusal above is satisfied by a rig that does
+        // nothing at all — including one whose resolver returns `None` for every path.
+        provider.write("/ordinary.txt", b"ordinary").expect("an ordinary write must still succeed");
+        assert_eq!(std::fs::read(root.join("ordinary.txt")).unwrap(), b"ordinary");
+        assert_eq!(provider.read(&format!("/{FILE_NAME}")).expect("an ordinary read"), FILE_BODY);
+
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    /// Escape family 2: an **absolute** request path, which replaces the served root outright because
+    /// `Path::join` discards its base — no `..` anywhere.
+    ///
+    /// **Windows-only, measured rather than assumed** (this ticket's probe; CPE-1731's before it):
+    /// [`FsSftp::joined`] trims the leading `/`, so on POSIX `/tmp/x/victim.txt` becomes the *relative*
+    /// `tmp/x/victim.txt` and lands **inside** the root. Measured in Docker `rust:1-slim`:
+    /// `resolver("/tmp/…/sibling/victim.txt") -> "/tmp/…/root/tmp/…/sibling/victim.txt"`. There is
+    /// nothing to catch there; a cross-platform version of this test would be asserting a refusal that
+    /// no platform-independent defect produces.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1730_an_absolute_request_path_cannot_replace_the_root() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let (victim_dir, victim, _) = cpe_1730_seed_victim_outside(&root);
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                .expect("connect");
+        let absolute = victim.display().to_string();
+        assert!(
+            Path::new(&absolute).is_absolute() && !absolute.starts_with('/'),
+            "the fixture must be absolute AND survive `trim_start_matches('/')`, or this test drives \
+             family 1 by accident: {absolute}"
+        );
+
+        let wrote = provider.write(&absolute, b"PWNED ABSOLUTELY");
+        assert_eq!(
+            std::fs::read(&victim).ok().as_deref(),
+            Some(CPE_1730_VICTIM_BYTES),
+            "an absolute write path must not replace the served root (outcome was {wrote:?})"
+        );
+        let deleted = provider.delete(&absolute);
+        assert!(victim.is_file(), "…and neither may an absolute delete ({deleted:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&deleted, CPE_1730_ESCAPED_ROOT_REFUSAL),
+            "…refused by the guard, by its own sentinel. Got {deleted:?}"
+        );
+        let _ = std::fs::remove_dir_all(&victim_dir);
+    }
+
+    /// The gap CPE-1731 wrote down at its own guard: `rename("/", "/x")` moved **the served root
+    /// itself** into a subdirectory and answered `Ok(())`.
+    ///
+    /// Closed here, in the containment ticket, because CPE-1731's note said a source guard "needs the
+    /// containment check CPE-1730 is opening" — and the finding is that **containment is not what closes
+    /// it**. The root is contained in itself by design (a resolver must map `/` somewhere or
+    /// `opendir("/")` cannot work), so `confined_to` says yes and `same_place` on the source says no.
+    ///
+    /// **The tree assertions below cannot fail today, and that is stated rather than implied.** With the
+    /// source guard neutralised, the sibling `cpe-ftp` test measured the rename being stopped by an
+    /// errno instead (`550 Rename failed`, Windows): every destination confinement still allows is
+    /// inside the root, and no filesystem renames a directory into its own subtree. What carries this
+    /// test is the **sentinel** — the one thing an errno cannot spell.
+    #[test]
+    fn cpe_1730_a_rename_whose_source_is_the_served_root_is_refused() {
+        let (addr, hostkey, root) = spawn_server_returning_root();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict)
+                .expect("connect");
+
+        let r = provider.rename("/", "/moved-root");
+        assert!(
+            root.join(FILE_NAME).is_file() && root.join(DIR_NAME).join("nested.txt").is_file(),
+            "the served root must still be the served root, with its contents (outcome was {r:?})"
+        );
+        assert!(!root.join("moved-root").exists(), "…and nothing may appear at the destination ({r:?})");
+        assert!(
+            cpe_1730_is_guard_refusal(&r, CPE_1730_ROOT_SOURCE_REFUSAL),
+            "the refusal must name the SOURCE guard. CPE-1731's destination sentinel would mean the \
+             wrong guard answered, and a bare `Failure: Failure` would mean an errno did. Got {r:?}"
+        );
     }
 
     /// CPE-1731 acceptance: `SSH_FXP_RMDIR` is the **empty-directory** verb, so a non-empty directory

@@ -1621,6 +1621,27 @@ mod tests {
     /// `LIST /` cannot work), so `confined_to` says yes; `same_place` on the *source* is what says no.
     /// The note's expectation was reasonable and wrong, which is worth more written down than quietly
     /// corrected.
+    ///
+    /// # The recorded gap was not actually destructive, and the neutralisation run is what showed it
+    ///
+    /// CPE-1731's note says this shape "still renames the served root itself into a subdirectory". With
+    /// the source guard neutralised, it does not — **measured, Windows**:
+    ///
+    /// ```text
+    /// RNFR / + RNTO /moved-root, source guard neutralised:
+    ///   reply = "550 Rename failed"          ← an errno, not the guard
+    ///   the served root and its contents: intact
+    /// ```
+    ///
+    /// Every destination the *confinement* guard still allows is inside the root, and no filesystem
+    /// renames a directory into its own subtree. So the tree assertions below **cannot fail today** —
+    /// stated rather than implied, because a test whose filesystem assertions are vacuous and whose
+    /// author has not noticed is the failure mode this ticket family keeps rediscovering. What carries
+    /// this test is the **exact refusal line**: with the guard gone the rig answers `550 Rename failed`,
+    /// which is byte-for-byte what a `rename` errno produces, and an assertion on the code alone would
+    /// have stayed green. That is the "saved by an errno" trap in its purest form, and it is why the
+    /// guard is still worth having: it turns a refusal that happens to be an OS accident into one the
+    /// server states.
     #[test]
     fn cpe_1730_an_rnfr_naming_the_served_root_cannot_move_it_away() {
         let (port, root) = exact_server();
