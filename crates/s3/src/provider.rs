@@ -675,6 +675,75 @@ fn non_canonical_listing_status_cause(status: u16) -> String {
     )
 }
 
+/// True if `status` is a 2xx HTTP status that is not the exact `200` a `GetObject`/`HEAD` reply requires
+/// (CPE-1749). Same shape as [`is_non_canonical_listing_status`], reused for a different pair of verbs:
+/// `read`'s `GetObject` and `stat`'s `HEAD` each have exactly one success status too, and `206` in
+/// particular is legitimate only in answer to a `Range` header — this crate's `signed_request` never sends
+/// one on either verb (see [`S3Provider::read`] and [`S3Provider::stat`]), so an unsolicited `206` here
+/// means the reply is, by definition, not the whole object.
+fn is_non_canonical_object_status(status: u16) -> bool {
+    status != 200 && (200..300).contains(&status)
+}
+
+/// The reason text for a `GetObject` reply whose status [`is_non_canonical_object_status`] (CPE-1749) —
+/// deliberately **not** routed through [`map_response_error`]/[`error::map_s3_error`], for the same reason
+/// [`non_canonical_listing_status_cause`] exists: a 203/206 body is not an S3 error document, it is (a
+/// fragment of) the real object, and hunting it for an `<Error>`'s `<Code>` would misdiagnose it exactly
+/// the way CPE-1740 measured for a listing.
+///
+/// # Why 200-only is right here, not merely consistent
+///
+/// [`FileSystemProvider::read`]'s whole contract is "the complete object, or a loud `Err`" — its own doc
+/// says a silent truncation is data loss wearing a success. `206 Partial Content` is an HTTP-legal answer
+/// **only** to a request carrying a `Range` header, and this client sends none on a `GetObject`, so a
+/// `206` reply is not a partial answer to something asked for — it is proof the object handed back is
+/// short. Measured reproduction: an unsolicited `206` with body `HALF` used to come back as
+/// `Ok([72, 65, 76, 70])`, which `cpe_server::transfer`'s download sink would write to disk as the
+/// finished file.
+fn non_canonical_read_status_cause(status: u16) -> String {
+    let explanation = match status {
+        203 => " RFC 9110 §15.3.4 makes 203 a standards-legitimate answer from a transforming proxy \
+                 between here and the origin — the body may have been rewritten in transit, so it is not \
+                 provably the object's own bytes either."
+            .to_string(),
+        206 => " 206 means the reply is a partial/range response, and this client never sends a Range \
+                 header on a GetObject request — nothing here asked for a fragment of the object, so an \
+                 unsolicited 206 means the body handed back is short of the whole object."
+            .to_string(),
+        _ => String::new(),
+    };
+    format!(
+        "HTTP {status}: GetObject has exactly one success status, 200, and this reply answered {status} \
+         instead of it. A complete object body was required — reading it as the object's contents would \
+         risk writing a truncated file to disk and reporting it as the finished download — so it is \
+         refused rather than returned.{explanation}"
+    )
+}
+
+/// The reason text for a `HEAD` reply whose status [`is_non_canonical_object_status`] (CPE-1749) —
+/// [`S3Provider::stat`]'s sibling of [`non_canonical_read_status_cause`]. A HEAD carries no body by
+/// protocol, so the harm here is not a truncated body but a wrong `Content-Length`: under a `206` that
+/// header is the RANGE length, not the object's full size, and reporting it as the size would be exactly
+/// the "confident wrong answer" [`S3Provider::stat`]'s own doc refuses to give for a missing
+/// `Content-Length` on a 200.
+fn non_canonical_stat_status_cause(status: u16) -> String {
+    let explanation = match status {
+        203 => " RFC 9110 §15.3.4 makes 203 a standards-legitimate answer from a transforming proxy \
+                 between here and the origin."
+            .to_string(),
+        206 => " 206 means the reply is a partial/range response, and this client never sends a Range \
+                 header on a HEAD request — nothing here asked for one, so an unsolicited 206's \
+                 Content-Length is the RANGE length, not the object's size."
+            .to_string(),
+        _ => String::new(),
+    };
+    format!(
+        "HTTP {status}: HEAD has exactly one success status, 200, and this reply answered {status} \
+         instead of it. Content-Length under a non-canonical 2xx cannot be trusted as the object's full \
+         size, so this is refused rather than reported as one.{explanation}"
+    )
+}
+
 /// Wrap a failed [`S3Provider::probe_prefix`] so the error names **the probe** as the thing that failed,
 /// instead of surfacing a bare access-denied about a prefix the user never typed (CPE-1723 item 1).
 ///
@@ -1422,6 +1491,13 @@ impl S3Provider {
             .signed_request(method, target, query, &payload_hash, request_deadline)
             .map_err(|e| (None, e))?;
         let (status, resp) = Self::send_capturing_status(req, body, &url).map_err(|e| (None, e))?;
+        // CPE-1749 re-check: deliberately still any `2xx`, not narrowed to `200`. This flag only gates
+        // whether an over-cap/read-failure is treated as *this call's* failure (see `over_cap && ok`
+        // below); it never decides success for a document a caller reads for completeness — every actual
+        // consumer of a body this exchange produces (`list`, `probe_prefix`/`probe_prefix_after`) re-checks
+        // `status != 200` itself on top of this, and `write`/`mkdir`/`delete` below check `(200..300)`
+        // directly against a response that carries no document whose completeness matters (see those
+        // call sites' own CPE-1749 notes).
         let ok = (200..300).contains(&status);
         // On the success path a body-read failure is the call's failure. On the error path it is not:
         // `map_response_error`/`error::map_s3_error` already handle an empty/truncated/garbled body
@@ -1752,6 +1828,11 @@ impl S3Provider {
             Some(self.request_deadline),
         )?;
         let (status, _resp) = Self::send_capturing_status(req, None, &url)?;
+        // CPE-1749 re-check: deliberately still any `2xx`, not narrowed to `200`. Unlike `stat`'s HEAD,
+        // this one reads no document at all — the response body is discarded (`_resp`) and no header off
+        // it is trusted as a measurement, only the fact that *some* 2xx came back for this exact key. A
+        // 206 answering a HEAD carries no body to be a fragment of and no `Content-Length` this function
+        // reads, so there is no completeness question here to get wrong.
         Ok((200..300).contains(&status))
     }
 }
@@ -2006,7 +2087,15 @@ impl FileSystemProvider for S3Provider {
             Some(self.request_deadline),
         )?;
         let (status, resp) = Self::send_capturing_status(req, None, &url)?;
-        if (200..300).contains(&status) {
+        // **`200` exactly, not `2xx`** (CPE-1749). A `206` here answers with a RANGE's `Content-Length`,
+        // not the object's — this client sends no `Range` header on a HEAD, so an unsolicited 206's
+        // length is provably not the size being asked for. See `is_non_canonical_object_status` and
+        // `non_canonical_stat_status_cause` for the full reasoning and the sibling `read` fix.
+        // **`200` exactly, not `2xx`** (CPE-1749). A `206` here answers with a RANGE's `Content-Length`,
+        // not the object's — this client sends no `Range` header on a HEAD, so an unsolicited 206's
+        // length is provably not the size being asked for. See `is_non_canonical_object_status` and
+        // `non_canonical_stat_status_cause` for the full reasoning and the sibling `read` fix.
+        if status == 200 {
             let size = resp
                 .header("Content-Length")
                 .and_then(|v| v.trim().parse::<u64>().ok())
@@ -2038,6 +2127,13 @@ impl FileSystemProvider for S3Provider {
             if raw_entries > 0 {
                 return Ok(ProviderEntry { name, is_dir: true, size: 0 });
             }
+        }
+        // A non-canonical 2xx (203/206) is diagnosed by `non_canonical_stat_status_cause`, not
+        // `map_response_error`: a HEAD carries no body by protocol either way, but the cause is not "no
+        // S3 error code to read" — it is that Content-Length under this status cannot be trusted as the
+        // object's size, which is a different, more specific claim.
+        if is_non_canonical_object_status(status) {
+            return Err(format!("s3: stat {path:?}: {}", non_canonical_stat_status_cause(status)));
         }
         Err(map_response_error("HEAD", status, &body, path))
     }
@@ -2079,9 +2175,23 @@ impl FileSystemProvider for S3Provider {
         let (url, req) =
             self.signed_request("GET", &target, &[], sigv4::EMPTY_PAYLOAD_SHA256, None)?;
         let (status, resp) = Self::send_capturing_status(req, None, &url)?;
-        if !(200..300).contains(&status) {
+        // **`200` exactly, not `2xx`** (CPE-1749). This used to accept any `2xx`, so an unsolicited `206`
+        // — this client sends no `Range` header on a GetObject — parsed as a normal body and came back
+        // `Ok` with whatever fragment the server sent: measured as `READ 206 >>> Ok([72, 65, 76, 70])`
+        // against a 4-byte `HALF` body. `cpe_server::transfer`'s download sink writes whatever `read`
+        // returns to disk as the finished file, so that was a truncated file reported as a success. See
+        // `is_non_canonical_object_status` and `non_canonical_read_status_cause`.
+        if status != 200 {
             let (body, _) = read_body_capped(resp.into_reader()).unwrap_or_default();
-            return Err(map_response_error("GET", status, &body, path));
+            let message = if is_non_canonical_object_status(status) {
+                // Not `map_response_error`: the body here is not an S3 error to be parsed — it may well
+                // be (a fragment of) the real object — and routing it through the S3 error parser would
+                // misdiagnose it exactly the way CPE-1740 measured for a listing's 203/206.
+                format!("s3: read {path:?}: {}", non_canonical_read_status_cause(status))
+            } else {
+                map_response_error("GET", status, &body, path)
+            };
+            return Err(message);
         }
 
         let mut reader = resp.into_reader();
@@ -2133,6 +2243,11 @@ impl FileSystemProvider for S3Provider {
         let (status, body) = self
             .signed_exchange("PUT", &target, &[], Some(data), None)
             .map_err(|(_, m)| m)?;
+        // CPE-1749 re-check: deliberately still `(200..300)`, not narrowed to `200`. `write` sends a
+        // document, it does not read one back — `body` here is S3's response to the PUT (error detail on
+        // failure, nothing this method uses on success), never the object's own bytes. There is no
+        // completeness question a non-canonical 2xx could get wrong for a caller that consumes nothing
+        // from the reply.
         if !(200..300).contains(&status) {
             return Err(map_response_error("PUT", status, &body, path));
         }
@@ -2164,6 +2279,8 @@ impl FileSystemProvider for S3Provider {
         let (status, body) =
             self.signed_exchange("PUT", &target, &[], Some(&[]), Some(self.request_deadline))
                 .map_err(|(_, m)| m)?;
+        // CPE-1749 re-check: deliberately still `(200..300)`, same reasoning as `write`'s own note — a
+        // zero-byte marker PUT reads nothing back from a non-canonical 2xx that could be wrong.
         if !(200..300).contains(&status) {
             return Err(map_response_error("PUT", status, &body, path));
         }
@@ -2319,6 +2436,8 @@ impl FileSystemProvider for S3Provider {
                     let (status, body) = self
                         .signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))
                         .map_err(|(_, m)| m)?;
+                    // CPE-1749 re-check: deliberately still `(200..300)`, same reasoning as `write`'s own
+                    // note — a DELETE reads no document back whose completeness matters.
                     if !(200..300).contains(&status) {
                         return Err(map_response_error("DELETE", status, &body, path));
                     }
@@ -2391,6 +2510,8 @@ impl FileSystemProvider for S3Provider {
         let (status, body) =
             self.signed_exchange("DELETE", &target, &[], None, Some(self.request_deadline))
                 .map_err(|(_, m)| m)?;
+        // CPE-1749 re-check: deliberately still `(200..300)`, same reasoning as `write`'s own note — a
+        // DELETE reads no document back whose completeness matters.
         if !(200..300).contains(&status) {
             return Err(map_response_error("DELETE", status, &body, path));
         }
@@ -4974,6 +5095,118 @@ mod tests {
         assert!(
             err.contains("refusing to report 0"),
             "size 0 would be an invented measurement, not a read one: {err}"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1749: `read` and `stat` both used to accept any `2xx`, so an unsolicited `206` — this client
+    // sends no `Range` header on either verb — parsed cleanly. On `read` that meant a truncated body
+    // returned as `Ok`, measured as `READ 206 >>> Ok([72, 65, 76, 70])` against a 4-byte `HALF` body,
+    // which `cpe_server::transfer`'s download sink would write to disk as the finished file. On `stat`
+    // it meant `Content-Length` — under a `206` the RANGE length, not the object's — reported as the
+    // object's size. `list`'s sibling fix is CPE-1740.
+    // ---------------------------------------------------------------------------------------------
+
+    /// A server that answers every request with an unsolicited `206` and `Content-Length: body.len()`,
+    /// and records whether any request carried a `Range` header. Used by both the `stat` and `read`
+    /// CPE-1749 tests below — a HEAD gets a bodiless 206 (tiny_http suppresses the body itself, matching
+    /// `handle`'s own HEAD arm), a GET gets `body` itself — so a guard that only catches one verb cannot
+    /// pass by only fixing the other.
+    fn spawn_a_server_that_answers_with_an_unsolicited_206(
+        body: &'static [u8],
+    ) -> (String, Arc<std::sync::Mutex<Vec<bool>>>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let addr = server.server_addr().to_ip().unwrap();
+        let saw_range = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let saw_range_thread = Arc::clone(&saw_range);
+        std::thread::spawn(move || {
+            for req in server.incoming_requests() {
+                let has_range = req.headers().iter().any(|h| h.field.equiv("Range"));
+                saw_range_thread.lock().unwrap().push(has_range);
+                let len = tiny_http::Header::from_bytes(
+                    &b"Content-Length"[..],
+                    body.len().to_string().as_bytes(),
+                )
+                .unwrap();
+                if req.method() == &tiny_http::Method::Head {
+                    let _ = req.respond(tiny_http::Response::empty(206).with_header(len));
+                } else {
+                    let _ = req.respond(
+                        tiny_http::Response::from_data(body).with_status_code(206).with_header(len),
+                    );
+                }
+            }
+        });
+        (format!("http://{addr}"), saw_range)
+    }
+
+    /// Pins the read half of AC1 and AC3: the measured reproduction from the ticket, reproduced against
+    /// this crate. Effect asserted BEFORE the `Result` is unwrapped (this sprint's standing rule; also
+    /// AC3) — this defect fails by returning `Ok`, so `.expect_err()` would panic unreachably on a
+    /// regression instead of naming the truncated bytes that came back.
+    #[test]
+    fn read_refuses_an_unsolicited_206_rather_than_returning_the_truncated_body_as_the_whole_object() {
+        let (base, saw_range) = spawn_a_server_that_answers_with_an_unsolicited_206(b"HALF");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let outcome = call_with_deadline(
+            "S3Provider::read against an unsolicited 206",
+            Duration::from_secs(60),
+            move || provider.read("/x.bin"),
+        );
+        match outcome {
+            Ok(bytes) => panic!(
+                "THE DEFECT: an unsolicited 206 carrying the 4-byte body b\"HALF\" was accepted and \
+                 returned as the object's complete contents: {bytes:?} ({} bytes) — \
+                 `cpe_server::transfer`'s download sink writes exactly this to disk as the finished file, \
+                 so this is a truncated download reported as a success",
+                bytes.len()
+            ),
+            Err(err) => {
+                assert!(err.contains("206"), "the message must name the status that caused the refusal: {err}");
+                assert!(err.contains("200"), "and say that a complete body requires exactly 200: {err}");
+            }
+        }
+        assert_eq!(
+            *saw_range.lock().unwrap(),
+            vec![false],
+            "the fixture must serve this 206 to a request carrying NO Range header — otherwise this test \
+             cannot tell an unsolicited 206 apart from a legitimately-ranged reply, and would pass for the \
+             wrong reason"
+        );
+    }
+
+    /// Pins the stat half of AC1: an unsolicited 206's `Content-Length` is a RANGE length, and reporting
+    /// it as the object's size would be exactly the invented-measurement failure
+    /// `stat_refuses_a_200_head_with_no_usable_content_length_...` already guards for a missing header —
+    /// this is the same guard against a present-but-wrong one.
+    #[test]
+    fn stat_refuses_an_unsolicited_206_rather_than_reporting_the_range_length_as_the_objects_size() {
+        let (base, saw_range) = spawn_a_server_that_answers_with_an_unsolicited_206(b"HALF");
+        let provider = S3Provider::connect(&cfg(&base));
+
+        let outcome = call_with_deadline(
+            "S3Provider::stat against an unsolicited 206",
+            Duration::from_secs(60),
+            move || provider.stat("/x.bin"),
+        );
+        match outcome {
+            Ok(entry) => panic!(
+                "THE DEFECT: an unsolicited 206 whose Content-Length is a 4-byte RANGE length was \
+                 accepted and reported as the object's size: {entry:?} — the object's real size is \
+                 unknown, and this claims to have measured it"
+            ),
+            Err(err) => {
+                assert!(err.contains("206"), "the message must name the status that caused the refusal: {err}");
+                assert!(err.contains("200"), "and say that stat requires exactly 200: {err}");
+            }
+        }
+        assert_eq!(
+            *saw_range.lock().unwrap(),
+            vec![false],
+            "the fixture must serve this 206 to a request carrying NO Range header — otherwise this test \
+             cannot tell an unsolicited 206 apart from a legitimately-ranged reply, and would pass for the \
+             wrong reason"
         );
     }
 
