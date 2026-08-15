@@ -41,11 +41,12 @@ pending. Nothing touches disk until you click **Save**:
   is locked by another program — your file is left exactly as it was, never half-rewritten, and the
   temporary file is cleaned up. (This is about *failed saves*, not about power cuts: like most desktop
   apps, the app doesn't force the change all the way down to the physical disk before reporting success.)
-- **If the app is killed mid-save, your file is still safe, but a leftover may need deleting.** The
-  original is untouched either way. The cleanup step only runs when the save *fails*, though, not when
-  the app stops running, so an app that is force-quit or crashes during a save can leave a stray file
-  next to yours whose name ends in `.cpe-tmp`. It's the half-written copy, it's safe to delete, and
-  nothing else will ever read it.
+- **If the app is killed mid-save, your file is still safe, and the leftover cleans itself up.** The
+  original is untouched either way. An app that is force-quit or crashes during a save can leave a stray
+  file next to yours whose name ends in `.cpe-tmp` — it's the half-written copy, and nothing else will
+  ever read it. You don't need to delete it by hand: the next time that same file is saved, the app
+  notices it's stale and removes it automatically. (It only lingers if that particular file is never
+  saved again.)
 - **What that safety costs, so you can judge it.** Writing a new file and moving it into place means the
   saved file is a *new* file, and things attached to the old one don't come with it:
   - **Permissions and ownership are reset** to what a newly created file gets. On Linux and macOS a file
@@ -67,7 +68,8 @@ playlist folders — Metadata Studio edits the file the link points at, and the 
 
 Because the save writes a temporary file next to the file it is really editing, that temporary file
 appears in the folder the **link points at** — the library folder, not the playlist folder you're looking
-at. It's cleaned up as part of the save; it only matters if you go looking for it after a crash.
+at. A failed save cleans it up immediately; if the app is killed before that, the next save of the same
+file removes it automatically, the same as everywhere else — see above.
 
 If the link is **broken** (it points at something that isn't there any more), the save is refused and
 tells you which link it was and that nothing was written. The alternative would be to quietly replace
