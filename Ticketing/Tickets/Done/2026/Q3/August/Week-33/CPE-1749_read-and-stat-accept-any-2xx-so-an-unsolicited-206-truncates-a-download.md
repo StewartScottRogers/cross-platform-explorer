@@ -3,11 +3,11 @@ id: CPE-1749
 title: read and stat accept any 2xx, so an unsolicited 206 truncates a download into a silent success
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
