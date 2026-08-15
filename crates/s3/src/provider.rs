@@ -2091,10 +2091,6 @@ impl FileSystemProvider for S3Provider {
         // not the object's — this client sends no `Range` header on a HEAD, so an unsolicited 206's
         // length is provably not the size being asked for. See `is_non_canonical_object_status` and
         // `non_canonical_stat_status_cause` for the full reasoning and the sibling `read` fix.
-        // **`200` exactly, not `2xx`** (CPE-1749). A `206` here answers with a RANGE's `Content-Length`,
-        // not the object's — this client sends no `Range` header on a HEAD, so an unsolicited 206's
-        // length is provably not the size being asked for. See `is_non_canonical_object_status` and
-        // `non_canonical_stat_status_cause` for the full reasoning and the sibling `read` fix.
         if status == 200 {
             let size = resp
                 .header("Content-Length")
