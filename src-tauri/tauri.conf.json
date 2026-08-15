@@ -1,4 +1,4 @@
-﻿{
+{
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Cross-Platform Explorer",
   "version": "0.57.66",

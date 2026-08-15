@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "cross-platform-explorer"
 version = "0.57.66"
 description = "A cross-platform file explorer with one-click install and auto-updates."

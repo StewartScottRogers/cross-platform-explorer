@@ -233,35 +233,52 @@ jobs:
         shell: bash
         env:
           PDFIUM_TAG: "chromium/7961"
-          FFMPEG_BUILD_TAG: "autobuild-2026-08-01-13-21"
-          FFMPEG_BUILD_VER: "n8.1.2-34-g9b6c8969e0"
+          FFMPEG_BUILD_TAG: "autobuild-2026-08-15-13-02"
+          FFMPEG_BUILD_VER: "n8.1.2-44-g7c533d0f86"
           FFMPEG_SRC_TAG: "n8.1.2"
         run: |
           set -euo pipefail
           mkdir -p native-deps/ffmpeg/windows native-deps/ffmpeg/unix native-deps/pdfium/windows native-deps/pdfium/unix
+          # CPE-1762: every download below goes through this. `curl -sSL` without --fail follows a 404 to
+          # an error page and writes it to the output file, so the first thing that complains is tar or
+          # unzip, about a "format not recognized" - which reads as a corrupt archive and sends the reader
+          # after the wrong thing entirely. It cost a whole release to diagnose once. BtbN publishes a new
+          # autobuild daily and PRUNES the old ones, so a pinned ffmpeg URL has a shelf life of weeks and
+          # this WILL happen again; when it does, the first error line should say so.
+          fetch() {
+            url="$1"; out="$2"
+            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url" || echo 000)
+            if [ "$code" != "200" ]; then
+              echo "::error::download failed (HTTP $code): $url"
+              echo "::error::If this is a BtbN ffmpeg URL, the pinned autobuild has been deleted upstream -"
+              echo "::error::bump FFMPEG_BUILD_TAG/FFMPEG_BUILD_VER to a current release. See CPE-1762."
+              exit 1
+            fi
+          }
+
 
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
             echo "--- pdfium (Windows) ---"
-            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz" pdfium.tgz
             tar xzf pdfium.tgz bin/pdfium.dll LICENSE
             mv bin/pdfium.dll native-deps/pdfium/windows/pdfium.dll
             mv LICENSE native-deps/pdfium/windows/LICENSE.txt
 
             echo "--- ffmpeg (Windows, BtbN LGPL static) ---"
-            curl -sSL -o ffmpeg.zip "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip"
+            fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip" ffmpeg.zip
             unzip -q ffmpeg.zip "*/bin/ffmpeg.exe" "*/LICENSE.txt"
             mv */bin/ffmpeg.exe native-deps/ffmpeg/windows/ffmpeg.exe
             mv */LICENSE.txt native-deps/ffmpeg/windows/LICENSE.txt
 
           elif [ "${{ matrix.platform }}" = "ubuntu-latest" ]; then
             echo "--- pdfium (Linux) ---"
-            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz"
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-linux-x64.tgz" pdfium.tgz
             tar xzf pdfium.tgz lib/libpdfium.so LICENSE
             mv lib/libpdfium.so native-deps/pdfium/unix/libpdfium.so
             mv LICENSE native-deps/pdfium/unix/LICENSE.txt
 
             echo "--- ffmpeg (Linux, BtbN LGPL static) ---"
-            curl -sSL -o ffmpeg.tar.xz "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz"
+            fetch "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz" ffmpeg.tar.xz
             mkdir -p ffmpeg-extract
             tar xJf ffmpeg.tar.xz -C ffmpeg-extract --strip-components=1
             mv ffmpeg-extract/bin/ffmpeg native-deps/ffmpeg/unix/ffmpeg
@@ -269,7 +286,7 @@ jobs:
 
           elif [ "${{ matrix.platform }}" = "macos-latest" ]; then
             echo "--- pdfium (macOS arm64) ---"
-            curl -sSL -o pdfium.tgz "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz"
+            fetch "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-mac-arm64.tgz" pdfium.tgz
             tar xzf pdfium.tgz lib/libpdfium.dylib LICENSE
             mv lib/libpdfium.dylib native-deps/pdfium/unix/libpdfium.dylib
             mv LICENSE native-deps/pdfium/unix/LICENSE.txt
