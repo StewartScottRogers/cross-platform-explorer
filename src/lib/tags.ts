@@ -105,11 +105,30 @@ export async function initTags(): Promise<void> {
 export function keyToWrite(store: TagStore, path: string): string {
   if (!store) return path;
   if (path in store) return path;
-  const key = canonicalPath(path);
+  const key = withoutTrailingSeparator(path);
   for (const k of Object.keys(store)) {
-    if (canonicalPath(k) === key) return k;
+    if (withoutTrailingSeparator(k) === key) return k;
   }
   return path;
+}
+
+/** Strip ONE trailing `/` or `\`, keeping a bare root (`/`, `C:/`, `C:\`) intact. Deliberately NOT
+ *  `canonicalPath`: this is the only place in the codebase where a normalised form selects the key a
+ *  write LANDS on, so it must collapse the trailing separator and nothing else. `canonicalPath` also
+ *  rewrites `\` to `/`, and on Linux/macOS a backslash is a legal filename character — so a file
+ *  literally named `a\b` and the path `a/b` are two unrelated files that canonicalise to one key, and
+ *  the write would land on whichever the store happened to hold (found by the round-3 review, which
+ *  reproduced it). Elsewhere the same collision only mis-toggles a favourite, which is recoverable;
+ *  here it would silently overwrite another entry's tags. The trailing slash is the ONLY spelling
+ *  difference CPE-1737 introduces, so it is the only one worth collapsing. */
+function withoutTrailingSeparator(p: string): string {
+  if (p.length < 2) return p;
+  const last = p[p.length - 1];
+  if (last !== "/" && last !== "\\") return p;
+  const rest = p.slice(0, -1);
+  // A bare drive root ("C:/") or a POSIX root ("/") keeps its separator — dropping it changes meaning.
+  if (/^[A-Za-z]:$/.test(rest)) return p;
+  return rest;
 }
 
 /** Replace one path's tags + label; the store is updated from the returned whole store. Sends
