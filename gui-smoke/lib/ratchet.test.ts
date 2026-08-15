@@ -421,6 +421,34 @@ describe("evaluate — empty/edge inputs", () => {
   });
 });
 
+// CPE-1728 (reviewer-found hole): `expectedSpecCount < 1` used to slip past clause 4's own
+// `reportedSpecCount < expectedSpecCount` check (`0 < 0` is false), so a caller that mis-globs the specs
+// directory (a bad env override, a future refactor bug) got a vacuous green "0/0 spec file(s) reported
+// ... OK" instead of a red "I don't know what was supposed to run". Reproduced first, then fixed — this
+// suite proves the fix, not just documents it.
+describe("evaluate — clause 8: INVALID EXPECTED SPEC COUNT (CPE-1728)", () => {
+  it("expectedSpecCount of 0, zero results, and an empty known-failing list is RED, not a vacuous green", () => {
+    const result = evaluate({ results: [], knownFailing: { cases: [] }, expectedSpecCount: 0 });
+    assert.equal(result.ok, false);
+    assert.equal(result.incomplete, true);
+    assert.ok(result.messages.some((m) => m.includes("INVALID EXPECTED SPEC COUNT")));
+  });
+
+  it("a negative expectedSpecCount is also RED (defensive — never a valid input, but never silently green either)", () => {
+    const result = evaluate({ results: [], knownFailing: { cases: [] }, expectedSpecCount: -1 });
+    assert.equal(result.ok, false);
+    assert.equal(result.incomplete, true);
+  });
+
+  it("does not fire when expectedSpecCount is a real positive number, even with zero results (clause 4 still owns that message)", () => {
+    const result = evaluate({ results: [], knownFailing: { cases: [] }, expectedSpecCount: 41 });
+    assert.equal(result.ok, false);
+    assert.equal(result.incomplete, true);
+    assert.ok(!result.messages.some((m) => m.includes("INVALID EXPECTED SPEC COUNT")));
+    assert.ok(result.messages.some((m) => m.includes("SUITE DID NOT COMPLETE")));
+  });
+});
+
 // CPE-1680 finding 1: an unrecognised wdio state used to fall through to "skipped", and a skipped case
 // is exempt from every clause above — so a state this ratchet has never seen silently became "safe to
 // ignore" instead of the honest "I don't know" it actually is. `evaluate()` now treats `"unknown"` as its

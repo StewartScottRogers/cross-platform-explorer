@@ -192,7 +192,39 @@ jobs:
     # holding a concurrency slot for hours.
     # CPE-1481: raised 20 -> 35 (round 1) -> 45 (round 2), same rationale as the windows leg above —
     # the CPE-1479 mouse fix made specs actually run; 35 min still left the sequential run's media-heavy
-    # back half (~18 of 39 specs) unrun at the cap. 45 gives margin; sharding (CPE-1266) is the real fix.
+    # back half (~18 of 39 specs) unrun at the cap. sharding (CPE-1266) is still the real long-term fix.
+    #
+    # CPE-1728: left at 45, NOT raised. Measured before changing anything, then re-measured after a
+    # reviewer round that caught an arithmetic error in an earlier draft of this comment (a claimed
+    # 45->55 raise + "guarantees >=10 minutes" reserve that didn't hold under the real max setup time) —
+    # both rounds used `gh run list`/`gh api .../jobs` across the last ~160 runs of this workflow, reading
+    # each job's own STEP-level timestamps (not just the run-level conclusion, which conflates an
+    # ordinary CPE-1266 concurrency-supersession with a genuine hard-timeout). Two separate findings, and
+    # they point at different fixes:
+    #   1. This job's own 45-minute cap has, in the sample measured, NEVER actually fired: 0 of 155
+    #      completed gui-smoke-linux job runs reached 44 minutes (max observed 42.5 min). Raising it would
+    #      have addressed zero observed incidents while weakening CPE-1266's original "dies in minutes,
+    #      not hours" rationale for a run that's genuinely hung. So it stays 45.
+    #   2. What DOES happen often: 26 of 85 `pull_request`-triggered runs sampled (31%) never produced a
+    #      Ratchet verdict, because the run was cancelled first — every single one of those 26 had the
+    #      suite step itself `cancelled` or `skipped`, i.e. an ordinary CPE-1266 concurrency-supersession
+    #      (a newer push landing on the same PR) killing an in-flight run, NEVER this job's own timeout.
+    #      PR #900 (CPE-1723, `cpe-1723-s3-listbucket-and-gaps`, run 31787491058) is one of them: suite
+    #      step cancelled at 23m09s against a normal ~30-minute suite (roughly 3/4 through, genuinely
+    #      incomplete — not a finished run losing its tally, see the "Ratchet" step's comment below). The
+    #      fix for THAT is `if: always()` on the "Ratchet" step below (so a supersession-cancelled run
+    #      still gets the ratchet's existing, honest `SUITE DID NOT COMPLETE` verdict instead of silence)
+    #      — a timeout-value change cannot fix a cancellation triggered by a NEW push, no matter what it's
+    #      set to.
+    # A step-level cap on "Run GUI smoke suite" was tried during CPE-1728 and REMOVED — see that step's
+    # own comment for the measurement. Short version: suite duration scales with spec count, the usable
+    # window for such a cap is ~2 minutes wide, and one added spec file costs 0.73-1.80 min, so any value
+    # in that window reds every PR within a spec file or two. The thing that actually protects the
+    # Ratchet/classify-log/screenshot steps from ANY cancellation — whichever of the two causes above
+    # triggers it — is `if: always()`, not a timing coincidence between two numbers.
+    # WARNING (CPE-1753): a fully healthy green run measured 41.70 min against this 45-minute cap. At
+    # 0.73-1.80 min per added spec file, 2-4 more specs breach it, and then this job dies mid-suite on
+    # every run with no verdict left for `if: always()` to rescue. Shard before that lands.
     timeout-minutes: 45
     # CPE-1594: this leg is now the BLOCKING gate — `continue-on-error` removed. It has run the whole
     # 40-spec suite to completion in CI (33 passed / 7 failed / 100% completed, ~28 min, confirmed on
@@ -338,9 +370,57 @@ jobs:
       # fail (see its comment and `gui-smoke/lib/ratchet.ts`). This also lets the suite step finish
       # normally (rather than the job aborting) so the JSON reporter output + screenshots below always
       # exist to upload/ratchet, even on a run with failures.
+      # CPE-1728: this step deliberately has NO step-level `timeout-minutes`. A 32-minute cap was tried
+      # and removed after review measured that it had a one-to-two-spec-file fuse. Suite duration scales
+      # with spec count rather than being near-constant: bucketed by the spec count at each run's own head
+      # SHA, 40 specs ran 27.50/28.15/29.25 min (min/median/max, n=6) and 41 specs ran 29.57/29.95/30.42
+      # (n=4) — disjoint ranges, +1.80 min at the median for one added spec, 0.73 min/spec flat-averaged.
+      # Margin under a 32-minute cap was 32 - 30.42 = 1.58 min, i.e. 0.9-2.2 spec files; this repo went
+      # 22 -> 39 -> 41 specs between 2026-08-01 and 08-15. The next spec or two would have reded every PR
+      # with a step timeout plus SUITE DID NOT COMPLETE — which reads exactly like the infrastructure
+      # failure CPE-1728 exists to eliminate. No safe value exists either: the cap must be < 45 - 11.9 =
+      # 33.1 to fire before the job cap and <= ~32.5 to leave the reporting tail room, a window ~2 min
+      # wide, narrower than one spec file's growth. The purchase was ~1.5 min of earlier hang detection.
+      # `if: always()` on the Ratchet step below is the load-bearing mechanism; the job-level 45-minute
+      # cap remains the backstop, and a job-level timeout concludes `cancelled`, never `success`.
+      # SEE CPE-1753: a fully healthy green run already sits at 41.70 of the 45-minute job cap, so 2-4
+      # more spec files breach it with or without this change. Sharding is the only fix that survives.
+      # This step still `tee`s the full output to `.results/suite-output.log` (on top of the existing
+      # `.results/*.json` per-spec reports) so the classify-log step below has real evidence to classify,
+      # and so it can be uploaded as an artifact (see the screenshot-upload step's CPE-1728 comment) —
+      # `gh run view --log` truncates a long job's log around ~4 MB, which has already hidden the tail of
+      # at least one real incomplete run investigated for this ticket. `|| true` at the end of the whole
+      # pipeline (not just after `npm test`) is defensive rather than strictly load-bearing under this
+      # workflow's ACTUAL default step shell (`bash -e {0}` — no `pipefail`, since no `defaults.run.shell`
+      # is set anywhere in this file or job, so the pipeline's exit status is `tee`'s, which already
+      # succeeds); kept anyway as cheap insurance against a future `defaults.run.shell` change
+      # reintroducing `pipefail` and silently reviving the "known-failing-only run fails this step" bug
+      # this line originally guarded against.
       - name: Run GUI smoke suite (xvfb-run)
         working-directory: gui-smoke
-        run: xvfb-run --auto-servernum npm test || true
+        run: |
+          mkdir -p .results
+          (xvfb-run --auto-servernum npm test 2>&1 | tee .results/suite-output.log) || true
+
+      # CPE-1728: advisory-only, deliberately BETWEEN the suite and the Ratchet gate — reads the log the
+      # suite step above just captured and prints whether this run's failures (if any) carry a real
+      # `AssertionError` or only the WebDriver/DRI3-class noise that PR #900 (CPE-1723) showed is not
+      # evidence about the app (see `gui-smoke/lib/logSignature.ts` for the full rationale and the exact
+      # markers). `if: always()` so it still runs — and still has a log to read — even when the suite step
+      # above hit ITS OWN timeout rather than finishing cleanly. Never changes the job's exit code: the
+      # Ratchet step immediately below remains the only thing that gates this job, unchanged by this
+      # step's classification. This is the answer to "distinguish the app being broken from the runner
+      # failing to paint" — printed automatically, not left for a reader to re-derive by counting
+      # PASSED/FAILED lines and grepping the raw log by hand. NOTE this classification is only as good as
+      # the log it was given: `gh run view --log` truncates a long job well before it reaches this step's
+      # own output on a run whose suite step ran a long time, so treat a clean classification on such a
+      # run as "nothing suspicious in what was retrievable," not "confirmed clean" — see the
+      # screenshot-upload step below, which now uploads the untruncated log as an artifact for exactly
+      # this reason.
+      - name: Classify suite log — app defect vs runner-could-not-paint (CPE-1728)
+        if: always()
+        working-directory: gui-smoke
+        run: npm run classify-log
 
       # CPE-1594: the actual gate, and DELIBERATELY the very next step after the suite — nothing that
       # can fail (like the screenshot upload below) is allowed to sit between the suite finishing and
@@ -356,7 +436,24 @@ jobs:
       # a clean run and a run with a broken case inside an already-listed spec file. See
       # `gui-smoke/lib/ratchet.ts` for the exact rules and `gui-smoke/README.md` for how to retire an
       # entry once its case is fixed.
+      # CPE-1728: `if: always()` is the fix this ticket is actually about. Before this, ANY cancellation
+      # of a prior step — in practice almost always an ordinary CPE-1266 concurrency-supersession (a newer
+      # push landing on the same PR) killing an in-flight run, since this job's own 45-minute cap has never
+      # been observed to fire (see the job-level CPE-1728 comment above) — skipped this step entirely
+      # under its default `if: success()` condition, leaving the log ending in a bare
+      # `##[error]The operation was canceled.` that reads as pure infrastructure noise regardless of how
+      # far the suite had gotten. PR #900's run (31787491058) was cancelled with its suite step ~3/4
+      # through a normal ~30-minute run — genuinely incomplete, not a finished run whose tally got thrown
+      # away. `loadCaseResults` (`scripts/run-ratchet.ts`) now also tolerates a completely missing
+      # `.results/` dir (0 cases reported) instead of throwing, so even a cancellation BEFORE the suite
+      # step started still lands on `evaluate()`'s existing, honest "SUITE DID NOT COMPLETE: expected N
+      # spec file(s) ... but only M reported" message (clause 4) — one uniform, readable verdict for every
+      # cancellation stage, never a raw stack trace and never silence. NOTE this does not stop a
+      # superseded run from concluding `cancelled` at the GitHub UI level — a genuinely obsolete run's
+      # verdict SHOULD read that way — it only makes the underlying log honest instead of misleading once
+      # someone opens it, which is what PR #900 actually needed.
       - name: Ratchet — no new GUI regressions
+        if: always()
         working-directory: gui-smoke
         run: npm run ratchet
 
@@ -376,12 +473,42 @@ jobs:
       # verdict above; the ratchet, not the screenshot upload, owns whether this leg is red or green.
       # Retrieve with `gh run download <run-id> -n gui-smoke-screenshots-ubuntu -D <dir>` (see
       # gui-smoke/README.md "Reading a CI run").
+      #
+      # CPE-1728: also uploads `.results/suite-output.log` (the `tee`'d full suite output, see the "Run
+      # GUI smoke suite" step above) — not just the screenshots. `gh run view --log`/the Actions web UI
+      # truncate a job's log around ~4 MB, which for a long-running suite step can cut off well before the
+      # end: investigating PR #900's run (31787491058) hit exactly this, losing the last third of that
+      # run's own suite output and leaving the "no evidence of an app race" conclusion for that specific
+      # incident only partially confirmable, not fully. Uploading the untruncated log is this ticket's
+      # AC2 ("a reader should not have to grep the raw log by hand") actually delivered — without it,
+      # nobody (human or the classify-log step's own reviewer) can audit a classification after the fact
+      # on a run long enough to get truncated.
+      #
+      # The log goes in its OWN artifact, deliberately. `upload-artifact@v4` roots an artifact at the
+      # least common ancestor of everything it matches, so listing both paths here rerooted the artifact
+      # at `gui-smoke/` and moved all 82 PNGs from the artifact root into `.screenshots/` — measured by
+      # downloading both artifacts and comparing (round 1: 82 PNGs at root, 0 nested; round 2: 0 at root,
+      # 82 nested). That directory is DOT-PREFIXED, so a Visual Critic told to download to `<dir>` and
+      # read the screenshots globs `<dir>/*.png`, matches nothing (default globbing skips dotfiles) and
+      # reports "no screenshots produced" — a silent failure of the visual leg, which is the exact shape
+      # of defect this ticket exists to eliminate. Two artifacts keep the gallery flat at its root and
+      # need no README or Visual-Critic-instruction edit to stay true.
       - name: Upload gui-smoke screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gui-smoke-screenshots-ubuntu
           path: gui-smoke/.screenshots/**
+          retention-days: 14
+          if-no-files-found: warn
+          include-hidden-files: true
+
+      - name: Upload gui-smoke suite log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-smoke-suite-log-ubuntu
+          path: gui-smoke/.results/suite-output.log
           retention-days: 14
           if-no-files-found: warn
           include-hidden-files: true
