@@ -3,11 +3,11 @@ id: CPE-1739
 title: The atomic save replaces the file object, dropping mode, attributes, ADS and open-handle identity
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
