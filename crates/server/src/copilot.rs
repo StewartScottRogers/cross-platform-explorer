@@ -251,7 +251,14 @@ fn confinement_refusal(field: &str, path: &Path) -> String {
     if stat.is_err() {
         return format!("refused: {field} — {}", crate::fsutil::unknown_slot_message(path, &stat));
     }
-    format!("refused: {field} {path:?} resolves outside the folder (symlink/junction escape)")
+    // Deliberately does NOT name a link as the cause. A path reaches here for either of two reasons: a
+    // link (or junction) along it redirects out, or the path simply leads out on its own — the rename
+    // destination of an op naming the confirmed folder is the second kind, and it involves no link at
+    // all. Naming a "symlink/junction escape" there was measured as misleading by CPE-1750's UAT: true
+    // that it resolves outside, wrong about why, and this module has already spent three review rounds
+    // on messages that were confident about the wrong cause. State what was established — it resolves
+    // outside — and stop there.
+    format!("refused: {field} {path:?} resolves outside the folder")
 }
 
 /// Say why an op was refused for naming **the confirmed folder itself** (CPE-1750, attempt 2).
@@ -1265,9 +1272,13 @@ mod tests {
 
     /// The other half of blocker 1: the root-identity refusal must not become a blanket refusal of
     /// anything *near* the root. Every ordinary op names something **inside** the folder, and the
-    /// pre-existing suite would notice a regression there — but a sibling whose name merely *starts with*
-    /// the root's name is the input that a sloppy `starts_with`/string comparison gets wrong, and it has
-    /// no other coverage here.
+    /// pre-existing suite would notice a regression there.
+    ///
+    /// The input a sloppy `starts_with`/string comparison gets wrong — a sibling whose name merely
+    /// *starts with* the root's name — is deliberately **not** here: it lies outside the root, so
+    /// `op_plan::validate` rejects it before this guard is ever asked. It is covered where it can
+    /// actually occur, in `fsutil`'s own `confined_to` probe. (An earlier version of this comment
+    /// claimed the case as covered by this test; it never was. Reported by the CPE-1750 round-2 review.)
     #[test]
     fn cpe_1750_root_identity_refusal_does_not_catch_ordinary_in_root_work() {
         let root = scratch("cpe1750-discriminate");
