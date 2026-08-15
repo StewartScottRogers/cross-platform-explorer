@@ -268,31 +268,37 @@ narrower than one spec file's growth. Sharding is the only fix whose margin does
 with the spec count — and at ~10 min per job it also largely defuses the `cancel-in-progress` cliff that
 killed 31% of sampled PR verdicts.
 
-**After, measured** on the first green sharded run (`31903995127`, head `aad21a57`, **the same 41 specs**
-as the 41.70-minute before-run, so it is a like-for-like comparison):
+**After, measured** across the **two** green sharded runs (`31903995127` / `31906687574`), both at **the
+same 41 specs** as the 41.70-minute before-run, so it is like-for-like. Two samples on purpose: one
+measurement at a fixed input size is what made the old job look near-deterministic right up until someone
+bucketed it by spec count.
 
-| min | job |
-|---:|---|
-| 9.58 | build (of which `tauri build` 7.78 — constant, no spec-count term) |
-| 7.15 | shard 1 (11 specs) |
-| **14.27** | **shard 2 (10 specs) — the long pole**: 0.87 setup + 13.32 suite |
-| 6.68 | shard 3 (10 specs) |
-| 6.40 | shard 4 (10 specs) |
-| 0.38 | verdict |
-| **25.68** | **whole leg, wall clock** — vs 41.70 (−38%) |
-| **14.27** | **longest single job** — vs 41.70 (−66%) |
+| min (run 1) | min (run 2) | job |
+|---:|---:|---|
+| 9.58 | 11.53 | build (`tauri build` 7.78 / 9.53 of it — constant, no spec-count term) |
+| 7.15 | 8.95 | shard 1 (11 specs) |
+| **14.27** | **16.22** | **shard 2 (10 specs) — the long pole** (run 1: 0.87 setup + 13.32 suite) |
+| 6.68 | 10.15 | shard 3 (10 specs) |
+| 6.40 | 6.28 | shard 4 (10 specs) |
+| 0.38 | 0.35 | verdict |
+| **14.27** | **16.22** | **longest single job** — vs **41.70** before (−61% to −66%) |
 
-The verdict job reported `41/41 spec file(s) reported … manifests received from shard(s): 1, 2, 3, 4` and
-`92 passed, 25 failed, 25 known-failing listed` — the unsharded run's semantics exactly, reassembled from
-four. The merged screenshot artifact downloaded as **82 PNGs flat at the root, zero nested directories**.
+Whole-leg wall clock was **25.68 min** in run 1 (vs 41.70, **−38%**); run 2's 34.80 isn't comparable —
+6.6 min of it was the verdict job queuing for a free runner behind four other PRs' matrices, which is
+queue time, not job time.
+
+Both runs' verdict job reported `41/41 spec file(s) reported … manifests received from shard(s): 1, 2, 3,
+4` and `92 passed, 25 failed, 25 known-failing listed` — the unsharded run's semantics exactly,
+reassembled from four. Run 1's merged screenshot artifact was verified **by download** to be 82 PNGs flat
+at the root with zero nested directories (the pre-sharding gallery was also 82).
 
 **The long pole is one spec file, not the shard count.** Shard 2's 13.32-minute suite against ~5.5–6.2
 for the others is `samples.smoke.ts` (46 cases, roughly 8 of those minutes by itself). No shard count gets
 below that floor — if the long pole ever binds again, the lever is **splitting `samples.smoke.ts`**, not
 adding shards. (Not free: 25 `known-failing.json` entries name it, and `spec` is the exemption key.)
-Headroom under the 30-minute shard cap: 15.73 min, worth roughly 35–87 more spec files averaged over the
-round-robin, or ~8 if every new spec is heavy *and* lands on the long-pole shard. The old cap had 3.3
-minutes and 2–4 spec files.
+Headroom under the 30-minute shard cap, sized against the *worse* observed long pole: 13.78 min, worth
+roughly 30–76 more spec files averaged over the round-robin, or ~7 if every new spec is heavy *and* lands
+on the long-pole shard. The old cap had 3.3 minutes and 2–4 spec files.
 
 **How the split is decided.** `lib/shard.ts#assignShardSpecs` deals the spec files out round-robin over a
 code-unit-sorted list (`i % shardTotal === shardIndex - 1`), so every spec lands in **exactly one** shard
