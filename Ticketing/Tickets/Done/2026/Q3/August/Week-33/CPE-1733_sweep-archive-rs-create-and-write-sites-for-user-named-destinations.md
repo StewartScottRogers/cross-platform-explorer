@@ -3,11 +3,11 @@ id: CPE-1733
 title: Sweep archive.rs's ~14 create/write sites and decide which destinations are user-named
 type: task
 priority: Medium
-status: In Progress
+status: Done
 tags: ready
 estimate: L
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## The observation, scoped exactly as it was given
