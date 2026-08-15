@@ -3,11 +3,11 @@ id: CPE-1728
 title: GUI smoke degrades under load — three unrelated specs red on a 45-minute run, then the job is cancelled
 type: bug
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 ## Problem
