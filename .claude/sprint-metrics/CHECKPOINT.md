@@ -1,55 +1,97 @@
-# Sprint Checkpoint
+# Sprint checkpoint — 2026-08-14 18:00 MST (reboot)
 
-## RUN 2026-08-11 (CLI resume, BATCHED "up to 50") — **COMPLETE at 50/50** — clean end
-**State:** `main` clean and pushed, **every one of our PRs merged, none open** (only the pre-existing
-Gource PR #738, which awaits the user). Batched run reached its bound; `BATCH-COUNTER` deleted. Lock
-released, wakeups cancelled. **Zero escaped defects; 7 blockers caught pre-merge.**
+**Batches: 20 of 40.** Counter at `.claude/sprint-metrics/BATCH-COUNTER` (`completed: 20`).
 
-### FIRST ACTION ON A NEW RUN
-Nothing is blocked or half-built. The Backlog holds **19** tickets. Suggested order:
+Nothing is unpushed. `main` is clean at `32d50ac7`; every merged ticket is closed to
+`Ticketing/Tickets/Done/2026/Q3/August/Week-33/`.
 
-1. **CPE-1645 (High)** — locking a vault **silently destroys edits made while unlocked**; nothing ever
-   re-encrypts, despite `src/docs/20-vaults.md` promising "re-seal". Decide the product behaviour first.
-   **Design with CPE-1654** (refused-lock UX) and **CPE-1653** (link debris) — same files, and 1654's
-   message work will be redone if 1645 lands after it.
-2. **CPE-1651 (High)** — `delete_permanent` deletes whatever it is handed and trusts the UI to have
-   confirmed. This was **step 2 of a working exploit chain** in the PR #838 review. Mirror the
-   `shred_paths` (CPE-1611) / `vault_create` (CPE-1630) consent shape. Audit `move_exact` alongside it.
-3. **CPE-1624** — batch-media per-write re-check (TOCTOU) + a colon **anywhere** in a rename template
-   writing a hidden NTFS stream. **Design with CPE-1652** (reparse tags + the two-census cost cliff) —
-   same files, and CPE-1642 just rewrote them.
-4. **CPE-1634** — 62 templated `showNotice` calls still untranslated, + a raw literal in a multi-line
-   ternary, + the regrowth guard is defeatable by embedding its own marker.
-5. **CPE-1655 / 1656 / 1657** — the log-viewer detector, all three at once as ONE design pass (they pull
-   in opposite directions: 1655 widens detection, 1657 tightens it, 1656 does both).
-6. **CPE-1649** — high-contrast theme solid-fill buttons fail worse than normal dark (filed by the
-   CPE-1632 worker; the new guard will find them).
-7. **CPE-1639** (needs a real `tauri build` + tauri-driver run), **CPE-1646**, **CPE-1648**, **CPE-1650**,
-   **CPE-1640**, **CPE-1658**, **CPE-1628** (Deferred), **CPE-1518** (needs the QNAP NAS).
+## To resume
 
-### Merged this run (7 PRs / 11 tickets)
-CPE-1641 crashed sessions in History (#839) · CPE-1620+1622 repo-URL strip + native model picker (#837) ·
-**CPE-1647 vault session containment, High (#838)** · CPE-1632 contrast guard app-wide (#841) ·
-**CPE-1642 batch-media output identity, High (#840)** · CPE-1636/1638/1644 log viewer follow-ups (#842) ·
-**CPE-1621 close-all-consoles, High + CPE-1643 (#843)**.
+Start a fresh session and say **"resume the batched sprint"**. Read this file first.
 
-### Owed to the USER (async, non-blocking)
-- **Visual/taste glance** on everything shipped. One concrete pick-list item: the two colour-blind-safe
-  agent swatches now read slightly **mustard / steel-blue** rather than vivid orange / sky-blue
-  (screenshots were sent; also at `.claude/sprint-metrics/visual-evidence/cpe-1632-{light,dark}.png`).
-- **`main` has no branch protection**, so the gauntlet isn't enforced at the merge button. Repo setting.
-- Gource PR #738 still open, pre-existing.
-- Older queue still standing: hands-on checks of AI search (v0.57.45), tray, archive-drag.
+## Merged this session (batches 16–20)
 
-### Lessons (full version in history.md — read its tail at kickoff)
-- **Neutralise each guard separately.** Both big security tickets had a guard that no test was pinning;
-  one could be deleted outright with the suite green. Disabling guards one at a time found both.
-- **A fix can be worse than the bug it fixes.** CPE-1642 round 1 made long paths fail OPEN — base `main`
-  refused the case the "fix" allowed. When a fix swaps a mechanism, diff the new mechanism's *reach*
-  against the old one's.
-- **Test the guard, not just the code** — the contrast guard passed vacuously on `var(--token, #fff)`.
-- **Real inputs beat fixtures.** Every UTF-16 fixture was pure ASCII; one emoji broke detection entirely.
-- **Refuse "too noisy to measure"** — a proper control showed the batch-media fix is ~19% *faster*.
-- **Two independent legs converging is the strongest signal** — reviewer and UAT hit the CPE-1621
-  failure-path defect by completely different routes.
-- **A Foreman-applied fix is right when the reviewer prescribes an exact, small change** (0 agents).
+| Batch | Ticket | PR | What |
+|---|---|---|---|
+| 16 | CPE-1718 | #901 | `join_files` refused a link at every split/join output slot |
+| 17 | CPE-1726 | #902 | WebDAV `MOVE` onto the served root — 5 rounds, `same_place` |
+| 18 | CPE-1725 | #904 | one answer for a dangling link on both save paths |
+| 19 | CPE-1727 | #903 | S3 delete for a GetObject credential + `start-after` belt — 6 rounds |
+| 20 | CPE-1731 | #905 | FTP/SFTP rig rename-onto-root + `RMD`/`rmdir` empty-only |
+
+## In flight at reboot — both will need re-dispatching
+
+**PR #906 — CPE-1733 (`archive.rs` create/write sweep).** Branch
+`cpe-1733-archive-create-sweep`, head `f68e7fcb` **pushed**. Reviewer **REQUEST CHANGES** (3
+findings), UAT **BLOCKER** (6 findings); the worker was mid-round on all nine when the session
+ended. Its worktree is `.claude/worktrees/cpe1733`. **Re-dispatch a worker** pointing at the
+existing branch — do not start over, `f68e7fcb` already carries the enumeration and 11 guards.
+
+The nine open findings, in one list:
+
+1. Rows 1–5's *"unreachable by the hazard"* is false — `create_dir_all` silently accepts a
+   pre-existing directory, so a link planted at the leaf is written through. What protects them is
+   `%TEMP%` being per-user **on Windows**, a platform fact. On Linux `/tmp` is world-writable,
+   `<pid>` is public, `<seq>` restarts at 0, nothing cleans up (measured: **1,054,930 leftover dirs;
+   13% of fresh processes collide with an existing `<pid>-0`**), and the leaf name is
+   archive-controlled. CWE-377/CWE-59. Not claiming rows 2–5 need guards — claiming the wording is
+   wider than the evidence.
+2. *"`guarded_join` does not need to be added"* is wider than its search. True for **traversal**;
+   but `guarded_join` also carries CPE-1709's `local_safe_segment`, which `entry_name_is_safe`
+   lacks — `entry_name_is_safe("file:stream") == true`, so bytes vanish into an NTFS alternate data
+   stream leaving no visible file.
+3. The rows 15/16 guard is **leaf-only**, and the `create_dir_all(parent)` above it follows a
+   directory symlink — `entry_name_is_safe("sub/leaf.txt")` is true, so an entry escapes `dest`
+   through a junction (no privilege needed). Row 17's *"no measured hazard"* overstates CPE-1729:
+   that measured `create_dir_all` is not **destructive**; a live directory link **redirects**.
+4. **F1 — the unpinned-gap note is false for 2 of the 3 paths it names.** tar (one-shot and
+   streamed) **unlinks the symlink and writes a regular file** — victim safe, *link destroyed*,
+   recorded nowhere. One-shot zip **aborts the whole extraction** (`Err("invalid Zip archive:
+   Invalid symlink target path")`, nothing extracted). Only **7z** follows, as claimed.
+5. **F2** — `src/docs/explorer-archives.md` says an entry landing on a link is *"skipped and the
+   rest still extracts"*. True for streamed, false for one-shot. `extract_archive` is a registered
+   Tauri command with **no current Svelte caller**, so API/doc inconsistency, not a live regression.
+6. **F3** — the 7z gap is **live on the path the UI uses** (`start_archive_extract` →
+   `extract_archive_streamed` → `extract_7z_stream` → `sevenz_rust::default_entry_extract_fn`,
+   `archive.rs:1212`). Returns `Ok`, bytes land where nobody named. **Needs its own ticket.**
+7. **F5** — row 17's rationale is inconsistent with row 7's (which got a guard purely because
+   `AlreadyExists` stringifies misleadingly). Also *"does nothing at all"* is wrong: it **errors**,
+   and the whole extraction fails with that wording.
+8. **F6** — row 15 swallows `classify_create_slot`'s `Err` arm (*"could not check… refusing to
+   guess"*) identically to a confirmed link, drops the entry silently, returns `Ok`.
+9. Non-blocking: 4 un-rowed `create_dir_all` sites; two figures missing their platform boundary
+   (`archive.rs:250-253` and the `every_guarded_row_…` doc); rows 15/16 have no live-link leg.
+
+Ticket IDs **1734–1743 are taken.** Allocate against `main` after a `git pull`, verified across all
+branches.
+
+**CPE-1730 (protocol rig containment).** Branch `cpe-1730-rig-containment`, worktree
+`.claude/worktrees/cpe-1730`, head **`ccdc27d8` — pushed**, no PR yet.
+
+Two commits, and **neither is trustworthy yet**: `7d592bd1` confines `cpe-ftp`'s rig resolver to its
+served root; `ccdc27d8` is a mid-edit snapshot of the SFTP call sites, committed only so the work
+survived the reboot. **Not reviewed, not tested, not verified — read the diff before trusting any of
+it.** Re-dispatch a worker onto that branch and have it start by checking what is actually there.
+
+Its brief: three escape shapes, all measured —
+(a) `..`-shaped (`/../<sibling>` moves the **served root itself** out and answers `250 Renamed` /
+`Ok(())`, both rigs, both platforms); (b) **absolute** destinations, since `Path::join` discards the
+base; (c) through a **symlinked intermediate directory**, needing neither of the first two. The task
+is *containment*, not equality — `same_place` answers the wrong question, and lexical `..` popping
+is unsound in the containment direction in a way it is not for equality.
+
+## Standing lessons this sprint keeps re-proving
+
+- **A red that is not the red you aimed at proves nothing** — a test can be saved by an errno
+  rather than by the guard. Pin a *distinctive* refusal.
+- **Assert the effect before unwrapping the `Result`**, or the assertion naming the damage is
+  unreachable when the guard fails by returning `Ok` — which is how these bugs behave.
+- **An assertion can discriminate by luck** — one matched a marker anywhere in a string built partly
+  from caller-supplied paths, so a path could forge it.
+- **A lenient test double can *conceal* a defect in the code under test**, not merely permit one
+  (CPE-1741, found by making the rigs honest).
+- **"No test" and "no record" are different questions.** Ask what holds *each* way a known defect
+  could bite.
+- CI: select the run by **head sha**, require `conclusion == "success"` by **equality**. A
+  `cancelled` run and a **null** conclusion both read as "not failed" to a careless check; every run
+  on one branch today ended cancelled, superseded by the next push.
