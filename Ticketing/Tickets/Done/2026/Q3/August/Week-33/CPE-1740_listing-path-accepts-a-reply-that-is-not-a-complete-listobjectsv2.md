@@ -3,11 +3,11 @@ id: CPE-1740
 title: The S3 list path still accepts a partial or non-authoritative reply as a complete listing
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-15
 ---
 
 Found by the CPE-1727 (PR #903) UAT, rounds 3–5. **Pre-existing and crate-wide** — not introduced by
