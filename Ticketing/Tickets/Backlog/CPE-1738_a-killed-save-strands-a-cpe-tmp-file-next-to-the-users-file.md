@@ -99,8 +99,11 @@ option), rejecting both "do nothing" and "sweep on startup":
 - The sweep (`sweep_stale_temp_siblings` in `crates/server/src/fsutil.rs`) runs from `stage_and_replace`
   **once, after its own rename succeeds** — never before staging, never on a failed save (which already
   removes its own temp on its existing error branches). It matches only `target`'s OWN
-  `<name>.*.cpe-tmp` siblings — never a directory-wide glob — so it can never mistake a different file's
-  in-flight temp for one of this file's leftovers. "Stale" is decided by an **age floor** (5 minutes, an
+  `<name>.*.cpe-tmp` siblings — never a directory-wide glob. **[Corrected 2026-08-15, see the round-2
+  entry below: this line originally claimed "so it can never mistake a different file's in-flight temp for
+  one of this file's leftovers" — that was false as shipped, because `*` here meant ANY middle segment,
+  including another file's own extension. Fixed by requiring the middle to be exactly the `<pid>-<nanos>`
+  stamp shape.]** "Stale" is decided by an **age floor** (5 minutes, an
   order of magnitude above any plausible in-flight save), not by asking the OS whether the stamped pid is
   still alive — pid-liveness needs a process-enumeration dependency this crate does not otherwise carry,
   and is the wrong question besides (a pid can be reused, and a process can outlive one particular save it
@@ -124,3 +127,66 @@ option), rejecting both "do nothing" and "sweep on startup":
 - Docs: `src/docs/25-metadata-studio.md` no longer tells the user to delete a `.cpe-tmp` by hand — both
   the "killed mid-save" bullet and the symlinked-files paragraph now say it cleans itself up on the next
   save of that file. `src/docs/03-explorer.md` needed no change (see the correction note above it).
+
+2026-08-15 — PR #910 review round 2 (attempt 2 of 3): **UAT FAIL, Reviewer CHANGES REQUESTED, Security SEC
+FINDINGS**, all three independently converging on the same root cause. Fixed in one round:
+
+- **Blocker 1 (data loss, all three legs).** The matcher was `starts_with(prefix) && ends_with(".cpe-tmp")`
+  as two INDEPENDENT conditions, never checking there was a valid `<pid>-<nanos>` stamp — or anything —
+  between them. Two real exposures: (a) an EMPTY middle — the prefix's trailing dot and the suffix's
+  leading dot are the same character, so a REAL file literally named `<target-name>.cpe-tmp` (exactly what
+  the pre-fix docs told a user to keep by hand) was silently, permanently destroyed; (b) a genuinely
+  DIFFERENT file's own in-flight temp with a matching prefix+extension (`a.txt.bak` staged as
+  `a.txt.bak.<pid>-<nanos>.cpe-tmp`, swept while saving `a.txt`) — ordinary sibling-name shapes
+  (`IMG_001.jpg`/`.xmp`, `data.csv`/`.old`, `archive.tar`/`.gz`), not exotic ones. **Fix:** the matcher now
+  strips the prefix, then the `.cpe-tmp` suffix, then requires what's left to parse as EXACTLY
+  `<digits>-<digits>` (`is_valid_temp_stamp`) — both exposures fail that shape. New tests:
+  `stage_and_replace_never_sweeps_a_real_file_with_an_empty_stamp`,
+  `stage_and_replace_never_sweeps_a_sibling_files_extension_suffixed_temp`,
+  `cpe_1738_is_valid_temp_stamp_requires_exactly_digits_dash_digits` (pure truth table).
+- **Blocker 2 (zero coverage).** Reviewer deleted the whole `.cpe-tmp` suffix check and `cargo test --lib
+  fsutil::` still reported 42/42 green — a one-token regression with no test aimed at it. New test:
+  `stage_and_replace_never_sweeps_a_name_with_a_stamp_shape_but_no_cpe_tmp_suffix`. Also corrected the
+  shipped `stage_and_replace_never_sweeps_a_different_files_stale_temp` fixture's own limits are now stated
+  in its doc comment rather than left implied — `a.txt`/`b.txt` cannot collide by name at all, so it only
+  ever exercised the OWN-NAME-PREFIX guard, never the stamp guard; the two new tests above cover the stamp
+  guard specifically.
+- **Blocker 3 (a live save's temp can still be swept once it crosses the age floor).** Confirmed NOT
+  closeable by a filename or age check alone — Rust opens with `FILE_SHARE_DELETE` on Windows and Unix
+  `unlink` never blocks on an open handle either way, so there is no OS-level signal this crate can check
+  without a process-liveness dependency (rejected earlier in this same ticket, for the same reason).
+  **Decision: documented as an accepted, bounded residual risk** rather than papered over — recorded in
+  `sweep_stale_temp_siblings`'s own doc comment ("What this does NOT close"). Narrow in practice (needs two
+  overlapping saves of the exact same file, one pathologically slower than the 5-minute floor); the user's
+  file is never damaged either way (that guarantee comes from the staging design, independent of the
+  sweep) — only the slower save's own temp is lost, failing loudly rather than silently.
+- **Blocker 4 (two clocks).** The age comparison used the CLIENT's `SystemTime::now()` against an mtime
+  stamped by the SHARE's clock — on this app's own first-class remote target (`qnap-nas-test-target`, a
+  real QNAP over SMB), clock drift of minutes is routine, which can make the 5-minute floor read as
+  anywhere from generous to effectively zero. **Fix:** the age reference is now `target`'s OWN mtime, read
+  immediately after `stage_and_replace`'s rename set it — the SAME filesystem stamps both sides of the
+  comparison, so client/share clock skew cancels out regardless of direction or magnitude. If `target`'s
+  own mtime can't be read, the whole sweep is skipped for that call rather than falling back to the client
+  clock. New test: `sweep_stale_temp_siblings_uses_the_filesystems_own_clock_not_the_clients` (stamps both
+  `target` and a same-instant candidate 6 minutes behind real wall-clock time — simulating a lagging
+  share — and asserts the candidate survives; reds under the old client-clock comparison).
+- **Non-blocking, fixed anyway:** `to_string_lossy` replaced with `OsStr::as_encoded_bytes()` byte-level
+  comparison (avoids a U+FFFD collision between two differently-invalid-UTF-8 names on a non-UTF-8
+  filesystem); the scan is now capped at `SWEEP_SCAN_CAP` (4096) entries so one save's added latency is
+  bounded regardless of directory size, trading "a stale temp in an enormous folder may survive a little
+  longer" for a predictable per-save ceiling (measured cost stated honestly in the doc comment: ~1.9µs per
+  entry, ~37.8ms uncapped at 20,000 entries versus 0.19ms for a plain write); the doc comment's inaccurate
+  "almost always match nothing, in which case nothing is stat'd" (which described the filter, not the
+  `read_dir` that actually dominates cost) is corrected.
+- Guard neutralisation, each restored to green afterward: is-symlink check removed → 1 test reds (the pure
+  table's OLD-link row); age-floor check removed → 2 (the pure table's age rows + the flagship real-IO
+  test, `result was Ok(())`); stamp-shape check removed → 1
+  (`stage_and_replace_never_sweeps_a_sibling_files_extension_suffixed_temp` — the empty-middle case still
+  passed even with the stamp check off, because the sequential prefix-then-suffix strip already closes
+  that exposure structurally, which is a stronger fix than the stamp check alone); `.cpe-tmp` suffix check
+  removed → 2 (the dedicated no-suffix test, plus the flagship test flipping to "not swept at all" because
+  the malformed remainder then fails stamp validation too); client-clock reversion → 1
+  (`sweep_stale_temp_siblings_uses_the_filesystems_own_clock_not_the_clients`).
+- Re-read `src/docs/25-metadata-studio.md` after the fix: still accurate — Blocker 1's hazard (a REAL file
+  the user kept surviving vs. being destroyed) is exactly what "cleans itself up" now correctly means, so
+  no further doc change was needed.

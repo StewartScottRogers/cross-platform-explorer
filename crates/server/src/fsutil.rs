@@ -565,10 +565,29 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 /// themselves is not the predictable, small footprint that tiebreaker is protecting — it is the opposite,
 /// dressed up as inaction. So this is the middle option, kept deliberately narrow:
 ///
-/// - **Scoped to `target`'s OWN stale siblings, never a directory-wide `*.cpe-tmp` glob.** The staged name
-///   is always `<target-file-name>.<pid>-<nanos>.cpe-tmp`, so matching only `<target-file-name>.*.cpe-tmp`
-///   means this can never remove a temp staged for a DIFFERENT file being saved in the same folder at the
-///   same time — the two names cannot collide by construction, so there is nothing to disambiguate.
+/// - **Scoped to `target`'s OWN stale siblings, matched on the STAMP SHAPE, never a loose
+///   `starts_with`/`ends_with` pair.** The staged name is always `<target-file-name>.<pid>-<nanos>.cpe-tmp`
+///   — [`is_valid_temp_stamp`] requires the segment between the stripped prefix and the stripped suffix to
+///   be exactly two non-empty ASCII-digit runs joined by one `-`, nothing else. **This was not always true
+///   and the looser version shipped once** (PR #910 review round 2, all three of UAT/Reviewer/Security
+///   converging on the same finding independently): checking `starts_with(prefix)` and
+///   `ends_with(".cpe-tmp")` as two *independent* conditions, with nothing checking there was a valid stamp
+///   — or anything at all — between them, let two real exposures through. First, the prefix's trailing dot
+///   and the suffix's leading dot are the *same character*, so a real file literally named
+///   `<target-file-name>.cpe-tmp` — the exact name the shipped docs used to tell a user to keep by hand —
+///   satisfied both conditions with an EMPTY middle and was permanently, silently unlinked (UAT measured
+///   this against a real file). Second, a genuinely different file's own in-flight temp — saving `a.txt`
+///   while `a.txt.bak` is independently mid-save, staged as `a.txt.bak.<pid>-<nanos>.cpe-tmp` — also starts
+///   with `a.txt.` and ends with `.cpe-tmp`, so it was swept as if it were `a.txt`'s own leftover (Reviewer
+///   measured: saving `a.txt` left `a.txt.bak`'s temp gone, `a.txt.bak`'s own rename then failing). Once the
+///   middle segment is required to be exactly the stamp shape, neither survives the check: `""` fails (no
+///   `-` at all) and `"bak.4242-1000000000000"` fails (the part before the `-` is not all digits).
+///   **Residual, stated rather than hidden:** a file whose real name happens to be
+///   `<target-file-name>.<digits>-<digits>.cpe-tmp` — deliberately mimicking the exact stamp shape, not
+///   merely starting and ending right — is still indistinguishable from a genuine stale temp and would be
+///   swept. Vanishingly unlikely to occur by accident (unlike the empty-middle and sibling-extension cases
+///   above, which are ordinary names), and not closed by any filename-pattern check alone; recorded so it is
+///   not mistaken for closed.
 /// - **An age floor, not a pid-liveness check, is what tells "stale" from "live".** The ticket asked how
 ///   to avoid deleting a temp that belongs to a live concurrent save, and the tempting-looking answer —
 ///   parse the pid back out of the stamp and ask the OS whether it is still running — needs a
@@ -580,11 +599,35 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 ///   question — "could a save still plausibly be writing this?" — directly, needs no extra dependency, and
 ///   is exactly what the ticket's own acceptance test asks for: a temp created seconds ago must survive.
 ///   [`STALE_TEMP_FLOOR`] is comfortably above that.
-/// - **Runs after the rename succeeds, never before staging.** Putting it before the write would tax every
-///   save — including the overwhelming majority that have no stale sibling at all — with a directory scan
-///   before the user's bytes have even started moving. Running it after success means the cost is paid
-///   only once the save has already done its real I/O, and a failed save (which already removes its own
-///   temp, see [`stage_and_replace`]'s error branches) never reaches this at all.
+/// - **The age reference is THIS FILESYSTEM's own clock, never the client's.** PR #910 review round 2
+///   (Blocker 4) measured a real SMB mount whose clock ran minutes off the client's — comparing a
+///   share-stamped mtime against `SystemTime::now()` made the floor read anywhere from "minutes generous" to
+///   effectively **zero**, depending on drift direction, on exactly the network target
+///   (`qnap-nas-test-target`) this app is built to work against. The reference is now `target`'s OWN mtime,
+///   read immediately after [`stage_and_replace`]'s rename just set it — the same filesystem stamps both
+///   sides of the comparison, so client/share clock skew cancels out however large it is. If `target`'s own
+///   mtime cannot be read, the sweep is skipped entirely for this call rather than falling back to the
+///   client clock, which would silently reintroduce the same skew in the rare path meant to be safer.
+/// - **What this does NOT close: a save that is merely SLOW, not killed, can still lose its own temp** (PR
+///   #910 review round 2, Blocker 3 — stated rather than papered over, matching this crate's convention of
+///   recording a known gap instead of overselling a fix, see `replace_file_contents`'s "What this does NOT
+///   do"). The floor answers "could a save still plausibly be writing this?" with a duration, and a
+///   duration cannot distinguish "still writing, unusually slowly" from "the process that was writing this
+///   is gone" — that distinction needs OS-level open-handle detection, and Windows' own semantics defeat
+///   the obvious version of it besides: Rust opens a file with `FILE_SHARE_DELETE`, and `unlink` on Unix
+///   never blocks on an open handle either way, so an open handle offers no protection to check for even if
+///   this reached for one. So: if save A of `target` is unusually slow (a huge file on a very slow link, or
+///   a suspended machine) and takes longer than [`STALE_TEMP_FLOOR`] to reach its own rename, a SEPARATE,
+///   independent save B of the SAME `target` that completes in the meantime will sweep A's still-live temp
+///   out from under it — A's own rename then fails, loudly, with an error naming `target` (not the vanished
+///   source, which the OS's `NotFound` does not distinguish). **The user's file is never damaged either
+///   way** — that guarantee comes from the staging design (the original is never touched until a rename
+///   succeeds), not from this sweep — but save A itself is lost and must be retried. Narrow in practice (it
+///   needs two overlapping saves of the very same file, one pathologically slower than the floor), not
+///   closed here, and not silently assumed closed: closing it needs real liveness detection, which is the
+///   same dependency-cost trade-off the pid-liveness idea above was rejected for, so it is out of scope for
+///   this ticket rather than fixed by a bigger floor (a bigger floor narrows the window; it cannot close it,
+///   since some save is always slower than any fixed number).
 /// - **Never touches a symlink.** Checked with [`std::fs::symlink_metadata`] (never [`std::fs::metadata`],
 ///   which would follow it) before either the age check or the removal, so a symlink whose name happens to
 ///   match the pattern is skipped outright regardless of its age — this module's established posture
@@ -594,28 +637,61 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
 ///   a platform call `std::fs` does not expose, so a real-IO test could only ever prove "a young link
 ///   survives" — which a young ordinary file would too, for an unrelated reason (the age floor). The pure
 ///   function lets the link-protection arm be asserted on its own, independent of age.
+/// - **Runs after the rename succeeds, never before staging.** Putting it before the write would tax every
+///   save — including the overwhelming majority that have no stale sibling at all — with a directory scan
+///   before the user's bytes have even started moving. Running it after success means the cost is paid
+///   only once the save has already done its real I/O, and a failed save (which already removes its own
+///   temp, see [`stage_and_replace`]'s error branches) never reaches this at all.
 ///
-/// ## Why this does not cost the common case, even on a slow network share
+/// ## The cost, measured rather than assumed (PR #910 review round 2)
 ///
-/// The scan is one `read_dir` of the folder the save just finished writing into — a connection already
-/// warm from the create+rename this function's caller just performed — filtered to a name prefix that will
-/// almost always match nothing at all, in which case nothing is stat'd or removed. It happens once per
-/// SUCCESSFUL save, never per failed one, and never blocks the write itself (it runs strictly after). A
-/// directory large enough for that one listing to be noticeably slow is the same cost the Explorer's own
-/// folder browsing already accepts on a network path — see `docs/design/STREAMING.md` — so this adds
-/// nothing qualitatively new; it is bounded, one-shot, and every error inside it (the read_dir itself, a
-/// stat, a remove) is swallowed rather than surfaced, so a slow or flaky network mount can never turn an
-/// already-successful save into a reported failure.
+/// The scan is one `read_dir` of the folder the save just finished writing into. Measured directly against
+/// a plain local write (0.19ms): an EMPTY directory adds roughly 1ms; a directory of 20,000 entries adds
+/// ~37.8ms (~1.9µs/entry) — real cost, not the "almost always match nothing so nothing is stat'd" the first
+/// version of this comment claimed, which described the name filter and ignored that `read_dir` itself, not
+/// the filter, is what dominates on a large directory. That cost is now BOUNDED: the scan stops after
+/// [`SWEEP_SCAN_CAP`] entries regardless of the directory's real size, so the worst case on any single save
+/// is fixed rather than growing with the folder. The trade this makes explicit: a stale temp sitting past
+/// entry [`SWEEP_SCAN_CAP`] in an enormous directory may simply survive longer than it otherwise would —
+/// tidiness deferred, never a correctness concern — in exchange for every save in that folder paying a
+/// predictable, bounded price instead of one proportional to how many files happen to be in it. It happens
+/// once per SUCCESSFUL save, never per failed one, and never blocks the write itself (it runs strictly
+/// after); every error inside it (the read_dir itself, a stat, a remove) is swallowed rather than surfaced,
+/// so a slow or flaky network mount can never turn an already-successful save into a reported failure.
 fn sweep_stale_temp_siblings(target: &Path) {
     let Some(dir) = target.parent() else { return };
     let Some(name) = target.file_name() else { return };
-    let name = name.to_string_lossy();
-    let prefix = format!("{name}.");
+    // The reference clock for "how old is this candidate?" — THIS filesystem's own idea of `target`'s
+    // mtime, just set by the rename this function's caller performed. See the "age reference" bullet
+    // above (Blocker 4): comparing against the client's `SystemTime::now()` instead let share/client clock
+    // skew move the effective floor anywhere from "generous" to "zero". No reference, no sweep this time.
+    let Ok(reference) = std::fs::symlink_metadata(target).and_then(|m| m.modified()) else { return };
+    // Raw bytes, not `to_string_lossy` — two names that differ only in invalid-UTF-8 bytes both collapse
+    // to the same U+FFFD replacement text under a lossy conversion, so a name comparison on the lossy form
+    // could match a DIFFERENT file's temp on a non-UTF-8 filesystem (Linux allows arbitrary bytes in a
+    // filename). `OsStr::as_encoded_bytes` compares the platform's own bytes, is exact, and needs no
+    // allocation per entry (PR #910 review round 2, non-blocking item, fixed anyway since it was cheap).
+    let name_bytes = name.as_encoded_bytes();
     let Ok(entries) = std::fs::read_dir(dir) else { return }; // best-effort: see doc comment above
-    for entry in entries.flatten() {
+    for entry in entries.flatten().take(SWEEP_SCAN_CAP) {
         let fname = entry.file_name();
-        let fname = fname.to_string_lossy();
-        if !fname.starts_with(prefix.as_str()) || !fname.ends_with(".cpe-tmp") {
+        let fbytes = fname.as_encoded_bytes();
+        // Prefix (`name_bytes` + the literal `.`), then suffix, then validate what's LEFT is the exact
+        // `<digits>-<digits>` stamp shape — never `starts_with`/`ends_with` as two independent conditions
+        // (Blocker 1: that let an empty middle and another file's own extension-suffixed temp both
+        // through). See `is_valid_temp_stamp`.
+        if fbytes.len() <= name_bytes.len() + 1
+            || &fbytes[..name_bytes.len()] != name_bytes
+            || fbytes[name_bytes.len()] != b'.'
+        {
+            continue;
+        }
+        let rest = &fbytes[name_bytes.len() + 1..];
+        let Some(stamp_bytes) = rest.strip_suffix(b".cpe-tmp") else { continue };
+        // A genuine stamp is pure ASCII digits and `-`, so this can only fail (and skip) on garbage that
+        // could never be a valid stamp anyway — `is_valid_temp_stamp` still does the real check.
+        let Ok(stamp) = std::str::from_utf8(stamp_bytes) else { continue };
+        if !is_valid_temp_stamp(stamp) {
             continue;
         }
         let candidate = entry.path();
@@ -624,9 +700,7 @@ fn sweep_stale_temp_siblings(target: &Path) {
         // that decision short-circuits before the age is ever consulted.
         let Ok(meta) = std::fs::symlink_metadata(&candidate) else { continue };
         let Ok(modified) = meta.modified() else { continue };
-        let age = std::time::SystemTime::now()
-            .duration_since(modified)
-            .unwrap_or(std::time::Duration::ZERO);
+        let age = reference.duration_since(modified).unwrap_or(std::time::Duration::ZERO);
         if should_sweep_temp(meta.file_type().is_symlink(), age, STALE_TEMP_FLOOR) {
             let _ = std::fs::remove_file(&candidate); // best-effort: see doc comment above
         }
@@ -637,7 +711,37 @@ fn sweep_stale_temp_siblings(target: &Path) {
 /// save — even a large media file on slow media — completes in, at most, low tens of seconds; this is an
 /// order of magnitude past that, deliberately, so a save that is merely slow is never mistaken for one that
 /// was killed. The ticket's own acceptance test needs only "a few seconds" of headroom; this gives minutes.
+/// **Does not, by itself, close Blocker 3** (a save slower than this WILL still lose its temp to a
+/// concurrent sweep) — see [`sweep_stale_temp_siblings`]'s doc comment; raising this number narrows that
+/// window without ever closing it, since some save is always slower than any fixed floor.
 const STALE_TEMP_FLOOR: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Upper bound on how many directory entries [`sweep_stale_temp_siblings`] will examine in one call
+/// (PR #910 review round 2, the measured hot-path cost). ~1.9µs/entry measured, so this bounds one save's
+/// worst-case added latency to roughly `SWEEP_SCAN_CAP` * 2µs regardless of how large the directory
+/// actually is, at the cost of a stale temp past this many entries surviving longer in a very large folder
+/// — tidiness deferred, never a correctness concern, and no worse than doing nothing for that folder at
+/// all (which was one of the ticket's own on-the-table options).
+const SWEEP_SCAN_CAP: usize = 4096;
+
+/// Whether `s` is exactly the `<pid>-<nanos>` stamp [`stage_and_replace`] writes: two non-empty runs of
+/// ASCII digits joined by exactly one `-`, nothing before, after, or in between. This is what actually
+/// distinguishes a genuine staged temp from an arbitrary name that merely starts and ends right (PR #910
+/// review round 2, Blocker 1) — an empty middle (a real file the user kept, named exactly
+/// `<target-name>.cpe-tmp`) and a different file's own extension-suffixed temp (`a.txt.bak`'s
+/// `a.txt.bak.<pid>-<nanos>.cpe-tmp`, matched while saving `a.txt`) both satisfy `starts_with`/`ends_with`
+/// but fail this: the first has no `-` to split on, the second's pre-`-` half is not all digits.
+fn is_valid_temp_stamp(s: &str) -> bool {
+    match s.split_once('-') {
+        Some((pid, nanos)) => {
+            !pid.is_empty()
+                && !nanos.is_empty()
+                && pid.bytes().all(|b| b.is_ascii_digit())
+                && nanos.bytes().all(|b| b.is_ascii_digit())
+        }
+        None => false,
+    }
+}
 
 /// The pure decision behind [`sweep_stale_temp_siblings`]: should this ONE already-matched candidate be
 /// removed? Split out, and unit-tested as a truth table, for the reason given in
@@ -2265,6 +2369,35 @@ mod tests {
         }
     }
 
+    /// **CPE-1738, PR #910 review round 2, Blocker 1 — the pure decision, as a truth table.** The two real
+    /// exposures the review round found, as the FIRST two negative rows: an empty middle (a real file kept
+    /// on purpose, literally `<name>.cpe-tmp`) and a different file's own extension-suffixed temp
+    /// (`bak.4242-...` — the pre-`-` half is not all digits). Neutralising the guard back to
+    /// `starts_with`/`ends_with` alone would make both of those `true`; this table is what proves it stays
+    /// `false`.
+    #[test]
+    fn cpe_1738_is_valid_temp_stamp_requires_exactly_digits_dash_digits() {
+        let table = [
+            ("4242-1000000000000", true, "a genuine stamp"),
+            ("0-0", true, "degenerate but still two digit runs joined by one dash"),
+            ("", false, "EMPTY MIDDLE — Blocker 1 exposure 1: a real file the user kept on purpose"),
+            (
+                "bak.4242-1000000000000",
+                false,
+                "a DIFFERENT file's own extension-suffixed stamp — Blocker 1 exposure 2",
+            ),
+            ("4242", false, "no dash at all"),
+            ("4242-", false, "empty nanos half"),
+            ("-1000000000000", false, "empty pid half"),
+            ("4242-1000000000000-1", false, "two dashes"),
+            ("42a2-1000000000000", false, "non-digit in the pid half"),
+            ("4242-100000000000a", false, "non-digit in the nanos half"),
+        ];
+        for (s, want, why) in table {
+            assert_eq!(is_valid_temp_stamp(s), want, "is_valid_temp_stamp({s:?}): {why}");
+        }
+    }
+
     /// **CPE-1738, end to end on a real filesystem.** A `.cpe-tmp` orphaned by an earlier "crash" — aged
     /// past the floor via [`std::fs::File::set_modified`] — is swept by the very next successful save of
     /// the same file, while a second one only seconds old (which could still belong to a save genuinely in
@@ -2315,9 +2448,17 @@ mod tests {
     }
 
     /// A `.cpe-tmp` staged for a DIFFERENT file in the same directory must never be swept while saving
-    /// THIS one — [`sweep_stale_temp_siblings`] matches on `<this-file's-name>.*.cpe-tmp`, never a
-    /// directory-wide glob, precisely so two files' saves in the same folder cannot interfere with each
+    /// THIS one — [`sweep_stale_temp_siblings`] matches on `<this-file's-name>.` as an exact prefix, never
+    /// a directory-wide glob, precisely so two files' saves in the same folder cannot interfere with each
     /// other's leftovers.
+    ///
+    /// **`a.txt`/`b.txt` is the OWN-NAME-PREFIX guard's fixture, not the STAMP guard's** (PR #910 review
+    /// round 2 correction): the two names share no prefix at all, so this only ever proves a different
+    /// file's temp is unreachable when the names themselves don't overlap. It does NOT exercise — and
+    /// passed unchanged through — the empty-middle and sibling-extension exposures Blocker 1 found, both
+    /// of which need a candidate whose name genuinely starts with `target`'s own name plus a dot. See
+    /// `stage_and_replace_never_sweeps_a_real_file_with_an_empty_stamp` and
+    /// `stage_and_replace_never_sweeps_a_sibling_files_extension_suffixed_temp` for those.
     #[test]
     fn stage_and_replace_never_sweeps_a_different_files_stale_temp() {
         let d = scratch("sweep-other-file");
@@ -2342,6 +2483,138 @@ mod tests {
             "a DIFFERENT file's stale temp must never be touched by this save (result was {r:?})"
         );
         r.expect("the save itself must still succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1738, PR #910 review round 2, Blocker 1 exposure 1 (UAT).** A REAL file the user kept on
+    /// purpose, literally named `<target-name>.cpe-tmp` — the exact name the shipped docs used to tell a
+    /// user to give one — must survive a save of `<target-name>`, even aged well past the floor. Before
+    /// the stamp-shape check landed this was permanently, silently destroyed: the prefix's trailing dot and
+    /// the suffix's leading dot are the SAME character in this name, so `starts_with(prefix)` and
+    /// `ends_with(".cpe-tmp")` were both true with nothing at all between them.
+    #[test]
+    fn stage_and_replace_never_sweeps_a_real_file_with_an_empty_stamp() {
+        let d = scratch("sweep-empty-middle");
+        let target = d.join("notes.txt");
+        std::fs::write(&target, b"original").unwrap();
+
+        let users_own_file = d.join("notes.txt.cpe-tmp");
+        std::fs::write(&users_own_file, b"a temp copy the user deliberately kept").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&users_own_file)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        let r = replace_file_contents(&target, b"new bytes");
+        assert!(
+            std::fs::symlink_metadata(&users_own_file).is_ok(),
+            "a REAL file the user kept, literally named <name>.cpe-tmp with no pid-nanos stamp at all, \
+             must never be swept (result was {r:?})"
+        );
+        r.expect("the save itself must still succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1738, PR #910 review round 2, Blocker 1 exposure 2 + Blocker 2 (Reviewer).** A genuinely
+    /// different file's OWN staged temp, whose name happens to extend THIS file's name plus an extension —
+    /// `a.txt.bak` mid-save, staged as `a.txt.bak.<pid>-<nanos>.cpe-tmp`, matched while saving `a.txt`.
+    /// `IMG_001.jpg`/`IMG_001.jpg.xmp`, `data.csv`/`data.csv.old`, `archive.tar`/`archive.tar.gz` are the
+    /// same shape with ordinary, everyday names — this is not an exotic fixture. Reviewer's own probe:
+    /// "saving a.txt; a.txt.bak's own temp survived = false (save result Ok(()))" before the fix.
+    #[test]
+    fn stage_and_replace_never_sweeps_a_sibling_files_extension_suffixed_temp() {
+        let d = scratch("sweep-sibling-ext");
+        let target = d.join("a.txt");
+        std::fs::write(&target, b"a").unwrap();
+        std::fs::write(d.join("a.txt.bak"), b"backup").unwrap();
+
+        let siblings_temp = d.join("a.txt.bak.4242-1000000000000.cpe-tmp");
+        std::fs::write(&siblings_temp, b"a.txt.bak's OWN in-flight save").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&siblings_temp)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        let r = replace_file_contents(&target, b"new a");
+        assert!(
+            std::fs::symlink_metadata(&siblings_temp).is_ok(),
+            "a.txt.bak's OWN staged temp must never be touched while saving a.txt — its middle segment \
+             (\"bak.4242-1000000000000\") is not a valid <digits>-<digits> stamp (result was {r:?})"
+        );
+        r.expect("the save itself must still succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1738, PR #910 review round 2, Blocker 2 (Reviewer).** A name that matches the prefix and even
+    /// has a valid-LOOKING stamp shape, but is missing the `.cpe-tmp` suffix entirely, must never be swept
+    /// — it is not a staging file at all. Pins the suffix check as independently load-bearing: the review
+    /// round deleted the whole `ends_with(".cpe-tmp")` check, ran `cargo test --lib fsutil::`, and got
+    /// "42 passed, 0 failed" — nothing in the shipped suite reds without this fixture.
+    #[test]
+    fn stage_and_replace_never_sweeps_a_name_with_a_stamp_shape_but_no_cpe_tmp_suffix() {
+        let d = scratch("sweep-no-suffix");
+        let target = d.join("notes.txt");
+        std::fs::write(&target, b"original").unwrap();
+
+        let lookalike = d.join("notes.txt.4242-1000000000000");
+        std::fs::write(&lookalike, b"not a staging file at all").unwrap();
+        let long_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&lookalike)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
+
+        let r = replace_file_contents(&target, b"new bytes");
+        assert!(
+            std::fs::symlink_metadata(&lookalike).is_ok(),
+            "a stamp-shaped name with NO .cpe-tmp suffix is not a staging file and must survive \
+             (result was {r:?})"
+        );
+        r.expect("the save itself must still succeed");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// **CPE-1738, PR #910 review round 2, Blocker 4 (Reviewer).** The age reference must be THIS
+    /// FILESYSTEM's own clock — `target`'s own just-set mtime — never the client's `SystemTime::now()`.
+    /// Simulates a share whose clock reads minutes behind the client's (Reviewer's own probe: "a file
+    /// created a millisecond ago whose mtime reads 6 minutes back") by stamping BOTH `target` and a
+    /// same-instant candidate with an mtime 6 minutes behind real wall-clock time: from the filesystem's
+    /// own point of view the two are simultaneous (age 0), so the candidate must survive. Under the OLD,
+    /// client-clocked comparison this candidate would read as 6 minutes old — past the 5-minute floor —
+    /// and be swept despite having been staged at the very instant `target` was renamed.
+    #[test]
+    fn sweep_stale_temp_siblings_uses_the_filesystems_own_clock_not_the_clients() {
+        let d = scratch("sweep-clock-skew");
+        let target = d.join("notes.txt");
+        std::fs::write(&target, b"original").unwrap();
+        // The share's clock, 6 minutes behind the client's real `SystemTime::now()` — past the 5-minute
+        // floor if compared against the client's clock, and exactly what a lagging share produces for a
+        // file it only just received.
+        let share_now = std::time::SystemTime::now() - std::time::Duration::from_secs(360);
+        std::fs::OpenOptions::new().write(true).open(&target).unwrap().set_modified(share_now).unwrap();
+
+        // A candidate staged at the SAME instant as `target`, from the filesystem's own point of view —
+        // i.e. a live save's temp, created moments ago.
+        let candidate = d.join("notes.txt.4242-1000000000000.cpe-tmp");
+        std::fs::write(&candidate, b"still writing").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&candidate).unwrap().set_modified(share_now).unwrap();
+
+        sweep_stale_temp_siblings(&target);
+
+        assert!(
+            std::fs::symlink_metadata(&candidate).is_ok(),
+            "a candidate stamped at the SAME instant as target's own reference mtime must survive \
+             regardless of how far that instant sits from the client's real SystemTime::now() — proves \
+             the age reference is the filesystem's own clock, not the client's"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
