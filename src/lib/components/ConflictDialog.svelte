@@ -7,6 +7,7 @@
   import { unwrap } from "../invoke";
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import Icon from "./Icon.svelte";
+  import { displaySafePath } from "../filename";
 
   export let path: string;
 
@@ -115,8 +116,8 @@
         <aside class="files">
           <div class="files-head">{unresolved} unresolved</div>
           {#each files as f (f.path)}
-            <button class="file" class:sel={selected === f.path} on:click={() => select(f.path)} title={f.path}>
-              <span class="file-name">{f.path}</span>
+            <button class="file" class:sel={selected === f.path} on:click={() => select(f.path)} title={displaySafePath(f.path)}>
+              <span class="file-name">{displaySafePath(f.path)}</span>
               <span class="file-kind">{f.label}</span>
             </button>
           {/each}

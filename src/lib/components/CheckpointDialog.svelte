@@ -16,6 +16,7 @@
   import Icon from "./Icon.svelte";
   import DiffPeek from "./DiffPeek.svelte"; // reused as-is (CPE-1197 frontend half, epic CPE-735)
   import { t } from "../i18n";
+  import { displaySafePath } from "../filename";
 
   /** Root folder to checkpoint/revert (pre-filled with the current folder by App). */
   export let initialPath = "";
@@ -281,8 +282,8 @@
           <div class="drift-list" data-testid="drift-list">
             {#each preview.drift_paths as p (p)}
               <div class="drift-row">
-                <div class="drift-item" title={p}>
-                  <span class="drift-path">{p}</span>
+                <div class="drift-item" title={displaySafePath(p)}>
+                  <span class="drift-path">{displaySafePath(p)}</span>
                   <button class="mini diff-btn" data-testid="diff-btn-{p}" disabled={loading}
                     on:click={() => toggleDiff(p)}>{diffOpenPath === p ? "Close diff" : "Open diff"}</button>
                 </div>
@@ -315,7 +316,7 @@
       <div class="confirm" data-testid="confirm-revert">
         <p class="confirm-msg">
           {#if confirming === "all"}
-            This overwrites/recreates/deletes files under <strong>{path}</strong> to match
+            This overwrites/recreates/deletes files under <strong>{displaySafePath(path)}</strong> to match
             checkpoint <strong>{selected.label || shortId(selected.manifest_id)}</strong>. This cannot be undone.
           {:else}
             This reverts <strong>{revertOnePath}</strong> alone to checkpoint

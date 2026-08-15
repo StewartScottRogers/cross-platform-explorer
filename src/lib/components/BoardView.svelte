@@ -18,6 +18,7 @@
     EPIC_COLUMNS, groupEpicsByColumn, archivedEpics, filterEpics,
     type Card, type Lane, type Epic,
   } from "../board";
+  import { displaySafePath } from "../filename";
 
   /** The folder the board scans (`<root>/Ticketing/Tickets/…`) — defaults to the folder being browsed. */
   export let root: string;
@@ -393,7 +394,7 @@
         {#each BOARD_LANES as l}<span class="sb-col">{l} <b>{grouped[l].length}</b></span>{/each}
       </span>
       <span class="sb-msg" class:error={!!error}>{error || note || ""}</span>
-      <span class="sb-root" title={root}>{root}</span>
+      <span class="sb-root" title={displaySafePath(root)}>{displaySafePath(root)}</span>
     </div>
 
     <!-- Resize grip (CPE-529). -->

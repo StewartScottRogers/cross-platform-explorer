@@ -67,17 +67,30 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   search-in-files), the tab strip (both the visible label and its hover tooltip), the details pane
   (including its Path row), Properties, Trash (including its tooltip and screen-reader label), Home's
   Recent/Favorites/Folders/Shared/Quick-access tiles, the preview-pane folder peek, the archive-safety
-  check, and the confirmation dialogs for delete/extract/unlock/run-command. In each of those, one of the
-  twelve characters is shown as a bracketed tag (`[RLO]`, `[LRM]`, …) instead of being allowed to
-  silently reorder the text, so what you read is always the file's real byte order. This is a
-  **display-only** change: the file on disk keeps its exact original name (these characters are legal in
-  a filename on every platform this app runs on, so nothing about the file itself is altered), and a name
-  you're actively renaming shows and edits your real characters, not the tagged version. That matters for
-  a genuinely right-to-left filename (Arabic, Hebrew) — those are never touched or "fixed"; only the
-  handful of invisible direction-control characters are ever flagged, never the letters themselves.
-  **Not yet covered:** a handful of lower-traffic dialogs (several File Health / duplicate-finder /
-  media-batch tabs, the split/join-file dialogs, the terminal tab strip) still draw a name or path
-  without this flag — tracked as a follow-up rather than claimed here.
+  check, the confirmation dialogs for delete/extract/unlock/run-command, the command palette's recent-folder
+  entries, and — from CPE-1757's audit of the follow-up review — the conflict resolver's overwrite/skip
+  list, Agent Watch (the activity timeline, replay reconstruction, overlap/rename-conflict radar, the
+  side-by-side diff title, and the consulted-files panel), session-history export, the integrity checker,
+  checkpoint/revert (including its "this overwrites…" confirmation), the crypto file inspector, the Agent
+  Board's status-bar root, and the AI file copilot (its scope line, its proposed plan, and its results
+  list — the three places you decide whether a destructive op runs). In each of those, one of the twelve
+  characters is shown as a bracketed tag (`[RLO]`, `[LRM]`, …) instead of being allowed to silently reorder
+  the text, so what you read is always the file's real byte order. This is a **display-only** change: the
+  file on disk keeps its exact original name (these characters are legal in a filename on every platform
+  this app runs on, so nothing about the file itself is altered), and a name you're actively renaming shows
+  and edits your real characters, not the tagged version. That matters for a genuinely right-to-left
+  filename (Arabic, Hebrew) — those are never touched or "fixed"; only the handful of invisible
+  direction-control characters are ever flagged, never the letters themselves. A grep-based guard test
+  (`src/lib/bidiEscape.guard.test.ts`) fails CI if a covered component's name/path render loses its escape,
+  so this list can't silently go stale the way it did between CPE-1712's two review rounds.
+  **Not yet covered**, each confirmed lower-consequence (a diagnostic read-out, not a decision surface)
+  though still capable of showing an attacker-supplied name: `ContentIndexSearchDialog`'s search-scope
+  label and hit rows, `FileHealthDialog`'s corrupted/orphaned/duplicate rows, `NearDuplicatesDialog` and
+  `SimilarImagesDialog`'s match names, `DeclutterDialog`'s suggestion list, `BatchMediaDialog`'s
+  input/output/skip names, the `SplitFileDialog`/`JoinPartsDialog` dialogs and their completion notices,
+  `ExplorerPane`'s live agent-edit chip, `TerminalPanel`'s tab label, and `Sidebar`'s agent-session chip.
+  Tracked as a follow-up rather than claimed here — see the guard test's `ALLOWLIST` for the exact
+  file/line list this prose summarizes.
 - **Preview** — select a file to see it in the side pane; text is editable in place. Text files (source
   code and plain text alike, e.g. `.txt`) get a richer read view: syntax highlighting when a language is
   recognised, a **line-number gutter**, **fold triangles** on collapsible blocks (click to hide a range,

@@ -37,6 +37,7 @@
   import { foldOverlaps, overlapHasUnknown, friendlyActor, relativeLabel } from "../agentConflicts";
   import { foldRenameConflicts, renameConflictNote } from "../agentRenameConflicts";
   import { commands } from "../bindings.gen";
+  import { displaySafeName, displaySafePath } from "../filename";
   import type {
     ReplayData,
     Baseline,
@@ -661,7 +662,7 @@
           >
             <button
               class="tl-row"
-              title={diff ? `${e.path} — hover to see what changed` : e.path}
+              title={diff ? `${displaySafePath(e.path)} — hover to see what changed` : displaySafePath(e.path)}
               on:click={() => dispatch("navigate", dirOf(e.path))}
               on:focus={() => { if (diff) openId = e.id; }}
               on:blur={() => { if (openId === e.id) openId = null; }}
@@ -849,7 +850,7 @@
       {#if replayCurrent}
         <div class="rp-current">
           <span class="tl-badge {replayCurrent.kind}">{KIND_LABEL[replayCurrent.kind]}</span>
-          <span class="tl-name" title={replayCurrent.path}>{baseOf(replayCurrent.path)}</span>
+          <span class="tl-name" title={displaySafePath(replayCurrent.path)}>{displaySafeName(baseOf(replayCurrent.path))}</span>
           <span class="tl-time">{clock(replayCurrent.at)}</span>
         </div>
         {#if replayMultiplyEdited}
@@ -900,7 +901,7 @@
                 <li>
                   <span class="tl-row rp-row rp-recon-row">
                     <Icon name={re.isDir ? "folder" : "document"} size={14} />
-                    <span class="tl-name" title={re.path}>{re.name}</span>
+                    <span class="tl-name" title={displaySafePath(re.path)}>{displaySafeName(re.name)}</span>
                     <span class="tl-badge {re.kind}">{replayKindLabel(re.kind)}</span>
                     {#if re.kind !== "baseline"}<span class="tl-time">{clock(re.ts)}</span>{/if}
                   </span>
@@ -917,7 +918,7 @@
           <li class:rp-current-row={replayCurrent?.id === e.id}>
             <span class="tl-row rp-row">
               <span class="tl-badge {e.kind}">{KIND_LABEL[e.kind]}</span>
-              <span class="tl-name">{baseOf(e.path)}</span>
+              <span class="tl-name">{displaySafeName(baseOf(e.path))}</span>
               <span class="tl-time">{clock(e.at)}</span>
             </span>
           </li>
@@ -980,10 +981,10 @@
             <li class="rd-item">
               <button
                 class="tl-row rd-row"
-                title={o.path}
+                title={displaySafePath(o.path)}
                 on:click={() => dispatch("navigate", dirOf(o.path))}
               >
-                <span class="tl-name">{baseOf(o.path)}</span>
+                <span class="tl-name">{displaySafeName(baseOf(o.path))}</span>
                 <span class="tl-time">{relativeLabel(o.lastAt, Date.now())}</span>
               </button>
               <div class="rd-actors">
@@ -1008,7 +1009,7 @@
             <li class="rd-item">
               <button
                 class="tl-row rd-row"
-                title={rc.path}
+                title={displaySafePath(rc.path)}
                 on:click={() => dispatch("navigate", dirOf(rc.path))}
               >
                 <span class="rd-kind-badge rd-kind-{rc.kind}">{rc.kind === "divergence" ? "diverged" : "collided"}</span>

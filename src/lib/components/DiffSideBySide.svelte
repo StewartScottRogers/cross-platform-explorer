@@ -8,6 +8,7 @@
    */
   import { createEventDispatcher } from "svelte";
   import { sideBySideRows, type SideRow } from "../agentDiffs";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   export let path = "";
   export let before = "";
@@ -25,9 +26,9 @@
 <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions -->
 <div class="backdrop" on:click={() => dispatch("close")}>
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-noninteractive-element-interactions -->
-  <div class="dialog" role="dialog" aria-modal="true" aria-label="Diff for {baseOf(path)}" on:click|stopPropagation>
+  <div class="dialog" role="dialog" aria-modal="true" aria-label="Diff for {displaySafeName(baseOf(path))}" on:click|stopPropagation>
     <header class="sbs-head">
-      <span class="sbs-title" title={path}>{baseOf(path)}</span>
+      <span class="sbs-title" title={displaySafePath(path)}>{displaySafeName(baseOf(path))}</span>
       <span class="sbs-cols"><span>before</span><span>after</span></span>
       <button class="sbs-close" title="Close" on:click={() => dispatch("close")}>✕</button>
     </header>

@@ -195,4 +195,22 @@ describe("ConflictDialog (CPE-496 / CPE-1391)", () => {
     // stay hidden while an error is showing.
     expect(screen.queryByText("No conflicts — nothing to resolve.")).toBeNull();
   });
+
+  // CPE-1757: `f.path` was rendered raw (both the row's visible text and its `title`) — the ONE
+  // undisclosed, un-escaped surface CPE-1712's follow-up review found, and the closest thing on the
+  // residual list to a real "what am I about to do" decision (overwrite ours/theirs/base or skip).
+  // Asserts on the rendered DOM text/attribute, not `displaySafePath`'s return value directly, per the
+  // Evidence Rule this repo already applies in FileList.bidiSpoof.test.ts.
+  it("escapes a bidi/format override in a conflicted file's path so the row can't lie about it (CPE-1757)", async () => {
+    const RLO = String.fromCharCode(0x202e); // RIGHT-TO-LEFT OVERRIDE, built from a code point (not a literal)
+    const spoofed: ConflictFile = { path: `src/${RLO}gnp.txt`, code: "both_modified", label: "both modified" };
+    files = [spoofed];
+
+    const { container } = render(ConflictDialog, { path: "/repo" });
+
+    await waitFor(() => expect(screen.getByTitle(`src/[RLO]gnp.txt`)).toBeTruthy());
+    // What the user's eyes see in the row: the true byte order, tagged — never the reversed "txt.png".
+    expect(screen.getByText("src/[RLO]gnp.txt")).toBeTruthy();
+    expect(container.textContent).not.toContain("txt.png");
+  });
 });

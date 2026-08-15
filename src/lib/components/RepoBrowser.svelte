@@ -90,6 +90,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import Icon from "./Icon.svelte";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   interface RepoEntry { name: string; path: string; is_dir: boolean; size: number }
 
@@ -333,7 +334,7 @@
     {#if loaded && !error}
       <div class="repo-crumbs">
         <button class="repo-crumb" on:click={() => browse("")}>{repo}</button>
-        {#if path}<span class="repo-crumb-sep">/</span><span class="repo-crumb-cur">{path}</span>{/if}
+        {#if path}<span class="repo-crumb-sep">/</span><span class="repo-crumb-cur">{displaySafePath(path)}</span>{/if}
       </div>
     {/if}
 
@@ -357,9 +358,9 @@
           <button class="repo-row-item" on:click={up}><Icon name="folder" size={16} /> <span class="repo-name">..</span></button>
         {/if}
         {#each entries as e (e.path)}
-          <button class="repo-row-item" class:dir={e.is_dir} on:click={() => open(e)} title={e.path}>
+          <button class="repo-row-item" class:dir={e.is_dir} on:click={() => open(e)} title={displaySafePath(e.path)}>
             <Icon name={e.is_dir ? "folder" : "file"} size={16} />
-            <span class="repo-name">{e.name}</span>
+            <span class="repo-name">{displaySafeName(e.name)}</span>
             {#if !e.is_dir}<span class="repo-size">{fmtSize(e.size)}</span>{/if}
           </button>
         {/each}
@@ -370,7 +371,7 @@
 
     <div class="repo-statusbar">
       <span class="repo-sb-repo">{loaded ? repo : "No repository open"}</span>
-      {#if loaded && path}<span class="repo-sb-path">/ {path}</span>{/if}
+      {#if loaded && path}<span class="repo-sb-path">/ {displaySafePath(path)}</span>{/if}
     </div>
   </div>
 </div>

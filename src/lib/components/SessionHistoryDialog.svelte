@@ -17,6 +17,7 @@
     type AuditEvent,
   } from "../auditExport";
   import { formatDate } from "../datetime";
+  import { displaySafePath } from "../filename";
 
   /** Home dir for the "redact home paths" option (App supplies it). */
   export let home = "";
@@ -121,7 +122,7 @@
               <div class="event" data-testid="event-row">
                 <span class="ts">{formatDate(e.ts)}</span>
                 <span class="kind kind-{e.kind}">{e.kind}</span>
-                <span class="path" title={e.path}>{e.path}</span>
+                <span class="path" title={displaySafePath(e.path)}>{displaySafePath(e.path)}</span>
               </div>
             {/each}
             {#if filtered.length === 0}
