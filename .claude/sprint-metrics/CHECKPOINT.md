@@ -1,97 +1,81 @@
-# Sprint checkpoint — 2026-08-14 18:00 MST (reboot)
+# Cold storage — 2026-08-15 17:21 MST
 
-**Batches: 20 of 40.** Counter at `.claude/sprint-metrics/BATCH-COUNTER` (`completed: 20`).
+Work is **paused indefinitely**, deliberately, at a clean stopping point. This file is the handoff:
+it assumes you remember nothing about the session that wrote it.
 
-Nothing is unpushed. `main` is clean at `32d50ac7`; every merged ticket is closed to
-`Ticketing/Tickets/Done/2026/Q3/August/Week-33/`.
+**Nothing is in flight.** No agents running, no scheduled wake-ups armed, no sprint lock held, no
+ticket in `Doing/`, no unpushed commits. `main` is green and every branch that mattered is merged.
 
-## To resume
+## Where things stand
 
-Start a fresh session and say **"resume the batched sprint"**. Read this file first.
+| | |
+|---|---|
+| `main` | `86888aed` — clean tree, 0 unpushed commits |
+| Latest release | **v0.57.66-sidecar**, published, installers on all three OSes |
+| Installed locally | 0.57.66 (Sidecar), verified host + sidecar timestamps match |
+| Ticket queue | **30** open in `Backlog/`, **0** in `Doing/`, **3** in `Blocked/` |
+| Open PRs | **#738** only (gource visualisation) — pre-existing, not from this sprint |
 
-## Merged this session (batches 16–20)
+## What the last sprint did (13–15 Aug, 36 batches)
 
-| Batch | Ticket | PR | What |
-|---|---|---|---|
-| 16 | CPE-1718 | #901 | `join_files` refused a link at every split/join output slot |
-| 17 | CPE-1726 | #902 | WebDAV `MOVE` onto the served root — 5 rounds, `same_place` |
-| 18 | CPE-1725 | #904 | one answer for a dangling link on both save paths |
-| 19 | CPE-1727 | #903 | S3 delete for a GetObject credential + `start-after` belt — 6 rounds |
-| 20 | CPE-1731 | #905 | FTP/SFTP rig rename-onto-root + `RMD`/`rmdir` empty-only |
+Fifteen tickets merged. Fourteen of them are the same defect wearing different clothes: **the app
+doing something wrong and reporting success.** A truncated download written to disk as the finished
+file; an archive writing outside the folder the user chose; the Copilot trashing the folder the user
+confirmed; a filename drawing as a different name; a save stripping a file's permissions and its
+downloaded-from-the-internet mark.
 
-## In flight at reboot — both will need re-dispatching
+The number worth remembering: **five of the worst defects were introduced by a fix and caught by an
+independent check before merge.** Not one reached the user. That is the argument for the two-check
+gate, and it is why the gate should not be economised when work resumes.
 
-**PR #906 — CPE-1733 (`archive.rs` create/write sweep).** Branch
-`cpe-1733-archive-create-sweep`, head `f68e7fcb` **pushed**. Reviewer **REQUEST CHANGES** (3
-findings), UAT **BLOCKER** (6 findings); the worker was mid-round on all nine when the session
-ended. Its worktree is `.claude/worktrees/cpe1733`. **Re-dispatch a worker** pointing at the
-existing branch — do not start over, `f68e7fcb` already carries the enumeration and 11 guards.
+Full write-up, built to be read cold:
+<https://claude.ai/code/artifact/55ce24fd-baed-49e0-92a3-4bc49bb5e1ed>
 
-The nine open findings, in one list:
+## Pick these up first when work resumes
 
-1. Rows 1–5's *"unreachable by the hazard"* is false — `create_dir_all` silently accepts a
-   pre-existing directory, so a link planted at the leaf is written through. What protects them is
-   `%TEMP%` being per-user **on Windows**, a platform fact. On Linux `/tmp` is world-writable,
-   `<pid>` is public, `<seq>` restarts at 0, nothing cleans up (measured: **1,054,930 leftover dirs;
-   13% of fresh processes collide with an existing `<pid>-0`**), and the leaf name is
-   archive-controlled. CWE-377/CWE-59. Not claiming rows 2–5 need guards — claiming the wording is
-   wider than the evidence.
-2. *"`guarded_join` does not need to be added"* is wider than its search. True for **traversal**;
-   but `guarded_join` also carries CPE-1709's `local_safe_segment`, which `entry_name_is_safe`
-   lacks — `entry_name_is_safe("file:stream") == true`, so bytes vanish into an NTFS alternate data
-   stream leaving no visible file.
-3. The rows 15/16 guard is **leaf-only**, and the `create_dir_all(parent)` above it follows a
-   directory symlink — `entry_name_is_safe("sub/leaf.txt")` is true, so an entry escapes `dest`
-   through a junction (no privilege needed). Row 17's *"no measured hazard"* overstates CPE-1729:
-   that measured `create_dir_all` is not **destructive**; a live directory link **redirects**.
-4. **F1 — the unpinned-gap note is false for 2 of the 3 paths it names.** tar (one-shot and
-   streamed) **unlinks the symlink and writes a regular file** — victim safe, *link destroyed*,
-   recorded nowhere. One-shot zip **aborts the whole extraction** (`Err("invalid Zip archive:
-   Invalid symlink target path")`, nothing extracted). Only **7z** follows, as claimed.
-5. **F2** — `src/docs/explorer-archives.md` says an entry landing on a link is *"skipped and the
-   rest still extracts"*. True for streamed, false for one-shot. `extract_archive` is a registered
-   Tauri command with **no current Svelte caller**, so API/doc inconsistency, not a live regression.
-6. **F3** — the 7z gap is **live on the path the UI uses** (`start_archive_extract` →
-   `extract_archive_streamed` → `extract_7z_stream` → `sevenz_rust::default_entry_extract_fn`,
-   `archive.rs:1212`). Returns `Ok`, bytes land where nobody named. **Needs its own ticket.**
-7. **F5** — row 17's rationale is inconsistent with row 7's (which got a guard purely because
-   `AlreadyExists` stringifies misleadingly). Also *"does nothing at all"* is wrong: it **errors**,
-   and the whole extraction fails with that wording.
-8. **F6** — row 15 swallows `classify_create_slot`'s `Err` arm (*"could not check… refusing to
-   guess"*) identically to a confirmed link, drops the entry silently, returns `Ok`.
-9. Non-blocking: 4 un-rowed `create_dir_all` sites; two figures missing their platform boundary
-   (`archive.rs:250-253` and the `every_guarded_row_…` doc); rows 15/16 have no live-link leg.
+Ranked. The top two are the ones that get worse on their own while nobody is looking.
 
-Ticket IDs **1734–1743 are taken.** Allocate against `main` after a `git pull`, verified across all
-branches.
+1. **CPE-1693 — the temp directory is now at 1,217,268 leftover folders.** It grew ~27,000 during a
+   single day of test runs and **starved the extraction path once**, failing a test spuriously. The
+   ticket records 145,000; it is an order of magnitude past its own writeup. A one-line purge clears
+   the symptom; the leak is the ticket.
+2. **CPE-1762 — the release pins an ffmpeg build upstream deletes.** Filed today because it blocked
+   release 0.57.66 outright, on all three OSes. It is re-pinned and the download now fails loudly
+   naming the URL, but the pin will rot again in weeks. The ticket asks the real question: mirror it,
+   or build from source as the macOS arm already does.
+3. **CPE-1761 — the new spoof guard fails OPEN on a stray brace.** A lone `{` in ordinary prose
+   silently ends the scan and reports the file **clean**. Two-line fix, and the worst possible failure
+   direction for a guard.
+4. **CPE-1758 — an archive entry can still hide bytes in an alternate data stream**, reporting full
+   success while the file is absent from the folder. Deliberately deferred, but it is **not**
+   fail-safe; a PR body said it was and had to be corrected before merge.
+5. **CPE-1760, CPE-1754, CPE-1755, CPE-1759** — small, well-specified residuals from the same work.
 
-**CPE-1730 (protocol rig containment).** Branch `cpe-1730-rig-containment`, worktree
-`.claude/worktrees/cpe-1730`, head **`ccdc27d8` — pushed**, no PR yet.
+Every one of these was written by whoever measured it, with the measurement in the ticket. Trust the
+numbers in them more than any summary, including this one.
 
-Two commits, and **neither is trustworthy yet**: `7d592bd1` confines `cpe-ftp`'s rig resolver to its
-served root; `ccdc27d8` is a mid-edit snapshot of the SFTP call sites, committed only so the work
-survived the reboot. **Not reviewed, not tested, not verified — read the diff before trusting any of
-it.** Re-dispatch a worker onto that branch and have it start by checking what is actually there.
+## Two lessons this sprint paid for, in blood
 
-Its brief: three escape shapes, all measured —
-(a) `..`-shaped (`/../<sibling>` moves the **served root itself** out and answers `250 Renamed` /
-`Ok(())`, both rigs, both platforms); (b) **absolute** destinations, since `Path::join` discards the
-base; (c) through a **symlinked intermediate directory**, needing neither of the first two. The task
-is *containment*, not equality — `same_place` answers the wrong question, and lexical `..` popping
-is unsound in the containment direction in a way it is not for equality.
+- **Assert the effect BEFORE unwrapping the `Result`.** Every defect above fails by *succeeding*, so
+  an assertion after an `unwrap` is unreachable exactly when it matters.
+- **Assert the reason, not only the effect, when two guards overlap.** With both in place the damage
+  cannot occur, so a damage-only test lets one guard be deleted with the whole suite green. This bit
+  twice.
 
-## Standing lessons this sprint keeps re-proving
+## Known-untidy, left deliberately
 
-- **A red that is not the red you aimed at proves nothing** — a test can be saved by an errno
-  rather than by the guard. Pin a *distinctive* refusal.
-- **Assert the effect before unwrapping the `Result`**, or the assertion naming the damage is
-  unreachable when the guard fails by returning `Ok` — which is how these bugs behave.
-- **An assertion can discriminate by luck** — one matched a marker anywhere in a string built partly
-  from caller-supplied paths, so a path could forge it.
-- **A lenient test double can *conceal* a defect in the code under test**, not merely permit one
-  (CPE-1741, found by making the rigs honest).
-- **"No test" and "no record" are different questions.** Ask what holds *each* way a known defect
-  could bite.
-- CI: select the run by **head sha**, require `conclusion == "success"` by **equality**. A
-  `cancelled` run and a **null** conclusion both read as "not failed" to a careless check; every run
-  on one branch today ended cancelled, superseded by the next push.
+- **72 git worktrees** under `.claude/worktrees/`. Registrations pruned; the directories are left
+  alone on purpose — this repo has a scar from an over-eager cleanup that deleted a live worker's
+  work. Safe to remove when nothing is running, one at a time, checking each branch is merged first.
+- **`.claude/sprint-metrics/visual-evidence/`** — two PNGs from 11 Aug, untracked. Pre-dates this
+  sprint and belongs to another session; left untouched rather than committed or deleted.
+- Several unmerged branches (`audit-*`, `CPE-1268-green-ci`) predating this sprint. Not investigated.
+- Desktop scheduled tasks (`cpe-daily-status`, `cpe-weekly-deps`) still run on their own schedule.
+  They are not mine and will keep going.
+
+## Resuming
+
+There is no sprint to resume — the last one ended at its bound, cleanly. Start fresh: read this file,
+`git pull`, then either `/ticketing-list` to see the queue or `/sprint-batched N` to run another
+supervised batch. Do not treat the list above as a plan; re-read the tickets, because the measurements
+in them will have aged.
