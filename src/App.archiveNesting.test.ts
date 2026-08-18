@@ -59,7 +59,7 @@ beforeEach(() => {
       case "can_restore_from_trash": return true;
       // The real C:\d is deliberately EMPTY so a fallback-to-plain-folder regression is visible: if exit
       // ever lands on the plain folder instead of the structured search, "bundle.zip" won't reappear.
-      case "list_dir": return [];
+      case "list_dir": return { entries: [], filtered: 0 };
       case "list_dir_stream": {
         const ch = args.onEntry as { onmessage: (b: unknown) => void };
         ch.onmessage([]);

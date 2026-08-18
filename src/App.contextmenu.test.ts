@@ -36,7 +36,7 @@ beforeEach(() => {
       case "list_drives": return [];
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
-      case "list_dir": return [];
+      case "list_dir": return { entries: [], filtered: 0 };
       case "parent_dir": return null;
       default: return null;
     }

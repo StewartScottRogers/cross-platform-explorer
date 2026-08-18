@@ -27,7 +27,7 @@
   import type { ColorRule } from "../colorRules";
   import type { AgentSession } from "../sidecar";
   import type { ActiveMetaColumn } from "../columns";
-  import type { AvailableColumn, MetadataCell } from "../bindings.gen";
+  import type { AvailableColumn, MetadataCell, ListDirResult, StreamDirResult } from "../bindings.gen";
   import { commands } from "../bindings.gen"; // typed client (CPE-964) — the non-streamed collect variant
   import { metaColumnCatalog, ensureMetaColumnCatalog } from "../metaColumnCatalog";
   import { canonicalPath } from "../paths";
@@ -94,6 +94,14 @@
   export let selectedTag = "";
   export let error = "";
   export let loading = false;
+  /** How many entries the CURRENT listing left out because their name could not be shown safely
+   *  (CPE-1708) — always 0 for a local folder or an unfiltered remote backend (SFTP/WebDAV/FTP). Bound
+   *  back to App so the status bar can say so; reset to 0 at the start of every `loadListing` and set
+   *  from whichever fetch actually completes (the stream's terminal result, or the cache/revalidate
+   *  path), so it always reflects the listing currently on screen — never a stale value left over from
+   *  the previous folder. See `loadListing`'s body for why this must NOT be a synthetic row in
+   *  `entries` (CPE-1704 round 2's rejected approach, documented on the backend's `ListDirResult`). */
+  export let filteredHidden = 0;
   export let cutPaths: string[] = [];
   export let renamingPath = "";
   export let renameValue = "";
@@ -315,9 +323,14 @@
     a.length === b.length && a.every((e, i) => e.path === b[i].path && e.size === b[i].size && e.modified === b[i].modified);
   async function revalidateDir(path: string, gen: number): Promise<void> {
     try {
-      const fresh = await rawInvoke<DirEntry[]>("list_dir", { path });
-      cachePut(path, fresh);
-      if (gen === loadGen && !sameListing(entries, fresh)) entries = fresh;
+      const fresh = await rawInvoke<ListDirResult>("list_dir", { path });
+      cachePut(path, fresh.entries);
+      if (gen === loadGen) {
+        if (!sameListing(entries, fresh.entries)) entries = fresh.entries;
+        // CPE-1708: refresh the honest count too — a cache-served view starts at 0 (unknown) until this
+        // background revalidation actually asks the provider, see `loadListing`'s cache branch below.
+        filteredHidden = fresh.filtered;
+      }
     } catch { /* keep the cached view */ }
   }
 
@@ -349,11 +362,16 @@
     const servedFromCache = useCache ? cacheGet(path) : undefined;
     if (servedFromCache) {
       entries = servedFromCache;
+      // CPE-1708: the cache only stores `DirEntry[]`, not the paired filtered count, so a cache-served
+      // paint can't know it yet — 0 (never a stale remembered value) until the stale-while-revalidate
+      // pass below asks the provider again and `revalidateDir` sets the real number moments later.
+      filteredHidden = 0;
       loading = false;
       markPainted();
       await tick(); // let the reactive `visible` derive before the caller's post-load hooks read it
     } else {
       entries = [];
+      filteredHidden = 0;
       loading = true;
       try {
         // Coalesce stream batches (CPE-689): buffer and flush once per animation frame so `visible`
@@ -374,8 +392,14 @@
           buffer.push(...batch);
           if (!flushQueued) { flushQueued = true; requestAnimationFrame(flush); }
         };
-        await rawInvoke("list_dir_stream", { path, streamId: gen, onEntry: channel });
+        const streamResult = await rawInvoke<StreamDirResult>("list_dir_stream", { path, streamId: gen, onEntry: channel });
         if (gen === loadGen && buffer.length > 0) flush();
+        // CPE-1708: this is the pane's actual first-paint path for a fresh (non-cached) listing, so this
+        // is where a filtered remote folder's count reaches the screen on the VERY FIRST view of it, not
+        // only after a later cache-hit revalidation. `?? 0` tolerates a bare-number legacy shape (there
+        // is none in production, but a defensive default costs nothing and keeps this resilient to a
+        // test double that doesn't model the full result shape).
+        if (gen === loadGen) filteredHidden = streamResult?.filtered ?? 0;
       } catch (e) {
         if (gen === loadGen) { entries = []; error = friendlyError(String(e)); }
       } finally {

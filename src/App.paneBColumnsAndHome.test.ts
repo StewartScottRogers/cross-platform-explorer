@@ -95,7 +95,7 @@ beforeEach(() => {
       case "list_drives": return drives;
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
-      case "list_dir": return entriesA;
+      case "list_dir": return { entries: entriesA, filtered: 0 };
       case "list_dir_stream": {
         const ch = args.onEntry as { onmessage: (b: unknown) => void };
         ch.onmessage(entriesA);
@@ -203,7 +203,7 @@ describe("App — pane B's own active metadata columns (CPE-1382)", () => {
         case "list_drives": return drives;
         case "home_dir": return "C:\\Users\\t";
         case "can_restore_from_trash": return true;
-        case "list_dir": return listingFor(args.path);
+        case "list_dir": return { entries: listingFor(args.path), filtered: 0 };
         case "list_dir_stream": {
           const ch = args.onEntry as { onmessage: (b: unknown) => void };
           const data = listingFor(args.path);
@@ -339,7 +339,7 @@ describe("App — the Column Picker dialog is pane-aware (CPE-1388)", () => {
         case "list_drives": return drives;
         case "home_dir": return "C:\\Users\\t";
         case "can_restore_from_trash": return true;
-        case "list_dir": return listingFor(args.path);
+        case "list_dir": return { entries: listingFor(args.path), filtered: 0 };
         case "list_dir_stream": {
           const ch = args.onEntry as { onmessage: (b: unknown) => void };
           const data = listingFor(args.path);
@@ -398,7 +398,7 @@ describe("App — the Column Picker dialog is pane-aware (CPE-1388)", () => {
         case "list_drives": return drives;
         case "home_dir": return "C:\\Users\\t";
         case "can_restore_from_trash": return true;
-        case "list_dir": return listingFor(args.path);
+        case "list_dir": return { entries: listingFor(args.path), filtered: 0 };
         case "list_dir_stream": {
           const ch = args.onEntry as { onmessage: (b: unknown) => void };
           const data = listingFor(args.path);

@@ -268,6 +268,11 @@
 
   let error = "";
   let loading = false;
+  /** How many of pane A's current entries were left out because their name could not be shown safely
+   *  (CPE-1708) — owned + kept current by `<ExplorerPane>`'s own fetch pipeline, bound back here purely
+   *  to hand to `<StatusBar>`. 0 for the overwhelming majority of listings (local, or an unfiltered
+   *  remote backend), in which case the status bar renders nothing for it at all. */
+  let filteredHidden = 0;
   // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
   // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
   // Directory-listing fetch + LRU cache moved into <ExplorerPane> (CPE-676 domino 3b) — the pane owns
@@ -3327,7 +3332,7 @@
     let existing: string[];
     if (inSubfolder) {
       const res = await commands.listDir(targetDir);
-      existing = res.status === "ok" ? res.data.map((e) => e.name) : [];
+      existing = res.status === "ok" ? res.data.entries.map((e) => e.name) : [];
     } else {
       existing = (inPaneB ? entriesB : entries).map((e) => e.name);
     }
@@ -6638,6 +6643,7 @@
       bind:showTimeline
       replayOverlay={replayOverlayEntries}
       bind:entries
+      bind:filteredHidden
       smartOverride={smartFolder ? smartEntries : structuredSearch ? structuredSearchEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
       archivePath={archive ? archive.zipPath : null}
@@ -6873,6 +6879,7 @@
   selectedCount={selectedCount(selection)}
   {selectedSize}
   hiddenShown={showHidden}
+  {filteredHidden}
   {notice}
   {noticeIsError}
   {diskFree}

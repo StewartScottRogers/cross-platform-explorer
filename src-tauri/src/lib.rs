@@ -429,7 +429,7 @@ fn workbench_diff_impl(root: String, path: Option<String>) -> Result<WorkbenchDi
 // The shared filesystem model types (DirEntry / OpResult / EntryInfo / Place) and the `extension_of` /
 // `is_hidden` helpers now live in `cpe_server::model` (CPE-815); re-export them so the many
 // construction/usage sites resolve unchanged.
-use cpe_server::model::{extension_of, is_hidden, DirEntry, EntryInfo, OpResult, Place};
+use cpe_server::model::{extension_of, is_hidden, DirEntry, EntryInfo, ListDirResult, OpResult, Place};
 // Secure-delete shred (CPE-1240, epic CPE-738): `ShredScheme` picks the overwrite pattern
 // (`secure_delete`, pure planning), `ShredResult` is the per-path OpResult-shaped outcome the
 // `shred_paths` command returns (`secure_shred`, the disk-backed engine).
@@ -599,25 +599,42 @@ fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
 // Async so a listing on a slow drive runs off the main thread (CPE-760).
 /// List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
 /// is a thin `spawn_blocking` dispatcher.
+///
+/// Returns [`ListDirResult`], not a bare `Vec<DirEntry>` (CPE-1708): `filtered` carries how many
+/// provider-supplied entries were left out of `entries` because their name could not be shown safely —
+/// always `0` for a local listing. This is the field CPE-1704 deliberately left at the Tauri boundary
+/// (an `eprintln!` only); see [`ListDirResult`]'s doc for why the count travels as typed data, never a
+/// synthetic row.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
-async fn list_dir(path: String) -> Result<Vec<DirEntry>, String> {
+async fn list_dir(path: String) -> Result<ListDirResult, String> {
     // Local fast-path (CPE-1511): a local URI takes the EXACT same code path as before — the same
     // classification `require_local` did, then the same `listing::list_dir` on a blocking thread — so the
     // plain explorer's hot path is byte-for-byte unchanged (PURPOSE.md). Only a recognised remote scheme
     // diverts to the provider router.
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
-            tauri::async_runtime::spawn_blocking(move || cpe_server::listing::list_dir(&path))
-                .await
-                .map_err(|e| e.to_string())?
+            tauri::async_runtime::spawn_blocking(move || {
+                cpe_server::listing::list_dir(&path)
+                    .map(|entries| ListDirResult { entries, filtered: 0 })
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
         cpe_server::fs_route::Route::Remote(_) => {
-            tauri::async_runtime::spawn_blocking(move || remote_list_dir_impl(path))
+            tauri::async_runtime::spawn_blocking(move || remote_list_dir_impl(path).map(listing_to_result))
                 .await
                 .map_err(|e| e.to_string())?
         }
     }
+}
+
+/// The `RemoteListing` → `ListDirResult` link of the CPE-1708 chain: a free function (not a `From` impl —
+/// neither type is local to this crate, so the orphan rule blocks that) so it's independently unit
+/// testable without needing a live provider pool. `entries`/`filtered` both carry straight across —
+/// nothing here can silently drop or zero the count.
+fn listing_to_result(listing: cpe_vfs::connect::RemoteListing) -> ListDirResult {
+    ListDirResult { entries: listing.entries, filtered: listing.filtered }
 }
 
 /// Registry of in-flight `list_dir_stream` walks' cancel flags, keyed by the frontend-supplied stream id,
@@ -633,11 +650,23 @@ fn dir_stream_registry(
     DIR_STREAM_CANCELS.get_or_init(Default::default)
 }
 
+/// `list_dir_stream`'s terminal result (CPE-1708). `total` is the entry count streamed, unchanged since
+/// CPE-663/665; `filtered` carries the SAME count `list_dir`'s [`ListDirResult::filtered`] carries — how
+/// many provider-supplied entries were left out because their name could not be shown safely — but via
+/// the streaming twin, which is the pane's actual first-paint path (`ExplorerPane.loadListing`; `list_dir`
+/// itself is only the collect-to-vec convenience path, STREAMING.md). Always `0` for a local walk.
+#[derive(serde::Serialize)]
+#[cfg_attr(feature = "specta-bindings", derive(specta::Type))]
+struct StreamDirResult {
+    total: usize,
+    filtered: usize,
+}
+
 /// Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
 /// as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
 /// whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
-/// a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns the
-/// total entry count once the walk completes (or is cancelled).
+/// a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns
+/// [`StreamDirResult`] once the walk completes (or is cancelled) — see its doc for `filtered` (CPE-1708).
 // Async so a listing on a slow/network drive streams from a blocking thread and never freezes the main
 // thread (CPE-760). The `Channel` batches still arrive live; only the walk moves off the UI thread.
 #[tauri::command]
@@ -646,16 +675,19 @@ async fn list_dir_stream(
     path: String,
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
-) -> Result<usize, String> {
+) -> Result<StreamDirResult, String> {
     // Local fast-path (CPE-1511): unchanged from before for a local URI (same classification + same
     // streaming walker on a blocking thread). A remote scheme streams the resolved provider's listing over
     // the SAME `Channel` + cancel registry, so the pane paints identically and `cancel_dir_stream` works
     // for remote too (STREAMING.md).
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
-            tauri::async_runtime::spawn_blocking(move || list_dir_stream_impl(path, stream_id, on_entry))
-                .await
-                .map_err(|e| e.to_string())?
+            tauri::async_runtime::spawn_blocking(move || {
+                list_dir_stream_impl(path, stream_id, on_entry)
+                    .map(|total| StreamDirResult { total, filtered: 0 })
+            })
+            .await
+            .map_err(|e| e.to_string())?
         }
         cpe_server::fs_route::Route::Remote(_) => {
             tauri::async_runtime::spawn_blocking(move || {
@@ -8049,16 +8081,18 @@ fn invalidate_remote(uri: &str) {
     }
 }
 
-/// Collect-to-vec remote directory listing — the remote arm of `list_dir`.
+/// Collect-to-vec remote directory listing — the remote arm of `list_dir` (and the entry point
+/// `remote_list_dir_stream_impl` below reuses for the streaming arm). Returns the full
+/// [`cpe_vfs::connect::RemoteListing`] — entries AND the filtered count together — so both callers can
+/// decide what to do with `filtered` themselves rather than this function silently choosing for them.
 ///
-/// CPE-1704: `remote_dir_entries` now also reports how many entries it filtered as an unsafe name, as a
-/// real `RemoteListing::filtered` count (never a fabricated row mixed into the entries — see that type's
-/// doc for why). The Tauri command surface (`list_dir`'s `Result<Vec<DirEntry>, String>`) is left
-/// unchanged here deliberately: threading the count into the frontend-visible contract means extending a
-/// `specta`-typed response and the TS side that consumes it — a genuinely separate, larger change, not one
-/// to fold into this fix under time pressure. For now the count is logged (never silently dropped on the
-/// floor), and a follow-up ticket should carry it into the UI (a status-bar note, e.g.).
-fn remote_list_dir_impl(uri: String) -> Result<Vec<DirEntry>, String> {
+/// CPE-1704 added the count; CPE-1708 carries it the rest of the way. It used to stop here as an
+/// `eprintln!` because threading it into the `specta`-typed command response (+ the TS side that
+/// consumes it) was judged out of scope for a fix already spanning three crates — the right call at the
+/// time, not a rushed one. This function itself no longer logs anything: both `list_dir` (via
+/// `ListDirResult`) and `list_dir_stream` (via `StreamDirResult`) now carry `filtered` to the frontend as
+/// typed data instead.
+fn remote_list_dir_impl(uri: String) -> Result<cpe_vfs::connect::RemoteListing, String> {
     let provider = remote_provider_for(&uri)?;
     let guard = match provider.lock() {
         Ok(g) => g,
@@ -8067,16 +8101,7 @@ fn remote_list_dir_impl(uri: String) -> Result<Vec<DirEntry>, String> {
             return Err("remote provider is unavailable (session dropped); retry".to_string());
         }
     };
-    let listing = cpe_vfs::connect::remote_dir_entries(&**guard, &uri)?;
-    if listing.filtered > 0 {
-        eprintln!(
-            "cpe: remote listing of {uri:?} hid {} entr{} with an unsafe name shape (CPE-1704) — not yet \
-             surfaced in the UI, see remote_list_dir_impl's doc",
-            listing.filtered,
-            if listing.filtered == 1 { "y" } else { "ies" }
-        );
-    }
-    Ok(listing.entries)
+    cpe_vfs::connect::remote_dir_entries(&**guard, &uri)
 }
 
 /// Streaming remote directory listing — the remote arm of `list_dir_stream`. Reuses the SAME cancel
@@ -8086,16 +8111,16 @@ fn remote_list_dir_stream_impl(
     uri: String,
     stream_id: u64,
     on_entry: tauri::ipc::Channel<Vec<DirEntry>>,
-) -> Result<usize, String> {
+) -> Result<StreamDirResult, String> {
     use std::sync::atomic::Ordering;
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     dir_stream_registry().lock().unwrap().insert(stream_id, cancel.clone());
     let result = (|| {
-        let rows = remote_list_dir_impl(uri)?;
-        let total = rows.len();
+        let listing = remote_list_dir_impl(uri)?;
+        let result = stream_result_for(&listing);
         // Drain into owned batches (DirEntry isn't `Clone`, so move rather than copy) — one flush for a
         // small listing, several for a big one, mirroring the local batch size.
-        let mut it = rows.into_iter();
+        let mut it = listing.entries.into_iter();
         loop {
             let batch: Vec<DirEntry> = it.by_ref().take(cpe_server::listing::LIST_DIR_BATCH).collect();
             if batch.is_empty() {
@@ -8106,10 +8131,18 @@ fn remote_list_dir_stream_impl(
                 break;
             }
         }
-        Ok(total)
+        Ok(result)
     })();
     dir_stream_registry().lock().unwrap().remove(&stream_id);
     result
+}
+
+/// The `RemoteListing` → `StreamDirResult` link of the CPE-1708 chain (the streaming twin of
+/// `listing_to_result`): pure and independently unit testable — computed BEFORE `listing.entries` is
+/// drained into channel batches, so `total`/`filtered` can never end up reflecting a partially-cancelled
+/// walk.
+fn stream_result_for(listing: &cpe_vfs::connect::RemoteListing) -> StreamDirResult {
+    StreamDirResult { total: listing.entries.len(), filtered: listing.filtered }
 }
 
 // ---- User-defined command exec (CPE-783, epic CPE-711) --------------------------------------------
@@ -13411,6 +13444,109 @@ mod tests {
         assert!(src.contains("DirEntry") && src.contains("OpResult") && src.contains("EntryInfo"),
             "cpe-server types should be exported into the typed client");
         assert!(src.contains("TrashEntry"), "TrashEntry DTO should be exported into the typed client");
+    }
+
+    // ---- `filtered` count survives provider → RemoteListing → command → frontend (CPE-1708) ----------
+    // CPE-1704 built the count (a `RemoteListing::filtered` `usize`, computed in-process from what the
+    // provider's own listing pass + the shared name guard actually dropped — never reconstructable from
+    // wire data) but deliberately left it at the Tauri boundary as an `eprintln!`. This is that count's
+    // missing last mile: `list_dir`/`list_dir_stream` now carry it to the frontend as a typed field
+    // (`ListDirResult`/`StreamDirResult`), never as a synthetic row mixed into `entries` (CPE-1704 round
+    // 2's rejected approach — see `ListDirResult`'s doc in `crates/server/src/model.rs`).
+    //
+    // Each link below is a DISTINCT test, per the Evidence Rules in `Ticketing/wiki.md`: breaking any ONE
+    // of them must turn exactly one of these red, not silently pass through the others.
+
+    /// A minimal `FileSystemProvider` double (mirrors `crates/vfs/src/connect.rs`'s `Hostile` test
+    /// fixture) that hands back two names the shared guard genuinely must refuse (a literal `..` and an
+    /// embedded-traversal `../escape`) alongside one safe leaf — so `cpe_vfs::connect::remote_dir_entries`
+    /// (the REAL production function, not a stand-in) has something real to filter.
+    struct HostileListing;
+    impl cpe_server::provider::FileSystemProvider for HostileListing {
+        fn list(&self, _p: &str) -> Result<Vec<cpe_server::provider::ProviderEntry>, String> {
+            Ok(vec![
+                cpe_server::provider::ProviderEntry { name: "..".into(), is_dir: true, size: 0 },
+                cpe_server::provider::ProviderEntry { name: "../escape".into(), is_dir: false, size: 1 },
+                cpe_server::provider::ProviderEntry { name: "ok.txt".into(), is_dir: false, size: 7 },
+            ])
+        }
+        fn stat(&self, _p: &str) -> Result<cpe_server::provider::ProviderEntry, String> { unreachable!() }
+        fn read(&self, _p: &str) -> Result<Vec<u8>, String> { unreachable!() }
+        fn write(&mut self, _p: &str, _d: &[u8]) -> Result<(), String> { unreachable!() }
+        fn mkdir(&mut self, _p: &str) -> Result<(), String> { unreachable!() }
+        fn delete(&mut self, _p: &str) -> Result<(), String> { unreachable!() }
+        fn rename(&mut self, _f: &str, _t: &str) -> Result<(), String> { unreachable!() }
+    }
+
+    /// Link 1→2 (provider → `RemoteListing`) THROUGH link 2→3 (`RemoteListing` → `ListDirResult`, the
+    /// `list_dir` command's own mapping): calls the real `remote_dir_entries` against `HostileListing`,
+    /// then feeds the real `listing_to_result` — the exact function `list_dir`'s remote arm calls — and
+    /// asserts the count comes out the other side unchanged. Breaking EITHER `remote_dir_entries`'s
+    /// filtering or `listing_to_result`'s field mapping turns this red.
+    #[test]
+    fn filtered_count_survives_remote_dir_entries_into_list_dir_result() {
+        let listing = cpe_vfs::connect::remote_dir_entries(&HostileListing, "sftp://h/x").unwrap();
+        assert_eq!(listing.filtered, 2, "sanity: the provider fixture must actually produce 2 unsafe names");
+        let result = listing_to_result(listing);
+        assert_eq!(result.entries.len(), 1, "only the one safe leaf reaches the entries the UI renders");
+        assert_eq!(result.entries[0].name, "ok.txt");
+        assert_eq!(result.filtered, 2, "list_dir's ListDirResult must carry the real count through, not 0");
+    }
+
+    /// The streaming twin of the test above: `stream_result_for` is the exact function
+    /// `remote_list_dir_stream_impl` calls (computed BEFORE `entries` is drained into channel batches).
+    /// This is a DISTINCT test from the one above — breaking `stream_result_for` alone (leaving
+    /// `listing_to_result` correct) must turn only this one red, proving `list_dir_stream` isn't silently
+    /// riding on `list_dir`'s own correctness.
+    #[test]
+    fn filtered_count_survives_remote_dir_entries_into_stream_dir_result() {
+        let listing = cpe_vfs::connect::remote_dir_entries(&HostileListing, "sftp://h/x").unwrap();
+        let result = stream_result_for(&listing);
+        assert_eq!(result.total, 1, "one safe leaf streamed");
+        assert_eq!(result.filtered, 2, "list_dir_stream's StreamDirResult must carry the real count through");
+    }
+
+    /// Link 3→4 (command → frontend): what actually crosses the Tauri IPC wire is `serde_json`, keyed by
+    /// field name — this is what `bindings.gen.ts`'s generated TS interface (and the frontend code that
+    /// reads `.filtered`) actually depends on. Proves the wire shape directly rather than trusting the
+    /// struct definition alone; breaking a field rename here (without updating the frontend) is exactly
+    /// the class of drift CI's Typed-bindings guard also independently catches.
+    #[test]
+    fn list_dir_result_and_stream_dir_result_serialize_the_filtered_field_by_name() {
+        let ldr = ListDirResult { entries: vec![], filtered: 3 };
+        let v = serde_json::to_value(&ldr).unwrap();
+        assert_eq!(v["filtered"], 3, "ListDirResult must serialize `filtered` under that exact key");
+        assert_eq!(v["entries"], serde_json::json!([]));
+
+        let sdr = StreamDirResult { total: 5, filtered: 2 };
+        let v = serde_json::to_value(&sdr).unwrap();
+        assert_eq!(v["filtered"], 2, "StreamDirResult must serialize `filtered` under that exact key");
+        assert_eq!(v["total"], 5);
+    }
+
+    /// AC: "Confirm every other provider (SFTP, WebDAV, FTP, local) reports zero and is unaffected."
+    /// `list_with_filtered_count`'s DEFAULT (delegates to `list`, reports 0 — every provider except S3)
+    /// is already covered by `crates/server/src/provider.rs`'s
+    /// `list_with_filtered_count_defaults_to_delegating_to_list_and_reporting_zero` (CPE-1704); this test
+    /// covers the ONE hop that's new here — `list_dir`'s LOCAL arm hardcodes `filtered: 0` rather than
+    /// asking any provider at all, since a local listing was never routed through `RemoteListing`.
+    #[test]
+    fn list_dir_local_arm_always_reports_zero_filtered() {
+        let dir = scratch("cpe1708-local-filtered");
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(dir.clone()); // armed before any assertion below can panic and skip it
+        fs::write(dir.join("a.txt"), b"hi").unwrap();
+
+        let result = cpe_server::listing::list_dir(dir.to_str().unwrap())
+            .map(|entries| ListDirResult { entries, filtered: 0 })
+            .expect("local listing succeeds");
+        assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
+        assert_eq!(result.entries.len(), 1);
     }
 
     // ---- Safety-scan command smoke tests (CPE-1287, epic CPE-1002) ----------------------------------

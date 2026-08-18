@@ -82,7 +82,7 @@ function mockBackend(listing: DirEntry[], overrides: Record<string, (args: Recor
       case "list_drives": return drives;
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
-      case "list_dir": return listing;
+      case "list_dir": return { entries: listing, filtered: 0 };
       case "list_dir_stream": {
         const ch = args.onEntry as { onmessage: (b: unknown) => void };
         if (listing.length) ch.onmessage(listing);

@@ -56,7 +56,7 @@ beforeEach(() => {
       case "list_drives": return drives;
       case "home_dir": return "C:\\Users\\t";
       case "can_restore_from_trash": return true;
-      case "list_dir": return [];
+      case "list_dir": return { entries: [], filtered: 0 };
       case "list_dir_stream": {
         const ch = args?.onEntry as { onmessage: (b: unknown) => void };
         ch.onmessage([]);

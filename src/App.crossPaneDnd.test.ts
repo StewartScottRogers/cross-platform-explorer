@@ -90,7 +90,7 @@ beforeEach(() => {
       case "can_restore_from_trash": return true;
       case "list_dir":
         listDirCalls.push(args.path as string);
-        return listingFor(args.path);
+        return { entries: listingFor(args.path), filtered: 0 };
       case "list_dir_stream": {
         listDirCalls.push(args.path as string);
         const ch = args.onEntry as { onmessage: (b: unknown) => void };

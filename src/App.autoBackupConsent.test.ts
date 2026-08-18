@@ -64,7 +64,7 @@ beforeEach(() => {
       case "special_folders": return [];
       case "list_drives": return connectedDrives;
       case "home_dir": return "C:\\Users\\t";
-      case "list_dir": return [];
+      case "list_dir": return { entries: [], filtered: 0 };
       case "list_dir_stream": return 0;
       case "can_restore_from_trash": return true;
       // The two scans the job's plan is built from. Dest holds a file the source doesn't, so the plan
