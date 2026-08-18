@@ -147,28 +147,52 @@ fn part_path(out_dir: &Path, original_name: &str, index: u64, width: usize) -> P
 /// Same convention as [`crate::archive`]'s `extraction_dest_error` (CPE-1744) at the analogous `dest`
 /// sites — one extra [`std::fs::symlink_metadata`] read to distinguish the cases cheaply:
 ///
-/// - a **link** at `out_dir` (dangling, per the measurement above, or pointed at a non-directory) —
-///   names the link and says it leads nowhere, rather than repeating the OS's "file already exists";
-/// - an ordinary **file** already occupying the name — says so plainly, distinct from the link case;
-/// - anything else (most commonly an unwritable parent) — the path plus the OS's own message, which is
-///   accurate once it is not being misapplied to a link.
+/// - a **dangling** link at `out_dir` (the measured case) — names the link and says it leads nowhere,
+///   rather than repeating the OS's "file already exists";
+/// - a **live** link at `out_dir` pointing at a non-directory — a second, resolving `metadata` read tells
+///   these two link shapes apart, because they need different advice: a dangling link's target must be
+///   *repaired*, but a live link pointing at a file is pointing somewhere real and must be *repointed*.
+///   Reviewer-caught (UAT, PR #930): the first cut of this function matched on "is a symlink" alone and
+///   told a live link-to-a-file to "repair the link's target" — which is false; the link is not broken,
+///   it just does not lead to a folder. A link resolving to a *directory* is not reachable here at all
+///   (`create_dir_all` would have already succeeded through it), so that non-case and any other resolve
+///   outcome this second read cannot classify fall through to the honest generic wording below rather
+///   than asserting a third claim about a case nothing here actually confirmed;
+/// - an ordinary **file** already occupying the name (no link involved at all) — says so plainly, distinct
+///   from both link cases;
+/// - anything else (most commonly an unwritable parent, but also ENOSPC, a too-long path, an invalid
+///   name, a vanished network mount, or a race) — never guessed at: the path plus the OS's own message,
+///   which is accurate once it is not being misapplied to a link.
 fn out_dir_error(out_dir: &Path, e: std::io::Error) -> String {
     let path = out_dir.display();
+    let unclassified = |e: &std::io::Error| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "the output folder \"{path}\" could not be created: permission denied — check that you \
+                 can write to that location, or to one of its parent folders"
+            )
+        } else {
+            format!("the output folder \"{path}\" could not be created: {e}")
+        }
+    };
     match std::fs::symlink_metadata(out_dir) {
-        Ok(meta) if meta.file_type().is_symlink() => format!(
-            "\"{path}\" is a link, and it leads nowhere — the output folder cannot be created there. The \
-             OS reports \"{e}\", which sends you to delete a file that does not exist; what exists at that \
-             name is the link. Repair the link's target, or split into a different folder"
-        ),
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::metadata(out_dir) {
+            Err(target_err) if target_err.kind() == std::io::ErrorKind::NotFound => format!(
+                "\"{path}\" is a link, and it leads nowhere — the output folder cannot be created there. \
+                 The OS reports \"{e}\", which sends you to delete a file that does not exist; what exists \
+                 at that name is the link. Repair the link's target, or split into a different folder"
+            ),
+            Ok(target_meta) if !target_meta.is_dir() => format!(
+                "\"{path}\" is a link that points at a file, not a folder — the output folder cannot be \
+                 created there. Repoint the link at a folder, or split into a different folder"
+            ),
+            _ => unclassified(&e),
+        },
         Ok(meta) if !meta.is_dir() => format!(
             "\"{path}\" already exists as a file, not a folder — split into a different folder, or remove \
              the file at that name"
         ),
-        _ if e.kind() == std::io::ErrorKind::PermissionDenied => format!(
-            "the output folder \"{path}\" could not be created: permission denied — check that you can \
-             write to that location, or to one of its parent folders"
-        ),
-        _ => format!("the output folder \"{path}\" could not be created: {e}"),
+        _ => unclassified(&e),
     }
 }
 
@@ -1009,6 +1033,63 @@ mod tests {
             err.contains(&out_dir.display().to_string()),
             "the message must name the path even when the cause is an unwritable parent, not just \
              something occupying out_dir's own name: {err}"
+        );
+    }
+
+    /// **Reviewer-caught, UAT on PR #930.** The first cut of `out_dir_error` matched on "is a symlink"
+    /// alone, so a **live** link at `out_dir` pointing at an existing file got the *dangling*-link wording
+    /// verbatim — "leads nowhere", "repair the link's target" — which is false: the link resolves fine, it
+    /// just does not resolve to a folder. This pins the corrected wording: it must name "file", and must
+    /// NOT claim the link leads nowhere or tell the user to repair a target that is not broken.
+    #[test]
+    fn cpe_1729_live_link_to_a_file_says_file_not_leads_nowhere() {
+        let d = scratch("cpe1729-live-file-link");
+        let _cleanup = RemoveOnDrop(d.clone());
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+
+        let real_file = d.join("real.txt");
+        std::fs::write(&real_file, b"an ordinary file, not a folder").unwrap();
+        let out_dir = d.join("outs");
+
+        // No pre-existing helper makes a LIVE **file** symlink cross-platform: `make_dir_link` (reused
+        // above via `deny_dir_traversal`'s neighbours) is directory-only, and unlike the dangling case
+        // there is no privilege-free junction fallback for a file symlink on Windows — `junction::create`
+        // only targets directories. So this is a bare `symlink_file`/`symlink`, matching the inline
+        // pattern already used the same way at several sites in `fsutil.rs`'s own tests (e.g. the
+        // `symlink_file(&real, &link)` calls), staged and then *verified*, never assumed.
+        fn make_live_file_link(target: &Path, link: &Path) -> bool {
+            #[cfg(windows)]
+            let made = std::os::windows::fs::symlink_file(target, link).is_ok();
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink(target, link).is_ok();
+            made && std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+        }
+
+        if !make_live_file_link(&real_file, &out_dir) {
+            crate::skip_notice!(
+                "[CPE-1729] SKIPPED the live-link-to-a-file wording leg: no file symlink could be created \
+                 at {} on this machine (needs Developer Mode or elevation on Windows, and there is no \
+                 non-privileged fallback for a FILE symlink the way a junction covers a directory one). \
+                 NOTHING in this test covered the live-link-to-a-file message on this run.",
+                out_dir.display()
+            );
+            return;
+        }
+
+        let err = split_file(&src, 128, &out_dir).expect_err("a live link to a file must still refuse");
+        assert!(
+            err.contains(&out_dir.display().to_string()),
+            "the message must name the path: {err}"
+        );
+        assert!(
+            err.contains("file"),
+            "a live link that resolves to a file must say so: {err}"
+        );
+        assert!(
+            !err.contains("leads nowhere") && !err.contains("Repair the link's target"),
+            "the link resolves fine — it must NOT be told it leads nowhere or to repair a target that \
+             isn't broken, the bug the Reviewer caught in PR #930: {err}"
         );
     }
 
