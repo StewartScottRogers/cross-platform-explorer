@@ -3,11 +3,11 @@ id: CPE-1715
 title: unique_target and resolve_conflict treat a dangling link as a free name, so a move renames onto it
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-13
-closed:
+closed: 2026-08-17
 ---
 
 Related: **CPE-1710** — the sibling half of this hazard, already fixed. It closed the sites that
