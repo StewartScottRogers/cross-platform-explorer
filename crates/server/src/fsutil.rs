@@ -694,10 +694,27 @@ pub fn create_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
 /// ```
 ///
 /// With the mode on the `openat` there is no window at all: the file is never, for any instant, more
-/// open than `0600`, and `carry_protections`' `fchmod` only ever *widens* it to whatever the user's own
-/// file actually had. Note this is deliberately **more** restrictive than the eventual mode during
-/// staging rather than equal to it — narrowing first and widening later is the only order that has no
-/// gap, since the target's mode is not known until after the file exists.
+/// open than `0600`. What [`carry_protections`]'s `fchmod` does to that birth mode next depends on what,
+/// if anything, sat at the target name — three cases, all pinned by CPE-1755's tests
+/// (`cpe_1755_a_0644_target_widens_the_staged_file_from_its_0600_birth_mode`,
+/// `cpe_1755_a_0400_target_narrows_the_staged_file_from_its_0600_birth_mode`,
+/// `cpe_1755_a_brand_new_name_lands_at_the_0600_staging_birth_mode_not_the_platform_default`):
+///
+/// - An existing `0644` target **widens** it, `0600 → 0644`. This is the case the pre-CPE-1755 wording
+///   here only described — "only ever widens" — which is where the next two cases correct it.
+/// - An existing `0400` target **narrows** it, `0600 → 0400`: `carry_protections`' `fchmod` takes the
+///   owner-write bit *away*, because it copies the target's mode exactly rather than only adding to the
+///   birth mode. "Widens" was never true in general — it happened to hold for every case CPE-1739 itself
+///   exercised (a `0600` secret staying `0600`, a `0755` script gaining bits), but a locked-down `0400`
+///   target falsifies it.
+/// - **No target at all** — `existing` is `None`, so `carry_protections` never runs, and the file is
+///   never touched again: it stays at `0600`, full stop. See the `else` of the `carry_protections` call
+///   in [`stage_and_replace`] for why that is the recorded, deliberate answer and not an accident of
+///   `None` skipping a branch (CPE-1755).
+///
+/// Note the birth mode is deliberately **more** restrictive than the eventual mode during staging rather
+/// than equal to it — narrowing first and widening later is the only order that has no gap, since the
+/// target's mode is not known until after the file exists.
 const STAGING_MODE: u32 = 0o600;
 
 /// The staging opener [`stage_and_replace`] actually calls, one line above the call site with nothing
@@ -770,6 +787,28 @@ fn stage_and_replace(path: &Path, bytes: &[u8]) -> Result<(), String> {
                 return Err(e);
             }
         }
+        // CPE-1755, THE RECORDED DECISION: no `else` here on purpose. `existing` is `None` for a save to
+        // a brand-new name (Save-As, or any free-name write nothing has ever occupied), so there is
+        // nothing to carry and the staged file is left exactly as `create_staging_file` made it — at
+        // `STAGING_MODE`, `0600` — all the way to the rename. Every OTHER file-creating path in this app
+        // (`create_exclusive`, used by `split_join`'s joined output and manifest) takes the platform
+        // default `0666 & ~umask` instead, so this is a deliberate, narrow exception, not an oversight:
+        //   - Chosen over matching the platform default because a private mode is the safer of the two
+        //     defensible answers for a file this app is writing on the user's behalf, and because the
+        //     staging file is already sitting at `0600` for CPE-1739's reasons — leaving it there costs
+        //     nothing, while widening it would mean deriving "the platform default" after the fact, which
+        //     on Unix means calling `umask(2)` — the ONLY way POSIX exposes the umask is by atomically
+        //     SETTING it and reading back the old value, a global, process-wide, thread-unsafe side effect
+        //     for a process that may be juggling other concurrent saves, in exchange for matching a default
+        //     this path does not even reach today.
+        //   - Low-stakes to get "wrong": `metadata_write_impl` always reads the target before writing, so
+        //     the target exists and this branch cannot run from there, and `write_file_text`'s Save-As does
+        //     not call this function at all. The free-name path is only reachable from tests today
+        //     (`cpe_1739_a_save_to_a_free_name_still_creates_the_file`,
+        //     `cpe_1755_a_brand_new_name_lands_at_the_0600_staging_birth_mode_not_the_platform_default`).
+        // If a future caller wants a brand-new file at the platform default instead of `0600`, that is
+        // what [`create_exclusive`] is for — this function's contract is now that a save through it never
+        // hands back a file wider than `0600` unless something existed at the name to widen it from.
         if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
             drop(f);
             let _ = std::fs::remove_file(&tmp);
@@ -3567,6 +3606,120 @@ mod tests {
         assert_eq!(carried_mode(0o102_755, 0, 1000), 0o755, "nor setgid");
         assert_eq!(carried_mode(0o101_777, 0, 1000), 0o1777, "but the sticky bit still travels");
         assert_eq!(carried_mode(0o100_600, 0, 1000), 0o600, "and an ordinary private file is untouched by this");
+    }
+
+    // ---- CPE-1755: the three cases STAGING_MODE's doc now describes, each measured on real IO -----
+    //
+    // Every test here arms its cleanup with a `Drop` guard BEFORE the assertion that can panic, so a red
+    // run (which this repo requires proving, not just a green one) still removes its scratch directory —
+    // the pattern `split_join.rs`/`dispatch.rs` already use, chosen over a trailing `remove_dir_all` that
+    // a panicking assertion would skip.
+
+    /// **CPE-1755, case 1: widen.** A `0644` target must come back `0644` — `carry_protections`'
+    /// `fchmod` opens the staging file's `0600` birth mode back out to match. This is the one case the
+    /// pre-CPE-1755 doc on [`STAGING_MODE`] actually described ("only ever widens").
+    ///
+    /// Mutation check (run manually, not left in the tree): commenting out the `set_permissions` call
+    /// inside `carry_protections` reds this test — see the Work Log for the actual red output.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1755_a_0644_target_widens_the_staged_file_from_its_0600_birth_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("cpe1755-widen");
+        struct Cleanup<'a>(&'a Path);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(self.0);
+            }
+        }
+        let _cleanup = Cleanup(&d);
+
+        let p = d.join("readme.txt");
+        std::fs::write(&p, b"old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let r = replace_file_contents(&p, b"new");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode, 0o644,
+            "a 0644 target must come back 0644, not stay at the staging file's 0600 birth mode \
+             (save result: {r:?})"
+        );
+        r.expect("the save itself must succeed");
+    }
+
+    /// **CPE-1755, case 2: narrow — the case [`STAGING_MODE`]'s doc got wrong before this ticket.** A
+    /// `0400` target must come back `0400`: the staging file is BORN `0600` (CPE-1739) and
+    /// `carry_protections`' `fchmod` copies the target's mode exactly, which here means taking the
+    /// owner-write bit AWAY, not adding to what the file already has. "Only ever widens" was never a
+    /// general truth — it happened to hold for every case CPE-1739 itself measured — and this is the
+    /// target that falsifies it.
+    ///
+    /// Mutation check (run manually, not left in the tree): same as the widen test above — commenting
+    /// out `carry_protections`' `set_permissions` call reds this one too, since the file then stays at
+    /// its `0600` birth mode instead of narrowing to `0400`. See the Work Log for the red output.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1755_a_0400_target_narrows_the_staged_file_from_its_0600_birth_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("cpe1755-narrow");
+        struct Cleanup<'a>(&'a Path);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(self.0);
+            }
+        }
+        let _cleanup = Cleanup(&d);
+
+        let p = d.join("readonly.txt");
+        std::fs::write(&p, b"old").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o400)).unwrap();
+
+        let r = replace_file_contents(&p, b"new");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode, 0o400,
+            "a 0400 target must come back 0400 — narrower than the staging file's own 0600 birth mode \
+             (save result: {r:?})"
+        );
+        r.expect("the save itself must succeed");
+    }
+
+    /// **CPE-1755, case 3: no target at all — the recorded decision.** `existing` is `None` for a save
+    /// to a brand-new name, so `carry_protections` never runs and the file is deliberately left at the
+    /// staging file's `0600` birth mode rather than widened to the platform's `0666 & ~umask` default —
+    /// see the `else` of the `carry_protections` call in [`stage_and_replace`] for the full reasoning.
+    /// This route is currently unreachable from production (`metadata_write_impl` always finds an
+    /// existing target; Save-As does not call this function), but the free-name path is directly
+    /// reachable from this test and from `cpe_1739_a_save_to_a_free_name_still_creates_the_file`, so the
+    /// mode it lands at is pinned here rather than left as an unchecked accident of `None` skipping a
+    /// branch.
+    ///
+    /// Mutation check (run manually, not left in the tree): widening the staged file unconditionally
+    /// when `existing` is `None` (simulating "match the platform default instead") reds this test — see
+    /// the Work Log for the red output.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1755_a_brand_new_name_lands_at_the_0600_staging_birth_mode_not_the_platform_default() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("cpe1755-free-name");
+        struct Cleanup<'a>(&'a Path);
+        impl Drop for Cleanup<'_> {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(self.0);
+            }
+        }
+        let _cleanup = Cleanup(&d);
+
+        let p = d.join("brand-new.json");
+        let r = replace_file_contents(&p, b"{}");
+        let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(
+            mode, 0o600,
+            "a save to a free name has nothing to carry and must stay at the staging file's 0600 birth \
+             mode (CPE-1755's recorded decision); save result: {r:?}"
+        );
+        r.expect("the save itself must succeed");
     }
 
     /// **CPE-1738, the pure decision, as a truth table.** Split out from [`sweep_stale_temp_siblings`]
