@@ -249,7 +249,8 @@ jobs:
           # this WILL happen again; when it does, the first error line should say so.
           fetch() {
             url="$1"; out="$2"
-            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url" || echo 000)
+            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url") || true
+            code="${code:-000}"
             if [ "$code" != "200" ]; then
               echo "::error::download failed (HTTP $code): $url"
               echo "::error::If this is a BtbN ffmpeg URL, the pinned autobuild has been deleted upstream -"

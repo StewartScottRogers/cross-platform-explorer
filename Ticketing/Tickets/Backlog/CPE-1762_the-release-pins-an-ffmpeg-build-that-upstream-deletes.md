@@ -122,3 +122,40 @@ actually missing against the acceptance criteria:
 
 No re-pin churn, no scope creep beyond the acceptance criteria. Diff is comment-only plus the missing
 long-term-reasoning block — 15 insertions / 3 deletions in `.github/workflows/release-sidecar.yml`.
+
+## Work Log addendum (2026-08-17, UAT fix round)
+
+UAT on the PR caught a real defect squarely inside this ticket's own acceptance criterion: on a DNS
+failure or refused connection, the guard printed `HTTP 000000` — two `000`s concatenated — instead of a
+plausible status. Root cause at `.github/workflows/release-sidecar.yml` (the `fetch()` helper): `curl
+--write-out '%{http_code}'` already writes `000` to stdout on a connection-level failure, and the
+`|| echo 000` fallback then appended a *second* `000` into the same command substitution, since curl's
+own exit code was nonzero even though it had already printed a value. `$code` ended up as the
+concatenation `000000`.
+
+Fixed by separating "did curl fail" from "what did curl report":
+
+```sh
+code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url") || true
+code="${code:-000}"
+```
+
+`|| true` stops `set -euo pipefail` from aborting on curl's nonzero exit while still capturing whatever
+curl already printed; `${code:-000}` only substitutes `000` if curl printed *nothing at all* (a case
+that shouldn't happen with `--write-out` but is a safe default). No more double-000 concatenation.
+
+Extracted the patched `fetch()` verbatim (same `code=$(...)`/conditional lines) into a standalone
+script and ran it against four cases:
+
+- Known-dead pin (`autobuild-2026-08-01-13-21`, linux64 asset) → `::error::download failed (HTTP 404): <url>` — as before, unaffected by this fix.
+- `https://this-host-does-not-exist-cpe1762.invalid/x.tar.xz` (DNS failure, curl error 6) → `::error::download failed (HTTP 000): <url>` — exactly three zeros, confirmed.
+- `http://127.0.0.1:1/x.tar.xz` (connection refused, curl error 7) → `::error::download failed (HTTP 000): <url>` — exactly three zeros, confirmed.
+- Live URL (`autobuild-2026-08-15-13-02` win64 zip, still HTTP 200 as of this check) → succeeds, exit 0 — confirms the guard is still a discriminator and doesn't fail closed on everything.
+
+All four real outputs captured above verbatim from the terminal.
+
+Re-confirmed `python -c "import yaml,sys; yaml.safe_load(open('.github/workflows/release-sidecar.yml'))"` → OK after the fix.
+
+Deliberately did **not** add a content-type/magic-byte check for a 200-with-HTML-body — Foreman flagged
+that as a real residual risk but explicitly out of scope for this ticket and filed separately. Stayed
+in scope: this addendum only touches the `code=$(...)` line and its immediate default.
