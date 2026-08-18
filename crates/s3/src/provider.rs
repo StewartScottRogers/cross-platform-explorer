@@ -5273,23 +5273,26 @@ mod tests {
         let mut provider = S3Provider::connect(&cfg(&base));
         std::fs::write(root.join("a.txt"), b"a").unwrap();
 
-        let err = provider
-            .rename("/a.txt", "/b.txt")
-            .expect_err("S3 has no rename; a copy+delete emulation must not be attempted");
+        let outcome = provider.rename("/a.txt", "/b.txt");
+
+        // Assert on the harm BEFORE unwrapping the Result: if the guard ever answers `Ok`, the run must
+        // still reach these and red on the damage, not stop at `expect_err`.
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            0,
+            "rename reached the network — refusing means refusing: no CopyObject PUT and no DELETE may be \
+             issued, because a delete that fails after a successful copy silently leaves two objects \
+             (outcome was {outcome:?})"
+        );
+        assert!(root.join("a.txt").is_file(), "the source object must be untouched (outcome was {outcome:?})");
+        assert!(!root.join("b.txt").exists(), "no destination object may have been created (outcome was {outcome:?})");
+
+        let err = outcome.expect_err("S3 has no rename; a copy+delete emulation must not be attempted");
         assert!(err.contains("no rename"), "the error must name S3's lack of a rename: {err}");
         assert!(
             err.contains("not atomic"),
             "the error must say why the emulation is refused, not just that it is: {err}"
         );
-
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            0,
-            "rename reached the network — refusing means refusing: no CopyObject PUT and no DELETE may be \
-             issued, because a delete that fails after a successful copy silently leaves two objects"
-        );
-        assert!(root.join("a.txt").is_file(), "the source object must be untouched");
-        assert!(!root.join("b.txt").exists(), "no destination object may have been created");
 
         assert!(
             !provider.capabilities().supports_rename,
@@ -5307,7 +5310,20 @@ mod tests {
         provider.write("/photos/2024/a.jpg", b"a").unwrap();
         provider.write("/photos/2024/b.jpg", b"b").unwrap();
 
-        let err = provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        // Assert on what the user still has BEFORE unwrapping the Result: if the guard ever answers
+        // `Ok`, the run must still reach these and red on the damage, not stop at `expect_err`.
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "a.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+        assert!(
+            root.join("photos/2024/b.jpg").is_file(),
+            "b.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "S3 answers 204 to a DELETE of a key that never existed, so a single-key delete of a \
              directory prefix would report success while the whole subtree stayed put",
         );
@@ -5315,10 +5331,6 @@ mod tests {
             err.contains("recursive"),
             "the error must name the missing capability, not just fail: {err}"
         );
-
-        // Assert on what the user still has, not on the `Result`.
-        assert!(root.join("photos/2024/a.jpg").is_file(), "a.jpg was deleted by a refused delete");
-        assert!(root.join("photos/2024/b.jpg").is_file(), "b.jpg was deleted by a refused delete");
     }
 
     #[test]
@@ -5380,12 +5392,18 @@ mod tests {
         std::fs::write(root.join("photos/2024/.s3marker"), b"").unwrap();
         std::fs::write(root.join("photos/2024/a.jpg"), b"a").unwrap();
 
-        let err = provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "the content was deleted anyway (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "a server that returned only the marker on the first page must not be read as an empty \
              directory — IsTruncated said there was more",
         );
         assert!(err.contains("recursive"), "{err}");
-        assert!(root.join("photos/2024/a.jpg").is_file(), "the content was deleted anyway");
     }
 
     /// **The sharpest bug the round-2 UAT found, and it was mine.** `probe_prefix` reported "real
@@ -5419,20 +5437,22 @@ mod tests {
         assert_eq!(entries.len(), 0, "precondition: the filtered leaf must not be surfaced");
         assert_eq!(filtered, 1, "precondition: it must be counted as filtered, not vanish");
 
-        let err = provider.delete("/photos").expect_err(
+        let outcome = provider.delete("/photos");
+
+        // Assert on what the user still has BEFORE unwrapping: the marker must NOT have been deleted,
+        // because deleting it is what makes the folder disappear while the object stays.
+        assert!(
+            root.join("photos/.s3marker").is_file(),
+            "the marker was deleted by a refused delete — the folder would vanish from listings while \
+             the object underneath it survived (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "the prefix holds a real object that `list` merely refuses to display — deleting the marker \
              and reporting success would tell the user a folder was removed while its contents survive, \
              now unreachable through the UI",
         );
         assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
-
-        // Assert on what the user still has: the marker must NOT have been deleted, because deleting it
-        // is what makes the folder disappear while the object stays.
-        assert!(
-            root.join("photos/.s3marker").is_file(),
-            "the marker was deleted by a refused delete — the folder would vanish from listings while \
-             the object underneath it survived"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -5460,10 +5480,18 @@ mod tests {
         std::fs::write(root.join("photos/a.jpg"), b"jpeg").unwrap();
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider
-            .delete("/photos/gone.jpg")
-            .expect_err("the directory check cannot run and no HEAD proves an object, so the delete must \
-                         be refused, not guessed");
+        let outcome = provider.delete("/photos/gone.jpg");
+
+        // Assert on what the user still has BEFORE unwrapping the Result.
+        assert!(
+            root.join("photos/a.jpg").is_file(),
+            "a refused delete removed the object anyway (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "the directory check cannot run and no HEAD proves an object, so the delete must \
+             be refused, not guessed",
+        );
 
         assert!(
             !err.starts_with("s3: \"photos/gone.jpg/\""),
@@ -5483,9 +5511,6 @@ mod tests {
             err.contains("nothing has been deleted"),
             "a user reading a failed delete needs to know whether anything happened: {err}"
         );
-
-        // Assert on what the user still has, not on the `Result`.
-        assert!(root.join("photos/a.jpg").is_file(), "a refused delete removed the object anyway");
     }
 
     /// **CPE-1727 item 1, the operation this family of tickets is about.** A credential holding
@@ -5668,13 +5693,21 @@ mod tests {
         std::fs::write(root.join("photos/2024/b.jpg"), b"b").unwrap();
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "a.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+        assert!(
+            root.join("photos/2024/b.jpg").is_file(),
+            "b.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+
+        outcome.expect_err(
             "falling back to an un-probed single-key DELETE here would return 204 and report a whole \
              subtree removed while every object in it stayed put",
         );
-
-        assert!(root.join("photos/2024/a.jpg").is_file(), "a.jpg was deleted by a refused delete");
-        assert!(root.join("photos/2024/b.jpg").is_file(), "b.jpg was deleted by a refused delete");
     }
 
     /// `stat`'s half of the same fix. On AWS proper this is mostly masked — without `s3:ListBucket` a HEAD
