@@ -205,6 +205,59 @@ pub fn classify_symlink_slot(stat: &std::io::Result<bool>, target: &Path) -> Opt
     }
 }
 
+/// **CPE-1715.** Probe a name-picking candidate the caller intends to *advance past* on collision, not
+/// refuse at — the sibling of [`symlink_slot_refusal`] for a loop such as `unique_target` or
+/// `resolve_conflict` (both `src-tauri`), whose whole job is to pick a *different* name, so a refusal is
+/// the wrong verdict for them.
+///
+/// [`Path::try_exists`] follows symlinks, so a name occupied by a **dangling** link answers `Ok(false)` —
+/// correctly, to the question it was asked — and a caller that stops there reads that as "this name is
+/// free". A `fs::rename`/`fs::copy` onto that name does not follow the final path component, so it
+/// destroys the link (or, for a live one, writes through it).
+///
+/// When `try_exists` says "nothing resolves here", this additionally takes a [`std::fs::symlink_metadata`]
+/// reading of the **same** candidate — which does not follow the final component, so it sees a dangling
+/// link that `try_exists` stepped straight through — and folds a successful stat there into `Ok(true)`
+/// (occupied), same as `try_exists` itself would answer for an ordinary occupied name.
+///
+/// **Deliberately broader than "is it a link".** The stat's payload is discarded (`.map(|_| true)`): *any*
+/// entry `symlink_metadata` can see but `try_exists` could not resolve counts as occupied, not only a
+/// symlink. Two routes reach that with something other than a link sitting there: a TOCTOU race (a plain
+/// file created between the two stats), and a non-symlink reparse point — a cloud-storage placeholder or a
+/// dedup stub — whose `file_type().is_symlink()` can read `false` while `try_exists`'s underlying stat
+/// still resolves it as absent. A version of this probe that fed [`classify_link_presence`] the narrower
+/// `is_symlink()` bit would answer `Free` for exactly that entry, which is the same "provably nothing
+/// there" mistake this whole ticket exists to close, just for a rarer trigger. Only a confirmed
+/// `NotFound` — nothing at all, of any kind, at that name — is allowed through as free.
+pub fn name_pick_slot_probe(candidate: &Path) -> std::io::Result<bool> {
+    match candidate.try_exists() {
+        Ok(false) => classify_link_presence(std::fs::symlink_metadata(candidate).map(|_| true)),
+        other => other,
+    }
+}
+
+/// The pure half of [`name_pick_slot_probe`]'s fallback check, split out — the same reason
+/// [`classify_target_slot`] and [`classify_symlink_slot`] are split from their callers — so the
+/// dangling-link arm, which only reproduces with a real filesystem entry, is unit-testable without
+/// touching disk. `is_link` is a [`std::fs::symlink_metadata`] outcome reduced to a `bool`, matching the
+/// shape [`classify_symlink_slot`] uses — [`name_pick_slot_probe`] always passes `true` on a successful
+/// stat (see its doc comment for why), but this function is kept general so a future caller that legitimately
+/// has an `is_symlink()` bit, rather than a bare "did the stat succeed", can still use the same taxonomy.
+///
+/// A link — dangling or live — occupies its slot (`Ok(true)`). A confirmed absence agrees with the
+/// `try_exists` probe that produced it (`Ok(false)`), including the explicit `NotFound` case (mirroring
+/// `classify_target_slot`'s own `NotFound` handling). Any other stat failure cannot prove the slot free, so
+/// it is threaded through as `Err` — `classify_target_slot` folds that into [`TargetSlot::Unknown`], the
+/// same "cannot tell, so not free" verdict an unreadable slot already gets.
+pub fn classify_link_presence(is_link: std::io::Result<bool>) -> std::io::Result<bool> {
+    match is_link {
+        Ok(true) => Ok(true),
+        Ok(false) => Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// **The one guard for a slot that is about to be `fs::rename`d onto** (CPE-1710): both
 /// [`clobber_refusal`] and [`symlink_slot_refusal`], in the order the two sites that got it right already
 /// used, as a single call that cannot be half-applied.
@@ -4382,6 +4435,30 @@ mod tests {
             );
             assert!(!msg.contains("what is at"), "the clipped wording must never return: {msg}");
         }
+    }
+
+    /// CPE-1715: the pure decision [`name_pick_slot_probe`] folds in when `try_exists` alone said "free".
+    /// No disk touched, so every arm — including the one that only reproduces with a real filesystem
+    /// symlink — is verifiable on every OS and CI account.
+    #[test]
+    fn classify_link_presence_treats_any_link_as_occupied_and_only_notfound_as_free() {
+        assert!(
+            classify_link_presence(Ok(true)).unwrap(),
+            "a link -- dangling or live -- occupies its slot"
+        );
+        assert!(
+            !classify_link_presence(Ok(false)).unwrap(),
+            "confirmed non-link agrees with the try_exists probe that produced it"
+        );
+        assert!(
+            !classify_link_presence(Err(std::io::Error::from(std::io::ErrorKind::NotFound))).unwrap(),
+            "an explicit NotFound is a genuine absence -- matches classify_target_slot's own NotFound arm"
+        );
+        assert!(
+            classify_link_presence(Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))).is_err(),
+            "a slot we could not even check whether it holds a link must not collapse into Ok(false) -- \
+             that is the exact stat-collapse CPE-1696 already fixed for the other half of this probe"
+        );
     }
 
     /// CPE-1718: the create-shaped classifier, arm by arm. Pure, so the `Ok(true)` arm — the one an

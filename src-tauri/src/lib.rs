@@ -502,6 +502,21 @@ fn copy_target_is_free(stat: std::io::Result<bool>) -> bool {
     classify_copy_target(stat) == TargetSlot::Free
 }
 
+/// **CPE-1715.** Probe a name-picking candidate, folding the dangling-link hazard into the same
+/// `try_exists`-shaped result [`classify_copy_target`]/[`copy_target_is_free`] already read — a change to
+/// their *input*, not a second guard bolted in front of the eventual `fs::rename`/`fs::copy`.
+///
+/// Thin one-line alias over [`cpe_server::fsutil::name_pick_slot_probe`] (see its doc comment for the full
+/// rationale, including why the fallback check is broader than "is it a link"). The real implementation
+/// moved there under review — it is character-for-character the same shape as
+/// `cpe_server::fsutil::symlink_slot_refusal`'s stat expression, and CPE-1705's own doc comment says why a
+/// fourteenth copy of "is this slot free?" logic must not live in the app adapter: *"twelve copies of the
+/// same check is how the thirteenth gets missed."* This alias exists only so this module's two call sites
+/// and its CPE-1715 tests read unchanged.
+fn probe_name_pick_slot(candidate: &Path) -> std::io::Result<bool> {
+    cpe_server::fsutil::name_pick_slot_probe(candidate)
+}
+
 /// How many candidate slots in a row may come back [`TargetSlot::Unknown`] before [`unique_target`]
 /// stops probing (CPE-1696).
 ///
@@ -549,7 +564,7 @@ fn unique_target(dir: &Path, file_name: &str) -> PathBuf {
             1 => build(" - Copy"),
             _ => build(&format!(" - Copy ({n})")),
         };
-        match classify_copy_target(candidate.try_exists()) {
+        match classify_copy_target(probe_name_pick_slot(&candidate)) {
             TargetSlot::Free => return candidate,
             TargetSlot::Occupied => unknown_run = 0,
             TargetSlot::Unknown => {
@@ -2599,9 +2614,10 @@ fn do_move_into(ctx: &dyn ServerCtx, src: &Path, dest_dir: &Path) -> Result<Path
     let target = unique_target(dest_dir, file_name);
     // CPE-1710: NOT `rename_into_slot`. `unique_target` has already *picked* a name it believes is free,
     // so the paired guard's occupancy half would refuse the name this function just chose. The residual
-    // hazard is real and is **CPE-1715**: `unique_target`'s probe follows links, so a dangling link reads
-    // as a free name and this rename destroys it. Fixing it means teaching the name-picker to treat a link
-    // slot as occupied — a different change from a refusal, which is why it is its own ticket.
+    // hazard — `unique_target`'s probe following links, so a dangling link read as a free name and this
+    // rename destroyed it — is closed at the source: `unique_target` (via `probe_name_pick_slot`) now
+    // treats a link slot as occupied and advances past it, rather than this site refusing the name
+    // `unique_target` already committed to (CPE-1715).
     #[allow(clippy::disallowed_methods)]
     if fs::rename(src, &target).is_ok() {
         let _ = cpe_server::tags::retag(ctx, &src.to_string_lossy(), &target.to_string_lossy());
@@ -2985,7 +3001,13 @@ fn resolve_conflict(
     // straight onto a path it could not prove was empty. An unknown now counts as occupied, which routes
     // it into the policy arms rather than past them: `Skip` skips it, `Keepboth` picks a different name
     // via `unique_target`, and `Overwrite` is the one case the user explicitly asked for.
-    if copy_target_is_free(base_target.try_exists()) {
+    //
+    // CPE-1715: `base_target.try_exists()` alone still followed a dangling link straight through to
+    // `Ok(false)` ("free"), so `Skip`/`Keepboth` were bypassed entirely and the caller's rename/copy
+    // landed on the link. `probe_name_pick_slot` folds the link check into this same probe, so a link slot
+    // — dangling or live — now reads as occupied here too, and only `Overwrite` (which the user chose
+    // explicitly) ever touches it.
+    if copy_target_is_free(probe_name_pick_slot(base_target)) {
         return Ok(Some(base_target.to_path_buf()));
     }
     match policy {
@@ -3008,14 +3030,25 @@ fn resolve_conflict(
             // sibling's deliberate fail-closed, and it omitted the `starts_with` half entirely.
             //
             // The precondition holds here: `contained_under` returns `Ok` for a path that doesn't
-            // resolve, which is sound only for a target about to be REMOVED, and this arm is reached
-            // only after `base_target.exists()` returned true above.
+            // resolve, which is sound only for a target about to be REMOVED — and this arm is now ALSO
+            // reached for a slot that does not resolve at all: an Unknown (CPE-1696) or a dangling link
+            // (CPE-1715), for which `contained_under` is vacuously `Ok`. That is sound here and only here:
+            // a path that resolves to nothing cannot resolve onto `dest_dir` either, and the arm's only
+            // action is removal.
             cpe_server::fsutil::contained_under(base_target, dest_dir)
                 .map_err(|e| format!("refusing to overwrite: {e}"))?;
             if base_target.is_dir() {
                 let _ = fs::remove_dir_all(base_target);
-            } else {
-                let _ = fs::remove_file(base_target);
+            } else if fs::remove_file(base_target).is_err() {
+                // CPE-1715: a dangling *directory* link — the NTFS junction `make_dangling_link` falls
+                // back to when `SeCreateSymbolicLinkPrivilege` is absent, which is what an unprivileged
+                // Windows CI runner stages — reports `is_dir() == false` (that check follows the link, and
+                // nothing resolves), so the branch above is skipped; but `remove_file` then refuses it with
+                // `PermissionDenied` (measured directly: os error 5), because a junction is a directory
+                // reparse point and Windows will not `DeleteFile` one. `remove_dir` removes the reparse
+                // point itself without following it, which is exactly the slot the user authorised
+                // replacing, and it is the call that actually succeeds here.
+                let _ = fs::remove_dir(base_target);
             }
             Ok(Some(base_target.to_path_buf()))
         }
@@ -3240,8 +3273,10 @@ fn run_transfer(
         };
         // Same-volume move: an atomic rename, no byte streaming needed.
         // CPE-1710: `resolve_conflict` above already applied the user's chosen policy to this name, so the
-        // paired guard would refuse the target it just authorised. Same residual hazard as `do_move_into`
-        // — a dangling link reads as a free name — tracked in **CPE-1715**.
+        // paired guard would refuse the target it just authorised. Same fix as `do_move_into`: closed at
+        // the source in `resolve_conflict` itself (via `probe_name_pick_slot`), which now treats a link
+        // slot — dangling or live — as occupied rather than handing it back as a free target for this
+        // rename to land on (CPE-1715).
         #[allow(clippy::disallowed_methods)]
         if kind == TransferKind::Move && fs::rename(src, &target).is_ok() {
             report.transferred += 1;
@@ -15760,6 +15795,236 @@ overlay / overlay rw,relatime 0 0
              refusal"
         );
         let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1715: unique_target / resolve_conflict must treat a link slot -- including a DANGLING one --
+    // as OCCUPIED, never as free (CPE-1710's sibling). Those sites REFUSE at an occupied slot; these two
+    // instead ADVANCE to the next candidate, so a refusal is the wrong verdict here -- the fix is a change
+    // to the classifier's *input*, not a guard.
+    //
+    // `Path::try_exists` follows symlinks, so a dangling link answers `Ok(false)` -- correctly, to the
+    // question it was asked -- and every one of these sites read that as "this name is free". A
+    // `fs::rename`/`fs::copy` onto that name does not follow the final component, so it destroys the link.
+    // Each disk-backed test below asserts on the SLOT (`symlink_metadata(..).is_symlink()`) or the picked
+    // NAME first, never on the returned `Result` alone -- the CPE-1710 lesson: a "successful" result is
+    // exactly what this bug produces.
+    //
+    // (The pure classifier test -- `classify_link_presence`'s taxonomy, no disk touched -- moved to
+    // `cpe_server::fsutil`'s own test module under review, alongside the function itself: PR #924.)
+    //
+    // Every test below arms a `Drop` guard for its scratch dir BEFORE any assertion, not just a trailing
+    // `remove_dir_all` -- a `Drop` is the only cleanup that still runs when an assertion panics, and a
+    // plain call after the assertions never reaches that path. Same requirement, same reason, as the
+    // `Restore` guard in `cpe_server::dispatch`'s and `split_join`'s tests.
+    struct Cpe1715Scratch(PathBuf);
+    impl Drop for Cpe1715Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// `probe_name_pick_slot` itself, on a real dangling link: `try_exists` alone answers "nothing here",
+    /// but the combined probe must answer "occupied".
+    #[test]
+    fn cpe_1715_probe_name_pick_slot_reports_a_dangling_link_as_occupied() {
+        use std::io::Write;
+        let d = scratch("cpe1715_probe");
+        let _clean = Cpe1715Scratch(d.clone());
+        let link = d.join("dangling.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the probe_name_pick_slot dangling-link leg: this machine could not \
+                 create a link at {}. NOTHING in this test covered the classification route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        // The pre-fix probe, side by side: `try_exists` alone genuinely answers "nothing resolves here" --
+        // that is not the bug, it is the fact the bug exploits.
+        assert!(
+            !link.try_exists().unwrap(),
+            "try_exists alone follows the link and correctly sees nothing at the far end"
+        );
+
+        let occupied =
+            probe_name_pick_slot(&link).expect("a dangling link is a readable slot, not a stat failure");
+        assert!(occupied, "the dangling link must read as OCCUPIED, not free");
+    }
+
+    /// [`unique_target`] itself: a dangling link at the bare candidate name must not be handed back as
+    /// free.
+    #[test]
+    fn cpe_1715_unique_target_skips_a_dangling_link_and_picks_the_next_candidate() {
+        use std::io::Write;
+        let d = scratch("cpe1715_unique_target");
+        let _clean = Cpe1715Scratch(d.clone());
+        let link = d.join("report.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the unique_target dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the name-picking route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let picked = unique_target(&d, "report.txt");
+        assert_eq!(
+            picked,
+            d.join("report - Copy.txt"),
+            "a dangling link's slot must be treated as occupied, so the picker must advance past it rather \
+             than hand it back as free"
+        );
+        // unique_target only probes candidates, it never writes -- the slot must be exactly as it was.
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "unique_target must not have touched the link's slot"
+        );
+    }
+
+    /// [`resolve_conflict`]'s `Skip` arm: a dangling link must route into the policy match as occupied,
+    /// not be handed back as a free target that skips the policy entirely.
+    #[test]
+    fn cpe_1715_resolve_conflict_skip_skips_a_dangling_link_instead_of_treating_it_as_free() {
+        use std::io::Write;
+        let d = scratch("cpe1715_resolve_skip");
+        let _clean = Cpe1715Scratch(d.clone());
+        let link = d.join("skip-me.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the resolve_conflict Skip dangling-link leg: this machine could not \
+                 create a link at {}. NOTHING in this test covered the Skip route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let r = resolve_conflict(&link, &d, ConflictPolicy::Skip).expect("Skip never errors");
+        assert!(
+            r.is_none(),
+            "a dangling link must be treated as occupied, so Skip must actually skip it (got {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "and the link itself must be untouched"
+        );
+    }
+
+    /// [`resolve_conflict`]'s `Keepboth` arm: a dangling link must be routed into `unique_target` for a
+    /// different name, not handed straight back as the (occupied) name itself.
+    #[test]
+    fn cpe_1715_resolve_conflict_keepboth_renames_past_a_dangling_link_instead_of_returning_it_as_free() {
+        use std::io::Write;
+        let d = scratch("cpe1715_resolve_keepboth");
+        let _clean = Cpe1715Scratch(d.clone());
+        let link = d.join("keep-me.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the resolve_conflict Keepboth dangling-link leg: this machine could \
+                 not create a link at {}. NOTHING in this test covered the Keepboth route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let r = resolve_conflict(&link, &d, ConflictPolicy::Keepboth)
+            .expect("Keepboth never errors")
+            .expect("Keepboth always finds a target");
+        assert_eq!(
+            r,
+            d.join("keep-me - Copy.txt"),
+            "a dangling link must be treated as occupied, so Keepboth must pick a different name instead \
+             of handing the link's own name back as free"
+        );
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "and the link itself must be untouched"
+        );
+    }
+
+    /// [`resolve_conflict`]'s `Overwrite` arm is the ONE policy allowed to touch the slot -- and it must
+    /// still work, now that the link routes through the same occupied branch as any other collision.
+    /// Exercises the CPE-1715 review's Overwrite fix: on an unprivileged Windows runner
+    /// `make_dangling_link` stages an NTFS junction, whose `is_dir()` follows the (unresolvable) link to
+    /// `false` while `remove_file` refuses it with `PermissionDenied` -- so this must fall back to
+    /// `remove_dir`, or the assertion below reds on CI even though it passes on a box with symlink
+    /// privilege (which only ever exercises the real-symlink leg).
+    #[test]
+    fn cpe_1715_resolve_conflict_overwrite_is_the_only_arm_that_touches_a_dangling_link() {
+        use std::io::Write;
+        let d = scratch("cpe1715_resolve_overwrite");
+        let _clean = Cpe1715Scratch(d.clone());
+        let link = d.join("replace-me.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the resolve_conflict Overwrite dangling-link leg: this machine could \
+                 not create a link at {}. NOTHING in this test covered the Overwrite route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let r = resolve_conflict(&link, &d, ConflictPolicy::Overwrite)
+            .expect("Overwrite never errors on a slot the user explicitly consented to replace")
+            .expect("Overwrite always resolves to a target");
+        assert_eq!(r, link, "Overwrite is the one policy the user explicitly asked to replace the slot with");
+        assert!(
+            fs::symlink_metadata(&link).is_err(),
+            "and, having been explicitly authorised, the link itself must actually be gone"
+        );
+    }
+
+    /// **End to end, through the real `fs::rename`.** [`do_move_into`] is the function CPE-1715's own
+    /// filing names as reached by "the bulk move command and the watch executor". This proves the dangling
+    /// link at the destination SURVIVES a bulk move: asserted on the slot first, exactly as the CPE-1710
+    /// tests above do, because a `Result` that reports success is precisely what this bug produces.
+    #[test]
+    fn cpe_1715_do_move_into_never_renames_onto_a_dangling_link_the_link_survives_a_bulk_move() {
+        use std::io::Write;
+        let d = scratch("cpe1715_move_survives");
+        let _clean = Cpe1715Scratch(d.clone());
+        let src_dir = d.join("src");
+        let dest_dir = d.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(src_dir.join("report.txt"), b"MOVED CONTENT").unwrap();
+        let link = dest_dir.join("report.txt");
+        if !cpe_server::fsutil::make_dangling_link(&link) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1715] SKIPPED the do_move_into dangling-link leg: this machine could not create a \
+                 link at {}. NOTHING in this test covered the survives-a-bulk-move route on this run.",
+                link.display()
+            );
+            return;
+        }
+
+        let ctx = cpe_server::ctx::HeadlessCtx::new(&d);
+        let r = do_move_into(&ctx, &src_dir.join("report.txt"), &dest_dir);
+
+        // The slot first, deliberately: an `unwrap()` here would red on the RESULT, and the whole point of
+        // this bug is that the result looks fine while the link is gone.
+        assert!(
+            fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink()),
+            "the dangling link at the destination was DESTROYED by the bulk move (result was {r:?})"
+        );
+        let landed = r.expect("the move must still succeed onto a non-colliding name");
+        assert_eq!(
+            landed,
+            dest_dir.join("report - Copy.txt"),
+            "unique_target must have advanced past the link's slot rather than handing it back as free"
+        );
+        assert_eq!(fs::read(&landed).unwrap(), b"MOVED CONTENT".to_vec());
+        assert!(
+            !src_dir.join("report.txt").exists(),
+            "the source must actually have moved, to the auto-renamed target"
+        );
     }
 
     // ---- CPE-1716: the metadata save must edit the file the user opened, not replace their link -------
