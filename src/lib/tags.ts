@@ -112,7 +112,7 @@ export function keyToWrite(store: TagStore, path: string): string {
   return path;
 }
 
-/** Strip ONE trailing `/` or `\`, keeping a bare root (`/`, `C:/`, `C:\`) intact. Deliberately NOT
+/** Strip ONE trailing FORWARD SLASH only, keeping a bare root (`/`, `C:/`) intact. Deliberately NOT
  *  `canonicalPath`: this is the only place in the codebase where a normalised form selects the key a
  *  write LANDS on, so it must collapse the trailing separator and nothing else. `canonicalPath` also
  *  rewrites `\` to `/`, and on Linux/macOS a backslash is a legal filename character — so a file
@@ -120,11 +120,19 @@ export function keyToWrite(store: TagStore, path: string): string {
  *  the write would land on whichever the store happened to hold (found by the round-3 review, which
  *  reproduced it). Elsewhere the same collision only mis-toggles a favourite, which is recoverable;
  *  here it would silently overwrite another entry's tags. The trailing slash is the ONLY spelling
- *  difference CPE-1737 introduces, so it is the only one worth collapsing. */
+ *  difference CPE-1737 introduces, so it is the only one worth collapsing.
+ *
+ *  CPE-1754: a trailing BACKSLASH used to be stripped here too, but on Linux/macOS a backslash is a
+ *  legal filename character — so a path whose FINAL character is a backslash (e.g. a POSIX file
+ *  literally named `x\`) is a distinct real path, not a separator, and stripping it collapsed that path
+ *  onto its sibling `x`, sending a tag write to the wrong entry (overwriting it). Windows never needed
+ *  the backslash case here: a real Windows path like `C:\Users\me\docs` has no trailing separator to
+ *  strip, and the bare drive root `C:\` never reaches this branch (its last char `\` no longer matches,
+ *  so it now returns unchanged — same outcome the old regex guard gave it for `C:/`). So narrowing to
+ *  forward-slash-only loses no behaviour this function's one caller (`keyToWrite`) needs. */
 function withoutTrailingSeparator(p: string): string {
   if (p.length < 2) return p;
-  const last = p[p.length - 1];
-  if (last !== "/" && last !== "\\") return p;
+  if (p[p.length - 1] !== "/") return p;
   const rest = p.slice(0, -1);
   // A bare drive root ("C:/") or a POSIX root ("/") keeps its separator — dropping it changes meaning.
   if (/^[A-Za-z]:$/.test(rest)) return p;

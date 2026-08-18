@@ -96,6 +96,37 @@ describe("tags helpers (CPE-636)", () => {
     });
   });
 
+  describe("keyToWrite — CPE-1754 (a trailing backslash is a real POSIX filename char, not a separator)", () => {
+    it("does NOT redirect a path ending in a literal backslash onto its non-backslash sibling", () => {
+      // On Linux/macOS "/home/x\\" and "/home/x" are two distinct, unrelated paths (a backslash is a
+      // legal filename character there). Stripping the trailing backslash before comparing would make
+      // the write land on "/home/x"'s entry — silently overwriting a DIFFERENT file's tags. Assert the
+      // no-redirect outcome by name, not just a string match, so a regression here reads as "redirected"
+      // rather than an opaque toBe failure.
+      const store: TagStore = { "/home/x": { tags: ["the-real-directory"], label: "" } };
+      const written = keyToWrite(store, "/home/x\\");
+      const redirectedOntoSibling = written === "/home/x";
+      expect(redirectedOntoSibling, "keyToWrite redirected a path ending in '\\\\' onto its sibling '/home/x' — a POSIX filename's trailing backslash is being stripped as if it were a separator").toBe(false);
+      expect(written).toBe("/home/x\\");
+    });
+
+    it("still redirects a genuine trailing FORWARD slash (the CPE-1737 remote-listing-row case)", () => {
+      const remoteStore: TagStore = { "sftp://h/srv/sub": { tags: ["x"], label: "" } };
+      expect(keyToWrite(remoteStore, "sftp://h/srv/sub/")).toBe("sftp://h/srv/sub");
+    });
+
+    it("preserves bare roots on all spellings — never strips '/', 'C:/' or 'C:\\\\' down to '' / 'C:'", () => {
+      expect(keyToWrite({}, "/")).toBe("/");
+      expect(keyToWrite({}, "C:/")).toBe("C:/");
+      expect(keyToWrite({}, "C:\\")).toBe("C:\\");
+    });
+
+    it("first-time tagging still returns the caller's path unchanged, including a Windows path", () => {
+      expect(keyToWrite({}, "C:\\Users\\me\\new-folder")).toBe("C:\\Users\\me\\new-folder");
+      expect(keyToWrite({}, "/home/new-file")).toBe("/home/new-file");
+    });
+  });
+
   it("hasTag reports membership per path", () => {
     expect(hasTag(store, "/a/one", "urgent")).toBe(true);
     expect(hasTag(store, "/a/one", "home")).toBe(false);
