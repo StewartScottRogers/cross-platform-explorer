@@ -6873,13 +6873,20 @@
   <TerminalPanel cwd={isHome || archive ? "" : currentPath} on:close={() => (showTerminal = false)} />
 {/if}
 
+<!-- CPE-1708 (Foreman F1): filteredHidden is gated to 0 for Home/archive/smart-folder/
+     structured-search below because none of those views has a real folder listing behind it —
+     loadPath short-circuits Home before loadListing ever runs, and enterArchive/smart-folder/
+     structured-search never call loadPath at all — so a stale count left over from the last real
+     folder must never leak into one of them (it would be a false statement in the status bar,
+     exactly what this ticket exists to remove). Gated HERE, at the single point of consumption,
+     rather than reset in each early-return, so a future early-return can't forget it. -->
 <StatusBar
   {itemCount}
   {totalCount}
   selectedCount={selectedCount(selection)}
   {selectedSize}
   hiddenShown={showHidden}
-  {filteredHidden}
+  filteredHidden={isHome || archive || smartFolder || structuredSearch ? 0 : filteredHidden}
   {notice}
   {noticeIsError}
   {diskFree}

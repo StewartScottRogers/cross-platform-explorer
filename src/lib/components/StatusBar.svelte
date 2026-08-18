@@ -52,6 +52,15 @@
 
   $: diskLabel =
     diskFree !== null && diskTotal !== null ? formatDiskFree(diskFree, diskTotal) : "";
+
+  // CPE-1708 (Foreman F2): hoisted so the SAME sentence backs both the visible (possibly
+  // ellipsis-truncated, see `.filtered-hidden` below) text and the `title` tooltip — the tooltip
+  // additionally appends the "loaded successfully" reassurance, so truncation at a narrow window
+  // never hides either the actual count or the reassurance that the listing didn't fail.
+  $: filteredHiddenText = filteredHidden === 1
+    ? "1 entry was hidden because its name could not be shown safely"
+    : `${filteredHidden} entries were hidden because their names could not be shown safely`;
+  $: filteredHiddenTitle = `${filteredHiddenText} — the folder itself loaded successfully.`;
 </script>
 
 <div class="statusbar">
@@ -75,14 +84,11 @@
 
   {#if filteredHidden > 0}
     <!-- CPE-1708: only ever a status-bar NOTE about the listing, never a synthetic ROW in it (see
-         `filteredHidden`'s doc above for why that distinction is the whole point). -->
-    <span
-      class="filtered-hidden"
-      title="The folder itself loaded successfully — these entries specifically could not be shown."
-    >
-      {filteredHidden === 1
-        ? "1 entry was hidden because its name could not be shown safely"
-        : `${filteredHidden} entries were hidden because their names could not be shown safely`}
+         `filteredHidden`'s doc above for why that distinction is the whole point). `title` carries
+         the SAME sentence (see `filteredHiddenTitle` above) plus the reassurance, so a narrow window
+         truncating the visible text (see `.filtered-hidden` below) never loses either. -->
+    <span class="filtered-hidden" title={filteredHiddenTitle}>
+      {filteredHiddenText}
     </span>
   {/if}
 
@@ -129,8 +135,10 @@
 
   /* CPE-1708: `--accent` is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
      `--danger`, which would read as "this folder failed to load" when it didn't. Same overflow strategy
-     as `.notice` below (CPE-1660): truncate to an ellipsis with the full sentence in the `title` tooltip,
-     so a long count never grows the status bar's fixed height. */
+     as `.notice` below (CPE-1660): truncate to an ellipsis, with the SAME sentence (`filteredHiddenText`
+     above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
+     (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
+     either the count or the reassurance, and the status bar's fixed height never grows for a long count. */
   .filtered-hidden {
     color: var(--accent);
     max-width: 45%;

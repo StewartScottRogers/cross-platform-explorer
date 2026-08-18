@@ -104,4 +104,25 @@ describe("filtered-hidden status-bar note (CPE-1708)", () => {
     // Never implies the LISTING failed — it succeeded; "ok.txt" is right there on screen too.
     expect(screen.queryByText(/fail|error|could not load/i)).toBeNull();
   });
+
+  // Foreman F1 (regression): loadPath short-circuits Home BEFORE loadListing ever runs
+  // (src/App.svelte ~2162-2166 — `entries = []; loading = false; return;`), so neither `loadGen`
+  // nor `filteredHidden` is touched on that path. Without gating filteredHidden at its single
+  // point of consumption (the <StatusBar> prop in src/App.svelte), a note from the last REAL
+  // folder view would keep asserting itself over Home — a view with no listing at all, which is
+  // exactly the false-statement-in-the-status-bar bug this ticket exists to remove.
+  it("clears the note on Ctrl+T (new tab lands on Home, which has no listing at all)", async () => {
+    filtered = 2;
+    await navigateIntoDrive();
+    await waitFor(() =>
+      expect(
+        screen.getByText("2 entries were hidden because their names could not be shown safely"),
+      ).toBeTruthy(),
+    );
+
+    await fireEvent.keyDown(window, { key: "t", ctrlKey: true });
+
+    await waitFor(() => expect(screen.queryByText("ok.txt")).toBeNull());
+    expect(screen.queryByText(/hidden because/)).toBeNull();
+  });
 });
