@@ -190,3 +190,65 @@ to close. Restored the fix with `git checkout -- src-tauri/src/lib.rs` and reran
   `cpe_1715_resolve_conflict_overwrite_is_the_only_arm_that_touches_a_dangling_link` test.
 - Did not re-run the full three-OS CI matrix locally (Windows-only box); relying on the pushed PR's GitHub
   Actions run for the Linux/macOS legs, watched synchronously per the sprint runbook.
+
+## Work Log — independent review round (2026-08-17, PR #924)
+
+An independent Opus review confirmed the core fix and the `do_move_into` e2e test's shape (harm-before-`Result`)
+were correct, and found six issues. Addressed all six:
+
+1. **BLOCKER, production bug — `resolve_conflict`'s `Overwrite` arm couldn't actually clear a dangling
+   *directory* link on an unprivileged runner.** `make_dangling_link` falls back to an NTFS **junction**
+   when `SeCreateSymbolicLinkPrivilege` is absent (the unprivileged Windows CI runner; my dev box has the
+   privilege, so my original local run only ever exercised the real-symlink leg and never caught this).
+   Measured by the reviewer on a dangling junction: `is_dir()` follows the link to `false` (nothing
+   resolves), so the `else` branch runs `fs::remove_file`, which refuses a junction with
+   `PermissionDenied` (os error 5) — the reparse point is a directory object and Windows will not
+   `DeleteFile` one. The slot was never cleared. Fixed at `src-tauri/src/lib.rs`'s `resolve_conflict`
+   Overwrite arm: on `remove_file` failure, fall back to `fs::remove_dir` (which removes the reparse point
+   itself without following it). **I could not reproduce the red locally** — this dev box has symlink
+   privilege, so `make_dangling_link` stages a real symlink here and the pre-fix code already passed; I
+   confirmed that by reverting the fix and re-running
+   `cpe_1715_resolve_conflict_overwrite_is_the_only_arm_that_touches_a_dangling_link`, which stayed green
+   (documented, not fabricated — see the CI run for the real red/green on the unprivileged Windows leg,
+   which is exactly the runner this bug needs).
+2. **Temp-dir hygiene — no `Drop` guard.** All six disk-backed CPE-1715 tests used a trailing
+   `let _ = fs::remove_dir_all(&d);`, which a panicking assertion skips. Added `struct
+   Cpe1715Scratch(PathBuf)` with a `Drop` impl (mirrors the `Restore` pattern in
+   `cpe_server::dispatch`/`split_join`'s tests), armed via `let _clean = Cpe1715Scratch(d.clone());`
+   immediately after every `scratch(..)` call — including the `make_dangling_link` skip branches — and
+   removed every trailing `remove_dir_all`. Verified: reran the red-proof (finding below) and confirmed no
+   `cpe1715` directories were left in `%TEMP%` afterward.
+3. **Wrong crate.** `probe_name_pick_slot`/`classify_link_presence` were the thirteenth copy of
+   `symlink_slot_refusal`/`classify_symlink_slot`'s stat shape, living in the app adapter where
+   `crates/server/src/batch_media.rs` and `snapshot_capture.rs` cannot reach them — directly contradicting
+   CPE-1705's own "twelve copies is how the thirteenth gets missed." Moved both, verbatim in spirit, into
+   `crates/server/src/fsutil.rs` as `pub fn name_pick_slot_probe` and `pub fn classify_link_presence`
+   (next to `classify_symlink_slot`). `src-tauri/src/lib.rs`'s `probe_name_pick_slot` is now a one-line
+   alias (`cpe_server::fsutil::name_pick_slot_probe(candidate)`), so both call sites and all six
+   disk-backed tests are unchanged. The pure classifier test moved with it, to
+   `crates/server/src/fsutil.rs`'s own `tests` module.
+4. **Stale/false comment.** `resolve_conflict`'s Overwrite arm still claimed it was "reached only after
+   `base_target.exists()` returned true above" — no longer true post-fix (it's now also reached for
+   Unknown and dangling-link slots). Replaced with an explanation of why `contained_under`'s vacuous `Ok`
+   on a non-resolving path is still sound there.
+5. **Residual: TOCTOU / non-symlink reparse points.** The original `probe_name_pick_slot` fed
+   `classify_link_presence` the narrow `is_symlink()` bit, so an entry `symlink_metadata` could see but
+   `try_exists` could not resolve — a plain file created between the two stats, or a non-symlink reparse
+   point such as a cloud-storage placeholder or dedup stub — would still read as `Free`. Took the
+   reviewer's suggested fix rather than just documenting it: `name_pick_slot_probe` now maps *any*
+   successful `symlink_metadata` stat to occupied (`.map(|_| true)`), not only a confirmed link, so only a
+   genuine `NotFound` reads as free.
+6. **Sibling sites — logged, not built.** Reviewer is filing **CPE-1769** and **CPE-1770** for the
+   unfixed create-shaped siblings (`crates/server/src/batch_media.rs:2109`,
+   `crates/server/src/batch_execute.rs:225`, `crates/server/src/snapshot_capture.rs:165`, the two
+   trash-restore sites, `crates/server/src/folder_template.rs:176`) found during this review. Not built
+   here — this ticket's ACs name only `unique_target`/`resolve_conflict`, both satisfied, and those sites
+   are a different hazard shape (create-time, not rename-time) per the class boundary already drawn above.
+
+Re-verified after all six: `cargo build --lib`, `cargo test --lib` (188 passed in `src-tauri` — one test
+count lower than the first round because the pure classifier test moved to `cpe-server`), `cargo test -p
+cpe-server` / `cargo test --lib` from `crates/server` (2199 passed, 4 ignored, 0 failed), `cargo clippy
+--all-targets -- -D warnings` in `src-tauri`, `crates/server`, and `src-tauri --features sidecar-platform`
+— all clean. Red-proof redone for the probe fix (all 6 disk-backed tests red again, including
+`do_move_into` on the harm message with `Ok(...)` printed) and restored; the Overwrite arm's own red could
+not be forced locally for the privilege reason above, documented rather than faked.
