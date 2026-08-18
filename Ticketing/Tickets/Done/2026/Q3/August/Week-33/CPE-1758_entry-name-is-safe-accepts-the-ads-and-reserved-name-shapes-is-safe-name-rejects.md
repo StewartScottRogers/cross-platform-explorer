@@ -3,11 +3,11 @@ id: CPE-1758
 title: entry_name_is_safe accepts the ADS and reserved-name shapes is_safe_name rejects
 type: task
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-15
-closed:
+closed: 2026-08-17
 ---
 
 ## Why this exists
