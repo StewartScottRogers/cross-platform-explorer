@@ -3107,8 +3107,12 @@ mod tests {
     /// Removes `dir` on drop, even if the test panics mid-assertion (CPE-1693 — this repo has leaked
     /// 1.2M+ temp dirs from tests that `return`/panic before their manual `remove_dir_all`). Armed
     /// *before* any assertion runs, per the ticket's own rule that this whole bug family fails by
-    /// returning `Ok` and an unwrap-then-assert ordering hides it.
+    /// returning `Ok` and an unwrap-then-assert ordering hides it. `#[cfg(windows)]` because its only
+    /// caller, [`ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped`], is —
+    /// unguarded, this is dead code on the Linux/macOS CI legs and `-D warnings` fails the build.
+    #[cfg(windows)]
     struct RemoveOnDrop(std::path::PathBuf);
+    #[cfg(windows)]
     impl Drop for RemoveOnDrop {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
