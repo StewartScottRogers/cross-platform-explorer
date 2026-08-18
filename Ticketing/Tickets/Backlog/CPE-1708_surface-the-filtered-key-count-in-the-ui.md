@@ -262,3 +262,46 @@ After each: reverted, `npx vitest run` (full suite) → `313 files / 4081 tests 
 Not run locally: `crates/vfs`'s live-server conformance suites (SFTP/WebDAV/FTP containers) and the
 Linux/macOS legs of the backend/crates CI matrices — Windows-only box, per the sprint's standing note
 that local Windows runs can't stand in for the 3-OS matrix.
+
+
+## Work Log addendum (2026-08-18, reviewer findings F1-F3)
+
+Foreman review (via a dedicated reviewer pass) confirmed the bidi-registry line shifts, the byte-identical
+`bindings.gen.ts` regen, and the ~45 test-mock re-shapes were all mechanically correct, and confirmed the
+`list_dir_stream` scope extension was necessary (not scope creep) — but found one blocking issue and two
+non-blocking ones.
+
+**F1 (BLOCKING, fixed)** — `filteredHidden` was surviving into views with NO real folder listing behind
+them: `loadPath` short-circuits Home before `loadListing` (and therefore `filteredHidden`) is ever
+touched, and `enterArchive`/smart-folder/structured-search never call `loadPath` at all. A note from the
+last real filtered folder kept asserting itself over Home/an archive/a smart folder — a false statement
+in the status bar, exactly what this ticket exists to remove. Fixed by gating at the single point of
+consumption (`src/App.svelte`'s `<StatusBar filteredHidden={...}>` prop) rather than resetting in each
+early-return, so a future early-return can't forget it:
+`filteredHidden={isHome || archive || smartFolder || structuredSearch ? 0 : filteredHidden}`.
+Regression test added to `App.filteredHiddenNote.test.ts`: navigate into a filtered drive, confirm the
+note shows, press Ctrl+T (new tab → Home), confirm the note is gone. Red-proofed: reverting the gate
+(`{filteredHidden}` alone) reproduces exactly the reviewer's repro —
+`expected <span …(2)></span> to be null` — then reverted, confirmed green.
+
+**F2 (fixed)** — the `.filtered-hidden` note's `title` tooltip claimed (in a comment) to carry "the full
+sentence" the same way `.notice` does, but it was actually a different, shorter, fixed string —
+truncation at a narrow window (`max-width: 45%`, ellipsis) left no way to recover the real count. Fixed
+by hoisting the sentence into `$: filteredHiddenText` and reusing it in both the visible body and the
+`title` (`$: filteredHiddenTitle`, which appends the "loaded successfully" reassurance); the CSS comment
+now describes what the code actually does. Regression test added to `StatusBar.test.ts`: renders with
+`filteredHidden: 3`, asserts the `title` attribute contains BOTH the exact sentence and "loaded
+successfully". Red-proofed against the old fixed-string title — failed with `expected 'The folder itself
+loaded successfully…' to contain '3 entries were hidden…'` — then reverted, confirmed green.
+
+**F3 (non-blocking, fixed)** — `src/docs/31-network.md` documented S3's `.`/`..` key-shape refusal but
+never said such keys are dropped from LISTINGS too, nor that the count is now shown. Added a bullet
+(reviewer's exact wording) right after the `.`/`..` bullet.
+
+Not touched (reviewer filed separately, explicitly out of this ticket's scope): a `revalidateDir` that
+can fire while Home is showing (CPE-756 class), pane B's `filteredHidden` never being surfaced, and the
+local arm silently dropping unreadable entries without counting them.
+
+Re-verified after F1-F3: `npm run check` (0 errors), `npx vitest run` (313 files / 4083 tests passed —
+2 new tests added: the F1 Ctrl+T regression and the F2 tooltip regression), `cargo test --lib`
+(src-tauri, 192 passed, unaffected — F1-F3 are frontend + docs only).
