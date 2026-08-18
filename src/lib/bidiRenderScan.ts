@@ -12,10 +12,21 @@
  * This is the inversion the reviewer prescribed instead: inside a render position (plain text content,
  * or a `title=`/`aria-label=`/`alt=` attribute, or `{@html …}`), **every** `{…}` expression must be a
  * literal, a `displaySafeName(…)`/`displaySafePath(…)` call (or an `||`/`??`/ternary combination of
- * those), or an explicitly allowlisted line. There is no third bucket — an expression that isn't
- * provably safe is unsafe by default, regardless of what it's named or shaped like. That is why this
- * module does not special-case `.name`/`.path`/`baseName` at all: `isSafeExpr` doesn't know or care what
- * an identifier is called.
+ * those), or an explicitly registered line (`REGISTRY`, `bidiEscape.guard.test.ts`). There is no third
+ * bucket — an expression that isn't provably safe is unsafe by default, regardless of what it's named or
+ * shaped like. That is why this module does not special-case `.name`/`.path`/`baseName` at all:
+ * `isSafeExpr` doesn't know or care what an identifier is called.
+ *
+ * CPE-1761 (round 3): a registered entry pins `line:expr`, not just `line` — editing an already-registered
+ * line's expression in place (e.g. swapping a harmless `title={$t(...)}` for a raw `title={entry.name}`)
+ * changes the recorded key and reds the guard, instead of the line number alone staying "found" either
+ * way. And any markup this module cannot confidently interpret — an unterminated `{…}`/`<!--…-->`/`</…>`,
+ * or a bare `<` that doesn't open a real tag/comment/closing-tag — throws `RenderScanError` (naming the
+ * file and position) instead of silently truncating the scan at that point. Round 2's engine did the
+ * latter (`i = markup.length`) and returned whatever was found so far — often `[]`, indistinguishable
+ * from "clean" — which is fail-open in the worst possible direction for a guard whose whole job is to
+ * catch what a human missed. A run of this guard now either names every offender or refuses to answer;
+ * it can never silently claim a file is clean when it wasn't sure.
  *
  * **What this still cannot see** (the honest boundary — read before trusting a green run):
  *   - A raw name/path placed in any DOM attribute OTHER than `title`/`aria-label`/`alt` — `data-*`,
@@ -36,6 +47,11 @@
  *     negative — the safe direction to be wrong in, since it costs an allowlist entry rather than lets a
  *     spoof through. Rewriting as `{#if kind === "dir"}{displaySafeName(a)}{:else}…{/if}` (this repo's
  *     own idiom) sidesteps it entirely, since each branch is then its own independently-checked mustache.
+ *   - CPE-1761's fail-loud fix is a trade, not a free lunch: a genuinely LITERAL `<` sitting in body text
+ *     (not opening a tag — a stray comparison typo, say) now hard-errors the whole scan rather than being
+ *     silently tolerated. That is deliberate (a loud false failure beats a quiet false pass), but it does
+ *     mean such text must be rewritten (or escaped) for the guard to run at all — it will not render a
+ *     verdict around markup it isn't sure it understood.
  */
 
 /** Strip every `<script>…</script>` / `<style>…</style>` block, replacing its content with the same
@@ -229,6 +245,51 @@ export interface RenderSite {
   expr: string;
 }
 
+/** CPE-1761: raised instead of silently truncating the scan when the state machine hits markup it
+ *  cannot confidently interpret (an unterminated `{…}`, `<!--…-->`, or `</…>`, or a `<` that isn't
+ *  followed by a tag name/`/`/`!--`). Round 2's engine used to fall back to `i = markup.length` in every
+ *  one of these spots, which silently ends the scan of the WHOLE REST OF THE FILE and returns whatever
+ *  offenders were found so far — often `[]`, indistinguishable from "clean". A guard whose entire job is
+ *  to catch what a human would miss must never let its own confusion look like a clean bill of health;
+ *  failing loudly (naming the file and the exact position) is the only safe direction to fail in. */
+export class RenderScanError extends Error {
+  constructor(fileLabel: string, reason: string, line: number, col: number) {
+    super(
+      `${fileLabel}: the render-guard scan could not be completed — ${reason} at line ${line}, col ${col}. ` +
+        `This does NOT mean the file is clean; the scan stopped because it could not safely interpret the ` +
+        `markup from that point on. Fix the malformed brace/tag (or, if it's deliberately literal text, ` +
+        `escape it) so the scan can see everything below it.`,
+    );
+    this.name = "RenderScanError";
+  }
+}
+
+/** 1-based line + 1-based column of `idx` within `s`, for error messages. */
+function lineCol(s: string, idx: number): { line: number; col: number } {
+  const before = s.slice(0, idx);
+  const line = before.split("\n").length;
+  const lastNl = before.lastIndexOf("\n");
+  const col = idx - lastNl;
+  return { line, col };
+}
+
+/** Collapse a render expression's whitespace to single spaces for a readable, diffable registry entry
+ *  (an expression can itself span multiple source lines). Diagnostics only — never re-parsed. */
+function normalizeExprForLabel(expr: string): string {
+  return expr.trim().replace(/\s+/g, " ");
+}
+
+/** Sort `${line}:${expr}` offender strings by their leading line number (numerically, not lexically —
+ *  "10:…" must sort after "2:…"), then by the rest of the string for a stable, deterministic order when
+ *  two offenders share a line. Exported so `bidiEscape.guard.test.ts` sorts REGISTRY's recorded entries
+ *  with the exact same rule `findUnsafeRenderLines` uses internally, instead of a numeric `a - b` sort
+ *  that would silently produce `NaN`-driven (i.e. no-op) ordering once entries are strings. */
+export function compareOffenders(a: string, b: string): number {
+  const la = parseInt(a, 10);
+  const lb = parseInt(b, 10);
+  return la - lb || a.localeCompare(b);
+}
+
 /** True if the character(s) immediately before `idx` (the position of a mustache's `{`) put it in a
  *  render position. `inTag` (see `findUnsafeRenderLines`'s state machine) disambiguates the two contexts
  *  that share the "preceded by `}`" shape:
@@ -256,27 +317,39 @@ function isRenderPosition(markup: string, idx: number, inTag: boolean): boolean 
  *  so a component's shorthand-prop attribute list — `<Sidebar {density} {currentPath} … />`, extremely
  *  common in this codebase — is never mistaken for a run of text-content renders just because each `{…}`
  *  sits right after the previous one's `}`; that ambiguity is exactly why `inTag` is threaded through. */
-export function findUnsafeRenderLines(fileSrc: string): number[] {
+export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): string[] {
   const markup = stripNonMarkup(fileSrc);
-  const offenderLines = new Set<number>();
+  const offenders = new Set<string>();
   let i = 0;
   let inTag = false;
   let quoteChar: string | null = null;
 
+  const fail = (idx: number, reason: string): never => {
+    const { line, col } = lineCol(markup, idx);
+    throw new RenderScanError(fileLabel, reason, line, col);
+  };
+
   const handleMustache = (renderCandidate: boolean) => {
+    const openIdx = i;
     const close = findMatchingBrace(markup, i);
-    const end = close === -1 ? markup.length : close;
-    const inner = markup.slice(i + 1, end);
+    // CPE-1761 #1: a `{` that never finds its closing `}` used to silently truncate the scan
+    // (`i = markup.length`), ending the WHOLE file's scan and reporting whatever was found so far —
+    // often `[]`. That is fail-open in the worst possible direction for a guard. Fail loudly instead.
+    if (close === -1) {
+      fail(openIdx, `unterminated "{" — no matching "}" was found for it`);
+    }
+    const inner = markup.slice(openIdx + 1, close);
     const trimmed = inner.trimStart();
     const isControlTag = !inTag && /^[#:/]|^@const\b|^@debug\b/.test(trimmed);
     const isHtmlTag = !inTag && /^@html\b/.test(trimmed);
     if (renderCandidate && !isControlTag) {
       const expr = isHtmlTag ? trimmed.replace(/^@html\s*/, "") : inner;
-      if (isRenderPosition(markup, i, inTag) && !isSafeExpr(expr)) {
-        offenderLines.add(markup.slice(0, i).split("\n").length);
+      if (isRenderPosition(markup, openIdx, inTag) && !isSafeExpr(expr)) {
+        const { line } = lineCol(markup, openIdx);
+        offenders.add(`${line}:${normalizeExprForLabel(expr)}`);
       }
     }
-    i = close === -1 ? markup.length : close + 1;
+    i = close + 1;
   };
 
   while (i < markup.length) {
@@ -320,17 +393,30 @@ export function findUnsafeRenderLines(fileSrc: string): number[] {
     if (ch === "<") {
       if (markup.startsWith("<!--", i)) {
         const end = markup.indexOf("-->", i);
-        i = end === -1 ? markup.length : end + 3;
+        // Same fail-open shape as the unmatched-brace case: an unterminated comment used to silently
+        // truncate the scan to EOF instead of erroring.
+        if (end === -1) fail(i, `unterminated comment "<!--" — no matching "-->" was found for it`);
+        i = end + 3;
         continue;
       }
       if (markup[i + 1] === "/") {
         const end = markup.indexOf(">", i);
-        i = end === -1 ? markup.length : end + 1;
+        if (end === -1) fail(i, `unterminated closing tag "</" — no matching ">" was found for it`);
+        i = end + 1;
         continue;
       }
-      inTag = true;
-      i++;
-      continue;
+      // CPE-1761 #3: a bare `<` that is NOT the start of a real tag/comment/closing-tag (e.g. a
+      // comparison written straight into text content, `a < b`) used to be treated as an opening tag
+      // anyway, flipping the state machine into `inTag` mode until the next real `>` — silently
+      // misclassifying every render in between as an ATTRIBUTE-position mustache (only counted for
+      // title=/aria-label=/alt=) instead of a body-text one, suppressing it. Same fail-open direction as
+      // #1: fail loudly instead of guessing.
+      if (/[A-Za-z]/.test(markup[i + 1] ?? "")) {
+        inTag = true;
+        i++;
+        continue;
+      }
+      fail(i, `"<" is not followed by a tag name, "/", or "!--", so the scan cannot tell whether this opens markup`);
     }
     if (ch === "{") {
       handleMustache(true);
@@ -338,5 +424,5 @@ export function findUnsafeRenderLines(fileSrc: string): number[] {
     }
     i++;
   }
-  return [...offenderLines].sort((a, b) => a - b);
+  return [...offenders].sort(compareOffenders);
 }
