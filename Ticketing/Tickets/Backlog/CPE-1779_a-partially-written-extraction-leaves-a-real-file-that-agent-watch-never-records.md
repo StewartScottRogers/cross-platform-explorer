@@ -75,3 +75,33 @@ promise — particularly since these leftovers are exactly what CPE-1693 is abou
 Found by UAT on **PR #932 / CPE-1745**, 2026-08-18, during the batched sprint; judged a lesser harm than the
 defect that PR fixed, and correctly not treated as a blocker. Related: CPE-1745, CPE-1195 (the
 `<pid>-<seq>` extraction directory), CPE-1693 (the leftovers these add to).
+
+## The reviewer converged on this independently, and prescribed the fix
+
+The #932 reviewer reproduced the same case from a different angle — a 2 MB entry corrupted mid-stream,
+returning `Err("Invalid checksum")` after `File::create` + `io::copy` had already written **2,000,259
+bytes** — and reached the same conclusion. Two independent legs finding the same thing is the strongest
+signal this crew produces.
+
+It also identified the cleanest fix, which is the "clean up the partial" option above:
+
+> `crates/server/src/archive.rs::extract_archive_entry` and its siblings `extract_tar_entry` /
+> `extract_7z_entry` / `extract_rar_entry` (~lines 793, 808, 832, 907) can leave a full-size orphaned file
+> when the copy or decode fails after `fs::File::create`. On the `Err` branch of `std::io::copy` /
+> `fs::write` in those functions, `let _ = fs::remove_file(&out);` before propagating the error — so a
+> failed extraction leaves nothing behind rather than relying on CPE-1693's general sweep.
+
+Prefer this over recording the partial. It makes "nothing written, nothing recorded" **true** rather than
+approximately true, removes the orphan instead of documenting it, and needs no change to CPE-1745's rule.
+
+Two scoping facts the review established, both worth keeping:
+
+- **This is pre-existing, not a regression.** The same `File::create`-then-copy shape predates CPE-1745, and
+  the old code's before-the-call record was *also* wrong for this file (it guessed a flat path that never
+  existed). Failure-path accuracy is unchanged, not worsened.
+- **No consumer is harmed today.** `note_app_op`'s ledger has exactly one consumer, `resolve_actor`, which
+  matches entries against filesystem-watcher events inside a session's watched **project folder**. Grepping
+  `src/` for `app_ops` / `note_app_op` returns nothing — it is never surfaced to the frontend as an
+  "attempts" list. `%TEMP%/cpe-archive/...` sits outside any watched project folder in the ordinary case.
+  Flagged as unverified: nothing structurally *prevents* `%TEMP%` from falling inside a user-chosen
+  `agent_watch_start` root. Worth checking when this is picked up.
