@@ -3,11 +3,11 @@ id: CPE-1754
 title: keyToWrite still strips a trailing backslash, so a POSIX name ending in one collapses onto its sibling
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-15
-closed:
+closed: 2026-08-17
 ---
 
 ## Problem
