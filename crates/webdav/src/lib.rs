@@ -710,7 +710,19 @@ mod tests {
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
             "MKCOL" => {
-                let code = if std::fs::create_dir_all(&real).is_ok() { 201 } else { 500 };
+                // CPE-1741 round 2: this rig was the same defect CPE-1731 fixed for MKD/`create_dir`,
+                // surviving in the third protocol — `create_dir_all` is idempotent and invents missing
+                // parents, so it was more forgiving than real WebDAV's `MKCOL`. RFC 4918 §9.3.1: `405` for
+                // an existing resource, `409` for a missing intermediate collection.
+                let code = if real.exists() {
+                    405 // §9.3.1: MKCOL on an existing resource
+                } else if real.parent().map(|p| !p.exists()).unwrap_or(false) {
+                    409 // §9.3.1: missing intermediate collection
+                } else if std::fs::create_dir(&real).is_ok() {
+                    201
+                } else {
+                    500
+                };
                 let _ = req.respond(tiny_http::Response::empty(code));
             }
             "DELETE" => {
@@ -2347,6 +2359,65 @@ mod tests {
         cpe_server::transfer::upload_tree(&mut provider, &out, "/copied", &cancel).unwrap();
         assert_eq!(provider.read("/copied/readme.txt").unwrap(), FILE_BODY);
         let _ = std::fs::remove_dir_all(&out);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1741 round 2 — `upload_tree` against a remote base/parent that already exists, over the
+    // real WebDAV wire, now that `MKCOL` (above) refuses an existing resource with `405` instead of
+    // silently succeeding via `create_dir_all`. Same shape as the sftp/ftp legs.
+    // ---------------------------------------------------------------------------------------------
+
+    #[test]
+    fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
+        // `/sub` is seeded by `spawn_webdav_server` (with `nested.txt` inside already) — uploading
+        // into it must not trip this rig's honest, non-idempotent `MKCOL`'s `405` refusal.
+        let base = spawn_webdav_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        let src = std::env::temp_dir().join(format!("cpe-webdav-up-exists-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
+        // Only a successful MKCOL can produce a directory with no file inside it — an empty dir can't
+        // be conjured by PUT's `create_dir_all(parent)` the way a non-empty one could (CPE-1741 F4).
+        std::fs::create_dir(src.join("empty")).unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let files = cpe_server::transfer::upload_tree(&mut provider, &src, "/sub", &cancel)
+            .expect("uploading into an already-existing remote base must succeed (CPE-1741)");
+        assert_eq!(files, 2);
+        assert_eq!(provider.read("/sub/a.txt").unwrap(), b"alpha");
+        assert_eq!(provider.read("/sub/inner/b.txt").unwrap(), b"bravo");
+        // The pre-existing seeded content is untouched.
+        assert_eq!(provider.read("/sub/nested.txt").unwrap(), b"deep");
+        assert!(provider.stat("/sub/empty").unwrap().is_dir, "MKCOL, not PUT's create_dir_all, must have made this");
+        let _ = std::fs::remove_dir_all(&src);
+    }
+
+    #[test]
+    fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
+        let base = spawn_webdav_server();
+        let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
+
+        let src = std::env::temp_dir().join(format!("cpe-webdav-up-multilevel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("z.txt"), b"zed").unwrap();
+        std::fs::create_dir(src.join("empty")).unwrap();
+
+        // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive)
+        // `MKCOL /new/deep` would 409.
+        let cancel = AtomicBool::new(false);
+        let files = cpe_server::transfer::upload_tree(&mut provider, &src, "/new/deep", &cancel)
+            .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(provider.read("/new/deep/z.txt").unwrap(), b"zed");
+        assert!(
+            provider.stat("/new/deep/empty").unwrap().is_dir,
+            "the MKCOL chain, not PUT's create_dir_all, must have made this"
+        );
+        let _ = std::fs::remove_dir_all(&src);
     }
 
     #[test]

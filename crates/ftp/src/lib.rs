@@ -366,7 +366,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Write as _};
     use std::net::{TcpListener, TcpStream};
     use std::path::{Path, PathBuf};
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     const FILE_NAME: &str = "readme.txt";
     const FILE_BODY: &[u8] = b"hello ftp"; // 9 bytes
@@ -885,6 +885,102 @@ mod tests {
         assert!(provider.stat("/renamed.txt").is_err(), "file should be gone");
         provider.delete("/newdir").expect("delete dir");
         assert!(provider.stat("/newdir").is_err(), "dir should be gone");
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1741 — `cpe_server::transfer::upload_tree` against a remote base/parent/nested-dir that
+    // already exists, over the real FTP wire (this rig's honest, non-idempotent `create_dir` MKD arm,
+    // per CPE-1731). `FtpProvider` has no `upload_tree` convenience wrapper (unlike `cpe-sftp`), so
+    // these call the shared `cpe_server::transfer::upload_tree` directly against the connected
+    // provider — the same thing `cpe-vfs`'s callers do.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Local scratch dir cleanup via `Drop`, armed before any assertion runs — a failed assertion
+    /// partway through a test must not leak the temp dir.
+    struct ScratchDirGuard(PathBuf);
+    impl Drop for ScratchDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
+        // `/sub` is seeded by `spawn_ftp_server` (with `nested.txt` inside already) — uploading into
+        // it must not trip this rig's honest, non-idempotent MKD's 550 refusal.
+        let (port, _root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        let src = std::env::temp_dir().join(format!("cpe-ftp-up-exists-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let files = cpe_server::transfer::upload_tree(&mut provider, &src, &format!("/{DIR_NAME}"), &cancel)
+            .expect("uploading into an already-existing remote base must succeed (CPE-1741)");
+        assert_eq!(files, 2);
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/a.txt")).unwrap(), b"alpha");
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/inner/b.txt")).unwrap(), b"bravo");
+        // The pre-existing seeded content is untouched.
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/nested.txt")).unwrap(), b"deep");
+    }
+
+    #[test]
+    fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
+        let (port, _root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        let src = std::env::temp_dir().join(format!("cpe-ftp-up-multilevel-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("z.txt"), b"zed").unwrap();
+        // Only a successful MKD chain can produce a directory with no file inside it — this rig's STOR
+        // does `create_dir_all(parent)` (CPE-1742), which would invent a non-empty directory's parents
+        // without ever exercising MKD, so an empty directory is the one thing that proves MKD ran.
+        std::fs::create_dir(src.join("empty")).unwrap();
+
+        // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive) MKD
+        // "/new/deep" would fail 550.
+        let cancel = AtomicBool::new(false);
+        let files = cpe_server::transfer::upload_tree(&mut provider, &src, "/new/deep", &cancel)
+            .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(provider.read("/new/deep/z.txt").unwrap(), b"zed");
+        assert!(
+            provider.stat("/new/deep/empty").unwrap().is_dir,
+            "the MKD chain, not STOR's create_dir_all, must have made these"
+        );
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_a_nested_directory_already_exists_remotely() {
+        // The partial-re-upload case: a directory INSIDE the tree (not just the base) already exists
+        // remotely — transfer.rs:761's own CPE-1741 shape, shadowed until the base-level (744) fix
+        // was in place.
+        let (port, _root) = exact_server();
+        let cfg = FtpConfig::password("127.0.0.1", port, "user", "pw");
+        let mut provider = FtpProvider::connect(&cfg).expect("connect");
+
+        let src = std::env::temp_dir().join(format!("cpe-ftp-up-partial-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("inner").join("c.txt"), b"charlie").unwrap();
+
+        provider.mkdir("/up2").expect("seed the base");
+        provider.mkdir("/up2/inner").expect("seed: 'inner' already exists remotely before the upload");
+
+        let cancel = AtomicBool::new(false);
+        let files = cpe_server::transfer::upload_tree(&mut provider, &src, "/up2", &cancel)
+            .expect("re-uploading over an already-existing nested dir must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(provider.read("/up2/inner/c.txt").unwrap(), b"charlie");
     }
 
     // ---------------------------------------------------------------------------------------------
