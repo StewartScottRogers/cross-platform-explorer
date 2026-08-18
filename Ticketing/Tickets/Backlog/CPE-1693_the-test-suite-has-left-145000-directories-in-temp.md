@@ -2,7 +2,7 @@
 id: CPE-1693
 title: The test suite has left 145,000 directories in %TEMP% and is still adding them
 type: bug
-priority: Medium
+priority: High
 status: Backlog
 tags: ready
 estimate: M
@@ -101,3 +101,35 @@ watching it grow between two measurements.
 Related: **CPE-1678** (the `Drop`-guard pattern this should generalise) and the Evidence Rules in
 `Ticketing/wiki.md` — the guard-neutralisation rule mandates a red run per guard, which means every leaking
 test leaks *by design of our own process*, once per ticket per developer.
+
+## 2026-08-18: it has started failing tests, and the count is 1.29 million
+
+Raised Medium → **High**. This is no longer a tidiness problem.
+
+During the batched sprint of 2026-08-17/18 the count on this machine reached **~1,290,000** `cpe-*`
+directories in `%TEMP%` — an order of magnitude past the 145,000 this ticket was filed at, which was itself
+an order of magnitude past the figure in its own title.
+
+**It caused a real test failure.** The CPE-1745 worker hit
+`zip_lists_real_tree_and_extracts_inner_file` failing in `crates/server`, traced to a **PID collision**: so
+many `%TEMP%/cpe-archive/<pid>-<seq>` directories are left behind that a reused process id now finds its
+own scratch name already occupied. The test passed on an immediate rerun, which is the worst property a
+failure can have — it teaches whoever sees it to hit rerun rather than read it.
+
+That is the crossing point this ticket predicted. From its own Problem section: *"An orphan should mean
+something went wrong. When there are 145,000, it means nothing."* At 1.29 million they no longer merely
+mean nothing — they actively manufacture false failures, and they do it non-deterministically.
+
+**Two further data points from the same sprint**, both arguing for the helper-level fix this ticket already
+proposes rather than per-test cleanup:
+
+- A review of PR #924 measured **five orphaned `cpe_test_cpe1715_*` trees** left by tests that cleaned up
+  with a trailing `remove_dir_all` — and **one leaked even on a green run**, so the trailing call is not
+  reliable when nothing panics either.
+- Every PR merged this sprint had to be told individually to arm a `Drop` guard before its assertions.
+  Three separate reviews raised it as a finding. That is the per-test standard being enforced by hand,
+  ticket after ticket, while the helper that would make it automatic stays unwritten.
+
+**Do the purge and the leak together.** A one-line purge clears the symptom and the flake; without the
+`scratch()`-returns-a-guard change the count starts climbing again with the next test run, and the next
+PID collision is only a matter of time.
