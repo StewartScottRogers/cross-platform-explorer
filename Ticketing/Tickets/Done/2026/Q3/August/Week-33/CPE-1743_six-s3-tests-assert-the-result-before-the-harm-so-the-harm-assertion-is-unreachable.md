@@ -3,11 +3,11 @@ id: CPE-1743
 title: Six cpe-s3 tests assert the Result before the harm, so the harm assertion cannot fire
 type: test
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-18
 ---
 
 ## Problem
