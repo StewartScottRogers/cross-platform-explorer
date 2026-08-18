@@ -5987,15 +5987,20 @@ mod tests {
         provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
         assert!(root.join("scratch/.s3marker").is_file(), "precondition: the marker exists");
 
-        let err = provider.delete("/scratch").expect_err(
-            "RECORDED, NOT DESIRED: the belt cannot confirm the marker-only verdict, so it refuses — this \
-             exact delete succeeds on a server that implements start-after",
-        );
+        let outcome = provider.delete("/scratch");
 
-        // The measured loss: an entitled operation removed by a new guard.
+        // The measured loss: an entitled operation removed by a new guard. Asserted BEFORE unwrapping
+        // the Result, so a guard that ever answers `Ok` here still reds on the marker's fate rather than
+        // on "expected an error, got ()" (CPE-1743).
         assert!(
             root.join("scratch/.s3marker").is_file(),
-            "the empty folder is still there — that is the cost this test exists to record"
+            "the empty folder is still there — that is the cost this test exists to record \
+             (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "RECORDED, NOT DESIRED: the belt cannot confirm the marker-only verdict, so it refuses — this \
+             exact delete succeeds on a server that implements start-after",
         );
         assert!(
             err.contains("nothing has been deleted"),
@@ -6741,20 +6746,32 @@ mod tests {
 
         provider.write("/dyn/src.txt", b"payload").expect("the rename source must really exist");
         let before = requests.load(Ordering::Relaxed);
-        let err = provider.rename("/dyn/src.txt", "/dyn/dst.txt").expect_err(
-            "rename must refuse through dyn too — and with a source that exists, a working copy-then-delete \
-             emulation would return Ok here instead",
-        );
-        assert!(err.contains("no rename"), "the refusal must say what it is refusing: {err}");
+        let outcome = provider.rename("/dyn/src.txt", "/dyn/dst.txt");
+
+        // Assert on the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`
+        // through the trait object, the run must still reach these and red on the damage, not stop at
+        // `expect_err`.
         assert_eq!(
             requests.load(Ordering::Relaxed),
             before,
             "rename reached the network through dyn: an emulation whose copy lands and which then reports \
              an honest-looking error still leaves the user two objects believing they have one, and only \
-             'no request was sent' can tell that apart from a real refusal"
+             'no request was sent' can tell that apart from a real refusal (outcome was {outcome:?})"
         );
-        assert!(root.join("dyn/src.txt").is_file(), "the source object was moved by a refused rename");
-        assert!(!root.join("dyn/dst.txt").exists(), "a destination object was created by a refused rename");
+        assert!(
+            root.join("dyn/src.txt").is_file(),
+            "the source object was moved by a refused rename (outcome was {outcome:?})"
+        );
+        assert!(
+            !root.join("dyn/dst.txt").exists(),
+            "a destination object was created by a refused rename (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "rename must refuse through dyn too — and with a source that exists, a working copy-then-delete \
+             emulation would return Ok here instead",
+        );
+        assert!(err.contains("no rename"), "the refusal must say what it is refusing: {err}");
 
         assert!(!provider.capabilities().supports_rename);
         assert!(!provider.capabilities().has_real_dirs);
