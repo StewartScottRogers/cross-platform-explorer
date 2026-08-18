@@ -3,11 +3,11 @@ id: CPE-1761
 title: The render guard fails open on an unmatched brace, and pins line numbers rather than expressions
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-15
-closed:
+closed: 2026-08-17
 ---
 
 ## Problem
