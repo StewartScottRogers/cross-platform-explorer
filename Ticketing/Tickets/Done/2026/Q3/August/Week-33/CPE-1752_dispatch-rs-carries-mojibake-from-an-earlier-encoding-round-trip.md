@@ -3,11 +3,11 @@ id: CPE-1752
 title: dispatch.rs carries mojibake from an earlier encoding round-trip
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-15
-closed:
+closed: 2026-08-17
 ---
 
 ## Problem
