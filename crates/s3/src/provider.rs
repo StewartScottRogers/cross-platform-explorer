@@ -5610,19 +5610,24 @@ mod tests {
         ]);
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider.delete("/photos").expect_err(
-            "the probe sees content under photos/ and refuses — which is right for the folder and wrong \
-             for the object of the same name",
-        );
-        assert!(err.contains("recursive"), "the refusal is the directory refusal: {err}");
+        let outcome = provider.delete("/photos");
 
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on the key set that actually survived, not on
+        // "expected an error".
         let left: Vec<String> = keys.lock().unwrap().iter().cloned().collect();
         assert_eq!(
             left,
             vec!["photos".to_string(), "photos/a.jpg".to_string(), "photos/b.jpg".to_string()],
             "nothing was removed — and the object `photos` cannot be removed by this credential at all, \
-             while the credential WITHOUT s3:ListBucket removes it in the test above"
+             while the credential WITHOUT s3:ListBucket removes it in the test above (outcome was {outcome:?})"
         );
+
+        let err = outcome.expect_err(
+            "the probe sees content under photos/ and refuses — which is right for the folder and wrong \
+             for the object of the same name",
+        );
+        assert!(err.contains("recursive"), "the refusal is the directory refusal: {err}");
     }
 
     /// **What the collision actually looks like to a user, measured by the PR #903 UAT round 3** — and the
@@ -6648,30 +6653,45 @@ mod tests {
         let (base, seen) = spawn_a_request_line_recorder();
         let provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider
-            .read("/a/../b.txt")
-            .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
-        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
-        assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
-        assert!(err.contains("CPE-1721"), "the error must point at the follow-up that would fix it: {err}");
+        let outcome = provider.read("/a/../b.txt");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on the request that actually reached the server, not
+        // on "expected an error".
         assert_eq!(
             seen.lock().unwrap().len(),
             0,
             "the guard must fire BEFORE the request leaves the process — a request reached the server \
-             despite the refusal"
+             despite the refusal (outcome was {outcome:?})"
         );
 
-        // Every verb goes through the same one guard, so none of them can miss it.
+        let err = outcome
+            .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
+        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
+        assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
+        assert!(err.contains("CPE-1721"), "the error must point at the follow-up that would fix it: {err}");
+
+        // Every verb goes through the same one guard, so none of them can miss it. Capture all four
+        // outcomes BEFORE asserting anything, so the shared request-count assertion runs before any
+        // one verb's `is_err()` check can mask what the others did.
         let mut provider = provider;
-        assert!(provider.stat("/a/./b.txt").is_err(), "stat must refuse a single-dot segment too");
-        assert!(provider.write("/a/../b.txt", b"x").is_err(), "write must refuse it too");
-        assert!(provider.delete("/a/../b.txt").is_err(), "delete must refuse it too");
-        assert!(provider.mkdir("/a/../b").is_err(), "mkdir must refuse it too");
+        let stat_outcome = provider.stat("/a/./b.txt");
+        let write_outcome = provider.write("/a/../b.txt", b"x");
+        let delete_outcome = provider.delete("/a/../b.txt");
+        let mkdir_outcome = provider.mkdir("/a/../b");
+
         assert_eq!(
             seen.lock().unwrap().len(),
             0,
-            "one of the other verbs sent a request whose path ureq would have rewritten"
+            "one of the other verbs sent a request whose path ureq would have rewritten (stat was \
+             {stat_outcome:?}, write was {write_outcome:?}, delete was {delete_outcome:?}, mkdir was \
+             {mkdir_outcome:?})"
         );
+
+        assert!(stat_outcome.is_err(), "stat must refuse a single-dot segment too");
+        assert!(write_outcome.is_err(), "write must refuse it too");
+        assert!(delete_outcome.is_err(), "delete must refuse it too");
+        assert!(mkdir_outcome.is_err(), "mkdir must refuse it too");
     }
 
     #[test]
