@@ -31,7 +31,7 @@
 //! | 2 | `fs::remove_file` in [`join_files`]' recovery | `out_path` | **fixed** — [`remove_partial_output`] never removes a link |
 //! | 3 | `File::create` per part in [`split_file`] | each `<name>.NNN` | **fixed** — same guard + exclusive open, once per part |
 //! | 4 | `fs::write` of the manifest in [`split_file`] | `<name>.split-manifest.json` | **fixed** — same guard + exclusive open (`fs::write` follows a link exactly as `File::create` does) |
-//! | 5 | `fs::create_dir_all(out_dir)` in [`split_file`] | `out_dir` | **left, deliberately** — see below |
+//! | 5 | `fs::create_dir_all(out_dir)` in [`split_file`] | `out_dir` | **refusal left alone, deliberately; its message fixed (CPE-1729)** — see below |
 //!
 //! There is no temp file and no staging in this module (both directions write their final names
 //! directly), and [`split_file`] has **no recovery path at all** — a split that fails part-way leaves its
@@ -56,9 +56,14 @@
 //! post: is_link=Ok(true)  missing_dir_created=Ok(false)  missing_census=[]
 //! ```
 //!
-//! (Measured on Windows, two link shapes; **not** measured on Linux or macOS.) So the residual here is not
-//! data placement — it is that the message names neither the path nor the real problem, and calls a
-//! directory a "file". CPE-1729 has been rewritten around that.
+//! (Measured on Windows, two link shapes; **not independently measured on Linux or macOS** — CI's
+//! three-OS matrix is what confirms this module's tests there, since `mkdir`'s refusal to walk through
+//! the final symlink component is standard POSIX behaviour, not something staged and eyeballed on this
+//! change alone.) So the residual here was not data placement — it was that the message named neither the
+//! path nor the real problem, and called a directory a "file". CPE-1729 rewrote the ticket around that,
+//! and [`out_dir_error`] is the fix: it classifies the failure (a link, an ordinary file, or something
+//! else — typically an unwritable parent) using one extra `symlink_metadata` read, and always names
+//! `out_dir`. `create_dir_all` itself, and the live-link redirect above, are unchanged.
 
 use std::fs::File;
 use std::io::{Read, Write};
@@ -125,6 +130,72 @@ fn part_path(out_dir: &Path, original_name: &str, index: u64, width: usize) -> P
     out_dir.join(format!("{original_name}.{index:0width$}"))
 }
 
+/// The error [`split_file`] returns when `create_dir_all(out_dir)` fails — CPE-1729. Before this, the
+/// call was `.map_err(|e| e.to_string())`, which discards the path entirely and passes the OS's wording
+/// straight through. Measured (module doc, row 5): a **dangling** link at `out_dir` fails with
+/// `Err("Cannot create a file when that file already exists. (os error 183)")` on Windows and
+/// `Err("File exists (os error 17)")` on Linux — no path anywhere in the string, and "file" for what is
+/// a directory-shaped problem. A user pointed at a symlinked drive gets a message that names neither
+/// what failed nor where.
+///
+/// This does **not** add a guard: `create_dir_all` already ran and already failed by the time this
+/// function is called, so classifying the failure only changes what the caller is *told*, never what
+/// happens to `out_dir`. A **live** directory link still makes `create_dir_all` succeed and never reaches
+/// this function at all — that is deliberate (module doc, row 5: redirecting into a live-linked drive is
+/// an ordinary, useful thing to let happen) and stays exactly as it was.
+///
+/// Same convention as [`crate::archive`]'s `extraction_dest_error` (CPE-1744) at the analogous `dest`
+/// sites — one extra [`std::fs::symlink_metadata`] read to distinguish the cases cheaply:
+///
+/// - a **dangling** link at `out_dir` (the measured case) — names the link and says it leads nowhere,
+///   rather than repeating the OS's "file already exists";
+/// - a **live** link at `out_dir` pointing at a non-directory — a second, resolving `metadata` read tells
+///   these two link shapes apart, because they need different advice: a dangling link's target must be
+///   *repaired*, but a live link pointing at a file is pointing somewhere real and must be *repointed*.
+///   Reviewer-caught (UAT, PR #930): the first cut of this function matched on "is a symlink" alone and
+///   told a live link-to-a-file to "repair the link's target" — which is false; the link is not broken,
+///   it just does not lead to a folder. A link resolving to a *directory* is not reachable here at all
+///   (`create_dir_all` would have already succeeded through it), so that non-case and any other resolve
+///   outcome this second read cannot classify fall through to the honest generic wording below rather
+///   than asserting a third claim about a case nothing here actually confirmed;
+/// - an ordinary **file** already occupying the name (no link involved at all) — says so plainly, distinct
+///   from both link cases;
+/// - anything else (most commonly an unwritable parent, but also ENOSPC, a too-long path, an invalid
+///   name, a vanished network mount, or a race) — never guessed at: the path plus the OS's own message,
+///   which is accurate once it is not being misapplied to a link.
+fn out_dir_error(out_dir: &Path, e: std::io::Error) -> String {
+    let path = out_dir.display();
+    let unclassified = |e: &std::io::Error| {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "the output folder \"{path}\" could not be created: permission denied — check that you \
+                 can write to that location, or to one of its parent folders"
+            )
+        } else {
+            format!("the output folder \"{path}\" could not be created: {e}")
+        }
+    };
+    match std::fs::symlink_metadata(out_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => match std::fs::metadata(out_dir) {
+            Err(target_err) if target_err.kind() == std::io::ErrorKind::NotFound => format!(
+                "\"{path}\" is a link, and it leads nowhere — the output folder cannot be created there. \
+                 The OS reports \"{e}\", which sends you to delete a file that does not exist; what exists \
+                 at that name is the link. Repair the link's target, or split into a different folder"
+            ),
+            Ok(target_meta) if !target_meta.is_dir() => format!(
+                "\"{path}\" is a link that points at a file, not a folder — the output folder cannot be \
+                 created there. Repoint the link at a folder, or split into a different folder"
+            ),
+            _ => unclassified(&e),
+        },
+        Ok(meta) if !meta.is_dir() => format!(
+            "\"{path}\" already exists as a file, not a folder — split into a different folder, or remove \
+             the file at that name"
+        ),
+        _ => unclassified(&e),
+    }
+}
+
 /// Split the file at `path` into fixed-`part_size` parts under `out_dir`, plus a manifest. Streams the
 /// source through a bounded 1 MiB buffer, hashing the whole file in the same pass. Refuses `part_size ==
 /// 0`, a directory `path`, or a `part_size` so small relative to the source that it would blow the
@@ -153,7 +224,7 @@ pub fn split_file(path: &Path, part_size: u64, out_dir: &Path) -> Result<SplitMa
         ));
     }
 
-    std::fs::create_dir_all(out_dir).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(out_dir).map_err(|e| out_dir_error(out_dir, e))?;
 
     // CPE-1705: both probes were `.exists()`. Every part path below is later opened with `File::create`,
     // which **truncates** — so an unreadable slot here read as free and the split overwrote whatever was
@@ -832,6 +903,194 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&d);
         }
+    }
+
+    /// Removes `dir` on drop, even if an assertion below panics — armed *before* any assertion runs, per
+    /// CPE-1693 (this repo has leaked 1.2M+ temp dirs from tests that `return`/panic before their manual
+    /// `remove_dir_all`). Same idiom as `archive.rs`'s `RemoveOnDrop` (CPE-1758), unconditional here
+    /// because every CPE-1729 test below needs it, not just a `#[cfg(windows)]` leg.
+    struct RemoveOnDrop(PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// **CPE-1729, the measured case.** Before this ticket, a dangling link at `out_dir` made
+    /// `create_dir_all` fail with `Err(e.to_string())` — the OS's raw wording, no path anywhere in it,
+    /// and "file" for what is a directory problem (module doc, row 5):
+    /// `Err("Cannot create a file when that file already exists. (os error 183)")` on Windows,
+    /// `Err("File exists (os error 17)")` on Linux. This pins the fixed wording: the path is present, and
+    /// the cause is named as a link rather than the OS's unexamined "already exists".
+    ///
+    /// Behaviour is asserted too, not just the message: the link itself must still be there afterwards
+    /// (this ticket is about wording — CPE-1718's "left, deliberately" verdict on `create_dir_all` is
+    /// untouched, so nothing here may start deleting or replacing the link).
+    #[test]
+    fn cpe_1729_dangling_out_dir_names_the_path_and_the_link_not_just_the_os_text() {
+        let d = scratch("cpe1729-dangling");
+        let _cleanup = RemoveOnDrop(d.clone());
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+
+        let out_dir = d.join("outs");
+        if !crate::fsutil::make_dangling_link(&out_dir) {
+            crate::skip_notice!(
+                "[CPE-1729] SKIPPED the dangling-out_dir wording leg: no link could be created at {} on \
+                 this machine (neither a symlink nor the junction fallback). NOTHING in this test covered \
+                 the dangling-link message on this run.",
+                out_dir.display()
+            );
+            return;
+        }
+
+        let err =
+            split_file(&src, 128, &out_dir).expect_err("a dangling link at out_dir must still refuse");
+        assert!(
+            err.contains(&out_dir.display().to_string()),
+            "the message must name the path the user pointed the split at: {err}"
+        );
+        assert!(
+            err.contains("link"),
+            "the message must say the problem is a link, not just repeat the OS's file-exists wording \
+             unexamined: {err}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&out_dir).map(|m| m.file_type().is_symlink()).unwrap_or(false),
+            "the link at out_dir must survive — this ticket fixes the wording of an existing refusal, it \
+             does not add a guard that touches the link"
+        );
+    }
+
+    /// The sibling case in the same classification: an ordinary **file** already sitting at the name
+    /// `out_dir` would occupy. Must say "file" and must NOT say "link" — the two need different advice
+    /// (delete the file at that name, vs. repair or remove the link), and CPE-1729's acceptance criteria
+    /// calls for distinguishing them.
+    #[test]
+    fn cpe_1729_file_at_out_dir_says_file_not_link() {
+        let d = scratch("cpe1729-file");
+        let _cleanup = RemoveOnDrop(d.clone());
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+
+        let out_dir = d.join("outs");
+        std::fs::write(&out_dir, b"not a directory").unwrap();
+
+        let err = split_file(&src, 128, &out_dir).expect_err("a file at out_dir's name must refuse");
+        assert!(
+            err.contains(&out_dir.display().to_string()),
+            "the message must name the path the user pointed the split at: {err}"
+        );
+        assert!(
+            err.contains("file") && !err.contains("link"),
+            "an ordinary file occupying the name must be described as a file, not a link — they need \
+             different advice: {err}"
+        );
+    }
+
+    /// The third case CPE-1729 asks to distinguish "if cheap": the **parent** is unwritable, rather than
+    /// anything occupying `out_dir`'s own name. Reuses [`crate::fsutil::deny_dir_traversal`] rather than
+    /// hand-rolling a new `icacls`/`chmod` pair — the existing helper's own doc already establishes that
+    /// this mechanism is Unix-only in practice (`SeChangeNotifyPrivilege` makes Windows `fs::metadata`-
+    /// based calls, which is what `create_dir_all` uses, ignore a directory-level deny), so a Windows run
+    /// is a legitimate, loud skip rather than a false pass or a false red.
+    ///
+    /// `src` is created as a *sibling* of the locked directory, not a child of it, so denying the locked
+    /// directory's traversal cannot also block the earlier `metadata(path)` read `split_file` does before
+    /// it ever reaches `create_dir_all` — that would make this test fail for the wrong reason.
+    #[test]
+    fn cpe_1729_unwritable_parent_names_the_path_too() {
+        let d = scratch("cpe1729-denied");
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+        let locked = d.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        let out_dir = locked.join("outs");
+
+        struct Cleanup(PathBuf, PathBuf); // (scratch root, locked dir whose deny must be undone first)
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                crate::fsutil::undo_deny_dir_traversal(&self.1);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(d.clone(), locked.clone());
+
+        if !crate::fsutil::deny_dir_traversal(&locked, &out_dir) {
+            crate::skip_notice!(
+                "[CPE-1729] SKIPPED the unwritable-parent wording leg: could not stage a denied parent at \
+                 {} on this machine/account (see `deny_dir_traversal`'s doc — this is a legitimate, \
+                 expected skip on Windows). NOTHING in this test covered the unwritable-parent message on \
+                 this run.",
+                locked.display()
+            );
+            return;
+        }
+
+        let err =
+            split_file(&src, 128, &out_dir).expect_err("an unwritable parent must still make split fail");
+        assert!(
+            err.contains(&out_dir.display().to_string()),
+            "the message must name the path even when the cause is an unwritable parent, not just \
+             something occupying out_dir's own name: {err}"
+        );
+    }
+
+    /// **Reviewer-caught, UAT on PR #930.** The first cut of `out_dir_error` matched on "is a symlink"
+    /// alone, so a **live** link at `out_dir` pointing at an existing file got the *dangling*-link wording
+    /// verbatim — "leads nowhere", "repair the link's target" — which is false: the link resolves fine, it
+    /// just does not resolve to a folder. This pins the corrected wording: it must name "file", and must
+    /// NOT claim the link leads nowhere or tell the user to repair a target that is not broken.
+    #[test]
+    fn cpe_1729_live_link_to_a_file_says_file_not_leads_nowhere() {
+        let d = scratch("cpe1729-live-file-link");
+        let _cleanup = RemoveOnDrop(d.clone());
+        let src = d.join("payload.bin");
+        std::fs::write(&src, pattern(300)).unwrap();
+
+        let real_file = d.join("real.txt");
+        std::fs::write(&real_file, b"an ordinary file, not a folder").unwrap();
+        let out_dir = d.join("outs");
+
+        // No pre-existing helper makes a LIVE **file** symlink cross-platform: `make_dir_link` (reused
+        // above via `deny_dir_traversal`'s neighbours) is directory-only, and unlike the dangling case
+        // there is no privilege-free junction fallback for a file symlink on Windows — `junction::create`
+        // only targets directories. So this is a bare `symlink_file`/`symlink`, matching the inline
+        // pattern already used the same way at several sites in `fsutil.rs`'s own tests (e.g. the
+        // `symlink_file(&real, &link)` calls), staged and then *verified*, never assumed.
+        fn make_live_file_link(target: &Path, link: &Path) -> bool {
+            #[cfg(windows)]
+            let made = std::os::windows::fs::symlink_file(target, link).is_ok();
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink(target, link).is_ok();
+            made && std::fs::symlink_metadata(link).is_ok_and(|m| m.file_type().is_symlink())
+        }
+
+        if !make_live_file_link(&real_file, &out_dir) {
+            crate::skip_notice!(
+                "[CPE-1729] SKIPPED the live-link-to-a-file wording leg: no file symlink could be created \
+                 at {} on this machine (needs Developer Mode or elevation on Windows, and there is no \
+                 non-privileged fallback for a FILE symlink the way a junction covers a directory one). \
+                 NOTHING in this test covered the live-link-to-a-file message on this run.",
+                out_dir.display()
+            );
+            return;
+        }
+
+        let err = split_file(&src, 128, &out_dir).expect_err("a live link to a file must still refuse");
+        assert!(
+            err.contains(&out_dir.display().to_string()),
+            "the message must name the path: {err}"
+        );
+        assert!(
+            err.contains("file"),
+            "a live link that resolves to a file must say so: {err}"
+        );
+        assert!(
+            !err.contains("leads nowhere") && !err.contains("Repair the link's target"),
+            "the link resolves fine — it must NOT be told it leads nowhere or to repair a target that \
+             isn't broken, the bug the Reviewer caught in PR #930: {err}"
+        );
     }
 
     fn scratch(tag: &str) -> PathBuf {
