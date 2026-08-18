@@ -262,4 +262,77 @@ describe("CPE-1761: the scan fails loudly instead of silently truncating (fail-o
     expect(findUnsafeRenderLines(`<!-- a < b, not a tag --><div>{entry.name}</div>`)).toEqual(["1:entry.name"]);
     expect(() => findUnsafeRenderLines(`<div>{entry.name}</div><!-- trailing -->`)).not.toThrow();
   });
+
+  // Reviewer (CPE-1761 attempt 2, F3): reverting either of these two fail-open fixes independently left
+  // the guard test suite 39/39 GREEN — untested production code guarding two of the ACs. Each must red on
+  // its own, not just ride along with the `{`/`<` tests above.
+  it("an unterminated '<!--' comment above a real offender must RED (throw), not silently truncate to EOF", () => {
+    const src = `<!-- unterminated\n{entry.name}`;
+    let threw: unknown;
+    try {
+      findUnsafeRenderLines(src, "unterminated-comment.svelte");
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, "an unterminated '<!--' must throw rather than silently truncate the scan").toBeInstanceOf(RenderScanError);
+    const message = (threw as Error).message;
+    expect(message).toContain("unterminated-comment.svelte");
+    expect(message).toMatch(/unterminated comment "<!--"/);
+    expect(message).toMatch(/does NOT mean the file is clean/);
+  });
+
+  it("an unterminated '</' closing tag above a real offender must RED (throw), not silently truncate to EOF", () => {
+    const src = `</div\n{entry.name}`;
+    let threw: unknown;
+    try {
+      findUnsafeRenderLines(src, "unterminated-closing-tag.svelte");
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, "an unterminated '</' must throw rather than silently truncate the scan").toBeInstanceOf(RenderScanError);
+    const message = (threw as Error).message;
+    expect(message).toContain("unterminated-closing-tag.svelte");
+    expect(message).toMatch(/unterminated closing tag "<\/"/);
+    expect(message).toMatch(/does NOT mean the file is clean/);
+  });
+
+  // Reviewer (CPE-1761 attempt 2, F1 — BLOCKER): `quoteChar`/`inTag` were never checked at EOF, so a tag
+  // with an odd number of quote characters swallowed every render below it as an (unflagged) attribute-
+  // position mustache. Measured live against DiskSpaceView.svelte: appending `<div title='it's a file'>x
+  // </div>` + a bare `{entry.name}` line let a raw filesystem name ship GREEN — this ticket's whole
+  // premise, unfixed. Reproduced narrowly here (the mechanism), plus the exact end-to-end probe against
+  // the real registered file below.
+  it("F1: an unbalanced attribute quote must RED at EOF (throw), not silently suppress every render below it", () => {
+    const src = [`<div title='it's a file'>x</div>`, `<span>{entry.name}</span>`].join("\n");
+    let threw: unknown;
+    try {
+      findUnsafeRenderLines(src, "unbalanced-quote.svelte");
+    } catch (e) {
+      threw = e;
+    }
+    expect(threw, "an odd number of quote characters in an attribute must throw at EOF, not silently swallow the rest of the file").toBeInstanceOf(RenderScanError);
+    const message = (threw as Error).message;
+    expect(message).toContain("unbalanced-quote.svelte");
+    expect(message).toMatch(/unterminated ' attribute string/);
+    expect(message).toMatch(/does NOT mean the file is clean/);
+  });
+
+  it("F1: an unterminated tag (never reaches a closing '>') must RED at EOF (throw)", () => {
+    const src = `<div title="x"\n{entry.name}`;
+    expect(() => findUnsafeRenderLines(src, "unterminated-tag.svelte")).toThrow(/unterminated tag — no closing ">"/);
+  });
+});
+
+// F1 (reviewer, CPE-1761 attempt 2): the exact end-to-end probe the reviewer ran against a REAL registered
+// component — appending an unbalanced-quote attribute to DiskSpaceView.svelte's real source used to let a
+// brand-new raw `{entry.name}` render ship completely undetected (attribute-position misclassification,
+// same mechanism as the synthetic F1 test above, demonstrated here on the actual file the reviewer used).
+describe("CPE-1761 F1: end-to-end probe against a real registered component (DiskSpaceView.svelte)", () => {
+  it("appending an unbalanced-quote attribute + a new raw render reds the scan instead of shipping green", () => {
+    const probe = [
+      `<div title='it's a file'>x</div>`,
+      `<span>{entry.name}</span>`,
+    ].join("\n");
+    expect(() => findUnsafeRenderLines(probe, "DiskSpaceView.svelte (probe)")).toThrow(RenderScanError);
+  });
 });

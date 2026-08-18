@@ -167,10 +167,14 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
       if (JSON.stringify(found) !== JSON.stringify(recordedSorted)) {
         const newlyRaw = found.filter((l) => !recordedSorted.includes(l));
         const stale = recordedSorted.filter((l) => !found.includes(l));
+        // F5 (reviewer, CPE-1761 attempt 2): the useful delta goes FIRST — a developer reading a failed
+        // registry file must see what actually changed before wading through the full recorded/found
+        // dumps (which, for a file like AgentTimeline.svelte, run to several KB and bury the diff).
         mismatches.push(
-          `${file}: found [${found.join(",")}] vs recorded [${recordedSorted.join(",")}]` +
-            (newlyRaw.length ? ` — NEW raw offender(s) (line:expr): ${newlyRaw.join(",")}` : "") +
-            (stale.length ? ` — STALE recorded entry(ies), expression no longer matches (line:expr): ${stale.join(",")}` : ""),
+          `${file}:` +
+            (newlyRaw.length ? ` NEW raw offender(s) (line:expr): ${newlyRaw.join(",")}` : "") +
+            (stale.length ? ` STALE recorded entry(ies), expression no longer matches (line:expr): ${stale.join(",")}` : "") +
+            ` — full found [${found.join(",")}] vs recorded [${recordedSorted.join(",")}]`,
         );
       }
     }
@@ -258,11 +262,23 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
   // REGISTRY in round 2) and calling the guard "grep-based" (it has been a parser since round 2). Neither
   // phrase was covered by the doc-parity test above (which only checks the DISCLOSED_GAPS names), which
   // is exactly why they went stale silently. Covering the literal wording here closes that gap.
+  //
+  // Reviewer (CPE-1761 attempt 2, F7): scoped to the bidi-escape bullet specifically (same extraction
+  // technique the "Not yet covered" test above uses, just anchored at the bullet's own start rather than
+  // its "Not yet covered" sub-heading), NOT the whole doc — an unrelated future feature legitimately using
+  // the word "allowlist" or "grep-based" elsewhere in 03-explorer.md must not red this test. Anchored to
+  // the bullet's start (not the "Not yet covered" sub-string) because "grep-based" lives EARLIER in the
+  // same bullet, before "Not yet covered" begins — scoping to only the later sub-paragraph would silently
+  // stop covering that phrase at all.
   it("the doc does not use the stale round-1 vocabulary (ALLOWLIST / grep-based) for this guard", () => {
     const doc = readFileSync(DOC, "utf8");
-    expect(doc, `src/docs/03-explorer.md still says "ALLOWLIST" — that exported constant was renamed to REGISTRY in CPE-1757 round 2; update the prose to match the real name`).not.toContain("ALLOWLIST");
-    expect(doc, `src/docs/03-explorer.md still calls the guard "grep-based" — it has been a parser (bidiRenderScan.ts) since CPE-1757 round 2, not a regex/grep scan; update the prose`).not.toMatch(/grep-based/i);
+    const bidiBullet = /- \*\*A name that tries to disguise its own extension is flagged, not hidden\.\*\*[\s\S]*?(?=\n- \*\*|\n## |$)/.exec(doc)?.[0];
+    expect(bidiBullet, `src/docs/03-explorer.md must have the bidi-escape bullet ("A name that tries to disguise...")`).toBeTruthy();
+    const paragraph = bidiBullet!;
+
+    expect(paragraph, `src/docs/03-explorer.md's bidi-escape bullet still says "ALLOWLIST" — that exported constant was renamed to REGISTRY in CPE-1757 round 2; update the prose to match the real name`).not.toContain("ALLOWLIST");
+    expect(paragraph, `src/docs/03-explorer.md's bidi-escape bullet still calls the guard "grep-based" — it has been a parser (bidiRenderScan.ts) since CPE-1757 round 2, not a regex/grep scan; update the prose`).not.toMatch(/grep-based/i);
     // Positive check, not just the negative ones above: the doc must actually name the real constant.
-    expect(doc, `src/docs/03-explorer.md should point readers at the guard test's real REGISTRY constant`).toContain("REGISTRY");
+    expect(paragraph, `src/docs/03-explorer.md's bidi-escape bullet should point readers at the guard test's real REGISTRY constant`).toContain("REGISTRY");
   });
 });

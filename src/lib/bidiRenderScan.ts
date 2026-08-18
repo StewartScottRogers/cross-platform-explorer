@@ -20,13 +20,17 @@
  * CPE-1761 (round 3): a registered entry pins `line:expr`, not just `line` — editing an already-registered
  * line's expression in place (e.g. swapping a harmless `title={$t(...)}` for a raw `title={entry.name}`)
  * changes the recorded key and reds the guard, instead of the line number alone staying "found" either
- * way. And any markup this module cannot confidently interpret — an unterminated `{…}`/`<!--…-->`/`</…>`,
- * or a bare `<` that doesn't open a real tag/comment/closing-tag — throws `RenderScanError` (naming the
- * file and position) instead of silently truncating the scan at that point. Round 2's engine did the
- * latter (`i = markup.length`) and returned whatever was found so far — often `[]`, indistinguishable
- * from "clean" — which is fail-open in the worst possible direction for a guard whose whole job is to
- * catch what a human missed. A run of this guard now either names every offender or refuses to answer;
- * it can never silently claim a file is clean when it wasn't sure.
+ * way. And any markup this module cannot confidently PARSE — an unterminated `{…}`/`<!--…-->`/`</…>`, a
+ * bare `<` that doesn't open a real tag/comment/closing-tag, or a tag/quoted-attribute that never closes
+ * before EOF — throws `RenderScanError` (naming the file and position) instead of silently truncating the
+ * scan at that point. Round 2's engine did the latter (`i = markup.length`, or just falling off the end of
+ * `markup` mid-tag) and returned whatever was found so far — often `[]`, indistinguishable from "clean" —
+ * which is fail-open in the worst possible direction for a guard whose whole job is to catch what a human
+ * missed. That closes the specific silent-truncation shape round 2 shipped: a run of this guard now either
+ * names every offender it could locate or refuses to answer outright when it can't parse the markup. It is
+ * NOT a blanket guarantee the computed set is exhaustive in every case — a mustache the scanner CAN parse
+ * but whose render-position HEURISTIC has a known gap (see "still cannot see" below) still scans clean
+ * without complaint, because nothing about that shape looks unparseable to the scanner.
  *
  * **What this still cannot see** (the honest boundary — read before trusting a green run):
  *   - A raw name/path placed in any DOM attribute OTHER than `title`/`aria-label`/`alt` — `data-*`,
@@ -44,7 +48,7 @@
  *   - An inline ternary's CONDITION is not parsed out: `kind === "dir" ? displaySafeName(a) :
  *     displaySafePath(b)` reads as unsafe (the leftover `kind`/`dir` tokens look identical to a real
  *     miss) even though both branches are properly wrapped. This is a false POSITIVE, not a false
- *     negative — the safe direction to be wrong in, since it costs an allowlist entry rather than lets a
+ *     negative — the safe direction to be wrong in, since it costs a `REGISTRY` entry rather than lets a
  *     spoof through. Rewriting as `{#if kind === "dir"}{displaySafeName(a)}{:else}…{/if}` (this repo's
  *     own idiom) sidesteps it entirely, since each branch is then its own independently-checked mustache.
  *   - CPE-1761's fail-loud fix is a trade, not a free lunch: a genuinely LITERAL `<` sitting in body text
@@ -52,6 +56,15 @@
  *     silently tolerated. That is deliberate (a loud false failure beats a quiet false pass), but it does
  *     mean such text must be rewritten (or escaped) for the guard to run at all — it will not render a
  *     verdict around markup it isn't sure it understood.
+ *   - The flip side of that trade: `findMatchingBrace` has no concept of a `//` or `/* … *​/` JS comment,
+ *     so an apostrophe (or an unbalanced quote of any kind) inside a comment written INSIDE an inline
+ *     tag-attribute expression (`on:click={() => { /* it's fine *​/ }}`) reads as opening a real string
+ *     literal — valid, harmless Svelte that now HARD-ERRORS the scan with a "malformed brace" message that
+ *     doesn't describe what's actually wrong. This is a hard-error FALSE POSITIVE (the safe direction —
+ *     loud and wrong beats quiet and wrong — but still a real developer-facing cost). Tracked as CPE-1767.
+ *   - A mustache preceded by ordinary body text on the same line. Render-position detection requires the
+ *     text immediately before `{` to end in `>` or `}`, so `<div>File: {entry.name}</div>` is not seen as
+ *     a render position and the file scans clean. Tracked as CPE-1766.
  */
 
 /** Strip every `<script>…</script>` / `<style>…</style>` block, replacing its content with the same
@@ -423,6 +436,18 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
       continue;
     }
     i++;
+  }
+  // F1 (reviewer, CPE-1761 attempt 2): reaching EOF still inside a quoted attribute string, or still
+  // inside a tag's attribute list at all, is the same fail-open shape as everything above — the loop
+  // just falls off the end of `markup` and returns whatever was found so far. An odd number of `'`/`"`
+  // in an attribute (e.g. `title='it's a file'`) used to silently swallow every render below it as an
+  // ATTRIBUTE-position mustache (suppressed unless title=/aria-label=/alt=) for the rest of the file.
+  // Fail loudly instead of letting the scan quietly run out of markup mid-tag.
+  if (quoteChar !== null) {
+    fail(markup.length - 1, `reached end of file inside an unterminated ${quoteChar} attribute string`);
+  }
+  if (inTag) {
+    fail(markup.length - 1, `reached end of file inside an unterminated tag — no closing ">" was found`);
   }
   return [...offenders].sort(compareOffenders);
 }

@@ -146,6 +146,17 @@ than being silently tolerated (a deliberate loud-failure-over-quiet-fail-open tr
 worth flagging for future readers). Also fixed the same `ALLOWLIST`→`REGISTRY` wording drift inside this
 file's own header (line ~15), since I was already touching it.
 
+**UAT follow-up — criterion 6 was initially incomplete.** UAT verified all three fail-closed fixes hold on
+main and red loudly on this branch, but flagged that the "still cannot see" header omitted a real,
+pre-existing (not a CPE-1761 regression) blind spot: `isRenderPosition` only treats a mustache as a render
+position when the text immediately before `{` ends in `>` or `}`, so ordinary prose between a tag boundary
+and the mustache defeats it — `<div>File: {entry.name} was found</div>` scans clean on both main and this
+branch. Per the Foreman's explicit direction, did NOT touch `isRenderPosition` here (fixing it surfaces new
+offenders across all 41 registry files, each needing individual triage — that's CPE-1766's whole scope, and
+folding it into this PR would bury the three fail-closed fixes in a much larger, riskier diff). Added the
+missing header bullet instead, referencing CPE-1766 (filed by the Foreman with the full measurement and the
+required 41-file rescan) as the ticket that owns the actual gap.
+
 **New tests (each proven to bite — broke the fix, ran the test, confirmed red, then restored):**
 - `bidiRenderScan.test.ts` → describe "CPE-1761: the scan fails loudly instead of silently truncating":
   - `control: baseline-two-raw` — sanity: 2 real offenders normally caught (`["2:entry.name","3:other.path"]`).
@@ -199,3 +210,72 @@ all green (includes the pre-existing `bidiRenderScan.test.ts` 27→32 tests and 
   picture doesn't contradict any doc claim.
 - Did not touch `src-tauri`/Rust or any other backend surface — this ticket is entirely `src/lib` +
   `src/docs`.
+
+## Attempt 2 — independent Reviewer findings, all addressed
+
+**F1 (BLOCKER) — an unbalanced attribute quote still failed open silently.** `quoteChar`/`inTag` were
+never checked at EOF, so `findUnsafeRenderLines` could fall off the end of `markup` mid-tag/mid-quote and
+return whatever it found so far — an odd number of `'`/`"` in an attribute (e.g. `title='it's a file'`)
+silently swallowed every render below it as an (unflagged) attribute-position mustache. Fixed:
+`src/lib/bidiRenderScan.ts`, immediately before the final `return`, added
+`if (quoteChar !== null) fail(...)` and `if (inTag) fail(...)`. Both throw `RenderScanError` naming
+"reached end of file inside an unterminated ' attribute string" / "...unterminated tag — no closing
+'>' was found". Ran across all 136 `.svelte` files under `src/` (a throwaway script, same shape as the
+registry-generation one) — 0 trip it, so this costs nothing on real files. New tests (bit and proven, see
+below): "F1: an unbalanced attribute quote must RED at EOF", "F1: an unterminated tag ... must RED at
+EOF", and an end-to-end probe reproducing the reviewer's exact DiskSpaceView.svelte-shaped repro.
+
+**F3 — two existing fail-open fixes had NO test that bit.** Reverting the unterminated-`<!--` hunk or the
+unterminated-`</` hunk independently left the suite 39/39 green — untested production code covering two of
+the ACs. Added two tests to the `CPE-1761: the scan fails loudly...` describe in
+`src/lib/bidiRenderScan.test.ts` (`<!-- unterminated\n{entry.name}` and `</div\n{entry.name}`), each
+proven red by reverting its fix (see red-proof section below) before restoring.
+
+**F2 — the header made a false absolute claim.** `bidiRenderScan.ts`'s new paragraph said the guard "can
+never silently claim a file is clean when it wasn't sure" — false once F4b/F4c's known heuristic gaps are
+counted (the scanner IS confident, just wrong, on those shapes — a different failure class than "unsure").
+Reworded to say the guard closes the specific silent-truncation-to-`[]` shape round 2 shipped, and
+explicitly disclaims that this is not a blanket exhaustiveness guarantee, pointing at "still cannot see"
+for the known heuristic gaps.
+
+**F4a — disclosed the apostrophe-in-comment trade + filed for CPE-1767.** Added a "still cannot see"
+bullet (right after the CPE-1761 fail-loud bullet) naming that `findMatchingBrace` has no concept of `//`
+or `/* */` JS comments, so an apostrophe inside a comment written INSIDE an inline tag-attribute expression
+(e.g. `on:click={() => { /* it's fine */ }}`) — valid, harmless Svelte — now hard-errors the scan with a
+message that doesn't describe the real cause. Framed explicitly as a hard-error FALSE POSITIVE (safe
+direction, real developer cost), referencing CPE-1767 per the Foreman's message.
+
+**F4b — the mid-text gap.** Bullet already added per the Foreman's first message (see "UAT follow-up"
+above); unchanged this round.
+
+**F5 — put the delta first.** `bidiEscape.guard.test.ts`'s mismatch message now emits the `NEW`/`STALE`
+clauses BEFORE the full `found [...] vs recorded [...]` array dump, so the useful diff isn't buried behind
+multi-KB dumps for large files like `AgentTimeline.svelte`.
+
+**F6 — nit.** `bidiRenderScan.ts`'s ternary-condition bullet: "costs an allowlist entry" → "costs a
+`REGISTRY` entry" (the same stale-vocabulary drift this ticket fixes in the shipped doc, now fixed in the
+module's own header too).
+
+**F7 — nit.** The new `ALLOWLIST`/`grep-based` doc test was checking the WHOLE `03-explorer.md`, which
+would red on an unrelated future feature legitimately using either word. Rescoped to the bidi-escape
+bullet specifically (same paragraph-extraction technique the sibling "Not yet covered" test uses, anchored
+at the bullet's own start rather than its "Not yet covered" sub-heading — anchoring narrower would have
+silently stopped covering "grep-based" at all, since that phrase sits earlier in the same bullet, before
+the "Not yet covered" sub-string begins).
+
+**Red-proof for the new/changed tests (attempt 2), each broken, run, confirmed red, then restored:**
+- `F1: an unbalanced attribute quote must RED at EOF` — reverted both new EOF checks (`if (false &&
+  quoteChar !== null)` / `if (false && inTag)`) → all three F1 tests (`unbalanced attribute quote`,
+  `unterminated tag`, and the DiskSpaceView-shaped end-to-end probe) failed: `expected undefined to be an
+  instance of RenderScanError`, `expected [Function] to throw an error`, `expected function to throw an
+  error, but it didn't`. Restored, reran green.
+- `an unterminated '<!--' comment ... must RED` — reverted the `<!--` `fail(...)` back to
+  `i = end === -1 ? markup.length : end + 3` → `expected undefined to be an instance of RenderScanError`.
+  Restored, reran green.
+- `an unterminated '</' closing tag ... must RED` — reverted the `</` `fail(...)` back to
+  `i = end === -1 ? markup.length : end + 1` → `expected undefined to be an instance of RenderScanError`.
+  Restored, reran green.
+
+**Verification (attempt 2).** `npm run check` — 0 errors, 0 warnings. Full `npx vitest run` — 312 files /
+4068 tests, all green (bidiRenderScan.test.ts grew 32→37, bidiEscape.guard.test.ts stayed at 7 with F5/F7
+edits to existing tests rather than new ones).
