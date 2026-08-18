@@ -227,3 +227,74 @@ still legitimately skipped on Windows).
   proven once CI's Unix legs run it.
 - Sibling sites in `backup.rs`/`batch_execute.rs` are reported, not fixed — deliberately out of this
   ticket's stated scope (`crates/server/src/split_join.rs`).
+
+## Work Log addendum (2026-08-18) — Reviewer/UAT finding, fixed
+
+**Reviewer approved and UAT passed the rest** (fallback ordering, the path named in all four arms, the
+loud Windows skip on `deny_dir_traversal`, refuse-vs-accept genuinely unchanged — a live directory link
+still works end to end with parts landing through it). **One finding, squarely in scope:**
+
+`out_dir_error`'s symlink arm matched on `meta.file_type().is_symlink()` alone and unconditionally used
+the dangling-link wording. UAT measured a **live** symlink pointing at an existing *file*:
+
+```
+setup:  out_dir = symlink -> a real file
+before: "<path>" is a link, and it leads nowhere — the output folder cannot be created there...
+        Repair the link's target, or split into a different folder
+```
+
+That is false — the link resolves fine, it just does not resolve to a folder. Telling the user to
+"repair the link's target" points them at a target that is not broken.
+
+**Fix:** split the symlink arm on a second, *resolving* `std::fs::metadata(out_dir)` read:
+
+- resolve fails with `NotFound` → the existing dangling wording (unchanged);
+- resolve succeeds but is not a directory (the new case) → `"<path>" is a link that points at a file, not
+  a folder — the output folder cannot be created there. Repoint the link at a folder, or split into a
+  different folder`;
+- resolve succeeds as a directory (should be unreachable — `create_dir_all` would already have succeeded
+  through it) or anything else this second read cannot classify → falls through to the same honest
+  generic `path: {e}` / permission-denied wording used for every other unclassified cause, rather than
+  asserting a third unverified claim.
+
+**Before / after, live link → file** (measured on this machine, Windows 11):
+- Before: `"C:\...\outs" is a link, and it leads nowhere — the output folder cannot be created there. The
+  OS reports "Cannot create a file when that file already exists. (os error 183)", which sends you to
+  delete a file that does not exist; what exists at that name is the link. Repair the link's target, or
+  split into a different folder`
+- After: `"C:\...\outs" is a link that points at a file, not a folder — the output folder cannot be
+  created there. Repoint the link at a folder, or split into a different folder`
+
+**New test:** `cpe_1729_live_link_to_a_file_says_file_not_leads_nowhere` — stages a live symlink at
+`out_dir` pointing at a real file (bare `symlink_file`/`symlink`, no pre-existing cross-platform helper
+covers a *live file* link the way `make_dir_link` covers a live *directory* link and `make_dangling_link`
+covers dangling — noted in the code as a possible future `fsutil` extraction, not done here since one
+call site doesn't earn a new shared helper). Ran for real on this machine (no skip — file symlinks work
+here without extra privilege). Asserts the message names the path, says "file", and does **not** contain
+"leads nowhere" or "Repair the link's target".
+
+**Red-proof** — reverted the symlink arm to the single-branch pre-review version, ran the new test alone:
+
+```
+thread '...cpe_1729_live_link_to_a_file_says_file_not_leads_nowhere' panicked at src\split_join.rs:1085:9:
+the link resolves fine — it must NOT be told it leads nowhere or to repair a target that isn't broken,
+the bug the Reviewer caught in PR #930: "C:\...\outs" is a link, and it leads nowhere — the output folder
+cannot be created there. The OS reports "Cannot create a file when that file already exists. (os error
+183)", which sends you to delete a file that does not exist; what exists at that name is the link. Repair
+the link's target, or split into a different folder
+test result: FAILED. 0 passed; 1 failed
+```
+
+Restored the fix; re-ran green (29/29 in `split_join`, including the new test and the still-legitimate
+Windows skip on the unwritable-parent test).
+
+**Re-verification after the fix, this machine:**
+- `cargo test -p cpe-server` (default): 2206 lib tests, 0 failed. One first-run failure in
+  `sample_fixtures::zip_lists_real_tree_and_extracts_inner_file` again (same pre-existing flake noted
+  above — passed in isolation on immediate re-run, still unrelated to `split_join.rs`).
+- `cargo clippy -p cpe-server --all-targets -- -D warnings`: clean.
+- `cargo clippy -p cpe-server --all-targets --features index -- -D warnings`: clean.
+
+**25-site tree sweep, read-only-filesystem/PermissionDenied nuance, and every other out-of-scope item the
+Reviewer raised are filed as CPE-1777** — not addressed here, per direct instruction to stay in
+`split_join.rs` and not expand beyond this one finding.
