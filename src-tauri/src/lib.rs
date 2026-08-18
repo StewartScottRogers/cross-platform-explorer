@@ -614,12 +614,9 @@ async fn list_dir(path: String) -> Result<ListDirResult, String> {
     // diverts to the provider router.
     match cpe_server::fs_route::route(&path) {
         cpe_server::fs_route::Route::Local => {
-            tauri::async_runtime::spawn_blocking(move || {
-                cpe_server::listing::list_dir(&path)
-                    .map(|entries| ListDirResult { entries, filtered: 0 })
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            tauri::async_runtime::spawn_blocking(move || local_list_dir_result(&path))
+                .await
+                .map_err(|e| e.to_string())?
         }
         cpe_server::fs_route::Route::Remote(_) => {
             tauri::async_runtime::spawn_blocking(move || remote_list_dir_impl(path).map(listing_to_result))
@@ -627,6 +624,14 @@ async fn list_dir(path: String) -> Result<ListDirResult, String> {
                 .map_err(|e| e.to_string())?
         }
     }
+}
+
+/// `list_dir`'s LOCAL arm (CPE-1708): a free function so the "a local listing always reports
+/// `filtered: 0`" AC line ("Confirm every other provider (SFTP, WebDAV, FTP, local) reports zero and is
+/// unaffected") is independently unit testable against the SAME code the real command calls, not a
+/// hand-duplicated copy of it that could silently drift from what `list_dir` actually runs.
+fn local_list_dir_result(path: &str) -> Result<ListDirResult, String> {
+    cpe_server::listing::list_dir(path).map(|entries| ListDirResult { entries, filtered: 0 })
 }
 
 /// The `RemoteListing` → `ListDirResult` link of the CPE-1708 chain: a free function (not a `From` impl —
@@ -13542,9 +13547,7 @@ mod tests {
         let _cleanup = Cleanup(dir.clone()); // armed before any assertion below can panic and skip it
         fs::write(dir.join("a.txt"), b"hi").unwrap();
 
-        let result = cpe_server::listing::list_dir(dir.to_str().unwrap())
-            .map(|entries| ListDirResult { entries, filtered: 0 })
-            .expect("local listing succeeds");
+        let result = local_list_dir_result(dir.to_str().unwrap()).expect("local listing succeeds");
         assert_eq!(result.filtered, 0, "a local listing has no name-guard filtering to report");
         assert_eq!(result.entries.len(), 1);
     }
