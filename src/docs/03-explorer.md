@@ -80,7 +80,7 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   this app runs on, so nothing about the file itself is altered), and a name you're actively renaming shows
   and edits your real characters, not the tagged version. That matters for a genuinely right-to-left
   filename (Arabic, Hebrew) — those are never touched or "fixed"; only the handful of invisible
-  direction-control characters are ever flagged, never the letters themselves. A grep-based guard test
+  direction-control characters are ever flagged, never the letters themselves. A parser-based guard test
   (`src/lib/bidiEscape.guard.test.ts`) fails CI if a covered component's name/path render loses its escape,
   so this list can't silently go stale the way it did between CPE-1712's two review rounds.
   **Not yet covered**, each confirmed lower-consequence (a diagnostic read-out, not a decision surface)
@@ -89,7 +89,7 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   `SimilarImagesDialog`'s match names, `DeclutterDialog`'s suggestion list, `BatchMediaDialog`'s
   input/output/skip names, the `SplitFileDialog`/`JoinPartsDialog` dialogs and their completion notices,
   `ExplorerPane`'s live agent-edit chip, `TerminalPanel`'s tab label, and `Sidebar`'s agent-session chip.
-  Tracked as a follow-up rather than claimed here — see the guard test's `ALLOWLIST` for the exact
+  Tracked as a follow-up rather than claimed here — see the guard test's `REGISTRY` for the exact
   file/line list this prose summarizes.
 - **Preview** — select a file to see it in the side pane; text is editable in place. Text files (source
   code and plain text alike, e.g. `.txt`) get a richer read view: syntax highlighting when a language is
