@@ -4193,17 +4193,23 @@ mod tests {
         let base = format!("http://{addr}");
 
         let provider = S3Provider::connect(&cfg(&base));
-        let err = provider.list("/").expect_err(
+        let outcome = provider.list("/");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on what actually happened, not on "expected an error".
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            1,
+            "must fail on the very first malformed page, not retry or silently accept what it has \
+             (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "IsTruncated=true with no NextContinuationToken must be a loud error, not a silently \
              truncated-but-reported-complete listing",
         );
         assert!(err.contains("IsTruncated=true"), "{err}");
         assert!(err.contains("NextContinuationToken"), "{err}");
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            1,
-            "must fail on the very first malformed page, not retry or silently accept what it has"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -4220,7 +4226,18 @@ mod tests {
         let cfg = S3Config::new(&base, "us-east-1", TEST_BUCKET, bad_creds).with_addressing(AddressingStyle::Path);
         let provider = S3Provider::connect(&cfg);
 
-        let err = provider.list("/").expect_err("a non-ASCII access key id must be refused, not silently mangled");
+        let outcome = provider.list("/");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): the harm here IS "no bytes left the
+        // process", so this must not be gated behind a successful `expect_err`.
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            0,
+            "the guard must fire BEFORE any request reaches the fixture — a live server saw a request \
+             despite the refusal (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err("a non-ASCII access key id must be refused, not silently mangled");
         assert!(err.contains("ureq"), "{err}");
         assert!(err.contains("Authorization"), "the error must name which header, not just that something failed: {err}");
         assert!(err.contains("byte") && err.contains("offset"), "the error must name the byte and its offset: {err}");
@@ -4230,12 +4247,6 @@ mod tests {
         assert!(!err.contains("Signature="), "the Authorization value leaked into the error: {err}");
         assert!(!err.contains("Credential="), "the Authorization value leaked into the error: {err}");
         assert!(!err.contains("AKIA"), "the access key id leaked into the error: {err}");
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            0,
-            "the guard must fire BEFORE any request reaches the fixture — a live server saw a request \
-             despite the refusal"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -5273,23 +5284,26 @@ mod tests {
         let mut provider = S3Provider::connect(&cfg(&base));
         std::fs::write(root.join("a.txt"), b"a").unwrap();
 
-        let err = provider
-            .rename("/a.txt", "/b.txt")
-            .expect_err("S3 has no rename; a copy+delete emulation must not be attempted");
+        let outcome = provider.rename("/a.txt", "/b.txt");
+
+        // Assert on the harm BEFORE unwrapping the Result: if the guard ever answers `Ok`, the run must
+        // still reach these and red on the damage, not stop at `expect_err`.
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            0,
+            "rename reached the network — refusing means refusing: no CopyObject PUT and no DELETE may be \
+             issued, because a delete that fails after a successful copy silently leaves two objects \
+             (outcome was {outcome:?})"
+        );
+        assert!(root.join("a.txt").is_file(), "the source object must be untouched (outcome was {outcome:?})");
+        assert!(!root.join("b.txt").exists(), "no destination object may have been created (outcome was {outcome:?})");
+
+        let err = outcome.expect_err("S3 has no rename; a copy+delete emulation must not be attempted");
         assert!(err.contains("no rename"), "the error must name S3's lack of a rename: {err}");
         assert!(
             err.contains("not atomic"),
             "the error must say why the emulation is refused, not just that it is: {err}"
         );
-
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            0,
-            "rename reached the network — refusing means refusing: no CopyObject PUT and no DELETE may be \
-             issued, because a delete that fails after a successful copy silently leaves two objects"
-        );
-        assert!(root.join("a.txt").is_file(), "the source object must be untouched");
-        assert!(!root.join("b.txt").exists(), "no destination object may have been created");
 
         assert!(
             !provider.capabilities().supports_rename,
@@ -5307,7 +5321,20 @@ mod tests {
         provider.write("/photos/2024/a.jpg", b"a").unwrap();
         provider.write("/photos/2024/b.jpg", b"b").unwrap();
 
-        let err = provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        // Assert on what the user still has BEFORE unwrapping the Result: if the guard ever answers
+        // `Ok`, the run must still reach these and red on the damage, not stop at `expect_err`.
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "a.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+        assert!(
+            root.join("photos/2024/b.jpg").is_file(),
+            "b.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "S3 answers 204 to a DELETE of a key that never existed, so a single-key delete of a \
              directory prefix would report success while the whole subtree stayed put",
         );
@@ -5315,10 +5342,6 @@ mod tests {
             err.contains("recursive"),
             "the error must name the missing capability, not just fail: {err}"
         );
-
-        // Assert on what the user still has, not on the `Result`.
-        assert!(root.join("photos/2024/a.jpg").is_file(), "a.jpg was deleted by a refused delete");
-        assert!(root.join("photos/2024/b.jpg").is_file(), "b.jpg was deleted by a refused delete");
     }
 
     #[test]
@@ -5380,12 +5403,18 @@ mod tests {
         std::fs::write(root.join("photos/2024/.s3marker"), b"").unwrap();
         std::fs::write(root.join("photos/2024/a.jpg"), b"a").unwrap();
 
-        let err = provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "the content was deleted anyway (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "a server that returned only the marker on the first page must not be read as an empty \
              directory — IsTruncated said there was more",
         );
         assert!(err.contains("recursive"), "{err}");
-        assert!(root.join("photos/2024/a.jpg").is_file(), "the content was deleted anyway");
     }
 
     /// **The sharpest bug the round-2 UAT found, and it was mine.** `probe_prefix` reported "real
@@ -5419,20 +5448,22 @@ mod tests {
         assert_eq!(entries.len(), 0, "precondition: the filtered leaf must not be surfaced");
         assert_eq!(filtered, 1, "precondition: it must be counted as filtered, not vanish");
 
-        let err = provider.delete("/photos").expect_err(
+        let outcome = provider.delete("/photos");
+
+        // Assert on what the user still has BEFORE unwrapping: the marker must NOT have been deleted,
+        // because deleting it is what makes the folder disappear while the object stays.
+        assert!(
+            root.join("photos/.s3marker").is_file(),
+            "the marker was deleted by a refused delete — the folder would vanish from listings while \
+             the object underneath it survived (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "the prefix holds a real object that `list` merely refuses to display — deleting the marker \
              and reporting success would tell the user a folder was removed while its contents survive, \
              now unreachable through the UI",
         );
         assert!(err.contains("recursive"), "the error must name the missing capability: {err}");
-
-        // Assert on what the user still has: the marker must NOT have been deleted, because deleting it
-        // is what makes the folder disappear while the object stays.
-        assert!(
-            root.join("photos/.s3marker").is_file(),
-            "the marker was deleted by a refused delete — the folder would vanish from listings while \
-             the object underneath it survived"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -5460,10 +5491,18 @@ mod tests {
         std::fs::write(root.join("photos/a.jpg"), b"jpeg").unwrap();
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider
-            .delete("/photos/gone.jpg")
-            .expect_err("the directory check cannot run and no HEAD proves an object, so the delete must \
-                         be refused, not guessed");
+        let outcome = provider.delete("/photos/gone.jpg");
+
+        // Assert on what the user still has BEFORE unwrapping the Result.
+        assert!(
+            root.join("photos/a.jpg").is_file(),
+            "a refused delete removed the object anyway (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "the directory check cannot run and no HEAD proves an object, so the delete must \
+             be refused, not guessed",
+        );
 
         assert!(
             !err.starts_with("s3: \"photos/gone.jpg/\""),
@@ -5483,9 +5522,6 @@ mod tests {
             err.contains("nothing has been deleted"),
             "a user reading a failed delete needs to know whether anything happened: {err}"
         );
-
-        // Assert on what the user still has, not on the `Result`.
-        assert!(root.join("photos/a.jpg").is_file(), "a refused delete removed the object anyway");
     }
 
     /// **CPE-1727 item 1, the operation this family of tickets is about.** A credential holding
@@ -5574,19 +5610,24 @@ mod tests {
         ]);
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider.delete("/photos").expect_err(
-            "the probe sees content under photos/ and refuses — which is right for the folder and wrong \
-             for the object of the same name",
-        );
-        assert!(err.contains("recursive"), "the refusal is the directory refusal: {err}");
+        let outcome = provider.delete("/photos");
 
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on the key set that actually survived, not on
+        // "expected an error".
         let left: Vec<String> = keys.lock().unwrap().iter().cloned().collect();
         assert_eq!(
             left,
             vec!["photos".to_string(), "photos/a.jpg".to_string(), "photos/b.jpg".to_string()],
             "nothing was removed — and the object `photos` cannot be removed by this credential at all, \
-             while the credential WITHOUT s3:ListBucket removes it in the test above"
+             while the credential WITHOUT s3:ListBucket removes it in the test above (outcome was {outcome:?})"
         );
+
+        let err = outcome.expect_err(
+            "the probe sees content under photos/ and refuses — which is right for the folder and wrong \
+             for the object of the same name",
+        );
+        assert!(err.contains("recursive"), "the refusal is the directory refusal: {err}");
     }
 
     /// **What the collision actually looks like to a user, measured by the PR #903 UAT round 3** — and the
@@ -5668,13 +5709,21 @@ mod tests {
         std::fs::write(root.join("photos/2024/b.jpg"), b"b").unwrap();
         let mut provider = S3Provider::connect(&cfg(&base));
 
-        provider.delete("/photos/2024").expect_err(
+        let outcome = provider.delete("/photos/2024");
+
+        assert!(
+            root.join("photos/2024/a.jpg").is_file(),
+            "a.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+        assert!(
+            root.join("photos/2024/b.jpg").is_file(),
+            "b.jpg was deleted by a refused delete (outcome was {outcome:?})"
+        );
+
+        outcome.expect_err(
             "falling back to an un-probed single-key DELETE here would return 204 and report a whole \
              subtree removed while every object in it stayed put",
         );
-
-        assert!(root.join("photos/2024/a.jpg").is_file(), "a.jpg was deleted by a refused delete");
-        assert!(root.join("photos/2024/b.jpg").is_file(), "b.jpg was deleted by a refused delete");
     }
 
     /// `stat`'s half of the same fix. On AWS proper this is mostly masked — without `s3:ListBucket` a HEAD
@@ -5954,15 +6003,20 @@ mod tests {
         provider.mkdir("/scratch").expect("mkdir must succeed — this server denies nothing");
         assert!(root.join("scratch/.s3marker").is_file(), "precondition: the marker exists");
 
-        let err = provider.delete("/scratch").expect_err(
-            "RECORDED, NOT DESIRED: the belt cannot confirm the marker-only verdict, so it refuses — this \
-             exact delete succeeds on a server that implements start-after",
-        );
+        let outcome = provider.delete("/scratch");
 
-        // The measured loss: an entitled operation removed by a new guard.
+        // The measured loss: an entitled operation removed by a new guard. Asserted BEFORE unwrapping
+        // the Result, so a guard that ever answers `Ok` here still reds on the marker's fate rather than
+        // on "expected an error, got ()" (CPE-1743).
         assert!(
             root.join("scratch/.s3marker").is_file(),
-            "the empty folder is still there — that is the cost this test exists to record"
+            "the empty folder is still there — that is the cost this test exists to record \
+             (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "RECORDED, NOT DESIRED: the belt cannot confirm the marker-only verdict, so it refuses — this \
+             exact delete succeeds on a server that implements start-after",
         );
         assert!(
             err.contains("nothing has been deleted"),
@@ -6599,30 +6653,45 @@ mod tests {
         let (base, seen) = spawn_a_request_line_recorder();
         let provider = S3Provider::connect(&cfg(&base));
 
-        let err = provider
-            .read("/a/../b.txt")
-            .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
-        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
-        assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
-        assert!(err.contains("CPE-1721"), "the error must point at the follow-up that would fix it: {err}");
+        let outcome = provider.read("/a/../b.txt");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on the request that actually reached the server, not
+        // on "expected an error".
         assert_eq!(
             seen.lock().unwrap().len(),
             0,
             "the guard must fire BEFORE the request leaves the process — a request reached the server \
-             despite the refusal"
+             despite the refusal (outcome was {outcome:?})"
         );
 
-        // Every verb goes through the same one guard, so none of them can miss it.
+        let err = outcome
+            .expect_err("a key ureq would rewrite must be refused, not sent under a mismatched signature");
+        assert!(err.contains("dot segment"), "the error must name what it found: {err}");
+        assert!(err.contains("SignatureDoesNotMatch"), "the error must name the failure it prevents: {err}");
+        assert!(err.contains("CPE-1721"), "the error must point at the follow-up that would fix it: {err}");
+
+        // Every verb goes through the same one guard, so none of them can miss it. Capture all four
+        // outcomes BEFORE asserting anything, so the shared request-count assertion runs before any
+        // one verb's `is_err()` check can mask what the others did.
         let mut provider = provider;
-        assert!(provider.stat("/a/./b.txt").is_err(), "stat must refuse a single-dot segment too");
-        assert!(provider.write("/a/../b.txt", b"x").is_err(), "write must refuse it too");
-        assert!(provider.delete("/a/../b.txt").is_err(), "delete must refuse it too");
-        assert!(provider.mkdir("/a/../b").is_err(), "mkdir must refuse it too");
+        let stat_outcome = provider.stat("/a/./b.txt");
+        let write_outcome = provider.write("/a/../b.txt", b"x");
+        let delete_outcome = provider.delete("/a/../b.txt");
+        let mkdir_outcome = provider.mkdir("/a/../b");
+
         assert_eq!(
             seen.lock().unwrap().len(),
             0,
-            "one of the other verbs sent a request whose path ureq would have rewritten"
+            "one of the other verbs sent a request whose path ureq would have rewritten (stat was \
+             {stat_outcome:?}, write was {write_outcome:?}, delete was {delete_outcome:?}, mkdir was \
+             {mkdir_outcome:?})"
         );
+
+        assert!(stat_outcome.is_err(), "stat must refuse a single-dot segment too");
+        assert!(write_outcome.is_err(), "write must refuse it too");
+        assert!(delete_outcome.is_err(), "delete must refuse it too");
+        assert!(mkdir_outcome.is_err(), "mkdir must refuse it too");
     }
 
     #[test]
@@ -6708,20 +6777,32 @@ mod tests {
 
         provider.write("/dyn/src.txt", b"payload").expect("the rename source must really exist");
         let before = requests.load(Ordering::Relaxed);
-        let err = provider.rename("/dyn/src.txt", "/dyn/dst.txt").expect_err(
-            "rename must refuse through dyn too — and with a source that exists, a working copy-then-delete \
-             emulation would return Ok here instead",
-        );
-        assert!(err.contains("no rename"), "the refusal must say what it is refusing: {err}");
+        let outcome = provider.rename("/dyn/src.txt", "/dyn/dst.txt");
+
+        // Assert on the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`
+        // through the trait object, the run must still reach these and red on the damage, not stop at
+        // `expect_err`.
         assert_eq!(
             requests.load(Ordering::Relaxed),
             before,
             "rename reached the network through dyn: an emulation whose copy lands and which then reports \
              an honest-looking error still leaves the user two objects believing they have one, and only \
-             'no request was sent' can tell that apart from a real refusal"
+             'no request was sent' can tell that apart from a real refusal (outcome was {outcome:?})"
         );
-        assert!(root.join("dyn/src.txt").is_file(), "the source object was moved by a refused rename");
-        assert!(!root.join("dyn/dst.txt").exists(), "a destination object was created by a refused rename");
+        assert!(
+            root.join("dyn/src.txt").is_file(),
+            "the source object was moved by a refused rename (outcome was {outcome:?})"
+        );
+        assert!(
+            !root.join("dyn/dst.txt").exists(),
+            "a destination object was created by a refused rename (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
+            "rename must refuse through dyn too — and with a source that exists, a working copy-then-delete \
+             emulation would return Ok here instead",
+        );
+        assert!(err.contains("no rename"), "the refusal must say what it is refusing: {err}");
 
         assert!(!provider.capabilities().supports_rename);
         assert!(!provider.capabilities().has_real_dirs);

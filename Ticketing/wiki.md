@@ -283,6 +283,33 @@ the restore, or a false green if you restore before capturing the break — whic
 ordinary flake: the mandated "restore and confirm green" step is exactly the one it corrupts. If you must
 restore by copy, touch the file first, and check the run actually printed `Compiling` before you trust it.
 
+**Assert the harm before unwrapping the `Result` (CPE-1743).** A test of the shape
+`let err = op(...).expect_err("...")` **then** `assert!(state survived, "...")` cannot fail the way its
+name promises: if the guard under test ever fails by returning `Ok` instead of `Err`, the run stops at
+`expect_err` and the harm assertion — the one carrying the actual damage — never executes. The test
+still reds, but on "expected an error, got `()`" rather than on "the user's files are gone", which looks
+like working coverage and is not. Capture the outcome, assert the harm, **then** unwrap:
+`let outcome = op(...); assert!(state survived, "... (outcome was {outcome:?})"); let err =
+outcome.expect_err("...");`. Interpolating `outcome` into the harm message is part of it — it names the
+damage and the cheerful success in one line. The "harm" is not always a file — a request counter proving
+*no request was sent*, or *how many pages were accepted*, is the same assertion and goes above the
+unwrap for the same reason. This is the subtler sibling of rule 1's own headline ("a test that cannot
+fail is not evidence"): CPE-1743 found **at least twelve** instances of it in one file — three
+successive scans of that one file each undercounted (six, then ten, then twelve), so treat any count
+here as a floor, not a total — immediately after a round that had just fixed the same shape twice
+elsewhere, which is why the rule alone — already written, already known — was not enough on its own to
+stop a sharp-eyed reviewer from reintroducing it. Treat "does the harm assertion run when the guard
+fails the *observed* way, not just some way" as part of guard-neutralisation review, the same as picking
+which guard to break.
+
+**Beware what "neutralise the guard" means.** Flipping the boolean the test names is a faithful fault;
+writing new destructive code inside the neutralisation is not — it proves the assertion would fire
+against an implementation that does not exist. If a reorder can only be proven by inventing production
+code, say so rather than pasting the red as evidence. CPE-1743's own review ran into this: a worker, an
+independent Reviewer, and an independent UAT all initially accepted a "recursive-delete walker" invented
+inside a test-only neutralisation as proof that a non-recursive, single-key `delete` would destroy a
+subtree it structurally cannot reach, before a minimal-fault re-check caught it.
+
 ### 2. Verify through the channel that will carry the message
 
 Prove a thing works **the way it will actually be used**, not the way that shows it most easily. A
