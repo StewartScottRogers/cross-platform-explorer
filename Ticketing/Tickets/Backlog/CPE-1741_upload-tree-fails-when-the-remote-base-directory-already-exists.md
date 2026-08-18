@@ -122,3 +122,160 @@ client layer instead.
 
 Filed from CPE-1731 (PR #905). Related: **CPE-1742** (FTP `STOR`'s parent invention, the other half of
 the same "the double is more permissive than the wire" family).
+
+## Work Log (2026-08-17/18)
+
+**Fix.** `crates/server/src/transfer.rs` gets a new `ensure_dir(provider, path)` helper (placed just
+above `upload_tree`), and both `mkdir` call sites in `upload_tree` are replaced with it:
+- `upload_tree`'s base-directory line (was `provider.mkdir(&base)?;`) → `ensure_dir(provider, &base)?;`
+- the per-directory line inside the walk (was `provider.mkdir(&remote)?;`) → `ensure_dir(provider, &remote)?;`
+
+`ensure_dir` never parses `mkdir`'s error text. It:
+1. `stat`s `path` first — if it's already a directory, returns `Ok(())` without ever calling `mkdir`.
+   If it exists as a **file**, returns a clear `"{path}: already exists and is not a directory"` error.
+2. If `path` doesn't exist, recursively `ensure_dir`s its parent first (a client-side `mkdir -p`, since
+   `mkdir(2)` creates exactly one level and can't build a missing chain), then calls `mkdir` on `path`.
+3. If that `mkdir` still fails, it rechecks via `stat` once: if a directory is there now (a race, or an
+   error the client can't otherwise classify), treats it as success; otherwise returns the original
+   `mkdir` error unchanged — a real failure (permission denied, a broken remote) always surfaces.
+
+**Already-exists vs. other-failure decision — option 2 from the ticket ("stat first"), not option 1.**
+Option 1 (tolerate `AlreadyExists` from `mkdir`'s own error) was rejected because it isn't reliably
+distinguishable from a generic failure on either wire, measured directly against both honest rigs:
+
+- **SFTP** (`crates/sftp/src/lib.rs`'s `io_err`): `ErrorKind::AlreadyExists` falls through the same
+  catch-all as every other unclassified error → `StatusCode::Failure`, rendered `"Failure: Failure"` —
+  bit-for-bit the same text a permission error or a broken remote would also produce through this
+  provider. This matches real OpenSSH (`sftp-server.c`), which likewise returns a bare `SSH_FX_FAILURE`
+  for `EEXIST` with no distinguishing reason code.
+- **FTP** (`crates/ftp/src/lib.rs`'s `MKD` arm): EEXIST and ENOENT both reply `"550 Create failed"`.
+  Measured directly (see red-proof below): the FTP red-proof line for the multi-level test —
+  `"/new/deep: Invalid response: [550] 550 Create failed"` — is textually identical in shape to the
+  already-exists red-proof line `"/sub: Invalid response: [550] 550 Create failed"`. RFC 959 gives `550`
+  no finer sub-code to split them.
+
+So the fix asks `stat` — a verb every provider already answers honestly — rather than classifying
+`mkdir`'s error. **What I could not distinguish:** whether a `mkdir` failure that reaches the final
+`stat`-recheck-still-absent branch is "genuinely broken" vs. "some other EEXIST/ENOENT shape my two test
+rigs didn't produce" — the fix doesn't need to know, since either way the directory verifiably isn't
+there and the original error is surfaced unchanged, but that also means a provider whose `stat` can lie
+(report a directory present when it isn't, or vice versa) would defeat this approach; no such provider
+exists in this codebase today.
+
+**Second site (line 761, per-directory `mkdir` inside the walk).** Changed in the same commit as the
+base fix — `ensure_dir(provider, &remote)?;` — per the ticket's own warning that a base-only fix would
+leave line 761 shadowed-then-broken. Covered by `upload_tree_succeeds_when_a_nested_directory_already_exists_remotely`
+(cpe-server) and its SFTP/FTP counterparts.
+
+**Sibling sites.** Re-ran the same sweep the ticket's UAT describes (`grep -rn "\.mkdir(" crates
+src-tauri sidecar`, excluding `/target/`): the only two shipped (non-`#[cfg(test)]`) callers of
+`FileSystemProvider::mkdir` performing an "ensure it exists" pattern were `transfer.rs:744`/`:761`
+(now `transfer.rs:861`/`:881` after the `ensure_dir` rewrite) — both fixed above. `crates/ftp/src/lib.rs:343`
+(`FtpProvider::mkdir`) and `crates/sftp/src/lib.rs:358`/`crates/webdav/src/lib.rs`'s `mkdir` are the
+trait *implementations* themselves, not callers, and are unaffected. `crates/webdav`'s own
+`upload_tree` test (`generic_transfer_walks_downloads_and_uploads_over_webdav`) exercises the same
+shared `cpe_server::transfer::upload_tree` and still passes. No other recursive upload/sync path exists
+in `crates/vfs`, `crates/s3`, or `src-tauri`/`sidecar`. No new sibling found beyond what the ticket
+already named.
+
+**Tests added (all against the honest, non-idempotent `create_dir` rigs — none loosened back to
+`create_dir_all`):**
+
+*`crates/server/src/transfer.rs`* — a new `StrictMkdirProvider` test double wraps `FakeProvider` but
+gives `mkdir` real `mkdir(2)` semantics (refuses an existing name with the SFTP-shaped
+`"Failure: Failure"` text, refuses a missing parent with `"No such file: No such file"`), so the
+`cpe-server`-level tests can't pass by accident the way a plain `FakeProvider` (whose `mkdir` is already
+`mkdir -p`) would let them:
+- `upload_tree_succeeds_when_the_remote_base_directory_already_exists`
+- `upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist`
+- `upload_tree_succeeds_when_a_nested_directory_already_exists_remotely`
+- `upload_tree_reports_a_clear_error_when_the_remote_base_is_a_file_not_a_directory` (defensive, not in
+  the ticket's AC, but the natural third branch of `ensure_dir`)
+- `upload_tree_surfaces_a_genuine_mkdir_failure_rather_than_swallowing_it` (via a second double,
+  `AlwaysDeniedMkdir`, whose `mkdir` always fails for a non-EEXIST reason — proves the already-exists
+  tolerance doesn't blur into swallowing every `mkdir` error)
+
+*`crates/sftp/src/lib.rs`* (real in-process SFTP server, `create_dir`-based rig):
+- `upload_tree_succeeds_when_the_remote_base_directory_already_exists` (uploads into the seeded `/sub`)
+- `upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist` (`/new/deep`, neither
+  level exists)
+- `upload_tree_succeeds_when_a_nested_directory_already_exists_remotely` (seeds `/up2/inner` first)
+
+*`crates/ftp/src/lib.rs`* (real in-process FTP server, `create_dir`-based `MKD` arm) — same three test
+names, calling `cpe_server::transfer::upload_tree` directly (no `upload_tree` convenience wrapper exists
+on `FtpProvider`, unlike `SftpProvider`).
+
+**Red-proof (guard-neutralisation, not a permanently-red test):** for each of the three "succeeds"
+tests in all three crates, I temporarily reverted `ensure_dir(provider, &base)?;` /
+`ensure_dir(provider, &remote)?;` back to the pre-fix `provider.mkdir(&base)?;` / `provider.mkdir(&remote)?;`,
+ran the suite, captured the failures below, then restored the fix via `git checkout --` (after the fix
+was already committed) and re-ran to confirm green.
+
+`cpe-server` (`cargo test transfer::tests::upload_tree` in `crates/server`):
+```
+test transfer::tests::upload_tree_reports_a_clear_error_when_the_remote_base_is_a_file_not_a_directory ... FAILED
+test transfer::tests::upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist ... FAILED
+test transfer::tests::upload_tree_succeeds_when_a_nested_directory_already_exists_remotely ... FAILED
+test transfer::tests::upload_tree_succeeds_when_the_remote_base_directory_already_exists ... FAILED
+
+---- upload_tree_reports_a_clear_error_when_the_remote_base_is_a_file_not_a_directory ----
+expected a clear diagnosis, got "dest: Failure: Failure"
+---- upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist ----
+a multi-level remote_root with missing parents must succeed (CPE-1741): "a/b: No such file: No such file"
+---- upload_tree_succeeds_when_a_nested_directory_already_exists_remotely ----
+re-uploading over an already-existing nested dir must succeed (CPE-1741): "dest: Failure: Failure"
+---- upload_tree_succeeds_when_the_remote_base_directory_already_exists ----
+uploading into an existing remote base must succeed (CPE-1741): "dest: Failure: Failure"
+
+test result: FAILED. 2 passed; 4 failed; 0 ignored
+```
+(`upload_tree_surfaces_a_genuine_mkdir_failure_rather_than_swallowing_it` correctly stayed green both
+before and after — it isn't specific to this fix, it's a guard against over-tolerance.)
+
+`cpe-sftp` (`cargo test upload_tree_succeeds` in `crates/sftp`, real wire):
+```
+test tests::upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist ... FAILED
+test tests::upload_tree_succeeds_when_the_remote_base_directory_already_exists ... FAILED
+test tests::upload_tree_succeeds_when_a_nested_directory_already_exists_remotely ... FAILED
+
+a multi-level remote_root with missing parents must succeed (CPE-1741): "/new/deep: No such file: No such file"
+uploading into an already-existing remote base must succeed (CPE-1741): "/sub: Failure: Failure"
+re-uploading over an already-existing nested dir must succeed (CPE-1741): "/up2: Failure: Failure"
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored
+```
+
+`cpe-ftp` (`cargo test upload_tree_succeeds` in `crates/ftp`, real wire):
+```
+test tests::upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist ... FAILED
+test tests::upload_tree_succeeds_when_the_remote_base_directory_already_exists ... FAILED
+test tests::upload_tree_succeeds_when_a_nested_directory_already_exists_remotely ... FAILED
+
+a multi-level remote_root with missing parents must succeed (CPE-1741): "/new/deep: Invalid response: [550] 550 Create failed"
+uploading into an already-existing remote base must succeed (CPE-1741): "/sub: Invalid response: [550] 550 Create failed"
+re-uploading over an already-existing nested dir must succeed (CPE-1741): "/up2: Invalid response: [550] 550 Create failed"
+
+test result: FAILED. 0 passed; 3 failed; 0 ignored
+```
+
+**Verification:** `cargo test --lib` in `crates/server` — 2207 passed, 0 failed. Full `cargo test` in
+`crates/sftp` (35/35) and `crates/ftp` (20/20). `crates/webdav`'s `upload_tree` test (30/30 suite) also
+still passes. `cargo clippy --all-targets -- -D warnings` clean in `crates/server` (base, `--features
+index`, `--features pdf-thumb,video-thumb,waveform,dicom-thumb`), `crates/sftp` (base), and `crates/ftp`
+(base, `--features e2e-extra-ca`) — the exact flag combinations `.github/workflows/ci.yml` runs for
+these crates.
+
+**Not loosened back:** confirmed both `cpe-sftp`'s and `cpe-ftp`'s `#[cfg(test)]` rigs are untouched —
+still `std::fs::create_dir` (not `create_dir_all`) in their `MKD`/`mkdir` handlers.
+
+**Unverified / assumptions:** the `cpe-server`-level `sample_fixtures.rs` integration test
+(`zip_lists_real_tree_and_extracts_inner_file`) fails in this environment on an unrelated pre-existing
+issue — `crates/server`'s own scratch-dir allocator under `%TEMP%\cpe-archive` exhausted 1024 naming
+attempts because that directory already held ~1.26M leftover entries from prior sessions on this
+machine, unrelated to archive extraction logic or to this ticket (no file this ticket touches is on that
+code path). Did not attempt to clean up that directory — out of scope, and other concurrent work on this
+machine may depend on files under `%TEMP%`. The "measured, not assumed" premise from the ticket's own
+Notes section (that a live OpenSSH/vsftpd daemon returns the same codes as the two in-process rigs) is
+still not independently re-verified against the QNAP NAS — this ticket's fix does not rely on that
+premise (it never branches on the specific status code at all, only on `stat`), so it is unaffected
+either way, but the premise itself remains as stated: read from RFCs/`sftp-server.c`, not measured live.
