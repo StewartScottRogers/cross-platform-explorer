@@ -215,9 +215,11 @@ jobs:
       # ever updated:
       #   - pdfium: bblanchon/pdfium-binaries release chromium/7961 (BSD-3-Clause), dynamically loaded
       #     by pdfium-render at runtime — never linked into our binary (crates/server/src/thumb_pdf.rs).
-      #   - ffmpeg (Windows/Linux): BtbN/FFmpeg-Builds release autobuild-2026-08-01-13-21, the
-      #     ffmpeg-n8.1.2 "lgpl" static build (`--disable-gpl --disable-nonfree` — no copyleft/patent-
-      #     encumbered external codec libs linked in). Shelled out to as a separate bundled program
+      #   - ffmpeg (Windows/Linux): BtbN/FFmpeg-Builds release (see FFMPEG_BUILD_TAG below — BtbN prunes
+      #     autobuilds daily, so this pin rots on a timescale of weeks; CPE-1762 re-pinned it once
+      #     already and made the download fail honestly instead of a misleading tar/xz error when it
+      #     rots again), the ffmpeg-n8.1.2 "lgpl" static build (`--disable-gpl --disable-nonfree` — no
+      #     copyleft/patent-encumbered external codec libs linked in). Shelled out to as a separate bundled program
       #     (mere aggregation — its license never attaches to our signed binary); its LICENSE.txt is
       #     staged alongside so it's carried into the bundle, satisfying the LGPL aggregation notice
       #     requirement.
@@ -247,7 +249,8 @@ jobs:
           # this WILL happen again; when it does, the first error line should say so.
           fetch() {
             url="$1"; out="$2"
-            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url" || echo 000)
+            code=$(curl -sSL --write-out '%{http_code}' -o "$out" "$url") || true
+            code="${code:-000}"
             if [ "$code" != "200" ]; then
               echo "::error::download failed (HTTP $code): $url"
               echo "::error::If this is a BtbN ffmpeg URL, the pinned autobuild has been deleted upstream -"
@@ -256,6 +259,16 @@ jobs:
             fi
           }
 
+          # CPE-1762 long-term-approach decision (recorded here, not just in the PR, so it survives):
+          # considered (a) self-mirroring the ffmpeg binary as a release of our own, (b) building ffmpeg
+          # from source on Windows/Linux the way the macOS leg already does, (c) a scheduled weekly job
+          # that curls the pin and files a ticket before it rots. Went with (c) as the recommended
+          # follow-up, NOT built here: (a) adds a signing/maintenance burden for a binary we don't
+          # otherwise own, and (b) would multiply Windows/Linux build time for a dependency that rarely
+          # changes (the macOS from-source leg is already the slow outlier in this job). A weekly
+          # freshness check is cheap and turns "release day surprise" into "ticket filed with days of
+          # runway." Until that scheduled job exists, the `fetch` guard above is the safety net: a rotted
+          # pin now fails loudly with the URL/status instead of masquerading as a corrupt archive.
 
           if [ "${{ matrix.platform }}" = "windows-latest" ]; then
             echo "--- pdfium (Windows) ---"
