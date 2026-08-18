@@ -1,13 +1,13 @@
-﻿//! Server-side contract dispatch (CPE-824, epic CPE-810): turn a [`Request`] envelope into a
+//! Server-side contract dispatch (CPE-824, epic CPE-810): turn a [`Request`] envelope into a
 //! [`Response`] by looking the method up in a registry and calling the matching `cpe-server` domain
-//! function. This is what a network `Client(Rust)` drives over a socket in CPE-820 â€” here with **no
+//! function. This is what a network `Client(Rust)` drives over a socket in CPE-820 — here with **no
 //! transport**, so it's fully unit-testable. Adding a method = register a handler, no core changes.
 //!
 //! Error taxonomy at the boundary: an unknown method â†’ [`ErrorCode::NotFound`], params that don't
 //! deserialize â†’ [`ErrorCode::BadRequest`]; a domain `Err(String)` from a **path-taking** handler goes
 //! through [`domain_path`], which is `NotFound` when the path genuinely doesn't exist and `Internal`
 //! otherwise (including when the path's existence can't even be determined, e.g. a permission-denied
-//! parent-directory traversal â€” "we don't know" must never be reported as "it isn't there"); every other
+//! parent-directory traversal — "we don't know" must never be reported as "it isn't there"); every other
 //! domain `Err(String)` â†’ [`ErrorCode::Internal`] via [`domain`]. A handler never panics the dispatcher.
 
 use std::collections::BTreeMap;
@@ -42,7 +42,7 @@ pub fn domain(err: String) -> ContractError {
 
 /// Map a domain `Err(String)` for a **path-taking** handler onto a structured contract error: a
 /// genuinely missing `path` is `NotFound` (the one domain failure a caller most needs to branch on
-/// structurally â€” CPE-1659, first applied to `list_dir` only); every other handler that takes a `path`
+/// structurally — CPE-1659, first applied to `list_dir` only); every other handler that takes a `path`
 /// goes through this same helper instead of re-deriving the check, so the mapping is one taxonomy
 /// instead of a one-off (CPE-1673 follow-up).
 pub fn domain_path(path: &str, err: String) -> ContractError {
@@ -51,11 +51,11 @@ pub fn domain_path(path: &str, err: String) -> ContractError {
 
 /// The pure classification `domain_path` delegates to, split out so the EACCES-vs-missing distinction is
 /// unit-testable without touching the real filesystem (permission bits are platform- and
-/// privilege-dependent â€” e.g. inert when the test process runs as root â€” so a real `chmod`-based test
+/// privilege-dependent — e.g. inert when the test process runs as root — so a real `chmod`-based test
 /// would be flaky; this stays deterministic on every OS and CI account).
 ///
-/// Deliberately does **not** collapse to `Path::exists()`, which swallows every `stat` failure â€” missing
-/// path AND permission-denied parent-directory traversal (EACCES) alike â€” into the same `false`. That
+/// Deliberately does **not** collapse to `Path::exists()`, which swallows every `stat` failure — missing
+/// path AND permission-denied parent-directory traversal (EACCES) alike — into the same `false`. That
 /// would report "we don't know" as "it isn't there": only a `stat` that fails with
 /// `io::ErrorKind::NotFound` is a genuine `NotFound`; anything else (including `PermissionDenied`, or no
 /// error at all because the path exists but the domain call failed for an unrelated reason) stays
@@ -143,7 +143,7 @@ impl Dispatcher {
             }
             let a: P = params(p)?;
             // CPE-1659 / CPE-1673: a missing path is a structured `NotFound` over the wire, not the
-            // generic `Internal` every other domain error gets â€” the real-server rig's Slice 2 E2E test
+            // generic `Internal` every other domain error gets — the real-server rig's Slice 2 E2E test
             // (`crates/net/tests/real_server_e2e.rs`) asserts exactly this ("a missing remote path must
             // be a clean error ... not a panic, not a silent success") and caught this gap for real.
             // `domain_path` applies the same mapping to every path-taking handler (not just this one).
@@ -246,7 +246,7 @@ mod tests {
     fn list_dir_of_a_missing_path_is_not_found() {
         // CPE-1659: a missing path is the ONE domain error a caller most needs to branch on
         // structurally, so it must not be flattened into the generic `Internal` every other domain
-        // error gets (see `domain_error_maps_to_internal` below) â€” proven in-process here, and the same
+        // error gets (see `domain_error_maps_to_internal` below) — proven in-process here, and the same
         // shape the real-server Docker rig's Slice 2 E2E test asserts over an actual wire socket.
         let ctx = HeadlessCtx::new(scratch("base"));
         let resp = Dispatcher::with_builtins()
@@ -260,7 +260,7 @@ mod tests {
     #[test]
     fn domain_error_maps_to_internal() {
         let ctx = HeadlessCtx::new(scratch("base"));
-        // hash_file on a directory errors in the domain, but the directory itself EXISTS â€” this must
+        // hash_file on a directory errors in the domain, but the directory itself EXISTS — this must
         // stay `Internal`, not `NotFound` (proves `domain_path` doesn't over-fire on every domain error,
         // only a genuinely missing path).
         let d = scratch("hash");
@@ -307,7 +307,7 @@ mod tests {
     /// Deliberately conservative: it returns `false` unless the resulting file is *both* unreadable
     /// (so the read-failure branch is genuinely exercised) *and* still stattable (so `compute` reaches
     /// that branch instead of failing earlier at `metadata`). Running elevated / as root, or on a
-    /// filesystem that ignores ACLs and mode bits, leaves the file readable â€” the caller then skips
+    /// filesystem that ignores ACLs and mode bits, leaves the file readable — the caller then skips
     /// rather than fails, because a machine that cannot construct a denied path is not evidence of a
     /// bug. CI runs Linux + macOS + Windows, so both branches are exercised somewhere.
     ///
@@ -319,7 +319,7 @@ mod tests {
     fn deny_read(path: &std::path::Path) -> bool {
         #[cfg(windows)]
         {
-            // `(RD)` denies FILE_READ_DATA *only*, leaving READ_ATTRIBUTES intact â€” a broader
+            // `(RD)` denies FILE_READ_DATA *only*, leaving READ_ATTRIBUTES intact — a broader
             // `(R)`/`(F)` deny would also break `fs::metadata` and short-circuit the test above the
             // code it is meant to cover.
             let Ok(user) = std::env::var("USERNAME") else { return false };
@@ -370,7 +370,7 @@ mod tests {
     #[test]
     fn text_stats_separates_a_read_failure_from_a_not_text_verdict() {
         // CPE-1678. The UAT on PR #860 found `text_stats` answering a *read* failure with a *content*
-        // verdict: a permission-denied path came back `Internal` â€” the right code â€” with the message
+        // verdict: a permission-denied path came back `Internal` — the right code — with the message
         // "not a text file", sending the user to inspect bytes nobody had managed to read. All three
         // outcomes are asserted here through the real `Dispatcher`, not the `compute` helper, because
         // the message is what reaches a caller and the helper's return type isn't.
@@ -403,7 +403,7 @@ mod tests {
         std::fs::write(&denied, b"readable text\n").unwrap();
 
         // `allow_read` must run even when an assertion below panics, or a red run leaves a
-        // permanently unreadable file behind in the temp dir â€” and this repo *mandates* a red run
+        // permanently unreadable file behind in the temp dir — and this repo *mandates* a red run
         // for every guard, so the leak would be once per ticket per developer machine, not a rare
         // event. The reviewer of PR #865 found three such orphans, two from this PR's own
         // red/green cycle. A `Drop` guard is the only thing that survives an unwind, and it has to
@@ -441,7 +441,7 @@ mod tests {
         } else {
             // A machine that cannot construct a denied path (elevated/root, or an ACL-less
             // filesystem) is not evidence of a bug, so this leg skips rather than fails. But it
-            // **says so**, because leg 3 is the only leg that tests CPE-1678 at all â€” legs 1 and 2
+            // **says so**, because leg 3 is the only leg that tests CPE-1678 at all — legs 1 and 2
             // assert behaviour that predates this fix. If the denial ever silently stops working
             // (CI moves to a root container, a runner image changes `icacls`, a filesystem stops
             // honouring mode bits), a silent skip would leave this test passing while guarding
@@ -449,12 +449,12 @@ mod tests {
             // mode by patching `deny_read` to return `false`: the run was byte-identical to a real
             // one. Announcing the skip is the difference between "verified" and "did not check".
             //
-            // Deliberately not a hard failure: see CPE-1680, which is about exactly this shape â€”
+            // Deliberately not a hard failure: see CPE-1680, which is about exactly this shape —
             // an unknown quietly folded into the one bucket that means "safe to ignore". The rule
             // there is that "I don't know" must red the run **or be reported loudly**; this is the
             // second.
             //
-            // `writeln!(std::io::stderr(), ..)` and NOT `eprintln!` â€” this is load-bearing, so do not
+            // `writeln!(std::io::stderr(), ..)` and NOT `eprintln!` — this is load-bearing, so do not
             // "simplify" it back. libtest captures stdout/stderr per test and replays it only for
             // FAILING tests; a skip is a pass, so an `eprintln!` here is swallowed and never reaches
             // the log. The capture works by intercepting the `print!`/`eprint!` macros, so writing to
@@ -463,7 +463,7 @@ mod tests {
             // a message only a developer sees when they remember a flag is not a report.
             //
             // This was got wrong once already, in this very block, by a fix whose comment asserted
-            // "the CI log shows it unconditionally" without checking â€” a confident claim about an
+            // "the CI log shows it unconditionally" without checking — a confident claim about an
             // unverified mechanism, inside a test about confident claims standing in for unknowns.
             // Caught by the PR #865 reviewer, who forced the skip without `--nocapture` and got a run
             // byte-identical to a real one. The lesson generalises: verify through the channel that
@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn classify_path_error_existing_path_stays_internal() {
-        // No stat error at all (the path exists) â€” the domain failure is unrelated to existence.
+        // No stat error at all (the path exists) — the domain failure is unrelated to existence.
         let e = classify_path_error(None, "not a folder".to_string());
         assert_eq!(e.code, ErrorCode::Internal);
     }
