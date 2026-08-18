@@ -797,6 +797,51 @@ pub fn download_tree(
     Ok(files)
 }
 
+/// Ensure a directory exists at `path`, creating it (and any missing ancestors) if it does not — CPE-1741.
+///
+/// `mkdir` on every real backend is `mkdir(2)`: it creates exactly one directory, fails `EEXIST`/
+/// `SSH_FX_FAILURE`/550 when `path` is already there, and fails `ENOENT` when its parent is not. Neither
+/// failure means "ensure it exists" failed — but a client can't safely tell them apart from `mkdir`'s own
+/// error text: measured against the `cpe-sftp` test rig, `create_dir`'s `ErrorKind::AlreadyExists` maps to
+/// the exact same `StatusCode::Failure` (rendered `"Failure: Failure"`) that every *other* unclassified
+/// `mkdir` error also maps to (`crates/sftp/src/lib.rs`'s `io_err`, matching real OpenSSH's `sftp-server.c`,
+/// which likewise returns a bare `SSH_FX_FAILURE` for `EEXIST` with no reason code to distinguish it). The
+/// `cpe-ftp` rig is the same shape one layer up the stack: both `EEXIST` and `ENOENT` on its `MKD` arm reply
+/// `550 Create failed` — RFC 959 gives `550` no finer-grained sub-code at all. So this function never parses
+/// `mkdir`'s error text; it asks `stat` instead, which every provider already reports honestly.
+///
+/// - `path` already exists as a directory → nothing to do, no `mkdir` call is made at all.
+/// - `path` exists but is a **file**, not a directory → a clear error, not swallowed.
+/// - `path` doesn't exist → its parent is ensured first (recursively — `mkdir` cannot create a chain, so
+///   this function does, one level at a time), then `path` itself is created.
+/// - if `mkdir` still fails (a race with another writer, or a genuine failure — permission denied, a
+///   broken remote) — `stat` is rechecked once: if a directory is there now, the race resolved in our
+///   favour and this returns `Ok`; otherwise the original `mkdir` error is returned unchanged. A real
+///   failure always surfaces; only "it turned out to already be there" is swallowed, and only once
+///   confirmed by `stat`.
+fn ensure_dir(provider: &mut dyn FileSystemProvider, path: &str) -> Result<(), String> {
+    if path.is_empty() {
+        return Ok(()); // the provider root — always "exists".
+    }
+    match provider.stat(path) {
+        Ok(entry) if entry.is_dir => return Ok(()),
+        Ok(_) => return Err(format!("{path}: already exists and is not a directory")),
+        Err(_) => {} // not found (or unresolvable) — fall through and try to create it.
+    }
+    if let Some(i) = path.rfind('/') {
+        if i > 0 {
+            ensure_dir(provider, &path[..i])?;
+        } // else: parent is the root itself ("/a" → ""), which always exists.
+    }
+    match provider.mkdir(path) {
+        Ok(()) => Ok(()),
+        Err(e) => match provider.stat(path) {
+            Ok(entry) if entry.is_dir => Ok(()), // it's there now — good enough, whatever `e` said.
+            _ => Err(e),                         // still not there: a real failure, surface it.
+        },
+    }
+}
+
 /// Upload the local tree under `local_dir` into `remote_root`, recreating the structure — the symmetric
 /// counterpart to [`download_tree`]. Returns the number of files written. Cancellable. Local `\` are mapped
 /// to `/` so a Windows source produces provider-native paths.
@@ -807,25 +852,13 @@ pub fn upload_tree(
     cancel: &AtomicBool,
 ) -> Result<usize, String> {
     let base = remote_root.trim_end_matches('/').to_string();
-    // **CPE-1741 — this does NOT "ensure the remote root exists", which is what the comment here used
-    // to claim.** `mkdir` is `mkdir(2)` on every real backend (`SSH_FXP_MKDIR`, FTP `MKD`), so a `base`
-    // that already exists is an *error*, and the `?` aborts the whole upload before a single file is
-    // written. Uploading into an existing remote folder fails — measured `FRESH -> Ok(2)`, `EXIST ->
-    // Err("…: Failure: Failure")`, against both the SFTP and the FTP rig.
-    //
-    // **Two symptoms, not one**, and a fix that closes only the first is incomplete: a `base` whose
-    // *parents* do not exist fails here too, with `ENOENT` rather than `EEXIST` (`/a/b` where `/a` is
-    // missing → `"No such file"` on SFTP, `550` on FTP), because a non-recursive `mkdir` cannot create
-    // the chain either. Tolerating `AlreadyExists` does not address that one.
-    //
-    // It stayed invisible because the only `mkdir`s this crate's own tests see are idempotent:
-    // `LocalProvider::mkdir` and the test `FakeProvider::mkdir` both tolerate an existing directory, as
-    // did `cpe-sftp`'s and `cpe-ftp`'s `#[cfg(test)]` rigs until CPE-1731 changed them to `create_dir`.
-    // No unit test in `cpe-server` could ever have caught it; making the doubles honest is what exposed
-    // it. Deliberately **not** pinned by a test — one asserting today's failure would encode the bug as
-    // the expectation, and whoever fixes CPE-1741 would meet a red test named as though the failure
-    // were correct. This comment is what holds it instead.
-    provider.mkdir(&base)?;
+    // CPE-1741 fix: `mkdir` is `mkdir(2)` on every real backend (`SSH_FXP_MKDIR`, FTP `MKD`) — it is
+    // NOT idempotent, and has no way to create a missing parent chain either. A bare `provider.mkdir(&base)?`
+    // therefore aborted the whole upload both when `base` already existed (`EEXIST`/`SSH_FX_FAILURE`/550)
+    // and when its parents did not exist yet (`ENOENT`). `ensure_dir` (below) replaces it: it `stat`s
+    // before it `mkdir`s, so "already there" is answered from `stat`, never from parsing `mkdir`'s error
+    // text — see `ensure_dir`'s doc for why that distinction can't be trusted on the wire.
+    ensure_dir(provider, &base)?;
     let mut stack = vec![local_dir.to_path_buf()];
     let mut files = 0usize;
     while let Some(dir) = stack.pop() {
@@ -842,13 +875,10 @@ pub fn upload_tree(
             let remote = join(&base, &rel.to_string_lossy().replace('\\', "/"));
             let Ok(meta) = entry.metadata() else { continue };
             if meta.is_dir() {
-                // Same CPE-1741 shape as the `mkdir(&base)` above, one level down: any directory in the
-                // tree that already exists remotely is an error here, so a *partial re-upload* aborts
-                // too. **Currently shadowed** — line 744 fails first, so nobody reaches this — which is
-                // precisely what makes it a trap: a fix up there that only tolerates `AlreadyExists`
-                // leaves this line broken, and the breakage then looks like a *new* bug the fix
-                // introduced. Both sites change together, or CPE-1741 is not done.
-                provider.mkdir(&remote)?;
+                // Same CPE-1741 shape as the base directory above, one level down: any directory in the
+                // tree that already exists remotely (a partial re-upload) must not abort the transfer.
+                // Both sites change together — `ensure_dir` here too, not a bare `mkdir`.
+                ensure_dir(provider, &remote)?;
                 stack.push(local);
             } else {
                 let data = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
@@ -927,6 +957,181 @@ mod tests {
         assert_eq!(fs.read("dest/x.txt").unwrap(), b"ex");
         assert_eq!(fs.read("dest/inner/y.txt").unwrap(), b"why");
         let _ = std::fs::remove_dir_all(&src);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1741 — `upload_tree` against a `mkdir` that has REAL `mkdir(2)` semantics: refuses an
+    // existing name, refuses a missing parent. `FakeProvider::mkdir` is `mkdir -p` and always
+    // idempotent, which is exactly the "the test double is more forgiving than the wire" shape
+    // CPE-1731 named — so these tests wrap it in `StrictMkdirProvider`, a thin `mkdir` override that
+    // gives the same two refusals a real SFTP/FTP server gives, with the same error TEXT a real
+    // provider produces (indistinguishable-from-generic-failure for "already exists", per the
+    // `ensure_dir` doc above) so a fix that cheated by parsing `mkdir`'s message could not pass here.
+    // Everything else delegates straight to the inner `FakeProvider`.
+    // ---------------------------------------------------------------------------------------------
+
+    /// Wraps a [`FakeProvider`] but gives `mkdir` real, non-idempotent `mkdir(2)` semantics: `EEXIST`
+    /// for a name already there, `ENOENT` for a missing parent — the two symptoms CPE-1741 is about.
+    /// The error text on both branches deliberately mirrors what a real backend's message looks like
+    /// once run through this crate's own `{path}: {e}` formatting (SFTP's `"Failure: Failure"` for
+    /// EEXIST — the same text a generic failure gets — and `"No such file: No such file"` for ENOENT),
+    /// so nothing in `ensure_dir` could pass by matching a convenient fake string that a real backend
+    /// would never actually send.
+    struct StrictMkdirProvider(FakeProvider);
+
+    impl FileSystemProvider for StrictMkdirProvider {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            self.0.list(path)
+        }
+        fn stat(&self, path: &str) -> Result<ProviderEntry, String> {
+            self.0.stat(path)
+        }
+        fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+            self.0.read(path)
+        }
+        fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+            self.0.write(path, data)
+        }
+        fn delete(&mut self, path: &str) -> Result<(), String> {
+            self.0.delete(path)
+        }
+        fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+            self.0.rename(from, to)
+        }
+        fn mkdir(&mut self, path: &str) -> Result<(), String> {
+            if self.0.stat(path).is_ok() {
+                return Err(format!("{path}: Failure: Failure")); // EEXIST, indistinguishable from a generic failure
+            }
+            let parent = path.rfind('/').map(|i| &path[..i]).unwrap_or("");
+            if !parent.is_empty() && self.0.stat(parent).is_err() {
+                return Err(format!("{path}: No such file: No such file")); // ENOENT — no recursive create
+            }
+            self.0.mkdir(path) // parent verified present, name verified absent: a real single-level mkdir
+        }
+    }
+
+    /// A provider whose `mkdir` always fails for a reason that is NOT "already exists" (a stand-in for
+    /// permission-denied or a genuinely broken remote) — proves `ensure_dir`'s already-exists tolerance
+    /// does not swallow a real failure. `stat` still delegates honestly, so `ensure_dir`'s post-`mkdir`
+    /// recheck correctly reports "still not there" and the original error surfaces.
+    struct AlwaysDeniedMkdir(FakeProvider);
+
+    impl FileSystemProvider for AlwaysDeniedMkdir {
+        fn list(&self, path: &str) -> Result<Vec<ProviderEntry>, String> {
+            self.0.list(path)
+        }
+        fn stat(&self, path: &str) -> Result<ProviderEntry, String> {
+            self.0.stat(path)
+        }
+        fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+            self.0.read(path)
+        }
+        fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+            self.0.write(path, data)
+        }
+        fn delete(&mut self, path: &str) -> Result<(), String> {
+            self.0.delete(path)
+        }
+        fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+            self.0.rename(from, to)
+        }
+        fn mkdir(&mut self, path: &str) -> Result<(), String> {
+            Err(format!("{path}: Permission denied"))
+        }
+    }
+
+    /// A `src` scratch dir cleaned up via `Drop`, armed before any assertion runs (per this shift's
+    /// leaked-scratch-dir finding) rather than on the last line of the test, where an early `panic!`
+    /// from a failed assertion would skip it.
+    struct ScratchDirGuard(std::path::PathBuf);
+    impl Drop for ScratchDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn one_file_src(tag: &str) -> (std::path::PathBuf, ScratchDirGuard) {
+        let src = std::env::temp_dir().join(format!("cpe-xfer-1741-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("z.txt"), b"zed").unwrap();
+        (src.clone(), ScratchDirGuard(src))
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
+        let src = std::env::temp_dir().join(format!("cpe-xfer-1741-exists-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("x.txt"), b"ex").unwrap();
+        std::fs::write(src.join("inner").join("y.txt"), b"why").unwrap();
+
+        let mut fs = StrictMkdirProvider(FakeProvider::new());
+        fs.mkdir("dest").unwrap(); // seed: the remote base ALREADY EXISTS before we upload into it
+        let cancel = AtomicBool::new(false);
+        let files = upload_tree(&mut fs, &src, "dest", &cancel)
+            .expect("uploading into an existing remote base must succeed (CPE-1741)");
+        assert_eq!(files, 2);
+        assert_eq!(fs.read("dest/x.txt").unwrap(), b"ex");
+        assert_eq!(fs.read("dest/inner/y.txt").unwrap(), b"why");
+    }
+
+    #[test]
+    fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
+        let (src, _guard) = one_file_src("multilevel"); // guard armed before any assertion
+
+        let mut fs = StrictMkdirProvider(FakeProvider::new()); // neither "a" nor "a/b" exists
+        let cancel = AtomicBool::new(false);
+        let files = upload_tree(&mut fs, &src, "a/b", &cancel)
+            .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(fs.read("a/b/z.txt").unwrap(), b"zed");
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_a_nested_directory_already_exists_remotely() {
+        // The partial-re-upload case (transfer.rs:761's own CPE-1741 shape): a directory INSIDE the
+        // tree, not just the base, is already there remotely.
+        let src = std::env::temp_dir().join(format!("cpe-xfer-1741-partial-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("inner").join("y.txt"), b"why").unwrap();
+
+        let mut fs = StrictMkdirProvider(FakeProvider::new());
+        fs.mkdir("dest").unwrap();
+        fs.mkdir("dest/inner").unwrap(); // seed: "inner" already exists remotely (a prior partial upload)
+        let cancel = AtomicBool::new(false);
+        let files = upload_tree(&mut fs, &src, "dest", &cancel)
+            .expect("re-uploading over an already-existing nested dir must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(fs.read("dest/inner/y.txt").unwrap(), b"why");
+    }
+
+    #[test]
+    fn upload_tree_reports_a_clear_error_when_the_remote_base_is_a_file_not_a_directory() {
+        let (src, _guard) = one_file_src("basefile"); // guard armed before any assertion
+
+        let mut fs = StrictMkdirProvider(FakeProvider::new());
+        fs.write("dest", b"i am a file, not a directory").unwrap(); // seed: "dest" exists as a FILE
+        let cancel = AtomicBool::new(false);
+        let err = upload_tree(&mut fs, &src, "dest", &cancel)
+            .expect_err("uploading into a remote path that is a file must fail, not silently succeed");
+        assert!(err.contains("not a directory"), "expected a clear diagnosis, got {err:?}");
+    }
+
+    #[test]
+    fn upload_tree_surfaces_a_genuine_mkdir_failure_rather_than_swallowing_it() {
+        // CPE-1741's already-exists tolerance must not blur into "ignore every mkdir error": a
+        // permission-denied (or otherwise genuinely broken) remote must still fail the transfer.
+        let (src, _guard) = one_file_src("denied"); // guard armed before any assertion
+
+        let mut fs = AlwaysDeniedMkdir(FakeProvider::new());
+        let cancel = AtomicBool::new(false);
+        let err = upload_tree(&mut fs, &src, "dest", &cancel)
+            .expect_err("a real mkdir failure must surface, not be swallowed by the already-exists tolerance");
+        assert!(err.contains("Permission denied"), "expected the real mkdir error, got {err:?}");
     }
 
     // ---------------------------------------------------------------------------------------------
