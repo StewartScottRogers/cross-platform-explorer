@@ -1223,6 +1223,97 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src);
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // CPE-1741 — `upload_tree` against a remote base/parent/nested-dir that already exists, over the
+    // real SFTP wire (this rig's honest, non-idempotent `create_dir`, per CPE-1731).
+    // ---------------------------------------------------------------------------------------------
+
+    /// Local scratch dir cleanup via `Drop`, armed before any assertion runs — a failed assertion
+    /// partway through a test must not leak the temp dir.
+    struct ScratchDirGuard(PathBuf);
+    impl Drop for ScratchDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
+        // `/sub` is seeded by `spawn_server` (with `nested.txt` inside already) — uploading into it
+        // must not trip this rig's honest, non-idempotent `create_dir`'s EEXIST refusal.
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let src = std::env::temp_dir().join(format!("cpe-sftp-up-exists-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("a.txt"), b"alpha").unwrap();
+        std::fs::write(src.join("inner").join("b.txt"), b"bravo").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let files = provider
+            .upload_tree(&src, &format!("/{DIR_NAME}"), &cancel)
+            .expect("uploading into an already-existing remote base must succeed (CPE-1741)");
+        assert_eq!(files, 2);
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/a.txt")).unwrap(), b"alpha");
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/inner/b.txt")).unwrap(), b"bravo");
+        // The pre-existing seeded content is untouched.
+        assert_eq!(provider.read(&format!("/{DIR_NAME}/nested.txt")).unwrap(), b"deep");
+    }
+
+    #[test]
+    fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let src = std::env::temp_dir().join(format!("cpe-sftp-up-multilevel-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("z.txt"), b"zed").unwrap();
+
+        // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive)
+        // `mkdir("/new/deep")` would fail ENOENT.
+        let cancel = AtomicBool::new(false);
+        let files = provider
+            .upload_tree(&src, "/new/deep", &cancel)
+            .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(provider.read("/new/deep/z.txt").unwrap(), b"zed");
+    }
+
+    #[test]
+    fn upload_tree_succeeds_when_a_nested_directory_already_exists_remotely() {
+        // The partial-re-upload case: a directory INSIDE the tree (not just the base) already exists
+        // remotely — transfer.rs:761's own CPE-1741 shape, shadowed until the base-level (744) fix
+        // was in place.
+        let (addr, hostkey) = spawn_server();
+        let cfg = SftpConfig::password("127.0.0.1", addr.port(), "user", "pw");
+        let mut provider =
+            SftpProvider::connect(&cfg, known_for(addr.port(), &hostkey), HostKeyPolicy::Strict).unwrap();
+
+        let src = std::env::temp_dir().join(format!("cpe-sftp-up-partial-{}", std::process::id()));
+        let _guard = ScratchDirGuard(src.clone()); // armed before any assertion
+        let _ = std::fs::remove_dir_all(&src);
+        std::fs::create_dir_all(src.join("inner")).unwrap();
+        std::fs::write(src.join("inner").join("c.txt"), b"charlie").unwrap();
+
+        provider.mkdir("/up2").expect("seed the base");
+        provider.mkdir("/up2/inner").expect("seed: 'inner' already exists remotely before the upload");
+
+        let cancel = AtomicBool::new(false);
+        let files = provider
+            .upload_tree(&src, "/up2", &cancel)
+            .expect("re-uploading over an already-existing nested dir must succeed (CPE-1741)");
+        assert_eq!(files, 1);
+        assert_eq!(provider.read("/up2/inner/c.txt").unwrap(), b"charlie");
+    }
+
     #[test]
     fn walk_stops_promptly_when_cancelled() {
         let (addr, hostkey) = spawn_server();
