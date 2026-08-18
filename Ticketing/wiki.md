@@ -294,19 +294,21 @@ outcome.expect_err("...");`. Interpolating `outcome` into the harm message is pa
 damage and the cheerful success in one line. The "harm" is not always a file — a request counter proving
 *no request was sent*, or *how many pages were accepted*, is the same assertion and goes above the
 unwrap for the same reason. This is the subtler sibling of rule 1's own headline ("a test that cannot
-fail is not evidence"): CPE-1743 found ten instances of it in one file, immediately after a round that
-had just fixed the same shape twice elsewhere, which is why the rule alone — already written, already
-known — was not enough on its own to stop a sharp-eyed reviewer from reintroducing it. Treat "does the
-harm assertion run when the guard fails the *observed* way, not just some way" as part of guard-
-neutralisation review, the same as picking which guard to break.
+fail is not evidence"): CPE-1743 found **at least twelve** instances of it in one file — three
+successive scans of that one file each undercounted (six, then ten, then twelve), so treat any count
+here as a floor, not a total — immediately after a round that had just fixed the same shape twice
+elsewhere, which is why the rule alone — already written, already known — was not enough on its own to
+stop a sharp-eyed reviewer from reintroducing it. Treat "does the harm assertion run when the guard
+fails the *observed* way, not just some way" as part of guard-neutralisation review, the same as picking
+which guard to break.
 
 **Beware what "neutralise the guard" means.** Flipping the boolean the test names is a faithful fault;
 writing new destructive code inside the neutralisation is not — it proves the assertion would fire
 against an implementation that does not exist. If a reorder can only be proven by inventing production
-code, say so rather than pasting the red as evidence. CPE-1743's own review walked into this twice
-(worker, an independent Reviewer, and an independent UAT all initially accepted a "recursive-delete
-walker" invented inside a test-only neutralisation as proof that a non-recursive, single-key `delete`
-would destroy a subtree it structurally cannot reach) before a minimal-fault re-check caught it.
+code, say so rather than pasting the red as evidence. CPE-1743's own review ran into this: a worker, an
+independent Reviewer, and an independent UAT all initially accepted a "recursive-delete walker" invented
+inside a test-only neutralisation as proof that a non-recursive, single-key `delete` would destroy a
+subtree it structurally cannot reach, before a minimal-fault re-check caught it.
 
 ### 2. Verify through the channel that will carry the message
 

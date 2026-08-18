@@ -86,17 +86,17 @@ evidence, of which this is the subtler variant: a test that cannot fail *for the
 
 ## Work Log
 
-Worked on branch `CPE-1743-s3-harm-asserted-before-result`. This log went through two rounds of
-independent review (Reviewer + UAT) that caught real problems in the first draft — corrected below,
-with the corrections left visible rather than silently rewritten, because the corrections are
-themselves the most valuable output of this ticket.
+Worked on branch `CPE-1743-s3-harm-asserted-before-result`. This log went through three rounds of
+independent review (Reviewer + UAT, twice over) that caught real problems in each prior draft —
+corrected below, with the corrections left visible rather than silently rewritten, because the
+corrections are themselves the most valuable output of this ticket.
 
-### The ten fixes (all in `crates/s3/src/provider.rs`)
+### The twelve fixes (all in `crates/s3/src/provider.rs`)
 
 Reordered each: capture the `Result` into `outcome`, assert the harm (interpolating `outcome` into the
 message), then `outcome.expect_err(...)`. The six named in the ticket, plus two more found while
-covering the rest of `crates/s3` per the ticket's own scope note, plus two more the first review pass
-missed (F1):
+covering the rest of `crates/s3` per the ticket's own scope note, plus two more a first review pass
+missed (F1), plus two more still that a *second* review pass found (F1, round 2):
 
 | # | Test (final line) | Guard exercised |
 |---|---|---|
@@ -110,10 +110,21 @@ missed (F1):
 | 8 | `every_object_op_works_through_a_trait_object_the_way_production_holds_the_provider` | `rename` again, exercised through `&dyn FileSystemProvider` |
 | 9 | `is_truncated_true_with_no_continuation_token_is_refused_not_silently_truncated` (found in review F1) | the pagination-continuation guard in `list_with_filtered_count` |
 | 10 | `sending_a_request_with_a_header_byte_ureq_would_drop_is_refused_before_any_bytes_leave_the_process` (found in review F1) | `guard_header_sendable` on the `Authorization` header |
+| 11 | `the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object` (found in review F1, round 2) | same recursion-refusal guard as 2/3, over a flat keyspace fixture |
+| 12 | `a_key_with_a_dot_segment_is_refused_because_ureq_resolves_it_away_before_sending` (found in review F1, round 2) | `guard_path_survives_the_client`; this test's own request-count assertion recurred a second time, gating four more `is_err()` checks that could mask each other — both occurrences reordered |
 
-Every `expect_err`/`unwrap_err`/`is_err()` site remaining in `crates/s3` was (re-)read after both review
-rounds; none has a state assertion after it. `cargo test -p cpe-s3`: 195 passed, 0 failed, both before
-and after every neutralisation below was reverted.
+**On coverage — stated as a bound, not a total, because that claim has already been wrong three times on
+this one ticket** ("six", then "ten", then "twelve" — each correction came from an independent scan, not
+from this worker's own re-check). The method: after each fix, `grep -n "expect_err\|unwrap_err\|is_err()"`
+was re-run over `crates/s3/src/provider.rs` and every hit's enclosing test function was read in full to
+check for a state assertion after it. That method **cannot see** a harm expressed through a channel the
+grep pattern misses — an `assert_ne!` on a struct field, a counter read without `.lock()`, or a helper
+function that wraps the verdict call one level removed from the literal token. So: **twelve found and
+fixed in `crates/s3`; treat this as a lower bound, not a claim of exhaustive coverage.** Anyone extending
+this ticket's search, in this crate or any other, should assume their own count is a lower bound too — three
+successive scans of this one file demonstrate the failure mode is the rule, not the exception.
+`cargo test -p cpe-s3`: 195 passed, 0 failed, both before and after every neutralisation below was
+reverted.
 
 ### Red-proof — corrected methodology after review
 
@@ -138,7 +149,23 @@ doesn't already have. Every neutralisation was committed-around (fix committed f
 captured, then reverted with `git checkout -- crates/s3/src/provider.rs`, confirmed by a subsequent full
 `cargo test -p cpe-s3` passing clean (195/195) before moving to the next site.
 
-#### Group A — proven under a minimal, faithful fault (4 of 10)
+**A second correction, smaller but the same lesson.** For sites 2 and 3 (Group B), the first version of
+this evidence claimed the minimal fault produced "192 passed, 2 failed, not a cascade." That number does
+not reproduce: disabling only the first recursion check (`real_entries > 0 || ...`) leaves the belt
+(`raw_entries > 0` re-probe) standing, and the belt alone still catches sites 2 and 3 — that fault
+produces **195 passed, 0 failed**, i.e. nothing goes red at all. Reaching the panics pasted below
+required disabling **both** the first check and the belt's own gate together, and that fault is **not**
+scoped to one guard: it produces **188 passed, 7 failed** — sites 2, 3, and 11 (Group B), plus Group A's
+site 4, plus three unrelated belt tests never named anywhere in this ticket
+(`a_belt_page_with_no_rows_but_is_truncated_still_refuses_the_delete`,
+`a_server_that_denies_being_truncated_is_still_seen_as_a_non_empty_directory`,
+`an_underfilling_server_that_denies_truncation_is_caught_by_the_start_after_belt`). The **conclusion**
+this evidence was meant to support is unchanged — sites 2, 3, and 11 cannot be driven to a genuine
+harm-red without a fault broader than any single guard, which is itself part of why they land in Group B
+rather than Group A — but the specific numbers were wrong, and "not a cascade" was the opposite of what
+actually happened. Corrected below with the real numbers.
+
+#### Group A — proven under a minimal, faithful fault (5 of 12)
 
 **1. `rename_is_refused_by_name_and_issues_no_request_at_all`.** Minimal fault: `rename`'s own doc names
 the copy-then-delete emulation as the historically tempting bug this function exists to refuse, so
@@ -188,17 +215,44 @@ apart from a real refusal (outcome was Ok(()))
  right: 9
 ```
 
-#### Group B — reachable ONLY by inventing a production code path that does not exist today (3 of 10)
+**12. `a_key_with_a_dot_segment_is_refused_because_ureq_resolves_it_away_before_sending`.** Minimal
+fault: `guard_path_survives_the_client` (`provider.rs:467`) made to always return `Ok(())`, no new code.
+Unlike the `Authorization`-header guard (site 10, Group C), there is no independent backstop here — a
+dot segment is ordinary ASCII the URL parser is happy to send, it just resolves `..` away first, which
+is exactly the danger this guard exists to name. With it disabled the request really does leave the
+process:
+```
+thread '...a_key_with_a_dot_segment_is_refused_because_ureq_resolves_it_away_before_sending' panicked at src\provider.rs:6664:9:
+assertion `left == right` failed: the guard must fire BEFORE the request leaves the process — a request reached the server despite the refusal (outcome was Ok([]))
+  left: 1
+ right: 0
+```
+`cargo test -p cpe-s3` under this fault: 194 passed, 1 failed — scoped to this one guard, not a cascade.
 
-For sites 2, 3 and 6, `delete`'s only destructive act on the probe-denied / recursion-refused path is a
-single non-recursive `DELETE` of one already-computed key. Under a **minimal** fault (just disabling the
-refusal check, no new code), that single `DELETE` targets a key that is either (a) a marker key with no
-real object behind it in this fixture, so the fixture's own `remove_dir`/`remove_file` no-ops silently
-(204 either way — S3's real idempotent behaviour), or (b) the literal path string with no trailing
-slash, which is a directory on disk and `remove_file` on a directory fails silently. Either way, the
-asserted child file survives regardless of assertion order, and both branch and main show the same
-generic panic. Real output, minimal fault, both booleans of the recursion-refusal check disabled
-(`if false && (...)`, no new code):
+#### Group B — reachable ONLY by inventing a production code path that does not exist today (4 of 12)
+
+For sites 2, 3, 6 and 11, `delete`'s only destructive act on the probe-denied / recursion-refused path is
+a single non-recursive `DELETE` of one already-computed key. Under a **minimal** fault (just disabling
+the refusal check, no new code), that single `DELETE` targets a key that is either (a) a marker key with
+no real object behind it in the relevant fixture, so the fixture's own `remove_dir`/`remove_file`/
+`BTreeSet::remove` no-ops or removes a key nothing was asserted against (204 either way — S3's real
+idempotent behaviour), or (b) the literal path string with no trailing slash, which is a directory on
+disk and `remove_file` on a directory fails silently. Either way, the asserted state survives regardless
+of assertion order, and both branch and main show the same generic panic.
+
+**Reaching that Ok is not scoped to one guard, and the real numbers say so.** Disabling only the first
+recursion check (`real_entries > 0 || ...`) leaves the belt standing and produces **195 passed, 0
+failed** — nothing reds, because the belt alone still catches sites 2, 3 and 11. The panics below needed
+**both** the first check and the belt's own gate disabled together (`if false && (...)` on each, no new
+code), and that broader fault is a real cascade: **188 passed, 7 failed** — sites 2, 3 and 11 here, plus
+Group A's site 4 (which has no independent second gate to save it once both checks are gone), plus three
+unrelated belt tests this ticket never otherwise touches
+(`a_belt_page_with_no_rows_but_is_truncated_still_refuses_the_delete`,
+`a_server_that_denies_being_truncated_is_still_seen_as_a_non_empty_directory`,
+`an_underfilling_server_that_denies_truncation_is_caught_by_the_start_after_belt`). That breadth is
+itself part of the evidence for Group B's classification: there is no single, faithful, minimal fault
+that isolates "just this guard" and reaches `Ok` for these three sites, which is a stronger and more
+specific claim than "the walked-in-a-recursive-walker proof was fake."
 
 ```
 thread '...delete_of_a_directory_with_content_is_refused_and_removes_nothing' panicked at src\provider.rs:5340:27:
@@ -206,25 +260,32 @@ S3 answers 204 to a DELETE of a key that never existed, so a single-key delete o
 
 thread '...a_directory_whose_first_returned_key_is_only_its_marker_is_still_refused_by_delete' panicked at src\provider.rs:5416:27:
 a server that returned only the marker on the first page must not be read as an empty directory — IsTruncated said there was more: ()
+
+thread '...the_credential_that_can_list_is_the_one_that_cannot_delete_the_colliding_object' panicked at src\provider.rs:5629:27:
+the probe sees content under photos/ and refuses — which is right for the folder and wrong for the object of the same name: ()
 ```
-`cargo test -p cpe-s3` under this fault: 192 passed, 2 failed (exactly sites 2 and 3 — confirms the fault
-is scoped to this one guard, not a cascade; site 6 uses an unrelated code path and stayed green under
-this specific fault, confirming it needed its own).
+
+Site 11 in particular: its target `photos` is a real key in the flat keyspace fixture, but `delete`
+still computes `doomed_key = "photos/"` (the trailing-slash marker convention) whenever `raw_entries > 0`
+— a key that does **not** match any of `"photos"`, `"photos/a.jpg"`, `"photos/b.jpg"` in the keyspace
+`BTreeSet`, so the `DELETE` that goes out removes nothing at all, and the key-set assertion passes
+silently either way.
 
 Site 6, minimal fault on its own gate (`if self.head_proves_object(&key).unwrap_or(false)` →
-`if true || ...`, no new code):
+`if true || ...`, no new code, and unaffected by the recursion-check fault above — confirmed it stayed
+green under that fault, needing its own):
 ```
 thread '...a_denied_probe_does_not_re_enable_the_directory_delete_that_a_successful_probe_refuses' panicked at src\provider.rs:5720:17:
 falling back to an un-probed single-key DELETE here would return 204 and report a whole subtree removed while every object in it stayed put: ()
 ```
 This IDENTICAL panic — same message, same `: ()` shape — is what **main** (unreordered) already
 produces for this guard failure; the reorder changes nothing observable for this specific site today.
-My first draft's "harm" red for these three sites (`a.jpg was deleted by a refused delete (outcome was
+My first draft's "harm" red for sites 2, 3 and 6 (`a.jpg was deleted by a refused delete (outcome was
 Ok(()))`) was produced only by adding a walker that iterates `self.list(path)` and issues a real `DELETE`
 per child — genuine production capability `delete` does not have. That proof was withdrawn; it is not
 evidence for today's code, only for a hypothetical future where recursive deletion is implemented.
 
-#### Group C — conceded undemonstrable under any fault reachable today (3 of 10)
+#### Group C — conceded undemonstrable under any fault reachable today (3 of 12)
 
 **5. `delete_without_listbucket_names_the_probe_instead_of_a_prefix_the_user_never_typed`.** Its target,
 `/photos/gone.jpg`, never exists. `delete` only ever issues a single-key `DELETE` of the literal key
@@ -268,18 +329,20 @@ this ticket's own mistake.
 
 ### Why the reorder is still right despite Groups B and C
 
-It is **strictly non-worse everywhere** (no site got harder to diagnose), **demonstrably better at four
+It is **strictly non-worse everywhere** (no site got harder to diagnose), **demonstrably better at five
 sites today** (Group A), and **correct in advance** for the day `delete` grows real recursive-delete
 support or `ureq`/a different byte pattern stops being a redundant backstop — at which point Groups B
 and C's tests start actually catching what they were written to catch, with no further changes needed.
 
-### Two more sites found and fixed in the same file (recap, code unchanged from earlier report)
+### Coverage recap — a bound, not a total (see "On coverage" above for the full statement)
 
-The wider scan found 2 more instances of the identical shape still in `provider.rs` (now rows 7-8 in the
-table above), which the ticket's own scope note said explicitly to also cover ("at minimum the rest of
-`crates/s3/`"), and a subsequent independent review found 2 more still (rows 9-10, F1). `crates/s3` was
-re-read in full after each round; no `expect_err`/`unwrap_err`/`is_err()` site remains with a state
-assertion after it.
+The six named in the ticket, plus 2 more found while covering the rest of `crates/s3` per the ticket's
+own scope note (rows 7-8), plus 2 more a first review pass found (rows 9-10, F1), plus 2 more still a
+*second* review pass found (rows 11-12, F1 round 2) — twelve total, all now fixed. Each of those three
+correction rounds re-read the whole crate with `expect_err`/`unwrap_err`/`.is_err()` as the search token
+and still missed sites the next round caught, which is itself the evidence for treating "twelve" as a
+floor rather than a completion claim — see "On coverage" in the fixes table section above for the exact
+method and its known blind spot.
 
 ### Wider scan: what was searched, what was found — corrected counts (review F3)
 
@@ -292,7 +355,8 @@ checked as real (e.g. `split_join.rs:1281`: `unwrap_err()` then
 `split_join.rs:1295`).
 
 **Searched, matches found (fixed — see above):**
-- `crates/s3/` (whole crate) — **10** instances, all now fixed.
+- `crates/s3/` (whole crate) — **at least 12** instances, all now fixed (a floor: see "On coverage" —
+  this same crate's own count moved six → ten → twelve across three successive re-reads).
 
 **Searched, matches found, NOT fixed (too large for this ticket — corrected list for the follow-up):**
 - `crates/server` and `src-tauri` combined — **~49** instances (corrected from the first pass's ~18; treat
@@ -333,7 +397,7 @@ checked as real (e.g. `split_join.rs:1281`: `unwrap_err()` then
 **Not searched (explicitly out of this ticket's scope):**
 - `src/` (Svelte/TS frontend) and `sidecar/` — out of this ticket's Rust-provider scope.
 
-**Total found beyond the ten fixed in `crates/s3`: ~49 confirmed-or-strongly-likely instances**,
+**Total found beyond the twelve fixed in `crates/s3`: ~49 confirmed-or-strongly-likely instances**,
 concentrated in `crates/server` (worst offenders `batch_execute.rs` at 12 and `split_join.rs`/
 `vault_manager.rs` at 8-9 each) and `src-tauri/src/lib.rs` (9). This is well beyond one S-ticket's
 scope — recommend the Foreman file a follow-up ticket (small epic, given the count and file spread)
@@ -358,12 +422,12 @@ trusting either scan's numbers as final — both were independently found short 
   than no scanner.
 - The wider scan proved the softer, cheaper intervention — **a strengthened, written-down rule** — was
   not sufficient on its own before this ticket (the rule already existed in prose, and was still broken
-  ten times in one file by the people who wrote that rule). So I added two paragraphs to
+  at least twelve times in one file by the people who wrote that rule). So I added two paragraphs to
   `Ticketing/wiki.md` → Evidence Rules, rule 1: the reorder pattern itself, and — new, out of this
-  ticket's own review — a second paragraph warning against the specific trap this ticket's review walked
-  into twice (a worker, an independent Reviewer, and an independent UAT all initially accepted a red
-  produced by inventing new production code inside a neutralisation as if it proved something about
-  today's code).
+  ticket's own review — a second paragraph warning against the specific trap this ticket's review ran
+  into (a worker, an independent Reviewer, and an independent UAT all initially accepted a red produced
+  by inventing new production code inside a neutralisation as if it proved something about today's
+  code).
 - **What would close the gap for real:** given the corrected wider scan found ~49 more instances
   concentrated in two crates, I think the right next mechanical step is a **scoped guard test in
   `crates/server`** (by far the largest concentration) once the follow-up ticket fixes that crate's
