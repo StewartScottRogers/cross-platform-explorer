@@ -279,3 +279,135 @@ Notes section (that a live OpenSSH/vsftpd daemon returns the same codes as the t
 still not independently re-verified against the QNAP NAS — this ticket's fix does not rely on that
 premise (it never branches on the specific status code at all, only on `stat`), so it is unaffected
 either way, but the premise itself remains as stated: read from RFCs/`sftp-server.c`, not measured live.
+
+## Work Log (2026-08-18) — Reviewer round 2, four findings applied
+
+The independent Reviewer confirmed correctness, TOCTOU handling, and `StrictMkdirProvider`'s fidelity
+to `mkdir(2)` were all sound, and that ten legs across three crates go red on revert. UAT PASSED. Four
+findings applied, in order:
+
+**F1 — the big one: a measured performance regression, with an exact fix.** Before this round,
+`ensure_dir` was used at BOTH `upload_tree` call sites (the base, and every in-walk directory). Measured
+with an instrumented `CountingProvider` wrapping `StrictMkdirProvider` (base + 10 sibling subdirs, one
+file each = 11 remote directories):
+
+```
+BEFORE (ensure_dir at both sites):
+  fresh base, 10 subdirs:   files=10  stat_calls=21  mkdir_calls=11   -> 32 metadata round trips
+  old (pre-CPE-1741) code equivalent:                                     11 round trips
+  re-upload over existing:  files=10  stat_calls=11  mkdir_calls=0    -> 11 round trips
+  fresh deep base a/b/c:    files=10  stat_calls=24  mkdir_calls=14   -> 38 round trips
+```
+
+A first-time upload cost **2.9x** the round trips of the old (buggy) code, not the 2x the ticket
+originally anticipated — because `ensure_dir` recurses into the parent unconditionally
+(`transfer.rs:834-838` at the time), even for an in-tree directory whose parent the walk had just
+created: `stat(self)` miss + `stat(parent)` hit + `mkdir(self)` = 3 round trips per directory. On FTP
+this is worse than "a round trip": `FtpProvider::stat` (`crates/ftp/src/lib.rs:300-317`) is
+`self.list(parent)?` — a full PASV + data-connection LIST of the parent, not a metadata verb — so `n`
+sibling subdirectories cost **O(n^2) in bytes transferred**, on the one protocol where a listing opens a
+whole new data connection.
+
+**Fix applied** — `ensure_dir` itself is untouched (still used for the base, `transfer.rs:861`). Only
+the in-walk call site (`transfer.rs:878`, was `ensure_dir(provider, &remote)?;`) changed to try the
+cheap operation first:
+
+```rust
+if provider.mkdir(&remote).is_err() {
+    ensure_dir(provider, &remote)?; // already there, or a genuine failure — `ensure_dir` decides
+}
+```
+
+This exploits the walk's own ordering guarantee: a directory's parent is always pushed onto `stack`
+before the directory itself is processed, so for a **fresh** in-tree directory `mkdir` succeeds on the
+first try — 1 round trip, not 3.
+
+**Re-measured after the fix** (same `CountingProvider` + `StrictMkdirProvider` harness, same 3
+scenarios):
+
+```
+AFTER (mkdir-first at the in-walk site, ensure_dir kept at the base):
+  fresh base, 10 subdirs:   files=10  stat_calls=1   mkdir_calls=11  -> 12 round trips  (was 32; -62%,
+                                                                         now within 1 round trip of the
+                                                                         old pre-CPE-1741 code's 11)
+  re-upload over existing:  files=10  stat_calls=11  mkdir_calls=10  -> 21 round trips  (was 11; +91%)
+  fresh deep base a/b/c:    files=10  stat_calls=3   mkdir_calls=13  -> 16 round trips  (was 38; -58%)
+```
+
+The fresh-tree cases (by far the common one — first-time upload, or a tree with new subdirectories) are
+dramatically cheaper, landing almost exactly at the old code's round-trip count while now being
+*correct* for an existing base. The one case that got measurably worse is a **full re-sync of a tree
+that already exists in its entirety remotely** (every in-tree directory already there): each such
+directory now costs a failed `mkdir` + a `stat` (2 round trips) instead of `ensure_dir`'s single
+early-return `stat` hit (1 round trip). This is the accepted trade-off the exact fix makes: on FTP in
+particular, the "wasted" first attempt is a cheap single `MKD` command, not the expensive
+`stat`-as-`LIST` this finding is otherwise trying to avoid — so trading round-trip *count* for round-trip
+*cost* is favourable even in this worse-by-count case. Not independently re-measured in bytes (only
+round trips), consistent with how the "before" numbers in the ticket were reported. Flagged here rather
+than silently accepted: a future ticket could special-case "parent already existed before this walk
+iteration, but this specific child was already there too" to recover the 1-round-trip case, but that
+needs a way to tell "just-created parent" from "not", which the walk doesn't currently expose cheaply.
+
+**F2 — the WebDAV rig was still more forgiving than the wire.** The exact defect CPE-1731 fixed for
+SFTP/FTP `mkdir`/`create_dir` had survived in the third protocol: `crates/webdav/src/lib.rs`'s `MKCOL`
+handler read `let code = if std::fs::create_dir_all(&real).is_ok() { 201 } else { 500 };` —
+`create_dir_all` is idempotent and invents missing parents, so an existing-resource MKCOL and a
+missing-intermediate-collection MKCOL both silently succeeded, which no real WebDAV server does. Fixed
+to answer per RFC 4918 §9.3.1: `405` for an existing resource, `409` for a missing intermediate
+collection, `201` only for a genuine single-level `create_dir`, `500` otherwise. `WebdavProvider::mkdir`
+uses `ureq`'s `.call()`, which turns any `>=400` into `Err`, so `ensure_dir`'s stat-based retry logic
+handles all three refusal codes correctly with no change needed on the client side. Re-ran the full
+cpe-webdav suite after the change: 32/32 green (30 pre-existing + the 2 new F3 tests below) — nothing
+depended on the old forgiveness.
+
+**F3 — WebDAV regression tests, landed together with F2** (so they aren't vacuous): added
+`upload_tree_succeeds_when_the_remote_base_directory_already_exists` (uploads into the seeded `/sub`)
+and `upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist` (uploads into
+`/new/deep`) next to `generic_transfer_walks_downloads_and_uploads_over_webdav` in
+`crates/webdav/src/lib.rs`. Same shape as the sftp/ftp legs: assert the bytes back, and assert the
+seeded `/sub/nested.txt` survived. Both also carry the F4(a) empty-directory strengthening below.
+
+**F4(a) — test-strength: prove `mkdir`, not a parent-inventing write, made the directory.** The existing
+"succeeds" tests read bytes back, which is right, but on two of the three protocols a write path
+independently invents parent directories, so a passing test didn't prove `mkdir`/`MKD`/`MKCOL` itself
+ran: `crates/ftp/src/lib.rs`'s rig `STOR` handler does `create_dir_all(parent)` (CPE-1742, known/kept),
+and `crates/server/src/provider.rs`'s `FakeProvider::write` calls `ensure_ancestors`. Only the sftp rig
+was clean. Fixed by adding an **empty** subdirectory to each affected source tree and asserting it
+exists remotely — only a successful `mkdir` call chain can produce a directory holding nothing:
+- `crates/ftp/src/lib.rs` (`upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist`):
+  added `std::fs::create_dir(src.join("empty")).unwrap();` and
+  `assert!(provider.stat("/new/deep/empty").unwrap().is_dir, "the MKD chain, not STOR's create_dir_all, must have made these");`.
+- `crates/server/src/transfer.rs` (`one_file_src`, shared by three tests): added the same empty-dir
+  creation; the multi-level test now also asserts `fs.stat("a/b/empty").unwrap().is_dir`.
+- The two new WebDAV tests (F3) were written with this strengthening from the start.
+
+**F4(b) — `StrictMkdirProvider` gaps.** Two fixed in `crates/server/src/transfer.rs`:
+1. It did not model `ENOTDIR` (parent exists but is a **file**, not a directory). The parent check in
+   `mkdir` now matches `self.0.stat(parent)`: `Err(_)` → `"No such file: No such file"` (unchanged,
+   ENOENT), `Ok(e) if !e.is_dir` → `"Failure: Failure"` (new, ENOTDIR — matches the same
+   indistinguishable-from-generic-failure text `ensure_dir`'s doc already establishes for EEXIST),
+   `Ok(_)` → proceed.
+2. Neither `StrictMkdirProvider` nor `AlwaysDeniedMkdir` forwarded `capabilities()` — both now add
+   `fn capabilities(&self) -> ProviderCapabilities { self.0.capabilities() }`, matching what
+   `FakeProvider` itself overrides, so a test that checks capabilities through either wrapper gets the
+   real answer instead of the trait's `ProviderCapabilities::default()`.
+
+**Full verification after all four findings:**
+- `cargo test --lib` in `crates/server`: **2207 passed, 0 failed, 4 ignored** (same count as before this
+  round — confirms the measurement scaffold used for F1's numbers was fully removed, not accidentally
+  left in the committed diff).
+- `cargo test` in `crates/sftp`: **35/35** (unaffected by this round's edits; sftp gets no changes).
+- `cargo test` in `crates/ftp`: **20/20**, including the strengthened multi-level test.
+- `cargo test` in `crates/webdav`: **32/32** (30 pre-existing + the 2 new F3 tests).
+- `cargo clippy --all-targets -- -D warnings`, clean in every feature mode `.github/workflows/ci.yml`
+  runs for these crates: `crates/server` (base, `--features index`), `crates/sftp` (base),
+  `crates/ftp` (base, `--features e2e-extra-ca`), `crates/webdav` (base).
+
+**Not changed** (per the Reviewer's explicit "confirmed good" list): `ensure_dir`'s TOCTOU handling, its
+own already-exists tolerance and base-is-a-file/permission-denied error shapes — all untouched.
+
+**Unverified / carried over:** the QNAP-NAS live-daemon cross-check noted in the previous Work Log entry
+is still not done — this round's changes don't depend on it either. The pre-existing
+`sample_fixtures.rs::zip_lists_real_tree_and_extracts_inner_file` local-environment flake (stale
+`%TEMP%\cpe-archive` entries) noted previously is unrelated to any file this round touched and was not
+revisited.

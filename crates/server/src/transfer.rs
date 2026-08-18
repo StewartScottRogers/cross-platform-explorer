@@ -877,8 +877,19 @@ pub fn upload_tree(
             if meta.is_dir() {
                 // Same CPE-1741 shape as the base directory above, one level down: any directory in the
                 // tree that already exists remotely (a partial re-upload) must not abort the transfer.
-                // Both sites change together — `ensure_dir` here too, not a bare `mkdir`.
-                ensure_dir(provider, &remote)?;
+                // But unlike the base, `stack` pushed this directory's *parent* onto the walk before we
+                // ever get here, so for a fresh in-tree directory the parent is already known to exist and
+                // a bare `mkdir` succeeds first try. Measured: `ensure_dir` here unconditionally costs
+                // stat(self) miss + stat(parent) hit + mkdir(self) = 3 round trips per fresh directory —
+                // 2.9x the round trips of the old (unsafe) code, not the 2x anticipated. On FTP it's worse
+                // than "a round trip": `FtpProvider::stat` (crates/ftp/src/lib.rs:300) is `list(parent)`, a
+                // full PASV + data-connection LIST, so n sibling subdirectories cost O(n^2) bytes. Try
+                // `mkdir` first and only fall back to `ensure_dir` on failure — "already there, or missing
+                // parent, or a genuine failure" all still get handled correctly by `ensure_dir`, just off
+                // the fast path instead of on it.
+                if provider.mkdir(&remote).is_err() {
+                    ensure_dir(provider, &remote)?; // already there, or a genuine failure — `ensure_dir` decides
+                }
                 stack.push(local);
             } else {
                 let data = std::fs::read(&local).map_err(|e| format!("{}: {e}", local.display()))?;
@@ -893,7 +904,7 @@ pub fn upload_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::provider::{FakeProvider, ProviderEntry};
+    use crate::provider::{FakeProvider, ProviderCapabilities, ProviderEntry};
 
     /// A `FakeProvider` seeded with `a.txt` + `sub/b.txt` (an empty `""` root, no leading slash).
     fn seeded() -> FakeProvider {
@@ -1003,10 +1014,17 @@ mod tests {
                 return Err(format!("{path}: Failure: Failure")); // EEXIST, indistinguishable from a generic failure
             }
             let parent = path.rfind('/').map(|i| &path[..i]).unwrap_or("");
-            if !parent.is_empty() && self.0.stat(parent).is_err() {
-                return Err(format!("{path}: No such file: No such file")); // ENOENT — no recursive create
+            if !parent.is_empty() {
+                match self.0.stat(parent) {
+                    Err(_) => return Err(format!("{path}: No such file: No such file")), // ENOENT — no recursive create
+                    Ok(e) if !e.is_dir => return Err(format!("{path}: Failure: Failure")), // ENOTDIR — parent is a file
+                    Ok(_) => {}
+                }
             }
             self.0.mkdir(path) // parent verified present, name verified absent: a real single-level mkdir
+        }
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.0.capabilities()
         }
     }
 
@@ -1038,6 +1056,9 @@ mod tests {
         fn mkdir(&mut self, path: &str) -> Result<(), String> {
             Err(format!("{path}: Permission denied"))
         }
+        fn capabilities(&self) -> ProviderCapabilities {
+            self.0.capabilities()
+        }
     }
 
     /// A `src` scratch dir cleaned up via `Drop`, armed before any assertion runs (per this shift's
@@ -1055,6 +1076,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("z.txt"), b"zed").unwrap();
+        // An empty subdirectory: `FakeProvider::write` invents ancestors via `ensure_ancestors`, so a
+        // directory holding a file proves nothing about whether `mkdir` itself ran. Only a successful
+        // `mkdir` can produce a directory with nothing inside it — CPE-1741 F4.
+        std::fs::create_dir(src.join("empty")).unwrap();
         (src.clone(), ScratchDirGuard(src))
     }
 
@@ -1087,6 +1112,10 @@ mod tests {
             .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
         assert_eq!(files, 1);
         assert_eq!(fs.read("a/b/z.txt").unwrap(), b"zed");
+        assert!(
+            fs.stat("a/b/empty").unwrap().is_dir,
+            "the mkdir chain, not write's ensure_ancestors, must have made this"
+        );
     }
 
     #[test]

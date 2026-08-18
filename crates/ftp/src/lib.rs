@@ -940,6 +940,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&src);
         std::fs::create_dir_all(&src).unwrap();
         std::fs::write(src.join("z.txt"), b"zed").unwrap();
+        // Only a successful MKD chain can produce a directory with no file inside it — this rig's STOR
+        // does `create_dir_all(parent)` (CPE-1742), which would invent a non-empty directory's parents
+        // without ever exercising MKD, so an empty directory is the one thing that proves MKD ran.
+        std::fs::create_dir(src.join("empty")).unwrap();
 
         // Neither "/new" nor "/new/deep" exists on the served root yet — a bare (non-recursive) MKD
         // "/new/deep" would fail 550.
@@ -948,6 +952,10 @@ mod tests {
             .expect("a multi-level remote_root with missing parents must succeed (CPE-1741)");
         assert_eq!(files, 1);
         assert_eq!(provider.read("/new/deep/z.txt").unwrap(), b"zed");
+        assert!(
+            provider.stat("/new/deep/empty").unwrap().is_dir,
+            "the MKD chain, not STOR's create_dir_all, must have made these"
+        );
     }
 
     #[test]
