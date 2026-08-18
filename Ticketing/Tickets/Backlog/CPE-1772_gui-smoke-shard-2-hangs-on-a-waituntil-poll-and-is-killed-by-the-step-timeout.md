@@ -74,3 +74,27 @@ Evidence:
 Reported by the CPE-1754 worker during the batched sprint of 2026-08-17, on the second occurrence it saw,
 and confirmed against `main`'s own recent run history. Related: CPE-1753 (the sharding that makes a missing
 shard red), CPE-1728 (the app-defect vs runner-could-not-paint classifier), CPE-1171 (the GUI smoke harness).
+
+## Further evidence, same evening (2026-08-17, batched sprint)
+
+Three GUI-smoke shard failures across three unrelated PRs within about ninety minutes, none of which
+touches GUI code:
+
+| PR | Ticket | Diff | Shard | Outcome |
+|---|---|---|---|---|
+| #923 | CPE-1754 | `src/lib/tags.ts`, one pure function | shard 2 | hung, cancelled at the step timeout; passed on a targeted re-run |
+| #924 | CPE-1715 | `src-tauri/src/lib.rs`, name-picking probe | shard 1 | cancelled during *"Install Linux system dependencies"*, before any test ran |
+| #926 | CPE-1758 | `crates/server/src/archive.rs` + docs | shard 3 | failed |
+
+Two things this adds to the report above:
+
+1. **It is not confined to shard 2**, so a fix aimed only at `samples.smoke.ts`'s poll will not close it.
+   Shard 1's failure happened during *dependency installation* — before any test executed — which is a
+   different mechanism entirely and points at runner contention or setup flakiness rather than a hanging
+   assertion.
+2. **Contention appears to be a factor.** All three occurred while six PRs were queued against the runner
+   pool simultaneously. On #924 the real CI leg (cargo check/clippy/test across all three OSes) **succeeded
+   on the same commit** while GUI smoke was cancelled — so the cancellation carried no code signal at all.
+
+That last point is the operational cost: a red X that means nothing is indistinguishable from a red X that
+means everything, and a Foreman draining a merge queue has to open each one to find out.
