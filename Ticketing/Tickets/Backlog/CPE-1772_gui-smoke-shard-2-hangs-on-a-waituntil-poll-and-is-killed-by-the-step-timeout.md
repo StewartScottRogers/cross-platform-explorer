@@ -98,3 +98,25 @@ Two things this adds to the report above:
 
 That last point is the operational cost: a red X that means nothing is indistinguishable from a red X that
 means everything, and a Foreman draining a merge queue has to open each one to find out.
+
+### Fourth occurrence, and this one takes every shard down with it
+
+PR #933, 2026-08-18. The failing job was **"GUI smoke — build once for every shard (CPE-1753)"** — the
+*shared* build, not a shard. It was cancelled during `Install tauri-driver`, after the gui-smoke unit tests
+had all passed and `tauri-driver v2.0.6` had finished installing:
+
+```
+Installed package `tauri-driver v2.0.6` (executable `tauri-driver`)
+##[error]The operation was canceled.
+```
+
+Then the cross-shard verdict job went red too, because its input never arrived.
+
+That makes four in one night, at four different points: a `waitUntil` poll (#923 shard 2), dependency
+installation (#924 shard 1), a shard failure (#926 shard 3), and now toolchain installation in the shared
+build (#933). **None was in test code and none carried a code signal.** The shared-build case is the worst
+shape: one cancellation there fails every shard at once, so a PR shows a wall of red that means nothing.
+
+The pattern across all four is a cancellation at an arbitrary setup step under runner contention, which
+argues the root cause is not `samples.smoke.ts`'s poll at all — that was just where the first one landed.
+Whatever is done here should start from "why are these jobs being cancelled" rather than from the poll.
