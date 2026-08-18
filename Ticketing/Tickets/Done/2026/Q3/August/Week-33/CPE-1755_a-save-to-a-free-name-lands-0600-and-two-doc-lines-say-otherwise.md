@@ -3,11 +3,11 @@ id: CPE-1755
 title: A save to a free name lands 0600, and two doc lines describe the mode carry inaccurately
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: XS
 created: 2026-08-15
-closed:
+closed: 2026-08-18
 ---
 
 ## Problem
