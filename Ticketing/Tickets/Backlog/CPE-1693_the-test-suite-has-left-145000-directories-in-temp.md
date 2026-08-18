@@ -133,3 +133,18 @@ proposes rather than per-test cleanup:
 **Do the purge and the leak together.** A one-line purge clears the symptom and the flake; without the
 `scratch()`-returns-a-guard change the count starts climbing again with the next test run, and the next
 PID collision is only a matter of time.
+
+### Second failure, hours later, and worse
+
+`could not claim a private extraction directory ... after 1024 attempts`
+
+That is `temp_extract_target`'s retry loop **exhausting its entire budget** — 1024 consecutive
+`%TEMP%/cpe-archive/<pid>-<seq>` names all already taken. Not a collision it recovered from; a hard give-up.
+
+It landed on CPE-1745's own brand-new test during a full parallel `cargo test` of `src-tauri`
+(191 passed, 1 failed). The same test passed alone, and the whole suite passed serially with
+`--test-threads=1` — so parallelism plus the backlog is what exhausts the namespace.
+
+Two failures in one night, on two unrelated tickets, both environmental, both passing on rerun. The failure
+mode is now **parallelism-dependent and non-deterministic**, which means it will surface most often on a
+loaded CI runner and least often on the machine of whoever tries to reproduce it.
