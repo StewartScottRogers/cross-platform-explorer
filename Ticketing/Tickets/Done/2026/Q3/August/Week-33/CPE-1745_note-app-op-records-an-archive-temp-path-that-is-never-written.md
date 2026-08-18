@@ -3,11 +3,11 @@ id: CPE-1745
 title: note_app_op records an archive temp path that is never written (drifted from CPE-1195)
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-18
 ---
 
 ## The defect
