@@ -3,11 +3,11 @@ id: CPE-1741
 title: upload_tree fails when the remote base directory already exists
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-14
-closed:
+closed: 2026-08-18
 ---
 
 ## Problem
