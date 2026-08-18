@@ -112,6 +112,15 @@ Three independent protections apply automatically — you don't opt into any of 
   folder — an absolute path, or one containing `..` — is **silently skipped** during extraction rather than
   written outside where you asked, for every supported format (zip, tar, 7z, the one-entry-at-a-time RAR
   path). This is a structural guard baked into the extractor itself, not something you check separately.
+- **Entry *names*, not just where they point, are checked too.** Separately from the traversal guard
+  above, an entry whose own leaf name isn't one the local filesystem can safely hold is also skipped
+  rather than written: a name containing a colon (`file:stream`) — which on Windows/NTFS would otherwise
+  divert the bytes into a hidden alternate data stream on a neighbouring file, leaving no visible file at
+  all — a name that starts with `..` without being a traversal component (`..evil`), and, on Windows
+  only, a reserved device name (`con`, `nul`, `com1`, …) or a name ending in a run of `.`/space. These are
+  the same per-segment rules the Network program's downloads already apply; extraction skips the entry
+  rather than renaming it, so the entry is missing rather than silently landing somewhere else — check
+  the operations panel if a count looks lower than expected.
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a
   ZIP's central directory (no extraction) and compares every entry's compressed size against its
   uncompressed size. It reports the overall compression ratio, total compressed → uncompressed size, how
