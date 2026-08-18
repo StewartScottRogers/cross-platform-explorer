@@ -321,6 +321,43 @@ describe("CPE-1761: the scan fails loudly instead of silently truncating (fail-o
     const src = `<div title="x"\n{entry.name}`;
     expect(() => findUnsafeRenderLines(src, "unterminated-tag.svelte")).toThrow(/unterminated tag — no closing ">"/);
   });
+
+  // CPE-1761 attempt 3 (reviewer): F1's EOF check only catches a quote that NEVER closes. If a forgotten
+  // closing `'` is later re-balanced by an unrelated apostrophe/contraction elsewhere in the file, the
+  // scanner never reaches EOF still "inside" a quote — it silently resumes normal parsing. The real bug
+  // isn't the EOF check; it's that isRenderPosition's inTag branch only recognized the DOUBLE-quote form
+  // (`attr="..{`), so a mustache reached while quoteChar === "'" was classified as a non-render and
+  // DROPPED regardless — not deferred, not flagged, just silently invisible.
+  it("F1 attempt 3: a forgotten closing quote re-balanced by a later contraction must not silently drop the render in between", () => {
+    const src = [
+      `<button title='Loading>Spinner</button>`,
+      `<span>{entry.name}</span>`,
+      `<p>You're all caught up</p>`,
+    ].join("\n");
+    // Before the fix this returned [] — completely clean — because the single-quoted `'Loading>...` never
+    // reaches EOF unterminated (the later "You're" apostrophe re-balances it), and the {entry.name}
+    // mustache in between was reached while quoteChar === "'", which isRenderPosition's inTag branch
+    // didn't recognize as a render position at all.
+    const found = findUnsafeRenderLines(src, "unbalanced-quote-rebalanced.svelte");
+    expect(found.some((e) => e.includes("entry.name")), `expected entry.name to be reported as an offender, got: ${JSON.stringify(found)}`).toBe(true);
+  });
+
+  // A legitimate single-quoted render position must be classified identically to the double-quoted form —
+  // proves the fix is genuine symmetry, not a special-cased patch for the repro shape above.
+  it("F1 attempt 3: a legitimate single-quoted mustache is a render position, same as the double-quoted form", () => {
+    const doubleQuoted = findUnsafeRenderLines(`<div title="{entry.name}">x</div>`, "double.svelte");
+    const singleQuoted = findUnsafeRenderLines(`<div title='{entry.name}'>x</div>`, "single.svelte");
+    expect(singleQuoted, `single-quoted title='{entry.name}' must be flagged exactly like the double-quoted form`).toEqual(["1:entry.name"]);
+    // Same expression, same line, same shape — the two forms must not be able to drift apart, since
+    // that drift IS the vulnerability (a spoof hiding behind whichever quote style isn't checked).
+    expect(singleQuoted.map((e) => e.split(":").slice(1).join(":"))).toEqual(doubleQuoted.map((e) => e.split(":").slice(1).join(":")));
+  });
+
+  it("F1 attempt 3: the narrower repro — an unterminated single-quoted attribute directly followed by a real offender and a later contraction", () => {
+    const src = `<div title='unterminated><span>{entry.name}</span><p>can't see</p>`;
+    const found = findUnsafeRenderLines(src, "narrow-repro.svelte");
+    expect(found.some((e) => e.includes("entry.name")), `expected entry.name to be reported, got: ${JSON.stringify(found)}`).toBe(true);
+  });
 });
 
 // F1 (reviewer, CPE-1761 attempt 2): the exact end-to-end probe the reviewer ran against a REAL registered

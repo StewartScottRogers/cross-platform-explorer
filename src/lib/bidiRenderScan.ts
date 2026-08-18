@@ -17,20 +17,24 @@
  * shaped like. That is why this module does not special-case `.name`/`.path`/`baseName` at all:
  * `isSafeExpr` doesn't know or care what an identifier is called.
  *
- * CPE-1761 (round 3): a registered entry pins `line:expr`, not just `line` — editing an already-registered
- * line's expression in place (e.g. swapping a harmless `title={$t(...)}` for a raw `title={entry.name}`)
- * changes the recorded key and reds the guard, instead of the line number alone staying "found" either
- * way. And any markup this module cannot confidently PARSE — an unterminated `{…}`/`<!--…-->`/`</…>`, a
- * bare `<` that doesn't open a real tag/comment/closing-tag, or a tag/quoted-attribute that never closes
- * before EOF — throws `RenderScanError` (naming the file and position) instead of silently truncating the
- * scan at that point. Round 2's engine did the latter (`i = markup.length`, or just falling off the end of
- * `markup` mid-tag) and returned whatever was found so far — often `[]`, indistinguishable from "clean" —
- * which is fail-open in the worst possible direction for a guard whose whole job is to catch what a human
- * missed. That closes the specific silent-truncation shape round 2 shipped: a run of this guard now either
- * names every offender it could locate or refuses to answer outright when it can't parse the markup. It is
- * NOT a blanket guarantee the computed set is exhaustive in every case — a mustache the scanner CAN parse
- * but whose render-position HEURISTIC has a known gap (see "still cannot see" below) still scans clean
- * without complaint, because nothing about that shape looks unparseable to the scanner.
+ * CPE-1761 changed three things, each closing one way a render could go unreported without the guard
+ * saying so — read this as narrowing specific failure shapes, NOT as a claim the computed set is exhaustive
+ * (it is not; see "still cannot see" below for what remains genuinely invisible to this engine):
+ *   1. A registered entry pins `line:expr`, not just `line` — editing an already-registered line's
+ *      expression in place (e.g. swapping a harmless `title={$t(...)}` for a raw `title={entry.name}`)
+ *      changes the recorded key and reds the guard, instead of the line number alone staying "found"
+ *      either way.
+ *   2. Markup this module cannot confidently PARSE — an unterminated `{…}`/`<!--…-->`/`</…>`, a bare `<`
+ *      that doesn't open a real tag/comment/closing-tag, or a tag/quoted-attribute that never closes
+ *      before EOF — throws `RenderScanError` (naming the file and position) instead of silently
+ *      truncating the scan at that point the way round 2's `i = markup.length` fallback did (returning
+ *      whatever was found so far — often `[]`, indistinguishable from "clean").
+ *   3. `isRenderPosition`'s inTag branch recognizes `attr='…{…}…'` exactly like `attr="…{…}…"` (attempt
+ *      3): the single-quoted form used to be silently classified as a non-render — not an EOF/parse
+ *      failure, just dropped — whenever a mustache was reached with `quoteChar === "'"`, which happens
+ *      even when the quote is LATER re-balanced by an unrelated apostrophe elsewhere in the file (so #2's
+ *      EOF check never saw anything wrong). Keeping the two quote styles symmetric removes the drop
+ *      entirely rather than trading it for a false-positive hard-error on legitimate single-quoted markup.
  *
  * **What this still cannot see** (the honest boundary — read before trusting a green run):
  *   - A raw name/path placed in any DOM attribute OTHER than `title`/`aria-label`/`alt` — `data-*`,
@@ -311,12 +315,19 @@ export function compareOffenders(a: string, b: string): number {
  *     `>`, the exact shape review's probe caught this engine missing).
  *   - INSIDE a tag's attribute list: `}` here almost always closes a PRIOR shorthand prop or directive
  *     (`{density} {currentPath}`, `bind:value={x}`), never a render — so only `title=`/`aria-label=`/
- *     `alt=`, given directly as `attr={…}` or embedded in a quoted `attr="…{…}…"` value, count. */
+ *     `alt=`, given directly as `attr={…}` or embedded in a quoted `attr="…{…}…"`/`attr='…{…}…'` value,
+ *     count. CPE-1761 attempt 3 (reviewer): the double- and single-quoted forms are kept SYMMETRIC on
+ *     purpose — `title='{entry.name}'` is exactly as legal Svelte as `title="{entry.name}"`, and treating
+ *     only the double-quoted spelling as a render position silently DROPPED the single-quoted one (not
+ *     merely mis-scanned: `isRenderPosition` returned false, so the mustache was classified as a non-render
+ *     and never even reached `isSafeExpr`) whenever `quoteChar` was `'` — the exact shape a forgotten
+ *     closing `'` re-balanced by an unrelated later contraction ("it's", "can't", "you're") reproduces. */
 function isRenderPosition(markup: string, idx: number, inTag: boolean): boolean {
   const before = markup.slice(Math.max(0, idx - 200), idx);
   if (!inTag) return /[>}]\s*$/.test(before);
   if (/\b(?:title|aria-label|alt)=\{?\s*$/.test(before)) return true;
   if (/\b(?:title|aria-label|alt)="[^"]*$/.test(before)) return true;
+  if (/\b(?:title|aria-label|alt)='[^']*$/.test(before)) return true;
   return false;
 }
 

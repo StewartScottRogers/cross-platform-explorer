@@ -279,3 +279,58 @@ the "Not yet covered" sub-string begins).
 **Verification (attempt 2).** `npm run check` — 0 errors, 0 warnings. Full `npx vitest run` — 312 files /
 4068 tests, all green (bidiRenderScan.test.ts grew 32→37, bidiEscape.guard.test.ts stayed at 7 with F5/F7
 edits to existing tests rather than new ones).
+
+## Attempt 3 — the remaining gap: single-quoted render positions were silently DROPPED, not merely EOF-missed
+
+**Root cause (reviewer).** Attempt 2's EOF check is correct as far as it goes, but `quoteChar` is a raw
+parity toggle with no concept of "this quote belongs to this tag." An unterminated single-quoted attribute
+LATER re-balanced by an unrelated apostrophe elsewhere in the file (any contraction — "it's", "can't",
+"you're", "don't") never reaches EOF in a bad state, so attempt 2's check never fires. The actual bug isn't
+in the EOF check at all: while `quoteChar === "'"`, a `{` still calls `handleMustache`, and
+`isRenderPosition`'s inTag branch only recognized the DOUBLE-quote form (`attr={` / `attr="..{`) — a
+single-quoted context (`attr='..{`) matched neither regex, so the mustache was silently classified as a
+non-render and DROPPED. Not deferred, not flagged — dropped, regardless of whether the quote ever balances.
+Reproduced exactly as the reviewer measured:
+```
+<button title='Loading>Spinner</button>
+<span>{entry.name}</span>
+<p>You're all caught up</p>
+```
+returned `[]` before this fix — a raw `{entry.name}` shipped green.
+
+**Fix.** `src/lib/bidiRenderScan.ts`, `isRenderPosition`'s inTag branch: added
+`if (/\b(?:title|aria-label|alt)='[^']*$/.test(before)) return true;` alongside the existing double-quote
+regex, making the two quote styles symmetric — `title='{entry.name}'` is now classified exactly like
+`title="{entry.name}"`, since both are equally legal Svelte. Chosen over failing closed on single quotes
+(which would red on legitimate single-quoted attributes, trading a silent miss for a false positive that
+blocks real work) per the reviewer's explicit direction — symmetry removes the drop entirely rather than
+relocating it.
+
+**New tests (each proven to bite — reverted the single-quote branch, ran, confirmed red, then restored):**
+- `F1 attempt 3: a forgotten closing quote re-balanced by a later contraction must not silently drop the
+  render in between` — the reviewer's exact realistic repro. RED PROOF (branch reverted to
+  `if (false && ...)`): `AssertionError: expected entry.name to be reported as an offender, got: []:
+  expected false to be true`. Restored, reran green.
+- `F1 attempt 3: a legitimate single-quoted mustache is a render position, same as the double-quoted form`
+  — asserts `title='{entry.name}'` and `title="{entry.name}"` produce IDENTICAL results (not just "both
+  non-empty"), so the two forms cannot silently drift apart again. RED PROOF: `AssertionError: expected []
+  to deeply equal [ '1:entry.name' ]`. Restored, reran green.
+- `F1 attempt 3: the narrower repro` — `<div title='unterminated><span>{entry.name}</span><p>can't see</p>`
+  (single-quote analog of the F1-attempt-2 double-quote-shaped probe). RED PROOF: `AssertionError: expected
+  entry.name to be reported, got: []: expected false to be true`. Restored, reran green.
+
+**136-file sweep (re-run after the fix).** A throwaway script ran `findUnsafeRenderLines` over every real
+`.svelte` file under `src/` (136 files, same walk as attempt 2's sweep): 0 throws, all 136 completed. The
+REGISTRY guard test (`bidiEscape.guard.test.ts`, "every registered component's raw-render set matches its
+recorded lines EXACTLY") stayed green with ZERO changes required to REGISTRY — the single-quote fix did not
+surface any new offender in any of the 41 registered files or App.svelte, so no individual-file triage was
+needed (per the Foreman's explicit stop-and-report condition — nothing to report; the set is unchanged).
+
+**Header softened again.** The CPE-1761 module-header paragraph was restructured into three enumerated,
+narrowly-scoped points (line:expr pinning / fail-loud-on-unparseable-markup / single-quote symmetry), each
+explicitly framed as "closing one way a render could go unreported" rather than a claim of exhaustiveness,
+with an explicit non-exhaustiveness disclaimer up front pointing at "still cannot see" for what remains
+genuinely invisible (CPE-1766's mid-text gap, CPE-1767's apostrophe-in-comment false positive).
+
+**Verification (attempt 3).** `npm run check` — 0 errors, 0 warnings. Full `npx vitest run` — 312 files /
+4071 tests, all green (bidiRenderScan.test.ts grew 37→40).
