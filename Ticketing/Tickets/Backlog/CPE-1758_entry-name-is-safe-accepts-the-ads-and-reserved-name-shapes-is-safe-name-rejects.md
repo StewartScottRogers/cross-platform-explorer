@@ -197,3 +197,87 @@ requirement):**
   their `Result<String, String>` signature) — recorded above as pre-existing and out of scope; a future
   ticket could widen those signatures to `ArchiveReport`-shaped output if that silence is judged worth
   fixing on its own.
+
+## Work Log addendum (2026-08-18) — review round 2 fixes
+
+Two independent reviewers (Reviewer + Security Auditor) found four things in the first PR revision.
+Addressed all four before re-pushing:
+
+**Finding 1 (BLOCKER, real bug, mine) — the `Cow` proxy silently rejected every `%` name on Windows.**
+`archive.rs`'s `entry_name_is_safe` matched `crate::transfer::local_safe_segment(seg)`'s return on its
+`Cow::Borrowed`/`Cow::Owned` *variant* as a proxy for "would this segment be rewritten". But
+`windows_safe_segment`'s pre-scan is *deliberately* over-broad for any segment containing a bare `%` (to
+escape a pre-existing `%XX` its own encoder could have emitted) — it allocates an `Owned` copy even when
+that copy is byte-identical to the input. That "allocated but identical" case is exactly what a
+`Cow`-variant match cannot distinguish from a genuine rewrite. Effect: an ordinary Windows filename like
+`"50% off.txt"`, `"report%2ffinal.txt"`, or a Hive/Athena partition value `"city=A%2FB"` (the literal
+example CPE-1709 round 2 fixed the mangling of) was silently rejected as "unsafe", reproducing the exact
+"successful-looking extraction, missing file" shape this ticket exists to eliminate — for a common
+character, invisible on every CI leg (`local_safe_segment` is the identity on Linux/macOS; the pre-fix
+Windows test table had no `%` row).
+
+**Fix:** changed the comparison from a `Cow`-variant match to a content comparison —
+`crate::transfer::local_safe_segment(seg).as_ref() != seg` (`archive.rs:1208` at the time of the fix; the
+doc comment grew again since). Applied the same fix to the existing Windows device-name test's assertion.
+Added a new `#[cfg(windows)]` regression test,
+`entry_name_is_safe_does_not_reject_percent_names_that_round_trip_unchanged`, covering `"50% off.txt"`,
+`"report%2ffinal.txt"`, `"city=A%2FB"`, `"100%"`, `"a%b"`, `"ok/50% off.txt"` — all now `true`. Re-ran the
+existing intended-refusal rows (`file:stream`, `..evil`, `con`, `nul`, `" sp "`, `x.`) — all still `false`.
+Full archive test module: 60 passed, 0 failed (was 58 before this ticket's first two tests, +2 more for
+this round = 60).
+
+**Finding 2 (BLOCKER, doc-only) — cited a surfacing route with zero callers.** My first Work Log entry
+and the `archive.rs` section comment said the skip "lands in `skipped_unsafe`, which is the plan the user
+reviews before committing to extract". Both reviewers independently confirmed by grep
+(`skipped_unsafe|plan_extract|ExtractPlan` over `src/`, `src-tauri/src/`, `*.svelte`) that
+`extract_plan::plan_extract` has **zero callers outside its own module** — it is not wired to a Tauri
+command and there is no plan-review UI. Corrected both the `entry_name_is_safe` doc comment and the
+section comment to name the *real* route instead: the streamed extractors (rows 16/20) push
+`"{name}: unsafe entry name, skipped"` into `ArchiveReport::errors`, which reaches the user as an error
+count in the operations panel (`TransferPanel.svelte`); `plan_extract`'s `skipped_unsafe` is mentioned
+only as "also records it, though currently unconsumed", not as the primary surfacing route. Also learned
+(and left as a note, not a fix, per the reviewer's instruction not to touch it in this PR):
+`App.svelte`'s notice only fires on `r.failed > 0`, and an unsafe-name skip increments neither `failed`
+nor `skipped`, so the toast still reads "Extracted" — only the operations-panel tooltip shows the skip.
+This is exactly why the `explorer-archives.md` line telling the user to check the operations panel is
+load-bearing, not decorative.
+
+**Finding 3 — added the end-to-end test the ticket's own checklist demanded.** Both new predicate tests
+from round 1 are pure `entry_name_is_safe(&str) -> bool` calls; neither touches a filesystem or a
+`Result`. Added `ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped`
+(`#[cfg(windows)]`): builds a real ZIP containing `"file:stream"` + `"ok.txt"`, pre-creates a neighbour
+file `"file"` in the destination, runs the real `extract_archive_streamed` (what `start_archive_extract`
+calls for the shipping Extract button on `.zip`), and — **before unwrapping the `Result`** — asserts the
+neighbour's bytes are untouched and no literal `"file:stream"` leaf exists; only then unwraps and asserts
+`report.errors` actually contains the skip message and that `"ok.txt"` still extracted. That last
+assertion is the one that would have caught Finding 2 on its own. Armed a `RemoveOnDrop` guard (new,
+local to this test — no pre-existing Drop-guard idiom was found elsewhere in `archive.rs`'s tests to
+reuse, so a minimal one was written) before any assertion, so a panicking assertion still cleans up the
+scratch dir (CPE-1693).
+
+**Finding 4 — two stale sentences fixed.** `archive.rs`'s "Rows 19–20 inherit this section unchanged"
+paragraph said "the caveat below is theirs too: `entry_name_is_safe` is not `is_safe_name`" — reworded to
+state the fix is now shared, not the old gap. The closing paragraph of the "three extractors" section said
+"the `entry_name_is_safe`/`is_safe_name` delta is **CPE-1758**" as if still open — appended "(closed)".
+
+**Security Auditor addendum — scope correction, not new work.** The auditor confirmed the guard fires
+correctly at every sink this PR touches (`ok/file:stream` → `false`, verified) but found two sinks that
+`entry_name_is_safe` is never called from at all: `extract_tar_stream`'s `entry.unpack_in` path
+(`archive.rs`, used by `start_archive_extract` for `.tar`/`.tar.gz`/`.tgz` — the real Extract button) and
+the one-shot `tar_unpack`/plain-ZIP-fallback `archive.extract(dest_path)` path. **Not fixed here** — the
+auditor is filing it separately (their ticket numbers, not repeated here since this file shouldn't name a
+ticket that doesn't exist yet in this queue) together with a demonstrated ZIP symlink-target escape and
+the invisible-skip UX gap (`App.svelte`'s notice threshold, above). Per instruction, did not touch the
+TAR path or the ZIP fallback in this PR. **What this DID change:** reworded
+`src/docs/explorer-archives.md`'s new bullet so it names exactly which sinks are covered (ZIP streamed +
+password-protected, 7-Zip both paths, the single-leaf open path) and explicitly states TAR extraction
+does not run this check yet, plus added a closing sentence pointing at the open TAR gap, the ZIP
+symlink-target escape, and the operations-panel skip-visibility gap as related open work — without
+naming internal ticket IDs in the user-facing doc (matching this doc file's existing convention; grepped
+`CPE-[0-9]` in it, zero pre-existing hits).
+
+**Re-verification after all four fixes:** `cargo test --lib archive::` — 60 passed, 0 failed (default
+features). `cargo test` (whole crate, default features) — 2201 passed, 0 failed, 4 ignored (was 2199
+before this round's 2 new tests). `cargo clippy --all-targets -- -D warnings` — clean. `cargo clippy
+--all-targets --features index -- -D warnings` — clean. `cargo clippy --all-targets --features
+pdf-thumb,video-thumb,waveform,dicom-thumb -- -D warnings` — clean.
