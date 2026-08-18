@@ -3,11 +3,11 @@ id: CPE-1729
 title: Splitting into a linked output directory fails with a message that names neither the path nor the real problem
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: 30m
 created: 2026-08-14
-closed:
+closed: 2026-08-18
 ---
 
 ## This ticket was rewritten before it was ever worked — read why
