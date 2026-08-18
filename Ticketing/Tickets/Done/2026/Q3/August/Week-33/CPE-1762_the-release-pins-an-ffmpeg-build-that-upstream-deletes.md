@@ -3,11 +3,11 @@ id: CPE-1762
 title: The sidecar release pins an ffmpeg build upstream deletes, and the failure reads as a corrupt archive
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-15
-closed:
+closed: 2026-08-17
 ---
 
 ## Problem
