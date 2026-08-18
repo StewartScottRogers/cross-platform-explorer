@@ -4193,17 +4193,23 @@ mod tests {
         let base = format!("http://{addr}");
 
         let provider = S3Provider::connect(&cfg(&base));
-        let err = provider.list("/").expect_err(
+        let outcome = provider.list("/");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): if the guard ever answers `Ok`, the
+        // run must still reach this and red on what actually happened, not on "expected an error".
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            1,
+            "must fail on the very first malformed page, not retry or silently accept what it has \
+             (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err(
             "IsTruncated=true with no NextContinuationToken must be a loud error, not a silently \
              truncated-but-reported-complete listing",
         );
         assert!(err.contains("IsTruncated=true"), "{err}");
         assert!(err.contains("NextContinuationToken"), "{err}");
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            1,
-            "must fail on the very first malformed page, not retry or silently accept what it has"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -4220,7 +4226,18 @@ mod tests {
         let cfg = S3Config::new(&base, "us-east-1", TEST_BUCKET, bad_creds).with_addressing(AddressingStyle::Path);
         let provider = S3Provider::connect(&cfg);
 
-        let err = provider.list("/").expect_err("a non-ASCII access key id must be refused, not silently mangled");
+        let outcome = provider.list("/");
+
+        // Assert the harm BEFORE unwrapping the Result (CPE-1743): the harm here IS "no bytes left the
+        // process", so this must not be gated behind a successful `expect_err`.
+        assert_eq!(
+            requests.load(Ordering::Relaxed),
+            0,
+            "the guard must fire BEFORE any request reaches the fixture — a live server saw a request \
+             despite the refusal (outcome was {outcome:?})"
+        );
+
+        let err = outcome.expect_err("a non-ASCII access key id must be refused, not silently mangled");
         assert!(err.contains("ureq"), "{err}");
         assert!(err.contains("Authorization"), "the error must name which header, not just that something failed: {err}");
         assert!(err.contains("byte") && err.contains("offset"), "the error must name the byte and its offset: {err}");
@@ -4230,12 +4247,6 @@ mod tests {
         assert!(!err.contains("Signature="), "the Authorization value leaked into the error: {err}");
         assert!(!err.contains("Credential="), "the Authorization value leaked into the error: {err}");
         assert!(!err.contains("AKIA"), "the access key id leaked into the error: {err}");
-        assert_eq!(
-            requests.load(Ordering::Relaxed),
-            0,
-            "the guard must fire BEFORE any request reaches the fixture — a live server saw a request \
-             despite the refusal"
-        );
     }
 
     // ---------------------------------------------------------------------------------------------
