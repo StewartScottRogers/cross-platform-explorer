@@ -8227,31 +8227,40 @@ fn run_command_impl(command: String, cwd: Option<String>, confirmed: bool) -> Re
     })
 }
 
+/// Turn one archive-extraction command's result into the paths `note_app_op` should record (CPE-1745,
+/// fixing drift from CPE-1195/1102): the REAL written path, taken from the `Ok` value, on success — and
+/// nothing on failure.
+///
+/// This used to be a `note_app_op` call made *before* the extraction, mirroring
+/// `cpe_server::archive::temp_extract_target`'s `dir.join(base)` by hand under a comment claiming it was
+/// "the exact temp-file target" the server would write. It was not: CPE-1733 hardened that target with an
+/// exclusive `fs::create_dir` that retries the next `<pid>-<seq>` when a name is taken, so the
+/// subdirectory actually used is not predictable from outside the call, even in principle — a mirror
+/// cannot be correct any more. Every extraction command already returns the written path as its `Ok`
+/// value, so recording *after* the call, from that value, is both simpler and correct.
+///
+/// Recording only on success is a deliberate choice, not an oversight: a failed extraction wrote
+/// nothing, so recording nothing is the accurate ledger entry, not a loss. It matches how
+/// `organize_apply` and `template_stamp` elsewhere in this file already record only the paths a
+/// spawn_blocking call actually produced, once its result is known.
+fn archive_extract_op_paths(result: &Result<String, String>) -> Vec<String> {
+    match result {
+        Ok(path) => vec![path.clone()],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Extract a single entry from a ZIP to a temp file and return its path, so it
 /// can be opened with its default app while browsing inside the archive
 /// (CPE-242). Read-only: the temp copy is what opens, not the archived bytes.
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn extract_archive_entry(app: tauri::AppHandle, zip: String, inner: String) -> Result<String, String> {
-    // Record the exact temp-file target `cpe_server::archive::extract_archive_entry` will write
-    // (mirroring its own `dir.join(base)` — CPE-1102), best-effort: if `inner`'s last path component
-    // can't be read (e.g. an empty name), the write itself will fail too, so skipping the record here
-    // is harmless.
-    note_app_op(&app, || {
-        Path::new(&inner)
-            .file_name()
-            .map(|base| {
-                std::env::temp_dir()
-                    .join("cpe-archive")
-                    .join(base)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .into_iter()
-            .collect()
-    });
-    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry(&zip, &inner))
-        .await.map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry(&zip, &inner))
+        .await.map_err(|e| e.to_string())?;
+    // See `archive_extract_op_paths` (CPE-1745): records the real returned path, success only.
+    note_app_op(&app, || archive_extract_op_paths(&result));
+    result
 }
 
 /// Extract a single entry from any supported non-zip archive (tar/tar.gz/tgz/7z; zip delegates to the
@@ -8261,23 +8270,11 @@ async fn extract_archive_entry(app: tauri::AppHandle, zip: String, inner: String
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn extract_archive_entry_any(app: tauri::AppHandle, path: String, inner: String) -> Result<String, String> {
-    // Record the exact temp-file target `cpe_server::archive::extract_archive_entry_any` will write
-    // (mirroring `extract_archive_entry`'s note above — CPE-1102/1180), best-effort.
-    note_app_op(&app, || {
-        Path::new(&inner)
-            .file_name()
-            .map(|base| {
-                std::env::temp_dir()
-                    .join("cpe-archive")
-                    .join(base)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .into_iter()
-            .collect()
-    });
-    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry_any(&path, &inner))
-        .await.map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_archive_entry_any(&path, &inner))
+        .await.map_err(|e| e.to_string())?;
+    // See `archive_extract_op_paths` (CPE-1745): records the real returned path, success only.
+    note_app_op(&app, || archive_extract_op_paths(&result));
+    result
 }
 
 /// Extract a single **STORED** entry from a `.rar` to a temp file and return its path (CPE-1360). RAR's
@@ -8287,23 +8284,11 @@ async fn extract_archive_entry_any(app: tauri::AppHandle, path: String, inner: S
 #[tauri::command]
 #[cfg_attr(feature = "specta-bindings", specta::specta)]
 async fn extract_rar_entry(app: tauri::AppHandle, path: String, inner: String) -> Result<String, String> {
-    // Record the exact temp-file target `cpe_server::archive::extract_rar_entry` will write (mirroring
-    // `extract_archive_entry`'s note above — CPE-1102/1360), best-effort.
-    note_app_op(&app, || {
-        Path::new(&inner)
-            .file_name()
-            .map(|base| {
-                std::env::temp_dir()
-                    .join("cpe-archive")
-                    .join(base)
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .into_iter()
-            .collect()
-    });
-    tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_rar_entry(&path, &inner))
-        .await.map_err(|e| e.to_string())?
+    let result = tauri::async_runtime::spawn_blocking(move || cpe_server::archive::extract_rar_entry(&path, &inner))
+        .await.map_err(|e| e.to_string())?;
+    // See `archive_extract_op_paths` (CPE-1745): records the real returned path, success only.
+    note_app_op(&app, || archive_extract_op_paths(&result));
+    result
 }
 
 // Archive creation & extraction (CPE-251/252/242) now live in `cpe_server::archive` (CPE-822); the
@@ -15200,6 +15185,118 @@ overlay / overlay rw,relatime 0 0
         let bytes = fs::read(&created).unwrap();
         assert_eq!(bytes.len(), 22, "empty zip is a single EOCD record");
         assert_eq!(&bytes[0..4], &[0x50, 0x4b, 0x05, 0x06], "EOCD signature");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    // ---- CPE-1745: `note_app_op` must record the REAL archive-extraction temp path, not a guess -----
+    //
+    // Before this ticket, `extract_archive_entry`/`extract_archive_entry_any`/`extract_rar_entry`
+    // recorded `temp_dir().join("cpe-archive").join(base)` *before* extracting, under a comment
+    // claiming it was "the exact temp-file target" the server would write. It was not: the server
+    // actually writes into a private `<pid>-<seq>` subdirectory (CPE-1195), and CPE-1733 made that
+    // sequence number unpredictable from outside the call (exclusive `fs::create_dir`, retried on
+    // collision). So the ledger recorded a path that was never written.
+    //
+    // These tests exercise `archive_extract_op_paths` — the extracted helper all three commands now
+    // call *after* the real extraction — against the REAL return value of `cpe_server::archive`'s
+    // extraction functions (a genuine zip, genuinely extracted), and assert EQUALITY with that real
+    // value, not merely that the recorded string has the right shape (that weaker assertion is exactly
+    // what let the drift go unnoticed for months).
+    //
+    // Cleanup: extraction writes into `%TEMP%/cpe-archive/<pid>-<seq>/`, which sits OUTSIDE `scratch()`'s
+    // per-test directory, so a second `Drop` guard is armed for it — armed immediately after the
+    // extraction call returns, before any assertion, per this file's leaked-temp-dir convention (mirrors
+    // `Cpe1715Scratch` above and `split_join`/`dispatch`'s `Restore` guards).
+    struct Cpe1745ExtractGuard(Option<PathBuf>);
+    impl Drop for Cpe1745ExtractGuard {
+        fn drop(&mut self) {
+            // `.0` is the file `temp_extract_target` wrote; its parent is the private `<pid>-<seq>` dir
+            // that owns it, which is what actually needs removing.
+            if let Some(parent) = self.0.as_deref().and_then(Path::parent) {
+                let _ = fs::remove_dir_all(parent);
+            }
+        }
+    }
+
+    /// The success case: `archive_extract_op_paths` must record EXACTLY the path
+    /// `cpe_server::archive::extract_archive_entry` actually returned — real `<pid>-<seq>` subdirectory
+    /// included — not a `temp_dir().join("cpe-archive").join(base)` guess. Proves the fix by comparing
+    /// against the real function's real output, and also proves the recorded path is the one genuinely
+    /// on disk (not just string-equal to something plausible).
+    #[test]
+    fn archive_extract_op_paths_records_the_real_written_path_on_success() {
+        let d = scratch("cpe1745_extract_ok");
+        // Build a REAL zip (via the same public `cpe_server::archive::compress_to_zip` the app's own
+        // `compress_to_zip` command dispatches to) so the extraction below exercises the real
+        // `temp_extract_target` machinery end to end, not a hand-built fixture.
+        let src = d.join("note.txt");
+        fs::write(&src, b"hello from CPE-1745").unwrap();
+        let zip_path = d.join("archive.zip");
+        cpe_server::archive::compress_to_zip(
+            &[src.to_string_lossy().into_owned()],
+            &zip_path.to_string_lossy(),
+        )
+        .unwrap();
+
+        let result = cpe_server::archive::extract_archive_entry(&zip_path.to_string_lossy(), "note.txt");
+        // Arm cleanup for the real out-of-scratch temp dir BEFORE any assertion below can panic.
+        let _clean_extract = Cpe1745ExtractGuard(result.as_ref().ok().map(PathBuf::from));
+
+        let real_path = result.clone().expect("extraction must succeed against a real zip");
+        assert!(
+            Path::new(&real_path).is_file(),
+            "the returned path must be the file genuinely written to disk"
+        );
+        assert_eq!(
+            fs::read(&real_path).unwrap(),
+            b"hello from CPE-1745",
+            "the returned path must point at the actual extracted bytes"
+        );
+
+        let recorded = archive_extract_op_paths(&result);
+        // The load-bearing assertion (CPE-1745's whole point): EQUALITY with the real value, not a
+        // shape/prefix check. `real_path` was never re-derived — it came straight out of the same `Ok`
+        // the command returns to the frontend.
+        assert_eq!(
+            recorded,
+            vec![real_path.clone()],
+            "note_app_op must be fed the exact path the extraction actually returned"
+        );
+        // And, since this is precisely the bug that shipped: the recorded path must NOT be the old
+        // flat guess, which never existed on disk once CPE-1195 introduced the `<pid>-<seq>` subdir.
+        let old_guess = std::env::temp_dir()
+            .join("cpe-archive")
+            .join("note.txt")
+            .to_string_lossy()
+            .into_owned();
+        assert_ne!(
+            recorded[0], old_guess,
+            "must not regress to the pre-CPE-1745 flat-guess path"
+        );
+
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The failure case, recorded deliberately (ticket's ordering decision): a failed extraction wrote
+    /// nothing, so `archive_extract_op_paths` must record nothing — not a phantom path for a file that
+    /// was never created. Exercised against a REAL failure (entry not present in a real zip), not a
+    /// synthetic `Err` string.
+    #[test]
+    fn archive_extract_op_paths_records_nothing_on_a_real_failure() {
+        let d = scratch("cpe1745_extract_err");
+        let zip_path = d.join("empty.zip");
+        cpe_server::archive::create_empty_zip(&zip_path.to_string_lossy()).unwrap();
+
+        let result = cpe_server::archive::extract_archive_entry(&zip_path.to_string_lossy(), "missing.txt");
+        assert!(result.is_err(), "extracting an absent entry must fail");
+
+        let recorded = archive_extract_op_paths(&result);
+        assert_eq!(
+            recorded,
+            Vec::<String>::new(),
+            "a failed extraction wrote nothing, so nothing should be recorded"
+        );
+
         let _ = fs::remove_dir_all(&d);
     }
 
