@@ -112,13 +112,8 @@ mod tests {
     use crate::action_macro::MacroStep;
     use crate::ctx::HeadlessCtx;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-macro-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-macro-{tag}"))
     }
 
     fn sample(name: &str) -> ActionMacro {
@@ -138,7 +133,7 @@ mod tests {
     #[test]
     fn save_then_load_round_trips() {
         let base = scratch("roundtrip");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let m = sample("tidy");
         save(&ctx, m.clone()).unwrap();
         assert_eq!(load(&ctx, "tidy").unwrap(), Some(m));
@@ -148,7 +143,7 @@ mod tests {
     #[test]
     fn save_replaces_same_named_macro_and_list_reflects_it() {
         let base = scratch("list");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert!(list(&ctx).unwrap().is_empty());
 
         save(&ctx, sample("tidy")).unwrap();
@@ -175,7 +170,7 @@ mod tests {
     #[test]
     fn delete_removes_a_macro() {
         let base = scratch("delete");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         save(&ctx, sample("a")).unwrap();
         save(&ctx, sample("b")).unwrap();
 
@@ -191,7 +186,7 @@ mod tests {
     #[test]
     fn import_inserts_single_macro_and_whole_catalog_and_rejects_garbage() {
         let base = scratch("import");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
 
         let m = sample("solo");
         let json = export(&m).unwrap();
@@ -212,7 +207,7 @@ mod tests {
     #[test]
     fn unknown_name_load_is_none() {
         let base = scratch("unknown");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         save(&ctx, sample("known")).unwrap();
         assert!(load(&ctx, "nope").unwrap().is_none());
         let _ = fs::remove_dir_all(&base);
@@ -220,7 +215,8 @@ mod tests {
 
     #[test]
     fn missing_catalog_reads_as_empty() {
-        let ctx = HeadlessCtx::new(scratch("empty"));
+        let ctx_base = scratch("empty");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         assert!(list(&ctx).unwrap().is_empty());
         assert!(load(&ctx, "nope").unwrap().is_none());
     }
@@ -228,7 +224,7 @@ mod tests {
     #[test]
     fn corrupt_catalog_file_is_tolerated_as_empty() {
         let base = scratch("corrupt");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let dir = ctx.app_config_dir().unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(macros_path(&dir), b"{ not valid json ]").unwrap();

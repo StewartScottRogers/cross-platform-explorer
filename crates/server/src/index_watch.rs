@@ -169,16 +169,11 @@ mod tests {
     use super::*;
     use crate::index_service::IndexService;
     use std::fs;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
     use std::sync::atomic::AtomicBool;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-idxwatch-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-idxwatch-{tag}"))
     }
 
     /// A small tree to crawl: report.rs / report.md across two folders + a README.

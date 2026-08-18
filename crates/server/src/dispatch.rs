@@ -196,13 +196,8 @@ mod tests {
     use crate::ctx::HeadlessCtx;
     use serde_json::json;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-dispatch-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-dispatch-{tag}"))
     }
 
     fn req(method: &str, params: serde_json::Value) -> Request {
@@ -213,7 +208,8 @@ mod tests {
     fn dispatch_list_dir_returns_entries() {
         let d = scratch("list");
         std::fs::write(d.join("a.txt"), b"hi").unwrap();
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let resp = Dispatcher::with_builtins().dispatch(&ctx, req("list_dir", json!({ "path": d.to_string_lossy() })));
         let val = resp.result.expect("list_dir should succeed");
         let names: Vec<String> = val.as_array().unwrap().iter().map(|e| e["name"].as_str().unwrap().to_string()).collect();
@@ -223,7 +219,8 @@ mod tests {
 
     #[test]
     fn unknown_method_is_not_found() {
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let resp = Dispatcher::with_builtins().dispatch(&ctx, req("does_not_exist", json!({})));
         match resp.result {
             Err(e) => assert_eq!(e.code, ErrorCode::NotFound),
@@ -233,7 +230,8 @@ mod tests {
 
     #[test]
     fn bad_params_are_a_bad_request() {
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         // list_dir needs { path }; send the wrong shape.
         let resp = Dispatcher::with_builtins().dispatch(&ctx, req("list_dir", json!({ "wrong": 1 })));
         match resp.result {
@@ -248,7 +246,8 @@ mod tests {
         // structurally, so it must not be flattened into the generic `Internal` every other domain
         // error gets (see `domain_error_maps_to_internal` below) — proven in-process here, and the same
         // shape the real-server Docker rig's Slice 2 E2E test asserts over an actual wire socket.
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let resp = Dispatcher::with_builtins()
             .dispatch(&ctx, req("list_dir", json!({ "path": "/definitely/not/a/real/path/xyz" })));
         match resp.result {
@@ -259,7 +258,8 @@ mod tests {
 
     #[test]
     fn domain_error_maps_to_internal() {
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         // hash_file on a directory errors in the domain, but the directory itself EXISTS — this must
         // stay `Internal`, not `NotFound` (proves `domain_path` doesn't over-fire on every domain error,
         // only a genuinely missing path).
@@ -281,7 +281,8 @@ mod tests {
 
     #[test]
     fn hash_file_of_a_missing_path_is_not_found() {
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let resp = Dispatcher::with_builtins()
             .dispatch(&ctx, req("hash_file", json!({ "path": "/definitely/not/a/real/path/xyz" })));
         match resp.result {
@@ -292,7 +293,8 @@ mod tests {
 
     #[test]
     fn text_stats_of_a_missing_path_is_not_found() {
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let resp = Dispatcher::with_builtins()
             .dispatch(&ctx, req("text_stats", json!({ "path": "/definitely/not/a/real/path/xyz" })));
         match resp.result {
@@ -374,7 +376,8 @@ mod tests {
         // "not a text file", sending the user to inspect bytes nobody had managed to read. All three
         // outcomes are asserted here through the real `Dispatcher`, not the `compute` helper, because
         // the message is what reaches a caller and the helper's return type isn't.
-        let ctx = HeadlessCtx::new(scratch("base"));
+        let ctx_base = scratch("base");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let d = Dispatcher::with_builtins();
         let dir = scratch("textstats");
 
@@ -506,7 +509,7 @@ mod tests {
     #[test]
     fn tags_set_then_load_round_trips_through_the_ctx() {
         let base = scratch("tagsbase");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let d = Dispatcher::with_builtins();
         // set
         let set = d.dispatch(&ctx, req("tags.set", json!({ "path": "/p", "tags": ["a", "b"], "label": "red" })));

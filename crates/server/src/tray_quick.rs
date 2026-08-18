@@ -185,13 +185,8 @@ mod tests {
     // --- Persistence (CPE-1272) ---------------------------------------------------------------
     use crate::ctx::HeadlessCtx;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-tray-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-tray-{tag}"))
     }
 
     #[test]
@@ -230,7 +225,7 @@ mod tests {
     #[test]
     fn ctx_load_save_round_trip_and_recents_update() {
         let base = scratch("ctx");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         // Fresh install → empty.
         assert!(super::load(&ctx, 5).is_empty());
 

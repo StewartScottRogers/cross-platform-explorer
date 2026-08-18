@@ -611,13 +611,8 @@ mod tests {
     /// Process-unique scratch dir (mirrors `snapshot_capture`/`revert_engine`'s test pattern): a
     /// `std::env::temp_dir()` subdir keyed by tag + pid + an atomic counter, so parallel test threads and
     /// parallel CI runs never collide, and no OS-permission trickery is needed for the Windows leg.
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-batchexec-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-batchexec-{tag}"))
     }
 
     fn png_bytes(w: u32, h: u32) -> Vec<u8> {
@@ -1404,7 +1399,7 @@ mod tests {
     fn cpe_1642_over_max_path_symlink_alias_is_refused_and_the_victim_bytes_are_untouched() {
         let d = scratch("cpe1642-longpath");
         // Pad the selected folder past MAX_PATH (260). `create_dir_all` gets there because std prefixes.
-        let mut deep = d.clone();
+        let mut deep = d.to_path_buf();
         while deep.to_string_lossy().chars().count() < 300 {
             deep = deep.join("padpadpadpadpadpadpadpadpadpadpadpadpadpad");
         }

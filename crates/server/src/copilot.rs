@@ -620,7 +620,6 @@ mod tests {
     use super::*;
     use crate::copilot_planner::FakePlanner;
     use std::fs;
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
     /// A minimal in-memory `ServerCtx`: everything lives under one scratch dir, no events (mirrors
@@ -669,12 +668,8 @@ mod tests {
         }
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-copilot-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-copilot-{tag}"))
     }
 
     fn ctx_for(root: &Path) -> TestCtx {
@@ -739,7 +734,8 @@ mod tests {
         fs::write(root.join("keep.txt"), b"keep").unwrap();
         fs::write(root.join("old.log"), b"old").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("hold"));
+        let trash_hold = scratch("hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![
@@ -787,7 +783,8 @@ mod tests {
         let root = scratch("tamper");
         fs::write(root.join("safe.txt"), b"safe").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("hold-tamper"));
+        let trash_hold = scratch("hold-tamper");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         // A plan whose delete path was tampered to escape the root — as if a compromised frontend re-sent
         // it. Even though a human may have confirmed some earlier plan, execute must independently refuse.
@@ -808,7 +805,8 @@ mod tests {
         let root = scratch("skip");
         fs::write(root.join("real.txt"), b"1").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("hold-skip"));
+        let trash_hold = scratch("hold-skip");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![
@@ -834,7 +832,8 @@ mod tests {
         fs::write(root.join("a.txt"), b"new").unwrap();
         fs::write(root.join("b.txt"), b"existing").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("hold-ow"));
+        let trash_hold = scratch("hold-ow");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![FileOp::Move {
@@ -886,7 +885,8 @@ mod tests {
             let victim = root.join("b.txt");
             fs::write(&victim, b"VICTIM ORIGINAL").unwrap();
             let ctx = ctx_for(&root);
-            let trash = FakeTrash::new(scratch("cpe1705-hold"));
+            let trash_hold = scratch("cpe1705-hold");
+            let trash = FakeTrash::new(trash_hold.to_path_buf());
 
             struct Restore<'a>(&'a Path, &'a Path);
             impl Drop for Restore<'_> {
@@ -970,7 +970,8 @@ mod tests {
             return;
         }
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1710-hold-rename"));
+        let trash_hold = scratch("cpe1710-hold-rename");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![FileOp::Rename {
@@ -1015,7 +1016,8 @@ mod tests {
             return;
         }
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1710-hold-move"));
+        let trash_hold = scratch("cpe1710-hold-move");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![FileOp::Move {
@@ -1080,7 +1082,8 @@ mod tests {
             return;
         }
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("hold-symlink"));
+        let trash_hold = scratch("hold-symlink");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         // Every op passes the TEXTUAL validate (they all start with root) but resolves through the link
         // to OUTSIDE. Copy and Move are here as well as Delete/Mkdir because they are the arms that call
@@ -1155,7 +1158,8 @@ mod tests {
             return;
         }
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1750-leaf-hold"));
+        let trash_hold = scratch("cpe1750-leaf-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![
@@ -1237,7 +1241,8 @@ mod tests {
         );
 
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1750-dangling-hold"));
+        let trash_hold = scratch("cpe1750-dangling-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![
@@ -1396,7 +1401,8 @@ mod tests {
             return;
         }
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1756-inflow-hold"));
+        let trash_hold = scratch("cpe1756-inflow-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![
@@ -1483,7 +1489,8 @@ mod tests {
             dangling.display()
         );
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1756-dangle-hold"));
+        let trash_hold = scratch("cpe1756-dangle-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let dst = root.join("copy-of-src");
         let plan = FileOpPlan {
@@ -1519,7 +1526,8 @@ mod tests {
     fn cpe_1756_ordinary_copy_and_an_in_root_child_link_still_work() {
         let root = scratch("cpe1756-ordinary");
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1756-ordinary-hold"));
+        let trash_hold = scratch("cpe1756-ordinary-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let src = root.join("src");
         fs::create_dir_all(src.join("a/b")).unwrap();
@@ -1597,7 +1605,8 @@ mod tests {
         let root = scratch("cpe1750-root-delete");
         fs::write(root.join("keep.txt"), b"the user's files").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1750-root-delete-hold"));
+        let trash_hold = scratch("cpe1750-root-delete-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan { ops: vec![FileOp::Delete { path: root_str(&root) }] };
         let out = execute_with(&ctx, &trash, &root_str(&root), &plan);
@@ -1649,7 +1658,8 @@ mod tests {
         let away = root.parent().expect("scratch dirs have a parent").join("cpe1750-relocated-root");
         let _ = fs::remove_dir_all(&away); // a previous run must not decide this one
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1750-root-rename-hold"));
+        let trash_hold = scratch("cpe1750-root-rename-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![FileOp::Rename {
@@ -1697,7 +1707,8 @@ mod tests {
         let root = scratch("cpe1750-discriminate");
         fs::write(root.join("a.txt"), b"payload").unwrap();
         let ctx = ctx_for(&root);
-        let trash = FakeTrash::new(scratch("cpe1750-discriminate-hold"));
+        let trash_hold = scratch("cpe1750-discriminate-hold");
+        let trash = FakeTrash::new(trash_hold.to_path_buf());
 
         let plan = FileOpPlan {
             ops: vec![

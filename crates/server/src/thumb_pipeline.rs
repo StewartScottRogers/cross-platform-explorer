@@ -222,20 +222,21 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
-    fn scratch_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
-        static SEQ: AtomicUsize = AtomicUsize::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-thumbpipe-{tag}-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
+    /// CPE-1693: returns the [`crate::fsutil::ScratchDir`] guard alongside the file path so the
+    /// directory is removed on drop instead of relying on each call site's own trailing
+    /// `remove_dir_all` (which never runs on a panic). Callers must keep the guard alive for as long as
+    /// the file path needs to exist — bind it (`let (_g, f) = scratch_file(..);`), don't discard it.
+    fn scratch_file(tag: &str, bytes: &[u8]) -> (crate::fsutil::ScratchDir, std::path::PathBuf) {
+        let d = crate::fsutil::scratch_dir(&format!("cpe-thumbpipe-{tag}"));
         let f = d.join("f.bin");
         std::fs::write(&f, bytes).unwrap();
-        f
+        (d, f)
     }
 
     #[test]
     fn visible_requests_are_computed_before_prefetch_requests() {
-        let a = scratch_file("order-a", b"aaaa");
-        let b = scratch_file("order-b", b"bbbb");
+        let (_ga, a) = scratch_file("order-a", b"aaaa");
+        let (_gb, b) = scratch_file("order-b", b"bbbb");
         let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
         let requests = vec![
             ThumbRequest { path: b.to_string_lossy().into(), target_px: 32, priority: Priority::Prefetch },
@@ -261,7 +262,7 @@ mod tests {
 
     #[test]
     fn a_cache_hit_never_calls_compute_again() {
-        let f = scratch_file("hit", b"hello");
+        let (_gf, f) = scratch_file("hit", b"hello");
         let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
         let req = ThumbRequest { path: f.to_string_lossy().into(), target_px: 64, priority: Priority::Visible };
         let calls = AtomicUsize::new(0);
@@ -284,8 +285,8 @@ mod tests {
 
     #[test]
     fn cancellation_stops_the_drain_early() {
-        let a = scratch_file("cancel-a", b"a");
-        let b = scratch_file("cancel-b", b"b");
+        let (_ga, a) = scratch_file("cancel-a", b"a");
+        let (_gb, b) = scratch_file("cancel-b", b"b");
         let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
         let requests = vec![
             ThumbRequest { path: a.to_string_lossy().into(), target_px: 32, priority: Priority::Visible },
@@ -333,7 +334,7 @@ mod tests {
 
     #[test]
     fn a_compute_error_yields_a_fallback_result_not_a_panic() {
-        let f = scratch_file("err", b"not-an-image");
+        let (_gf, f) = scratch_file("err", b"not-an-image");
         let store = StdMutex::new(ThumbCacheStore::new(16, 1_000_000));
         let req = ThumbRequest { path: f.to_string_lossy().into(), target_px: 32, priority: Priority::Visible };
         let mut results = Vec::new();
@@ -354,9 +355,9 @@ mod tests {
     fn cache_eviction_under_the_byte_budget_still_works_end_to_end() {
         // A tiny byte budget forces eviction after a couple of puts — proves `ThumbCacheStore` actually
         // exercises `ThumbCache`'s real eviction (not bypassed) and keeps `bytes` in sync with it.
-        let a = scratch_file("evict-a", b"a");
-        let b = scratch_file("evict-b", b"b");
-        let c = scratch_file("evict-c", b"c");
+        let (_ga, a) = scratch_file("evict-a", b"a");
+        let (_gb, b) = scratch_file("evict-b", b"b");
+        let (_gc, c) = scratch_file("evict-c", b"c");
         let store = StdMutex::new(ThumbCacheStore::new(16, 12)); // ~2 six-byte thumbnails fit, not 3
         let six_bytes = |_p: &Path, _e: u32| Ok::<Vec<u8>, String>(vec![0u8; 6]);
         for p in [&a, &b, &c] {

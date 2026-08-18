@@ -37,13 +37,8 @@ mod tests {
     use super::*;
     use crate::ctx::HeadlessCtx;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-settings-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-settings-{tag}"))
     }
 
     #[test]
@@ -68,7 +63,7 @@ mod tests {
     #[test]
     fn ctx_load_save_round_trip() {
         let base = scratch("settings_ctx");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert_eq!(load(&ctx).unwrap(), "{}");
         save(&ctx, r#"{"a":1}"#).unwrap();
         assert_eq!(load(&ctx).unwrap(), r#"{"a":1}"#);

@@ -2122,6 +2122,135 @@ pub fn staging_failure_message(mechanism: &str) -> String {
     )
 }
 
+/// Owns a per-test scratch directory under `%TEMP%` and removes it (recursively, best-effort) when
+/// dropped — including when a test panics mid-assertion. **CPE-1693.**
+///
+/// Before this, every `scratch()`-style test helper across the tree (and there were ~70 near-identical
+/// copies, one per test module) returned a bare [`PathBuf`] and relied on a manual `remove_dir_all` at
+/// the end of the test — which never runs on a panicking assertion, and, per the CPE-1693 PR #924
+/// review, is not reliable even on a green run (one of five orphaned trees the review measured leaked
+/// on a passing test). The count reached **~1.29 million** leftover `cpe-*` directories in `%TEMP%`
+/// before this landed, and started causing a real, non-deterministic test failure: enough leaked
+/// `%TEMP%/cpe-archive/<pid>-<seq>` directories that a reused PID collided with its own scratch name.
+///
+/// Fixing this at the *helper* level rather than test-by-test closes the whole class at once: a new
+/// test that calls `scratch()` cannot reintroduce the leak even if its author never thinks about
+/// cleanup, because the directory's owner is the return value itself, not a `remove_dir_all` the author
+/// has to remember to write (and to write *before* the assertions, not after).
+///
+/// Derefs to [`Path`], and implements [`AsRef<Path>`], so call sites that only ever read the path
+/// (`d.join(..)`, `&d`, `d.exists()`, `d.display()`, …) keep compiling unchanged. Two things do *not*
+/// carry over automatically:
+/// - `d.clone()` — deliberately not [`Clone`]: cloning would let the directory outlive the guard that
+///   is supposed to own it. Use `d.to_path_buf()` for an owned copy of the *path* (the clone doesn't
+///   extend the directory's lifetime).
+/// - Passing `scratch(..)` inline as a temporary that is never bound to a `let` — the guard would drop,
+///   and delete the directory, at the end of that statement. Bind it (`let d = scratch(..);`) for as
+///   long as the directory needs to exist.
+pub struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// The path this guard owns.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Wrap an **already-created** directory so it is removed on drop, without the `<prefix>-<pid>-<seq>`
+    /// naming [`scratch_dir`] imposes. For callers with their own directory-naming scheme that
+    /// `create_dir_all`s the path themselves — e.g. a nested per-spawn subdirectory under one shared
+    /// parent (`cpe-s3`'s and `cpe-webdav`'s fixture spawners, CPE-1693) — and only need the *cleanup*
+    /// half of what [`scratch_dir`] does. `path` must already exist; this does not create it.
+    pub fn adopt(path: PathBuf) -> Self {
+        ScratchDir(path)
+    }
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Alongside [`AsRef<Path>`](ScratchDir#impl-AsRef<Path>-for-ScratchDir), so `&ScratchDir` satisfies the
+/// same `impl Into<PathBuf>`-style bounds a plain `&Path`/`&PathBuf` does (std's blanket `From<&T> for
+/// PathBuf where T: AsRef<OsStr>`) without every call site needing its own `.to_path_buf()`. Borrowing
+/// only — it cannot consume the guard, so it doesn't touch the early-drop hazard documented on
+/// [`ScratchDir`] itself (that hazard is specifically about an *owned* `ScratchDir` being dropped as an
+/// unbound temporary; nothing here changes when that drop happens).
+impl AsRef<std::ffi::OsStr> for ScratchDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ScratchDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        remove_dir_all_with_retries(&self.0);
+    }
+}
+
+/// `remove_dir_all`, retried a few times with a short backoff before giving up silently.
+///
+/// **Measured for CPE-1693, not theoretical:** a full-workspace `cargo test` run left real, freshly
+/// created `cpe-*` directories behind — hundreds concentrated in the binary-fixture truncation sweeps
+/// (`binary_preview`/`dotnet_metadata`), plus a handful scattered across ordinary single-scratch tests —
+/// even though every one of those same tests, run in isolation or a small group, cleaned up perfectly.
+/// That isolation-vs-full-suite gap, concentrated on the fixtures that most resemble real executables
+/// (PE/ELF/Mach-O), is the signature of Windows Defender's real-time scanner transiently holding a
+/// handle on a just-written file under heavy parallel `cargo test` load — exactly the interference this
+/// repo's own `MEMORY.md` already documents ("Defender quarantines test binaries... os error 225 is
+/// Defender, not a code fail"). A single `remove_dir_all` attempt swallows that as a silent failure (the
+/// pre-CPE-1693 trailing `let _ = fs::remove_dir_all(..)` calls had the identical exposure — this isn't a
+/// regression, it's the first time anything retries). A short bounded retry is the standard mitigation
+/// for a transient Windows sharing violation and costs nothing when there's no contention (the common
+/// case exits on the first attempt).
+fn remove_dir_all_with_retries(path: &Path) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)));
+            }
+            Err(_) => {} // Out of attempts — give up silently, same as every pre-CPE-1693 cleanup call.
+        }
+    }
+}
+
+/// Create a uniquely-named directory under `%TEMP%` and hand back the [`ScratchDir`] guard that owns
+/// it (CPE-1693). `prefix` should already carry the caller's own module tag (e.g.
+/// `"cpe-fsutil-contained"`) — this appends only the per-process, per-call disambiguator (`-<pid>-<seq>`)
+/// every pre-CPE-1693 `scratch()` helper already appended, so directory names are unchanged and any
+/// tooling that greps for a specific `cpe-<module>-` prefix keeps working.
+///
+/// **Not** `#[cfg(test)]`-gated, for the same reason [`make_dangling_link`] isn't: `cpe-server`'s
+/// dependents (`src-tauri`, `cpe-net`, `cpe-webdav`, `cpe-s3`, …) need it from their *own* test builds,
+/// and `#[cfg(test)]` is per-crate — an item gated on it in this crate is invisible when a downstream
+/// crate compiles its own tests. One implementation, reachable everywhere a `scratch()`-style helper
+/// used to hand-roll its own, is the point of this ticket.
+pub fn scratch_dir(prefix: &str) -> ScratchDir {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    ScratchDir(d)
+}
+
 /// Test-only mechanism for the `fs::metadata`-based CPE-1692 guards in this crate (`links::link_status`,
 /// `dangling_links_scan`'s target-resolution check): deny traversal on `dir` itself so a `stat` of
 /// anything reached *through* it fails with a genuine (non-`NotFound`) error.
@@ -2524,6 +2653,42 @@ mod tests {
         assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
     }
 
+    /// **CPE-1693, the assertion the whole ticket rests on.** `scratch_dir` is armed — and must already
+    /// own the directory — *before* the panic below runs, exactly the ordering every converted test
+    /// module now gets for free just by calling `scratch()`. Panics mid-assertion via
+    /// `std::panic::catch_unwind`, so a leak here doesn't crash the test binary and abort every other
+    /// guard's own drop — it lets this one test observe, on the far side of the unwind, whether the
+    /// directory it created is gone.
+    ///
+    /// Before CPE-1693 every `scratch()`-style helper in this tree returned a bare `PathBuf` and relied
+    /// on a manual `remove_dir_all` written *after* the assertions — which this exact panic shape would
+    /// have skipped, which is how the tree reached ~1.29 million leaked `cpe-*` directories in `%TEMP%`
+    /// (see the ticket's Work Log for the measured before/after counts across a full `cargo test`).
+    #[test]
+    fn scratch_dir_guard_removes_the_directory_even_when_the_caller_panics_mid_assertion() {
+        let dir = scratch_dir("cpe-fsutil-panic-proof");
+        let path = dir.path().to_path_buf();
+        assert!(path.is_dir(), "sanity: the guard must actually own a real directory before we panic");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // `dir` is moved into the closure so it drops during the unwind below, not after — the
+            // ordering the whole ticket is about. If `scratch_dir` regressed to returning a bare
+            // `PathBuf` again, this line wouldn't compile (nothing to move-and-drop), and if the `Drop`
+            // impl regressed to a no-op, `path.is_dir()` below would still read `true`.
+            let _armed = dir;
+            panic!("CPE-1693 proof: deliberate panic — the guard above must already be armed");
+        }))
+        .is_err();
+
+        assert!(panicked, "the proof only proves anything if the inner closure actually panicked");
+        assert!(
+            !path.is_dir(),
+            "CPE-1693 REGRESSION: {} still exists after its owning ScratchDir panicked out of scope — \
+             the guard did not clean up on the unwind path, which is the entire point of this ticket",
+            path.display()
+        );
+    }
+
     /// CPE-1717. The whole policy as a table, because the policy is the deliverable and it has to be
     /// checkable without setting process-global environment variables under a parallel harness.
     ///
@@ -2728,13 +2893,8 @@ mod tests {
         assert!(!win32_name_is_unstable(""));
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-fsutil-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-fsutil-{tag}"))
     }
 
     /// A NUL-terminated wide string for the Win32 calls the CPE-1739 tests make directly. `std` exposes

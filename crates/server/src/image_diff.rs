@@ -159,14 +159,9 @@ fn channel_delta(a: Rgba<u8>, b: Rgba<u8>) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-imgdiff-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-imgdiff-{tag}"))
     }
 
     fn save_png(dir: &Path, name: &str, w: u32, h: u32, rgb: [u8; 3]) -> std::path::PathBuf {

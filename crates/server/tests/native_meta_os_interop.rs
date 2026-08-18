@@ -17,22 +17,15 @@
 //! `MetaError::Unsupported`.
 
 use cpe_server::native_meta::{self, MetaError};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-/// A unique scratch file under the OS temp dir (NTFS on Windows, APFS/ext4/tmpfs on Unix), mirroring
-/// the pattern already used by `native_meta`'s own unit tests.
-fn scratch_file() -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("cpe-nativemeta-osinterop-{}-{}", std::process::id(), n));
-    std::fs::create_dir_all(&dir).expect("create scratch dir");
-    dir.join("file.txt")
-}
+use std::path::Path;
 
 #[test]
 fn os_native_tool_reads_back_what_native_meta_wrote() {
-    let path = scratch_file();
+    // CPE-1693: the scratch dir is a guard that removes itself on drop, including on a panicking
+    // assertion below — replaces the old `scratch_file()` + manual `cleanup(&path)` pair, which never
+    // ran its cleanup on a panic.
+    let dir = cpe_server::fsutil::scratch_dir("cpe-nativemeta-osinterop");
+    let path = dir.join("file.txt");
     std::fs::write(&path, b"base file contents").expect("create base file");
 
     // `native_meta::write`/`read`/`remove` take the already-namespaced attribute name — the caller
@@ -55,7 +48,6 @@ fn os_native_tool_reads_back_what_native_meta_wrote() {
                 path.display()
             );
             assert!(!native_meta::is_supported(&path), "an unsupported write implies an unsupported fs");
-            cleanup(&path);
             return;
         }
         Err(e) => panic!("unexpected native_meta::write error: {e}"),
@@ -67,13 +59,6 @@ fn os_native_tool_reads_back_what_native_meta_wrote() {
     // Tidy up via native_meta itself (already exercised elsewhere) — fine to use here since the
     // interop assertion above is already complete.
     let _ = native_meta::remove(&path, &attr_name);
-    cleanup(&path);
-}
-
-fn cleanup(path: &Path) {
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }
 
 // ---------------------------------------------------------------------------

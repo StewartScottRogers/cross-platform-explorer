@@ -699,20 +699,19 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-dotnetmeta-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-dotnetmeta-{tag}"))
     }
 
-    fn write_temp(bytes: &[u8], tag: &str) -> std::path::PathBuf {
+    /// CPE-1693: returns the [`crate::fsutil::ScratchDir`] guard alongside the file path, so the
+    /// directory is removed on drop instead of leaking the moment this helper returns (the earlier
+    /// bare-`PathBuf` shape dropped its own scratch dir before any caller could read the file back —
+    /// exactly the bug this ticket exists to close). Callers must keep the guard alive.
+    fn write_temp(bytes: &[u8], tag: &str) -> (crate::fsutil::ScratchDir, std::path::PathBuf) {
         let d = scratch(tag);
         let f = d.join("asm.dll");
         fs::write(&f, bytes).unwrap();
-        f
+        (d, f)
     }
 
     // -----------------------------------------------------------------------------------------
@@ -1275,7 +1274,7 @@ mod tests {
     #[test]
     fn read_reports_managed_assembly_identity_refs_types_and_methods() {
         let (bytes, _) = build_minimal_managed_pe();
-        let path = write_temp(&bytes, "managed");
+        let (_scratch, path) = write_temp(&bytes, "managed");
         let result = read(&path.to_string_lossy()).expect("a well-formed managed PE must parse");
         let meta = result.expect("the fixture's CLI header must be detected as managed");
 
@@ -1315,7 +1314,7 @@ mod tests {
     #[test]
     fn read_reports_none_for_a_native_pe() {
         let bytes = build_minimal_native_pe();
-        let path = write_temp(&bytes, "native");
+        let (_scratch, path) = write_temp(&bytes, "native");
         let result = read(&path.to_string_lossy()).expect("a well-formed native PE must parse");
         assert!(result.is_none(), "a native PE (no CLI header) must read as Ok(None), not managed metadata");
         let _ = fs::remove_file(&path);
@@ -1330,7 +1329,7 @@ mod tests {
         // has nothing in it. `Ok(None)` is reserved for "couldn't find/parse the structure at all", not
         // "found it, and it's empty".
         let bytes = build_minimal_managed_pe_no_tables();
-        let path = write_temp(&bytes, "empty-module");
+        let (_scratch, path) = write_temp(&bytes, "empty-module");
         let result = read(&path.to_string_lossy()).expect("a well-formed managed PE must parse");
         let meta = result.expect(
             "a genuinely empty-but-valid module must read as Ok(Some(..)), not Ok(None) — \
@@ -1363,7 +1362,7 @@ mod tests {
         );
         bytes[offsets.metadata_root_start..offsets.metadata_root_start + 4].copy_from_slice(b"XXXX");
 
-        let path = write_temp(&bytes, "corrupted-bsjb");
+        let (_scratch, path) = write_temp(&bytes, "corrupted-bsjb");
         let result = read(&path.to_string_lossy()).expect("PE headers/CLI header are untouched — still parses");
         assert!(
             result.is_none(),
@@ -1380,14 +1379,14 @@ mod tests {
 
     #[test]
     fn read_errors_cleanly_on_a_zero_byte_file() {
-        let path = write_temp(&[], "empty");
+        let (_scratch, path) = write_temp(&[], "empty");
         assert!(read(&path.to_string_lossy()).is_err());
         let _ = fs::remove_file(&path);
     }
 
     #[test]
     fn read_errors_cleanly_on_a_renamed_text_file() {
-        let path = write_temp(b"this is not a PE, just plain text pretending to be a DLL", "text");
+        let (_scratch, path) = write_temp(b"this is not a PE, just plain text pretending to be a DLL", "text");
         assert!(read(&path.to_string_lossy()).is_err());
         let _ = fs::remove_file(&path);
     }
@@ -1403,7 +1402,7 @@ mod tests {
         // return cleanly (Err, Ok(None), or a partial/empty Ok(Some(..))), never panic.
         let (bytes, _) = build_minimal_managed_pe();
         for cut in (0..bytes.len()).step_by(11) {
-            let path = write_temp(&bytes[..cut], "trunc");
+            let (_scratch, path) = write_temp(&bytes[..cut], "trunc");
             let _ = read(&path.to_string_lossy());
             let _ = fs::remove_file(&path);
         }
@@ -1417,7 +1416,7 @@ mod tests {
         let (mut bytes, offsets) = build_minimal_managed_pe();
         bytes[offsets.clr_dir_va..offsets.clr_dir_va + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
-        let path = write_temp(&bytes, "bogus-clr-rva");
+        let (_scratch, path) = write_temp(&bytes, "bogus-clr-rva");
         // `is_managed` only checks the directory is non-empty, not that its RVA actually resolves, so
         // this still dispatches into the managed path — but since the CLI header itself can't be
         // located, no metadata root can be found either. Per CPE-1615 UAT, that must be reported
@@ -1439,7 +1438,7 @@ mod tests {
         bytes[offsets.typedef_row_count..offsets.typedef_row_count + 4]
             .copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
-        let path = write_temp(&bytes, "absurd-rows");
+        let (_scratch, path) = write_temp(&bytes, "absurd-rows");
         let result = read(&path.to_string_lossy());
         // Never panics (the call above completing at all is the real check); whatever comes back must
         // still be a well-formed, boundedly-sized result.
@@ -1458,7 +1457,7 @@ mod tests {
         let (mut bytes, offsets) = build_minimal_managed_pe();
         bytes[offsets.assembly_name_index..offsets.assembly_name_index + 2].copy_from_slice(&0xFFFFu16.to_le_bytes());
 
-        let path = write_temp(&bytes, "heap-oob");
+        let (_scratch, path) = write_temp(&bytes, "heap-oob");
         let result = read(&path.to_string_lossy());
         // Never panics; if a result comes back, the unresolvable name must degrade to empty, not
         // garbage or an out-of-bounds read.
@@ -1483,7 +1482,7 @@ mod tests {
                     (state >> 33) as u8
                 })
                 .collect();
-            let path = write_temp(&bytes, "fuzz");
+            let (_scratch, path) = write_temp(&bytes, "fuzz");
             let _ = read(&path.to_string_lossy());
             let _ = fs::remove_file(&path);
         }

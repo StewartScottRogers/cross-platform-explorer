@@ -216,13 +216,8 @@ mod tests {
     }
 
     /// A scratch dir under the OS temp dir, unique per test run, cleaned up by the caller.
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-colcells-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-colcells-{tag}"))
     }
 
     fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> String {

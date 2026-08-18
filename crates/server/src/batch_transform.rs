@@ -462,19 +462,15 @@ mod tests {
     }
 
     /// Process-unique scratch file for watermark-overlay fixtures (mirrors `batch_execute`'s scratch-dir
-    /// pattern) since `apply_watermark` reads the overlay from a real path, not bytes.
-    fn scratch_file(tag: &str, bytes: &[u8]) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!(
-            "cpe-watermark-{}-{}-{}.png",
-            tag,
-            std::process::id(),
-            n
-        ));
+    /// pattern) since `apply_watermark` reads the overlay from a real path, not bytes. CPE-1693: the file
+    /// now lives inside a [`crate::fsutil::ScratchDir`] so it is removed on drop rather than relying on
+    /// each call site's own `remove_file` (which never runs on a panic). Callers must keep the returned
+    /// guard alive for as long as `overlay_path` needs to exist.
+    fn scratch_file(tag: &str, bytes: &[u8]) -> (crate::fsutil::ScratchDir, std::path::PathBuf) {
+        let dir = crate::fsutil::scratch_dir(&format!("cpe-watermark-{tag}"));
+        let p = dir.join("overlay.png");
         std::fs::write(&p, bytes).unwrap();
-        p
+        (dir, p)
     }
 
     #[test]
@@ -493,7 +489,7 @@ mod tests {
     #[test]
     fn watermark_composites_the_overlay_at_the_target_corner() {
         let input = png_bytes(20, 20); // solid [10,20,30] base, no alpha
-        let overlay_path = scratch_file("topleft", &solid_png_bytes(4, 4, [200, 0, 0]));
+        let (_scratch, overlay_path) = scratch_file("topleft", &solid_png_bytes(4, 4, [200, 0, 0]));
 
         let out = apply_ops(
             &input,
@@ -518,7 +514,7 @@ mod tests {
     #[test]
     fn watermark_opacity_zero_leaves_the_base_unchanged() {
         let input = png_bytes(16, 16);
-        let overlay_path = scratch_file("opacity0", &solid_png_bytes(8, 8, [255, 255, 255]));
+        let (_scratch, overlay_path) = scratch_file("opacity0", &solid_png_bytes(8, 8, [255, 255, 255]));
 
         let out = apply_ops(
             &input,
@@ -540,7 +536,7 @@ mod tests {
     fn watermark_oversized_overlay_is_clamped_not_panicking() {
         let input = png_bytes(10, 10);
         // Overlay is deliberately larger than the base in both dimensions.
-        let overlay_path = scratch_file("oversized", &solid_png_bytes(50, 50, [0, 255, 0]));
+        let (_scratch, overlay_path) = scratch_file("oversized", &solid_png_bytes(50, 50, [0, 255, 0]));
 
         let out = apply_ops(
             &input,
@@ -578,7 +574,7 @@ mod tests {
     #[test]
     fn watermark_undecodable_overlay_errors_instead_of_panicking() {
         let input = png_bytes(8, 8);
-        let overlay_path = scratch_file("not-an-image", b"this is definitely not image bytes");
+        let (_scratch, overlay_path) = scratch_file("not-an-image", b"this is definitely not image bytes");
         let err = apply_ops(
             &input,
             &[MediaOp::Watermark {

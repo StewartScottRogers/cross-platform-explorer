@@ -14655,11 +14655,8 @@ mod tests {
     // ---- file operations (CPE-030) ----
 
     /// Unique scratch dir per test, so tests don't collide when run in parallel.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cpe_test_{tag}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    fn scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe_test_{tag}"))
     }
 
     #[test]
@@ -16048,16 +16045,11 @@ overlay / overlay rw,relatime 0 0
     // (The pure classifier test -- `classify_link_presence`'s taxonomy, no disk touched -- moved to
     // `cpe_server::fsutil`'s own test module under review, alongside the function itself: PR #924.)
     //
-    // Every test below arms a `Drop` guard for its scratch dir BEFORE any assertion, not just a trailing
-    // `remove_dir_all` -- a `Drop` is the only cleanup that still runs when an assertion panics, and a
-    // plain call after the assertions never reaches that path. Same requirement, same reason, as the
-    // `Restore` guard in `cpe_server::dispatch`'s and `split_join`'s tests.
-    struct Cpe1715Scratch(PathBuf);
-    impl Drop for Cpe1715Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    // Every test below relies on its scratch dir's own `ScratchDir` guard (armed the moment `scratch()`
+    // returns, i.e. before any assertion) rather than a manual per-test `Drop` wrapper -- CPE-1693 moved
+    // this guarantee to the `scratch()` helper itself, closing the whole class at once instead of test by
+    // test. Same requirement, same reason, as the `Restore` guard in `cpe_server::dispatch`'s and
+    // `split_join`'s tests before this ticket.
 
     /// `probe_name_pick_slot` itself, on a real dangling link: `try_exists` alone answers "nothing here",
     /// but the combined probe must answer "occupied".
@@ -16065,7 +16057,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_probe_name_pick_slot_reports_a_dangling_link_as_occupied() {
         use std::io::Write;
         let d = scratch("cpe1715_probe");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("dangling.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16095,7 +16086,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_unique_target_skips_a_dangling_link_and_picks_the_next_candidate() {
         use std::io::Write;
         let d = scratch("cpe1715_unique_target");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("report.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16127,7 +16117,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_skip_skips_a_dangling_link_instead_of_treating_it_as_free() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_skip");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("skip-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16156,7 +16145,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_keepboth_renames_past_a_dangling_link_instead_of_returning_it_as_free() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_keepboth");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("keep-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16194,7 +16182,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_overwrite_is_the_only_arm_that_touches_a_dangling_link() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_overwrite");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("replace-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16224,7 +16211,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_do_move_into_never_renames_onto_a_dangling_link_the_link_survives_a_bulk_move() {
         use std::io::Write;
         let d = scratch("cpe1715_move_survives");
-        let _clean = Cpe1715Scratch(d.clone());
         let src_dir = d.join("src");
         let dest_dir = d.join("dest");
         fs::create_dir_all(&src_dir).unwrap();
@@ -16846,7 +16832,7 @@ overlay / overlay rw,relatime 0 0
             // assertion below is the point of the test and must not be defeated by the ACLs that staged it.
             if let Ok(user) = std::env::var("USERNAME") {
                 // Parent first — see the `Restore` impl above for why the order matters.
-                for p in [d.as_path(), victim.as_path()] {
+                for p in [d.path(), victim.as_path()] {
                     let _ = std::process::Command::new("icacls")
                         .arg(p)
                         .arg("/remove:d")

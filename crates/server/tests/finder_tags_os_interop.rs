@@ -124,32 +124,18 @@ fn hex_dump_to_bytes_decodes_a_known_bplist_tag_array() {
 #[cfg(target_os = "macos")]
 mod macos_interop {
     use super::{decode_finder_tag_names, hex_dump_to_bytes};
-    use std::path::{Path, PathBuf};
     use std::process::Command;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     use cpe_server::native_bridge;
     use cpe_server::tags::{tag_store_set, TagStore};
 
-    /// A unique scratch file under the OS temp dir (APFS), mirroring the pattern used by
-    /// `native_meta_os_interop.rs` and `native_bridge`'s own unit tests.
-    fn scratch_file() -> PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cpe-findertags-osinterop-{}-{}", std::process::id(), n));
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir.join("file.txt")
-    }
-
-    fn cleanup(path: &Path) {
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::remove_dir_all(dir);
-        }
-    }
-
     #[test]
     fn xattr_tool_reads_back_the_finder_tags_native_bridge_pushed() {
-        let path = scratch_file();
+        // CPE-1693: the scratch dir is a guard that removes itself on drop, including on a panicking
+        // assertion below — replaces the old `scratch_file()` + manual `cleanup(&path)` pair, which
+        // never ran its cleanup on a panic.
+        let dir = cpe_server::fsutil::scratch_dir("cpe-findertags-osinterop");
+        let path = dir.join("file.txt");
         std::fs::write(&path, b"base file contents").expect("create base file");
 
         // Tag the path in an internal TagStore, then push it out to native (Finder) metadata. `push` is
@@ -216,6 +202,5 @@ mod macos_interop {
         );
 
         let _ = native_bridge::push(&TagStore::new(), &path); // clear the native blob (untagged push removes it)
-        cleanup(&path);
     }
 }

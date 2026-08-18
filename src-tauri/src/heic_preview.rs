@@ -237,13 +237,8 @@ fn decode_heic_macos(path: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-heic-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe-heic-{tag}"))
     }
 
     /// A corrupt/truncated `.heic` must return `Err` (no panic) on every platform, whether or not a

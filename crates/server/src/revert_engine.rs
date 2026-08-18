@@ -165,15 +165,9 @@ mod tests {
     use super::*;
     use crate::restore_plan::plan_restore;
     use crate::snapshot_capture::scan_dir;
-    use std::path::PathBuf;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-revert-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-revert-{tag}"))
     }
 
     /// Write every file in `snapshot` (paths relative, `/`-joined) as a blob in `store_dir/blobs/<hash>`,

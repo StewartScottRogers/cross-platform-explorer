@@ -268,15 +268,9 @@ impl IndexService {
 mod tests {
     use super::*;
     use std::fs;
-    use std::sync::atomic::Ordering;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::AtomicU64;
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-idxsvc-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-idxsvc-{tag}"))
     }
 
     /// A small tree to crawl: report.rs / report.md across two folders + a README.
@@ -483,6 +477,11 @@ mod tests {
         let tree = scratch("concurrent");
         sample_tree(&tree);
         let idxdir = scratch("concurrent-idx");
+        // CPE-1693: `idxdir` (a `ScratchDir` guard) isn't `Clone` — deliberately, so the directory can't
+        // outlive the guard that owns it. The threads below only need the *path*; `idxdir` itself stays
+        // alive at this function's scope for the trailing `fresh.search_all(&idxdir, ..)` below and for
+        // cleanup on drop.
+        let idxdir_path = idxdir.to_path_buf();
         let svc = IndexService::new();
         let root = tree.to_string_lossy().to_string();
 
@@ -493,7 +492,7 @@ mod tests {
                 .map(|_| {
                     let svc = svc.clone();
                     let root = root.clone();
-                    let idxdir = idxdir.clone();
+                    let idxdir = idxdir_path.clone();
                     std::thread::spawn(move || {
                         svc.build_root(&root, 9, &idxdir, &AtomicBool::new(false), |_| {})
                     })

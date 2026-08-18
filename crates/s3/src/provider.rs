@@ -2859,13 +2859,21 @@ mod tests {
     /// `(base_url, root, requests)`. `requests` counts every request the fixture receives, so a test can
     /// prove a request was never sent (e.g. the `ureq`-header-drop guard firing before any I/O). See
     /// [`handle`]'s doc for `page_cap`.
-    fn spawn_s3_fixture_with_page_cap(page_cap: Option<usize>) -> (String, PathBuf, Arc<AtomicUsize>) {
+    ///
+    /// **CPE-1693:** `root` is a [`cpe_server::fsutil::ScratchDir`] guard, not a bare `PathBuf` — it
+    /// removes the fixture's numbered subdirectory when the caller's binding goes out of scope (normally
+    /// the end of the `#[test]` fn), the `impl Drop` guard the CPE-1693 review prescribed for this exact
+    /// spawner. Keep the returned guard bound (`let (base, root, requests) = spawn_s3_fixture();`), not
+    /// discarded, for as long as the fixture needs to keep serving.
+    fn spawn_s3_fixture_with_page_cap(
+        page_cap: Option<usize>,
+    ) -> (String, cpe_server::fsutil::ScratchDir, Arc<AtomicUsize>) {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 handle(req, &root_for_thread, page_cap, &requests_thread);
@@ -2876,23 +2884,22 @@ mod tests {
 
     /// A fresh, numbered scratch directory for one fixture, nested under a single per-test-binary-run
     /// parent. Factored out of [`spawn_s3_fixture_with_page_cap`] so a second fixture shape can reuse it
-    /// **without adding a second top-level temp directory** — CPE-1693 is still owed the cleanup, and this
-    /// keeps a run at one `cpe-s3-fixtures-*` entry rather than making that worse.
-    fn fixture_root() -> PathBuf {
+    /// **without adding a second top-level temp directory**.
+    ///
+    /// **CPE-1693:** returns the numbered subdirectory wrapped in a [`cpe_server::fsutil::ScratchDir`]
+    /// guard (via [`cpe_server::fsutil::ScratchDir::adopt`], since this directory is already created with
+    /// its own numbered-child naming rather than `scratch_dir`'s `<prefix>-<pid>-<seq>` scheme) so the
+    /// caller's cleanup is automatic. The shared `PARENT` directory itself is deliberately left as-is —
+    /// one empty (once every numbered child guard has dropped) `cpe-s3-fixtures-*` entry per test-binary
+    /// run, not per spawn, same as before this ticket — process-exit-time cleanup of the parent is out of
+    /// scope; see the ticket's Work Log.
+    fn fixture_root() -> cpe_server::fsutil::ScratchDir {
         static SEQ: AtomicUsize = AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        // `(pid, n)` alone is NOT unique across runs — these roots are never cleaned up and Windows
-        // reuses process ids, so a later run can inherit an earlier one's files. The sibling `cpe-webdav`
-        // fixture was actually bitten by this during CPE-1706; same shape, same fix, applied here before
-        // it bites too.
-        //
-        // CPE-1684 round 2: the uniqueness stamp is now taken ONCE PER TEST BINARY RUN rather than once
-        // per spawn, and each spawn gets a numbered subdirectory of it. The roots are still never cleaned
-        // up — that is CPE-1693's job, not this ticket's — but a run now leaves **one** top-level
-        // `cpe-s3-fixtures-*` entry instead of one per spawn site. The round-2 UAT counted 1 339 leftover
-        // directories in `%TEMP%` from the old shape, across a 3-OS matrix and 16 spawn sites; nesting
-        // does not delete anything, it just stops the count being multiplied by the number of tests, and
-        // gives CPE-1693 a single path to remove.
+        // `(pid, n)` alone is NOT unique across runs — Windows reuses process ids, so a later run could
+        // inherit an earlier one's files if a previous run's directory somehow survived. The sibling
+        // `cpe-webdav` fixture was actually bitten by this during CPE-1706; same shape, same fix, applied
+        // here before it bites too.
         static PARENT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
         let parent = PARENT.get_or_init(|| {
             let stamp = std::time::SystemTime::now()
@@ -2903,12 +2910,12 @@ mod tests {
         });
         let root = parent.join(n.to_string());
         std::fs::create_dir_all(&root).unwrap();
-        root
+        cpe_server::fsutil::ScratchDir::adopt(root)
     }
 
     /// The common case: no server-enforced page cap (the fixture honours whatever `max-keys` the client
     /// sent, which `S3Provider::list` always sets to 1000).
-    fn spawn_s3_fixture() -> (String, PathBuf, Arc<AtomicUsize>) {
+    fn spawn_s3_fixture() -> (String, cpe_server::fsutil::ScratchDir, Arc<AtomicUsize>) {
         spawn_s3_fixture_with_page_cap(None)
     }
 
@@ -2922,13 +2929,13 @@ mod tests {
     /// through [`error::map_s3_error`] exactly as a real gateway's would. GET/HEAD/PUT/DELETE on object
     /// keys are served normally by [`handle`], because that is the whole point: the caller really is
     /// entitled to those.
-    fn spawn_s3_fixture_without_listbucket() -> (String, PathBuf, Arc<AtomicUsize>) {
+    fn spawn_s3_fixture_without_listbucket() -> (String, cpe_server::fsutil::ScratchDir, Arc<AtomicUsize>) {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let full = req.url().to_string();
@@ -3863,7 +3870,7 @@ mod tests {
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let full = req.url().to_string();
@@ -3942,7 +3949,7 @@ mod tests {
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             let mut xml = String::from(
                 "<?xml version=\"1.0\"?><ListBucketResult><IsTruncated>false</IsTruncated>\
@@ -4874,7 +4881,7 @@ mod tests {
     // =============================================================================================
 
     /// A provider wired to a fresh fixture, plus that fixture's root directory and request counter.
-    fn s3_fixture_provider() -> (S3Provider, PathBuf, Arc<AtomicUsize>) {
+    fn s3_fixture_provider() -> (S3Provider, cpe_server::fsutil::ScratchDir, Arc<AtomicUsize>) {
         let (base, root, requests) = spawn_s3_fixture();
         (S3Provider::connect(&cfg(&base)), root, requests)
     }
@@ -5973,7 +5980,7 @@ mod tests {
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let full = req.url().to_string();
@@ -6100,7 +6107,7 @@ mod tests {
             let root = fixture_root();
             let requests = Arc::new(AtomicUsize::new(0));
             let requests_thread = Arc::clone(&requests);
-            let root_for_thread = root.clone();
+            let root_for_thread = root.to_path_buf();
             let body_owned = body.to_vec();
             std::thread::spawn(move || {
                 for req in server.incoming_requests() {
@@ -6177,7 +6184,7 @@ mod tests {
         let root = fixture_root();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let full = req.url().to_string();
@@ -6451,7 +6458,7 @@ mod tests {
         std::fs::write(root.join("photos/a.jpg"), b"a").unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let requests_thread = Arc::clone(&requests);
-        let root_for_thread = root.clone();
+        let root_for_thread = root.to_path_buf();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
                 let full = req.url().to_string();

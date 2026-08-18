@@ -552,13 +552,8 @@ pub fn torrent_info(path: &str) -> Result<String, String> {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-binprev-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-binprev-{tag}"))
     }
 
     // -----------------------------------------------------------------------------------------
@@ -707,11 +702,15 @@ mod tests {
     // binary_info (CPE-1572): structured PE/ELF/Mach-O DTO
     // -----------------------------------------------------------------------------------------
 
-    fn write_temp_binary_info(bytes: &[u8], tag: &str) -> std::path::PathBuf {
+    /// CPE-1693: returns the [`crate::fsutil::ScratchDir`] guard alongside the file path, so the
+    /// directory is removed on drop instead of leaking the moment this helper returns (the earlier
+    /// bare-`PathBuf` shape dropped its own scratch dir before any caller could read the file back —
+    /// exactly the bug this ticket exists to close). Callers must keep the guard alive.
+    fn write_temp_binary_info(bytes: &[u8], tag: &str) -> (crate::fsutil::ScratchDir, std::path::PathBuf) {
         let d = scratch(tag);
         let f = d.join("bin.dat");
         fs::write(&f, bytes).unwrap();
-        f
+        (d, f)
     }
 
     /// Builds a minimal-but-real PE32 image with one section, one import, and one export — enough
@@ -890,7 +889,7 @@ mod tests {
     #[test]
     fn binary_info_reports_pe_sections_imports_and_exports() {
         let bytes = build_minimal_pe32();
-        let path = write_temp_binary_info(&bytes, "pe");
+        let (_scratch, path) = write_temp_binary_info(&bytes, "pe");
         let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal PE must parse");
         assert_eq!(info.format, crate::model::BinaryFormat::Pe);
         assert!(!info.is_64, "this fixture is PE32, not PE32+");
@@ -1132,7 +1131,7 @@ mod tests {
     #[test]
     fn binary_info_reports_elf_sections_imports_exports_and_symbols() {
         let bytes = build_minimal_elf64();
-        let path = write_temp_binary_info(&bytes, "elf");
+        let (_scratch, path) = write_temp_binary_info(&bytes, "elf");
         let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal ELF64 must parse");
         assert_eq!(info.format, crate::model::BinaryFormat::Elf);
         assert!(info.is_64);
@@ -1174,7 +1173,7 @@ mod tests {
         // (EM_AARCH64 = 0xB7) instead of x86-64 — ARM disassembly is a future slice (yaxpeax-arm),
         // so `binary_info` must report an empty `disasm`, never an error, for it (CPE-1581).
         let bytes = build_minimal_elf64_with_machine(0xB7);
-        let path = write_temp_binary_info(&bytes, "elf-arm64");
+        let (_scratch, path) = write_temp_binary_info(&bytes, "elf-arm64");
         let info = binary_info(&path.to_string_lossy()).expect("a well-formed ELF64 must still parse");
         assert!(info.disasm.is_empty(), "expected no disasm for a non-x86 architecture: {info:?}");
         let _ = fs::remove_file(&path);
@@ -1288,7 +1287,7 @@ mod tests {
     #[test]
     fn binary_info_reports_macho_sections_and_symbols() {
         let bytes = build_minimal_macho64();
-        let path = write_temp_binary_info(&bytes, "macho");
+        let (_scratch, path) = write_temp_binary_info(&bytes, "macho");
         let info = binary_info(&path.to_string_lossy()).expect("a well-formed minimal Mach-O must parse");
         assert_eq!(info.format, crate::model::BinaryFormat::MachO);
         assert!(info.is_64);
@@ -1316,7 +1315,7 @@ mod tests {
 
     #[test]
     fn binary_info_errors_gracefully_on_unrecognized_bytes() {
-        let path = write_temp_binary_info(b"not a binary at all, just plain text", "junk");
+        let (_scratch, path) = write_temp_binary_info(b"not a binary at all, just plain text", "junk");
         assert!(binary_info(&path.to_string_lossy()).is_err());
         let _ = fs::remove_file(&path);
     }
@@ -1337,7 +1336,7 @@ mod tests {
             ("macho-trunc", build_minimal_macho64()),
         ] {
             for cut in (0..bytes.len()).step_by(7) {
-                let path = write_temp_binary_info(&bytes[..cut], tag);
+                let (_scratch, path) = write_temp_binary_info(&bytes[..cut], tag);
                 let _ = binary_info(&path.to_string_lossy()); // must not panic, Ok or Err both fine
                 let _ = fs::remove_file(&path);
             }

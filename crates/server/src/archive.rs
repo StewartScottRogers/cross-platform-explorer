@@ -1963,13 +1963,8 @@ mod tests {
     use super::*;
     use std::io::Write;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-archive-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-archive-{tag}"))
     }
 
     #[test]
@@ -3104,21 +3099,6 @@ mod tests {
         }
     }
 
-    /// Removes `dir` on drop, even if the test panics mid-assertion (CPE-1693 — this repo has leaked
-    /// 1.2M+ temp dirs from tests that `return`/panic before their manual `remove_dir_all`). Armed
-    /// *before* any assertion runs, per the ticket's own rule that this whole bug family fails by
-    /// returning `Ok` and an unwrap-then-assert ordering hides it. `#[cfg(windows)]` because its only
-    /// caller, [`ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped`], is —
-    /// unguarded, this is dead code on the Linux/macOS CI legs and `-D warnings` fails the build.
-    #[cfg(windows)]
-    struct RemoveOnDrop(std::path::PathBuf);
-    #[cfg(windows)]
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
-
     /// **End-to-end: the actual CPE-1758 bug shape, through the real streamed-extraction entry point,
     /// asserting the filesystem BEFORE the `Result` is unwrapped** — exactly what the ticket's checklist
     /// demanded ("this whole family fails by returning `Ok`") and what the two predicate-only tests above
@@ -3137,7 +3117,6 @@ mod tests {
     #[cfg(windows)]
     fn ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped() {
         let d = scratch("cpe1758_ads_e2e");
-        let _cleanup = RemoveOnDrop(d.clone());
 
         let zip_path = d.join("evil.zip");
         {
@@ -4005,7 +3984,7 @@ mod tests {
         tag: &str,
         kind: &str,
         deep_dir: bool,
-    ) -> Option<(PathBuf, PathBuf, PathBuf, PathBuf)> {
+    ) -> Option<(crate::fsutil::ScratchDir, PathBuf, PathBuf, PathBuf)> {
         let d = scratch(tag);
         let stage = d.join("stage");
         fs::create_dir_all(stage.join("sub")).unwrap();

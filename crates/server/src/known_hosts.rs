@@ -410,12 +410,8 @@ malformed-line-only-two-fields ssh-rsa
 
     /// A fresh scratch dir for the persistence tests below, unique per test run (PID + a counter so
     /// several tests in the same process don't collide).
-    fn scratch_dir(tag: &str) -> std::path::PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("cpe-kh-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
+    fn scratch_dir(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-kh-{tag}"))
     }
 
     #[test]

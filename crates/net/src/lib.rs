@@ -35,7 +35,6 @@ pub use cpe_contract as contract;
 mod tests {
     use super::*;
     use std::net::{SocketAddr, TcpListener};
-    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -56,12 +55,8 @@ mod tests {
     use cpe_server::dispatch::Dispatcher;
 
     /// A unique scratch directory for a test, cleaned up by the OS temp reaper.
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-net-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe-net-{tag}"))
     }
 
     /// Start a Server on an ephemeral loopback port with the given security chain, and return
@@ -69,11 +64,18 @@ mod tests {
     fn start_server(chain: SecurityChain) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
+        // DETACHED thread for the life of the test process (per this fn's own doc comment above),
+        // outliving both this function and the test that called it, so a guard armed here would delete
+        // the server's own data directory out from under it. Left to the OS temp reaper, exactly as
+        // before CPE-1693.
         let base = scratch("srvbase");
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
         let rt = Arc::new(ServerRuntime::new(
             Dispatcher::with_builtins(),
             chain,
-            Arc::new(HeadlessCtx::new(base)),
+            Arc::new(HeadlessCtx::new(base_path)),
         ));
         std::thread::spawn(move || {
             let _ = rt.serve(listener);
@@ -356,11 +358,16 @@ mod tests {
     fn start_streaming_server(chain: SecurityChain) -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // CPE-1693: same deliberate exemption as `start_server` above — the detached server thread
+        // outlives this function and its caller, so the scratch dir must not be guard-cleaned here.
+        let base = scratch("streambase");
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
                 chain,
-                Arc::new(HeadlessCtx::new(scratch("streambase"))),
+                Arc::new(HeadlessCtx::new(base_path)),
             )
             .with_stream_handler("count_stream", |_ctx, params, emit| {
                 let n = params.get("n").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -404,11 +411,17 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
+        // DETACHED thread that outlives this test function, so a guard armed here would delete the
+        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        let base = scratch("liststreambase");
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
                 SecurityChain::local(),
-                Arc::new(HeadlessCtx::new(scratch("liststreambase"))),
+                Arc::new(HeadlessCtx::new(base_path)),
             )
             .with_builtin_streams(),
         );
@@ -437,11 +450,17 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
+        // DETACHED thread that outlives this test function, so a guard armed here would delete the
+        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        let base = scratch("searchstreambase");
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
                 SecurityChain::local(),
-                Arc::new(HeadlessCtx::new(scratch("searchstreambase"))),
+                Arc::new(HeadlessCtx::new(base_path)),
             )
             .with_builtin_streams(),
         );
@@ -471,11 +490,17 @@ mod tests {
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();
+        // CPE-1693: deliberately NOT cleaned up by the `ScratchDir` guard — the server below runs on a
+        // DETACHED thread that outlives this test function, so a guard armed here would delete the
+        // server's own data directory out from under it. Left to the OS temp reaper, as before.
+        let base = scratch("contentstreambase");
+        let base_path = base.path().to_path_buf();
+        std::mem::forget(base);
         let rt = Arc::new(
             ServerRuntime::new(
                 Dispatcher::with_builtins(),
                 SecurityChain::local(),
-                Arc::new(HeadlessCtx::new(scratch("contentstreambase"))),
+                Arc::new(HeadlessCtx::new(base_path)),
             )
             .with_builtin_streams(),
         );
@@ -596,7 +621,8 @@ mod tests {
         const TRIALS: usize = 5;
 
         // In-process: direct dispatch, no socket — the local fast path.
-        let ctx = HeadlessCtx::new(scratch("benchbase"));
+        let ctx_base = scratch("benchbase");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         let dispatcher = Dispatcher::with_builtins();
         // Over loopback: the identical calls through the client/server.
         let addr = start_server(SecurityChain::local());
