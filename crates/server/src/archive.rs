@@ -318,10 +318,11 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // ## Rows 15–16 — what they cover, and the two things they do NOT
 //
 // **Rows 19–20 (CPE-1746) inherit this section unchanged.** They apply the same guards to the same kind
-// of destination — an archive-controlled name under a user-named directory — so the caveat below is
-// theirs too: `entry_name_is_safe` is not `is_safe_name`. The only difference is where the write happens
-// (inside `sevenz-rust`), which changes nothing about what the checks see. Do not read the "rows 15–16"
-// wording below as scoping the gap away from 7z.
+// of destination — an archive-controlled name under a user-named directory — so the section below is
+// theirs too: `entry_name_is_safe` now applies the same per-segment rules as `is_safe_name` (closed by
+// CPE-1758). The only difference is where the write happens (inside `sevenz-rust`), which changes
+// nothing about what the checks see. Do not read the "rows 15–16" wording below as scoping the fix away
+// from 7z.
 //
 // **Traversal is answered, and only traversal.** `guarded_join`/`is_safe_name` (CPE-1461,
 // `crate::transfer`) is not in this path and does not need to be added *for traversal*: this module has
@@ -332,8 +333,8 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // The first version of this paragraph stopped there, and that was wider than the search behind it.
 // `guarded_join` does not only answer traversal: it applies [`crate::transfer::is_safe_name`] per segment
 // (which fails closed on a `:` anywhere and on a leading `..`, CPE-1461/1709) and, on Windows, sanitises
-// each segment through `local_safe_segment`. [`entry_name_is_safe`] has **no equivalent to either**.
-// Measured for the PR #906 review:
+// each segment through `local_safe_segment`. [`entry_name_is_safe`] had **no equivalent to either**, until
+// CPE-1758 (below). Measured for the PR #906 review, before the fix:
 //
 // ```text
 // [M7] entry_name_is_safe("file:stream") = true    entry_name_is_safe("..evil") = true
@@ -342,14 +343,31 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 //      adsbase_len = Some(4) (unchanged)   a plain file named "adsbase:stream" exists = false
 // ```
 //
-// So a ZIP entry named `file:stream` passes this module's check, reaches rows 15–16's `File::create`, and
-// on NTFS the bytes land in an **alternate data stream** of a neighbouring file, leaving the user no
+// So a ZIP entry named `file:stream` passed this module's check, reached rows 15–16's `File::create`, and
+// on NTFS the bytes landed in an **alternate data stream** of a neighbouring file, leaving the user no
 // visible file at all — the CPE-1709 bug, at a sink CPE-1709 did not cover. The Windows reserved-device
-// and trailing-space/dot shapes are accepted too. **Still not fixed** — CPE-1744 closed the *containment*
-// half of `guarded_join` (below) and deliberately left the *per-segment name* half, which belongs with the
-// `local_safe_segment` family and changes what names are legal rather than where they land: tracked as
-// **CPE-1758**, and pinned by `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects` below so
-// the gap is a recorded, CI-enforced absence rather than a sentence.
+// and trailing-space/dot shapes were accepted too. CPE-1744 closed the *containment* half of `guarded_join`
+// (below) and deliberately left this *per-segment name* half, which belongs with the `local_safe_segment`
+// family and changes what names are legal rather than where they land.
+//
+// **CPE-1758 closed it: [`entry_name_is_safe`] now runs every `Normal` path segment through
+// `is_safe_name` and `local_safe_segment`, same as `guarded_join`.** Re-measured after the fix:
+//
+// ```text
+// [CPE-1758 M] entry_name_is_safe("file:stream") = false   entry_name_is_safe("..evil") = false
+//              entry_name_is_safe("con") = false (Windows) entry_name_is_safe(" sp ") = false (Windows)
+//              entry_name_is_safe("x.") = false (Windows)  entry_name_is_safe("a/b.txt") = true (unchanged)
+// ```
+//
+// **REFUSE, not rename** — see [`entry_name_is_safe`]'s own doc for the full argument. In short:
+// `local_safe_segment`'s rename is right for a transfer sink that owns the destination name outright; an
+// extraction entry that fails the check is **skipped, same as a traversal escape always was**, and the
+// skip is not silent: the streamed extractors (rows 16/20) push `"{name}: unsafe entry name, skipped"`
+// into `ArchiveReport::errors`, which the frontend renders as an error count in the operations panel
+// (`TransferPanel.svelte`). `extract_plan::plan_extract` also records it in `skipped_unsafe`, though that
+// field currently has no UI consumer — nothing calls `plan_extract` outside its own module yet. Pinned by
+// `entry_name_is_safe_now_agrees_with_transfers_is_safe_name` below, so the gap closing is a recorded,
+// CI-enforced fact rather than a sentence.
 //
 // **The link check WAS leaf-only. CPE-1744 closed that** — and it was the largest of the three gaps
 // CPE-1733 recorded, by blast radius: five shipping sinks, against the one 7z path CPE-1746 fixed.
@@ -476,8 +494,8 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // says which other places must move in the same commit. A characterization test does not endorse the
 // behaviour; it makes the fix announce itself instead of drifting away from four descriptions of it.
 // (CPE-1744 re-aimed those two tickets: tar and the ZIP divergence are **CPE-1759**, the
-// `entry_name_is_safe`/`is_safe_name` delta is **CPE-1758**. CPE-1744 itself closed the containment gap
-// and the two wording defects, so a test still naming it would name a closed ticket.)
+// `entry_name_is_safe`/`is_safe_name` delta is **CPE-1758** (closed). CPE-1744 itself closed the
+// containment gap and the two wording defects, so a test still naming it would name a closed ticket.)
 // CPE-1718 established that an unrecorded absence is indistinguishable from an overlooked one; the
 // PR #906 review added that a recorded absence with no ticket is one nobody is scheduled to fix; this
 // round adds that an unpinned description is one nobody is scheduled to keep true.
@@ -591,9 +609,9 @@ fn escaped_dest_message(dest: &Path, out: &Path) -> String {
 /// touches the filesystem, so it cannot see a *live directory link* at `dest/sub` — the escape shape
 /// measured here, which needs neither `..` nor an absolute path and is invisible to any textual check.
 /// `confined_to` is the filesystem-resolving half and is what this needs. The *other* half of
-/// `guarded_join` — the per-segment name rules [`entry_name_is_safe`] still lacks (`:` anywhere, a
-/// leading `..`, the Windows reserved-device/trailing-dot shapes) — remains open and is tracked
-/// separately; see `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects`.
+/// `guarded_join` — the per-segment name rules (`:` anywhere, a leading `..`, the Windows
+/// reserved-device/trailing-dot shapes) — is a separate guard with a separate blast radius, now adopted
+/// at [`entry_name_is_safe`] itself (CPE-1758); see `entry_name_is_safe_now_agrees_with_transfers_is_safe_name`.
 ///
 /// # Cost
 ///
@@ -1139,6 +1157,49 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
 /// True if an archive entry name is a plain relative path that cannot escape the extraction root — the
 /// shared "zip-slip" guard for extractors that don't provide one (CPE-628). `\` is normalised to `/`.
 /// `pub(crate)` so [`crate::extract_plan`] can reuse it rather than duplicating the check (CPE-1055).
+///
+/// **CPE-1758: adopts `crate::transfer::is_safe_name` / `local_safe_segment` per segment**, closing the
+/// gap the section comment above measured — `entry_name_is_safe("file:stream")` used to be `true`, and
+/// that name reaches `File::create` at rows 15/16/19/20 and lands in an NTFS alternate data stream,
+/// leaving the user no visible file. Every `Component::Normal` segment (a `Component::CurDir` — a lone
+/// `.` — still passes through untouched, exactly as before) now has to clear BOTH:
+///
+/// - [`crate::transfer::is_safe_name`] — fails closed on a `:` anywhere in the segment (the ADS shape)
+///   and on a segment that *starts with* `..` without being exactly a traversal component (`..evil`,
+///   `..:$DATA`), platform-independently.
+/// - **content-unchanged by [`crate::transfer::local_safe_segment`]** — on Windows this also fails
+///   closed on a reserved DOS device name (`con`, `nul`, …) and a trailing run of `.`/space (`"x."`,
+///   `" sp "`), because those are exactly the shapes [`crate::transfer::windows_safe_segment`] would
+///   otherwise rewrite; `local_safe_segment` is the identity function on every other OS (`cfg!(windows)`
+///   inside it), so this half of the check is a no-op there, matching the platform scope of the hazard.
+///   **Compared by rewritten bytes (`local_safe_segment(seg).as_ref() != seg`), never by the `Cow`
+///   variant it returns.** `windows_safe_segment`'s cheap pre-scan is deliberately over-broad — it
+///   allocates an `Owned` copy for any segment containing a bare `%` even when that copy comes out
+///   byte-identical, a guarantee that only mattered to a rename sink. An earlier version of this
+///   function matched on `Cow::Borrowed`/`Cow::Owned` and refused every `%`-containing name on Windows
+///   as a result — `"50% off.txt"`, `"report%2ffinal.txt"`, an ordinary Hive/Athena partition value like
+///   `"city=A%2FB"` — a real regression caught in review before it shipped. Pinned by
+///   `entry_name_is_safe_does_not_reject_percent_names_that_round_trip_unchanged`.
+///
+/// **Adopted, not reimplemented** — a third "is this leaf name safe" predicate is exactly how
+/// `deny_stat_of` needed the same fix three times (CPE-1733's own finding); this reuses the two
+/// functions `guarded_join` already applies at the transfer sink instead of duplicating their rules.
+///
+/// **Decision: REFUSE, not rename.** `local_safe_segment` *sanitises* at `guarded_join` — the transfer
+/// sink can rewrite a segment because a rewritten name is still a fresh, unclaimed leaf under a
+/// destination the caller is free to name however it likes. An archive extraction has no such freedom:
+/// every one of `entry_name_is_safe`'s ~10 call sites already treats a `false` result as "skip this
+/// entry, keep extracting the rest" (see the section comment above for the real surfacing route — the
+/// streamed extractors record it in `ArchiveReport::errors`, rendered as an error count in the
+/// operations panel; `extract_plan::plan_extract` also records it in `skipped_unsafe`, which has no UI
+/// consumer yet). Switching to rename would mean growing this
+/// function's contract from a predicate to a name transform and threading a renamed destination through
+/// every call site — including the two `sevenz-rust` callbacks, which receive `entry_dest` already built
+/// by a crate we do not control, so there is nowhere to apply a rename before the fact. That is the same
+/// one-third-implementation sprawl the "adopted, not reimplemented" call above exists to avoid, for a
+/// ticket scoped to *what a name may be*, not *how the sink recovers a bad one*. Skip is also not new
+/// silence: it is the same "successful-looking extraction, missing entry" shape the traversal check
+/// already produces for `../evil`, which nobody has treated as this module's bug to fix.
 pub(crate) fn entry_name_is_safe(name: &str) -> bool {
     use std::path::Component;
     if name.is_empty() {
@@ -1146,7 +1207,38 @@ pub(crate) fn entry_name_is_safe(name: &str) -> bool {
     }
     let normalized = name.replace('\\', "/");
     let p = Path::new(&normalized);
-    !p.is_absolute() && p.components().all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+    if p.is_absolute() {
+        return false;
+    }
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::Normal(seg) => {
+                let Some(seg) = seg.to_str() else { return false };
+                if !crate::transfer::is_safe_name(seg) {
+                    return false;
+                }
+                // NOT a `Cow::Borrowed`/`Cow::Owned` match: `windows_safe_segment`'s cheap pre-scan
+                // (`crate::transfer::windows_safe_segment`) is DELIBERATELY over-broad — it allocates an
+                // `Owned` copy for any segment containing a bare `%` (so it can escape a pre-existing
+                // `%XX` this encoder itself could have emitted) even when the copy comes out
+                // byte-identical to the input. That guarantee only ever mattered to a rename sink
+                // ("never a wrong answer" because the caller writes the returned bytes either way); a
+                // predicate that reads `Cow::Owned` as "reject" turns "allocated, but identical" into a
+                // false refusal for every `%` name on Windows — `"50% off.txt"`, `"report%2ffinal.txt"`,
+                // an ordinary Hive/Athena partition value like `"city=A%2FB"` — exactly the
+                // successful-looking-extraction-missing-file shape this ticket exists to remove, just
+                // moved onto a common character CPE-1709 round 2 specifically fixed the mangling of.
+                // Comparing the rewritten *content* is what `local_safe_segment` actually promises to
+                // preserve when nothing needed rewriting.
+                if crate::transfer::local_safe_segment(seg).as_ref() != seg {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// **The link decision for a `sevenz-rust` per-entry callback — rows 19–20** (CPE-1746).
@@ -2868,34 +2960,54 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
-    /// **A recorded absence, made CI-enforced** (PR #906 review, finding 2).
+    /// **A recorded absence, closed by CPE-1758** (PR #906 review, finding 2 — the gap this test used to
+    /// pin; see the section comment above for the "before" measurement).
     ///
     /// The table above says `guarded_join`'s traversal answer is already covered here by
-    /// [`entry_name_is_safe`], and that is true *for traversal*. It is not true for the rest of what
-    /// `guarded_join` carries: [`crate::transfer::is_safe_name`] fails closed on a `:` anywhere in a
-    /// segment and on a leading `..`, and this module's check accepts both. A ZIP entry named
-    /// `file:stream` therefore reaches rows 15–16's `File::create` and, on NTFS, disappears into an
+    /// [`entry_name_is_safe`], and that is true *for traversal*. It used NOT to be true for the rest of
+    /// what `guarded_join` carries: [`crate::transfer::is_safe_name`] fails closed on a `:` anywhere in a
+    /// segment and on a leading `..`, and this module's check used to accept both. A ZIP entry named
+    /// `file:stream` therefore used to reach rows 15–16's `File::create` and, on NTFS, disappear into an
     /// alternate data stream of a neighbouring file — measured: `fs::write("adsbase:stream")` → `Ok`,
     /// `adsbase` still 4 bytes, no visible file created.
     ///
-    /// **This test asserts the gap, not the fix.** It exists because a paragraph saying "we do not cover
-    /// `:`" rots the moment someone changes either function, whereas this fails. Fixing it is
-    /// **CPE-1758**; when that lands, this test is what tells you the delta closed and the wording
-    /// upstairs is stale.
+    /// **This test used to assert the gap; CPE-1758 re-points it to assert the fix, in the same commit
+    /// that closed the gap — never deleted.** It exists because a paragraph saying "we now cover `:`"
+    /// rots the moment someone changes either function, whereas this fails. If this test goes red, either
+    /// [`entry_name_is_safe`] or [`crate::transfer::is_safe_name`] moved and the section comment above
+    /// (and `src/docs/explorer-archives.md`'s zip-slip bullet) needs to move with it.
     ///
-    /// **Re-aimed by CPE-1744, which did NOT fix this.** That ticket closed the *containment* half of the
-    /// `guarded_join` comparison — the intermediate-directory escape, which is a question about where a
-    /// path lands — and deliberately left this half, which is a question about what a *segment* may be
-    /// called and shares its answer with `local_safe_segment`. The pointer moved so it does not name a
-    /// closed ticket; the gap it pins is unchanged and this test is expected to stay GREEN.
+    /// **Re-aimed once already by CPE-1744, which did NOT fix this** (that ticket closed the
+    /// *containment* half of the `guarded_join` comparison, the intermediate-directory escape — a
+    /// question about where a path lands — and deliberately left this half, a question about what a
+    /// *segment* may be called). Renamed here from
+    /// `entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects` because that name described the
+    /// disagreement this test now asserts is gone.
+    ///
+    /// This covers the platform-independent half of the fix — the shapes [`crate::transfer::is_safe_name`]
+    /// itself rejects, which is every CI OS. The Windows-only half (reserved device names, trailing
+    /// dot/space — [`crate::transfer::local_safe_segment`]'s job, which `is_safe_name` does not know
+    /// about) is a separate, `#[cfg(windows)]`-gated test right below, so a regression in either
+    /// half-guard goes red on its own row rather than being hidden behind the other.
     #[test]
-    fn entry_name_is_safe_accepts_shapes_transfers_is_safe_name_rejects() {
+    fn entry_name_is_safe_now_agrees_with_transfers_is_safe_name() {
         // (name, what this module says, what the transfer sink says)
         let rows: &[(&str, bool, bool)] = &[
-            ("file:stream", true, false), // NTFS alternate data stream — CPE-1709's bug shape
-            ("..evil", true, false),      // leading `..` that is not a traversal component
-            ("..:$DATA", true, false),    // both at once
-            ("a/b.txt", true, false),     // a separator: legal to us (we join it), never a single segment
+            // These three are caught by `is_safe_name` ALONE — `local_safe_segment` never rewrites any of
+            // them on any OS (no WINDOWS_UNSAFE_CHARS-only reason to single them out: "..evil" has no
+            // unsafe char, isn't a device name, has no trailing dot/space), so if the `is_safe_name` call
+            // were ever dropped from `entry_name_is_safe`, this row goes red on Linux and macOS too, not
+            // just Windows.
+            ("..evil", false, false), // leading `..` that is not a traversal component
+            ("..:$DATA", false, false), // same, plus a colon
+            // Colon is also a WINDOWS_UNSAFE_CHARS entry, so on Windows BOTH guards independently reject
+            // this one — still a useful row: it is the exact CPE-1709/M7 measured bug shape.
+            ("file:stream", false, false), // NTFS alternate data stream — CPE-1709's bug shape
+            ("a/b.txt", true, false), // a separator: legal to us (we join it), never a single segment —
+            // deliberately UNCHANGED disagreement: `is_safe_name` only ever judges one segment in
+            // isolation and rejects anything containing `/`, while `entry_name_is_safe` is allowed to
+            // accept a multi-segment relative path. A row here that started matching would mean
+            // `entry_name_is_safe` regressed to rejecting ordinary nested entries.
             // Agreed rejections, so a change that broke BOTH would still red here rather than pass.
             ("..", false, false),
             ("../x", false, false),
@@ -2905,8 +3017,8 @@ mod tests {
             assert_eq!(
                 entry_name_is_safe(name),
                 *ours,
-                "archive::entry_name_is_safe({name:?}) changed — if this is the CPE-1758 fix, update the \
-                 table in this module's section comment too"
+                "archive::entry_name_is_safe({name:?}) changed — if this un-does the CPE-1758 fix, update \
+                 the table in this module's section comment (and src/docs/explorer-archives.md) too"
             );
             assert_eq!(
                 crate::transfer::is_safe_name(name),
@@ -2915,6 +3027,164 @@ mod tests {
                  comment is measured against it and is now stale"
             );
         }
+    }
+
+    /// **The Windows-only half of the CPE-1758 fix** — reserved DOS device names and a trailing run of
+    /// `.`/space, which is [`crate::transfer::local_safe_segment`]'s job (via `windows_safe_segment`), not
+    /// [`crate::transfer::is_safe_name`]'s: `is_safe_name` has no device-name or trailing-character logic
+    /// at all, so none of these three shapes appear in
+    /// `entry_name_is_safe_now_agrees_with_transfers_is_safe_name` above — they would pass `is_safe_name`
+    /// on every OS. `#[cfg(windows)]` because `local_safe_segment` is the identity function everywhere
+    /// else (`cfg!(windows)` inside it): `"con"`, `" sp "` and `"x."` are ordinary, legal filenames on
+    /// Linux and macOS, so asserting `false` there would be asserting a Windows-only hazard as if it were
+    /// universal — exactly the mistake CI's 3-OS matrix exists to catch (never assert Windows-only shapes
+    /// unconditionally).
+    ///
+    /// Distinctive refusal, not `is_err()`: this asserts the boolean `entry_name_is_safe` returns
+    /// directly, so there is no ambiguity with `File::create` independently failing on some of these
+    /// shapes (CPE-1709 already measured that `CreateFileW` refuses a couple of the unsafe-char cases
+    /// outright) — that failure mode is not exercised here at all, only the name predicate.
+    #[test]
+    #[cfg(windows)]
+    fn entry_name_is_safe_rejects_windows_device_names_and_trailing_dot_space() {
+        for name in ["con", "CON", "con.txt", "nul", " sp ", "x.", "trailing "] {
+            assert!(
+                !entry_name_is_safe(name),
+                "entry_name_is_safe({name:?}) should be false on Windows — local_safe_segment would \
+                 rewrite this segment, so it is one of the CPE-1758 shapes"
+            );
+            // The reason, not only the effect: pin that it's `local_safe_segment` doing the rejecting,
+            // not `is_safe_name` (which does not know about device names or trailing runs at all) and not
+            // some other accident — so this row cannot pass with the `local_safe_segment` check deleted
+            // from `entry_name_is_safe` while a stray `is_safe_name` failure coincidentally covers it.
+            assert!(
+                crate::transfer::is_safe_name(name),
+                "transfer::is_safe_name({name:?}) should be true — this shape is only unsafe via \
+                 local_safe_segment, and if is_safe_name started rejecting it too this test would no \
+                 longer isolate which guard is doing the work"
+            );
+            assert!(
+                crate::transfer::local_safe_segment(name).as_ref() != name,
+                "local_safe_segment({name:?}) should rewrite to different bytes — that rewrite is exactly \
+                 what entry_name_is_safe now refuses instead of writing through"
+            );
+        }
+    }
+
+    /// **Regression: a real bug caught in review before it shipped.** An earlier version of
+    /// [`entry_name_is_safe`] matched `crate::transfer::local_safe_segment`'s return on its `Cow`
+    /// *variant* (`Cow::Owned` == "would rewrite" == reject) rather than comparing the rewritten bytes.
+    /// `crate::transfer::windows_safe_segment`'s cheap pre-scan is deliberately over-broad — it allocates
+    /// an `Owned` copy for ANY segment containing a bare `%` (so it can escape a pre-existing `%XX`
+    /// sequence its own encoder could have emitted), even when that copy comes out byte-identical to the
+    /// input. That "allocated but identical" case is exactly what a `Cow`-variant check cannot tell apart
+    /// from a genuine rewrite, and the bug rejected an ordinary Hive/Athena partition-style name
+    /// (`"city=A%2FB"`, the literal example CPE-1709 round 2 fixed the mangling of) and a plain `%` in a
+    /// filename (`"50% off.txt"`) on Windows only — invisible to every CI leg, since `local_safe_segment`
+    /// is the identity function on Linux/macOS and the pre-fix Windows test table had no `%` row.
+    /// `#[cfg(windows)]` because the whole hazard is Windows-only by construction.
+    #[test]
+    #[cfg(windows)]
+    fn entry_name_is_safe_does_not_reject_percent_names_that_round_trip_unchanged() {
+        for name in
+            ["50% off.txt", "report%2ffinal.txt", "city=A%2FB", "100%", "a%b", "ok/50% off.txt"]
+        {
+            assert_eq!(
+                crate::transfer::local_safe_segment(name.rsplit('/').next().unwrap()).as_ref(),
+                name.rsplit('/').next().unwrap(),
+                "local_safe_segment({name:?}) allocated an Owned copy but it must be byte-identical to \
+                 the input for this row to be testing the bug this test guards against"
+            );
+            assert!(
+                entry_name_is_safe(name),
+                "entry_name_is_safe({name:?}) should be true — local_safe_segment allocates a Cow::Owned \
+                 for the bare '%' here but the bytes round-trip unchanged, so this is NOT one of the \
+                 CPE-1758 unsafe shapes; a Cow-variant check would wrongly reject it"
+            );
+        }
+    }
+
+    /// Removes `dir` on drop, even if the test panics mid-assertion (CPE-1693 — this repo has leaked
+    /// 1.2M+ temp dirs from tests that `return`/panic before their manual `remove_dir_all`). Armed
+    /// *before* any assertion runs, per the ticket's own rule that this whole bug family fails by
+    /// returning `Ok` and an unwrap-then-assert ordering hides it. `#[cfg(windows)]` because its only
+    /// caller, [`ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped`], is —
+    /// unguarded, this is dead code on the Linux/macOS CI legs and `-D warnings` fails the build.
+    #[cfg(windows)]
+    struct RemoveOnDrop(std::path::PathBuf);
+    #[cfg(windows)]
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// **End-to-end: the actual CPE-1758 bug shape, through the real streamed-extraction entry point,
+    /// asserting the filesystem BEFORE the `Result` is unwrapped** — exactly what the ticket's checklist
+    /// demanded ("this whole family fails by returning `Ok`") and what the two predicate-only tests above
+    /// do not cover on their own.
+    ///
+    /// Builds a ZIP with `"file:stream"` (the exact CPE-1709/M7 measured ADS shape) alongside a plain
+    /// `"ok.txt"`, pre-creates a neighbour file named `"file"` in the destination (the base component an
+    /// ADS write would attach to), and runs the real `extract_archive_streamed` — the function
+    /// `start_archive_extract` calls for the shipping Extract button on a `.zip`. Before touching the
+    /// `Result` at all: asserts the neighbour's bytes are untouched (no stream landed on it) and that no
+    /// entry literally named `"file:stream"` exists. Only then unwraps and asserts `report.errors`
+    /// actually names the skip — the assertion Finding 2 of the review showed was missing: a route that
+    /// looks silent from the caller's `Result` alone is not the same as a route with no user-visible
+    /// trace at all.
+    #[test]
+    #[cfg(windows)]
+    fn ads_shaped_entry_is_skipped_end_to_end_and_recorded_not_silently_dropped() {
+        let d = scratch("cpe1758_ads_e2e");
+        let _cleanup = RemoveOnDrop(d.clone());
+
+        let zip_path = d.join("evil.zip");
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            let opts: zip::write::FileOptions<()> = zip::write::FileOptions::default();
+            w.start_file("file:stream", opts).unwrap();
+            w.write_all(b"ADS PAYLOAD").unwrap();
+            w.start_file("ok.txt", opts).unwrap();
+            w.write_all(b"ORDINARY FILE").unwrap();
+            w.finish().unwrap();
+        }
+
+        let dest = d.join("out");
+        fs::create_dir_all(&dest).unwrap();
+        let neighbor = dest.join("file");
+        fs::write(&neighbor, b"NEIGHBOR").unwrap();
+
+        let cancel = AtomicBool::new(false);
+        let outcome = extract_archive_streamed(&zip_path.to_string_lossy(), &dest.to_string_lossy(), &cancel, |_| {});
+
+        // Filesystem effects, asserted BEFORE the Result is unwrapped.
+        assert_eq!(
+            fs::read(&neighbor).unwrap(),
+            b"NEIGHBOR".to_vec(),
+            "the neighbour file's bytes must be untouched — an alternate-data-stream write would leave \
+             the base file's own length/content exactly as it was while a hidden stream held the payload, \
+             so an unchanged read is necessary but the next assertion (no separate leaf) is what actually \
+             distinguishes 'skipped entirely' from 'ADS attached'"
+        );
+        assert!(
+            !dest.join("file:stream").exists(),
+            "no entry literally named file:stream should exist at the destination"
+        );
+
+        let report = outcome.expect("one unsafe-named entry must not abort the rest of the extraction");
+        assert!(
+            report.errors.iter().any(|e| e == "file:stream: unsafe entry name, skipped"),
+            "the skip must be RECORDED — this is the real surfacing route (ArchiveReport::errors, \
+             rendered in the operations panel), not the unwired extract_plan::plan_extract path; got {:?}",
+            report.errors
+        );
+        assert_eq!(
+            fs::read(dest.join("ok.txt")).unwrap(),
+            b"ORDINARY FILE".to_vec(),
+            "the rest of the archive must still extract"
+        );
     }
 
     /// Gzip `raw`, so the row-13/14 legs can build a single-file gzip whose extraction leaf lands on the
