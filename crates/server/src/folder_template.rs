@@ -305,13 +305,8 @@ mod tests {
     use super::*;
     use crate::ctx::HeadlessCtx;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-tmpl-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-tmpl-{tag}"))
     }
 
     fn vars(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -524,7 +519,7 @@ mod tests {
     #[test]
     fn store_save_list_load_delete_round_trip() {
         let base = scratch("store");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert!(list(&ctx).unwrap().is_empty());
 
         let t = sample("proj");
@@ -550,7 +545,7 @@ mod tests {
     #[test]
     fn export_import_round_trips_and_rejects_garbage() {
         let base = scratch("io");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let t = sample("x");
         let json = export(&t).unwrap();
         import(&ctx, &json).unwrap();
@@ -570,7 +565,8 @@ mod tests {
 
     #[test]
     fn missing_catalog_reads_as_empty() {
-        let ctx = HeadlessCtx::new(scratch("empty"));
+        let ctx_base = scratch("empty");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         assert!(list(&ctx).unwrap().is_empty());
         assert!(load(&ctx, "nope").unwrap().is_none());
     }

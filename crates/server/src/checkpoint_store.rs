@@ -587,13 +587,8 @@ mod tests {
     use crate::ctx::HeadlessCtx;
 
     /// A unique scratch dir per call (parallel-test-safe: atomic counter, not a timestamp).
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-ckpt-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-ckpt-{tag}"))
     }
 
     #[test]
@@ -625,7 +620,7 @@ mod tests {
     #[test]
     fn create_mutate_preview_revert_round_trips_the_tree() {
         let app = scratch("app-data");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root");
 
         // Initial tree.
@@ -688,7 +683,7 @@ mod tests {
     #[test]
     fn revert_entry_points_refuse_a_traversal_manifest_id() {
         let app = scratch("app-data-traversal");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-traversal");
         fs::write(root.join("a.txt"), b"a").unwrap();
         let root_s = root.to_string_lossy().to_string();
@@ -708,7 +703,7 @@ mod tests {
     #[test]
     fn cherry_revert_one_restores_a_single_path_only() {
         let app = scratch("app-data-one");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-one");
         fs::write(root.join("a.txt"), b"a original").unwrap();
         fs::write(root.join("b.txt"), b"b original").unwrap();
@@ -737,7 +732,7 @@ mod tests {
     #[test]
     fn preview_with_session_excludes_only_that_sessions_own_changes_from_drift() {
         let app = scratch("app-data-attrib");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-attrib");
         fs::write(root.join("a.txt"), b"a original").unwrap();
         fs::write(root.join("b.txt"), b"b original").unwrap();
@@ -806,7 +801,7 @@ mod tests {
     #[test]
     fn preview_with_session_ignores_pre_checkpoint_events() {
         let app = scratch("app-data-pre-cp");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-pre-cp");
         fs::write(root.join("a.txt"), b"a original").unwrap();
         let root_s = root.to_string_lossy().to_string();
@@ -853,7 +848,7 @@ mod tests {
     #[test]
     fn preview_with_session_and_no_journal_degrades_to_conservative_behaviour() {
         let app = scratch("app-data-no-journal");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-no-journal");
         fs::write(root.join("a.txt"), b"a original").unwrap();
         let root_s = root.to_string_lossy().to_string();
@@ -878,7 +873,7 @@ mod tests {
     #[test]
     fn prune_preview_and_apply_go_through_the_roots_own_store() {
         let app = scratch("app-data-prune");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-prune");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("a.txt"), b"v1").unwrap();
@@ -916,7 +911,7 @@ mod tests {
     #[test]
     fn diff_file_returns_checkpoint_and_live_content_for_a_changed_file() {
         let app = scratch("app-data-diff");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-diff");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("a.txt"), b"original content").unwrap();
@@ -935,7 +930,7 @@ mod tests {
     #[test]
     fn diff_file_errors_cleanly_on_binary_content_and_oversize_and_unknown_path() {
         let app = scratch("app-data-diff-err");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-diff-err");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("bin.dat"), [0xFFu8, 0xFE, 0x00, 0x01]).unwrap(); // invalid UTF-8
@@ -966,7 +961,7 @@ mod tests {
     #[test]
     fn diff_file_refuses_a_path_that_escapes_root() {
         let app = scratch("app-data-diff-escape");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-diff-escape");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("a.txt"), b"content").unwrap();
@@ -985,7 +980,7 @@ mod tests {
     #[test]
     fn recorded_failure_is_listed_newest_first_and_is_separate_from_the_checkpoint_list() {
         let app = scratch("app-data-fail");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-fail");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("a.txt"), b"a").unwrap();
@@ -1020,7 +1015,7 @@ mod tests {
     #[test]
     fn a_missing_failures_file_degrades_to_an_empty_list() {
         let app = scratch("app-data-fail-empty");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-fail-empty");
         let root_s = root.to_string_lossy().to_string();
 
@@ -1037,7 +1032,7 @@ mod tests {
         // run) must not grow the failures index without limit — it rotates at `MAX_CHECKPOINT_FAILURES`,
         // same shape as the audit journal's per-session cap.
         let app = scratch("app-data-fail-rotate");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-fail-rotate");
         let root_s = root.to_string_lossy().to_string();
 
@@ -1061,7 +1056,7 @@ mod tests {
     #[test]
     fn a_malformed_failure_line_is_skipped_not_fatal() {
         let app = scratch("app-data-fail-torn");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("root-fail-torn");
         let root_s = root.to_string_lossy().to_string();
 

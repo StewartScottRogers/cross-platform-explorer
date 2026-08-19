@@ -165,12 +165,8 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn scratch(tag: &str) -> PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-ffmpegutil-test-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-ffmpegutil-test-{tag}"))
     }
 
     /// Unconditional (no ffmpeg needed): each concurrent [`create_scratch_dir`] call must succeed and
@@ -259,7 +255,7 @@ mod tests {
     #[test]
     fn set_native_dep_dir_is_a_silent_no_op_on_a_second_call() {
         let d = scratch("native-dep");
-        set_native_dep_dir(d.clone());
+        set_native_dep_dir(d.to_path_buf());
         set_native_dep_dir(Path::new("Z:/somewhere/else").to_path_buf());
         // Doesn't panic and doesn't change already-set state (OnceLock semantics); nothing else to
         // assert without a bundled binary present.

@@ -958,27 +958,40 @@ mod tests {
         }
     }
 
-    /// Spawn the in-process WebDAV server on an ephemeral port; returns its base URL. Seeds a temp root:
-    /// `readme.txt` ("hello webdav") + `sub/nested.txt`.
-    fn spawn_webdav_server() -> String {
-        spawn_webdav_server_returning_root().0
+    /// Spawn the in-process WebDAV server on an ephemeral port; returns its base URL plus the guard
+    /// owning its on-disk root. Seeds a temp root: `readme.txt` ("hello webdav") + `sub/nested.txt`.
+    ///
+    /// **CPE-1693:** the root used to be thrown away entirely here (never even returned), so it leaked
+    /// unconditionally on every call — every one of this function's 9 call sites left a `cpe-webdav-*`
+    /// directory behind. Now the [`cpe_server::fsutil::ScratchDir`] guard removes it once the caller's
+    /// binding goes out of scope (normally the end of the `#[test]` fn). Keep it bound
+    /// (`let (base, _root) = spawn_webdav_server();`), not discarded, for as long as the server needs to
+    /// keep serving.
+    fn spawn_webdav_server() -> (String, cpe_server::fsutil::ScratchDir) {
+        spawn_webdav_server_returning_root()
     }
 
-    /// Like [`spawn_webdav_server`] but also hands back the server's on-disk root, so a test can stage a
-    /// condition *inside* the served tree (CPE-1726 needs a symlink sitting at a MOVE destination) rather
-    /// than only driving it through the wire. Same seeding, same uniqueness scheme — the root is simply
-    /// not thrown away.
-    fn spawn_webdav_server_returning_root() -> (String, PathBuf) {
+    /// Like [`spawn_webdav_server`] but the caller can also read/stage files under the server's on-disk
+    /// root directly, so a test can stage a condition *inside* the served tree (CPE-1726 needs a symlink
+    /// sitting at a MOVE destination) rather than only driving it through the wire. Same seeding, same
+    /// uniqueness scheme.
+    ///
+    /// **CPE-1693:** `root` is a [`cpe_server::fsutil::ScratchDir`] guard, not a bare `PathBuf` — the
+    /// `impl Drop` guard the CPE-1693 review prescribed for this exact spawner (the pattern
+    /// `cpe-s3`'s fixture spawner copied, per the same review). Keep it bound for as long as the
+    /// server needs to keep serving.
+    fn spawn_webdav_server_returning_root() -> (String, cpe_server::fsutil::ScratchDir) {
         static SEQ: AtomicU64 = AtomicU64::new(0);
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
         let addr = server.server_addr().to_ip().unwrap();
         let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        // `(pid, n)` alone is NOT unique across runs: these directories are never cleaned up, and Windows
-        // reuses process ids freely, so a later run can land on a previous run's root and inherit its
-        // files. That bit during CPE-1706 — `lists_stats_and_reads_over_webdav` saw a `renamed.txt` left
-        // by `rename_moves_a_file_over_webdav` from an earlier process with the same pid (223 stale roots
-        // were sitting in the temp dir at the time). A nanosecond stamp makes reuse collide only if two
-        // roots are created in the same nanosecond by the same pid with the same counter.
+        // `(pid, n)` alone is NOT unique across runs: Windows reuses process ids freely, so a later run
+        // could land on a previous run's root and inherit its files if that root somehow survived. That
+        // bit during CPE-1706 — `lists_stats_and_reads_over_webdav` saw a `renamed.txt` left by
+        // `rename_moves_a_file_over_webdav` from an earlier process with the same pid (223 stale roots
+        // were sitting in the temp dir at the time, back when nothing here cleaned up at all). A
+        // nanosecond stamp makes reuse collide only if two roots are created in the same nanosecond by
+        // the same pid with the same counter.
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -988,13 +1001,13 @@ mod tests {
         std::fs::create_dir_all(root.join("sub")).unwrap();
         std::fs::write(root.join("readme.txt"), FILE_BODY).unwrap();
         std::fs::write(root.join("sub").join("nested.txt"), b"deep").unwrap();
-        let root_ret = root.clone();
+        let root_for_thread = root.clone();
         std::thread::spawn(move || {
             for req in server.incoming_requests() {
-                handle(req, &root);
+                handle(req, &root_for_thread);
             }
         });
-        (format!("http://{addr}"), root_ret)
+        (format!("http://{addr}"), cpe_server::fsutil::ScratchDir::adopt(root))
     }
 
     // ---------------------------------------------------------------------------------------------
@@ -1187,7 +1200,7 @@ mod tests {
     fn a_read_that_runs_past_the_byte_cap_is_refused_rather_than_truncated() {
         // An ordinary file must round-trip untouched through the real read path — the cap must not be
         // something a normal download can feel.
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         assert_eq!(
             provider.read("/readme.txt").unwrap(),
@@ -1322,7 +1335,7 @@ mod tests {
 
     #[test]
     fn lists_stats_and_reads_over_webdav() {
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
 
         let mut names: Vec<_> =
@@ -1338,7 +1351,7 @@ mod tests {
 
     #[test]
     fn writes_mkdirs_and_deletes_round_trip() {
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
 
         provider.write("/notes.txt", b"remote write").expect("write");
@@ -1353,7 +1366,7 @@ mod tests {
 
     #[test]
     fn rename_moves_a_file_over_webdav() {
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         provider.rename("/readme.txt", "/renamed.txt").expect("MOVE");
         assert_eq!(provider.read("/renamed.txt").unwrap(), FILE_BODY);
@@ -2336,7 +2349,7 @@ mod tests {
     #[test]
     fn generic_transfer_walks_downloads_and_uploads_over_webdav() {
         // The provider-agnostic cpe_server::transfer works over the WebDAV transport too.
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         let cancel = AtomicBool::new(false);
 
@@ -2371,7 +2384,7 @@ mod tests {
     fn upload_tree_succeeds_when_the_remote_base_directory_already_exists() {
         // `/sub` is seeded by `spawn_webdav_server` (with `nested.txt` inside already) — uploading
         // into it must not trip this rig's honest, non-idempotent `MKCOL`'s `405` refusal.
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
 
         let src = std::env::temp_dir().join(format!("cpe-webdav-up-exists-{}", std::process::id()));
@@ -2397,7 +2410,7 @@ mod tests {
 
     #[test]
     fn upload_tree_succeeds_for_a_multi_level_remote_root_whose_parents_do_not_exist() {
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let mut provider = WebdavProvider::connect(&WebdavConfig::new(&base));
 
         let src = std::env::temp_dir().join(format!("cpe-webdav-up-multilevel-{}", std::process::id()));
@@ -2422,7 +2435,7 @@ mod tests {
 
     #[test]
     fn a_missing_path_is_an_error() {
-        let base = spawn_webdav_server();
+        let (base, _root) = spawn_webdav_server();
         let provider = WebdavProvider::connect(&WebdavConfig::new(&base));
         assert!(provider.read("/nope.txt").unwrap_err().contains("404"));
         assert!(provider.stat("/nope").is_err());

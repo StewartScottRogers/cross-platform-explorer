@@ -208,15 +208,9 @@ pub fn snapshot_run_due(
 mod tests {
     use super::*;
     use crate::ctx::HeadlessCtx;
-    use std::path::PathBuf;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-snapsched-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-snapsched-{tag}"))
     }
 
     fn rule(root: &str, interval_s: u64, enabled: bool) -> ScheduleRule {
@@ -283,7 +277,7 @@ mod tests {
     #[test]
     fn reschedule_persists_the_migration_and_a_later_run_uses_the_new_root() {
         let base = scratch("reschedule-persist");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set_rule(&ctx, rule("/watched", 60, true)).unwrap();
 
         let migrated = reschedule(&ctx, "/watched", "/watched-renamed").unwrap();
@@ -301,7 +295,7 @@ mod tests {
     #[test]
     fn reschedule_is_a_noop_and_skips_the_write_when_nothing_matches() {
         let base = scratch("reschedule-noop");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set_rule(&ctx, rule("/kept", 60, true)).unwrap();
 
         let result = reschedule(&ctx, "/absent", "/elsewhere").unwrap();
@@ -315,7 +309,7 @@ mod tests {
     #[test]
     fn set_then_get_round_trips_and_list_reflects_it() {
         let base = scratch("crud-roundtrip");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert!(list_rules(&ctx).unwrap().is_empty());
 
         set_rule(&ctx, rule("/photos", 3600, true)).unwrap();
@@ -327,7 +321,7 @@ mod tests {
     #[test]
     fn set_replaces_same_root_rule_and_remove_deletes_only_that_one() {
         let base = scratch("crud-replace");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set_rule(&ctx, rule("/a", 100, true)).unwrap();
         set_rule(&ctx, rule("/b", 200, true)).unwrap();
         set_rule(&ctx, rule("/a", 999, false)).unwrap(); // replace /a
@@ -345,7 +339,7 @@ mod tests {
     #[test]
     fn missing_and_corrupt_catalog_are_tolerated_as_empty() {
         let base = scratch("crud-corrupt");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert!(list_rules(&ctx).unwrap().is_empty(), "no file yet");
 
         let dir = ctx.app_config_dir().unwrap();
@@ -401,7 +395,7 @@ mod tests {
     #[test]
     fn run_due_captures_and_prunes_only_due_enabled_roots() {
         let app = scratch("rundue-app");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root_a = scratch("rundue-root-a");
         let root_b = scratch("rundue-root-b");
         fs::write(root_a.join("f.txt"), b"a content").unwrap();
@@ -430,7 +424,7 @@ mod tests {
     #[test]
     fn run_due_is_deterministic_with_an_injected_now_and_last_run_map() {
         let app = scratch("rundue-deterministic");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("rundue-det-root");
         fs::write(root.join("f.txt"), b"content").unwrap();
         let root_s = root.to_string_lossy().to_string();
@@ -454,7 +448,7 @@ mod tests {
     #[test]
     fn run_due_applies_retention_pruning_to_each_captured_root() {
         let app = scratch("rundue-retain-app");
-        let ctx = HeadlessCtx::new(&app);
+        let ctx = HeadlessCtx::new(app.to_path_buf());
         let root = scratch("rundue-retain-root");
         let root_s = root.to_string_lossy().to_string();
         fs::write(root.join("f.txt"), b"v1").unwrap();

@@ -2122,6 +2122,235 @@ pub fn staging_failure_message(mechanism: &str) -> String {
     )
 }
 
+/// Owns a per-test scratch directory under `%TEMP%` and removes it (recursively, best-effort) when
+/// dropped — including when a test panics mid-assertion. **CPE-1693.**
+///
+/// Before this, every `scratch()`-style test helper across the tree (and there were ~70 near-identical
+/// copies, one per test module) returned a bare [`PathBuf`] and relied on a manual `remove_dir_all` at
+/// the end of the test — which never runs on a panicking assertion, and, per the CPE-1693 PR #924
+/// review, is not reliable even on a green run (one of five orphaned trees the review measured leaked
+/// on a passing test). The count reached **~1.29 million** leftover `cpe-*` directories in `%TEMP%`
+/// before this landed, and started causing a real, non-deterministic test failure: enough leaked
+/// `%TEMP%/cpe-archive/<pid>-<seq>` directories that a reused PID collided with its own scratch name.
+///
+/// Fixing this at the *helper* level rather than test-by-test closes the whole class at once: a new
+/// test that calls `scratch()` cannot reintroduce the leak even if its author never thinks about
+/// cleanup, because the directory's owner is the return value itself, not a `remove_dir_all` the author
+/// has to remember to write (and to write *before* the assertions, not after).
+///
+/// Derefs to [`Path`], and implements [`AsRef<Path>`], so call sites that only ever read the path
+/// (`d.join(..)`, `&d`, `d.exists()`, `d.display()`, …) keep compiling unchanged. Two things do *not*
+/// carry over automatically:
+/// - `d.clone()` — deliberately not [`Clone`]: cloning would let the directory outlive the guard that
+///   is supposed to own it. Use `d.to_path_buf()` for an owned copy of the *path* (the clone doesn't
+///   extend the directory's lifetime).
+/// - Passing `scratch(..)` inline as a temporary that is never bound to a `let` — the guard would drop,
+///   and delete the directory, at the end of that statement. Bind it (`let d = scratch(..);`) for as
+///   long as the directory needs to exist.
+pub struct ScratchDir(PathBuf);
+
+impl ScratchDir {
+    /// The path this guard owns.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Wrap an **already-created** directory so it is removed on drop, without the `<prefix>-<pid>-<seq>`
+    /// naming [`scratch_dir`] imposes. For callers with their own directory-naming scheme that
+    /// `create_dir_all`s the path themselves — e.g. a nested per-spawn subdirectory under one shared
+    /// parent (`cpe-s3`'s and `cpe-webdav`'s fixture spawners, CPE-1693) — and only need the *cleanup*
+    /// half of what [`scratch_dir`] does. `path` must already exist; this does not create it.
+    ///
+    /// # Panics
+    ///
+    /// **Constrained deliberately (PR #934 review finding 2).** As first written this took *any* path
+    /// and armed a recursive delete on it — an unconditional `remove_dir_all` foot-gun sitting in a
+    /// test-support API, where one wrong argument wipes something real. It now refuses anything that
+    /// does not resolve to an existing directory *strictly inside* the scratch root
+    /// ([`std::env::temp_dir`]):
+    ///
+    /// - **a relative path is refused outright**, before anything else. It would be resolved against the
+    ///   process-wide current directory, and nothing pins that between the check and the drop;
+    /// - both sides are [`canonicalize`](std::fs::canonicalize)d first, so the containment check is on
+    ///   real resolved paths — a symlink or a Windows directory junction that *points* out of `%TEMP%`
+    ///   is refused, not followed (the same hazard the purge script's `/XJ` covers);
+    /// - the root itself is refused, since `starts_with` would otherwise accept it (a path is its own
+    ///   prefix) and the guard would take `%TEMP%` with it on drop;
+    /// - a path that doesn't exist is refused, which is also how the "must already exist" contract above
+    ///   stops being merely a comment.
+    ///
+    /// **The guard owns the *resolved* path, not the argument** (PR #934 re-review). Storing the raw
+    /// argument meant what was checked was not what was deleted: the second re-review's probe defeated
+    /// the containment check with `adopt("victim")` and a current directory inside `%TEMP%` — the check
+    /// resolved it one way, and `Drop`'s `remove_dir_all` was free to resolve it another. Keeping the
+    /// canonical path also shrinks the residual TOCTOU window for absolute arguments, since a fully
+    /// resolved path has no reparse points left in it to be re-pointed after the check.
+    ///
+    /// It panics rather than returning a `Result` because every caller is a test fixture: there is no
+    /// recovery, and a panic names the offending path at the call site.
+    pub fn adopt(path: PathBuf) -> Self {
+        assert!(
+            path.is_absolute(),
+            "ScratchDir::adopt refused {}: it is a relative path. A relative path is resolved against \
+             the process-wide current directory, which nothing pins between this check and the \
+             recursive delete on drop — pass an absolute path inside the scratch root instead \
+             (CPE-1693 PR #934 re-review).",
+            path.display()
+        );
+        let root = std::env::temp_dir();
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|e| {
+            panic!(
+                "ScratchDir::adopt: cannot canonicalize the scratch root {} ({e}) — refusing to arm a \
+                 recursive delete without a root to check containment against",
+                root.display()
+            )
+        });
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
+            panic!(
+                "ScratchDir::adopt refused {}: it cannot be resolved ({e}). adopt() takes an \
+                 already-created directory inside the scratch root {}; it never creates one.",
+                path.display(),
+                root.display()
+            )
+        });
+        assert!(
+            canonical.is_dir(),
+            "ScratchDir::adopt refused {}: it is not a directory. adopt() arms a recursive delete on \
+             drop and only ever owns a scratch *directory*.",
+            path.display()
+        );
+        assert!(
+            canonical != canonical_root && canonical.starts_with(&canonical_root),
+            "ScratchDir::adopt refused {}: it resolves to {}, which is not strictly inside the scratch \
+             root {}. adopt() arms a recursive delete on drop, so it must never be pointed outside \
+             %TEMP% (CPE-1693 PR #934 review finding 2).",
+            path.display(),
+            canonical.display(),
+            canonical_root.display()
+        );
+        // The RESOLVED path, never the argument — see the note above. What is checked must be what is
+        // deleted; storing `path` here is exactly the defect the re-review's probe exploited.
+        ScratchDir(de_verbatim(canonical))
+    }
+}
+
+/// Re-spell a canonical Windows path without its `\\?\` verbatim prefix, leaving every other platform
+/// (and every non-drive verbatim form) untouched.
+///
+/// [`std::fs::canonicalize`] returns extended-length paths on Windows. Storing one verbatim inside a
+/// [`ScratchDir`] is *correct* — same directory, fully resolved — but it leaks an unusual spelling into
+/// everything that reads the guard, and two of `cpe-webdav`'s CPE-1726/CPE-1730 root-replacement tests
+/// caught exactly that: `\\?\C:\…` normalises to `//?/C:/…`, which no longer looks like the absolute path
+/// their fixtures assert on. `scratch_dir`, the constructor the other 70 helpers use, hands back a plain
+/// `temp_dir().join(..)`, so this also keeps the two constructors spelling paths the same way.
+///
+/// Only the plain drive form (`\\?\C:\…`) is stripped. `\\?\UNC\server\share` is deliberately left
+/// verbatim: naively removing the prefix there would produce `UNC\server\share`, a different path.
+/// Operates on `OsString` rather than a lossy `to_string_lossy`, so a non-UTF-8 component can't be
+/// mangled on the way through.
+fn de_verbatim(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(prefix)) = p.components().next() {
+            if let Prefix::VerbatimDisk(letter) = prefix.kind() {
+                let mut rebuilt = std::ffi::OsString::from(format!("{}:\\", letter as char));
+                // Skip the Prefix and the RootDir that always follows it, keep the rest verbatim-free.
+                let rest: PathBuf = p.components().skip(2).collect();
+                rebuilt.push(rest.as_os_str());
+                return PathBuf::from(rebuilt);
+            }
+        }
+    }
+    p
+}
+
+impl std::ops::Deref for ScratchDir {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for ScratchDir {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Alongside [`AsRef<Path>`](ScratchDir#impl-AsRef<Path>-for-ScratchDir), so `&ScratchDir` satisfies the
+/// same `impl Into<PathBuf>`-style bounds a plain `&Path`/`&PathBuf` does (std's blanket `From<&T> for
+/// PathBuf where T: AsRef<OsStr>`) without every call site needing its own `.to_path_buf()`. Borrowing
+/// only — it cannot consume the guard, so it doesn't touch the early-drop hazard documented on
+/// [`ScratchDir`] itself (that hazard is specifically about an *owned* `ScratchDir` being dropped as an
+/// unbound temporary; nothing here changes when that drop happens).
+impl AsRef<std::ffi::OsStr> for ScratchDir {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.0.as_ref()
+    }
+}
+
+impl std::fmt::Debug for ScratchDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        remove_dir_all_with_retries(&self.0);
+    }
+}
+
+/// `remove_dir_all`, retried a few times with a short backoff before giving up silently.
+///
+/// **Measured for CPE-1693, not theoretical:** a full-workspace `cargo test` run left real, freshly
+/// created `cpe-*` directories behind — hundreds concentrated in the binary-fixture truncation sweeps
+/// (`binary_preview`/`dotnet_metadata`), plus a handful scattered across ordinary single-scratch tests —
+/// even though every one of those same tests, run in isolation or a small group, cleaned up perfectly.
+/// That isolation-vs-full-suite gap, concentrated on the fixtures that most resemble real executables
+/// (PE/ELF/Mach-O), is the signature of Windows Defender's real-time scanner transiently holding a
+/// handle on a just-written file under heavy parallel `cargo test` load — exactly the interference this
+/// repo's own `MEMORY.md` already documents ("Defender quarantines test binaries... os error 225 is
+/// Defender, not a code fail"). A single `remove_dir_all` attempt swallows that as a silent failure (the
+/// pre-CPE-1693 trailing `let _ = fs::remove_dir_all(..)` calls had the identical exposure — this isn't a
+/// regression, it's the first time anything retries). A short bounded retry is the standard mitigation
+/// for a transient Windows sharing violation and costs nothing when there's no contention (the common
+/// case exits on the first attempt).
+fn remove_dir_all_with_retries(path: &Path) {
+    const ATTEMPTS: u32 = 5;
+    for attempt in 0..ATTEMPTS {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) if attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(std::time::Duration::from_millis(25 * (attempt as u64 + 1)));
+            }
+            Err(_) => {} // Out of attempts — give up silently, same as every pre-CPE-1693 cleanup call.
+        }
+    }
+}
+
+/// Create a uniquely-named directory under `%TEMP%` and hand back the [`ScratchDir`] guard that owns
+/// it (CPE-1693). `prefix` should already carry the caller's own module tag (e.g.
+/// `"cpe-fsutil-contained"`) — this appends only the per-process, per-call disambiguator (`-<pid>-<seq>`)
+/// every pre-CPE-1693 `scratch()` helper already appended, so directory names are unchanged and any
+/// tooling that greps for a specific `cpe-<module>-` prefix keeps working.
+///
+/// **Not** `#[cfg(test)]`-gated, for the same reason [`make_dangling_link`] isn't: `cpe-server`'s
+/// dependents (`src-tauri`, `cpe-net`, `cpe-webdav`, `cpe-s3`, …) need it from their *own* test builds,
+/// and `#[cfg(test)]` is per-crate — an item gated on it in this crate is invisible when a downstream
+/// crate compiles its own tests. One implementation, reachable everywhere a `scratch()`-style helper
+/// used to hand-roll its own, is the point of this ticket.
+pub fn scratch_dir(prefix: &str) -> ScratchDir {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&d).unwrap();
+    ScratchDir(d)
+}
+
 /// Test-only mechanism for the `fs::metadata`-based CPE-1692 guards in this crate (`links::link_status`,
 /// `dangling_links_scan`'s target-resolution check): deny traversal on `dir` itself so a `stat` of
 /// anything reached *through* it fails with a genuine (non-`NotFound`) error.
@@ -2524,6 +2753,232 @@ mod tests {
         assert_eq!(to_epoch_ms(UNIX_EPOCH), Some(0));
     }
 
+    /// **CPE-1693, the assertion the whole ticket rests on.** `scratch_dir` is armed — and must already
+    /// own the directory — *before* the panic below runs, exactly the ordering every converted test
+    /// module now gets for free just by calling `scratch()`. Panics mid-assertion via
+    /// `std::panic::catch_unwind`, so a leak here doesn't crash the test binary and abort every other
+    /// guard's own drop — it lets this one test observe, on the far side of the unwind, whether the
+    /// directory it created is gone.
+    ///
+    /// Before CPE-1693 every `scratch()`-style helper in this tree returned a bare `PathBuf` and relied
+    /// on a manual `remove_dir_all` written *after* the assertions — which this exact panic shape would
+    /// have skipped, which is how the tree reached ~1.29 million leaked `cpe-*` directories in `%TEMP%`
+    /// (see the ticket's Work Log for the measured before/after counts across a full `cargo test`).
+    #[test]
+    fn scratch_dir_guard_removes_the_directory_even_when_the_caller_panics_mid_assertion() {
+        let dir = scratch_dir("cpe-fsutil-panic-proof");
+        let path = dir.path().to_path_buf();
+        assert!(path.is_dir(), "sanity: the guard must actually own a real directory before we panic");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // `dir` is moved into the closure so it drops during the unwind below, not after — the
+            // ordering the whole ticket is about. If `scratch_dir` regressed to returning a bare
+            // `PathBuf` again, this line wouldn't compile (nothing to move-and-drop), and if the `Drop`
+            // impl regressed to a no-op, `path.is_dir()` below would still read `true`.
+            let _armed = dir;
+            panic!("CPE-1693 proof: deliberate panic — the guard above must already be armed");
+        }))
+        .is_err();
+
+        assert!(panicked, "the proof only proves anything if the inner closure actually panicked");
+        assert!(
+            !path.is_dir(),
+            "CPE-1693 REGRESSION: {} still exists after its owning ScratchDir panicked out of scope — \
+             the guard did not clean up on the unwind path, which is the entire point of this ticket",
+            path.display()
+        );
+    }
+
+    /// A directory that is definitely **outside** the scratch root, created fresh for one refusal probe.
+    /// Preferred site is next to the test binary (`target/<profile>/deps/`): already build output,
+    /// already gitignored, and — the point — not under `std::env::temp_dir()`. Falls back to the crate
+    /// directory if a CI runner ever points `TMPDIR` at an ancestor of the build directory, so the probe
+    /// can't fail for a reason that has nothing to do with what it is testing.
+    fn out_of_root_probe_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::fs::canonicalize(std::env::temp_dir()).expect("canonicalize temp_dir");
+        let candidates = [
+            std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        ];
+        let base = candidates
+            .into_iter()
+            .flatten()
+            .find(|p| std::fs::canonicalize(p).map(|c| !c.starts_with(&root)).unwrap_or(false))
+            .unwrap_or_else(|| {
+                panic!("no writable directory outside the scratch root {} to probe with", root.display())
+            });
+        let d = base.join(format!("cpe-1693-adopt-probe-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// **CPE-1693 PR #934 review finding 2.** `ScratchDir::adopt` arms an unconditional recursive delete
+    /// on drop, and before this fix it accepted *any* path — a test-support API one typo away from
+    /// `remove_dir_all`-ing something real. It must refuse a path that does not resolve inside the
+    /// scratch root.
+    ///
+    /// The probe deliberately plants a canary file inside the out-of-root directory and checks it
+    /// **survived**, so this stays red in both of the ways the bug can be present: `adopt` not refusing
+    /// at all, and `adopt` "refusing" only after its guard has already eaten the directory. `catch_unwind`
+    /// rather than `#[should_panic]` so the probe directory is cleaned up either way.
+    #[test]
+    fn adopt_refuses_a_path_outside_the_scratch_root() {
+        let outside = out_of_root_probe_dir("outside");
+        let canary = outside.join("canary.txt");
+        std::fs::write(&canary, b"this file must survive a refused adopt").unwrap();
+
+        // Sanity: the whole probe is meaningless if the "outside" path is somehow inside %TEMP%.
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert!(
+            !std::fs::canonicalize(&outside).unwrap().starts_with(&root),
+            "probe setup is wrong: {} is inside the scratch root {}",
+            outside.display(),
+            root.display()
+        );
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Pre-fix this returns a guard, and the guard drops right here — recursively deleting a
+            // directory that was never scratch space.
+            let _guard = ScratchDir::adopt(outside.clone());
+        }))
+        .is_err();
+
+        let survived = canary.is_file();
+        let _ = std::fs::remove_dir_all(&outside);
+
+        assert!(
+            refused,
+            "CPE-1693 review finding 2: ScratchDir::adopt accepted {}, which is outside the scratch \
+             root — adopt() is an unconstrained recursive-delete primitive again",
+            outside.display()
+        );
+        assert!(
+            survived,
+            "CPE-1693 review finding 2: ScratchDir::adopt DELETED {} — an out-of-root path must be \
+             refused before any guard that could remove it is constructed",
+            outside.display()
+        );
+    }
+
+    /// The other half of the containment rule: the scratch root *itself* is not adoptable. `starts_with`
+    /// alone would say yes (a path is a prefix of itself), and a guard over `%TEMP%` would wipe every
+    /// other test's scratch space — and everything else in the temp directory — on drop.
+    #[test]
+    fn adopt_refuses_the_scratch_root_itself() {
+        let root = std::env::temp_dir();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ScratchDir::adopt(root.clone());
+            // If this ever stops panicking, do NOT let the guard drop: leaking the (already existing)
+            // temp root is infinitely preferable to removing it.
+            std::mem::forget(_guard);
+        }))
+        .is_err();
+        assert!(
+            refused,
+            "CPE-1693 review finding 2: ScratchDir::adopt accepted the scratch root {} itself",
+            root.display()
+        );
+    }
+
+    /// A path that doesn't exist can't be shown to be inside the root, so it is refused too — which also
+    /// enforces `adopt`'s documented "`path` must already exist" contract instead of leaving it a comment.
+    #[test]
+    fn adopt_refuses_a_path_that_does_not_exist() {
+        let missing = std::env::temp_dir().join("cpe-1693-adopt-nonexistent-probe-never-created");
+        assert!(!missing.exists(), "probe setup: the path must not exist");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ScratchDir::adopt(missing.clone());
+            std::mem::forget(_guard);
+        }))
+        .is_err();
+        assert!(refused, "ScratchDir::adopt accepted a path that does not exist");
+    }
+
+    /// **CPE-1693 PR #934 re-review, the defeat.** `adopt` validated `canonicalize(path)` and then stored
+    /// the *raw argument*, so what was checked was not what was deleted. The re-review's probe drove that
+    /// wedge with a relative argument and a current directory inside `%TEMP%`; this test pins the same
+    /// defect without touching `set_current_dir`, which is process-global and would race every other test
+    /// in this parallel harness.
+    ///
+    /// Instead it hands `adopt` a **non-canonical absolute spelling** of a legitimate in-root directory
+    /// (`…/child/../child`). Both spellings resolve to the same directory, so the containment check passes
+    /// either way — the only thing this can detect is whether the guard kept the argument or the resolved
+    /// path. Before the fix it stored the raw `..`-laden spelling and this is red.
+    #[test]
+    fn adopt_stores_the_resolved_path_not_the_raw_argument() {
+        let parent = scratch_dir("cpe-fsutil-adopt-resolve");
+        let nested = parent.join("child");
+        std::fs::create_dir_all(&nested).unwrap();
+        let resolved = std::fs::canonicalize(&nested).unwrap();
+
+        // A different spelling of exactly the same directory.
+        let noncanonical = parent.join("child").join("..").join("child");
+        assert_ne!(noncanonical, resolved, "probe setup: the two spellings must differ textually");
+
+        let guard = ScratchDir::adopt(noncanonical.clone());
+
+        // The discriminator: a resolved path has no `..` left in it. The raw argument does. This is the
+        // platform-neutral form of the assertion — comparing against `canonicalize`'s own output would
+        // pin Windows' `\\?\` spelling, which `de_verbatim` deliberately strips back off.
+        assert!(
+            !guard.path().components().any(|c| matches!(c, std::path::Component::ParentDir)),
+            "CPE-1693 re-review: ScratchDir::adopt stored {} — the argument, with its `..` intact, not \
+             the path it actually validated. What is checked must be what is deleted.",
+            guard.path().display()
+        );
+        assert_eq!(
+            std::fs::canonicalize(guard.path()).unwrap(),
+            resolved,
+            "the stored path must still denote the very directory that was validated"
+        );
+        assert!(guard.path().is_absolute(), "the stored path must remain absolute");
+    }
+
+    /// The other half of the same defect, closed at the front door: a relative argument is refused before
+    /// anything resolves it. Asserting on the *panic message* is what makes this a real before/after —
+    /// pre-fix `adopt("cpe-1693-relative-probe")` did panic, but from `canonicalize` failing ("cannot be
+    /// resolved"), which is an accident of the probe path not existing rather than a refusal of relative
+    /// paths. With a current directory inside `%TEMP%` and a directory of that name present, the pre-fix
+    /// code sailed through.
+    #[test]
+    fn adopt_refuses_a_relative_path_by_name_not_by_accident() {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = ScratchDir::adopt(PathBuf::from("cpe-1693-relative-probe"));
+            std::mem::forget(guard); // never let an unexpectedly-constructed guard delete anything
+        }))
+        .expect_err("ScratchDir::adopt must refuse a relative path");
+
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string();
+        assert!(
+            msg.contains("it is a relative path"),
+            "CPE-1693 re-review: adopt rejected the relative path for the wrong reason — it must refuse \
+             it *as relative*, not merely fail to resolve it. Panic was: {msg}"
+        );
+    }
+
+    /// …and the legitimate case still works, so the containment check can't be "refuse everything".
+    /// Mirrors what `cpe-s3`'s and `cpe-webdav`'s fixture spawners actually do: create a nested
+    /// directory under a temp-rooted parent with their own naming, then hand it to `adopt`.
+    #[test]
+    fn adopt_accepts_a_directory_nested_inside_the_scratch_root() {
+        let parent = scratch_dir("cpe-fsutil-adopt-ok");
+        let nested = parent.join("0");
+        std::fs::create_dir_all(&nested).unwrap();
+        {
+            let guard = ScratchDir::adopt(nested.clone());
+            assert!(guard.is_dir(), "adopt must hand back a usable guard over the directory");
+        }
+        assert!(!nested.exists(), "the adopted guard must still remove its directory on drop");
+    }
+
     /// CPE-1717. The whole policy as a table, because the policy is the deliverable and it has to be
     /// checkable without setting process-global environment variables under a parallel harness.
     ///
@@ -2728,13 +3183,8 @@ mod tests {
         assert!(!win32_name_is_unstable(""));
     }
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-fsutil-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-fsutil-{tag}"))
     }
 
     /// A NUL-terminated wide string for the Win32 calls the CPE-1739 tests make directly. `std` exposes

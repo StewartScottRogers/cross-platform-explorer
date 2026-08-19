@@ -149,14 +149,9 @@ pub fn decode_thumb_image(path: &Path, max_edge: u32) -> Result<(DynamicImage, V
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-thumbsrc-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-thumbsrc-{tag}"))
     }
 
     /// CPE-1268 regression pin for CPE-1267 (frontend/backend thumbnail-format drift). This is the

@@ -241,15 +241,9 @@ mod tests {
     use crate::ffmpeg_util::ffmpeg_available;
     use std::fs;
     use std::io::Cursor;
-    use std::path::PathBuf;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn scratch(tag: &str) -> PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-waveform-test-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-waveform-test-{tag}"))
     }
 
     // --- CPE-1478 CRITICAL: bounded read ------------------------------------------------------------

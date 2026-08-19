@@ -255,13 +255,8 @@ mod tests {
     use crate::ctx::HeadlessCtx;
 
     /// A unique temp dir per call (parallel-test-safe).
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-tags-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-tags-{tag}"))
     }
 
     #[test]
@@ -388,7 +383,7 @@ mod tests {
     #[test]
     fn ctx_entry_points_persist_and_reload() {
         let base = scratch("tags_ctx");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert!(load(&ctx).unwrap().is_empty());
         set(&ctx, "/p", vec!["a".into(), "b".into()], "red".into()).unwrap();
         // Reloading through the ctx sees the persisted entry.
@@ -408,7 +403,7 @@ mod tests {
     #[test]
     fn retag_through_ctx_migrates_a_directorys_whole_tagged_subtree() {
         let base = scratch("tags_ctx_subtree");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set(&ctx, "/proj", vec!["work".into()], "".into()).unwrap();
         set(&ctx, "/proj/notes.txt", vec!["keep".into()], "blue".into()).unwrap();
 
@@ -431,7 +426,7 @@ mod tests {
     #[test]
     fn import_rejects_malformed_json_and_leaves_the_store_intact() {
         let base = scratch("tags_import_bad");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set(&ctx, "/keep", vec!["mine".into()], "red".into()).unwrap();
 
         let err = import(&ctx, "{ this is not json ]").unwrap_err();
@@ -447,7 +442,7 @@ mod tests {
     #[test]
     fn import_merges_valid_json_into_the_current_store() {
         let base = scratch("tags_import_ok");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set(&ctx, "/a", vec!["keep".into()], "red".into()).unwrap();
 
         let json = r#"{"/a":{"tags":["added"],"label":"blue"},"/b":{"tags":["new"],"label":""}}"#;

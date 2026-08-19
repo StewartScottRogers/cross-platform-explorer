@@ -716,17 +716,16 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::AtomicU64;
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-index-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-index-{tag}"))
     }
 
     /// Build a small tree, index it, and assert queries return the right names.
-    fn sample_tree() -> std::path::PathBuf {
+    /// CPE-1693: returns the [`crate::fsutil::ScratchDir`] guard itself (it derefs to `Path`, so every
+    /// existing call site keeps working) rather than a bare `PathBuf` derived from it — the earlier shape
+    /// dropped (and deleted) the scratch dir the moment this function returned, before any caller could
+    /// use it.
+    fn sample_tree() -> crate::fsutil::ScratchDir {
         let d = scratch("tree");
         fs::create_dir_all(d.join("src")).unwrap();
         fs::create_dir_all(d.join("docs")).unwrap();

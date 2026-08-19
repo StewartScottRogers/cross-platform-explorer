@@ -220,13 +220,8 @@ mod tests {
     use std::fs;
     use std::io::Cursor;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-simimg-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-simimg-{tag}"))
     }
 
     /// A horizontal gradient (brightness increases left→right), encoded at `w×h`. Monotonic ⇒ every dHash

@@ -607,7 +607,6 @@ fn join_into(manifest: &SplitManifest, dir: &Path, out_path: &Path) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU64, Ordering};
 
     /// CPE-1705 at `join_files`: the output slot's guard was `out_path.exists()`, and `join_into` opens
     /// `out_path` with `File::create`, which **truncates**. Worse, the recovery path `remove_file`s
@@ -905,17 +904,6 @@ mod tests {
         }
     }
 
-    /// Removes `dir` on drop, even if an assertion below panics — armed *before* any assertion runs, per
-    /// CPE-1693 (this repo has leaked 1.2M+ temp dirs from tests that `return`/panic before their manual
-    /// `remove_dir_all`). Same idiom as `archive.rs`'s `RemoveOnDrop` (CPE-1758), unconditional here
-    /// because every CPE-1729 test below needs it, not just a `#[cfg(windows)]` leg.
-    struct RemoveOnDrop(PathBuf);
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
     /// **CPE-1729, the measured case.** Before this ticket, a dangling link at `out_dir` made
     /// `create_dir_all` fail with `Err(e.to_string())` — the OS's raw wording, no path anywhere in it,
     /// and "file" for what is a directory problem (module doc, row 5):
@@ -929,7 +917,6 @@ mod tests {
     #[test]
     fn cpe_1729_dangling_out_dir_names_the_path_and_the_link_not_just_the_os_text() {
         let d = scratch("cpe1729-dangling");
-        let _cleanup = RemoveOnDrop(d.clone());
         let src = d.join("payload.bin");
         std::fs::write(&src, pattern(300)).unwrap();
 
@@ -969,7 +956,6 @@ mod tests {
     #[test]
     fn cpe_1729_file_at_out_dir_says_file_not_link() {
         let d = scratch("cpe1729-file");
-        let _cleanup = RemoveOnDrop(d.clone());
         let src = d.join("payload.bin");
         std::fs::write(&src, pattern(300)).unwrap();
 
@@ -1007,14 +993,17 @@ mod tests {
         std::fs::create_dir_all(&locked).unwrap();
         let out_dir = locked.join("outs");
 
-        struct Cleanup(PathBuf, PathBuf); // (scratch root, locked dir whose deny must be undone first)
-        impl Drop for Cleanup {
+        // CPE-1693: `d`'s own `ScratchDir` guard now owns the recursive removal (it drops after this
+        // one, since Rust drops locals in reverse declaration order) — this guard only has to undo the
+        // deny ACE on `locked` first, or the scratch guard's `remove_dir_all` could fail/partially fail
+        // while the ACE is still in effect.
+        struct UndoDeny(PathBuf);
+        impl Drop for UndoDeny {
             fn drop(&mut self) {
-                crate::fsutil::undo_deny_dir_traversal(&self.1);
-                let _ = std::fs::remove_dir_all(&self.0);
+                crate::fsutil::undo_deny_dir_traversal(&self.0);
             }
         }
-        let _cleanup = Cleanup(d.clone(), locked.clone());
+        let _undo_deny = UndoDeny(locked.clone());
 
         if !crate::fsutil::deny_dir_traversal(&locked, &out_dir) {
             crate::skip_notice!(
@@ -1044,7 +1033,6 @@ mod tests {
     #[test]
     fn cpe_1729_live_link_to_a_file_says_file_not_leads_nowhere() {
         let d = scratch("cpe1729-live-file-link");
-        let _cleanup = RemoveOnDrop(d.clone());
         let src = d.join("payload.bin");
         std::fs::write(&src, pattern(300)).unwrap();
 
@@ -1093,12 +1081,8 @@ mod tests {
         );
     }
 
-    fn scratch(tag: &str) -> PathBuf {
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-splitjoin-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-splitjoin-{tag}"))
     }
 
     /// A deterministic, non-repeating-enough byte stream so a byte-flip or truncation is detectable

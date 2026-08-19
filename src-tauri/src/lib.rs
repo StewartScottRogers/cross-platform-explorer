@@ -12731,32 +12731,53 @@ mod agent_watch_tests {
     /// Build a real `notify` watcher over a fresh temp subdir so an `AgentWatch` can be inserted in a
     /// test without any Tauri machinery. The receiver is dropped immediately: we only assert on the
     /// map's lifecycle (arm/disarm/clear), not on emitted events.
-    fn make_watch(tag: &str) -> AgentWatch {
+    ///
+    /// **CPE-1693 (PR #934 re-review, the 69th helper).** Returns the owning [`ScratchDir`] alongside the
+    /// watch. This helper was invisible to the first census because that filtered on *return type* and
+    /// this returns a domain struct, not a path — and it was worse than the 68th: `sched_scratch` at least
+    /// had a trailing `remove_dir_all` at its call sites, so it leaked only on a panicking assertion,
+    /// whereas nothing anywhere removed these. Measured: two green tests left 6 directories behind.
+    /// The old `cpe1099-` name also fell outside the purge script's `cpe-*` filter, so the backlog it
+    /// built was unpurgeable as well as uncounted; the new prefix brings it back in scope.
+    ///
+    /// The caller must keep the guard alive for at least as long as the watch — see the drop-order note
+    /// at each call site.
+    fn make_watch(tag: &str) -> (cpe_server::fsutil::ScratchDir, AgentWatch) {
         use notify::{RecursiveMode, Watcher};
-        let dir = std::env::temp_dir().join(format!("cpe1099-{}-{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cpe_server::fsutil::scratch_dir(&format!("cpe-agent-watch-{tag}"));
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
         .unwrap();
         watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-        AgentWatch { _watcher: watcher, path: dir.to_string_lossy().into_owned() }
+        let watch = AgentWatch { _watcher: watcher, path: dir.to_string_lossy().into_owned() };
+        (dir, watch)
     }
 
     #[test]
     fn arming_two_sessions_then_stop_all_leaves_zero_watchers() {
+        // CPE-1693: declared FIRST so it drops LAST — locals drop in reverse declaration order, so every
+        // scratch directory outlives `state` and therefore every `notify` watcher holding a handle on it.
+        // Removing a directory out from under a live watcher is what would make this flaky on Windows.
+        let mut _dirs = Vec::new();
         let state = AgentWatchState::default();
         // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
         assert!(state.is_empty());
 
         // Arm two distinct sessions — both are watched concurrently (keyed by sessionId).
-        state.arm("s1".into(), make_watch("s1"));
-        state.arm("s2".into(), make_watch("s2"));
+        let (d, w) = make_watch("s1");
+        _dirs.push(d);
+        state.arm("s1".into(), w);
+        let (d, w) = make_watch("s2");
+        _dirs.push(d);
+        state.arm("s2".into(), w);
         assert_eq!(state.armed_count(), 2);
 
         // Re-arming an existing key replaces (drops) its prior watch, not add a second — still 2.
-        state.arm("s1".into(), make_watch("s1b"));
+        let (d, w) = make_watch("s1b");
+        _dirs.push(d);
+        state.arm("s1".into(), w);
         assert_eq!(state.armed_count(), 2);
 
         // Disarming one session removes only that key; the other keeps watching.
@@ -12775,32 +12796,46 @@ mod agent_watch_tests {
     /// test without any Tauri machinery (mirrors `make_watch` for `AgentWatch` above). The receiver is
     /// dropped immediately: this only asserts on the map's lifecycle (arm/stop/stop_all), not on
     /// emitted events — event→mutation behaviour is covered by `cpe_server::index_watch`'s own tests.
-    fn make_index_watch(tag: &str) -> IndexWatch {
+    ///
+    /// **CPE-1693 (PR #934 re-review, the 70th helper)** — same fix, same reason as `make_watch` above:
+    /// it returned a domain struct so the return-type census could not see it, nothing removed its
+    /// `cpe1138-` directories on any code path, and that prefix was outside the purge script's `cpe-*`
+    /// filter.
+    fn make_index_watch(tag: &str) -> (cpe_server::fsutil::ScratchDir, IndexWatch) {
         use notify::{RecursiveMode, Watcher};
-        let dir = std::env::temp_dir().join(format!("cpe1138-{}-{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cpe_server::fsutil::scratch_dir(&format!("cpe-index-watch-{tag}"));
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
         .unwrap();
         watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-        IndexWatch { _watcher: watcher, root: dir.to_string_lossy().into_owned() }
+        let watch = IndexWatch { _watcher: watcher, root: dir.to_string_lossy().into_owned() };
+        (dir, watch)
     }
 
     #[test]
     fn arming_two_volumes_then_stop_all_leaves_zero_watchers() {
+        // CPE-1693: declared FIRST so it drops LAST, after `state` and therefore after every watcher —
+        // see the same note in `arming_two_sessions_then_stop_all_leaves_zero_watchers`.
+        let mut _dirs = Vec::new();
         let state = IndexWatchState::default();
         // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
         assert_eq!(state.armed_count(), 0);
 
         // Arm two distinct volumes — both watched concurrently (keyed by volume_id).
-        state.arm(1, make_index_watch("v1"));
-        state.arm(2, make_index_watch("v2"));
+        let (d, w) = make_index_watch("v1");
+        _dirs.push(d);
+        state.arm(1, w);
+        let (d, w) = make_index_watch("v2");
+        _dirs.push(d);
+        state.arm(2, w);
         assert_eq!(state.armed_count(), 2);
 
         // Re-arming an already-watched volume (a rebuild) replaces its watch, not adds a second.
-        state.arm(1, make_index_watch("v1b"));
+        let (d, w) = make_index_watch("v1b");
+        _dirs.push(d);
+        state.arm(1, w);
         assert_eq!(state.armed_count(), 2);
 
         // Stopping one volume (`index_drop`) removes only that key; the other keeps watching.
@@ -13522,14 +13557,11 @@ mod tests {
     /// asking any provider at all, since a local listing was never routed through `RemoteListing`.
     #[test]
     fn list_dir_local_arm_always_reports_zero_filtered() {
+        // CPE-1693: `scratch()` now returns the guard itself, armed before any assertion below can
+        // panic and skip it — so CPE-1708's hand-rolled `Cleanup(PathBuf)` wrapper is redundant and has
+        // been dropped in the rebase. This is exactly the per-test boilerplate the helper-level fix
+        // exists to delete.
         let dir = scratch("cpe1708-local-filtered");
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(dir.clone()); // armed before any assertion below can panic and skip it
         fs::write(dir.join("a.txt"), b"hi").unwrap();
 
         let result = local_list_dir_result(dir.to_str().unwrap()).expect("local listing succeeds");
@@ -13692,13 +13724,43 @@ mod tests {
     use cpe_server::{checkpoint_store, snapshot_schedule};
     use std::collections::BTreeMap;
 
-    fn sched_scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-sched-tick-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    /// CPE-1693 (PR #934 review finding 1): the 68th scratch helper, missed by the sweep because it is
+    /// spelled `sched_scratch`, not `scratch`. Now delegates to the shared `scratch_dir` and hands back
+    /// the owning guard like every other one — same `cpe-sched-tick-<tag>-<pid>-<seq>` directory naming
+    /// as before, since `scratch_dir` appends the `-<pid>-<seq>` half itself.
+    fn sched_scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe-sched-tick-{tag}"))
+    }
+
+    /// **CPE-1693 PR #934 review finding 1.** The 68th scratch helper — the one the mechanical sweep
+    /// missed, because it is spelled `sched_scratch` rather than `scratch` and so didn't match the
+    /// transform's pattern. It sits in a crate the sweep *did* convert, three call sites deep, and every
+    /// one of those tests leaks its directory on a failing assertion exactly the way this whole ticket
+    /// is about.
+    ///
+    /// Same proof shape as `cpe_server::fsutil`'s: arm the helper, drop it on a panicking unwind, and
+    /// check the directory is gone on the far side. This compiles either way — with a bare `PathBuf`
+    /// (`to_path_buf` is `PathBuf`'s own method, `let _armed = dir;` just moves it) it fails on the last
+    /// assertion, which is precisely the "returns a bare path with no `Drop` guard" bug.
+    #[test]
+    fn sched_scratch_removes_its_directory_even_when_the_caller_panics_mid_assertion() {
+        let dir = sched_scratch("guard-proof");
+        let path = dir.to_path_buf();
+        assert!(path.is_dir(), "sanity: the helper must actually create a real directory");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _armed = dir;
+            panic!("CPE-1693 proof: deliberate panic — sched_scratch's guard must already be armed");
+        }))
+        .is_err();
+
+        assert!(panicked, "the proof only proves anything if the inner closure actually panicked");
+        assert!(
+            !path.is_dir(),
+            "CPE-1693 REGRESSION: {} still exists after sched_scratch's value went out of scope on a \
+             panicking unwind — this helper still hands back a bare path with no Drop guard",
+            path.display()
+        );
     }
 
     /// Off means off: with no rules at all a tick captures nothing, writes nothing to disk, and leaves
@@ -14655,11 +14717,8 @@ mod tests {
     // ---- file operations (CPE-030) ----
 
     /// Unique scratch dir per test, so tests don't collide when run in parallel.
-    fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("cpe_test_{tag}_{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("scratch dir");
-        dir
+    fn scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe_test_{tag}"))
     }
 
     #[test]
@@ -16048,16 +16107,11 @@ overlay / overlay rw,relatime 0 0
     // (The pure classifier test -- `classify_link_presence`'s taxonomy, no disk touched -- moved to
     // `cpe_server::fsutil`'s own test module under review, alongside the function itself: PR #924.)
     //
-    // Every test below arms a `Drop` guard for its scratch dir BEFORE any assertion, not just a trailing
-    // `remove_dir_all` -- a `Drop` is the only cleanup that still runs when an assertion panics, and a
-    // plain call after the assertions never reaches that path. Same requirement, same reason, as the
-    // `Restore` guard in `cpe_server::dispatch`'s and `split_join`'s tests.
-    struct Cpe1715Scratch(PathBuf);
-    impl Drop for Cpe1715Scratch {
-        fn drop(&mut self) {
-            let _ = fs::remove_dir_all(&self.0);
-        }
-    }
+    // Every test below relies on its scratch dir's own `ScratchDir` guard (armed the moment `scratch()`
+    // returns, i.e. before any assertion) rather than a manual per-test `Drop` wrapper -- CPE-1693 moved
+    // this guarantee to the `scratch()` helper itself, closing the whole class at once instead of test by
+    // test. Same requirement, same reason, as the `Restore` guard in `cpe_server::dispatch`'s and
+    // `split_join`'s tests before this ticket.
 
     /// `probe_name_pick_slot` itself, on a real dangling link: `try_exists` alone answers "nothing here",
     /// but the combined probe must answer "occupied".
@@ -16065,7 +16119,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_probe_name_pick_slot_reports_a_dangling_link_as_occupied() {
         use std::io::Write;
         let d = scratch("cpe1715_probe");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("dangling.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16095,7 +16148,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_unique_target_skips_a_dangling_link_and_picks_the_next_candidate() {
         use std::io::Write;
         let d = scratch("cpe1715_unique_target");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("report.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16127,7 +16179,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_skip_skips_a_dangling_link_instead_of_treating_it_as_free() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_skip");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("skip-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16156,7 +16207,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_keepboth_renames_past_a_dangling_link_instead_of_returning_it_as_free() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_keepboth");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("keep-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16194,7 +16244,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_resolve_conflict_overwrite_is_the_only_arm_that_touches_a_dangling_link() {
         use std::io::Write;
         let d = scratch("cpe1715_resolve_overwrite");
-        let _clean = Cpe1715Scratch(d.clone());
         let link = d.join("replace-me.txt");
         if !cpe_server::fsutil::make_dangling_link(&link) {
             let _ = writeln!(
@@ -16224,7 +16273,6 @@ overlay / overlay rw,relatime 0 0
     fn cpe_1715_do_move_into_never_renames_onto_a_dangling_link_the_link_survives_a_bulk_move() {
         use std::io::Write;
         let d = scratch("cpe1715_move_survives");
-        let _clean = Cpe1715Scratch(d.clone());
         let src_dir = d.join("src");
         let dest_dir = d.join("dest");
         fs::create_dir_all(&src_dir).unwrap();
@@ -16846,7 +16894,7 @@ overlay / overlay rw,relatime 0 0
             // assertion below is the point of the test and must not be defeated by the ACLs that staged it.
             if let Ok(user) = std::env::var("USERNAME") {
                 // Parent first — see the `Restore` impl above for why the order matters.
-                for p in [d.as_path(), victim.as_path()] {
+                for p in [d.path(), victim.as_path()] {
                     let _ = std::process::Command::new("icacls")
                         .arg(p)
                         .arg("/remove:d")

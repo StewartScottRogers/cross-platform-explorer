@@ -13,8 +13,6 @@
 
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use cpe_server::restore_plan::{plan_restore, RestoreOp};
 use cpe_server::revert_engine::execute_restore;
@@ -24,18 +22,8 @@ use cpe_server::snapshot::CaptureBudget;
 
 /// A unique scratch directory under the OS temp dir, mirroring the pattern already used by
 /// `snapshot_capture`'s and `revert_engine`'s own `#[cfg(test)]` blocks.
-fn scratch(tag: &str) -> PathBuf {
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-    let n = SEQ.fetch_add(1, Ordering::Relaxed);
-    let d = std::env::temp_dir().join(format!("cpe-checkpoint-roundtrip-{tag}-{}-{n}", std::process::id()));
-    fs::create_dir_all(&d).expect("create scratch dir");
-    d
-}
-
-fn cleanup(dirs: &[&PathBuf]) {
-    for d in dirs {
-        let _ = fs::remove_dir_all(d);
-    }
+fn scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+    cpe_server::fsutil::scratch_dir(&format!("cpe-checkpoint-roundtrip-{tag}"))
 }
 
 /// End-to-end: capture a baseline tree with nested dirs, mutate it via create/overwrite/delete/rename,
@@ -170,7 +158,6 @@ fn capture_mutate_plan_drift_revert_round_trips_the_tree_byte_for_byte() {
     // over an identical path set means the restored tree's content is identical to the baseline's).
     assert_eq!(restored, checkpoint, "restored tree's content hashes match the baseline exactly");
 
-    cleanup(&[&root, &store]);
 }
 
 /// Skip-unreadable guardrail: when a plan action's checkpoint content can't actually be read back from
@@ -222,5 +209,4 @@ fn unreadable_content_is_skipped_not_a_hard_failure_and_the_rest_of_the_plan_sti
     // The failed restore leaves the mutated content untouched (never partially written / corrupted).
     assert_eq!(fs::read(root.join("will_lose_its_blob.txt")).unwrap(), b"mutated unreadable");
 
-    cleanup(&[&root, &store]);
 }

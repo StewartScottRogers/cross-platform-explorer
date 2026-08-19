@@ -228,16 +228,8 @@ mod imp {
 mod tests {
     use super::*;
 
-    fn scratch(tag: &str) -> std::path::PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        // Uses the OS temp dir: NTFS on Windows / APFS on macOS (both store native metadata). On
-        // Linux this may be tmpfs, which lacks xattr on older kernels — the round-trip test tolerates
-        // that as `Unsupported` rather than flaking.
-        let d = std::env::temp_dir().join(format!("cpe-nativemeta-{}-{}-{}", tag, std::process::id(), n));
-        std::fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-nativemeta-{tag}"))
     }
 
     #[test]

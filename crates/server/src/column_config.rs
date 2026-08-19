@@ -77,19 +77,14 @@ mod tests {
     use super::*;
     use crate::ctx::HeadlessCtx;
 
-    fn scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-colcfg-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
+        crate::fsutil::scratch_dir(&format!("cpe-colcfg-{tag}"))
     }
 
     #[test]
     fn set_then_get_round_trips() {
         let base = scratch("roundtrip");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let cfg = ColumnConfig {
             columns: vec!["size".into(), "modified".into(), "kind".into()],
         };
@@ -101,7 +96,7 @@ mod tests {
     #[test]
     fn unknown_folder_yields_default_empty() {
         let base = scratch("unknown");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         assert_eq!(get(&ctx, "/nope"), ColumnConfig::default());
         assert!(get(&ctx, "/nope").columns.is_empty());
         let _ = fs::remove_dir_all(&base);
@@ -110,7 +105,7 @@ mod tests {
     #[test]
     fn clear_removes_only_that_folder() {
         let base = scratch("clear");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let a = ColumnConfig { columns: vec!["size".into()] };
         let b = ColumnConfig { columns: vec!["duration".into()] };
         set(&ctx, "/a", a.clone()).unwrap();
@@ -126,7 +121,7 @@ mod tests {
     #[test]
     fn corrupt_catalog_file_is_tolerated() {
         let base = scratch("corrupt");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         let dir = ctx.app_config_dir().unwrap();
         fs::create_dir_all(&dir).unwrap();
         fs::write(config_path(&dir), b"{ this is not valid json").unwrap();
@@ -137,14 +132,15 @@ mod tests {
 
     #[test]
     fn missing_catalog_file_is_tolerated() {
-        let ctx = HeadlessCtx::new(scratch("missing"));
+        let ctx_base = scratch("missing");
+        let ctx = HeadlessCtx::new(ctx_base.to_path_buf());
         assert_eq!(get(&ctx, "/anything"), ColumnConfig::default());
     }
 
     #[test]
     fn set_overwrites_same_folder_entry() {
         let base = scratch("overwrite");
-        let ctx = HeadlessCtx::new(&base);
+        let ctx = HeadlessCtx::new(base.to_path_buf());
         set(&ctx, "/f", ColumnConfig { columns: vec!["size".into()] }).unwrap();
         set(&ctx, "/f", ColumnConfig { columns: vec!["kind".into(), "size".into()] }).unwrap();
         assert_eq!(
