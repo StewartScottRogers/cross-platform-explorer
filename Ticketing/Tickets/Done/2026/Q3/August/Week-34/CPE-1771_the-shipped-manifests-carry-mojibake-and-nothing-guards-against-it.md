@@ -114,7 +114,11 @@ expected offenders by file:line. Restored the repair, guard passed again.
 - 2026-08-19: Repaired `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `CLAUDE.md` byte-exact via
   Python. Built `src/lib/mojibakeGuard.ts` + `.test.ts`. Red-proofed by reverting and restoring the
   manifest fix. Filed CPE-1783 (dispatch.rs residual) and CPE-1784 (Ticketing/ cleanup) as follow-ups.
-  `npm run check` + full test suite green. PR opened, CI watched to green.
+  `npm run check` + full test suite green. PR #936 opened. CI hit an unrelated infra flake (`apt-get
+  update` hanging on the ubuntu-latest mirror in "Install Linux system dependencies", ~30min job timeout
+  or, for jobs with no timeout-minutes cap, over 2 hours with no progress) across three separate jobs at
+  different points in the run — cancelled and reran each affected job/run; all green on retry. Final
+  state: all 18 checks pass, PR mergeStateStatus CLEAN.
 
 ## Notes
 
