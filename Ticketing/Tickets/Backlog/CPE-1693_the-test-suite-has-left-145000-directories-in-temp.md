@@ -606,6 +606,21 @@ capped deliberately). That is essentially the entire 1.29M crisis figure, alive,
 it is the site of *both* failures that escalated this ticket to High (the PID collision, and
 `temp_extract_target`'s 1024-attempt exhaustion).
 
+**Demonstrated from a clean slate**, which removes any doubt that this is historical accumulation. A full
+green `crates/server` run against a **fresh, empty** synthetic temp root (`TMP`/`TEMP` redirected, exit 0):
+
+```
+leftover top-level dirs = 2
+  cpe-archive          (children: 2681)
+  cpe-semidx-23800     (children: 0)
+```
+
+Both counting methods on the same single run: **2** by the metric this ticket has been reporting, **2,683**
+by the one that actually reflects what is on disk. The post-fix "2 survivors" figure is true and is also
+exactly the trap — the two survivors are precisely the two leaks left open, `cpe-archive` (CPE-1786) and
+`semantic_index::temp_path` (Tier 3). One run of one crate creates 2,681 directories nothing will ever
+remove, and no `cpe-*`-filtered purge reaches them because they are nested one level down.
+
 Filed as **CPE-1786** (High). Any future measurement of this class must count **inside** `cpe-archive`,
 not just top-level `cpe-*`, or it will report success it has not earned.
 
