@@ -307,28 +307,33 @@ export function compareOffenders(a: string, b: string): number {
   return la - lb || a.localeCompare(b);
 }
 
-/** True if the character(s) immediately before `idx` (the position of a mustache's `{`) put it in a
- *  render position. `inTag` (see `findUnsafeRenderLines`'s state machine) disambiguates the two contexts
- *  that share the "preceded by `}`" shape:
- *   - OUTSIDE a tag (body text): preceded by `>` (a normal tag boundary) or `}` (CPE-1757 round 2's fix —
- *     a render sitting directly after `{#if}`/`{:else}`/`{/each}`'s own closing brace, not just after
- *     `>`, the exact shape review's probe caught this engine missing).
- *   - INSIDE a tag's attribute list: `}` here almost always closes a PRIOR shorthand prop or directive
- *     (`{density} {currentPath}`, `bind:value={x}`), never a render — so only `title=`/`aria-label=`/
- *     `alt=`, given directly as `attr={…}` or embedded in a quoted `attr="…{…}…"`/`attr='…{…}…'` value,
- *     count. CPE-1761 attempt 3 (reviewer): the double- and single-quoted forms are kept SYMMETRIC on
- *     purpose — `title='{entry.name}'` is exactly as legal Svelte as `title="{entry.name}"`, and treating
- *     only the double-quoted spelling as a render position silently DROPPED the single-quoted one (not
- *     merely mis-scanned: `isRenderPosition` returned false, so the mustache was classified as a non-render
- *     and never even reached `isSafeExpr`) whenever `quoteChar` was `'` — the exact shape a forgotten
- *     closing `'` re-balanced by an unrelated later contraction ("it's", "can't", "you're") reproduces. */
-function isRenderPosition(markup: string, idx: number, inTag: boolean): boolean {
-  const before = markup.slice(Math.max(0, idx - 200), idx);
-  if (!inTag) return /[>}]\s*$/.test(before);
-  if (/\b(?:title|aria-label|alt)=\{?\s*$/.test(before)) return true;
-  if (/\b(?:title|aria-label|alt)="[^"]*$/.test(before)) return true;
-  if (/\b(?:title|aria-label|alt)='[^']*$/.test(before)) return true;
-  return false;
+/** True if a mustache is in a *render position* — somewhere its content is actually drawn to the page.
+ *  `inTag` (see `findUnsafeRenderLines`'s state machine) tells the two contexts apart:
+ *   - OUTSIDE a tag: this state machine only ever reaches "outside a tag" for real body text — script/
+ *     style content is stripped before scanning starts (`stripNonMarkup`), and an attribute value's `{…}`
+ *     is handled by the `inTag` branch below, never this one. So EVERY mustache reached with `inTag ===
+ *     false` is body text, full stop — CPE-1766: there is no longer any lookback at what character
+ *     preceded the `{`, because that was never actually the disambiguating fact; the state machine already
+ *     knows the context, and re-deriving it from a textual prefix (originally just `>`, widened in CPE-1757
+ *     round 2 to `[>}]` to also catch a render sitting directly after `{#if}`/`{:else}`/`{/each}`'s own
+ *     closing brace) is exactly the kind of two-mechanisms-that-can-disagree design CPE-1776 diagnoses for
+ *     the attribute case below — ordinary prose between a tag boundary and the mustache (`hello {name}`) is
+ *     the disagreement CPE-1766 tracks. (A `{#if …}`/`{:else}`/`{/each}`/`{@const …}`/`{@debug …}` control
+ *     tag itself is still never treated as a render — that's `isControlTag`, computed from the mustache's
+ *     own CONTENT in `handleMustache`, entirely independent of this function.)
+ *   - INSIDE a tag's attribute list: only `title=`/`aria-label=`/`alt=` count, given directly as
+ *     `attr={…}` or embedded in a quoted `attr="…{…}…"`/`attr='…{…}…'` value — a bare `{density}`
+ *     shorthand prop or a directive's `{x}` (`bind:value={x}`) never does. CPE-1776: this used to be
+ *     re-derived from a fixed 200-char textual lookback (`/\b(?:title|aria-label|alt)="[^"]*$/` etc.),
+ *     which silently dropped the render once the attribute's own text ran past ~194 chars (verbose,
+ *     accessible `alt`/`aria-label` text is exactly what pushes past that) — a second mechanism
+ *     re-deriving state the caller already has, guaranteed to disagree with it eventually. Now the caller
+ *     (`findUnsafeRenderLines`'s state machine) tracks `currentAttrName` directly as it scans — set the
+ *     instant it sees `attrName=`, cleared the instant that attribute's value ends — and simply passes it
+ *     in, so there is no length limit and nothing to keep in sync. */
+function isRenderPosition(inTag: boolean, currentAttrName: string | null): boolean {
+  if (!inTag) return true;
+  return currentAttrName === "title" || currentAttrName === "aria-label" || currentAttrName === "alt";
 }
 
 /** Scan Svelte markup (script/style already stripped) for every render-position mustache — text
@@ -347,6 +352,12 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
   let i = 0;
   let inTag = false;
   let quoteChar: string | null = null;
+  // CPE-1776: the attribute name the scanner is CURRENTLY inside the value of, tracked live instead of
+  // re-derived later from a lookback slice. Set the instant an `attrName=` is seen; cleared the instant
+  // that attribute's value fully ends (bare `{…}` value consumed, or its quote closes). Attribute NAMES
+  // are always short (unlike values, which can run to any length), so the bounded lookback used to find
+  // the name at the `=` sign is safe in a way the old value-side lookback never was.
+  let currentAttrName: string | null = null;
 
   const fail = (idx: number, reason: string): never => {
     const { line, col } = lineCol(markup, idx);
@@ -368,7 +379,7 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
     const isHtmlTag = !inTag && /^@html\b/.test(trimmed);
     if (renderCandidate && !isControlTag) {
       const expr = isHtmlTag ? trimmed.replace(/^@html\s*/, "") : inner;
-      if (isRenderPosition(markup, openIdx, inTag) && !isSafeExpr(expr)) {
+      if (isRenderPosition(inTag, currentAttrName) && !isSafeExpr(expr)) {
         const { line } = lineCol(markup, openIdx);
         offenders.add(`${line}:${normalizeExprForLabel(expr)}`);
       }
@@ -386,6 +397,7 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
         }
         if (ch === quoteChar) {
           quoteChar = null;
+          currentAttrName = null; // the attribute's value just ended
           i++;
           continue;
         }
@@ -403,10 +415,22 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
       }
       if (ch === "{") {
         handleMustache(true);
+        currentAttrName = null; // a bare `attr={…}` value just ended
         continue;
       }
       if (ch === ">") {
         inTag = false;
+        currentAttrName = null;
+        i++;
+        continue;
+      }
+      if (ch === "=") {
+        // Attribute names are short and simple (`\w`/`-`), so a small bounded lookback is safe here in a
+        // way it never was for the VALUE side (which is exactly CPE-1776's defect): this only has to span
+        // one identifier, not an arbitrarily long accessible label.
+        const nameLookback = markup.slice(Math.max(0, i - 64), i);
+        const nameMatch = /([\w-]+)\s*$/.exec(nameLookback);
+        currentAttrName = nameMatch ? nameMatch[1] : null;
         i++;
         continue;
       }

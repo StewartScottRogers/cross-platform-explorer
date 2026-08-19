@@ -3,7 +3,7 @@
 // one probe shape verbatim (or as close as a standalone expression allows) so a future reader can check
 // the claim against the actual behavior, not against prose.
 import { describe, it, expect } from "vitest";
-import { isSafeExpr, findUnsafeRenderLines, RenderScanError } from "./bidiRenderScan";
+import { isSafeExpr, findUnsafeRenderLines, RenderScanError, findMatchingBrace } from "./bidiRenderScan";
 
 describe("isSafeExpr — the whitelist: literal, displaySafe* call, or unsafe", () => {
   it("accepts plain literals", () => {
@@ -128,6 +128,43 @@ describe("findUnsafeRenderLines — render-position gating + the {#if}-adjacency
 
   it("flags {@html entry.name}", () => {
     expect(findUnsafeRenderLines(`<div>{@html entry.name}</div>`)).toEqual(["1:entry.name"]);
+  });
+
+  // CPE-1766: isRenderPosition used to require the character immediately before `{` to be `>` or `}`
+  // (`/[>}]\s*$/`), so a mustache preceded by ordinary body-text prose on the same line was never
+  // recognised as a render position at all and the file scanned clean ([]). Any raw render written the
+  // way a person actually writes Svelte — "label: {value}" — was invisible to the guard on every file,
+  // since the guard existed.
+  it("CPE-1766: flags a mustache preceded by ordinary body text, not just `>` or `}`", () => {
+    expect(findUnsafeRenderLines(`<div>hello {entry.name}</div>`)).toEqual(["1:entry.name"]);
+    expect(findUnsafeRenderLines(`<div>File: {entry.name} was found</div>`)).toEqual(["1:entry.name"]);
+  });
+
+  // The fix must still correctly EXCLUDE the three contexts a mid-text mustache is deliberately not
+  // drawn from: inside an attribute value (already covered by isRenderPosition's inTag branch), inside
+  // `<script>`/`<style>` (stripped before scanning ever begins), and inside a Svelte block tag itself
+  // (`{#if …}` etc. — its own condition/binding is never treated as a render).
+  it("CPE-1766: a mid-text-looking mustache inside an attribute value is still NOT a body-text render", () => {
+    // `data-x` is not title/aria-label/alt, so this must stay clean even though "foo " precedes the `{`.
+    expect(findUnsafeRenderLines(`<div data-x="foo {entry.name}">x</div>`)).toEqual([]);
+  });
+
+  it("CPE-1766: a mid-text-looking mustache inside <script>/<style> is still NOT scanned", () => {
+    const src = [
+      `<script>`,
+      `  const msg = "hello " + entry.name;`,
+      `</script>`,
+      `<style>.x::before { content: "hello entry.name"; }</style>`,
+      `<span>ok</span>`,
+    ].join("\n");
+    expect(findUnsafeRenderLines(src)).toEqual([]);
+  });
+
+  it("CPE-1766: the Svelte block-tag condition itself is still not drawn as a render, even with prose before it", () => {
+    const src = `<div>please {#if entry.name}<span>{entry.name}</span>{/if}</div>`;
+    // `{#if entry.name}`'s own condition is exempt (isControlTag); only the body-text `{entry.name}`
+    // inside the branch is a real render.
+    expect(findUnsafeRenderLines(src)).toEqual(["1:entry.name"]);
   });
 
   // The exact miss named in review: a render sitting right after {#if}/{:else}/{/each} rather than `>`.
@@ -371,5 +408,106 @@ describe("CPE-1761 F1: end-to-end probe against a real registered component (Dis
       `<span>{entry.name}</span>`,
     ].join("\n");
     expect(() => findUnsafeRenderLines(probe, "DiskSpaceView.svelte (probe)")).toThrow(RenderScanError);
+  });
+});
+
+// CPE-1776: isRenderPosition used to RE-DERIVE the current attribute from a fixed 200-character textual
+// lookback (`markup.slice(idx - 200, idx)`), so once the text between `title=`/`aria-label=`/`alt=` and
+// the mustache ran past ~194 characters the attribute-name token itself fell outside the slice and the
+// render was silently dropped ([] — not an error). Verbose, accessible alt/aria-label text is exactly
+// the shape that trips this. The fix removes the lookback entirely: the scanner now tracks the CURRENT
+// attribute name live as it walks the markup (`currentAttrName` in findUnsafeRenderLines) and passes it
+// straight to isRenderPosition, so there is no length limit to exceed.
+describe("CPE-1776: isRenderPosition no longer truncates its attribute lookback at a fixed length", () => {
+  const withPrecedingText = (len: number) => {
+    const filler = "A".repeat(len);
+    return `<img alt="${filler} {entry.name}" />`;
+  };
+
+  it("detects a render after 200 chars of preceding alt text (just past the old 194-char blind spot)", () => {
+    expect(findUnsafeRenderLines(withPrecedingText(200))).toEqual(["1:entry.name"]);
+  });
+
+  it("detects a render after 500 chars of preceding alt text", () => {
+    expect(findUnsafeRenderLines(withPrecedingText(500))).toEqual(["1:entry.name"]);
+  });
+
+  it("detects a render after 2000 chars of preceding alt text — not just a bigger fixed window", () => {
+    expect(findUnsafeRenderLines(withPrecedingText(2000))).toEqual(["1:entry.name"]);
+  });
+
+  it("same fix applies to title= and aria-label=, and to the single-quoted attribute form", () => {
+    const filler = "B".repeat(300);
+    expect(findUnsafeRenderLines(`<span title="${filler} {entry.path}">x</span>`)).toEqual(["1:entry.path"]);
+    expect(findUnsafeRenderLines(`<span aria-label='${filler} {entry.path}'>x</span>`)).toEqual(["1:entry.path"]);
+  });
+
+  // CPE-1776 caveat #2: escaped-quote handling. Checked against the real Svelte compiler (see the PR
+  // description) — `title="…\"…{entry.name}"` does NOT compile as a single attribute value; HTML/Svelte
+  // markup attribute values have no backslash-escape syntax, so the compiler reads the first unescaped
+  // `"` as closing the attribute early and then fails to parse what follows as a new attribute. That
+  // shape is UNREACHABLE in valid Svelte, so it is recorded as such rather than fixed speculatively — but
+  // the redesign fixes the underlying design flaw either way: isRenderPosition no longer re-derives
+  // attribute-value TEXT at all (escaped or not), so nothing about quote-escaping can make it disagree
+  // with the scanner's own state.
+  it("no longer re-derives an attribute's value text to answer the render-position question at all", () => {
+    // A value containing characters that would have confused the old `[^"]*$`/`[^']*$` lookback (a
+    // literal backslash, unmatched-looking punctuation) has no effect now, since the value's TEXT is
+    // never inspected — only the attribute NAME, captured once at `=`.
+    expect(findUnsafeRenderLines(`<span title="back\\\\slash and \\"quote-ish\\" text {entry.path}">x</span>`)).toEqual([
+      "1:entry.path",
+    ]);
+  });
+
+  it("does NOT flag a long-value non-title/aria-label/alt attribute — the membership decision still holds beyond 200 chars", () => {
+    expect(findUnsafeRenderLines(withPrecedingText(2000).replace("alt=", "data-x="))).toEqual([]);
+  });
+});
+
+// CPE-1767: findMatchingBrace had no concept of a `//` or `/* */` JS comment, so an apostrophe (or any
+// unbalanced quote) written INSIDE a comment inside an inline tag-attribute expression read as opening a
+// real string literal. The quote never closed, the brace never matched, and CPE-1761's fail-loud change
+// turned that into a hard `RenderScanError` on perfectly valid, compiling Svelte — telling the developer
+// to "fix the malformed brace" when there is no malformed brace. This cost Sidebar.svelte three comment
+// reworded away from natural English (`don't` -> `do not`, etc.) to get CI green.
+describe("CPE-1767: JS comments inside a mustache are inert to brace/quote matching", () => {
+  it("a `//` comment containing an apostrophe inside an inline attribute expression does not hard-fail the scan", () => {
+    expect(() => findUnsafeRenderLines(`<div on:click={() => { // it's fine\n }}>x</div>`)).not.toThrow();
+  });
+
+  it("a `/* */` comment containing an apostrophe inside an inline attribute expression does not hard-fail the scan", () => {
+    expect(() => findUnsafeRenderLines(`<div on:click={() => { /* it's fine */ }}>x</div>`)).not.toThrow();
+  });
+
+  it("an apostrophe, a double quote, a backtick, and an unbalanced brace inside a comment are all inert", () => {
+    const src = `{ /* it's a "test" \`here\` { unbalanced */ 1 }`;
+    // findMatchingBrace must find the mustache's OWN closing `}` (the final one), not get confused by
+    // anything inside the comment — including a brace that would otherwise change `depth`.
+    expect(findMatchingBrace(src, 0)).toBe(src.length - 1);
+  });
+
+  it("a genuinely unterminated string OUTSIDE a comment still throws loudly — the comment fix must not regress CPE-1761's fail-closed guarantee", () => {
+    const src = `<div on:click={() => { const x = "unterminated }}>x</div>`;
+    expect(() => findUnsafeRenderLines(src, "unterminated-string.svelte")).toThrow(RenderScanError);
+  });
+
+  it("a genuinely unterminated brace OUTSIDE a comment still throws loudly", () => {
+    const src = `<div on:click={() => { const x = 1; }>x</div>`;
+    expect(() => findUnsafeRenderLines(src, "unterminated-brace.svelte")).toThrow(RenderScanError);
+  });
+
+  it("Sidebar.svelte's real repro shape: a right-click handler with `do not`/`doesn't`-style comments above a real offender scans clean", () => {
+    const src = [
+      `<div on:contextmenu={(e) => {`,
+      `  // Drive rows get a folder-like right-click menu; place rows don't (unchanged).`,
+      `  if (!isDrive) return;`,
+      `  // stopPropagation so the event doesn't bubble to window, where ContextMenu.svelte's`,
+      `  // window-level dismisser would instantly close the just-opened menu.`,
+      `  e.stopPropagation();`,
+      `}}>`,
+      `  <span>{entry.name}</span>`,
+      `</div>`,
+    ].join("\n");
+    expect(findUnsafeRenderLines(src)).toEqual(["8:entry.name"]);
   });
 });
