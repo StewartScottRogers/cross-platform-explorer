@@ -314,8 +314,18 @@ function scanRepo(): Violation[] {
       violations.push({ file: relFile, line: 1, kind: "bom", detail: "file opens with a UTF-8 BOM (EF BB BF)" });
     }
     const text = bytes.toString("utf8"); // Buffer#toString never throws -- lossy on genuinely non-UTF-8
-    // content (substitutes U+FFFD), which is fine: a lossy decode can only ever LOSE a match, never
-    // fabricate one, so it can't turn a clean file into a false failure.
+    // content (substitutes U+FFFD). That is safe in one direction only: a lossy decode can never
+    // FABRICATE a match (U+FFFD is not CP1252-producible), so it cannot turn a clean file into a false
+    // failure. It can, however, LOSE one -- and that is a real residual gap, not a harmless detail.
+    //
+    // Two shapes of the very corruption this guard exists for pass it silently (CPE-1788):
+    //   - A file rewritten as UTF-16 (PowerShell 5.1's > and Out-File default to UTF-16LE) has NUL
+    //     bytes in its first 4 KB, so looksBinary skips it entirely, and hasLeadingBom only matches
+    //     the UTF-8 BOM EF BB BF, never FF FE / FE FF.
+    //   - A file rewritten as ANSI/CP1252 (PowerShell 5.1 Set-Content's default) is not valid UTF-8,
+    //     so this decode yields U+FFFD and the scan reports zero hits on a genuinely corrupted file.
+    // Both are the same root cause -- a PowerShell text round-trip -- in a different output encoding.
+    // Named here rather than left implied as covered; tracked in CPE-1788.
     for (const offender of findMojibake(text)) {
       if (isAllowlisted(relFile, offender.line, "mojibake")) continue;
       violations.push({

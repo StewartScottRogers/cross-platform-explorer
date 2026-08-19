@@ -116,8 +116,12 @@ attempt 2 (same two files):
    down to two directory prefixes, each with a ticketed reason: `Ticketing/` (CPE-1784, unchanged) and
    `samples/` (new — CPE-1042 requires that tree to be a byte-exact reproducible baseline; attempt 1 had
    half-included it by extension, which review correctly called worse than either fully in or fully out).
-   Scanned set: **1379 of 3190** tracked files (up from 1291), covering categories attempt 1 missed
-   entirely, with the excluded set now fully accounted for (1763 Ticketing/ + 48 samples/).
+   Scanned set: **1320 of 3190** tracked files, up from 1291 - a net gain of 29, and 35 files gained
+   against 7 deliberately given up (the samples/ tree). The exclusions are three rules, not two: the
+   two directory prefixes above (1763 Ticketing/ + 48 samples/) **and** the binary skip, which removes
+   a further 59 files. An earlier draft of this line said 1379 by subtracting only the two prefixes and
+   forgetting the binary rule; corrected here because this repo cites its own measurements forward and a
+   wrong figure reads as a regression the next time somebody counts.
 
 Two smaller review findings, also fixed: the allowlist now carries a `kind: "mojibake" | "bom"` tag (not
 just file+line), so a future entry can never silently suppress the *other* violation kind on the same
@@ -126,9 +130,12 @@ detector found one genuine new false positive, `src/lib/mediaTransport.ts:33` (`
 multiplication sign immediately followed by an en dash happens to be valid UTF-8 for U+05D6, HEBREW LETTER
 ZAYIN, by coincidence) — allowlisted with that reasoning and a dedicated unit test. (The review also cited
 `mediaTransport.ts:105`; measured directly against the implemented algorithm, that line's `×` is separated
-from the arrow that follows it by an ordinary space and is not itself a match — verified by the "no stale
-entries" self-check passing without an entry for it, and called out explicitly in the PR reply rather than
-added defensively.)
+from the arrow that follows it by an ordinary space and is not itself a match — verified by codepoint against the implemented
+algorithm, and called out explicitly in the PR reply rather than added defensively. The reason to omit it is
+simply that it never matches - the same reason four other inert entries sit harmlessly in the list. An
+earlier draft claimed a defensive entry would fail the "no stale entries" self-check; the re-review
+disproved that by adding one and watching the suite pass 42/42, because that check only confirms the
+recorded substring is still on the recorded line and never re-runs the detector.)
 
 Both the original attempt-1 red-proof (38 offenders on revert) and the new attempt-2 red-proof (the review's
 own café/中文 reproduction) were re-run against the final code and both still hold.
