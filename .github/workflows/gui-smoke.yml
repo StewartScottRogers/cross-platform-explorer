@@ -299,22 +299,33 @@ jobs:
       # each job. See the long CPE-1702 note on the shard job's copy for why the GStreamer codec packages
       # are deliberately NOT here.
       #
-      # CPE-1772: `timeout-minutes` here (and on "Install tauri-driver" below) is new, and the lock-wait
-      # loop before `apt-get` is a REAL root-cause fix, not just a backstop — reproduced live on THIS
-      # PR's own CI (run 32270751601): the step hung with ZERO further output for the full 8 minutes,
-      # twice in a row, both times stopping right after apt-get update's last network fetch and before
-      # anything from `apt-get install` printed. That silent-hang signature (no error, no output, just
-      # stops) is the well-documented GitHub-hosted `ubuntu-latest` gotcha: a background
-      # `apt-daily.service`/`apt-daily-upgrade.service` (unattended security updates) holds
-      # `/var/lib/dpkg/lock-frontend` for the first several minutes after the runner boots, and
-      # `apt-get install` blocks on that lock via a silent `flock()` wait — no message printed while
-      # blocked, which is exactly why the log just stops. This is very plausibly the real mechanism
-      # behind PR #924's shard-1 cancellation too (same step, same "no code signal" shape). Waiting out
-      # the lock (rather than fighting it) is the standard fix; `timeout-minutes: 8` remains as the
-      # backstop for a genuinely different hang, now with real evidence of what 8 minutes needs to
-      # cover. This does not explain PR #933's shared-build `Install tauri-driver` cancellation — see
-      # the longer note on `connectionRetryCount` in `wdio.conf.ts` for what evidence does and doesn't
-      # establish there.
+      # CPE-1772 — this step's OWN hang, reproduced live and repeatedly on THIS PR's own CI, not
+      # merely theorised. `timeout-minutes` below is new. What was tried, in order, with what each run
+      # actually showed (kept as the record, not just the current state):
+      #   1st/2nd attempts (runs 32270751601, both shard-build jobs): hung with ZERO further output for
+      #      the full 8 minutes, both times stopping right after apt-get's last InRelease fetch
+      #      (archive.ubuntu.com noble-security) and before anything from `apt-get install` printed.
+      #      Hypothesised as the documented GitHub-hosted-runner dpkg-lock gotcha (a background
+      #      `apt-daily`/`apt-daily-upgrade` service holding `/var/lib/dpkg/lock-frontend` for the
+      #      first few minutes after boot) and "fixed" with the lock-wait loop below.
+      #   3rd attempt (run 32273686091): the SAME hang, at the SAME exact point, with the lock-wait
+      #      loop now in place and printing NOTHING (both `fuser` checks found no lock) before falling
+      #      straight through to `apt-get update` — which then hung again regardless. This DISPROVES
+      #      the dpkg-lock hypothesis; the loop is kept anyway (harmless, real GH-runner gotcha, just
+      #      not this one) but is not what actually protects this step.
+      # Current best account, NOT confirmed by a clean run yet: `apt-get update` has fetched every
+      # InRelease file and stops before fetching any Packages/Translation index, three times running,
+      # at the exact same source — that shape (a stalled connection producing no output at all, versus
+      # a fast Ign/fallback like the azure mirror lines above it) matches the documented class of
+      # GitHub-hosted-runner IPv6 connectivity stalls (the runner advertises IPv6 that doesn't actually
+      # route, so a client that tries it first hangs on the OS TCP timeout before ever falling back to
+      # IPv4 — apt does not print anything while a single request is stalled, which is exactly why no
+      # further log lines ever appeared). Forcing IPv4 is the standard mitigation; applied below.
+      # `timeout-minutes: 8` stays regardless of which of these is right — it is what turned three
+      # otherwise-silent ~30-minute mystery kills into three fast, named, readable failures, which is
+      # this ticket's actual AC1/AC2, independent of whether the IPv4 forcing below also clears the
+      # underlying hang. Say so honestly rather than claiming a fix not yet proven by a green run: this
+      # PR's own CI is the test of whether it does.
       - name: Install Linux system dependencies
         timeout-minutes: 8
         run: |
@@ -326,8 +337,8 @@ jobs:
               break
             fi
           done
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -522,14 +533,13 @@ jobs:
       # real, that assertion breaks loudly instead of staying silently green, and this comment is the
       # place to come update it.
       #
-      # CPE-1772: `timeout-minutes` + the lock-wait loop here are new — this is the exact step where
-      # PR #924's shard 1 was cancelled, before any test ran, and the same class of silent hang
-      # reproduced live on the build job's copy of this step during THIS PR's own CI (see its comment
-      # for the full root-cause writeup: a background `apt-daily`/`apt-daily-upgrade` service holding
-      # `/var/lib/dpkg/lock-frontend` on a freshly-booted `ubuntu-latest` runner, which `apt-get`
-      # blocks on silently). Doesn't scale with spec count (unlike the suite step below, which
-      # deliberately has no step cap — see its own CPE-1728/1753 note), so a tight cap here has no
-      # growth-curve fuse.
+      # CPE-1772: `timeout-minutes` + the lock-wait loop + `Acquire::ForceIPv4` here are new — this is
+      # the exact step where PR #924's shard 1 was cancelled, before any test ran, and the same class of
+      # silent hang reproduced live and repeatedly on the build job's copy of this step during THIS PR's
+      # own CI. See that job's copy of this comment for the full record of what was tried (dpkg-lock
+      # hypothesis — disproved live; current best account — an IPv6-connectivity stall, not confirmed by
+      # a clean run yet). Doesn't scale with spec count (unlike the suite step below, which deliberately
+      # has no step cap — see its own CPE-1728/1753 note), so a tight cap here has no growth-curve fuse.
       - name: Install Linux system dependencies
         timeout-minutes: 8
         run: |
@@ -541,8 +551,8 @@ jobs:
               break
             fi
           done
-          sudo apt-get update
-          sudo apt-get install -y \
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
