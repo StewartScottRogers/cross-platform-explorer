@@ -304,8 +304,26 @@ The panic fires (proving the closure really panicked, not merely returned), and 
   `scratch()`-style helper that leaks silently by default). Left as-is — converting them to the
   helper-level guard is a reasonable follow-up but is not named in this ticket's scope and risks scope
   creep into two crates the ticket never mentions.
-- **`crates/server`'s "Tier 3" ad-hoc `std::env::temp_dir().join(..)` call sites** that were never behind
-  a `scratch()`-named helper to begin with — mainly `transfer.rs` (~25 individual literals, several
+- **`crates/server`'s "Tier 3" `std::env::temp_dir().join(..)` sites.**
+
+  **Corrected 2026-08-19 (PR #934 re-review item 3).** This bullet used to say these sites "were never
+  behind a `scratch()`-named helper to begin with". That is **factually wrong for four of them**, and the
+  wrong reason is the actual hazard here — an inaccurate exemption is what stops the next person looking,
+  which is precisely why CPE-1782 had to be filed later. `audit_journal::tmp`, `metrics_journal::tmp`,
+  `replay_session::tmp` and `semantic_index::temp_path` are all **named helper functions**, and the first
+  three are byte-for-byte the `scratch()` shape — `static SEQ: AtomicU64`, pid in the name,
+  `create_dir_all`, return a bare `PathBuf` — differing only in being spelled `tmp` instead of `scratch`.
+  That is exactly the name-based miss that finding 1 of this same review exists to correct.
+
+  They are still exempted, and that is still a defensible call — but on the honest reason: they are a
+  different, larger job than this ticket's mechanical conversion, each needing its own correctness read.
+  What is *not* defensible is the previous wording implying nothing helper-shaped was left behind.
+  `semantic_index::temp_path` in particular is **the largest single leaker measured on this machine at
+  1,090 directories**, has no `remove_dir_all` anywhere in its file, and is one of the two survivors in
+  this ticket's own post-fix measurement (`cpe-semidx-<pid>`). Anyone picking up the remaining leak should
+  start there, not conclude from this list that the helper-shaped ones are all done.
+
+  The genuinely ad-hoc inline sites — mainly `transfer.rs` (~25 individual literals, several
   already self-defending with a `remove_dir_all` *before* `create_dir_all` to survive a previous
   interrupted run), plus one-offs in `connections.rs`, `audit_journal.rs`, `metrics_journal.rs`,
   `model.rs`, `vector_index.rs`, `semantic_index.rs`, `vault_crypto.rs`, `fs_route.rs`, `provider.rs`,
@@ -413,14 +431,16 @@ passing with the fix.
 
 ### Finding 1 — the 68th helper: `src-tauri`'s `sched_scratch`
 
-Found by census rather than by search-and-hope: every `fn … -> …Path…` in the five converted crates
-(`crates/server`, `crates/net`, `src-tauri`, `crates/s3`, `crates/webdav`) whose body contains both
-`temp_dir()` and `create_dir…` — 8 functions. Seven are production code, already guarded
-(`archive::temp_extract_target`, `ffmpeg_util::create_scratch_dir`, `transfer::one_file_src`), or
-explicitly on this ticket's Tier-3 exemption list above (`audit_journal::tmp`, `metrics_journal::tmp`,
-`replay_session::tmp`, `semantic_index::temp_path`). Exactly one was a `scratch()`-style helper the sweep
-should have caught and didn't: **`src-tauri/src/lib.rs`'s `sched_scratch(tag) -> PathBuf`** (CPE-1199's
-snapshot-schedule tick tests, 3 call sites). It was missed because the transform matched on the name
+Census: every `fn … -> …Path…` in the five converted crates (`crates/server`, `crates/net`, `src-tauri`,
+`crates/s3`, `crates/webdav`) whose body contains both `temp_dir()` and `create_dir…` — 8 functions. Seven
+were left alone: `transfer::one_file_src` already returns its own guard; `ffmpeg_util::create_scratch_dir`
+is production code that removes its own directory; four (`audit_journal::tmp`, `metrics_journal::tmp`,
+`replay_session::tmp`, `semantic_index::temp_path`) are on this ticket's Tier-3 exemption list above; and
+**`archive::temp_extract_target` leaks by design and is now tracked by CPE-1786** — see the correction
+below, this Work Log first described it as "already guarded", which was wrong. Exactly one was a
+`scratch()`-style helper the sweep should have caught and didn't: **`src-tauri/src/lib.rs`'s
+`sched_scratch(tag) -> PathBuf`** (CPE-1199's snapshot-schedule tick tests, 3 call sites). It was missed
+because the transform matched on the name
 `scratch`, and this one is `sched_scratch`. Cross-checked: it is now the only `*scratch*`-named helper in
 the tree that doesn't return `tempfile::TempDir` or `ScratchDir`.
 
@@ -510,3 +530,98 @@ canary OUTSIDE temp survived  = True       <-- fixed
 cpe-real\sub\junk.txt purged  = True       <-- and the purge still purges
 cpe-real purged               = True
 ```
+
+## Work Log — 2026-08-19, PR #934 second re-review
+
+Four items. Three were correct as raised and are fixed; the fourth is a correction to this ticket's own
+claims, which were wrong.
+
+### Re-review item 1 — `adopt()` was defeated: what was checked was not what was deleted
+
+`adopt` validated `canonicalize(path)` and then constructed `ScratchDir(path)` from the **raw argument**.
+A 9-attack probe got 8 refusals (`..` traversal, an NTFS junction inside `%TEMP%`, the string-prefix
+sibling `Temp-cpe1693evil` vs `Temp`, a non-existent path, a `\\?\` path, forward slashes with a trailing
+separator) and **one defeat**: `adopt("victim")` with the current directory inside `%TEMP%` was accepted,
+and the out-of-root canary died.
+
+Fixed twice over: a relative argument is now refused up front *by name*, and the guard stores the
+**resolved** path so `Drop` removes exactly what containment was checked against. No current caller was
+ever exposed — `cpe-s3`'s `fixture_root` and `cpe-webdav`'s spawner both pass absolute `temp_dir()`-rooted
+paths, and `set_current_dir` has zero hits in the tree — so this was a latent gap in the primitive, not a
+live bug. It still had to close: finding 2's whole premise is a test-support API where one wrong argument
+wipes something real, and a wrong argument still could.
+
+Storing `canonicalize`'s output verbatim then broke two of `cpe-webdav`'s CPE-1726/CPE-1730
+root-replacement tests, because on Windows that is an extended-length `\\?\C:\…` path which normalises to
+`//?/C:/…` and no longer reads as absolute to their fixtures. `de_verbatim` strips the prefix for the
+plain drive form only (leaving `\\?\UNC\server\share` alone, where stripping would yield a *different*
+path), so the stored path is still fully resolved — no `..`, no unresolved links — but spelled the way
+`scratch_dir` spells the other 70 helpers' paths. `cpe-webdav` back to 32 passed, `cpe-s3` 195 passed.
+
+Both tests are deliberately **cwd-free**: `set_current_dir` is process-global and would race every other
+test in this parallel harness. One adopts a non-canonical absolute spelling (`…/child/../child`) of a
+legitimate in-root directory and asserts the stored path has no `ParentDir` component left; the other
+asserts the relative refusal fires *by name*, matching on the panic message, because pre-fix a relative
+probe panicked anyway from `canonicalize` failing — an accident of the probe path not existing rather than
+a refusal of relative paths.
+
+### Re-review item 2 — there was a 69th and a 70th, and they were worse
+
+`src-tauri`'s `make_watch` (CPE-1099) and `make_index_watch` (CPE-1138). The first census filtered on
+**return type**, and these return a domain struct (`AgentWatch` / `IndexWatch`), not a path — so it was
+structurally incapable of seeing them. That is the real lesson: a census keyed on the shape of the
+*return value* misses every helper that hands the directory to something else.
+
+They are worse than the 68th. `sched_scratch` had a trailing `remove_dir_all` at all three call sites, so
+it leaked only on a panicking assertion; **nothing anywhere removed these**, so they leaked on every green
+run. Measured on a fresh synthetic temp root, the two *passing* tests left **6 directories** behind. On
+this machine's real `%TEMP%`: `cpe1099-*` = 138, `cpe1138-*` = 99 (counted directly, both figures
+confirmed). Neither prefix matches the purge script's `cpe-*` filter, so those 237 were **unpurgeable as
+well as uncounted** — the new `cpe-agent-watch-` / `cpe-index-watch-` prefixes bring them back in scope.
+
+Both now return `(ScratchDir, Watch)`. At each call site the guard vector is declared **before** the state
+map so it drops **after** it — locals drop in reverse declaration order — so no directory is removed out
+from under a live `notify` watcher still holding a handle on it. Same probe after the change: **6 → 0**,
+both tests still green, synthetic temp root completely empty.
+
+### Re-review item 4 — `archive::temp_extract_target` is NOT "already guarded". Correcting the record.
+
+This Work Log dismissed `archive::temp_extract_target` as "already guarded". **That was wrong**, and it
+conflated two unrelated properties. CPE-1733 gave it an exclusive `create_dir` to defend against
+**squatting/redirect**. That says nothing about **leak-freedom**, and the function's own doc comment says
+the opposite in as many words:
+
+> **Nothing here cleans up.** CPE-1693 tracks the 145,000 leftover directories; this change adds one more
+> directory per extraction just as before.
+
+CPE-1745's Done record said the same: *"CPE-1693 tracks the leak; not touched by this ticket."* Two
+reviews and this Work Log all read past it.
+
+**The counting-method trap, which is what concealed it.** Counting top-level `%TEMP%\cpe-*` shows `+1`
+after a full run, which looks like a rounding error. That `+1` is the single `cpe-archive` **parent**;
+every extraction's directory is one level *down* inside it. Counted one level down, an independent UAT
+measured **1,394,403 directories**, growing `+12` from a single 8-way-parallel module run. Independently
+re-checked here: `cpe-archive` exists and its child enumeration passes **200,000 without finishing** (walk
+capped deliberately). That is essentially the entire 1.29M crisis figure, alive, in production code — and
+it is the site of *both* failures that escalated this ticket to High (the PID collision, and
+`temp_extract_target`'s 1024-attempt exhaustion).
+
+Filed as **CPE-1786** (High). Any future measurement of this class must count **inside** `cpe-archive`,
+not just top-level `cpe-*`, or it will report success it has not earned.
+
+### What this ticket actually closes — narrowed
+
+Previously claimed: "closes the temp-dir leak". Corrected to what the evidence supports:
+
+> **Closes the temp-dir leak at the test-helper level.** 70 `scratch()`-style helpers across five crates
+> now return a `Drop` guard, taking a full `crates/server` test run from **532 leaked directories to 2**
+> (99.6%), with a panic-mid-assertion proof test and a junction-safe purge script for the existing
+> backlog.
+
+Explicitly **not** closed by this ticket, and tracked elsewhere:
+
+| Left open | Where | Scale |
+|---|---|---|
+| `archive::temp_extract_target` — production extraction path, leaks by design | **CPE-1786** | ~1.39M inside `cpe-archive` |
+| `crates/sftp`, `crates/ftp`, `crates/net` test scratch | **CPE-1782** | first re-review's finding 4 |
+| Tier-3 helpers, `semantic_index::temp_path` worst | exemption list above | 1,090 (`cpe-semidx-*`, confirmed) |
