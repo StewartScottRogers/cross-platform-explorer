@@ -299,19 +299,33 @@ jobs:
       # each job. See the long CPE-1702 note on the shard job's copy for why the GStreamer codec packages
       # are deliberately NOT here.
       #
-      # CPE-1772: `timeout-minutes` here (and on "Install tauri-driver" below) is new. Neither step
-      # scales with spec count — unlike the suite step, a tight cap here has no growth-curve fuse —
-      # and both are exactly where two of the four documented cancellations landed (PR #933's shared
-      # build died mid "Install tauri-driver"; the sibling shard job's apt step died the same way on
-      # PR #924, see that job's identical comment below). ~45s/~20s is the normal cost of each; 8
-      # minutes is generous headroom for a slow apt mirror or a cold `cargo install` compile, while
-      # still turning a genuine hang here into a fast, NAMED failure instead of riding the job's full
-      # 30-minute cap to an ambiguous cancellation. This does not by itself explain those two
-      # incidents — see the longer note on `connectionRetryCount` in `wdio.conf.ts` for what evidence
-      # does and doesn't establish about the root cause.
+      # CPE-1772: `timeout-minutes` here (and on "Install tauri-driver" below) is new, and the lock-wait
+      # loop before `apt-get` is a REAL root-cause fix, not just a backstop — reproduced live on THIS
+      # PR's own CI (run 32270751601): the step hung with ZERO further output for the full 8 minutes,
+      # twice in a row, both times stopping right after apt-get update's last network fetch and before
+      # anything from `apt-get install` printed. That silent-hang signature (no error, no output, just
+      # stops) is the well-documented GitHub-hosted `ubuntu-latest` gotcha: a background
+      # `apt-daily.service`/`apt-daily-upgrade.service` (unattended security updates) holds
+      # `/var/lib/dpkg/lock-frontend` for the first several minutes after the runner boots, and
+      # `apt-get install` blocks on that lock via a silent `flock()` wait — no message printed while
+      # blocked, which is exactly why the log just stops. This is very plausibly the real mechanism
+      # behind PR #924's shard-1 cancellation too (same step, same "no code signal" shape). Waiting out
+      # the lock (rather than fighting it) is the standard fix; `timeout-minutes: 8` remains as the
+      # backstop for a genuinely different hang, now with real evidence of what 8 minutes needs to
+      # cover. This does not explain PR #933's shared-build `Install tauri-driver` cancellation — see
+      # the longer note on `connectionRetryCount` in `wdio.conf.ts` for what evidence does and doesn't
+      # establish there.
       - name: Install Linux system dependencies
         timeout-minutes: 8
         run: |
+          for i in $(seq 1 60); do
+            if sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+              echo "waiting for background apt/dpkg lock (attempt $i/60)..."
+              sleep 5
+            else
+              break
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
@@ -508,13 +522,25 @@ jobs:
       # real, that assertion breaks loudly instead of staying silently green, and this comment is the
       # place to come update it.
       #
-      # CPE-1772: `timeout-minutes` here is new — this is the exact step where PR #924's shard 1 was
-      # cancelled, before any test ran. Doesn't scale with spec count (unlike the suite step below,
-      # which deliberately has no step cap — see its own CPE-1728/1753 note), so a tight cap here has
-      # no growth-curve fuse. See the build job's identical apt step for the full reasoning.
+      # CPE-1772: `timeout-minutes` + the lock-wait loop here are new — this is the exact step where
+      # PR #924's shard 1 was cancelled, before any test ran, and the same class of silent hang
+      # reproduced live on the build job's copy of this step during THIS PR's own CI (see its comment
+      # for the full root-cause writeup: a background `apt-daily`/`apt-daily-upgrade` service holding
+      # `/var/lib/dpkg/lock-frontend` on a freshly-booted `ubuntu-latest` runner, which `apt-get`
+      # blocks on silently). Doesn't scale with spec count (unlike the suite step below, which
+      # deliberately has no step cap — see its own CPE-1728/1753 note), so a tight cap here has no
+      # growth-curve fuse.
       - name: Install Linux system dependencies
         timeout-minutes: 8
         run: |
+          for i in $(seq 1 60); do
+            if sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+              echo "waiting for background apt/dpkg lock (attempt $i/60)..."
+              sleep 5
+            else
+              break
+            fi
+          done
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
