@@ -452,17 +452,61 @@ describe("CPE-1776: isRenderPosition no longer truncates its attribute lookback 
   // the redesign fixes the underlying design flaw either way: isRenderPosition no longer re-derives
   // attribute-value TEXT at all (escaped or not), so nothing about quote-escaping can make it disagree
   // with the scanner's own state.
+  //
+  // B3 (reviewer, round 2): the ORIGINAL version of this test used a fixture containing `\"…\"` — which
+  // the real Svelte compiler REJECTS (`Expected =`), the exact "UNREACHABLE in valid Svelte" case this
+  // block's own comment names two paragraphs up. It stayed green only because B2's now-deleted backslash-
+  // escape branch artificially kept the attribute's quote open past where real HTML/Svelte closes it —
+  // i.e. the test was PINNING B2's bug, not exercising this claim. Replaced with a fixture confirmed
+  // against the real compiler to actually compile (a literal backslash and a single-quoted "quote-ish"
+  // word, neither of which needs escaping in a double-quoted attribute value).
   it("no longer re-derives an attribute's value text to answer the render-position question at all", () => {
     // A value containing characters that would have confused the old `[^"]*$`/`[^']*$` lookback (a
     // literal backslash, unmatched-looking punctuation) has no effect now, since the value's TEXT is
-    // never inspected — only the attribute NAME, captured once at `=`.
-    expect(findUnsafeRenderLines(`<span title="back\\\\slash and \\"quote-ish\\" text {entry.path}">x</span>`)).toEqual([
+    // never inspected — only the attribute NAME, captured once at `=`. Confirmed against the real Svelte
+    // compiler: compiles to `"back\\slash and 'quote-ish' text " + entry.path`.
+    expect(findUnsafeRenderLines(`<span title="back\\slash and 'quote-ish' text {entry.path}">x</span>`)).toEqual([
       "1:entry.path",
     ]);
   });
 
+  // B2 (reviewer, round 2): a confirmed silent fail-open (and its mirror-image false hard-fail) in the
+  // OUTER markup attribute-quote state machine, both checked against the real Svelte compiler.
+  describe("B2: a backslash inside a markup attribute value is a literal character, never an escape", () => {
+    // `title="C:\{entry.name}"` compiles to `attr(div, "title", "C:\\" + entry.name)` — entry.name IS
+    // genuinely interpolated into the tooltip. The old code's `if (ch === "\\") { i += 2; continue; }`
+    // skipped straight over the "\" AND the "{" that opens the mustache, so the render was silently never
+    // seen at all — a fail-open on markup that compiles and renders exactly this way.
+    it("a literal backslash before a mustache does not hide the render (confirmed against the Svelte compiler)", () => {
+      expect(findUnsafeRenderLines(`<div title="C:\\{entry.name}">x</div>`)).toEqual(["1:entry.name"]);
+    });
+
+    // `data-x="a\">{entry.name}</div>` compiles to `attr(div, "data-x", "a\\")` — the un-escaped '"' right
+    // after the backslash legitimately CLOSES the attribute value (value is `a\`), then `>` closes the
+    // tag, so `{entry.name}` is body text. The old code treated `\"` as an escaped quote and kept
+    // `quoteChar` open past where the value actually ends, running to EOF still "inside" a quote and
+    // throwing CPE-1761's unterminated-attribute error on markup that compiles and renders fine — a false
+    // hard-fail in the opposite direction from the case above.
+    it("a backslash immediately before the closing quote does not extend the attribute (confirmed against the Svelte compiler)", () => {
+      expect(() => findUnsafeRenderLines(`<div data-x="a\\">{entry.name}</div>`)).not.toThrow();
+      expect(findUnsafeRenderLines(`<div data-x="a\\">{entry.name}</div>`)).toEqual(["1:entry.name"]);
+    });
+  });
+
   it("does NOT flag a long-value non-title/aria-label/alt attribute — the membership decision still holds beyond 200 chars", () => {
     expect(findUnsafeRenderLines(withPrecedingText(2000).replace("alt=", "data-x="))).toEqual([]);
+  });
+
+  // N3 (reviewer, round 2): `currentAttrName` now captures the FULL hyphenated attribute name, so
+  // `data-title=`/`data-alt=` are matched EXACTLY against "title"/"alt" (and correctly fail to match) —
+  // a real behavior change from the old textual lookback, which matched the bare word "title"/"alt"
+  // wherever a `\b` boundary put it, including right after the hyphen in `data-title=`/`data-alt=`
+  // (treating them as if they WERE the real title=/alt= attributes, a false positive).
+  it("N3: data-title= / data-alt= are NOT treated as the real title=/alt= attributes", () => {
+    expect(findUnsafeRenderLines(`<span data-title={entry.name}>x</span>`)).toEqual([]);
+    expect(findUnsafeRenderLines(`<span data-alt={entry.name}>x</span>`)).toEqual([]);
+    // Control: the real attributes right beside a hyphenated look-alike still work correctly.
+    expect(findUnsafeRenderLines(`<span data-title={entry.oldName} title={entry.name}>x</span>`)).toEqual(["1:entry.name"]);
   });
 });
 
@@ -540,6 +584,41 @@ describe("CPE-1768: isCandidateComponent — the membership-rule trigger", () =>
   it("does NOT flag a component with no name/path-shaped reference at all", () => {
     const src = `<script>\n  export let count = 0;\n</script>\n<span>{count} items</span>`;
     expect(isCandidateComponent(src)).toBe(false);
+  });
+
+  // B1 (reviewer, round 2): the first CANDIDATE_PATTERN — five property spellings plus `export let
+  // name`/`export let path` — was itself a "regex zoo" (the exact shape this module's CORE engine already
+  // replaced, just relocated from expressions to filenames). Confirmed misses, reproduced here as their
+  // own named red-proofs so a future narrowing of the pattern is caught directly, not just incidentally
+  // via whatever happens to still be in REGISTRY:
+  it("B1: flags an `export let fileName` prop rendered raw — the confirmed miss under the old five-property pattern", () => {
+    const src = `<script>\n  export let fileName = "";\n</script>\n<span>{fileName}</span>`;
+    expect(isCandidateComponent(src)).toBe(true);
+  });
+
+  it("B1: flags a baseName(...)/basename(...)/parentDir(...) call site, even on an unlisted variable name", () => {
+    expect(isCandidateComponent(`<script>export let p;</script>\n<span>{baseName(p)}</span>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let p;</script>\n<span>{basename(p)}</span>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let p;</script>\n<span title={parentDir(p)}>x</span>`)).toBe(true);
+  });
+
+  it("B1: flags an {#each … as { name }} / { path } destructuring pattern", () => {
+    expect(isCandidateComponent(`{#each files as { name }}{name}{/each}`)).toBe(true);
+    expect(isCandidateComponent(`{#each entries as { path }}{path}{/each}`)).toBe(true);
+  });
+
+  it("B1: flags the wider vocabulary of filesystem-location prop names — root/folder/dir/target/filePath/linkPath", () => {
+    expect(isCandidateComponent(`<script>export let root: string;</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>let folder = outDir;</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let dir = "";</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let target = "";</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let filePath: string;</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>export let linkPath: string;</script>`)).toBe(true);
+  });
+
+  it("B1: flags [\"name\"]/['path'] bracket property access", () => {
+    expect(isCandidateComponent(`<script>let x = entry["name"];</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>let x = entry['path'];</script>`)).toBe(true);
   });
 
   // The literal review probe, reproduced without leaving a permanent unregistered fixture in the tree

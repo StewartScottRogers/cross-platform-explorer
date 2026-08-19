@@ -20,6 +20,7 @@
   import type { KeyType } from "../bindings.gen";
   import { unwrap } from "../invoke";
   import { sanitizeFileBase, joinPath, canCreateCert } from "../certCreate";
+  import { displaySafePath } from "../filename";
 
   /** Default output folder — the clicked/active pane's folder (CPE-1424), or "" from the command
    *  palette when no folder context is available; a native Browse picker fills it in either way. */
@@ -272,7 +273,7 @@
         bind:value={folder}
         disabled={busy}
         spellcheck="false"
-        title={folder}
+        title={displaySafePath(folder)}
         data-testid="cert-create-folder"
       />
       <button class="btn" type="button" disabled={busy} on:click={browseFolder} data-testid="cert-create-folder-browse">

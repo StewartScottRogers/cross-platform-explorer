@@ -33,6 +33,7 @@
   import { recordVisit, defaultView } from "../spotlightFrecency";
   import * as settings from "../settings";
   import { t } from "../i18n";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   /** The current folder to scope the file/folder-name walk to (empty ⇒ no file source, e.g. on Home). */
   export let root = "";
@@ -211,12 +212,12 @@
                 data-kind={section.kind}
                 role="button"
                 tabindex="-1"
-                title={row.text}
+                title={displaySafePath(row.text)}
                 on:mousemove={() => (active = row.i)}
                 on:click={() => activate(row.i)}
               >
                 <span class="sp-text">
-                  {#each highlightByPositions(row.text, rowHighlightPositions(row.text, row.positions, searchedQuery)) as seg}{#if seg.match}<mark class="sp-hl">{seg.text}</mark>{:else}{seg.text}{/if}{/each}
+                  {#each highlightByPositions(row.text, rowHighlightPositions(row.text, row.positions, searchedQuery)) as seg}{#if seg.match}<mark class="sp-hl">{displaySafeName(seg.text)}</mark>{:else}{displaySafeName(seg.text)}{/if}{/each}
                 </span>
               </div>
             {/each}

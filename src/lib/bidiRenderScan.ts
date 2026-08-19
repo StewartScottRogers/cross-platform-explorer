@@ -94,10 +94,17 @@
  *   - CPE-1767's comment handling does not parse regex literals (a stated, deliberate limit — "a
  *     correct-enough parser with a stated limit beats a subtly wrong one that looks complete"): a `/` that
  *     opens a regex literal containing a literal `//` or `/*` (e.g. `/a\/\/b/`) is misread as the start of
- *     a comment, which can desynchronize brace/quote tracking for the rest of that expression. Regex
- *     literals inside a Svelte mustache are rare (an inline arrow function occasionally has one; a raw
- *     filesystem name never does) — distinguishing regex-`/` from divide-`/` needs real expression parsing
- *     this module deliberately doesn't do.
+ *     a comment. The real blast radius (N2, reviewer round 2): since `findMatchingBrace` tracks `{`/`}`
+ *     depth as it scans, skipping a real code chunk as an "inert comment" can make the mustache's depth
+ *     count never re-balance, or land on the wrong closing `}` — and `handleMustache` moves its cursor
+ *     from whatever `close` index this returns, so a wrong one shifts where the REST OF THE MARKUP is
+ *     parsed from, not just the misread expression. Every case probed while fixing CPE-1767 failed CLOSED
+ *     (a loud `RenderScanError`, either "unterminated {" or the tag/text state machine hitting something
+ *     it can't parse next) rather than silently producing a wrong answer — but that isn't proven
+ *     impossible in general, which is exactly why this stays a listed boundary. Regex literals inside a
+ *     Svelte mustache are rare (an inline arrow function occasionally has one; a raw filesystem name
+ *     render never does) — distinguishing regex-`/` from divide-`/` needs real expression parsing this
+ *     module deliberately doesn't do.
  *   - Membership is enforced mechanically (CPE-1768): see `bidiEscape.guard.test.ts`'s membership-criterion
  *     test for the stated rule for which `.svelte` files must be in `REGISTRY` at all, and why a file
  *     outside that criterion (no filesystem-derived render) is legitimately never scanned rather than
@@ -119,10 +126,22 @@ export function stripNonMarkup(src: string): string {
  *
  *  **Stated boundary** (CPE-1767 AC: "decide how far to go and write down the boundary"): this does NOT
  *  parse regex literals. A `/` that opens a regex containing a literal `//` or `/*` (e.g. `/a\/\/b/`,
- *  `/a\/*b/`) will be misread as starting a comment at that inner `/`. Regex literals are rare inside a
- *  Svelte mustache (an inline arrow function occasionally has one; a raw filesystem name never does), and
- *  distinguishing regex-`/` from divide-`/` requires real expression parsing this module deliberately
- *  doesn't do (see the header). Listed in "What this still cannot see" rather than silently assumed away. */
+ *  `/a\/*b/`) will be misread as starting a comment at that inner `/` — real blast radius (N2, reviewer
+ *  round 2): `findMatchingBrace` counts `{`/`}` depth as it goes, so treating a chunk of real code as an
+ *  inert "comment" skips whatever `{`/`}` characters happen to fall inside it, which can make the whole
+ *  mustache's depth count land on the WRONG closing `}` — or, just as likely, never balance back to zero at
+ *  all. `handleMustache` sets `i = close + 1` from whatever this function returns, so a wrong `close`
+ *  doesn't just affect the misread expression: it moves the scanner's cursor to the wrong point in the
+ *  MARKUP that follows, and everything after that is parsed relative to that wrong position. In practice
+ *  this is expected to (and every case probed while fixing CPE-1767 did) fail CLOSED rather than silently:
+ *  either the depth never re-balances (this function returns -1, and `handleMustache` throws "unterminated
+ *  {" immediately) or the cursor lands somewhere the outer tag/text state machine can't make sense of
+ *  (an unmatched quote, an unrecognized `<`, …), which throws its own `RenderScanError` shortly after. It
+ *  is not proven exhaustively impossible for a misread `/` to land on some other real `}` and silently
+ *  produce a plausible-looking wrong answer instead — that is exactly why this is listed as a boundary
+ *  rather than dismissed, and why regex literals inside a Svelte mustache (rare — an inline arrow function
+ *  occasionally has one, a raw filesystem name render never does) are worth avoiding until real expression
+ *  parsing replaces this module's comment-skipping, which is a heuristic, not a parser, by design. */
 function skipJsComment(s: string, i: number): number {
   if (s[i + 1] === "/") {
     const nl = s.indexOf("\n", i);
@@ -464,10 +483,22 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
     const ch = markup[i];
     if (inTag) {
       if (quoteChar) {
-        if (ch === "\\") {
-          i += 2;
-          continue;
-        }
+        // B2 (reviewer, this round): a backslash here used to be treated as an ESCAPE (skipping it and
+        // whatever followed), but real HTML/Svelte markup attribute values have no backslash-escape
+        // syntax at all — that rule only applies inside a JS string literal (which findMatchingBrace/
+        // findMatchingParen above correctly handle, since those scan actual JS INSIDE a mustache, not
+        // this outer markup). Treating "\\" as an escape here was a silent fail-open in one direction and
+        // a false hard-fail in the other, confirmed against the real Svelte compiler:
+        //   - `title="C:\{entry.name}"` compiles with {entry.name} genuinely interpolated into the
+        //     tooltip (the backslash is just a literal character before it) — but the old code skipped
+        //     straight over the "\" AND the "{" that opens the mustache, so the render was never seen.
+        //   - `data-x="a\">{entry.name}` has its quote legitimately CLOSED by the un-escaped '"' right
+        //     after the backslash — but the old code treated `\"` as an escaped quote and kept
+        //     `quoteChar` open past where the value actually ends, running the scanner to EOF still
+        //     "inside" a quote and throwing CPE-1761's unterminated-attribute error on markup that
+        //     compiles and renders fine.
+        // Deleting this branch lets "\" fall through to the plain "any other character" case below,
+        // matching what the compiler actually does with it.
         if (ch === quoteChar) {
           quoteChar = null;
           currentAttrName = null; // the attribute's value just ended
@@ -501,6 +532,18 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
         // Attribute names are short and simple (`\w`/`-`), so a small bounded lookback is safe here in a
         // way it never was for the VALUE side (which is exactly CPE-1776's defect): this only has to span
         // one identifier, not an arbitrarily long accessible label.
+        //
+        // N3 (reviewer, round 2 — undocumented until now): this captures the FULL hyphenated attribute
+        // name (`[\w-]+`), so `currentAttrName` for `data-title=` is the literal string `"data-title"`,
+        // not `"title"`. isRenderPosition's `currentAttrName === "title"` check is therefore an EXACT
+        // match, not a substring one — a genuine behavior change from CPE-1776's old textual-lookback
+        // regex (`/\btitle=\{?\s*$/`), which matched on the WORD "title" anywhere a `\b` boundary put it,
+        // including right after the hyphen in `data-title=` (`-` is non-word, `t` is word, so `\b` sits
+        // exactly there) — i.e. the old code treated `data-title=`/`data-alt=` as equivalent to the real
+        // `title=`/`alt=` attributes, a false positive. The new exact-match behavior is MORE correct and
+        // matches this module's own documented `data-*` boundary above ("data-fullpath={e.path} staying
+        // green is the INTENDED behavior"), but it is still a real behavior change from `main`, recorded
+        // here rather than left implicit.
         const nameLookback = markup.slice(Math.max(0, i - 64), i);
         const nameMatch = /([\w-]+)\s*$/.exec(nameLookback);
         currentAttrName = nameMatch ? nameMatch[1] : null;
@@ -560,34 +603,52 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
   return [...offenders].sort(compareOffenders);
 }
 
-/** CPE-1768: the membership CRITERION — a `.svelte` file must carry a `REGISTRY` entry in
- *  `bidiEscape.guard.test.ts` (even `[]`, once `findUnsafeRenderLines` proves it draws nothing unsafe) if
- *  its source references a value shaped like a filesystem entry's identity: a `.name`/`.path`/`.fullPath`/
- *  `.oldName`/`.cwd` property access (the exact shapes this codebase's directory entries, agent sessions,
- *  and repo/vault paths use — `entry.name`, `e.path`, `f.fullPath`, `rc.oldName`, `s.cwd`), or a component
- *  prop literally declared `export let name`/`export let path`.
+/** CPE-1768 (widened this round — reviewer B1): the membership CRITERION — a `.svelte` file must carry a
+ *  `REGISTRY` entry in `bidiEscape.guard.test.ts` (even `[]`, once `findUnsafeRenderLines` proves it draws
+ *  nothing unsafe) if its source references a value shaped like a filesystem entry's identity, in ANY of
+ *  the concrete shapes this codebase actually uses for one:
+ *   - a `.name`/`.path`/`.fullPath`/`.oldName`/`.cwd`/`.root`/`.folder`/`.dir`/`.target`/`.fileName`/
+ *     `.filePath`/`.linkPath` property access (`entry.name`, `e.path`, `f.fullPath`, `rc.oldName`,
+ *     `s.cwd`, `rule.root`, `job.source`, `sig.target`, …),
+ *   - a variable of that same vocabulary DECLARED with `let`/`export let` (`export let root`, `export let
+ *     fileName`, or a plain `let folder = outDir` deriving one from a differently-named prop — the exact
+ *     "intermediate variable" shape this module's own header (line 7) already names as a render pattern),
+ *   - a call to one of this codebase's own path-splitting helpers: `baseName(`/`basename(`/`parentDir(`,
+ *   - an `{#each … as { name }}`/`{ path }` (or plain JS `const { name } = …`) destructuring pattern, or
+ *   - `["name"]`/`['path']` bracket property access.
+ *  The first CPE-1768 pass shipped only the first bullet's five spellings plus `export let name`/`path` —
+ *  literally a five-property regex, the same "regex zoo" shape the header above (lines 4-10) says this
+ *  module's CORE engine already replaced, just relocated from expressions to filenames. Review confirmed
+ *  it missed real, already-shipping renders: `WorkbenchView.svelte`'s `export let root` (rendered raw in
+ *  body text), `CreateCertDialog.svelte`'s `let folder = outDir` (rendered raw in a `title=` tooltip), and
+ *  `RepairLinkDialog.svelte`'s `export let linkPath` (a symlink target, the component's whole subject).
  *
  *  **In scope** (example): `<div title={entry.path}>{entry.name}</div>` — the ordinary shape of a
  *  directory-listing row, a dialog operating on selected files, or a component fed a name/path prop by
- *  its parent (`<TagEditor name={entry.name} />`).
+ *  its parent (`<TagEditor name={entry.name} />`); equally, `export let root: string;` — any prop whose
+ *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it.
  *  **Out of scope** (example): `StatusBar.svelte` as it stands today — item counts, a disk-free label, git
- *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path, so it
- *  doesn't match this pattern and carries no `REGISTRY` entry. The moment it (or any file) starts
- *  rendering one of these shapes, `isCandidateComponent` flags it and the membership test in
- *  `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the thing you cannot
- *  forget, not the thing you must remember. See that test's own mutation-probe demonstration (CPE-1768 AC:
- *  the review's original `StatusBar.svelte` injected-render probe, reproduced without leaving a permanent
- *  unregistered fixture in the tree).
+ *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path (or a
+ *  variable NAMED like one), so it doesn't match this pattern and carries no `REGISTRY` entry. The moment
+ *  it (or any file) starts rendering one of these shapes, `isCandidateComponent` flags it and the
+ *  membership test in `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the
+ *  thing you cannot forget, not the thing you must remember. See that test's own mutation-probe
+ *  demonstration (CPE-1768 AC: the review's original `StatusBar.svelte` injected-render probe, reproduced
+ *  without leaving a permanent unregistered fixture in the tree).
  *
  *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
  *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive
  *  costs one `REGISTRY` line (often `[]`) while a false negative is the actual hazard CPE-1768 exists to
- *  close, so over-inclusion is the safe direction to err in. `.name`/`.path` alone will also match plenty
- *  of NON-filesystem uses (a macro's name, a saved search's name, an HTML `<input name>`, a CSS class named
- *  `.path`) — that's expected, not a bug: those files still get a `REGISTRY` entry (usually `[]` or a
- *  benign-recorded one), same as any other candidate, rather than being silently exempted by a narrower
- *  pattern that could just as easily miss a real one. */
-export const CANDIDATE_PATTERN = /\.(?:name|path|fullPath|oldName|cwd)\b|export let (?:name|path)\b/;
+ *  close, so over-inclusion is the safe direction to err in — `root`/`folder`/`dir`/`target` are common
+ *  enough English words that this WILL also match plenty of non-filesystem uses (a macro's name, a saved
+ *  search's name, an HTML `<input name>`, a DOM/menu "root" element) — that's expected, not a bug: those
+ *  files still get a `REGISTRY` entry (usually `[]` or a benign-recorded one), same as any other
+ *  candidate, rather than being silently exempted by a narrower pattern that could just as easily miss a
+ *  real one. This is still not a claim of exhaustiveness — it is the concrete vocabulary this codebase is
+ *  KNOWN to use for a filesystem location today; a genuinely novel prop name (`export let whereItLives`)
+ *  is still invisible to it, same honest boundary every heuristic in this file states rather than hides. */
+export const CANDIDATE_PATTERN =
+  /\.(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|(?:export\s+)?let\s+(?:name|path|fullPath|oldName|cwd|root|folder|dir|target|fileName|filePath|linkPath)\b|\b(?:baseName|basename|parentDir)\s*\(|\{\s*(?:name|path)\s*\}|\[\s*["'](?:name|path)["']\s*\]/;
 
 /** True if `src` (a whole `.svelte` file's text — script and markup both, unlike `findUnsafeRenderLines`
  *  which only ever looks at markup) matches `CANDIDATE_PATTERN` and therefore must carry a `REGISTRY`

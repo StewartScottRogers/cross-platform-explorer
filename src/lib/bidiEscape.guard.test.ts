@@ -31,14 +31,19 @@
 // PLUS the ticket's originally-disclosed "not yet covered" dialogs (ContentIndexSearchDialog,
 // FileHealthDialog, NearDuplicatesDialog, SimilarImagesDialog, DeclutterDialog, BatchMediaDialog,
 // SplitFileDialog, JoinPartsDialog, ExplorerPane, TerminalPanel), registered here too so their remaining
-// raw lines are pinned exactly rather than left completely unchecked. That's 41 of the 135 `.svelte`
-// files under src/lib/components/, plus App.svelte on its own (see below) — NOT `readdir(components)` in
-// full (review round 2's B5, explicitly hedged "Consider"). Running this engine over the other ~94 files
-// found the overwhelming majority of their `{…}` renders are non-filesystem UI text (macro/workspace/
-// rule/template names, i18n strings, counts) that the ticket's own scope excludes — auditing every one of
-// them individually is a different, much larger undertaking than this ticket's residual-call-site list,
-// and doing it hastily to tick a box would produce exactly the "guard that passes while the property is
-// broken" the review warned against. Left as a natural follow-up, not silently declared done.
+// raw lines are pinned exactly rather than left completely unchecked. That was the CPE-1757 round-2
+// baseline: 41 of the 135 `.svelte` files under src/lib/components/, plus App.svelte on its own (see
+// below) — NOT `readdir(components)` in full (review round 2's B5, explicitly hedged "Consider"), and the
+// "auditing the other ~94 individually is a different, much larger undertaking" paragraph that used to sit
+// here was exactly the debt CPE-1768 was filed to close.
+//
+// CPE-1768 (below, in its own section) IS that follow-up: `isCandidateComponent` in bidiRenderScan.ts
+// states the mechanical membership rule (a filesystem-entry-identity shape — property access, a same-
+// vocabulary `let`/`export let` declaration, a `baseName`/`basename`/`parentDir` call site, a destructuring
+// or bracket-access pattern — see its own doc for the exact list, widened in review round 2's B1 finding
+// after the first pass's narrower five-property version missed three already-shipping raw renders), and a
+// guard test walks every REAL `.svelte` file and fails when a candidate isn't registered here. REGISTRY
+// now carries 92 keys — every file the criterion currently flags, not a hand-picked residual list.
 //
 // A dry-run of this exact engine across every file in COVERED_FILES surfaced FOUR real, previously-missed
 // spoof surfaces beyond the CheckpointDialog:322 UAT bug — proof the inversion earns its keep, not just a
@@ -166,6 +171,14 @@ const REGISTRY: Record<string, string[]> = {
   "WatchRulesDialog.svelte": ["171:rule.name","172:condSummary(rule.when)","173:rule.actions.map(actSummary).join(\", \")","212:actSummary(a)","222:preview.actions.map((a) => a.resolved).join(\", \")","222:preview.rule.name","241:f","247:fire.summary"],
   "WorkspacesDialog.svelte": ["73:w.name","74:w.tabs.length","74:w.tabs.length === 1 ? '' : 's'"],
   "YamlTomlPreview.svelte": ["155:loadError","165:parseErrorMessage","170:format === \"yaml\" ? \"YAML\" : \"TOML\"","170:parseErrorMessage","175:rawFallback","177:RAW_FALLBACK_CHARS.toLocaleString()"],
+
+  // --- B1 (reviewer, round 2): 6 more candidates surfaced by the widened CANDIDATE_PATTERN ---
+  "CardDetailDialog.svelte": ["122:id","123:title","137:error","143:k","143:v","150:bodyHtml","162:sending ? \"…\" : \"Send ▸\"","167:detail?.location || \"Tickets\"","168:bodyLines","168:bodyLines === 1 ? \"\" : \"s\"","168:metaFields.length","168:metaFields.length === 1 ? \"\" : \"s\""],
+  "CreateCertDialog.svelte": ["183:v","188:`Remove ${v}`","210:v","215:`Remove ${v}`","256:kt.label","313:error","320:busy ? \"Creating…\" : \"Create\""],
+  "NewLinkDialog.svelte": ["114:$t(\"link.newLinkTitle\")","115:$t(\"link.newLinkTitle\")","117:$t(\"link.kindLabel\")","119:$t(\"link.kindSymlink\")","120:$t(\"link.kindHardlink\")","122:$t(\"link.kindJunction\")","126:$t(\"link.targetLabel\")","137:$t(\"link.browse\")","141:$t(\"link.junctionTargetHint\")","144:$t(\"link.nameLabel\")","155:error","159:$t(\"common.cancel\")","162:$t(\"link.create\")"],
+  "RepairLinkDialog.svelte": ["106:$t(\"link.repairTitle\")","107:$t(\"link.repairTitle\")","108:$t(\"link.repairIntro\")","111:$t(\"link.repairLoading\")","115:$t(\"link.repairSuggestionLabel\")","119:$t(\"link.repairNoSuggestion\")","124:translate($locale, \"link.repairConfirm\", { target: displaySafePath(chosenTarget ?? \"\") })","128:$t(\"common.cancel\")","131:$t(\"link.repairConfirmYes\")","135:error","138:$t(\"common.close\")","141:$t(\"link.repairBrowse\")","148:$t(\"link.repairAccept\")"],
+  "Spotlight.svelte": ["186:$t(\"spotlight.title\")","197:$t(\"spotlight.ariaSearch\")","201:query.trim() ? $t(\"spotlight.noMatches\") : $t(\"spotlight.typeHint\")","205:$t(GROUP_LABEL[section.kind])"],
+  "WorkbenchView.svelte": ["92:branch || \"detached\"","96:stats.added","96:stats.files","96:stats.files === 1 ? \"\" : \"s\"","96:stats.removed","130:error","132:branch || \"the working tree\"","140:isCollapsed ? \"Expand\" : \"Collapse\"","141:isCollapsed ? \"▸\" : \"▾\"","142:fileLabel(f)","143:fs.added","143:fs.removed","144:copiedFile === key ? \"✓ Copied\" : \"Copy\"","149:h.header","151:l.kind === \"add\" ? \"+\" : l.kind === \"del\" ? \"−\" : \" \"","151:l.newLine ?? \"\"","151:l.oldLine ?? \"\"","151:l.text","151:s.text"],
 };
 
 /** The subset of REGISTRY whose non-empty array is an ACTUAL disclosed "still renders a raw filesystem
@@ -329,11 +342,13 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
     expect(paragraph, `src/docs/03-explorer.md's bidi-escape bullet should point readers at the guard test's real REGISTRY constant`).toContain("REGISTRY");
   });
 
-  // CPE-1768: REGISTRY covered 41 of 136 .svelte files with no stated rule for which files MUST be in it —
-  // a new component rendering a raw filesystem name could go unregistered forever with nothing to notice.
-  // This is the mechanical enforcement: walk every REAL .svelte file under src/lib/components, and require
-  // every one `isCandidateComponent` flags (see its doc in bidiRenderScan.ts for the exact criterion) to be
-  // a REGISTRY key — registration becomes the thing you cannot forget, not the thing you must remember.
+  // CPE-1768: REGISTRY used to cover 41 of 136 .svelte files with no stated rule for which files MUST be
+  // in it — a new component rendering a raw filesystem name could go unregistered forever with nothing to
+  // notice. This is the mechanical enforcement: walk every REAL .svelte file under src/lib/components, and
+  // require every one `isCandidateComponent` flags (see its doc in bidiRenderScan.ts for the exact
+  // criterion) to be a REGISTRY key — registration becomes the thing you cannot forget, not the thing you
+  // must remember. REGISTRY now carries 92 keys (up from 41), matching the criterion's live output, not a
+  // number frozen in prose that can go stale the moment a new component ships.
   it("CPE-1768: every candidate component (a name/path-shaped reference) is registered in REGISTRY", () => {
     const files = readdirSync(COMPONENTS).filter((f) => f.endsWith(".svelte"));
     const missing = files.filter((f) => {
@@ -346,6 +361,23 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
         `bidiRenderScan.ts) but have no REGISTRY entry here — add one (findUnsafeRenderLines's live output, ` +
         `even [] once it's clean) rather than leaving them unscanned: ${missing.join(", ")}`,
     ).toEqual([]);
+  });
+
+  // B1 (reviewer, round 2): the FIRST CANDIDATE_PATTERN (`.name`/`.path`/`.fullPath`/`.oldName`/`.cwd`
+  // property access, plus `export let name`/`export let path`) was itself a five-property regex zoo, and
+  // missed three components already shipping a raw filesystem render: WorkbenchView.svelte's
+  // `export let root` (rendered raw in body text), CreateCertDialog.svelte's `let folder = outDir`
+  // (rendered raw in a title= tooltip), and RepairLinkDialog.svelte's `export let linkPath`/`chosenTarget`
+  // (a symlink target, the component's whole subject). All three are fixed (displaySafeName/Path) and
+  // registered above, but a REGRESSION that narrows CANDIDATE_PATTERN back down must be caught even if it
+  // doesn't happen to touch one of REGISTRY's current keys — pin these three by name, directly against the
+  // detector, not just indirectly via "is it in REGISTRY" (which a narrower pattern could vacuously pass
+  // if the file simply stayed registered from a previous, wider pass).
+  it("B1: the three components the review found missing under the narrower CANDIDATE_PATTERN are still detected as candidates", () => {
+    for (const f of ["WorkbenchView.svelte", "CreateCertDialog.svelte", "RepairLinkDialog.svelte"]) {
+      const src = readFileSync(join(COMPONENTS, f), "utf8");
+      expect(isCandidateComponent(src), `${f} must be detected as a candidate — this is the exact shape CPE-1768's review found missing`).toBe(true);
+    }
   });
 
   // The AC's demonstration ("adding a new component… shows CI red without any manual registration step"),
