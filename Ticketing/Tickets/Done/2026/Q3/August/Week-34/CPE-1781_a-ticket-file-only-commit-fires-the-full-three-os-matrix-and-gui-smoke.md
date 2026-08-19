@@ -69,3 +69,28 @@ commits to `main` in one night**, each firing both workflows. Because `ci.yml` s
 Found by the Foreman during the batched sprint of 2026-08-18, on noticing that every recent `main` run was
 either its own bookkeeping or a cancellation of it. Related: CPE-1772 (the GUI-smoke cancellations this
 contends with), CPE-1266 (which introduced `cancel-in-progress`), CPE-1753 (the GUI-smoke sharding).
+
+## AC1 demonstrated post-merge, 2026-08-19 — controlled before/after
+
+The acceptance criterion could not be run before the merge: \paths-ignore\ sits on the \pushtrigger, and a push to a PR branch fires \pull_request\ instead, so no push-triggered run existed to
+observe. Both the reviewer and the UAT independently reached that conclusion, and the PR body's
+original claim that a branch commit could demonstrate it described an impossible test.
+
+Run by the Foreman on \main\ immediately after merge. Two commits of the **same kind** — tickets-only,
+no code — thirty minutes apart, either side of the merge:
+
+| Commit | When | Kind | CI | GUI smoke |
+|--------|------|------|----|-----------|
+| \ea49a9e1\ | 22:08 UTC, **before** the merge | Tickets-only | **fired** | **fired** |
+| \832c2672\ | 22:39 UTC, the merge itself | Code (workflows + wdio.conf.ts) | **fired** | **fired** |
+| \dfd3c737\ | 22:39 UTC, **after** the merge | Tickets-only | **did not fire** | **did not fire** |
+
+So the filter suppresses exactly what it was meant to and nothing else: a bookkeeping commit starts no
+build, while a code commit pushed one minute earlier started the full matrix.
+
+One run does appear against \dfd3c737\: \pages-build-deployment\. That is GitHub's own managed Pages
+workflow, not a file in \.github/workflows/\, so \paths-ignore\ does not apply to it and never could.
+Recorded here so a future reader who sees a run listed against a ticket-only commit does not conclude
+the filter regressed.
+
+**AC1: met.**
