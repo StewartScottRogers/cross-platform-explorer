@@ -36,9 +36,15 @@ on:
     #
     # Also NOT a blanket `**/*.md` — this repo has Markdown that IS a build input a real code change
     # can break: `src/docs/*.md` is shipped and guarded by `src/lib/sectionDocs.test.ts` (part of the
-    # `frontend` job below), and `docs/design/*.md` is asserted against by doc-parity tests
-    # (CPE-1761). A blanket ignore would silence exactly the guards those tickets exist to keep
-    # honest.
+    # `frontend` job below). `docs/design/*.md` is kept out of the ignore list too, but conservatively,
+    # not because of a specific guard: a repo-wide search (ts/rs test files) found nothing that reads
+    # its content today — CPE-1761 is scoped to `src/lib` + `src/docs/03-explorer.md` wording, not
+    # `docs/design/`. An earlier version of this comment cited CPE-1761 for `docs/design/*.md`
+    # specifically; that was wrong and is corrected here rather than repeated. Named anyway because it
+    # is exactly the kind of doc a future guard could plausibly read, and — same logic as `Ticketing/
+    # Epics/**` in the blocker above — the cost of leaving it un-ignored is zero (no bookkeeping commit
+    # ever touches it) against a real, if currently theoretical, risk of silencing a guard added later
+    # without this comment being updated to match.
     #
     # `.claude/**` stays in the ignore list — verified safe: every reference to it across the repo
     # (ts/rs/js/svelte/json/yml) is a prose comment, no workflow `run:` step reads a file under it,

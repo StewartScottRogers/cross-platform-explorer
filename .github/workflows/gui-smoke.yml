@@ -48,10 +48,12 @@ on:
     # as by PR). Narrowed to `Ticketing/Tickets/**` and `Ticketing/Sprints/**` — the two trees a
     # routine ticketing-workflow commit actually touches, neither read by any test or build step —
     # plus `.claude/**` (verified inert: prose-only references, no `run:` step reads it, already
-    # excluded from vitest). Not a blanket `**/*.md`: `docs/design/*.md` is asserted against by
-    # doc-parity tests and `src/docs/*.md` is guarded by `sectionDocs.test.ts` (both in ci.yml, not
-    # this workflow, but naming only the two unambiguous ticketing paths avoids having to reason
-    # per-workflow about which Markdown is a shipped input). PUSH ONLY, not `pull_request` below: the
+    # excluded from vitest). Not a blanket `**/*.md`: `src/docs/*.md` is guarded by
+    # `sectionDocs.test.ts` (in ci.yml, not this workflow), and `docs/design/*.md` is kept out
+    # conservatively rather than because a specific guard reads it today — see ci.yml's identical note
+    # for the correction of an earlier, wrong CPE-1761 citation here. Naming only the two unambiguous
+    # ticketing paths avoids having to reason per-workflow about which Markdown is a shipped input.
+    # PUSH ONLY, not `pull_request` below: the
     # `pull_request` trigger carries no path filter, so any change routed through a PR still gets the
     # full run regardless of diff — that, plus direct-push discipline, is this repo's only automated
     # signal (there being no required-check mechanism to fall back on), and the filtered `push` run

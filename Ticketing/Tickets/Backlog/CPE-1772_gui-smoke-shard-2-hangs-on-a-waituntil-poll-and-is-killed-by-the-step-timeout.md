@@ -120,3 +120,40 @@ shape: one cancellation there fails every shard at once, so a PR shows a wall of
 The pattern across all four is a cancellation at an arbitrary setup step under runner contention, which
 argues the root cause is not `samples.smoke.ts`'s poll at all — that was just where the first one landed.
 Whatever is done here should start from "why are these jobs being cancelled" rather than from the poll.
+
+## Work Log
+
+2026-08-19 — Root-caused the `connectionRetryTimeout` (180s) x default `connectionRetryCount` (3)
+compounding in `wdio.conf.ts`: one wedged WebDriver command could silently retry for up to 12 minutes
+with zero output, and it's never just one command (afterEach's `snapFailure`, the next test's setup).
+Fixed with `connectionRetryCount: 0`. That removal opened a narrower race in `beforeSession` (spawns
+`tauri-driver`, returned before it was listening) — closed with a bounded TCP-readiness poll instead of
+restoring the retry count. See PR #935 for the full diffs.
+
+2026-08-19 — CORRECTION to this ticket's own "What to do" section (the "the classifier itself exited 127
+after the cancellation" line): pulled the raw log for the exact incident cited there (PR #923 shard 2,
+job 95580439494) via `gh api .../jobs/<id>/logs`. The classify-log step (CPE-1728) **ran and succeeded**,
+correctly printing `ENVIRONMENT SIGNATURE ONLY — no AssertionError... 6 known WebDriver/runner marker(s)
+matched`. The actual failure was the NEXT step, Ratchet, throwing `failed to parse
+wdio-shard-2-of-4-0-7.json as JSON: Unexpected end of JSON input` and exiting **1, not 127** — a truncated
+results file from the job being killed by the 30-minute JOB-LEVEL cap (`gui-smoke.yml`'s `timeout-minutes`
+on the shard job), not a step-level poll timeout, and not a case where the classifier "never got to
+judge" — it judged, correctly, and was overruled by the job dying mid-write one step later. The exit-127
+mechanism described in "What to do" (apt hang -> `npm ci` never runs -> `tsx` missing) is real and was
+independently observed on PR #935's own CI during the CPE-1781 companion work, but it is a DIFFERENT
+incident than the one originally cited here — corrected rather than left standing uncorrected next to a
+newer, accurate account. One piece of this incident's log DOES strengthen the `connectionRetryCount`
+theory: the suite step ran 03:13:43-03:25:26 (11m43s) before cancellation — close to the theorised
+4 x 180s = 12-minute ceiling for a stuck command retried to exhaustion.
+
+2026-08-19 — Acceptance criterion "ten consecutive green shard-2 runs" is explicitly **NOT MET**.
+Observed count: 1 clean shard-2 pass (run 32275319086 attempt 2, 17:19-17:33 UTC) plus one earlier rerun
+that was itself cancelled mid-flight by a subsequent push on the same branch (not a tenth data point
+either way). Not achievable right now: the apt-hang class this investigation also surfaced (see PR #935's
+`gui-smoke.yml` comments) is external and recurring — **it reproduced live again during PR #935's review,
+with `Acquire::ForceIPv4=true` already applied**, same shape (silent stop right after the last InRelease
+fetch, named 8:00 timeout), on the SAME `ubuntu-latest` pool this ticket's shard-2 runs also use. Root
+cause is therefore NOT fixed and no run demonstrates otherwise. What IS proven, twice, including live
+during this review: a hang now fails as a bounded, named, ~8-minute failure with diagnostics, instead of
+a silent ~30-minute kill with none — that is this ticket's AC1/AC2 delivered; AC "ten consecutive greens"
+stays open until the external stall itself is resolved (tracked more broadly in follow-up CPE-1787).
