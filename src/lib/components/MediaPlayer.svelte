@@ -10,6 +10,7 @@
    */
   import * as mt from "../mediaTransport";
   import type { MediaType } from "../mediaTransport";
+  import { displaySafeName } from "../filename";
 
   /** Asset-protocol URL for the file (from `convertFileSrc` in the app; injectable in tests). */
   export let src: string;
@@ -128,7 +129,7 @@
         class="mp-media"
         bind:this={mediaEl}
         {src}
-        aria-label={name}
+        aria-label={displaySafeName(name)}
         on:timeupdate={onTimeUpdate}
         on:durationchange={onDurationChange}
         on:loadedmetadata={onDurationChange}
@@ -143,7 +144,7 @@
         class="mp-media"
         bind:this={mediaEl}
         {src}
-        aria-label={name}
+        aria-label={displaySafeName(name)}
         on:timeupdate={onTimeUpdate}
         on:durationchange={onDurationChange}
         on:loadedmetadata={onDurationChange}

@@ -11,6 +11,7 @@
   import { parseDiff, diffStats, fileStats, fileLabel, annotateInline, toPatch, type DiffFile } from "../diff";
   import { lsGet, lsSet } from "../persist";
   import { isBrowsableUrl, normalizeUrl, workbenchState } from "../workbench";
+  import { displaySafePath } from "../filename";
 
   /** Repo root to diff. */
   export let root: string;
@@ -124,7 +125,7 @@
         <div class="wb-empty wb-edge"><div class="wb-edge-h">Git isn't available</div><p>The Workbench needs <code>git</code> on your PATH to read changes. Install Git, then try again.</p></div>
       {:else if state === "not-a-repo"}
         <div class="wb-empty wb-edge"><div class="wb-edge-h">Not a Git repository</div>
-          <p><code>{root || "(no folder)"}</code> isn't a Git repo, so there are no changes to show. Open a repository folder (one with a <code>.git</code>), or clone one from <b>Repositories</b>.</p></div>
+          <p><code>{displaySafePath(root) || "(no folder)"}</code> isn't a Git repo, so there are no changes to show. Open a repository folder (one with a <code>.git</code>), or clone one from <b>Repositories</b>.</p></div>
       {:else if state === "error"}
         <div class="wb-empty wb-edge error"><div class="wb-edge-h">Couldn't read the diff</div><p>{error}</p></div>
       {:else if state === "clean"}
@@ -138,7 +139,7 @@
             <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
             <div class="file-head" on:click={() => toggleCollapse(key)} title={isCollapsed ? "Expand" : "Collapse"}>
               <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
-              <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
+              <span class="file-name">{displaySafePath(fileLabel(f))}{#if f.binary} <span class="binary">binary</span>{/if}</span>
               {#if !f.binary}<span class="file-stat"><span class="fs-add">+{fs.added}</span> <span class="fs-del">−{fs.removed}</span></span>{/if}
               {#if !f.binary}<button class="edit-btn" on:click|stopPropagation={() => copyPatch(f)} title="Copy this file's diff">{copiedFile === key ? "✓ Copied" : "Copy"}</button>{/if}
               <button class="edit-btn" on:click|stopPropagation={() => editFile(f)} title="Open this file in the editor">Edit</button>

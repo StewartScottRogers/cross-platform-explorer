@@ -6,6 +6,7 @@
   import { get } from "svelte/store";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
   import * as settings from "../settings";
   import {
     tags as tagStore,
@@ -136,7 +137,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" aria-label={$t("tags.title")} on:click|stopPropagation>
     <h2>{$t("tags.title")}</h2>
-    {#if batch}<p class="subject">{$t("status.items", { count })}</p>{:else if name}<p class="subject" title={name}>{name}</p>{/if}
+    {#if batch}<p class="subject">{$t("status.items", { count })}</p>{:else if name}<p class="subject" title={displaySafeName(name)}>{displaySafeName(name)}</p>{/if}
 
     <div class="field">
       <div class="chips">

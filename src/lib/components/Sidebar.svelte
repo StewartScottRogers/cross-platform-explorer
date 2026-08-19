@@ -755,11 +755,11 @@
         on:dragleave={() => (dropPath = dropPath === place.path ? "" : dropPath)}
         on:drop={(e) => onDrop(e, place.path)}
         on:contextmenu={(e) => {
-          // Drive rows get a folder-like right-click menu (CPE-1158); place rows do not (unchanged).
+          // Drive rows get a folder-like right-click menu (CPE-1158); place rows don't (unchanged).
           if (!isDrive) return;
           e.preventDefault();
-          // stopPropagation so the event does not bubble to window, where the window-level dismisser
-          // in ContextMenu.svelte would instantly close the just-opened menu (CPE-1159 — same
+          // stopPropagation so the event doesn't bubble to window, where ContextMenu.svelte's
+          // window-level dismisser would instantly close the just-opened menu (CPE-1159 — same
           // open-then-close race CPE-1157 fixed for the pane; matches the agentMenu handler above).
           e.stopPropagation();
           dispatch("driveContext", { x: e.clientX, y: e.clientY, path: place.path, name: place.name });

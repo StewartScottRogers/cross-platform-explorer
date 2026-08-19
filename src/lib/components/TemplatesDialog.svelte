@@ -10,6 +10,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import type { TemplateSummary } from "../bindings.gen";
   import { buildVars } from "../templateVars";
+  import { displaySafeName } from "../filename";
 
   /** The current folder: the capture source AND the stamp destination. Supplied by App. */
   export let path = "";
@@ -128,7 +129,7 @@
       <input class="in" placeholder="New template name…" bind:value={captureName}
              aria-label="New template name" disabled={busy} />
       <button class="btn" data-testid="capture-btn" disabled={busy || !captureName.trim() || !path}
-              on:click={captureCurrent} title={path ? `Capture ${base(path)}` : "No folder"}>
+              on:click={captureCurrent} title={path ? `Capture ${displaySafeName(base(path))}` : "No folder"}>
         Capture this folder
       </button>
     </div>
@@ -156,7 +157,7 @@
       <input class="in" placeholder="{'{name}'} value (optional)…" bind:value={nameVar}
              aria-label="Name variable" disabled={busy} />
       <button class="btn primary" data-testid="stamp-btn" disabled={busy || !selected || !path}
-              on:click={stampSelected} title={path ? `Stamp into ${base(path)}` : "No folder"}>
+              on:click={stampSelected} title={path ? `Stamp into ${displaySafeName(base(path))}` : "No folder"}>
         Stamp here
       </button>
     </div>

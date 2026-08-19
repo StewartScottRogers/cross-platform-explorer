@@ -11,6 +11,7 @@
   import { createEventDispatcher } from "svelte";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
+  import { displaySafeName } from "../filename";
 
   /** Friendly vault name (blob base name minus `.cpevault`). */
   export let name: string;
@@ -26,7 +27,7 @@
 
 <div class="vault-banner" role="status" data-testid="vault-banner">
   <span class="vb-icon" aria-hidden="true"><Icon name="lock-open" size={15} /></span>
-  <span class="vb-text"><strong data-testid="vault-banner-name">{name}</strong> — unlocked</span>
+  <span class="vb-text"><strong data-testid="vault-banner-name">{displaySafeName(name)}</strong> — unlocked</span>
   <button
     class="vb-lock"
     data-testid="vault-lock"

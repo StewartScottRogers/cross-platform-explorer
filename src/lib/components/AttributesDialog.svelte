@@ -15,6 +15,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { octalToMode, modeToSymbolic } from "../permissions";
   import { msToLocalInput, localInputToMs } from "../datetimeInput";
+  import { displaySafeName } from "../filename";
 
   interface FileAttributes {
     readonly: boolean;
@@ -168,7 +169,7 @@
     dispatch("applied");
   }
 
-  $: heading = batch ? `Attributes — ${targets.length} items` : `Attributes — ${targets[0]?.name ?? ""}`;
+  $: heading = batch ? `Attributes — ${targets.length} items` : `Attributes — ${displaySafeName(targets[0]?.name ?? "")}`;
 </script>
 
 <svelte:window on:keydown={(e) => e.key === "Escape" && dispatch("cancel")} />

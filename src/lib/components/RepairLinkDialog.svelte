@@ -18,6 +18,7 @@
   import { commands } from "../bindings.gen";
   import { unwrap } from "../invoke";
   import { t, translate, locale } from "../i18n";
+  import { displaySafeName, displaySafePath } from "../filename";
 
   /** Full path of the broken symlink being repaired. */
   export let linkPath: string;
@@ -104,7 +105,7 @@
   <!-- svelte-ignore a11y-click-events-have-key-events a11y-no-static-element-interactions a11y-no-noninteractive-element-interactions -->
   <div class="dialog" role="dialog" aria-modal="true" aria-label={$t("link.repairTitle")} on:click|stopPropagation>
     <h2>{$t("link.repairTitle")}</h2>
-    <p class="intro">{$t("link.repairIntro")} <strong>{linkName}</strong></p>
+    <p class="intro">{$t("link.repairIntro")} <strong>{displaySafeName(linkName)}</strong></p>
 
     {#if phase === "loading"}
       <p class="dim" data-testid="repair-loading">{$t("link.repairLoading")}</p>
@@ -112,7 +113,7 @@
       {#if chosenTarget}
         <div class="suggestion" data-testid="repair-suggestion">
           <span class="field-label">{$t("link.repairSuggestionLabel")}</span>
-          <span class="target-path">{chosenTarget}</span>
+          <span class="target-path">{displaySafePath(chosenTarget ?? "")}</span>
         </div>
       {:else}
         <p class="dim" data-testid="repair-no-suggestion">{$t("link.repairNoSuggestion")}</p>
@@ -120,7 +121,7 @@
 
       {#if phase === "confirming"}
         <p class="confirm-text" data-testid="repair-confirm-text">
-          {translate($locale, "link.repairConfirm", { target: chosenTarget ?? "" })}
+          {translate($locale, "link.repairConfirm", { target: displaySafePath(chosenTarget ?? "") })}
         </p>
         <div class="actions">
           <button class="btn" data-testid="repair-cancel" on:click={() => (phase = "ready")}>

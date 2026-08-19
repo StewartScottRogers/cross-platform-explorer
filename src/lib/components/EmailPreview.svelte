@@ -9,6 +9,7 @@
   import { commands } from "../bindings.gen";
   import type { EmailPreview as EmailPreviewData } from "../bindings.gen";
   import { formatSize } from "../format";
+  import { displaySafeName } from "../filename";
   import Icon from "./Icon.svelte";
 
   /** The `.eml` file's path. */
@@ -75,9 +76,9 @@
         <div class="cp-title">{data.attachments.length === 1 ? "1 attachment" : `${data.attachments.length} attachments`}</div>
         <div class="email-pills" data-testid="email-attachments">
           {#each data.attachments as att}
-            <span class="email-pill" title={`${att.filename} — ${att.content_type}`}>
+            <span class="email-pill" title={`${displaySafeName(att.filename)} — ${att.content_type}`}>
               <Icon name="paperclip" size={11} />
-              <span class="email-pill-name">{att.filename}</span>
+              <span class="email-pill-name">{displaySafeName(att.filename)}</span>
               <span class="email-pill-size">{formatSize(att.size)}</span>
             </span>
           {/each}
