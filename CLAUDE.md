@@ -1,4 +1,4 @@
-﻿# CLAUDE.md
+# CLAUDE.md
 
 Guidance for AI assistants (and humans) maintaining this repository.
 
@@ -24,11 +24,11 @@ plugin, and CI builds/signs releases through GitHub Actions.
 
 ## Common commands
 
-- `npm install` â€” install frontend deps
-- `npm run tauri dev` â€” run the app with hot reload
-- `npm run tauri build` â€” build local installers
-- `npm run check` â€” type-check Svelte + TS
-- `npm run tauri icon <png>` â€” regenerate app icons
+- `npm install` — install frontend deps
+- `npm run tauri dev` — run the app with hot reload
+- `npm run tauri build` — build local installers
+- `npm run check` — type-check Svelte + TS
+- `npm run tauri icon <png>` — regenerate app icons
 
 ## How the pieces connect
 
@@ -46,7 +46,7 @@ plugin, and CI builds/signs releases through GitHub Actions.
   there too (the app is deliberately kept lean). Full architecture + the extraction recipe:
   [docs/design/SERVER-ARCHITECTURE.md](docs/design/SERVER-ARCHITECTURE.md) (epic CPE-810).
 
-## Versioning â€” keep three files in sync
+## Versioning — keep three files in sync
 
 When releasing, bump the version in ALL of:
 
@@ -54,7 +54,7 @@ When releasing, bump the version in ALL of:
 2. `src-tauri/Cargo.toml`
 3. `src-tauri/tauri.conf.json`
 
-Then tag `vX.Y.Z` and push â€” CI does the rest.
+Then tag `vX.Y.Z` and push — CI does the rest.
 
 ## Guardrails
 
@@ -62,7 +62,7 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
 - The updater `pubkey` and `endpoints` in `tauri.conf.json` must be filled in for
   auto-updates to work (see README "Auto-updates").
 - Filesystem commands skip entries they can't read rather than failing the whole
-  listing â€” preserve that behavior when editing `list_dir`.
+  listing — preserve that behavior when editing `list_dir`.
 
 ## UI conventions
 
@@ -104,7 +104,7 @@ Then tag `vX.Y.Z` and push â€” CI does the rest.
 - tauri-action: https://github.com/tauri-apps/tauri-action
 - Menu design standard: [docs/design/MENUS.md](docs/design/MENUS.md)
 
-## Managing this project â€” two surfaces
+## Managing this project — two surfaces
 
 This repo is managed from **both** the Claude Code CLI and the Claude desktop (Cowork) app.
 Both operate on the same files, so either can be used interchangeably.
@@ -133,20 +133,20 @@ directory). That starts a Claude Code session scoped to this repo with the slash
 When the user says **"Run"**, execute `.claude/commands/run.md`:
 
 1. Find the **latest** release, drafts included.
-2. If it is still a draft, **publish it first** (`gh release edit <tag> --draft=false`) â€” but only
+2. If it is still a draft, **publish it first** (`gh release edit <tag> --draft=false`) — but only
    after confirming the draft actually carries installer assets. A draft with no assets means the
    release build failed or is still running; publishing it would create an empty public release.
    In that case stop and report, rather than publishing.
 3. Download the right installer for the current OS, install silently, verify the install, launch.
 
-If **no release exists at all**, `/run` stops and says so â€” it never installs nothing and calls it
+If **no release exists at all**, `/run` stops and says so — it never installs nothing and calls it
 success.
 
-When the user says **"Remove"**, execute `.claude/commands/remove.md` â€” close the app, uninstall it
+When the user says **"Remove"**, execute `.claude/commands/remove.md` — close the app, uninstall it
 silently, and verify it is gone. "Remove" means uninstall the **installed application**, never the
 source repo or the user's files; if that is ambiguous in context, ask first.
 
-Both commands act on the built app â€” they never touch this working tree.
+Both commands act on the built app — they never touch this working tree.
 
 `RunClaude.cmd` passes `--dangerously-skip-permissions` for an uninterrupted local session; it is
 path-independent (`%~dp0`) so it works wherever the repo lives.
@@ -155,10 +155,10 @@ path-independent (`%~dp0`) so it works wherever the repo lives.
 
 The desktop app manages releases and monitoring:
 
-- **`RELEASING.md`** â€” runbook; say "cut a release 0.2.0", "check the build", "what needs updating".
-- **`scripts/release.ps1`** â€” one-command version bump + tag + push.
-- **`STATUS.html`** â€” local dashboard (gitignored), refreshed by a scheduled task.
-- **Scheduled tasks** â€” `cpe-daily-status` (CI + dashboard refresh + notify) and
+- **`RELEASING.md`** — runbook; say "cut a release 0.2.0", "check the build", "what needs updating".
+- **`scripts/release.ps1`** — one-command version bump + tag + push.
+- **`STATUS.html`** — local dashboard (gitignored), refreshed by a scheduled task.
+- **Scheduled tasks** — `cpe-daily-status` (CI + dashboard refresh + notify) and
   `cpe-weekly-deps` (dependency scan).
 
 ### Using both together
@@ -202,14 +202,14 @@ folder. Both board implementations (`crates/server` + `src-tauri`, and the `side
 sidecar) and the ticket MCP read these folders directly, so drift makes them **lie** rather than error
 — change every reader in lockstep.
 
-### Showing open tickets â€” ALWAYS include Blocked, Deferred, Epics, and Sprints
+### Showing open tickets — ALWAYS include Blocked, Deferred, Epics, and Sprints
 
 When the user asks to see "open tickets", "the tickets", "tasks", or "all tickets", ALWAYS show the
 Backlog table **plus** the Blocked, Deferred, **Epics**, and **Sprints** tables — never just the
 Backlog. (User preference, stated 2026-07-16: ticket listings must always surface **epics and
 sprints**.):
 
-1. **Open** â€” all `Ticketing/Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
+1. **Open** — all `Ticketing/Tickets/Backlog/CPE-*.md`, as a table of ID, title, type, priority, tags, estimate.
    `tags` is the ticket's disposition (`ready`, `big-design`, `resource-blocked` + qualifier, etc.);
    the controlled vocabulary lives in `Ticketing/wiki.md` ("Disposition Tags").
 2. **Blocked** — all `Ticketing/Tickets/Blocked/CPE-*.md`, as a table of ID, title, tags, and a one-line
@@ -224,7 +224,7 @@ sprints**.):
    surfaced only on request. This is the separate epic queue; epics are decomposed via
    `/ticketing-epic`, not worked by `/ticketing-work`.
 5. **Sprints** — all `Ticketing/Sprints/SPR-*.md`, **Active first then Planned**, as a table of ID, title,
-   status (`Active`/`Planned`), window (`start â†’ end`), a one-line goal, and progress (`X of Y tickets
+   status (`Active`/`Planned`), window (`start → end`), a one-line goal, and progress (`X of Y tickets
    Done`, counting tickets whose `sprint:` frontmatter names it). This is the separate, time-boxed sprint
    queue; sprints are managed via `/ticketing-sprint`, not worked directly. Orthogonal to epics — a
    ticket can appear in both.

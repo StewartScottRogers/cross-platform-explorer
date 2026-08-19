@@ -36,7 +36,7 @@
   },
   "plugins": {
     "cli": {
-      "description": "Cross-Platform Explorer â€” window geometry launch options (CPE-580).",
+      "description": "Cross-Platform Explorer — window geometry launch options (CPE-580).",
       "longDescription": "Position and size the window at launch. Values are logical pixels (stable across DPI) unless --physical. Precedence: CLI flag > saved window state > default. Off-screen/oversized values are clamped onto the monitor with a warning.",
       "args": [
         { "name": "x", "takesValue": true, "description": "Window left position (logical px)" },

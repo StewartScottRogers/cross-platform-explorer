@@ -1,0 +1,78 @@
+---
+id: CPE-1788
+title: the mojibake guard is blind to UTF-16 and ANSI rewrites — the same PowerShell round-trip, different output encoding
+type: bug
+priority: Medium
+status: Backlog
+tags: ready
+estimate: S
+created: 2026-08-19
+closed:
+---
+
+## Problem
+
+CPE-1771's guard catches a PowerShell round-trip when the result is still **UTF-8** — the classic
+`—` → `â€"` mojibake. Measured by an independent re-review at **89 of 89** corruption shapes caught,
+including double- and triple-encoded ones, so the detector itself is sound.
+
+But the same round-trip can land in two other encodings, and both pass the guard silently:
+
+### 1. UTF-16 — skipped as binary
+
+PowerShell 5.1's `>` and `Out-File` default to **UTF-16LE**. A file rewritten that way has NUL bytes
+throughout, so `looksBinary` (NUL in the first 4 KB) skips it before any check runs. And
+`hasLeadingBom` only matches the UTF-8 BOM `EF BB BF` — it never looks for `FF FE` or `FE FF`.
+
+So the single most common accidental PowerShell rewrite produces a file the guard does not examine at
+all.
+
+### 2. ANSI / CP1252 — decoded lossily to zero hits
+
+PowerShell 5.1 `Set-Content`'s default encoding is ANSI. A file rewritten that way is not valid UTF-8,
+so `bytes.toString("utf8")` substitutes U+FFFD and `findMojibake` reports **zero** hits on a genuinely
+corrupted file.
+
+The code comment at `src/lib/mojibakeGuard.test.ts` previously said a lossy decode "can only ever LOSE a
+match, never fabricate one, so it can't turn a clean file into a false failure". The first half is true
+and the conclusion is true — it cannot produce a *false failure*. What it does not say is that it can
+produce a **false pass**, which is the direction that matters for a guard. That comment has been
+corrected to name this gap and point here.
+
+## Why it matters
+
+This is not a new hazard — it is the *same* hazard, in a different shape. The repo's standing rule
+exists because a PowerShell write has already broken a release (`86888aed`, "strip the BOM I added to
+the manifests"). CPE-1771 exists to make the next occurrence fail loudly. It does, for one of the three
+encodings PowerShell can leave behind.
+
+A guard that covers one third of its own root cause while reporting green is worse than an obviously
+absent one, because it converts "nobody checked" into "checked and clean".
+
+## What to do
+
+Both are cheap and independent:
+
+- **UTF-16:** before the binary skip, check for a `FF FE` / `FE FF` BOM and report it as a violation in
+  its own right (a repo source file should never be UTF-16). Consider also treating a file whose NULs
+  fall on a strict alternating pattern as UTF-16 text rather than binary, so its content can be decoded
+  and scanned rather than merely rejected.
+- **ANSI:** detect the lossy decode instead of ignoring it —
+  `Buffer.compare(Buffer.from(text, "utf8"), bytes) !== 0` means the bytes were not valid UTF-8. Report
+  that as its own violation kind ("not valid UTF-8"), rather than scanning the U+FFFD-substituted text
+  and concluding the file is clean.
+
+Give each its own `kind` so the allowlist stays honest (CPE-1771 already split `mojibake` from `bom` for
+exactly this reason), and **red-proof both** by writing a real file through PowerShell's `Out-File` and
+`Set-Content` defaults, per the Evidence Rules in `Ticketing/wiki.md` — not by constructing the bytes
+synthetically, since the whole point is to catch what that specific tool actually produces.
+
+## Notes
+
+Filed by the Foreman from PR #936's independent re-review, 2026-08-19. The re-review confirmed no
+tracked file currently has its first NUL after 4 KB, so the binary heuristic has no present false
+negative from that direction — this ticket is about the encodings, not the heuristic's threshold.
+
+Related: **CPE-1771** (the guard this extends), **CPE-1783** (real corruption in `dispatch.rs`),
+**CPE-1784** (683 occurrences across `Ticketing/`), and the release that motivated all of them,
+`86888aed`.

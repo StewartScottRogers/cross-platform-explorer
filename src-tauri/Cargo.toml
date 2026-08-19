@@ -35,82 +35,82 @@ specta = { version = "=2.0.0-rc.22", optional = true }
 specta-typescript = { version = "0.0.9", optional = true }
 tauri-specta = { version = "=2.0.0-rc.21", features = ["derive", "typescript"], optional = true }
 # The Cross-Platform Explorer Server: Tauri-free domain logic behind the `ServerCtx` seam +
-# the wire contract (CPE-810/815). A normal (non-optional) dependency â€” it pulls only
+# the wire contract (CPE-810/815). A normal (non-optional) dependency — it pulls only
 # serde/serde_json/cpe-contract, all already in the tree, so it adds no weight to the plain
 # explorer. The app is the thin adapter that provides `TauriCtx` and dispatches to it.
 # The `index` feature turns on the instant-search index engine + service (CPE-832/1137, epic CPE-703).
 # The app is the adapter that exposes the index commands, so it enables the gate here (the crate default
-# stays OFF, keeping `cpe-server`'s own plain build/test the delete-test). Adds no new crates â€” the index
+# stays OFF, keeping `cpe-server`'s own plain build/test the delete-test). Adds no new crates — the index
 # is std-only.
 # `pdf-thumb` (CPE-1256) + `video-thumb` (CPE-1257) turn on the PDF first-page / video representative-
 # frame thumbnail extractors for the shipped build (CPE-1258, epic CPE-718). Both stay feature-gated OFF
-# in `cpe-server`'s own default build â€” enabling them here is what actually ships the code. `pdf-thumb`
+# in `cpe-server`'s own default build — enabling them here is what actually ships the code. `pdf-thumb`
 # pulls in `pdfium-render`, which loads the pdfium shared library at RUNTIME via `libloading` (never
-# statically linked), so the app still *builds and ships* with zero local pdfium install â€” the native
+# statically linked), so the app still *builds and ships* with zero local pdfium install — the native
 # libs (pdfium + a bundled ffmpeg) are provisioned as release bundle resources (CPE-1258;
 # release-sidecar.yml) and resolved next to the running executable at startup, falling back gracefully
 # to the generic type icon if either is missing. `video-thumb` adds zero new crates (shells out to a
 # bundled `ffmpeg`, never linked).
 # `dicom-thumb` (CPE-1345/1350, epic CPE-102) turns on the DICOM tag reader + pixel-data-to-PNG decoder
-# for the shipped build â€” it stays OFF in `cpe-server`'s own default build; enabling it here is what
+# for the shipped build — it stays OFF in `cpe-server`'s own default build; enabling it here is what
 # actually ships the code (pulls in the pure-Rust `dicom-object`/`dicom-pixeldata` crates, no native
-# codec toolchain required â€” see `crates/server/Cargo.toml`).
-# `waveform` (CPE-1478, epic CPE-720) turns on audio-waveform peak extraction for the shipped build â€”
+# codec toolchain required — see `crates/server/Cargo.toml`).
+# `waveform` (CPE-1478, epic CPE-720) turns on audio-waveform peak extraction for the shipped build —
 # shells out to the SAME bundled ffmpeg `video-thumb` already provisions (CPE-1258), so it adds no new
 # native dependency to bundle/ship; enabling it here is what actually exposes the command.
 cpe-server = { path = "../crates/server", features = ["index", "pdf-thumb", "video-thumb", "waveform", "http-embedder", "copilot", "dicom-thumb"] }
-# Remote-location routing (CPE-1511, epic CPE-1499): turns a remote URI (sftp://â€¦, webdav://â€¦) into a
+# Remote-location routing (CPE-1511, epic CPE-1499): turns a remote URI (sftp://…, webdav://…) into a
 # live provider so it browses through the same commands a local path does. `cpe-vfs` re-exports the
 # connections model + concrete SFTP/WebDAV providers behind one `connected_provider`/pool seam, so this is
 # the only new dependency the app needs to go from "remote rejected" to "remote browsable". The plain
-# explorer's local hot path never touches it â€” the command fast-path routes local straight to the local
+# explorer's local hot path never touches it — the command fast-path routes local straight to the local
 # backend as before (PURPOSE.md).
 cpe-vfs = { path = "../crates/vfs" }
 # Cross-platform mDNS/DNS-SD LAN discovery (CPE-1523, epic CPE-1517): the complement to the Windows-only
-# WNet walk above â€” mDNS is the ONLY discovery path on macOS/Linux, and a superset on Windows too
+# WNet walk above — mDNS is the ONLY discovery path on macOS/Linux, and a superset on Windows too
 # (surfaces sftp/webdav/ftp/nfs hosts WNet's SMB-only neighborhood never sees). Not feature-gated (like
 # `cpe-vfs` above): `discover_network_mdns` is a normal, always-on command, not opt-in sidecar code.
 cpe-mdns = { path = "../crates/mdns" }
-# (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 â€” no longer a
+# (sha2 moved to `cpe-server` with the checksum/backup/thumbnail domains, CPE-815/821 — no longer a
 # direct app dep.)
 # (The recursive directory-size walk that used rayon moved to `cpe-server` (CPE-815, disk_usage);
 # rayon is no longer a direct app dependency.)
 
-# Editable file timestamps (CPE-785). Pure-Rust, already in the tree transitively â€” this makes it direct.
+# Editable file timestamps (CPE-785). Pure-Rust, already in the tree transitively — this makes it direct.
 filetime = "0.2"
 
 # Optional: the sidecar platform host (ADR 0001), a standalone crate under ../sidecar.
 # Compiled ONLY with the `sidecar-platform` feature, so the plain explorer builds and
-# ships with zero sidecar code â€” the delete-test (CPE-272). One-way dependency: the app
+# ships with zero sidecar code — the delete-test (CPE-272). One-way dependency: the app
 # may use the host; the host never depends on the app.
 sidecar-host = { path = "../sidecar/host", optional = true }
 sidecar-contract = { path = "../sidecar/contract", optional = true }
 # The Repositories sidecar's domain crate (CPE-429). Pulled in ONLY to reuse its already-tested,
-# hardened `git clone` argv builder for the host `forge_clone` command (CPE-436) â€” same feature gate,
+# hardened `git clone` argv builder for the host `forge_clone` command (CPE-436) — same feature gate,
 # so the plain explorer still ships with zero repos/clone code (the delete-test).
 repos = { path = "../sidecar/repos", optional = true }
 
-# (Archive listing + create/extract â€” zip/tar/flate2/sevenz-rust â€” moved to `cpe-server` with the
-# `archive` domain, CPE-815/822 â€” no longer direct app deps. Also gone: the binary/data preview crates
+# (Archive listing + create/extract — zip/tar/flate2/sevenz-rust — moved to `cpe-server` with the
+# `archive` domain, CPE-815/822 — no longer direct app deps. Also gone: the binary/data preview crates
 # goblin/midly/wasmprinter/serde_bencode/calamine/rusqlite/parquet, CPE-815.)
-# (image/kamadak-exif/psd moved to `cpe-server` with the thumbnail + image_preview domains, CPE-815 â€”
+# (image/kamadak-exif/psd moved to `cpe-server` with the thumbnail + image_preview domains, CPE-815 —
 # no longer direct app deps. base64 stays: the thumbnail command still encodes the PNG as a data URL.)
 base64 = "0.22"
-# (iso9660 moved to `cpe-server` with the archive-listing domain, CPE-815 â€” no longer a direct app dep.)
+# (iso9660 moved to `cpe-server` with the archive-listing domain, CPE-815 — no longer a direct app dep.)
 
 # The terminal dock's embedded PTY backend (CPE-1242, epic CPE-714): mirrors the proven `PtySession` in
-# `sidecar/ai-console/src/pty.rs`. Same version, no drift â€” it's already a workspace dep there.
+# `sidecar/ai-console/src/pty.rs`. Same version, no drift — it's already a workspace dep there.
 # Cross-platform: Windows ConPTY, Unix openpty. Core-explorer feature (not sidecar-gated): the docked
 # terminal is additive but always available, like list_dir/thumbnails.
 portable-pty = "0.8"
 
 # Live provider API-key verification for the AI Console (CPE-347). Optional + gated behind
 # `sidecar-platform` so the plain explorer pulls no HTTP/TLS stack. ureq's default backend is
-# pure-Rust rustls â€” no OpenSSL / system libs.
+# pure-Rust rustls — no OpenSSL / system libs.
 ureq = { version = "2", optional = true }
 
 # Filesystem-activity watcher for Agent Watch (CPE-398). Optional + gated behind
-# `sidecar-platform` so the plain explorer pulls no watcher/thread machinery â€” off means off
+# `sidecar-platform` so the plain explorer pulls no watcher/thread machinery — off means off
 # (AGENT-WATCH.md). notify is pure-Rust on every target (ReadDirectoryChangesW / FSEvents / inotify).
 notify = { version = "6", optional = true }
 
@@ -124,30 +124,30 @@ fs4 = { version = "1", features = ["sync"] }
 
 # The updater plugin only makes sense on desktop targets. Window-state (remember
 # window size/position/maximized across restarts, CPE-228) is likewise desktop-
-# only â€” mobile has no free-floating, user-positioned window to restore.
+# only — mobile has no free-floating, user-positioned window to restore.
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-window-state = "2"
 # Spotlight global hotkey (CPE-1215, epic CPE-704): summons Spotlight (CPE-1216) with an OS-wide chord
-# even while the main window is hidden/unfocused. Desktop-only â€” mobile has no global-shortcut surface.
+# even while the main window is hidden/unfocused. Desktop-only — mobile has no global-shortcut surface.
 # Registered with zero shortcuts at startup; Settings opts in (off means no background cost).
 tauri-plugin-global-shortcut = "2"
 
 # Native OS drag-OUT plumbing (CPE-1264, epic CPE-661 follow-on for CPE-672/674): starts a real OS-level
-# file drag from `startDrag` in `src/lib/dragOut.ts` so a drop lands in Explorer/Finder/other apps â€” HTML5
+# file drag from `startDrag` in `src/lib/dragOut.ts` so a drop lands in Explorer/Finder/other apps — HTML5
 # webview drag can't expose real filesystem paths cross-platform. This slice only registers the plugin;
-# nothing calls it yet (no row is wired to drag-out). Desktop-only â€” mobile has no OS drag-out surface.
+# nothing calls it yet (no row is wired to drag-out). Desktop-only — mobile has no OS drag-out surface.
 tauri-plugin-drag = "2"
 
 # Keep the display awake while the app is open (CPE-225). Cross-platform screen-
 # lock / screensaver / display-sleep inhibition: Windows SetThreadExecutionState,
 # macOS IOPMAssertion, Linux org.freedesktop.ScreenSaver via zbus (no system dbus
-# headers needed). Desktop-only â€” mobile has no equivalent assertion.
+# headers needed). Desktop-only — mobile has no equivalent assertion.
 keepawake = "0.6"
 
 # Windows known folders (Desktop/Documents/Pictures/...) can be redirected
-# anywhere by OneDrive â€” on a real machine Pictures was found at
-# "â€¦\OneDrive\Exteriors Cave Homes\Pictures". No env-var heuristic can find that;
+# anywhere by OneDrive — on a real machine Pictures was found at
+# "…\OneDrive\Exteriors Cave Homes\Pictures". No env-var heuristic can find that;
 # the registry is the only authoritative source (CPE-025). This is a
 # Windows-only dependency, which is exactly why CI also compiles on
 # windows-latest (CPE-028).
@@ -165,11 +165,11 @@ windows = { version = "0.56", features = [
     "Win32_System_IO",
     # HEIC/HEIF preview via the Windows Imaging Component (CPE-1351, epic CPE-097): WIC decoder +
     # format-converter to 32bpp RGBA (Win32_Graphics_Imaging), plus COM apartment init/CoCreateInstance
-    # (Win32_System_Com). Same `windows` dep â€” just more features, no second crate.
+    # (Win32_System_Com). Same `windows` dep — just more features, no second crate.
     "Win32_Graphics_Imaging",
     "Win32_System_Com",
     # Windows-native network discovery (CPE-1519, epic CPE-1517): WNetOpenEnumW/WNetEnumResourceW walk
-    # RESOURCE_GLOBALNET the same way Explorer's "Network" folder does â€” same `windows` dep, no new crate.
+    # RESOURCE_GLOBALNET the same way Explorer's "Network" folder does — same `windows` dep, no new crate.
     "Win32_NetworkManagement_WNet",
 ] }
 # Encrypted-vault passphrase storage in the OS credential store (CPE-1248, epic CPE-738): the ONLY place a
@@ -178,12 +178,12 @@ windows = { version = "0.56", features = [
 # `keyring` v3 feature set as `sidecar/host` so there's no version/feature drift. Windows Credential Manager.
 keyring = { version = "3", features = ["windows-native"] }
 
-# macOS Keychain via the Security framework for vault passphrases (CPE-1248) â€” pure system framework, no libs.
+# macOS Keychain via the Security framework for vault passphrases (CPE-1248) — pure system framework, no libs.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", features = ["apple-native"] }
 # HEIC/HEIF preview via ImageIO (CPE-1351, epic CPE-097): pure Rust bindings to the system ImageIO +
-# CoreGraphics frameworks â€” macOS decodes HEIC natively (since 10.13), no Store install needed. All
-# permissive (`Zlib OR Apache-2.0 OR MIT`); no bundled C â€” the frameworks are dynamically linked from
+# CoreGraphics frameworks — macOS decodes HEIC natively (since 10.13), no Store install needed. All
+# permissive (`Zlib OR Apache-2.0 OR MIT`); no bundled C — the frameworks are dynamically linked from
 # the OS. objc2 0.6 / objc2-* 0.3 per the vetted plan. objc2 crates gate every type behind a
 # per-type feature, so the exact ones the ImageIO decode path names are enabled explicitly.
 objc2 = "0.6"
@@ -215,10 +215,10 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 # This feature is used for production builds where `devUrl` is disabled.
 default = []
 # Opt-in sidecar platform integration (ADR 0001 / CPE-260). OFF by default so the plain
-# explorer compiles and ships with no sidecar code whatsoever â€” the delete-test (CPE-272).
+# explorer compiles and ships with no sidecar code whatsoever — the delete-test (CPE-272).
 sidecar-platform = ["dep:sidecar-host", "dep:sidecar-contract", "dep:ureq", "dep:notify", "dep:repos"]
 # Opt-in typed-binding codegen (CPE-812, epic CPE-810). OFF by default so a normal build/`cargo test`
-# never compiles specta/tauri-specta â€” keeping the default lean AND avoiding the Windows loader failure
+# never compiles specta/tauri-specta — keeping the default lean AND avoiding the Windows loader failure
 # they trigger in a libtest binary. Enabled only for `cargo run --bin export_bindings --features
 # specta-bindings`, which regenerates `src/lib/bindings.gen.ts`.
 specta-bindings = ["dep:specta", "dep:specta-typescript", "dep:tauri-specta", "cpe-server/specta", "sidecar-contract?/specta", "repos?/specta"]
