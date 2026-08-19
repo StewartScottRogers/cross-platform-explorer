@@ -40,6 +40,19 @@ name: GUI smoke
 on:
   push:
     branches: [main]
+    # CPE-1781: same reasoning as ci.yml's identical block — a `Ticketing/**`/`.claude/**`-only
+    # commit cannot affect the built app, yet used to start the full shared build + 4-shard matrix +
+    # verdict job on `main` anyway. Narrow on purpose (not a blanket `**/*.md`): `docs/design/*.md`
+    # is asserted against by doc-parity tests and is NOT covered by this workflow, but `src/docs/*.md`
+    # is a frontend concern guarded in ci.yml, not here — naming only the two unambiguous paths avoids
+    # having to reason per-workflow about which Markdown is a shipped input. PUSH ONLY, not
+    # `pull_request` below: a PR still gets the full run regardless of diff, and `main` only moves via
+    # a PR whose `pull_request` run already passed as a required check, so this filtered `push` run
+    # was always a redundant confirmation rather than a gate — see ci.yml's longer note for the full
+    # required-check argument, identical here.
+    paths-ignore:
+      - "Ticketing/**"
+      - ".claude/**"
   pull_request:
     branches: [main]
   # CPE-1594: lets a human kick off the Windows leg on demand (Actions tab -> Run workflow) once
@@ -53,6 +66,8 @@ on:
 
 # CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight run, so rapid pushes
 # don't pile up dozens of gui-smoke runs (which, being flaky, could hang and starve the queue).
+# CPE-1781 keeps this as-is (see ci.yml's identical note): correct for rapid CODE pushes, and no
+# longer contended-for by bookkeeping-only pushes now that those don't start a run at all.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -283,7 +298,19 @@ jobs:
       # hardest class of CI failure to read. One list, copied verbatim, is worth the ~45 seconds of apt in
       # each job. See the long CPE-1702 note on the shard job's copy for why the GStreamer codec packages
       # are deliberately NOT here.
+      #
+      # CPE-1772: `timeout-minutes` here (and on "Install tauri-driver" below) is new. Neither step
+      # scales with spec count — unlike the suite step, a tight cap here has no growth-curve fuse —
+      # and both are exactly where two of the four documented cancellations landed (PR #933's shared
+      # build died mid "Install tauri-driver"; the sibling shard job's apt step died the same way on
+      # PR #924, see that job's identical comment below). ~45s/~20s is the normal cost of each; 8
+      # minutes is generous headroom for a slow apt mirror or a cold `cargo install` compile, while
+      # still turning a genuine hang here into a fast, NAMED failure instead of riding the job's full
+      # 30-minute cap to an ambiguous cancellation. This does not by itself explain those two
+      # incidents — see the longer note on `connectionRetryCount` in `wdio.conf.ts` for what evidence
+      # does and doesn't establish about the root cause.
       - name: Install Linux system dependencies
+        timeout-minutes: 8
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -332,7 +359,14 @@ jobs:
       # The official WebDriver proxy — version is independent of the Tauri crate version. Locates
       # `WebKitWebDriver` via PATH on Linux automatically (tauri-driver's own per-OS default), so
       # `webkit2gtk-driver`'s `/usr/bin/WebKitWebDriver` is all the shards need alongside it.
+      #
+      # CPE-1772: `timeout-minutes` here is where PR #933's shared-build cancellation actually landed
+      # (mid `Install tauri-driver`, after `tauri-driver v2.0.6` had already installed and the job's
+      # own unit tests had passed) — see the apt step's identical comment above for the full
+      # reasoning. Compiling `tauri-driver` from source normally takes well under a minute with a warm
+      # `cargo install` cache; 8 minutes covers a cold one.
       - name: Install tauri-driver
+        timeout-minutes: 8
         run: cargo install tauri-driver --locked
 
       # The two binaries a shard job needs and cannot cheaply reproduce. `ls -l` is not decoration: it is
@@ -473,7 +507,13 @@ jobs:
       # just "settled somehow") — so the day this runner's audio/video pipeline starts working for
       # real, that assertion breaks loudly instead of staying silently green, and this comment is the
       # place to come update it.
+      #
+      # CPE-1772: `timeout-minutes` here is new — this is the exact step where PR #924's shard 1 was
+      # cancelled, before any test ran. Doesn't scale with spec count (unlike the suite step below,
+      # which deliberately has no step cap — see its own CPE-1728/1753 note), so a tight cap here has
+      # no growth-curve fuse. See the build job's identical apt step for the full reasoning.
       - name: Install Linux system dependencies
+        timeout-minutes: 8
         run: |
           sudo apt-get update
           sudo apt-get install -y \

@@ -6,11 +6,46 @@ name: CI
 on:
   push:
     branches: [main]
+    # CPE-1781: a commit touching ONLY ticket/agent bookkeeping cannot affect a build, yet without
+    # this every ticket-filed/status-moved/Work-Log-appended commit fired the full frontend +
+    # 3-OS backend matrix on `main`. Measured during the 2026-08-17/18 batched sprint: ~15
+    # ticket-only commits to `main` in one night, each starting the whole matrix AND (because of
+    # `cancel-in-progress` below) cancelling the previous bookkeeping commit's still-running matrix
+    # mid-flight — burning the same account concurrency the PR queue needed (see CPE-1772, filed
+    # from noticing GUI-smoke cancellations the same night) for zero possible signal.
+    #
+    # Deliberately narrow: ONLY `Ticketing/**` and `.claude/**`. NOT a blanket `**/*.md` — this repo
+    # has Markdown that IS a build input a real code change can break: `src/docs/*.md` is shipped
+    # and guarded by `src/lib/sectionDocs.test.ts` (part of the `frontend` job below), and
+    # `docs/design/*.md` is asserted against by doc-parity tests (CPE-1761). A blanket ignore would
+    # silence exactly the guards those tickets exist to keep honest. `Ticketing/**` and `.claude/**`
+    # are the only paths with no build-affecting content at all, so they're the only ones safe to
+    # name here without a case-by-case audit.
+    #
+    # PUSH ONLY — deliberately NOT applied to the `pull_request` trigger below, and this is also why
+    # it creates no required-check hole. A PR always gets the full, unfiltered run regardless of its
+    # diff (a docs-only PR still exercises real review + the guards above), and merging to `main`
+    # only happens through a PR whose `pull_request` run already passed as a required check — so by
+    # the time a `push` to `main` exists at all, the change it carries was already fully vetted. The
+    # `push` trigger's own run is a redundant confirmation, not a gate, so skipping it for
+    # `Ticketing/**`/`.claude/**`-only commits removes waste without weakening what "required" means
+    # anywhere a merge is actually decided. (A direct push to `main` bypassing PR review skips this
+    # too, but that already bypasses every other required check the same way — not a hole this
+    # ticket opens.)
+    paths-ignore:
+      - "Ticketing/**"
+      - ".claude/**"
   pull_request:
     branches: [main]
 
 # CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight CI run, so rapid
 # back-to-back pushes don't pile up dozens of full matrix runs and clog the account's concurrency.
+# CPE-1781 revisited this while adding the paths-ignore above and is keeping it as-is: it is still
+# correct for a burst of rapid CODE pushes to `main` (only the last commit's result needs to
+# survive), and now that bookkeeping-only pushes no longer start a run at all, they can no longer be
+# the thing a real code push's run gets cancelled by, or vice versa. The known cost — the last commit
+# of a fast batch is the only one whose CI result survives — is an accepted, chosen trade-off, not an
+# oversight.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true

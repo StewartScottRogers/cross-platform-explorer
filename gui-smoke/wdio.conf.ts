@@ -1027,6 +1027,47 @@ export const config: WebdriverIO.Config = {
   // — not a fix for a hard sandbox/GPU crash on its own, just headroom so a slow-but-successful
   // session isn't misread as a failure.
   connectionRetryTimeout: 180_000,
+  // CPE-1772 root cause for the "GUI smoke shard 2 hangs on a waitUntil poll, produces no further
+  // output, and is killed by the ~30-minute step timeout" failure (first seen on PR #923,
+  // `specs/samples.smoke.ts`, re-run alone passes clean): `waitForPreviewToSettle`
+  // (`lib/samplesNav.ts`) already has its own explicit, bounded deadline (20s by default), but that
+  // bound is measured BETWEEN condition polls — it cannot fire while a single poll is still stuck
+  // inside one WebDriver command. If the WebKitGTK/Xvfb session becomes unresponsive mid-poll (a
+  // crashed/wedged compositor, not an app bug — confirmed by CPE-1679's `.mp-fallback` finding that
+  // the app itself had already reached a real terminal state on a similar hang), that ONE command
+  // does not fail fast: WDIO's default `connectionRetryCount` (3) means it retries up to
+  // `connectionRetryTimeout` (above) THREE MORE TIMES before giving up, so one wedged command can
+  // silently eat up to 4 x 180s = 12 minutes with zero log output — and it is never just one command.
+  // `specs/samples.smoke.ts`'s own `afterEach` (see `lib/snap.ts#snapFailure`) issues a screenshot
+  // command against the SAME wedged session immediately after, and the next test's setup does too —
+  // each can independently eat another ~12 minutes, which stacks past the 30-minute job timeout with
+  // no diagnostic ever written, exactly matching "no further output" + "killed at the step timeout"
+  // rather than a normal test failure. This is also why re-running the SAME job alone passes clean:
+  // the WebKitGTK/Xvfb wedge is a per-session, per-run condition, not a deterministic app or test
+  // defect — retrying is legitimate here ONLY because the cause has been identified, not by default.
+  //
+  // Fix: cap retries at 0. A wedged command now fails after ONE `connectionRetryTimeout` (180s) —
+  // still generous relative to a normal command (which returns in milliseconds), and unchanged from
+  // today for the CPE-1048 slow-cold-start case this value was originally sized for (that is one
+  // attempt already, so `connectionRetryCount` was never doing anything useful for it) — instead of
+  // silently multiplying to ~12 minutes. A hang now surfaces as a real, timestamped WebdriverIO error
+  // within single-digit minutes, `afterEach`'s `snapFailure` still runs and still has a real chance to
+  // capture a screenshot (see its CPE-1149 note), and the existing "Classify suite log" step
+  // (CPE-1728) and the shard's Ratchet verdict both get a log to read instead of a bare
+  // `##[error]The operation was canceled.` with nothing to classify.
+  //
+  // What this does NOT explain or fix, stated honestly (CPE-1772's own "further evidence" section):
+  // three OTHER occurrences in the same investigation were cancelled during `Install Linux system
+  // dependencies` (shard 1, PR #924), a plain shard failure with no code signal (shard 3, PR #926),
+  // and `Install tauri-driver` in the SHARED BUILD job itself (PR #933) — none of those touch a
+  // WebDriver session at all (the build job compiles the app and installs tools; no browser session
+  // exists yet), so this fix cannot be the whole story. That pattern looks like the runner pool
+  // itself reclaiming/cancelling jobs under contention (six PRs' matrices in flight at once on the
+  // night investigated) rather than an in-process hang — gui-smoke.yml's step-level `timeout-minutes`
+  // added on the setup steps below turns THAT class into a fast, named failure too where it can, but
+  // an externally-cancelled job is not something this workflow file can make retry itself. CPE-1781
+  // (same PR) reduces how much of that contention `main`'s own bookkeeping traffic was contributing.
+  connectionRetryCount: 0,
   // CPE-1594: "spec" stays for a human-readable log; the "json" reporter writes one machine-readable
   // result file per spec-file worker into `.results/` (gitignored — run output, same treatment as
   // `.screenshots/`) — `scripts/run-ratchet.ts` reads those files as the ratchet's source of truth
