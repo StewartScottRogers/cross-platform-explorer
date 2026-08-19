@@ -34,6 +34,46 @@ describe("StatusBar free space (CPE-403)", () => {
   });
 });
 
+describe("StatusBar filtered-hidden note (CPE-1708)", () => {
+  it("shows nothing when nothing was filtered — the overwhelming majority of listings", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 0 });
+    expect(screen.queryByText(/hidden because/)).toBeNull();
+  });
+
+  it("says N entries were hidden, for a person, when the count is non-zero", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 3 });
+    expect(
+      screen.getByText("3 entries were hidden because their names could not be shown safely"),
+    ).toBeTruthy();
+  });
+
+  it("uses the singular for exactly one", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 1 });
+    expect(
+      screen.getByText("1 entry was hidden because its name could not be shown safely"),
+    ).toBeTruthy();
+  });
+
+  it("never implies the listing itself failed — no error-tinted wording", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 2 });
+    expect(screen.queryByText(/fail|error|could not load|couldn'?t open/i)).toBeNull();
+  });
+
+  // Foreman F2 (regression): the visible text truncates to an ellipsis at narrow widths
+  // (`.filtered-hidden`'s CSS, mirroring `.notice`'s CPE-1660 overflow strategy) — so the reader's
+  // only way to recover the full sentence is the `title` tooltip. It must therefore carry the SAME
+  // sentence the body shows (not a different, shorter, fixed string), plus the "loaded successfully"
+  // reassurance.
+  it("puts the full sentence — plus the loaded-successfully reassurance — in the title tooltip, not a different fixed string", () => {
+    render(StatusBar, { itemCount: 5, totalCount: 5, filteredHidden: 3 });
+    const note = screen.getByText("3 entries were hidden because their names could not be shown safely");
+    expect(note.getAttribute("title")).toContain(
+      "3 entries were hidden because their names could not be shown safely",
+    );
+    expect(note.getAttribute("title")).toContain("loaded successfully");
+  });
+});
+
 describe("StatusBar git sync (CPE-462)", () => {
   it("shows branch + ahead/behind and offers Pull/Push, dispatching them", async () => {
     const { component } = render(StatusBar, {

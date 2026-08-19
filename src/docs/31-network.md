@@ -163,6 +163,10 @@ client, and none of this applies to it yet.
   *listing* such a folder isn't affected by the rewriting, so if you type a path like `/a/../b` you get a
   folder that opens and browses normally — but every file shown inside it will refuse to open, for the
   reason above. You can't reach one by clicking; only by typing it.
+- **A key the app can't show safely is left out of the listing, and counted.** If a listing contains a
+  key whose name the app can't render safely — an embedded `/`, a literal `..` — that entry is dropped
+  rather than shown. The folder still opens normally, and the status bar tells you how many were left
+  out, so a listing is never quietly shorter than the folder really is.
 - **Access keys only.** Temporary/STS credentials, instance roles, and SSO logins won't be supported —
   the connection needs a long-lived access key ID and secret. *This one applies to the form today:* it
   is why **Access key** is the only authentication S3 offers.

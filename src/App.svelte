@@ -268,6 +268,11 @@
 
   let error = "";
   let loading = false;
+  /** How many of pane A's current entries were left out because their name could not be shown safely
+   *  (CPE-1708) — owned + kept current by `<ExplorerPane>`'s own fetch pipeline, bound back here purely
+   *  to hand to `<StatusBar>`. 0 for the overwhelming majority of listings (local, or an unfiltered
+   *  remote backend), in which case the status bar renders nothing for it at all. */
+  let filteredHidden = 0;
   // Monotonic token identifying the current folder load (CPE-664). A new load bumps it; batches from a
   // superseded stream carry a stale token and are dropped, so navigating away mid-load can't bleed rows.
   // Directory-listing fetch + LRU cache moved into <ExplorerPane> (CPE-676 domino 3b) — the pane owns
@@ -3327,7 +3332,7 @@
     let existing: string[];
     if (inSubfolder) {
       const res = await commands.listDir(targetDir);
-      existing = res.status === "ok" ? res.data.map((e) => e.name) : [];
+      existing = res.status === "ok" ? res.data.entries.map((e) => e.name) : [];
     } else {
       existing = (inPaneB ? entriesB : entries).map((e) => e.name);
     }
@@ -6638,6 +6643,7 @@
       bind:showTimeline
       replayOverlay={replayOverlayEntries}
       bind:entries
+      bind:filteredHidden
       smartOverride={smartFolder ? smartEntries : structuredSearch ? structuredSearchEntries : null}
       archiveOverride={archive ? archiveChildren(archive) : null}
       archivePath={archive ? archive.zipPath : null}
@@ -6867,12 +6873,20 @@
   <TerminalPanel cwd={isHome || archive ? "" : currentPath} on:close={() => (showTerminal = false)} />
 {/if}
 
+<!-- CPE-1708 (Foreman F1): filteredHidden is gated to 0 for Home/archive/smart-folder/
+     structured-search below because none of those views has a real folder listing behind it —
+     loadPath short-circuits Home before loadListing ever runs, and enterArchive/smart-folder/
+     structured-search never call loadPath at all — so a stale count left over from the last real
+     folder must never leak into one of them (it would be a false statement in the status bar,
+     exactly what this ticket exists to remove). Gated HERE, at the single point of consumption,
+     rather than reset in each early-return, so a future early-return can't forget it. -->
 <StatusBar
   {itemCount}
   {totalCount}
   selectedCount={selectedCount(selection)}
   {selectedSize}
   hiddenShown={showHidden}
+  filteredHidden={isHome || archive || smartFolder || structuredSearch ? 0 : filteredHidden}
   {notice}
   {noticeIsError}
   {diskFree}

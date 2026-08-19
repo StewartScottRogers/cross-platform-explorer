@@ -29,6 +29,21 @@
 
   $: isFiltered = totalCount > itemCount;
   export let hiddenShown = false;
+  /** How many entries the current remote listing left out because their name could not be shown safely
+   *  (CPE-1708) — 0 for every ordinary (local, or unfiltered-remote) folder, which is the overwhelming
+   *  majority of listings, so this renders NOTHING at all in that case (an always-on note nobody reads
+   *  is exactly how a real warning gets tuned out). Deliberately worded to say the LISTING succeeded —
+   *  "N entries were hidden" reads as "here's what happened to some entries", not "your folder failed to
+   *  load" — since the alternative (silence) is the actual bug this exists to fix: CPE-1704 built a real,
+   *  trustworthy, non-spoofable count for exactly this a `RemoteListing::filtered` `usize` computed
+   *  in-process from what the provider's own listing pass genuinely had to refuse — but it stopped at the
+   *  Tauri boundary as a developer-only `eprintln!`, so a user with a hidden key saw a listing that
+   *  looked complete. A synthetic "⚠ N keys hidden" ROW was tried and rejected (PR 890, round 2): it was
+   *  spoofable by a real object sharing the marker's name, its `is_dir`/`size` fields were dishonest, and
+   *  deleting it "succeeded" without deleting anything. This status-bar note is why: a plain status-bar
+   *  line is data ABOUT the listing, never a fake ROW IN it — same convention as `hiddenShown` above,
+   *  the closest existing precedent (a folder-scoped fact about what's/isn't currently shown). */
+  export let filteredHidden = 0;
   export let notice = "";
   export let noticeIsError = false;
   /** Free / total bytes on the current drive (CPE-403); null ⇒ unknown (Home/archive/error). */
@@ -37,6 +52,15 @@
 
   $: diskLabel =
     diskFree !== null && diskTotal !== null ? formatDiskFree(diskFree, diskTotal) : "";
+
+  // CPE-1708 (Foreman F2): hoisted so the SAME sentence backs both the visible (possibly
+  // ellipsis-truncated, see `.filtered-hidden` below) text and the `title` tooltip — the tooltip
+  // additionally appends the "loaded successfully" reassurance, so truncation at a narrow window
+  // never hides either the actual count or the reassurance that the listing didn't fail.
+  $: filteredHiddenText = filteredHidden === 1
+    ? "1 entry was hidden because its name could not be shown safely"
+    : `${filteredHidden} entries were hidden because their names could not be shown safely`;
+  $: filteredHiddenTitle = `${filteredHiddenText} — the folder itself loaded successfully.`;
 </script>
 
 <div class="statusbar">
@@ -56,6 +80,16 @@
 
   {#if hiddenShown}
     <span class="dim">Hidden files shown</span>
+  {/if}
+
+  {#if filteredHidden > 0}
+    <!-- CPE-1708: only ever a status-bar NOTE about the listing, never a synthetic ROW in it (see
+         `filteredHidden`'s doc above for why that distinction is the whole point). `title` carries
+         the SAME sentence (see `filteredHiddenTitle` above) plus the reassurance, so a narrow window
+         truncating the visible text (see `.filtered-hidden` below) never loses either. -->
+    <span class="filtered-hidden" title={filteredHiddenTitle}>
+      {filteredHiddenText}
+    </span>
   {/if}
 
   {#if notice}
@@ -98,6 +132,22 @@
 
 <style>
   .dim { color: var(--text-faint); }
+
+  /* CPE-1708: `--accent` is this app's INFO tone (app.css: "ERROR/INFO reuse --danger/--accent") — never
+     `--danger`, which would read as "this folder failed to load" when it didn't. Same overflow strategy
+     as `.notice` below (CPE-1660): truncate to an ellipsis, with the SAME sentence (`filteredHiddenText`
+     above) plus the "loaded successfully" reassurance always readable via the `title` tooltip
+     (`filteredHiddenTitle`) — so a narrow window that ellipsis-truncates the visible text never loses
+     either the count or the reassurance, and the status bar's fixed height never grows for a long count. */
+  .filtered-hidden {
+    color: var(--accent);
+    max-width: 45%;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 0 1 auto;
+  }
 
   /* The notice/toast text (CPE-1660): a plain <span> had no overflow strategy at all, so a notice
      longer than the window could hold wrapped to a second line and the fixed 26px `.statusbar` grew

@@ -1,7 +1,8 @@
 //! Shared filesystem model types used across the explorer's commands (CPE-815): the directory-listing
-//! [`DirEntry`], the Properties-dialog [`EntryInfo`], the sidebar [`Place`], and the bulk-operation
-//! [`OpResult`], plus the pure `extension_of` / `is_hidden` helpers. Pure and Tauri-free; re-exported into
-//! the app so its many construction/usage sites resolve unchanged.
+//! [`DirEntry`], the `list_dir` command's [`ListDirResult`] envelope (CPE-1708), the Properties-dialog
+//! [`EntryInfo`], the sidebar [`Place`], and the bulk-operation [`OpResult`], plus the pure
+//! `extension_of` / `is_hidden` helpers. Pure and Tauri-free; re-exported into the app so its many
+//! construction/usage sites resolve unchanged.
 
 use std::fs;
 use std::path::Path;
@@ -28,6 +29,29 @@ pub struct DirEntry {
     /// (which does not follow the link), never from a following `metadata()` call, so listing a folder
     /// costs no extra syscall per entry whether or not it contains links (epic CPE-715).
     pub is_symlink: bool,
+}
+
+/// The `list_dir` command's response (CPE-1708): the entries to render, plus how many were left out
+/// because their name could not be shown safely. `filtered` reaches the frontend as this typed field —
+/// never as a synthetic row mixed into `entries`. CPE-1704 round 2 tried exactly that (a fake
+/// `⚠ N filtered` `DirEntry`) and review found it worse than the silent drop it replaced: a REAL object
+/// can be named the marker's own text (nothing stops it, and the marker's own name was itself refused by
+/// the same guard, so the only such row a user could ever see WAS an attacker-planted one); the fake
+/// entry's `is_dir`/`size` fields were dishonest; and deleting it "succeeded" without deleting anything
+/// (S3 `DELETE` of a nonexistent key returns 204). `filtered` here can't be spoofed by anything a server
+/// sends — it's computed in-process from what the provider's own listing pass (and the shared name
+/// guard) actually dropped; see `cpe_vfs::connect::RemoteListing` for the source of the count on the
+/// remote side.
+///
+/// Always `0` for a local listing and for a remote backend whose listing needs no filtering (SFTP,
+/// WebDAV, FTP) — see `FileSystemProvider::list_with_filtered_count`'s default, which delegates to
+/// `list` and reports `0`. Only a backend with its own keyspace rule (e.g. `cpe-s3`, whose `:`-bearing
+/// keys are legal but an embedded `/`/literal `..` genuinely is not) can ever produce a non-zero count.
+#[derive(Serialize)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+pub struct ListDirResult {
+    pub entries: Vec<DirEntry>,
+    pub filtered: usize,
 }
 
 /// Per-item outcome of a bulk operation. Bulk file operations must NOT be all-or-nothing and must not

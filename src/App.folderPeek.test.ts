@@ -89,7 +89,7 @@ beforeEach(() => {
       case "list_dir": {
         const p = args.path as string;
         if (p === BADDIR) throw new Error("access denied");
-        return listingByPath[p] ?? [];
+        return { entries: listingByPath[p] ?? [], filtered: 0 };
       }
       case "list_dir_stream": {
         const p = args.path as string;

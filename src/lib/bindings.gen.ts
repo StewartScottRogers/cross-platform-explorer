@@ -11,8 +11,14 @@ export const commands = {
  * List the immediate children of `path`.
  * List a directory's entries. Model + the shared walker live in `cpe_server::listing` (CPE-815); this
  * is a thin `spawn_blocking` dispatcher.
+ * 
+ * Returns [`ListDirResult`], not a bare `Vec<DirEntry>` (CPE-1708): `filtered` carries how many
+ * provider-supplied entries were left out of `entries` because their name could not be shown safely —
+ * always `0` for a local listing. This is the field CPE-1704 deliberately left at the Tauri boundary
+ * (an `eprintln!` only); see [`ListDirResult`]'s doc for why the count travels as typed data, never a
+ * synthetic row.
  */
-async listDir(path: string) : Promise<Result<DirEntry[], string>> {
+async listDir(path: string) : Promise<Result<ListDirResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_dir", { path }) };
 } catch (e) {
@@ -1438,10 +1444,10 @@ async metadataColumnCellsCollect(paths: string[], column: MetaColumn) : Promise<
  * Streaming variant of `list_dir` (CPE-663, epic CPE-662): pushes `DirEntry` batches over an IPC channel
  * as the directory is read, so the frontend paints the first rows immediately instead of waiting for the
  * whole listing. `stream_id` (frontend-supplied, monotonic) registers a cancel flag polled each batch, so
- * a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns the
- * total entry count once the walk completes (or is cancelled).
+ * a superseded walk stops promptly instead of reading a huge folder to completion (CPE-665). Returns
+ * [`StreamDirResult`] once the walk completes (or is cancelled) — see its doc for `filtered` (CPE-1708).
  */
-async listDirStream(path: string, streamId: number, onEntry: TAURI_CHANNEL<DirEntry[]>) : Promise<Result<number, string>> {
+async listDirStream(path: string, streamId: number, onEntry: TAURI_CHANNEL<DirEntry[]>) : Promise<Result<StreamDirResult, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("list_dir_stream", { path, streamId, onEntry }) };
 } catch (e) {
@@ -5031,6 +5037,25 @@ target: string | null;
  */
 broken: boolean }
 /**
+ * The `list_dir` command's response (CPE-1708): the entries to render, plus how many were left out
+ * because their name could not be shown safely. `filtered` reaches the frontend as this typed field —
+ * never as a synthetic row mixed into `entries`. CPE-1704 round 2 tried exactly that (a fake
+ * `⚠ N filtered` `DirEntry`) and review found it worse than the silent drop it replaced: a REAL object
+ * can be named the marker's own text (nothing stops it, and the marker's own name was itself refused by
+ * the same guard, so the only such row a user could ever see WAS an attacker-planted one); the fake
+ * entry's `is_dir`/`size` fields were dishonest; and deleting it "succeeded" without deleting anything
+ * (S3 `DELETE` of a nonexistent key returns 204). `filtered` here can't be spoofed by anything a server
+ * sends — it's computed in-process from what the provider's own listing pass (and the shared name
+ * guard) actually dropped; see `cpe_vfs::connect::RemoteListing` for the source of the count on the
+ * remote side.
+ * 
+ * Always `0` for a local listing and for a remote backend whose listing needs no filtering (SFTP,
+ * WebDAV, FTP) — see `FileSystemProvider::list_with_filtered_count`'s default, which delegates to
+ * `list` and reports `0`. Only a backend with its own keyspace rule (e.g. `cpe-s3`, whose `:`-bearing
+ * keys are legal but an embedded `/`/literal `..` genuinely is not) can ever produce a non-zero count.
+ */
+export type ListDirResult = { entries: DirEntry[]; filtered: number }
+/**
  * A failed [`VaultRegistry::lock`]: a machine-readable [`LockFailureCode`] plus the human explanation.
  */
 export type LockError = { 
@@ -5916,6 +5941,14 @@ export type SpotResult = { text: string; kind: ResultKind; score: number; positi
  * A kind-grouped section of results (for a sectioned overlay).
  */
 export type SpotSection = { kind: ResultKind; results: SpotResult[] }
+/**
+ * `list_dir_stream`'s terminal result (CPE-1708). `total` is the entry count streamed, unchanged since
+ * CPE-663/665; `filtered` carries the SAME count `list_dir`'s [`ListDirResult::filtered`] carries — how
+ * many provider-supplied entries were left out because their name could not be shown safely — but via
+ * the streaming twin, which is the pane's actual first-paint path (`ExplorerPane.loadListing`; `list_dir`
+ * itself is only the collect-to-vec convenience path, STREAMING.md). Always `0` for a local walk.
+ */
+export type StreamDirResult = { total: number; filtered: number }
 /**
  * One symbol in the outline.
  */

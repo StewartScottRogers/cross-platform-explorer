@@ -321,7 +321,7 @@
     loadingPaths.add(path);
     loadingPaths = loadingPaths;
     try {
-      const entries = unwrap(await commands.listDir(path));
+      const { entries } = unwrap(await commands.listDir(path));
       children[path] = entries
         .filter((e) => e.is_dir)
         .sort((a, b) => a.name.localeCompare(b.name));
