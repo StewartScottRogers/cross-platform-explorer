@@ -3,7 +3,7 @@ id: CPE-1781
 title: A ticket-file-only commit fires the full three-OS matrix and GUI smoke
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-18

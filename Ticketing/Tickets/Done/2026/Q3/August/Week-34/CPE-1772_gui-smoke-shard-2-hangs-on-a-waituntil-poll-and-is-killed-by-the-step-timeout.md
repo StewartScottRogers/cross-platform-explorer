@@ -3,7 +3,7 @@ id: CPE-1772
 title: GUI smoke shard 2 hangs on a waitUntil poll and is killed by the step timeout, ~30 minutes later
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
