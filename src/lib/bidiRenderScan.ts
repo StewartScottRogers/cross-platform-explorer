@@ -36,6 +36,37 @@
  *      EOF check never saw anything wrong). Keeping the two quote styles symmetric removes the drop
  *      entirely rather than trading it for a false-positive hard-error on legitimate single-quoted markup.
  *
+ * CPE-1766/CPE-1767/CPE-1776 (this round) fixed four more pre-existing holes the CPE-1761 UAT/review found
+ * while probing shapes nobody had asked about — all in the same fail-open direction as everything above:
+ *   4. CPE-1766: a mustache preceded by ordinary body-text PROSE, not just a tag boundary — `<div>File:
+ *      {entry.name}</div>` — used to fail `isRenderPosition`'s `/[>}]\s*$/` lookback entirely and scan
+ *      clean. Fixed by removing the lookback for this case: the state machine already knows when it's
+ *      outside a tag (script/style are stripped before scanning starts; an attribute value's mustache goes
+ *      through the separate `inTag` branch), so every `!inTag` mustache reached at all IS body text — full
+ *      stop, nothing left to disambiguate by re-reading nearby characters.
+ *   5. CPE-1776: `isRenderPosition`'s `inTag` branch re-derived the current attribute from a FIXED
+ *      200-character textual slice (`markup.slice(idx - 200, idx)`) and a `[^"]*$`/`[^']*$` regex. Once an
+ *      `alt=`/`aria-label=`/`title=` value's own text ran past ~194 characters — exactly what verbose,
+ *      accessible label text looks like — the attribute-name token fell outside the slice and the render
+ *      was silently dropped. Fixed at the design level, not by widening the window: the scanner now tracks
+ *      the CURRENT attribute name live (`currentAttrName` in `findUnsafeRenderLines`, set the instant it
+ *      sees `attrName=`, cleared the instant that value ends) and passes it straight to `isRenderPosition`,
+ *      so there is no attribute-VALUE length to exceed — only the attribute NAME is ever looked at, and
+ *      names are always short. The escaped-quote half of CPE-1776 (`title="…\"…{name}"`) was checked
+ *      against the real Svelte compiler and does not compile — HTML/Svelte attribute values have no
+ *      backslash-escape syntax, so that shape is unreachable in valid Svelte — but the redesign closes it
+ *      structurally regardless, since attribute-value TEXT (escaped or not) is never re-inspected at all.
+ *   6. CPE-1767: `findMatchingBrace` (and `findMatchingParen`/`hasUnsafeIdentifier`, which share the same
+ *      quote-scanning shape) had no concept of a `//` or `/* … *​/` JS comment, so an apostrophe (or any
+ *      unbalanced quote) written INSIDE a comment inside an inline tag-attribute expression —
+ *      `on:click={() => { /* it's fine *​/ }}` — read as opening a real string literal. The quote never
+ *      closed, the brace never matched, and #2 above turned that into a hard `RenderScanError` on valid,
+ *      compiling Svelte, telling the developer to "fix the malformed brace" when there wasn't one. Fixed by
+ *      a shared `skipJsComment`: `//` runs to end-of-line, `/* *​/` to its terminator, and anything inside
+ *      either is inert to brace/quote/depth tracking. **Stated boundary**: regex literals are not parsed,
+ *      so a `/` opening a regex that itself contains a literal `//`/`/*` is misread as a comment start —
+ *      see the boundary item below.
+ *
  * **What this still cannot see** (the honest boundary — read before trusting a green run):
  *   - A raw name/path placed in any DOM attribute OTHER than `title`/`aria-label`/`alt` — `data-*`,
  *     `placeholder`, `value`, `style`, etc. UAT round 1 confirmed `data-fullpath={e.path}` staying green
@@ -60,15 +91,17 @@
  *     silently tolerated. That is deliberate (a loud false failure beats a quiet false pass), but it does
  *     mean such text must be rewritten (or escaped) for the guard to run at all — it will not render a
  *     verdict around markup it isn't sure it understood.
- *   - The flip side of that trade: `findMatchingBrace` has no concept of a `//` or `/* … *​/` JS comment,
- *     so an apostrophe (or an unbalanced quote of any kind) inside a comment written INSIDE an inline
- *     tag-attribute expression (`on:click={() => { /* it's fine *​/ }}`) reads as opening a real string
- *     literal — valid, harmless Svelte that now HARD-ERRORS the scan with a "malformed brace" message that
- *     doesn't describe what's actually wrong. This is a hard-error FALSE POSITIVE (the safe direction —
- *     loud and wrong beats quiet and wrong — but still a real developer-facing cost). Tracked as CPE-1767.
- *   - A mustache preceded by ordinary body text on the same line. Render-position detection requires the
- *     text immediately before `{` to end in `>` or `}`, so `<div>File: {entry.name}</div>` is not seen as
- *     a render position and the file scans clean. Tracked as CPE-1766.
+ *   - CPE-1767's comment handling does not parse regex literals (a stated, deliberate limit — "a
+ *     correct-enough parser with a stated limit beats a subtly wrong one that looks complete"): a `/` that
+ *     opens a regex literal containing a literal `//` or `/*` (e.g. `/a\/\/b/`) is misread as the start of
+ *     a comment, which can desynchronize brace/quote tracking for the rest of that expression. Regex
+ *     literals inside a Svelte mustache are rare (an inline arrow function occasionally has one; a raw
+ *     filesystem name never does) — distinguishing regex-`/` from divide-`/` needs real expression parsing
+ *     this module deliberately doesn't do.
+ *   - Membership is enforced mechanically (CPE-1768): see `bidiEscape.guard.test.ts`'s membership-criterion
+ *     test for the stated rule for which `.svelte` files must be in `REGISTRY` at all, and why a file
+ *     outside that criterion (no filesystem-derived render) is legitimately never scanned rather than
+ *     silently skipped.
  */
 
 /** Strip every `<script>…</script>` / `<style>…</style>` block, replacing its content with the same
@@ -525,4 +558,43 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
     fail(markup.length - 1, `reached end of file inside an unterminated tag — no closing ">" was found`);
   }
   return [...offenders].sort(compareOffenders);
+}
+
+/** CPE-1768: the membership CRITERION — a `.svelte` file must carry a `REGISTRY` entry in
+ *  `bidiEscape.guard.test.ts` (even `[]`, once `findUnsafeRenderLines` proves it draws nothing unsafe) if
+ *  its source references a value shaped like a filesystem entry's identity: a `.name`/`.path`/`.fullPath`/
+ *  `.oldName`/`.cwd` property access (the exact shapes this codebase's directory entries, agent sessions,
+ *  and repo/vault paths use — `entry.name`, `e.path`, `f.fullPath`, `rc.oldName`, `s.cwd`), or a component
+ *  prop literally declared `export let name`/`export let path`.
+ *
+ *  **In scope** (example): `<div title={entry.path}>{entry.name}</div>` — the ordinary shape of a
+ *  directory-listing row, a dialog operating on selected files, or a component fed a name/path prop by
+ *  its parent (`<TagEditor name={entry.name} />`).
+ *  **Out of scope** (example): `StatusBar.svelte` as it stands today — item counts, a disk-free label, git
+ *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path, so it
+ *  doesn't match this pattern and carries no `REGISTRY` entry. The moment it (or any file) starts
+ *  rendering one of these shapes, `isCandidateComponent` flags it and the membership test in
+ *  `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the thing you cannot
+ *  forget, not the thing you must remember. See that test's own mutation-probe demonstration (CPE-1768 AC:
+ *  the review's original `StatusBar.svelte` injected-render probe, reproduced without leaving a permanent
+ *  unregistered fixture in the tree).
+ *
+ *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
+ *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive
+ *  costs one `REGISTRY` line (often `[]`) while a false negative is the actual hazard CPE-1768 exists to
+ *  close, so over-inclusion is the safe direction to err in. `.name`/`.path` alone will also match plenty
+ *  of NON-filesystem uses (a macro's name, a saved search's name, an HTML `<input name>`, a CSS class named
+ *  `.path`) — that's expected, not a bug: those files still get a `REGISTRY` entry (usually `[]` or a
+ *  benign-recorded one), same as any other candidate, rather than being silently exempted by a narrower
+ *  pattern that could just as easily miss a real one. */
+export const CANDIDATE_PATTERN = /\.(?:name|path|fullPath|oldName|cwd)\b|export let (?:name|path)\b/;
+
+/** True if `src` (a whole `.svelte` file's text — script and markup both, unlike `findUnsafeRenderLines`
+ *  which only ever looks at markup) matches `CANDIDATE_PATTERN` and therefore must carry a `REGISTRY`
+ *  entry. Exported separately from the membership test itself so that test can be demonstrated against an
+ *  in-memory string (CPE-1768's AC: "adding a new component… shows CI red") without needing a permanent
+ *  new fixture file on disk — the same convention this file's own `RenderScanError`/render-position tests
+ *  already use for reproducing a mechanism instead of just asserting it in prose. */
+export function isCandidateComponent(src: string): boolean {
+  return CANDIDATE_PATTERN.test(src);
 }

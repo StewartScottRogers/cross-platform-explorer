@@ -3,7 +3,9 @@
 // one probe shape verbatim (or as close as a standalone expression allows) so a future reader can check
 // the claim against the actual behavior, not against prose.
 import { describe, it, expect } from "vitest";
-import { isSafeExpr, findUnsafeRenderLines, RenderScanError, findMatchingBrace } from "./bidiRenderScan";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { isSafeExpr, findUnsafeRenderLines, RenderScanError, findMatchingBrace, isCandidateComponent } from "./bidiRenderScan";
 
 describe("isSafeExpr — the whitelist: literal, displaySafe* call, or unsafe", () => {
   it("accepts plain literals", () => {
@@ -509,5 +511,48 @@ describe("CPE-1767: JS comments inside a mustache are inert to brace/quote match
       `</div>`,
     ].join("\n");
     expect(findUnsafeRenderLines(src)).toEqual(["8:entry.name"]);
+  });
+});
+
+// CPE-1768: REGISTRY covered 41 of 136 .svelte files with nothing written down about which files MUST be
+// registered, or why — a new component could render a raw filesystem name and never be added to
+// REGISTRY, and no test would notice (demonstrated live against StatusBar.svelte by the review: injecting
+// a raw `{entry.name}` into it left the guard green, because it isn't registered so it isn't scanned at
+// all). `isCandidateComponent` is the mechanical trigger: bidiEscape.guard.test.ts's membership test walks
+// every real .svelte file and requires each one this flags to carry a REGISTRY entry.
+describe("CPE-1768: isCandidateComponent — the membership-rule trigger", () => {
+  it("flags a component whose markup renders entry.name / entry.path", () => {
+    const src = `<script>export let entry;</script>\n<div title={entry.path}>{entry.name}</div>`;
+    expect(isCandidateComponent(src)).toBe(true);
+  });
+
+  it("flags a component with a bare `export let name` / `export let path` prop, even before it's used", () => {
+    expect(isCandidateComponent(`<script>\n  export let name = "";\n</script>\n<span>{name}</span>`)).toBe(true);
+    expect(isCandidateComponent(`<script>\n  export let path: string;\n</script>\n<span>{path}</span>`)).toBe(true);
+  });
+
+  it("flags the other filesystem-identity shapes this codebase uses: .fullPath / .oldName / .cwd", () => {
+    expect(isCandidateComponent(`<script>let x = f.fullPath;</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>let x = rc.oldName;</script>`)).toBe(true);
+    expect(isCandidateComponent(`<script>let x = s.cwd;</script>`)).toBe(true);
+  });
+
+  it("does NOT flag a component with no name/path-shaped reference at all", () => {
+    const src = `<script>\n  export let count = 0;\n</script>\n<span>{count} items</span>`;
+    expect(isCandidateComponent(src)).toBe(false);
+  });
+
+  // The literal review probe, reproduced without leaving a permanent unregistered fixture in the tree
+  // (same convention this file's other demonstrations use — see the PreviewPane.svelte:1015 substitution
+  // test in bidiEscape.guard.test.ts): read StatusBar.svelte's REAL current source (confirmed out of scope
+  // today — no name/path shape in it), then inject the review's exact probe shape and show the mutated
+  // content becomes a candidate. That's the mechanism that makes CI red the moment such a render lands,
+  // whether in StatusBar.svelte or anywhere else — proven end-to-end here, enforced for real by
+  // bidiEscape.guard.test.ts's membership test walking the actual directory.
+  it("the StatusBar.svelte review probe: injecting a raw {entry.name} makes it a candidate", () => {
+    const src = readFileSync(join(process.cwd(), "src", "lib", "components", "StatusBar.svelte"), "utf8");
+    expect(isCandidateComponent(src), "StatusBar.svelte gained a name/path-shaped reference — update this test/the module header's out-of-scope example").toBe(false);
+    const mutated = src + `\n<span>{entry.name}</span>\n`;
+    expect(isCandidateComponent(mutated)).toBe(true);
   });
 });

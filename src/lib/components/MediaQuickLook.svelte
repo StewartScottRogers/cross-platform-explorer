@@ -14,6 +14,7 @@
   import MediaPlayer from "./MediaPlayer.svelte";
   import Icon from "./Icon.svelte";
   import type { MediaTrack, RepeatMode } from "../mediaQuickLook";
+  import { displaySafeName } from "../filename";
 
   /** The track under the cursor to play (its `src` is resolved via {@link assetUrl}). */
   export let track: MediaTrack;
@@ -75,14 +76,14 @@
     class="mq-panel"
     role="dialog"
     aria-modal="true"
-    aria-label={`Media player — ${track.name}`}
+    aria-label={`Media player — ${displaySafeName(track.name)}`}
     tabindex="-1"
     bind:this={panelEl}
     on:click|stopPropagation
     on:keydown={trapTab}
   >
     <div class="mq-head">
-      <span class="mq-name" title={track.name}>{track.name}</span>
+      <span class="mq-name" title={displaySafeName(track.name)}>{displaySafeName(track.name)}</span>
       {#if multiple}<span class="mq-counter">{position + 1} / {count}</span>{/if}
       <button class="mq-icon mq-close" title="Close (Esc / Space)" aria-label="Close" on:click={() => dispatch("close")}>
         <Icon name="close" size={16} />

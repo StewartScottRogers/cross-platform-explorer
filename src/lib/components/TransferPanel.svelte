@@ -4,6 +4,7 @@
   // no transfer is running, so the plain explorer is unaffected.
   import { transfers, percent, cancelTransfer, dismissTransfer, type TransferState } from "../transfers";
   import Icon from "./Icon.svelte";
+  import { displaySafePath } from "../filename";
 
   /** Past-tense verb for the row's op — "copied"/"moved"/"compressed"/"extracted" (CPE-1184). */
   function verb(t: TransferState): string {
@@ -24,7 +25,7 @@
       if (r.skipped > 0) return `${r.transferred} done, ${r.skipped} skipped`;
       return `${r.transferred} item${r.transferred === 1 ? "" : "s"} ${verb(t)}`;
     }
-    return t.current || "Preparing…";
+    return (t.current ? displaySafePath(t.current) : "") || "Preparing…";
   }
 </script>
 

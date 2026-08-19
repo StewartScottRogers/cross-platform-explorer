@@ -15,6 +15,7 @@
   import { byteDiff, type ByteDiff } from "../byteDiff";
   import { lineDiff, type LineDiffResult } from "../lineDiff";
   import { isImage } from "../filetypes";
+  import { displaySafeName } from "../filename";
   import ImageCompareView from "./ImageCompareView.svelte";
 
   export let initialLeft = "";
@@ -194,7 +195,7 @@
             on:click={() => toggle(row)}
           >
             <span class="caret">{row.hasChildren ? (collapsed.has(row.path) ? "▸" : "▾") : ""}</span>
-            <span class="nname">{row.node.name}</span>
+            <span class="nname">{displaySafeName(row.node.name)}</span>
             <span class="nstatus">{STATUS_LABEL[row.node.status]}</span>
           </div>
         {/each}

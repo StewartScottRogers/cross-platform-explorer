@@ -13,6 +13,7 @@
   import type { OrganizeRule, MoveProposal, OrganizeApplyOutcome } from "../bindings.gen";
   import { t } from "../i18n";
   import Icon from "./Icon.svelte";
+  import { displaySafeName } from "../filename";
 
   /** Folder to organize (the current folder — fixed, not a free-text field, like Find Duplicates). */
   export let path = "";
@@ -137,7 +138,7 @@
                 </div>
                 <div class="group-items">
                   {#each g.items as it (it.name)}
-                    <div class="item" title={it.name}>{it.name}</div>
+                    <div class="item" title={displaySafeName(it.name)}>{displaySafeName(it.name)}</div>
                   {/each}
                 </div>
               </div>

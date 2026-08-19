@@ -10,6 +10,7 @@
   import { commands } from "../bindings.gen"; // typed client (CPE-964)
   import { addJob, removeJob, updateJob, planBackup, type BackupJob, type BackupPlan } from "../backup";
   import type { CompareNode } from "../treeDiff";
+  import { displaySafePath } from "../filename";
 
   interface OpResult { path: string; ok: boolean; error: string; }
   interface RunStatus { when: number; ok: number; failed: number; label: string; }
@@ -127,7 +128,7 @@
             <span class="jname">{job.name}</span>
             {#if job.mirror}<span class="mirror">mirror</span>{/if}
             {#if job.autoRun}<span class="mirror auto" data-testid="auto-pill">auto</span>{/if}
-            <span class="paths">{job.source} → {job.dest}</span>
+            <span class="paths">{displaySafePath(job.source)} → {displaySafePath(job.dest)}</span>
             <label class="chk autorun" title="Run automatically when the destination drive connects">
               <input type="checkbox" data-testid="autorun-toggle" checked={!!job.autoRun}
                      on:change={(e) => toggleAutoRun(job.id, e.currentTarget.checked)} />

@@ -13,6 +13,7 @@
   import { commands, type MetaField } from "../bindings.gen";
   import { joinFieldKey, buildMetaEdits, stageFieldEdits, isFieldDirty, revertFieldEdit } from "../metaEdits";
   import { parentDir } from "../contentSearch";
+  import { displaySafeName, displaySafePath } from "../filename";
   import { recordCheckpointFailure } from "../checkpointFailures";
   import Icon from "./Icon.svelte";
   import { t } from "../i18n";
@@ -211,9 +212,9 @@
     {#if !primary}
       <p class="muted">{$t("studio.noFile")}</p>
     {:else}
-      <div class="filename" title={primary.path}>
+      <div class="filename" title={displaySafePath(primary.path)}>
         <Icon name="info" size={14} />
-        <span>{primary.name}</span>
+        <span>{displaySafeName(primary.name)}</span>
         {#if !writable}<span class="ro-badge">{$t("studio.viewOnly")}</span>{/if}
       </div>
 

@@ -14,6 +14,7 @@
   import DetailsPane from "./DetailsPane.svelte";
   import Icon from "./Icon.svelte";
   import { iconFor } from "../filetypes";
+  import { displaySafeName, displaySafePath } from "../filename";
   import {
     loadPreviewText, loadArchiveEntries, loadPreviewInfo, loadImageData, loadRawImageData,
     loadDicomImageData, loadDicomTags, loadHeicImageData, loadPdfValidity, savePreviewText,
@@ -59,7 +60,7 @@
       <div class="float-tab" class:active={t.id === activeId}>
         <span class="ft-icon"><Icon name={iconFor(t.entry)} size={14} /></span>
         <button class="ft-label" role="tab" aria-selected={t.id === activeId}
-          on:click={() => (activeId = t.id)} title={t.entry.path}>{t.entry.name}</button>
+          on:click={() => (activeId = t.id)} title={displaySafePath(t.entry.path)}>{displaySafeName(t.entry.name)}</button>
         <button class="ft-close" title="Close tab" on:click={() => closeTab(t.id)}>
           <Icon name="close" size={12} />
         </button>

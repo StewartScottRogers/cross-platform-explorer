@@ -16,6 +16,7 @@
   import { onMount } from "svelte";
   import { open as openFolderDialog } from "@tauri-apps/plugin-dialog";
   import { commands, type ScheduleRule, type RetentionPolicy } from "../bindings.gen";
+  import { displaySafePath } from "../filename";
 
   type Unit = "minutes" | "hours" | "days";
   const UNIT_S: Record<Unit, number> = { minutes: 60, hours: 3600, days: 86400 };
@@ -137,7 +138,7 @@
             />
             {rule.enabled ? "on" : "paused"}
           </label>
-          <span class="path" title={rule.root}>{rule.root}</span>
+          <span class="path" title={displaySafePath(rule.root)}>{displaySafePath(rule.root)}</span>
           <button
             class="mini"
             aria-label="Remove scheduled folder"
