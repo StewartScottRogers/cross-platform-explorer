@@ -13522,14 +13522,11 @@ mod tests {
     /// asking any provider at all, since a local listing was never routed through `RemoteListing`.
     #[test]
     fn list_dir_local_arm_always_reports_zero_filtered() {
+        // CPE-1693: `scratch()` now returns the guard itself, armed before any assertion below can
+        // panic and skip it — so CPE-1708's hand-rolled `Cleanup(PathBuf)` wrapper is redundant and has
+        // been dropped in the rebase. This is exactly the per-test boilerplate the helper-level fix
+        // exists to delete.
         let dir = scratch("cpe1708-local-filtered");
-        struct Cleanup(std::path::PathBuf);
-        impl Drop for Cleanup {
-            fn drop(&mut self) {
-                let _ = fs::remove_dir_all(&self.0);
-            }
-        }
-        let _cleanup = Cleanup(dir.clone()); // armed before any assertion below can panic and skip it
         fs::write(dir.join("a.txt"), b"hi").unwrap();
 
         let result = local_list_dir_result(dir.to_str().unwrap()).expect("local listing succeeds");
@@ -13692,13 +13689,43 @@ mod tests {
     use cpe_server::{checkpoint_store, snapshot_schedule};
     use std::collections::BTreeMap;
 
-    fn sched_scratch(tag: &str) -> PathBuf {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-        let n = SEQ.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!("cpe-sched-tick-{}-{}-{}", tag, std::process::id(), n));
-        fs::create_dir_all(&d).unwrap();
-        d
+    /// CPE-1693 (PR #934 review finding 1): the 68th scratch helper, missed by the sweep because it is
+    /// spelled `sched_scratch`, not `scratch`. Now delegates to the shared `scratch_dir` and hands back
+    /// the owning guard like every other one — same `cpe-sched-tick-<tag>-<pid>-<seq>` directory naming
+    /// as before, since `scratch_dir` appends the `-<pid>-<seq>` half itself.
+    fn sched_scratch(tag: &str) -> cpe_server::fsutil::ScratchDir {
+        cpe_server::fsutil::scratch_dir(&format!("cpe-sched-tick-{tag}"))
+    }
+
+    /// **CPE-1693 PR #934 review finding 1.** The 68th scratch helper — the one the mechanical sweep
+    /// missed, because it is spelled `sched_scratch` rather than `scratch` and so didn't match the
+    /// transform's pattern. It sits in a crate the sweep *did* convert, three call sites deep, and every
+    /// one of those tests leaks its directory on a failing assertion exactly the way this whole ticket
+    /// is about.
+    ///
+    /// Same proof shape as `cpe_server::fsutil`'s: arm the helper, drop it on a panicking unwind, and
+    /// check the directory is gone on the far side. This compiles either way — with a bare `PathBuf`
+    /// (`to_path_buf` is `PathBuf`'s own method, `let _armed = dir;` just moves it) it fails on the last
+    /// assertion, which is precisely the "returns a bare path with no `Drop` guard" bug.
+    #[test]
+    fn sched_scratch_removes_its_directory_even_when_the_caller_panics_mid_assertion() {
+        let dir = sched_scratch("guard-proof");
+        let path = dir.to_path_buf();
+        assert!(path.is_dir(), "sanity: the helper must actually create a real directory");
+
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _armed = dir;
+            panic!("CPE-1693 proof: deliberate panic — sched_scratch's guard must already be armed");
+        }))
+        .is_err();
+
+        assert!(panicked, "the proof only proves anything if the inner closure actually panicked");
+        assert!(
+            !path.is_dir(),
+            "CPE-1693 REGRESSION: {} still exists after sched_scratch's value went out of scope on a \
+             panicking unwind — this helper still hands back a bare path with no Drop guard",
+            path.display()
+        );
     }
 
     /// Off means off: with no rules at all a tick captures nothing, writes nothing to disk, and leaves

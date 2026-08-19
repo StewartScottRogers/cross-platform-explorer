@@ -2160,7 +2160,57 @@ impl ScratchDir {
     /// `create_dir_all`s the path themselves — e.g. a nested per-spawn subdirectory under one shared
     /// parent (`cpe-s3`'s and `cpe-webdav`'s fixture spawners, CPE-1693) — and only need the *cleanup*
     /// half of what [`scratch_dir`] does. `path` must already exist; this does not create it.
+    ///
+    /// # Panics
+    ///
+    /// **Constrained deliberately (PR #934 review finding 2).** As first written this took *any* path
+    /// and armed a recursive delete on it — an unconditional `remove_dir_all` foot-gun sitting in a
+    /// test-support API, where one wrong argument wipes something real. It now refuses anything that
+    /// does not resolve to an existing directory *strictly inside* the scratch root
+    /// ([`std::env::temp_dir`]):
+    ///
+    /// - both sides are [`canonicalize`](std::fs::canonicalize)d first, so the containment check is on
+    ///   real resolved paths — a symlink or a Windows directory junction that *points* out of `%TEMP%`
+    ///   is refused, not followed (the same hazard the purge script's `/XJ` covers);
+    /// - the root itself is refused, since `starts_with` would otherwise accept it (a path is its own
+    ///   prefix) and the guard would take `%TEMP%` with it on drop;
+    /// - a path that doesn't exist is refused, which is also how the "must already exist" contract above
+    ///   stops being merely a comment.
+    ///
+    /// It panics rather than returning a `Result` because every caller is a test fixture: there is no
+    /// recovery, and a panic names the offending path at the call site.
     pub fn adopt(path: PathBuf) -> Self {
+        let root = std::env::temp_dir();
+        let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|e| {
+            panic!(
+                "ScratchDir::adopt: cannot canonicalize the scratch root {} ({e}) — refusing to arm a \
+                 recursive delete without a root to check containment against",
+                root.display()
+            )
+        });
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|e| {
+            panic!(
+                "ScratchDir::adopt refused {}: it cannot be resolved ({e}). adopt() takes an \
+                 already-created directory inside the scratch root {}; it never creates one.",
+                path.display(),
+                root.display()
+            )
+        });
+        assert!(
+            canonical.is_dir(),
+            "ScratchDir::adopt refused {}: it is not a directory. adopt() arms a recursive delete on \
+             drop and only ever owns a scratch *directory*.",
+            path.display()
+        );
+        assert!(
+            canonical != canonical_root && canonical.starts_with(&canonical_root),
+            "ScratchDir::adopt refused {}: it resolves to {}, which is not strictly inside the scratch \
+             root {}. adopt() arms a recursive delete on drop, so it must never be pointed outside \
+             %TEMP% (CPE-1693 PR #934 review finding 2).",
+            path.display(),
+            canonical.display(),
+            canonical_root.display()
+        );
         ScratchDir(path)
     }
 }
@@ -2687,6 +2737,129 @@ mod tests {
              the guard did not clean up on the unwind path, which is the entire point of this ticket",
             path.display()
         );
+    }
+
+    /// A directory that is definitely **outside** the scratch root, created fresh for one refusal probe.
+    /// Preferred site is next to the test binary (`target/<profile>/deps/`): already build output,
+    /// already gitignored, and — the point — not under `std::env::temp_dir()`. Falls back to the crate
+    /// directory if a CI runner ever points `TMPDIR` at an ancestor of the build directory, so the probe
+    /// can't fail for a reason that has nothing to do with what it is testing.
+    fn out_of_root_probe_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        let root = std::fs::canonicalize(std::env::temp_dir()).expect("canonicalize temp_dir");
+        let candidates = [
+            std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)),
+            Some(PathBuf::from(env!("CARGO_MANIFEST_DIR"))),
+        ];
+        let base = candidates
+            .into_iter()
+            .flatten()
+            .find(|p| std::fs::canonicalize(p).map(|c| !c.starts_with(&root)).unwrap_or(false))
+            .unwrap_or_else(|| {
+                panic!("no writable directory outside the scratch root {} to probe with", root.display())
+            });
+        let d = base.join(format!("cpe-1693-adopt-probe-{tag}-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// **CPE-1693 PR #934 review finding 2.** `ScratchDir::adopt` arms an unconditional recursive delete
+    /// on drop, and before this fix it accepted *any* path — a test-support API one typo away from
+    /// `remove_dir_all`-ing something real. It must refuse a path that does not resolve inside the
+    /// scratch root.
+    ///
+    /// The probe deliberately plants a canary file inside the out-of-root directory and checks it
+    /// **survived**, so this stays red in both of the ways the bug can be present: `adopt` not refusing
+    /// at all, and `adopt` "refusing" only after its guard has already eaten the directory. `catch_unwind`
+    /// rather than `#[should_panic]` so the probe directory is cleaned up either way.
+    #[test]
+    fn adopt_refuses_a_path_outside_the_scratch_root() {
+        let outside = out_of_root_probe_dir("outside");
+        let canary = outside.join("canary.txt");
+        std::fs::write(&canary, b"this file must survive a refused adopt").unwrap();
+
+        // Sanity: the whole probe is meaningless if the "outside" path is somehow inside %TEMP%.
+        let root = std::fs::canonicalize(std::env::temp_dir()).unwrap();
+        assert!(
+            !std::fs::canonicalize(&outside).unwrap().starts_with(&root),
+            "probe setup is wrong: {} is inside the scratch root {}",
+            outside.display(),
+            root.display()
+        );
+
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Pre-fix this returns a guard, and the guard drops right here — recursively deleting a
+            // directory that was never scratch space.
+            let _guard = ScratchDir::adopt(outside.clone());
+        }))
+        .is_err();
+
+        let survived = canary.is_file();
+        let _ = std::fs::remove_dir_all(&outside);
+
+        assert!(
+            refused,
+            "CPE-1693 review finding 2: ScratchDir::adopt accepted {}, which is outside the scratch \
+             root — adopt() is an unconstrained recursive-delete primitive again",
+            outside.display()
+        );
+        assert!(
+            survived,
+            "CPE-1693 review finding 2: ScratchDir::adopt DELETED {} — an out-of-root path must be \
+             refused before any guard that could remove it is constructed",
+            outside.display()
+        );
+    }
+
+    /// The other half of the containment rule: the scratch root *itself* is not adoptable. `starts_with`
+    /// alone would say yes (a path is a prefix of itself), and a guard over `%TEMP%` would wipe every
+    /// other test's scratch space — and everything else in the temp directory — on drop.
+    #[test]
+    fn adopt_refuses_the_scratch_root_itself() {
+        let root = std::env::temp_dir();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ScratchDir::adopt(root.clone());
+            // If this ever stops panicking, do NOT let the guard drop: leaking the (already existing)
+            // temp root is infinitely preferable to removing it.
+            std::mem::forget(_guard);
+        }))
+        .is_err();
+        assert!(
+            refused,
+            "CPE-1693 review finding 2: ScratchDir::adopt accepted the scratch root {} itself",
+            root.display()
+        );
+    }
+
+    /// A path that doesn't exist can't be shown to be inside the root, so it is refused too — which also
+    /// enforces `adopt`'s documented "`path` must already exist" contract instead of leaving it a comment.
+    #[test]
+    fn adopt_refuses_a_path_that_does_not_exist() {
+        let missing = std::env::temp_dir().join("cpe-1693-adopt-nonexistent-probe-never-created");
+        assert!(!missing.exists(), "probe setup: the path must not exist");
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = ScratchDir::adopt(missing.clone());
+            std::mem::forget(_guard);
+        }))
+        .is_err();
+        assert!(refused, "ScratchDir::adopt accepted a path that does not exist");
+    }
+
+    /// …and the legitimate case still works, so the containment check can't be "refuse everything".
+    /// Mirrors what `cpe-s3`'s and `cpe-webdav`'s fixture spawners actually do: create a nested
+    /// directory under a temp-rooted parent with their own naming, then hand it to `adopt`.
+    #[test]
+    fn adopt_accepts_a_directory_nested_inside_the_scratch_root() {
+        let parent = scratch_dir("cpe-fsutil-adopt-ok");
+        let nested = parent.join("0");
+        std::fs::create_dir_all(&nested).unwrap();
+        {
+            let guard = ScratchDir::adopt(nested.clone());
+            assert!(guard.is_dir(), "adopt must hand back a usable guard over the directory");
+        }
+        assert!(!nested.exists(), "the adopted guard must still remove its directory on drop");
     }
 
     /// CPE-1717. The whole policy as a table, because the policy is the deliverable and it has to be

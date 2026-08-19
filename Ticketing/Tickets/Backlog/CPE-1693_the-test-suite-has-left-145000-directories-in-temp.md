@@ -323,8 +323,34 @@ The panic fires (proving the closure really panicked, not merely returned), and 
 Deleting ~294,800 directories is a real filesystem operation on the user's/Foreman's machine, scoped
 here to exactly `%TEMP%\cpe-*` and nowhere else. A plain `Remove-Item -Recurse` loop is impractically slow
 at this count; the script below stages every `%TEMP%\cpe-*` top-level entry into one temporary folder
-(same-volume move, cheap) and bulk-deletes that folder via `robocopy /MIR` against an empty directory (a
-standard fast-purge technique), which is dramatically faster than one `Remove-Item` per directory.
+(same-volume move, cheap) and then bulk-deletes that one folder in a single native recursive delete.
+
+**Junction safety (PR #934 review finding 3), and why the mechanism changed.** The first draft of this
+script bulk-deleted the staging folder with `robocopy /MIR` against an empty directory. The review flagged
+that this follows a directory junction out of `%TEMP%` and deletes the junction's *target*, and proposed
+adding `/XJ`. Measured on this machine: **`/XJ` does not fix it.** `/XJ` excludes junctions on robocopy's
+*source* side only; `/MIR`'s destination purge still walks into a junction sitting in the destination tree
+and deletes what's on the far side. Probe — a junction `staging\cpe-junction` pointing at `victim\`
+containing `canary.txt`:
+
+```
+robocopy empty staging /MIR /XJ
+        *EXTRA Dir        -1    ...\staging\cpe-junction\
+          *EXTRA File            14    canary.txt
+canary exists = False      <-- deleted through the junction, WITH /XJ
+```
+
+So the junction exclusion here is not a robocopy switch — it is a change of mechanism. The script now:
+
+1. **Never stages a reparse point at all** — a top-level `%TEMP%\cpe-*` entry that is a junction/symlink is
+   skipped, not moved, so nothing outside `%TEMP%` can ever be reached through the staged tree.
+2. **Bulk-deletes with `rd /s /q`**, which deletes a junction *itself* rather than recursing through it.
+   Verified with the same probe: `staging gone = True`, `canary survived = True`. It is one native
+   recursive delete over one folder, so it keeps the speed the staging trick was for; it is `Remove-Item
+   -Recurse` per directory that was slow, not `rd`.
+
+Both points are commented in the script below — **do not "tidy" them away**; each one is load-bearing and
+each is there because the alternative was measured deleting a file it had no business touching.
 
 ```powershell
 # CPE-1693 purge — run this yourself; it is NOT executed by the ticket worker.
@@ -333,20 +359,26 @@ standard fast-purge technique), which is dramatically faster than one `Remove-It
 $ErrorActionPreference = 'Stop'
 $tempRoot = $env:TEMP
 $staging  = Join-Path $tempRoot ("cpe-purge-staging-" + [guid]::NewGuid())
-$empty    = Join-Path $tempRoot ("cpe-purge-empty-"   + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
-New-Item -ItemType Directory -Path $empty   -Force | Out-Null
 
 Get-ChildItem -Path $tempRoot -Directory -Filter 'cpe-*' -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -ne $staging -and $_.FullName -ne $empty } |
+    Where-Object { $_.FullName -ne $staging } |
+    # JUNCTION EXCLUSION 1 of 2 — DO NOT REMOVE (CPE-1693 / PR #934 review finding 3).
+    # A `cpe-*` entry that is a junction or symlink is left exactly where it is. Staging it would put a
+    # door to somewhere else on the disk inside the folder we are about to delete recursively.
+    Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) } |
     ForEach-Object {
         try { Move-Item -Path $_.FullName -Destination $staging -Force -ErrorAction Stop }
         catch { Write-Warning "Skipped $($_.FullName): $($_.Exception.Message)" }
     }
 
-robocopy $empty $staging /MIR /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null
-Remove-Item -Path $staging -Recurse -Force -ErrorAction SilentlyContinue
-Remove-Item -Path $empty   -Recurse -Force -ErrorAction SilentlyContinue
+# JUNCTION EXCLUSION 2 of 2 — DO NOT REMOVE (CPE-1693 / PR #934 review finding 3).
+# `rd /s /q` deletes a junction itself instead of following it; a nested junction inside a staged tree
+# therefore costs its target nothing. This deliberately replaces `robocopy /MIR`, which followed one and
+# deleted through it EVEN WITH `/XJ` (`/XJ` is source-side only — measured, see above). Do not swap this
+# back to robocopy, and do not "simplify" it to `Remove-Item -Recurse` (slow at this count, and Windows
+# PowerShell 5.1's recursive remove has its own history of walking into reparse points).
+cmd /c rd /s /q "$staging"
 
 Write-Host "CPE-1693 purge complete."
 ```
@@ -371,3 +403,110 @@ SilentlyContinue | Measure-Object).Count`
 Not run: `crates/sftp`/`crates/ftp` test suites (untouched by this ticket — see Exemptions), and the
 Docker/E2E-gated legs of `crates/vfs`/`crates/s3`/`crates/webdav` (`e2e-extra-ca`, real-server
 conformance) that need infrastructure this environment doesn't have.
+
+## Work Log — 2026-08-19, PR #934 review response
+
+Independent review returned CHANGES REQUESTED with four findings. Finding 4 (`crates/sftp`, `crates/ftp`,
+`crates/net` still leaking) was split out as **CPE-1782** and is deliberately untouched here. The other
+three are addressed below, each red-proofed: the test/probe is shown failing with the bug present and
+passing with the fix.
+
+### Finding 1 — the 68th helper: `src-tauri`'s `sched_scratch`
+
+Found by census rather than by search-and-hope: every `fn … -> …Path…` in the five converted crates
+(`crates/server`, `crates/net`, `src-tauri`, `crates/s3`, `crates/webdav`) whose body contains both
+`temp_dir()` and `create_dir…` — 8 functions. Seven are production code, already guarded
+(`archive::temp_extract_target`, `ffmpeg_util::create_scratch_dir`, `transfer::one_file_src`), or
+explicitly on this ticket's Tier-3 exemption list above (`audit_journal::tmp`, `metrics_journal::tmp`,
+`replay_session::tmp`, `semantic_index::temp_path`). Exactly one was a `scratch()`-style helper the sweep
+should have caught and didn't: **`src-tauri/src/lib.rs`'s `sched_scratch(tag) -> PathBuf`** (CPE-1199's
+snapshot-schedule tick tests, 3 call sites). It was missed because the transform matched on the name
+`scratch`, and this one is `sched_scratch`. Cross-checked: it is now the only `*scratch*`-named helper in
+the tree that doesn't return `tempfile::TempDir` or `ScratchDir`.
+
+Converted identically to the other 67 — `cpe_server::fsutil::scratch_dir(&format!("cpe-sched-tick-{tag}"))`,
+which reproduces the previous `cpe-sched-tick-<tag>-<pid>-<seq>` naming exactly.
+
+**Red-proof** — `cd src-tauri && cargo test --lib sched_scratch_removes`, with the helper still returning
+a bare `PathBuf` (the new test compiles either way, so this is a genuine before/after, not a compile
+error):
+
+```
+test tests::sched_scratch_removes_its_directory_even_when_the_caller_panics_mid_assertion ... FAILED
+CPE-1693 REGRESSION: C:\...\Temp\cpe-sched-tick-guard-proof-2736-0 still exists after sched_scratch's
+value went out of scope on a panicking unwind — this helper still hands back a bare path with no Drop guard
+test result: FAILED. 0 passed; 1 failed
+```
+
+After the conversion: `test result: ok. 1 passed; 0 failed`.
+
+The rebase onto `main` also turned up CPE-1708's `list_dir_local_arm_always_reports_zero_filtered`, which
+had hand-rolled a `Cleanup(PathBuf)` guard around `scratch()`'s old bare return and called `dir.clone()`.
+`ScratchDir` is deliberately not `Clone`, so it stopped compiling; the wrapper is redundant now and was
+removed — which is exactly the boilerplate this ticket exists to delete.
+
+### Finding 2 — `ScratchDir::adopt` was an unconstrained recursive-delete primitive
+
+`adopt(path)` took *any* `PathBuf` and armed `remove_dir_all` on it at drop. It now canonicalises both the
+argument and the scratch root (`std::env::temp_dir()`) and refuses anything that is not an existing
+directory *strictly* inside that root — panicking with the offending path, since every caller is a test
+fixture and there is nothing to recover to. Canonicalising first is what makes it junction/symlink-proof:
+a link inside `%TEMP%` whose target is elsewhere resolves out of the root and is refused. The root itself
+is refused separately, because `starts_with` accepts a path as its own prefix and a guard over `%TEMP%`
+would take every other test's scratch space with it on drop.
+
+Both existing callers (`cpe-s3`'s `fixture_root`, `cpe-webdav`'s `spawn_webdav_server`) build their paths
+under `std::env::temp_dir()` and are unaffected.
+
+**Red-proof** — `cd crates/server && cargo test --lib adopt_`, before the constraint. The out-of-root probe
+plants a canary file and checks it survived, so it stays red both if `adopt` doesn't refuse and if it
+"refuses" only after its guard has already eaten the directory:
+
+```
+test fsutil::tests::adopt_refuses_a_path_that_does_not_exist ... FAILED
+test fsutil::tests::adopt_refuses_the_scratch_root_itself ... FAILED
+test fsutil::tests::adopt_refuses_a_path_outside_the_scratch_root ... FAILED
+test fsutil::tests::adopt_accepts_a_directory_nested_inside_the_scratch_root ... ok
+  ScratchDir::adopt accepted …\target\debug\deps\cpe-1693-adopt-probe-outside-4584-0, which is outside
+  the scratch root — adopt() is an unconstrained recursive-delete primitive again
+test result: FAILED. 1 passed; 3 failed
+```
+
+After: `test result: ok. 4 passed; 0 failed`. The fourth (positive) test is there so the constraint can't
+regress into "refuse everything".
+
+### Finding 3 — the purge script followed junctions out of `%TEMP%`
+
+The review was right about the hazard and wrong about the remedy, which the probe caught: **`/XJ` does not
+fix `robocopy /MIR`**. `/XJ` is a *source*-side exclusion; the `/MIR` destination purge still walks into a
+junction in the destination tree and deletes through it. Measured with a junction
+`staging\cpe-junction` → `victim\canary.txt`:
+
+```
+robocopy empty staging /MIR /XJ
+        *EXTRA Dir        -1    ...\staging\cpe-junction\
+          *EXTRA File            14    canary.txt
+canary exists = False        <-- deleted through the junction, WITH /XJ
+```
+
+So the junction exclusion had to be a change of mechanism, not a switch. The script now (a) skips any
+top-level `%TEMP%\cpe-*` entry that is a reparse point instead of staging it, and (b) bulk-deletes staging
+with `rd /s /q`, which removes a junction itself rather than recursing through it. Both are commented
+in-script as load-bearing, with the measurement, so they don't read as noise later.
+
+**Red-proof** — end-to-end probe over a `%TEMP%` stand-in containing a real `cpe-real\sub\junk.txt` tree, a
+top-level `cpe-toplevel-junction`, and a nested `cpe-real\sub\cpe-nested-junction`, both pointing at an
+out-of-temp `outside\precious\canary.txt`. Old script (with the reviewer's `/XJ`) vs new script, same
+fixture:
+
+```
+variant                       = old
+canary OUTSIDE temp survived  = False      <-- data loss outside %TEMP%
+cpe-real\sub\junk.txt purged  = True
+cpe-real purged               = True
+
+variant                       = new
+canary OUTSIDE temp survived  = True       <-- fixed
+cpe-real\sub\junk.txt purged  = True       <-- and the purge still purges
+cpe-real purged               = True
+```
