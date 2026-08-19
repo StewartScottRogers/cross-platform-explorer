@@ -3,7 +3,7 @@ id: CPE-1693
 title: The test suite has left 145,000 directories in %TEMP% and is still adding them
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-12
