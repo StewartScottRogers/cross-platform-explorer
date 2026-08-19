@@ -14,26 +14,56 @@ on:
     # mid-flight — burning the same account concurrency the PR queue needed (see CPE-1772, filed
     # from noticing GUI-smoke cancellations the same night) for zero possible signal.
     #
-    # Deliberately narrow: ONLY `Ticketing/**` and `.claude/**`. NOT a blanket `**/*.md` — this repo
-    # has Markdown that IS a build input a real code change can break: `src/docs/*.md` is shipped
-    # and guarded by `src/lib/sectionDocs.test.ts` (part of the `frontend` job below), and
-    # `docs/design/*.md` is asserted against by doc-parity tests (CPE-1761). A blanket ignore would
-    # silence exactly the guards those tickets exist to keep honest. `Ticketing/**` and `.claude/**`
-    # are the only paths with no build-affecting content at all, so they're the only ones safe to
-    # name here without a case-by-case audit.
+    # NOT `Ticketing/**` — `Ticketing/Epics/**` is a LIVE test input, not inert bookkeeping.
+    # `src/lib/epicsQueueLayout.test.ts` (which runs in the `frontend` job below) `readdirSync`s and
+    # `readFileSync`s the real `Ticketing/Epics/` tree on disk and asserts no epic sits loose at the
+    # old flat location and every epic's frontmatter `status:` agrees with its folder — the guard
+    # CLAUDE.md names as what stops the two board implementations plus the ticket MCP from silently
+    # lying instead of erroring. `/ticketing-epic activate` and routine sprint bookkeeping already
+    # `git mv` files under `Ticketing/Epics/**` straight onto `main`; an ignore list that swallowed
+    # that path would have made that exact guard unreachable — a real code-adjacent regression class
+    # hidden as a side effect of a CI-cost ticket, surfacing later on a totally unrelated PR. `.md`
+    # files elsewhere in `Ticketing/` also is not uniformly inert for the same reason worth stating
+    # plainly: `Ticketing/wiki.md` and `Ticketing/_template.md` are prose, not test input, but they
+    # are NOT excluded either — narrowing to the two folders below costs nothing (no bookkeeping
+    # commit touches either) and avoids re-litigating that distinction file-by-file. Named narrowly
+    # instead: `Ticketing/Tickets/**` (ticket status moves + Work Log edits) and `Ticketing/Sprints/**`
+    # (sprint bookkeeping) are the two trees a routine ticketing-workflow commit actually touches, and
+    # neither is read by any test or build step. Measured against the last 400 commits to `main`: 1
+    # touched `Ticketing/Epics/` and it was a code commit that would have run anyway; the ~37
+    # bookkeeping-only pushes in the same window are all `Tickets/`-shaped and are still fully
+    # skipped — essentially the whole win, none of the risk.
     #
-    # PUSH ONLY — deliberately NOT applied to the `pull_request` trigger below, and this is also why
-    # it creates no required-check hole. A PR always gets the full, unfiltered run regardless of its
-    # diff (a docs-only PR still exercises real review + the guards above), and merging to `main`
-    # only happens through a PR whose `pull_request` run already passed as a required check — so by
-    # the time a `push` to `main` exists at all, the change it carries was already fully vetted. The
-    # `push` trigger's own run is a redundant confirmation, not a gate, so skipping it for
-    # `Ticketing/**`/`.claude/**`-only commits removes waste without weakening what "required" means
-    # anywhere a merge is actually decided. (A direct push to `main` bypassing PR review skips this
-    # too, but that already bypasses every other required check the same way — not a hole this
-    # ticket opens.)
+    # Also NOT a blanket `**/*.md` — this repo has Markdown that IS a build input a real code change
+    # can break: `src/docs/*.md` is shipped and guarded by `src/lib/sectionDocs.test.ts` (part of the
+    # `frontend` job below), and `docs/design/*.md` is asserted against by doc-parity tests
+    # (CPE-1761). A blanket ignore would silence exactly the guards those tickets exist to keep
+    # honest.
+    #
+    # `.claude/**` stays in the ignore list — verified safe: every reference to it across the repo
+    # (ts/rs/js/svelte/json/yml) is a prose comment, no workflow `run:` step reads a file under it,
+    # and `vite.config.ts` already excludes `**/.claude/**` from vitest, so nothing here can be a
+    # test or build input the way `Ticketing/Epics/**` is.
+    #
+    # PUSH ONLY — deliberately NOT applied to the `pull_request` trigger below. Stated accurately,
+    # not aspirationally: this repo has **no branch protection and no required status checks**
+    # (`gh api repos/:owner/:repo/branches/main/protection` -> 404 "Branch not protected"; `gh api
+    # repos/:owner/:repo/rulesets` -> `[]`) — so "required check" is not a mechanism that exists here
+    # to protect, and `main` does NOT only move via PR either: history is linear squash-merges with
+    # 37 of the last 60 commits being direct pushes carrying no PR number, some of them code (e.g.
+    # `86888aed fix: strip the BOM I added to the manifests, and unrot the ffmpeg pin`). What IS true,
+    # and is the actual safety argument for narrowing rather than removing this filter: the
+    # `pull_request` trigger below carries NO path filter of its own, so any change that goes through
+    # a PR — reviewed or not — still gets the full, unfiltered run regardless of diff; and this
+    # workflow relies on that `pull_request` run plus direct-push discipline as its only automated
+    # signal, there being no required-check mechanism to fall back on. For a commit that goes straight
+    # to `main` outside a PR, the filtered `push` run was the ONLY automated signal that would have
+    # fired — skipping it for `Ticketing/Tickets/**`/`Ticketing/Sprints/**`/`.claude/**`-only content
+    # is a deliberate trade being made with that understood, not a gap being papered over as already
+    # covered elsewhere.
     paths-ignore:
-      - "Ticketing/**"
+      - "Ticketing/Tickets/**"
+      - "Ticketing/Sprints/**"
       - ".claude/**"
   pull_request:
     branches: [main]

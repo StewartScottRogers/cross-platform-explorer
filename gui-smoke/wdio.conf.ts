@@ -20,6 +20,7 @@
 // CI (windows-latest, no interactive user) is the intended place to run it.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -964,6 +965,33 @@ function killTauriDriver() {
   tauriDriver?.kill();
 }
 
+// CPE-1772: polls `host:port` with a real TCP connect attempt (not an HTTP request — tauri-driver
+// doesn't need to answer anything yet, just accept the socket) every 200ms until one succeeds or
+// `budgetMs` elapses. Used by `beforeSession` below to close the spawn-then-immediately-POST race —
+// see that hook's comment for the failure mode this closes. Resolves on success; on timeout it
+// throws rather than silently letting the caller proceed to a doomed first request, since a
+// tauri-driver that never opens its port is a real, nameable failure, not something to paper over.
+function waitForPort(host: string, port: number, budgetMs: number): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  return new Promise((resolve, reject) => {
+    const attempt = () => {
+      const socket = net.connect({ host, port }, () => {
+        socket.end();
+        resolve();
+      });
+      socket.on("error", () => {
+        socket.destroy();
+        if (Date.now() >= deadline) {
+          reject(new Error(`[gui-smoke] tauri-driver never accepted a connection on ${host}:${port} within ${budgetMs}ms`));
+        } else {
+          setTimeout(attempt, 200);
+        }
+      });
+    };
+    attempt();
+  });
+}
+
 export const config: WebdriverIO.Config = {
   runner: "local",
   hostname: "127.0.0.1",
@@ -1047,14 +1075,28 @@ export const config: WebdriverIO.Config = {
   // defect — retrying is legitimate here ONLY because the cause has been identified, not by default.
   //
   // Fix: cap retries at 0. A wedged command now fails after ONE `connectionRetryTimeout` (180s) —
-  // still generous relative to a normal command (which returns in milliseconds), and unchanged from
-  // today for the CPE-1048 slow-cold-start case this value was originally sized for (that is one
-  // attempt already, so `connectionRetryCount` was never doing anything useful for it) — instead of
-  // silently multiplying to ~12 minutes. A hang now surfaces as a real, timestamped WebdriverIO error
-  // within single-digit minutes, `afterEach`'s `snapFailure` still runs and still has a real chance to
+  // still generous relative to a normal command (which returns in milliseconds) — instead of silently
+  // multiplying to ~12 minutes. A hang now surfaces as a real, timestamped WebdriverIO error within
+  // single-digit minutes, `afterEach`'s `snapFailure` still runs and still has a real chance to
   // capture a screenshot (see its CPE-1149 note), and the existing "Classify suite log" step
   // (CPE-1728) and the shard's Ratchet verdict both get a log to read instead of a bare
   // `##[error]The operation was canceled.` with nothing to classify.
+  //
+  // CORRECTION to an earlier version of this comment, which claimed `connectionRetryCount` "was never
+  // doing anything useful" for the CPE-1048 slow-cold-start case — that is right about the SLOW-
+  // RESPONSE window (a request that connects but takes a while to answer, which
+  // `connectionRetryTimeout` alone already covers) but wrong about a DIFFERENT window this repo relies
+  // on the default retry count for: `beforeSession` (below) spawns `tauri-driver` and returns
+  // immediately, with no readiness check, before WDIO's first `POST /session` to `127.0.0.1:4444`. If
+  // that request lands before the child process has bound the port, the result is an immediate
+  // `ECONNREFUSED` — a REFUSED connection, not a slow one — which `connectionRetryTimeout` cannot
+  // cover at all (it bounds how long a request waits for a response, not whether a connection is
+  // accepted in the first place). The retry count was the only thing papering over that race on a
+  // slow/contended runner exactly like the ones this ticket's evidence is about, so removing it here
+  // without addressing that window would have traded a well-diagnosed hang for a worse-diagnosed
+  // flake. Fixed at the actual source instead: `beforeSession` below now polls the port until
+  // `tauri-driver` is actually accepting connections (bounded, ~10s budget) before returning, so
+  // `connectionRetryCount: 0` no longer needs to cover that race by accident.
   //
   // What this does NOT explain or fix, stated honestly (CPE-1772's own "further evidence" section):
   // three OTHER occurrences in the same investigation were cancelled during `Install Linux system
@@ -1222,7 +1264,19 @@ export const config: WebdriverIO.Config = {
 
   // tauri-driver proxies WebDriver requests to the platform's native driver (msedgedriver on
   // Windows, WebKitWebDriver on Linux), which is what actually launches the app binary.
-  beforeSession: () => {
+  //
+  // CPE-1772: `beforeSession` used to spawn and return immediately, with no readiness check, before
+  // WDIO issues its first `POST /session` to `127.0.0.1:4444`. On a slow/contended runner (spawn ->
+  // bind can take longer than usual under the runner-pool contention this ticket's evidence is about)
+  // that first request can land before the port is open, which is an immediate `ECONNREFUSED` —
+  // nothing `connectionRetryTimeout` covers, since that only bounds a slow RESPONSE, not a refused
+  // CONNECT. The default `connectionRetryCount` of 3 used to paper over this by accident; now that
+  // it's capped at 0 (see that config option's own comment for why), this poll is what actually covers
+  // the window instead. Bounded at ~10s — generous for a process spawn+bind, small next to the
+  // multi-minute failures this ticket is about, and if it's never actually ready this just surfaces as
+  // a clear "tauri-driver never started listening" error instead of a silent hang inherited by the
+  // first real WebDriver command.
+  beforeSession: async () => {
     tauriDriver = spawn(TAURI_DRIVER_BIN, [], {
       stdio: [null, process.stdout, process.stderr],
     });
@@ -1236,6 +1290,7 @@ export const config: WebdriverIO.Config = {
         process.exit(1);
       }
     });
+    await waitForPort("127.0.0.1", 4444, 10_000);
   },
 
   // Note: afterSession might not run if the session fails to start, so onComplete (below) also
