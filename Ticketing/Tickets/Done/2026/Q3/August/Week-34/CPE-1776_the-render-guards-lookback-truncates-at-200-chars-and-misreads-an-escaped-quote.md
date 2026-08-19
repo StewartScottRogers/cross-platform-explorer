@@ -3,7 +3,7 @@ id: CPE-1776
 title: The render guard's lookback truncates at 200 characters, silently dropping a render after long alt text
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17

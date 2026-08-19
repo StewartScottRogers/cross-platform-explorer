@@ -3,7 +3,7 @@ id: CPE-1768
 title: The render guard covers 41 of 136 components, and nothing states which files must be registered
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17

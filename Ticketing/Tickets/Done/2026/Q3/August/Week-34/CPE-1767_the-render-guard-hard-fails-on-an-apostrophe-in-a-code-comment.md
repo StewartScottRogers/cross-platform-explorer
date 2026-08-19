@@ -3,7 +3,7 @@ id: CPE-1767
 title: The render guard hard-fails CI on an apostrophe in a JS comment, and tells the developer to fix a brace that is fine
 type: bug
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
@@ -71,3 +71,16 @@ Teach `findMatchingBrace` (and the tag/quote state machine it shares) about Java
 Found by the Reviewer on **PR #925 / CPE-1761**, 2026-08-17, during the batched sprint. The review noted the
 PR's Work Log explicitly declined to file this — "which is how this class of debt goes missing". Related:
 CPE-1761 (fail-closed), CPE-1766 (the mid-text render-position gap), CPE-1757 (the parser rewrite).
+
+## Correction from the independent UAT, 2026-08-19
+
+This ticket's acceptance criterion says to confirm the file still scans to **38** entries. The merged
+state scans to **39**, and the guard is internally consistent at that number (it matches
+`REGISTRY["Sidebar.svelte"]` exactly), so this is not a defect.
+
+The extra entry comes from CPE-1766's mid-text fix landing in the same PR: it surfaced one more
+previously-invisible mid-text mustache in that same file, one of the 26 the fix commit reported
+across the tree. The stated number was simply written before that fix existed.
+
+Recorded rather than quietly corrected, because a reviewer checking the AC literally would otherwise
+see a mismatch and have no way to tell whether the guard or the ticket was wrong.

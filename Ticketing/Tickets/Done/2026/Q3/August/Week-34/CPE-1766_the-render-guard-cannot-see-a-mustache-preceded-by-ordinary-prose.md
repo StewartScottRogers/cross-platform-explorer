@@ -3,7 +3,7 @@ id: CPE-1766
 title: The render guard cannot see a mustache preceded by ordinary body text, and reports the file clean
 type: bug
 priority: High
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-17
