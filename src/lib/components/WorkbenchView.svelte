@@ -139,7 +139,7 @@
             <!-- svelte-ignore a11y-no-static-element-interactions a11y-click-events-have-key-events -->
             <div class="file-head" on:click={() => toggleCollapse(key)} title={isCollapsed ? "Expand" : "Collapse"}>
               <span class="chevron" aria-hidden="true">{isCollapsed ? "▸" : "▾"}</span>
-              <span class="file-name">{fileLabel(f)}{#if f.binary} <span class="binary">binary</span>{/if}</span>
+              <span class="file-name">{displaySafePath(fileLabel(f))}{#if f.binary} <span class="binary">binary</span>{/if}</span>
               {#if !f.binary}<span class="file-stat"><span class="fs-add">+{fs.added}</span> <span class="fs-del">−{fs.removed}</span></span>{/if}
               {#if !f.binary}<button class="edit-btn" on:click|stopPropagation={() => copyPatch(f)} title="Copy this file's diff">{copiedFile === key ? "✓ Copied" : "Copy"}</button>{/if}
               <button class="edit-btn" on:click|stopPropagation={() => editFile(f)} title="Open this file in the editor">Edit</button>
