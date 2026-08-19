@@ -3,7 +3,7 @@ id: CPE-1708
 title: When a remote listing hides keys, the count only reaches a log line the user never sees
 type: task
 priority: Medium
-status: Backlog
+status: Done
 tags: ready
 estimate: M
 created: 2026-08-13
