@@ -40,6 +40,30 @@ name: GUI smoke
 on:
   push:
     branches: [main]
+    # CPE-1781: same reasoning as ci.yml's identical block — see it for the full writeup, including
+    # WHY `Ticketing/**` is wrong (it swallows `Ticketing/Epics/**`, which
+    # `src/lib/epicsQueueLayout.test.ts` reads as a real test input in the `frontend` job of ci.yml)
+    # and WHY the "required check" framing this comment used to carry was factually wrong for this
+    # repo (no branch protection, no required status checks, and `main` moves by direct push as often
+    # as by PR). Narrowed to `Ticketing/Tickets/**` and `Ticketing/Sprints/**` — the two trees a
+    # routine ticketing-workflow commit actually touches, neither read by any test or build step —
+    # plus `.claude/**` (verified inert: prose-only references, no `run:` step reads it, already
+    # excluded from vitest). Not a blanket `**/*.md`: `src/docs/*.md` is guarded by
+    # `sectionDocs.test.ts` (in ci.yml, not this workflow), and `docs/design/*.md` is kept out
+    # conservatively rather than because a specific guard reads it today — see ci.yml's identical note
+    # for the correction of an earlier, wrong CPE-1761 citation here. Naming only the two unambiguous
+    # ticketing paths avoids having to reason per-workflow about which Markdown is a shipped input.
+    # PUSH ONLY, not `pull_request` below: the
+    # `pull_request` trigger carries no path filter, so any change routed through a PR still gets the
+    # full run regardless of diff — that, plus direct-push discipline, is this repo's only automated
+    # signal (there being no required-check mechanism to fall back on), and the filtered `push` run
+    # was the only signal a direct-to-`main` `Ticketing/Tickets/**`/`Ticketing/Sprints/**`/`.claude/**`
+    # -only commit would otherwise have gotten — a deliberate, understood trade, not a gap assumed
+    # covered elsewhere.
+    paths-ignore:
+      - "Ticketing/Tickets/**"
+      - "Ticketing/Sprints/**"
+      - ".claude/**"
   pull_request:
     branches: [main]
   # CPE-1594: lets a human kick off the Windows leg on demand (Actions tab -> Run workflow) once
@@ -53,6 +77,8 @@ on:
 
 # CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight run, so rapid pushes
 # don't pile up dozens of gui-smoke runs (which, being flaky, could hang and starve the queue).
+# CPE-1781 keeps this as-is (see ci.yml's identical note): correct for rapid CODE pushes, and no
+# longer contended-for by bookkeeping-only pushes now that those don't start a run at all.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -140,7 +166,14 @@ jobs:
           $PWD.Path | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       # The official WebDriver proxy — version is independent of the Tauri crate version.
+      #
+      # CPE-1772 nit: this Windows leg is schedule/dispatch-only (see the job `if:` above), so it was
+      # never part of this ticket's evidence trail — but its Linux twin (`gui-smoke-linux-build`'s
+      # "Install tauri-driver") got a `timeout-minutes` and this one hadn't, which reads as an
+      # oversight rather than a deliberate choice. Added for consistency; low value given how rarely
+      # this leg runs, but a hang here now fails named instead of riding to the job's own 15-minute cap.
       - name: Install tauri-driver
+        timeout-minutes: 8
         run: cargo install tauri-driver --locked
 
       - name: Install gui-smoke dependencies
@@ -283,10 +316,72 @@ jobs:
       # hardest class of CI failure to read. One list, copied verbatim, is worth the ~45 seconds of apt in
       # each job. See the long CPE-1702 note on the shard job's copy for why the GStreamer codec packages
       # are deliberately NOT here.
+      #
+      # CPE-1772 — this step's OWN hang, reproduced live and repeatedly on THIS PR's own CI, not
+      # merely theorised. `timeout-minutes` below is new. Unambiguous record of what was tried, by run
+      # id + run ATTEMPT (a `gh run rerun` reuses the run id and increments the attempt; a fresh push
+      # gets a new run id) — kept as the record, not just the current state:
+      #   run 32270751601 attempt 1, build job (id 96126309515), 15:35:43-15:44:24 UTC: hung with ZERO
+      #      further output for the full 8 minutes, stopping right after apt-get's last InRelease fetch
+      #      (archive.ubuntu.com noble-security) and before anything from `apt-get install` printed.
+      #   run 32270751601 attempt 2 (rerun of the failed job, same run id), build job (id 96130399692),
+      #      15:45:53-15:54:30 UTC: the SAME hang at the SAME point. Both attempts hypothesised as the
+      #      documented GitHub-hosted-runner dpkg-lock gotcha (a background `apt-daily`/
+      #      `apt-daily-upgrade` service holding `/var/lib/dpkg/lock-frontend` for the first few
+      #      minutes after boot) and "fixed" with the lock-wait loop below, added in the next push.
+      #   run 32273686091 attempt 1 (new run, new push carrying the lock-wait loop), build job
+      #      (id 96135901916), 16:03:16-16:11:58 UTC: the SAME hang, at the SAME exact point, with the
+      #      lock-wait loop now in place and printing NOTHING (both `fuser` checks found no lock)
+      #      before falling straight through to `apt-get update` — which then hung again regardless.
+      #      This DISPROVES the dpkg-lock hypothesis for all three occurrences above; the loop is kept
+      #      anyway (harmless, real GH-runner gotcha, just not this one) but is not what protects this
+      #      step — see the timeout-sizing note further down for why it is no longer cost-free either.
+      #   run 32275319086 attempt 1 (new run, new push adding `Acquire::ForceIPv4` below), build job
+      #      (id 96141255204), 16:39:56-16:48:44 UTC: SUCCESS — first clean run of this step. BUT in
+      #      the SAME run attempt, all four shard jobs' OWN copy of this step (see below) hit the
+      #      identical hang independently: shard 1 (id 96149957353) 16:53:39-17:02:03, shard 2
+      #      (id 96149957281) 16:50:49-16:59:09, shard 3 (id 96149957270) 16:52:15-17:00:35, shard 4
+      #      (id 96149957321) 16:58:26-17:06:53 — all four timed out at 8 minutes, all in the same
+      #      ~15-minute window. Rerunning just the failed jobs (run 32275319086 attempt 2) passed all
+      #      four cleanly: shard 1 17:19:20-17:27:59, shard 2 17:19:20-17:33:18, shard 3
+      #      17:19:21-17:26:57, shard 4 17:19:21-17:26:24, build job's cached success carried forward,
+      #      verdict 17:33:21-17:33:45 success.
+      # Current best account, NOT confirmed as fully resolved: the build job succeeding once with
+      # `ForceIPv4` while four sibling shard jobs hung in the same narrow window, then all four passing
+      # on a bare retry with no code change, is not the shape of a deterministic misconfiguration — it
+      # is the shape of a time-windowed external condition (a specific mirror or network path degraded
+      # for roughly the 16:50-17:07 UTC stretch, recovered by ~17:19). That is CONSISTENT WITH, but
+      # does not conclusively prove, the GitHub-hosted-runner IPv6 connectivity-stall class (a runner
+      # advertising non-routing IPv6 hangs on the OS TCP timeout before falling back to IPv4, and apt
+      # prints nothing while a single request is stalled, matching the zero-output shape above exactly)
+      # — `ForceIPv4` is applied below as the standard mitigation for that class regardless, since it
+      # is low-risk and was in place for the one clean run. `timeout-minutes: 8` stands independent of
+      # which of these is right: it is what turned five otherwise-silent ~30-minute mystery kills into
+      # five fast, named, readable failures — this ticket's actual AC1/AC2 — whether or not the IPv4
+      # forcing also reduces how often the underlying stall occurs. This PR's own CI is the honest
+      # test of the latter, not a claim made in advance of it.
       - name: Install Linux system dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          # CPE-1772: capped at 2 minutes (24 x 5s), not the 5-minute ceiling an earlier commit on
+          # this branch shipped (seq 1 60). That earlier loop was sized before the disproof above
+          # existed: at 60 x 5s = 300s worst case inside this step's 480s (8-minute) `timeout-minutes`
+          # cap, a run that was BOTH lock-contended (a real, separate GH-runner gotcha this loop still
+          # guards against) AND hit a slow/degraded mirror would have had only 180s left for the actual
+          # apt operations the cap exists to bound, and would fail attributed to apt when dpkg-lock
+          # contention was still a real contributor. 2 minutes leaves 6 minutes for apt itself —
+          # comfortably above the ~45s this step normally costs, generous even under contention — while
+          # still capping the now-disproved-but-harmless-to-keep lock wait at a minority of the budget.
+          for i in $(seq 1 24); do
+            if sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+              echo "waiting for background apt/dpkg lock (attempt $i/24)..."
+              sleep 5
+            else
+              break
+            fi
+          done
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
@@ -332,7 +427,14 @@ jobs:
       # The official WebDriver proxy — version is independent of the Tauri crate version. Locates
       # `WebKitWebDriver` via PATH on Linux automatically (tauri-driver's own per-OS default), so
       # `webkit2gtk-driver`'s `/usr/bin/WebKitWebDriver` is all the shards need alongside it.
+      #
+      # CPE-1772: `timeout-minutes` here is where PR #933's shared-build cancellation actually landed
+      # (mid `Install tauri-driver`, after `tauri-driver v2.0.6` had already installed and the job's
+      # own unit tests had passed) — see the apt step's identical comment above for the full
+      # reasoning. Compiling `tauri-driver` from source normally takes well under a minute with a warm
+      # `cargo install` cache; 8 minutes covers a cold one.
       - name: Install tauri-driver
+        timeout-minutes: 8
         run: cargo install tauri-driver --locked
 
       # The two binaries a shard job needs and cannot cheaply reproduce. `ls -l` is not decoration: it is
@@ -473,10 +575,33 @@ jobs:
       # just "settled somehow") — so the day this runner's audio/video pipeline starts working for
       # real, that assertion breaks loudly instead of staying silently green, and this comment is the
       # place to come update it.
+      #
+      # CPE-1772: `timeout-minutes` + the lock-wait loop + `Acquire::ForceIPv4` here are new — this is
+      # the exact step where PR #924's shard 1 was cancelled, before any test ran, and the same class of
+      # silent hang reproduced live and repeatedly on the build job's copy of this step AND on all four
+      # of THIS job's own shard instances during THIS PR's own CI (run 32275319086 attempt 1: shards
+      # 1-4 all hung 8 minutes in the same ~16:50-17:07 UTC window; attempt 2, a bare rerun with no code
+      # change, passed all four cleanly). See the build job's copy of this comment for the full
+      # run-id/attempt-by-attempt record and why that shape argues for a time-windowed external
+      # condition over a deterministic misconfiguration (dpkg-lock hypothesis — disproved live; current
+      # best account — an IPv6-connectivity stall — plausible, not conclusively proven). Doesn't scale
+      # with spec count (unlike the suite step below, which deliberately has no step cap — see its own
+      # CPE-1728/1753 note), so a tight cap here has no growth-curve fuse. Lock-wait loop capped at 2
+      # minutes (not 5), same reasoning as the build job's copy: leaves 6 of the 8-minute cap for apt
+      # itself instead of letting the now-disproved-but-harmless lock wait eat more than half the budget.
       - name: Install Linux system dependencies
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          for i in $(seq 1 24); do
+            if sudo fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || sudo fuser /var/lib/apt/lists/lock >/dev/null 2>&1; then
+              echo "waiting for background apt/dpkg lock (attempt $i/24)..."
+              sleep 5
+            else
+              break
+            fi
+          done
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo apt-get -o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \

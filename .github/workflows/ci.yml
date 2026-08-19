@@ -6,11 +6,82 @@ name: CI
 on:
   push:
     branches: [main]
+    # CPE-1781: a commit touching ONLY ticket/agent bookkeeping cannot affect a build, yet without
+    # this every ticket-filed/status-moved/Work-Log-appended commit fired the full frontend +
+    # 3-OS backend matrix on `main`. Measured during the 2026-08-17/18 batched sprint: ~15
+    # ticket-only commits to `main` in one night, each starting the whole matrix AND (because of
+    # `cancel-in-progress` below) cancelling the previous bookkeeping commit's still-running matrix
+    # mid-flight — burning the same account concurrency the PR queue needed (see CPE-1772, filed
+    # from noticing GUI-smoke cancellations the same night) for zero possible signal.
+    #
+    # NOT `Ticketing/**` — `Ticketing/Epics/**` is a LIVE test input, not inert bookkeeping.
+    # `src/lib/epicsQueueLayout.test.ts` (which runs in the `frontend` job below) `readdirSync`s and
+    # `readFileSync`s the real `Ticketing/Epics/` tree on disk and asserts no epic sits loose at the
+    # old flat location and every epic's frontmatter `status:` agrees with its folder — the guard
+    # CLAUDE.md names as what stops the two board implementations plus the ticket MCP from silently
+    # lying instead of erroring. `/ticketing-epic activate` and routine sprint bookkeeping already
+    # `git mv` files under `Ticketing/Epics/**` straight onto `main`; an ignore list that swallowed
+    # that path would have made that exact guard unreachable — a real code-adjacent regression class
+    # hidden as a side effect of a CI-cost ticket, surfacing later on a totally unrelated PR. `.md`
+    # files elsewhere in `Ticketing/` also is not uniformly inert for the same reason worth stating
+    # plainly: `Ticketing/wiki.md` and `Ticketing/_template.md` are prose, not test input, but they
+    # are NOT excluded either — narrowing to the two folders below costs nothing (no bookkeeping
+    # commit touches either) and avoids re-litigating that distinction file-by-file. Named narrowly
+    # instead: `Ticketing/Tickets/**` (ticket status moves + Work Log edits) and `Ticketing/Sprints/**`
+    # (sprint bookkeeping) are the two trees a routine ticketing-workflow commit actually touches, and
+    # neither is read by any test or build step. Measured against the last 400 commits to `main`: 1
+    # touched `Ticketing/Epics/` and it was a code commit that would have run anyway; the ~37
+    # bookkeeping-only pushes in the same window are all `Tickets/`-shaped and are still fully
+    # skipped — essentially the whole win, none of the risk.
+    #
+    # Also NOT a blanket `**/*.md` — this repo has Markdown that IS a build input a real code change
+    # can break: `src/docs/*.md` is shipped and guarded by `src/lib/sectionDocs.test.ts` (part of the
+    # `frontend` job below). `docs/design/*.md` is kept out of the ignore list too, but conservatively,
+    # not because of a specific guard: a repo-wide search (ts/rs test files) found nothing that reads
+    # its content today — CPE-1761 is scoped to `src/lib` + `src/docs/03-explorer.md` wording, not
+    # `docs/design/`. An earlier version of this comment cited CPE-1761 for `docs/design/*.md`
+    # specifically; that was wrong and is corrected here rather than repeated. Named anyway because it
+    # is exactly the kind of doc a future guard could plausibly read, and — same logic as `Ticketing/
+    # Epics/**` in the blocker above — the cost of leaving it un-ignored is zero (no bookkeeping commit
+    # ever touches it) against a real, if currently theoretical, risk of silencing a guard added later
+    # without this comment being updated to match.
+    #
+    # `.claude/**` stays in the ignore list — verified safe: every reference to it across the repo
+    # (ts/rs/js/svelte/json/yml) is a prose comment, no workflow `run:` step reads a file under it,
+    # and `vite.config.ts` already excludes `**/.claude/**` from vitest, so nothing here can be a
+    # test or build input the way `Ticketing/Epics/**` is.
+    #
+    # PUSH ONLY — deliberately NOT applied to the `pull_request` trigger below. Stated accurately,
+    # not aspirationally: this repo has **no branch protection and no required status checks**
+    # (`gh api repos/:owner/:repo/branches/main/protection` -> 404 "Branch not protected"; `gh api
+    # repos/:owner/:repo/rulesets` -> `[]`) — so "required check" is not a mechanism that exists here
+    # to protect, and `main` does NOT only move via PR either: history is linear squash-merges with
+    # 37 of the last 60 commits being direct pushes carrying no PR number, some of them code (e.g.
+    # `86888aed fix: strip the BOM I added to the manifests, and unrot the ffmpeg pin`). What IS true,
+    # and is the actual safety argument for narrowing rather than removing this filter: the
+    # `pull_request` trigger below carries NO path filter of its own, so any change that goes through
+    # a PR — reviewed or not — still gets the full, unfiltered run regardless of diff; and this
+    # workflow relies on that `pull_request` run plus direct-push discipline as its only automated
+    # signal, there being no required-check mechanism to fall back on. For a commit that goes straight
+    # to `main` outside a PR, the filtered `push` run was the ONLY automated signal that would have
+    # fired — skipping it for `Ticketing/Tickets/**`/`Ticketing/Sprints/**`/`.claude/**`-only content
+    # is a deliberate trade being made with that understood, not a gap being papered over as already
+    # covered elsewhere.
+    paths-ignore:
+      - "Ticketing/Tickets/**"
+      - "Ticketing/Sprints/**"
+      - ".claude/**"
   pull_request:
     branches: [main]
 
 # CPE-1266: a newer push/PR to a ref cancels that ref's superseded in-flight CI run, so rapid
 # back-to-back pushes don't pile up dozens of full matrix runs and clog the account's concurrency.
+# CPE-1781 revisited this while adding the paths-ignore above and is keeping it as-is: it is still
+# correct for a burst of rapid CODE pushes to `main` (only the last commit's result needs to
+# survive), and now that bookkeeping-only pushes no longer start a run at all, they can no longer be
+# the thing a real code push's run gets cancelled by, or vice versa. The known cost — the last commit
+# of a fast batch is the only one whose CI result survives — is an accepted, chosen trade-off, not an
+# oversight.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
