@@ -12731,32 +12731,53 @@ mod agent_watch_tests {
     /// Build a real `notify` watcher over a fresh temp subdir so an `AgentWatch` can be inserted in a
     /// test without any Tauri machinery. The receiver is dropped immediately: we only assert on the
     /// map's lifecycle (arm/disarm/clear), not on emitted events.
-    fn make_watch(tag: &str) -> AgentWatch {
+    ///
+    /// **CPE-1693 (PR #934 re-review, the 69th helper).** Returns the owning [`ScratchDir`] alongside the
+    /// watch. This helper was invisible to the first census because that filtered on *return type* and
+    /// this returns a domain struct, not a path — and it was worse than the 68th: `sched_scratch` at least
+    /// had a trailing `remove_dir_all` at its call sites, so it leaked only on a panicking assertion,
+    /// whereas nothing anywhere removed these. Measured: two green tests left 6 directories behind.
+    /// The old `cpe1099-` name also fell outside the purge script's `cpe-*` filter, so the backlog it
+    /// built was unpurgeable as well as uncounted; the new prefix brings it back in scope.
+    ///
+    /// The caller must keep the guard alive for at least as long as the watch — see the drop-order note
+    /// at each call site.
+    fn make_watch(tag: &str) -> (cpe_server::fsutil::ScratchDir, AgentWatch) {
         use notify::{RecursiveMode, Watcher};
-        let dir = std::env::temp_dir().join(format!("cpe1099-{}-{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cpe_server::fsutil::scratch_dir(&format!("cpe-agent-watch-{tag}"));
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
         .unwrap();
         watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-        AgentWatch { _watcher: watcher, path: dir.to_string_lossy().into_owned() }
+        let watch = AgentWatch { _watcher: watcher, path: dir.to_string_lossy().into_owned() };
+        (dir, watch)
     }
 
     #[test]
     fn arming_two_sessions_then_stop_all_leaves_zero_watchers() {
+        // CPE-1693: declared FIRST so it drops LAST — locals drop in reverse declaration order, so every
+        // scratch directory outlives `state` and therefore every `notify` watcher holding a handle on it.
+        // Removing a directory out from under a live watcher is what would make this flaky on Windows.
+        let mut _dirs = Vec::new();
         let state = AgentWatchState::default();
         // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
         assert!(state.is_empty());
 
         // Arm two distinct sessions — both are watched concurrently (keyed by sessionId).
-        state.arm("s1".into(), make_watch("s1"));
-        state.arm("s2".into(), make_watch("s2"));
+        let (d, w) = make_watch("s1");
+        _dirs.push(d);
+        state.arm("s1".into(), w);
+        let (d, w) = make_watch("s2");
+        _dirs.push(d);
+        state.arm("s2".into(), w);
         assert_eq!(state.armed_count(), 2);
 
         // Re-arming an existing key replaces (drops) its prior watch, not add a second — still 2.
-        state.arm("s1".into(), make_watch("s1b"));
+        let (d, w) = make_watch("s1b");
+        _dirs.push(d);
+        state.arm("s1".into(), w);
         assert_eq!(state.armed_count(), 2);
 
         // Disarming one session removes only that key; the other keeps watching.
@@ -12775,32 +12796,46 @@ mod agent_watch_tests {
     /// test without any Tauri machinery (mirrors `make_watch` for `AgentWatch` above). The receiver is
     /// dropped immediately: this only asserts on the map's lifecycle (arm/stop/stop_all), not on
     /// emitted events — event→mutation behaviour is covered by `cpe_server::index_watch`'s own tests.
-    fn make_index_watch(tag: &str) -> IndexWatch {
+    ///
+    /// **CPE-1693 (PR #934 re-review, the 70th helper)** — same fix, same reason as `make_watch` above:
+    /// it returned a domain struct so the return-type census could not see it, nothing removed its
+    /// `cpe1138-` directories on any code path, and that prefix was outside the purge script's `cpe-*`
+    /// filter.
+    fn make_index_watch(tag: &str) -> (cpe_server::fsutil::ScratchDir, IndexWatch) {
         use notify::{RecursiveMode, Watcher};
-        let dir = std::env::temp_dir().join(format!("cpe1138-{}-{}", std::process::id(), tag));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = cpe_server::fsutil::scratch_dir(&format!("cpe-index-watch-{tag}"));
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut watcher = notify::recommended_watcher(move |res| {
             let _ = tx.send(res);
         })
         .unwrap();
         watcher.watch(&dir, RecursiveMode::Recursive).unwrap();
-        IndexWatch { _watcher: watcher, root: dir.to_string_lossy().into_owned() }
+        let watch = IndexWatch { _watcher: watcher, root: dir.to_string_lossy().into_owned() };
+        (dir, watch)
     }
 
     #[test]
     fn arming_two_volumes_then_stop_all_leaves_zero_watchers() {
+        // CPE-1693: declared FIRST so it drops LAST, after `state` and therefore after every watcher —
+        // see the same note in `arming_two_sessions_then_stop_all_leaves_zero_watchers`.
+        let mut _dirs = Vec::new();
         let state = IndexWatchState::default();
         // Off means off: nothing armed ⇒ empty map ⇒ zero watcher/pump threads.
         assert_eq!(state.armed_count(), 0);
 
         // Arm two distinct volumes — both watched concurrently (keyed by volume_id).
-        state.arm(1, make_index_watch("v1"));
-        state.arm(2, make_index_watch("v2"));
+        let (d, w) = make_index_watch("v1");
+        _dirs.push(d);
+        state.arm(1, w);
+        let (d, w) = make_index_watch("v2");
+        _dirs.push(d);
+        state.arm(2, w);
         assert_eq!(state.armed_count(), 2);
 
         // Re-arming an already-watched volume (a rebuild) replaces its watch, not adds a second.
-        state.arm(1, make_index_watch("v1b"));
+        let (d, w) = make_index_watch("v1b");
+        _dirs.push(d);
+        state.arm(1, w);
         assert_eq!(state.armed_count(), 2);
 
         // Stopping one volume (`index_drop`) removes only that key; the other keeps watching.
