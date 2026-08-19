@@ -2169,6 +2169,8 @@ impl ScratchDir {
     /// does not resolve to an existing directory *strictly inside* the scratch root
     /// ([`std::env::temp_dir`]):
     ///
+    /// - **a relative path is refused outright**, before anything else. It would be resolved against the
+    ///   process-wide current directory, and nothing pins that between the check and the drop;
     /// - both sides are [`canonicalize`](std::fs::canonicalize)d first, so the containment check is on
     ///   real resolved paths — a symlink or a Windows directory junction that *points* out of `%TEMP%`
     ///   is refused, not followed (the same hazard the purge script's `/XJ` covers);
@@ -2177,9 +2179,24 @@ impl ScratchDir {
     /// - a path that doesn't exist is refused, which is also how the "must already exist" contract above
     ///   stops being merely a comment.
     ///
+    /// **The guard owns the *resolved* path, not the argument** (PR #934 re-review). Storing the raw
+    /// argument meant what was checked was not what was deleted: the second re-review's probe defeated
+    /// the containment check with `adopt("victim")` and a current directory inside `%TEMP%` — the check
+    /// resolved it one way, and `Drop`'s `remove_dir_all` was free to resolve it another. Keeping the
+    /// canonical path also shrinks the residual TOCTOU window for absolute arguments, since a fully
+    /// resolved path has no reparse points left in it to be re-pointed after the check.
+    ///
     /// It panics rather than returning a `Result` because every caller is a test fixture: there is no
     /// recovery, and a panic names the offending path at the call site.
     pub fn adopt(path: PathBuf) -> Self {
+        assert!(
+            path.is_absolute(),
+            "ScratchDir::adopt refused {}: it is a relative path. A relative path is resolved against \
+             the process-wide current directory, which nothing pins between this check and the \
+             recursive delete on drop — pass an absolute path inside the scratch root instead \
+             (CPE-1693 PR #934 re-review).",
+            path.display()
+        );
         let root = std::env::temp_dir();
         let canonical_root = std::fs::canonicalize(&root).unwrap_or_else(|e| {
             panic!(
@@ -2211,7 +2228,9 @@ impl ScratchDir {
             canonical.display(),
             canonical_root.display()
         );
-        ScratchDir(path)
+        // The RESOLVED path, never the argument — see the note above. What is checked must be what is
+        // deleted; storing `path` here is exactly the defect the re-review's probe exploited.
+        ScratchDir(canonical)
     }
 }
 
@@ -2845,6 +2864,65 @@ mod tests {
         }))
         .is_err();
         assert!(refused, "ScratchDir::adopt accepted a path that does not exist");
+    }
+
+    /// **CPE-1693 PR #934 re-review, the defeat.** `adopt` validated `canonicalize(path)` and then stored
+    /// the *raw argument*, so what was checked was not what was deleted. The re-review's probe drove that
+    /// wedge with a relative argument and a current directory inside `%TEMP%`; this test pins the same
+    /// defect without touching `set_current_dir`, which is process-global and would race every other test
+    /// in this parallel harness.
+    ///
+    /// Instead it hands `adopt` a **non-canonical absolute spelling** of a legitimate in-root directory
+    /// (`…/child/../child`). Both spellings resolve to the same directory, so the containment check passes
+    /// either way — the only thing this can detect is whether the guard kept the argument or the resolved
+    /// path. Before the fix it stored the raw `..`-laden spelling and this is red.
+    #[test]
+    fn adopt_stores_the_resolved_path_not_the_raw_argument() {
+        let parent = scratch_dir("cpe-fsutil-adopt-resolve");
+        let nested = parent.join("child");
+        std::fs::create_dir_all(&nested).unwrap();
+        let resolved = std::fs::canonicalize(&nested).unwrap();
+
+        // A different spelling of exactly the same directory.
+        let noncanonical = parent.join("child").join("..").join("child");
+        assert_ne!(noncanonical, resolved, "probe setup: the two spellings must differ textually");
+
+        let guard = ScratchDir::adopt(noncanonical.clone());
+        assert_eq!(
+            guard.path(),
+            resolved.as_path(),
+            "CPE-1693 re-review: ScratchDir::adopt stored {} — the argument, not the path it actually \
+             validated ({}). What is checked must be what is deleted.",
+            guard.path().display(),
+            resolved.display()
+        );
+    }
+
+    /// The other half of the same defect, closed at the front door: a relative argument is refused before
+    /// anything resolves it. Asserting on the *panic message* is what makes this a real before/after —
+    /// pre-fix `adopt("cpe-1693-relative-probe")` did panic, but from `canonicalize` failing ("cannot be
+    /// resolved"), which is an accident of the probe path not existing rather than a refusal of relative
+    /// paths. With a current directory inside `%TEMP%` and a directory of that name present, the pre-fix
+    /// code sailed through.
+    #[test]
+    fn adopt_refuses_a_relative_path_by_name_not_by_accident() {
+        let payload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = ScratchDir::adopt(PathBuf::from("cpe-1693-relative-probe"));
+            std::mem::forget(guard); // never let an unexpectedly-constructed guard delete anything
+        }))
+        .expect_err("ScratchDir::adopt must refuse a relative path");
+
+        let msg = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("<non-string panic payload>")
+            .to_string();
+        assert!(
+            msg.contains("it is a relative path"),
+            "CPE-1693 re-review: adopt rejected the relative path for the wrong reason — it must refuse \
+             it *as relative*, not merely fail to resolve it. Panic was: {msg}"
+        );
     }
 
     /// …and the legitimate case still works, so the containment check can't be "refuse everything".
