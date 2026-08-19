@@ -2230,8 +2230,39 @@ impl ScratchDir {
         );
         // The RESOLVED path, never the argument — see the note above. What is checked must be what is
         // deleted; storing `path` here is exactly the defect the re-review's probe exploited.
-        ScratchDir(canonical)
+        ScratchDir(de_verbatim(canonical))
     }
+}
+
+/// Re-spell a canonical Windows path without its `\\?\` verbatim prefix, leaving every other platform
+/// (and every non-drive verbatim form) untouched.
+///
+/// [`std::fs::canonicalize`] returns extended-length paths on Windows. Storing one verbatim inside a
+/// [`ScratchDir`] is *correct* — same directory, fully resolved — but it leaks an unusual spelling into
+/// everything that reads the guard, and two of `cpe-webdav`'s CPE-1726/CPE-1730 root-replacement tests
+/// caught exactly that: `\\?\C:\…` normalises to `//?/C:/…`, which no longer looks like the absolute path
+/// their fixtures assert on. `scratch_dir`, the constructor the other 70 helpers use, hands back a plain
+/// `temp_dir().join(..)`, so this also keeps the two constructors spelling paths the same way.
+///
+/// Only the plain drive form (`\\?\C:\…`) is stripped. `\\?\UNC\server\share` is deliberately left
+/// verbatim: naively removing the prefix there would produce `UNC\server\share`, a different path.
+/// Operates on `OsString` rather than a lossy `to_string_lossy`, so a non-UTF-8 component can't be
+/// mangled on the way through.
+fn de_verbatim(p: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        if let Some(Component::Prefix(prefix)) = p.components().next() {
+            if let Prefix::VerbatimDisk(letter) = prefix.kind() {
+                let mut rebuilt = std::ffi::OsString::from(format!("{}:\\", letter as char));
+                // Skip the Prefix and the RootDir that always follows it, keep the rest verbatim-free.
+                let rest: PathBuf = p.components().skip(2).collect();
+                rebuilt.push(rest.as_os_str());
+                return PathBuf::from(rebuilt);
+            }
+        }
+    }
+    p
 }
 
 impl std::ops::Deref for ScratchDir {
@@ -2888,14 +2919,22 @@ mod tests {
         assert_ne!(noncanonical, resolved, "probe setup: the two spellings must differ textually");
 
         let guard = ScratchDir::adopt(noncanonical.clone());
-        assert_eq!(
-            guard.path(),
-            resolved.as_path(),
-            "CPE-1693 re-review: ScratchDir::adopt stored {} — the argument, not the path it actually \
-             validated ({}). What is checked must be what is deleted.",
-            guard.path().display(),
-            resolved.display()
+
+        // The discriminator: a resolved path has no `..` left in it. The raw argument does. This is the
+        // platform-neutral form of the assertion — comparing against `canonicalize`'s own output would
+        // pin Windows' `\\?\` spelling, which `de_verbatim` deliberately strips back off.
+        assert!(
+            !guard.path().components().any(|c| matches!(c, std::path::Component::ParentDir)),
+            "CPE-1693 re-review: ScratchDir::adopt stored {} — the argument, with its `..` intact, not \
+             the path it actually validated. What is checked must be what is deleted.",
+            guard.path().display()
         );
+        assert_eq!(
+            std::fs::canonicalize(guard.path()).unwrap(),
+            resolved,
+            "the stored path must still denote the very directory that was validated"
+        );
+        assert!(guard.path().is_absolute(), "the stored path must remain absolute");
     }
 
     /// The other half of the same defect, closed at the front door: a relative argument is refused before
