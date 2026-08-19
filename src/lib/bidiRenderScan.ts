@@ -78,14 +78,45 @@ export function stripNonMarkup(src: string): string {
   return src.replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1>/gi, (m) => "\n".repeat(m.split("\n").length - 1));
 }
 
+/** CPE-1767: the index just past a `//` line comment or `/* … *​/` block comment starting at `i` (caller
+ *  has already checked `s[i] === "/"` and `s[i + 1]` is `/` or `*`). A line comment runs to (but does not
+ *  consume) the next `\n`, or EOF; an unterminated block comment runs to EOF. Quotes/braces/backticks
+ *  inside either are inert — the whole point of this function is that callers skip straight past them
+ *  without ever looking at their content.
+ *
+ *  **Stated boundary** (CPE-1767 AC: "decide how far to go and write down the boundary"): this does NOT
+ *  parse regex literals. A `/` that opens a regex containing a literal `//` or `/*` (e.g. `/a\/\/b/`,
+ *  `/a\/*b/`) will be misread as starting a comment at that inner `/`. Regex literals are rare inside a
+ *  Svelte mustache (an inline arrow function occasionally has one; a raw filesystem name never does), and
+ *  distinguishing regex-`/` from divide-`/` requires real expression parsing this module deliberately
+ *  doesn't do (see the header). Listed in "What this still cannot see" rather than silently assumed away. */
+function skipJsComment(s: string, i: number): number {
+  if (s[i + 1] === "/") {
+    const nl = s.indexOf("\n", i);
+    return nl === -1 ? s.length : nl;
+  }
+  const end = s.indexOf("*/", i + 2);
+  return end === -1 ? s.length : end + 2;
+}
+
+/** True if `s[i]` opens a JS comment (`//` or `/*`) — the one shared check every brace/paren/identifier
+ *  scanner below runs before its normal quote/brace handling, so a comment's content never reaches it. */
+function startsJsComment(s: string, i: number): boolean {
+  return s[i] === "/" && (s[i + 1] === "/" || s[i + 1] === "*");
+}
+
 /** Find the index of the `}` that closes the `{` at `openIdx`, skipping over nested `'...'`/`"..."`
- *  string literals and `` `...` `` template literals (including their own nested `${…}`). Returns -1 if
- *  unterminated. */
+ *  string literals, `` `...` `` template literals (including their own nested `${…}`), and `//`/`/* *​/`
+ *  JS comments (CPE-1767). Returns -1 if unterminated. */
 export function findMatchingBrace(s: string, openIdx: number): number {
   let depth = 0;
   let i = openIdx;
   while (i < s.length) {
     const ch = s[i];
+    if (startsJsComment(s, i)) {
+      i = skipJsComment(s, i);
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       i++;
       while (i < s.length && s[i] !== ch) {
@@ -136,13 +167,17 @@ function skipTemplateLiteral(s: string, backtickIdx: number): number {
   return i;
 }
 
-/** Find the index of the `)` that closes the `(` at `openIdx`, with the same string/template awareness
- *  as `findMatchingBrace`. Returns -1 if unterminated. */
+/** Find the index of the `)` that closes the `(` at `openIdx`, with the same string/template/comment
+ *  awareness as `findMatchingBrace`. Returns -1 if unterminated. */
 export function findMatchingParen(s: string, openIdx: number): number {
   let depth = 0;
   let i = openIdx;
   while (i < s.length) {
     const ch = s[i];
+    if (startsJsComment(s, i)) {
+      i = skipJsComment(s, i);
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       i++;
       while (i < s.length && s[i] !== ch) {
@@ -200,11 +235,16 @@ const SAFE_BARE_WORDS = new Set(["true", "false", "null", "undefined"]);
  *  a string/template's static text — i.e. something that isn't a `displaySafe*` call, a literal, or one
  *  of the bare keywords `true`/`false`/`null`/`undefined`. Recurses into a template literal's `${…}`
  *  sections (their static text is safe; their interpolations are checked the same way). This is the
- *  whole engine: no shape is named, so no shape can be missed by omission. */
+ *  whole engine: no shape is named, so no shape can be missed by omission. Also comment-aware (CPE-1767):
+ *  a word inside a `//`/`/* *​/` comment is never mistaken for a real identifier reference. */
 export function hasUnsafeIdentifier(code: string): boolean {
   let i = 0;
   while (i < code.length) {
     const ch = code[i];
+    if (startsJsComment(code, i)) {
+      i = skipJsComment(code, i);
+      continue;
+    }
     if (ch === '"' || ch === "'") {
       i++;
       while (i < code.length && code[i] !== ch) {
