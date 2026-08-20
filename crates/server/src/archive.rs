@@ -485,13 +485,15 @@ pub fn read_archive_entries(path: &str) -> Result<Vec<ArchiveEntry>, String> {
 // note that on POSIX `EPERM`-vs-`EACCES` **is** a real same-kind collision, which is where round 2's
 // story would have been true if it had been told about the right platform.
 //
-// **That refusal is ZIP-only, and round 4 caught the help claiming otherwise.** `materialise_entry_symlink`
-// has exactly one call site — inside `extract_zip_archive_stream` (rows 16/23). Rows 21–22 hand link
-// creation to `tar`'s `unpack_in`, whose failure both sinks propagate with `?`, so a tar link that the
-// volume cannot hold still aborts. Bringing tar to parity is a behaviour change, filed separately; what
-// this round fixed is the *sentence*, in the help and in three places here. The pattern across rounds
-// 2–4 is one thing: every wrong claim was reasoned from the shape of the code instead of read off the
-// path. The implementation was right or nearly right each time; the story about it was not.
+// **That refusal was ZIP-only through round 4, which caught the help claiming otherwise; CPE-1813
+// closed the gap.** `materialise_entry_symlink` still has exactly one call site — inside
+// `extract_zip_archive_stream` (rows 16/23) — and `tar`'s `unpack_in` still owns rows 21–22's link
+// creation, deliberately. What changed is what happens to its `Err`: instead of both tar sinks
+// propagating it with `?`, [`tar_link_creation_outcome`] translates it through the same classifier,
+// after recovering the raw OS code `unpack_in` rewraps away (see [`recover_raw_os_error`]). A tar link
+// the volume cannot hold now skips, the same as a zip one. The pattern across rounds 2–4 was one thing:
+// every wrong claim was reasoned from the shape of the code instead of read off the path. The
+// implementation was right or nearly right each time; the story about it was not.
 //
 // The one judgement call left is that a machine which *categorically* has no links refuses rather than
 // fails: it is a standing property of the machine, and every ordinary entry in the archive still
@@ -1064,22 +1066,26 @@ const EPERM: i32 = 1;
 /// Measured, `Unsupported` is reachable from Windows 120 and from the
 /// `not(any(unix, windows))` arm of [`create_entry_symlink`] that no CI leg compiles — while the codes a
 /// real FAT volume produces (Windows 1/50, POSIX `EPERM`) all aborted. The help promised a skip the code
-/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`] — **for ZIP**,
-/// which is the only format whose link creation this function sees; see the next paragraph, and the
-/// in-app help says so rather than claiming every format.
+/// did not deliver. It is delivered now, on [`WINDOWS_NO_LINK_SUPPORT`] and [`EPERM`].
 ///
-/// That mattered beyond the broken promise, and the reason is **ZIP-specific** — an earlier version of
-/// this paragraph said "source tarball", which is the one format the fix does not cover. Checked
-/// against the paths rather than inferred: [`materialise_entry_symlink`] has exactly one call site,
-/// inside [`extract_zip_archive_stream`]. TAR's links are created by `tar`'s own `unpack_in`
-/// (`entry.rs:560`, a bare `symlink(&src, dst)`), whose error both tar sinks propagate with `?`.
+/// **This function itself only ever sees ZIP's syscall error directly** — [`materialise_entry_symlink`]
+/// has exactly one call site, inside [`extract_zip_archive_stream`] — but it is no longer the only
+/// format that answers this way. **CPE-1813 brought TAR to parity**, by translating rather than
+/// duplicating: `tar`'s own `unpack_in` still makes the `symlink`/`hard_link` syscall (`entry.rs:560`
+/// and four lines above it) — that ownership of the write was deliberate and stays — but the two tar
+/// sinks ([`tar_unpack`], [`extract_tar_stream`]) now route its `Err` through this same function via
+/// [`tar_link_creation_outcome`] instead of aborting on it with `?`. The wrinkle that made this more
+/// than a five-line change is [`recover_raw_os_error`]: `unpack_in` rewraps the syscall's `io::Error`
+/// twice before it reaches our code, and each wrap discards `raw_os_error()`, so the raw code this
+/// function's Windows/POSIX arms key on has to be recovered from the wrapped error's rendered text
+/// first — see that function's doc for the measurement.
 ///
-/// So: before CPE-1759 the **ZIP** loop wrote a symlink entry's target out as *text*, and a zip
-/// carrying link entries extracted onto a FAT stick without failing. Materialising real links without
-/// this arm would have turned that into a dead extraction — a regression introduced by a fix, on a
-/// platform combination nothing here can test. A **tar** with links on that same stick failed before
-/// this ticket and still fails: `unpack_in` owns the write, this classifier is not on that path, and
-/// bringing it there is a behaviour change outside CPE-1759's scope rather than a wording choice.
+/// So: before CPE-1759 the ZIP loop wrote a symlink entry's target out as *text*, and a zip carrying
+/// link entries extracted onto a FAT stick without failing. Materialising real links without this arm
+/// would have turned that into a dead extraction — a regression introduced by a fix, on a platform
+/// combination nothing here can test. A tar with links on that same stick aborted before CPE-1759 and
+/// CPE-1813 alike (the containment guard CPE-1759 added did not touch this path; only an entry whose
+/// *creation itself* the volume refuses reaches here) — it now answers the same way ZIP does.
 fn link_creation_is_categorical(e: &std::io::Error) -> bool {
     if e.kind() == std::io::ErrorKind::Unsupported {
         return true;
@@ -1147,6 +1153,73 @@ fn link_creation_outcome(target: &Path, out: &Path, e: &std::io::Error) -> Resul
     // Names the path, unlike the bare `e.to_string()` its neighbours use: an OS string alone ("Access is
     // denied.") tells the user nothing about *which* of an archive's entries died on it.
     Err(format!("could not create the link \"{}\": {e}", out.display()))
+}
+
+/// Recover the raw OS error `tar-0.4.46`'s `Entry::unpack_in` throws away when a symlink or hard-link
+/// entry's own creation fails (CPE-1813) — the seam that lets TAR reuse [`link_creation_is_categorical`]
+/// instead of a second copy of [`WINDOWS_NO_LINK_SUPPORT`]/[`EPERM`] that could drift from it.
+///
+/// **Why recovery is needed, measured against `entry.rs:529-568` rather than assumed:** both the
+/// symlink and hard-link arms of `EntryFields::unpack` catch the syscall's `io::Error` and rewrap it —
+/// `Error::new(err.kind(), format!("{err} when symlinking/hard linking …"))` — and `unpack_in` wraps
+/// *that* again in a `TarError`. `Error::new` always builds a `Custom`-repr error, and a `Custom`
+/// error's `raw_os_error()` is unconditionally `None` — reproducing this exact two-level wrap for a
+/// synthetic `os error 1` gives `final.raw_os_error() == None` at both the intermediate and outer
+/// layers, the same collision [`link_creation_is_categorical`]'s own doc names for `ErrorKind`. So by
+/// the time our code sees `unpack_in`'s `Err`, the original errno is gone from every level
+/// `raw_os_error()` can see — a naive `link_creation_outcome(target, out, &e)` on that `e` would never
+/// match the Windows/POSIX numeric arms, only the (much rarer) `ErrorKind::Unsupported` one, making the
+/// fix a no-op on exactly the FAT-stick case the ticket is about.
+///
+/// **It is not gone from the text.** `{err}` was interpolated into the format string *before* the typed
+/// error was discarded, and `std::io::Error`'s `Display` for an OS-repr error is `"<message> (os error
+/// <code>)"`. That string survives one level down the `source()` chain — `TarError::source` returns the
+/// inner `io::Error`, and *its* `Display` still carries the text — measured the same way: the
+/// synthetic wrap's `.source()` renders as `"…(os error 1) when symlinking a to b"`. So this walks
+/// `source()` looking for [`parse_os_error_code`]'s pattern rather than a field that no longer exists,
+/// checking `raw_os_error()` at each level first in case a future `tar` release stops re-wrapping.
+fn recover_raw_os_error(e: &std::io::Error) -> Option<i32> {
+    if let Some(code) = e.raw_os_error() {
+        return Some(code);
+    }
+    if let Some(code) = parse_os_error_code(&e.to_string()) {
+        return Some(code);
+    }
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(err) = cur {
+        if let Some(code) = err.downcast_ref::<std::io::Error>().and_then(std::io::Error::raw_os_error) {
+            return Some(code);
+        }
+        if let Some(code) = parse_os_error_code(&err.to_string()) {
+            return Some(code);
+        }
+        cur = err.source();
+    }
+    None
+}
+
+/// Pull the numeric code out of `std::io::Error`'s own `Display` shape for an OS-repr error,
+/// `"<message> (os error <code>)"` — the one place [`recover_raw_os_error`] can still find it once
+/// `tar` has rewrapped the error away from `raw_os_error()`. Not a documented format guarantee, but
+/// stable across every Rust toolchain this crate has shipped on; [`recover_raw_os_error`]'s own doc has
+/// the measurement this leans on.
+fn parse_os_error_code(text: &str) -> Option<i32> {
+    let after = text.split_once("(os error ")?.1;
+    after.split(')').next()?.trim().parse().ok()
+}
+
+/// [`link_creation_outcome`] for a TAR link entry, translating `entry.unpack_in`'s already-wrapped
+/// `Err` instead of duplicating the classifier (CPE-1813 — "stated once", the way the ticket that filed
+/// this required). `unpack_in` still owns the write; this only interprets what it already produced.
+///
+/// Classification is done against a **reconstructed** error — `std::io::Error::from_raw_os_error(code)`
+/// when [`recover_raw_os_error`] finds a code, so [`link_creation_is_categorical`]'s raw-code arms work
+/// the same as they do for ZIP's direct syscall error — falling back to the original wrapped `e`
+/// otherwise, so the `ErrorKind::Unsupported` arm and the message still see real information rather
+/// than a manufactured "unknown" error.
+fn tar_link_creation_outcome(target: &Path, out: &Path, e: &std::io::Error) -> Result<Option<String>, String> {
+    let reconstructed = recover_raw_os_error(e).map(std::io::Error::from_raw_os_error);
+    link_creation_outcome(target, out, reconstructed.as_ref().unwrap_or(e))
 }
 
 /// Create the link a symlink entry asks for, classifying what happens into this module's two outcomes:
@@ -2502,6 +2575,13 @@ fn tar_entry_kind<'a>(entry_type: tar::EntryType, link_target: Option<&'a Path>)
 /// The skip is **silent** on this one-shot path, for row 15's reason: this signature predates
 /// [`ArchiveReport`] and has nowhere to record a per-entry note. Its streamed sibling
 /// ([`extract_tar_stream`]) records both the count and the reason.
+///
+/// **A link entry's `unpack_in` failure is translated, not just propagated (CPE-1813).** `tar_entry_refusal`
+/// only answers the containment questions asked *before* the write; if the write itself fails because
+/// this volume cannot hold links at all, that is [`tar_link_creation_outcome`]'s question, asked here
+/// because it needs the `io::Error` `unpack_in` actually produced. A refusal is skipped exactly like
+/// [`EntrySlotAction::Skip`] above — silently, for the same "no `ArchiveReport` on this path" reason —
+/// and anything else still aborts via `?`, unchanged from before this ticket.
 fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
     let mut archive = tar::Archive::new(reader);
     if fs::symlink_metadata(dest).is_err() {
@@ -2524,8 +2604,16 @@ fn tar_unpack<R: std::io::Read>(reader: R, dest: &Path) -> Result<(), String> {
         }
         if is_dir {
             directories.push(entry);
-        } else {
-            entry.unpack_in(&root).map_err(|e| e.to_string())?;
+        } else if let Err(e) = entry.unpack_in(&root) {
+            match &link {
+                // CPE-1813: this volume may simply not support links at all — a refusal, not a failure.
+                // Refused (`Ok(Some(_))`) or the practically-unreachable `Ok(None)` both fall through
+                // and skip silently, this path's own reason above; only `Err` aborts.
+                Some(target) => {
+                    tar_link_creation_outcome(target, &root.join(&name), &e)?;
+                }
+                None => return Err(e.to_string()),
+            }
         }
     }
     directories.sort_by(|a, b| b.path_bytes().cmp(&a.path_bytes()));
@@ -3317,6 +3405,11 @@ fn tar_totals(path: &str, gz: bool) -> (u64, u64) {
 /// own path-safety-checked writer — the exact same per-entry call `Archive::unpack` (the one-shot
 /// [`extract_archive`]'s tar path) makes internally, so this is not a behaviour change, just the same
 /// work done one entry at a time so `cancel`/`emit` can run between them.
+///
+/// **One behaviour change layered on top (CPE-1813): a link entry whose creation `unpack_in` refuses
+/// because this volume cannot hold links is a counted, recorded skip, not an abort** — see
+/// [`tar_link_creation_outcome`]. Everything else `unpack_in` can fail on is still a failure and still
+/// aborts via `?`, unchanged.
 fn extract_tar_stream<R: std::io::Read>(
     reader: R,
     dest: &Path,
@@ -3363,17 +3456,34 @@ fn extract_tar_stream<R: std::io::Read>(
             // path having somewhere to *record* a skip is not a reason to reclassify one as a skip.
             EntrySlotAction::Abort(e) => return Err(e),
         }
-        let unpacked = entry.unpack_in(dest).map_err(|e| e.to_string())?;
-        if unpacked {
-            if !is_dir {
-                report.done += 1;
-                prog.done_bytes += size;
-                prog.done_items += 1;
+        match entry.unpack_in(dest) {
+            Ok(unpacked) => {
+                if unpacked {
+                    if !is_dir {
+                        report.done += 1;
+                        prog.done_bytes += size;
+                        prog.done_items += 1;
+                    }
+                } else {
+                    // `unpack_in`'s own traversal refusal (`../evil`), which never reached our guard
+                    // because `entry_name_is_safe` rejects those first — kept as the belt it always was.
+                    report.skip(&name, UNSAFE_NAME_SKIP);
+                }
             }
-        } else {
-            // `unpack_in`'s own traversal refusal (`../evil`), which never reached our guard because
-            // `entry_name_is_safe` rejects those first — kept as the belt it always was.
-            report.skip(&name, UNSAFE_NAME_SKIP);
+            // CPE-1813: this volume may simply not support links at all — a refusal, not a failure —
+            // and only reachable for a link entry (containment already passed `tar_entry_refusal`).
+            Err(e) => match &link {
+                Some(target) => {
+                    let refusal = tar_link_creation_outcome(target, &dest.join(&name), &e)?;
+                    if let Some(reason) = refusal {
+                        report.skip(&name, &reason);
+                        if !is_dir {
+                            prog.done_items += 1;
+                        }
+                    }
+                }
+                None => return Err(e.to_string()),
+            },
         }
         emit(&prog);
     }
@@ -6032,6 +6142,149 @@ mod tests {
                  loop — reporting it as a skip returns Ok with an entry silently missing"
             );
         }
+    }
+
+    /// Reproduces the **exact** two-level wrap `tar-0.4.46/src/entry.rs` puts around a symlink/hard-link
+    /// creation failure inside `Entry::unpack_in` (`entry.rs:529-568` for the first wrap,
+    /// `error.rs`'s `From<TarError> for Error` for the second) — not an approximation, the same shape,
+    /// so tests using it exercise the real hazard [`recover_raw_os_error`] exists for rather than a
+    /// stand-in for it. See [`recover_raw_os_error`]'s doc for the measurement this reproduces.
+    fn wrap_like_tar_unpack_in_symlink_failure(raw: std::io::Error) -> std::io::Error {
+        #[derive(Debug)]
+        struct FakeTarError {
+            desc: String,
+            io: std::io::Error,
+        }
+        impl std::fmt::Display for FakeTarError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                self.desc.fmt(f)
+            }
+        }
+        impl std::error::Error for FakeTarError {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.io)
+            }
+        }
+        // `unpack()`'s symlink arm: `Error::new(err.kind(), format!("{err} when symlinking {src} to {dst}"))`.
+        let inner = std::io::Error::new(raw.kind(), format!("{raw} when symlinking a to b"));
+        let tar_err = FakeTarError { desc: "failed to unpack `x`".to_string(), io: inner };
+        // `unpack_in()`'s own wrap, via `TarError`'s `From<TarError> for Error`: `Error::new(t.io.kind(), t)`.
+        std::io::Error::new(tar_err.io.kind(), tar_err)
+    }
+
+    /// **CPE-1813: [`recover_raw_os_error`] reads back the code `tar`'s wrap discards.**
+    ///
+    /// Measured directly rather than assumed: `raw_os_error()` on the wrapped error is `None` — the
+    /// whole reason this function exists — and the recovered code still equals the original.
+    #[test]
+    fn cpe1813_recover_raw_os_error_reads_the_code_tar_rewrapped_away() {
+        use std::io::ErrorKind;
+        for code in [1, 13, 50, 120, 1314] {
+            let raw = std::io::Error::from_raw_os_error(code);
+            let wrapped = wrap_like_tar_unpack_in_symlink_failure(raw);
+            assert_eq!(
+                wrapped.raw_os_error(),
+                None,
+                "os error {code}: precondition — tar's wrap must actually have discarded raw_os_error, \
+                 or this test is not exercising the hazard it claims to"
+            );
+            assert_eq!(
+                recover_raw_os_error(&wrapped),
+                Some(code),
+                "os error {code}: the code must be recoverable from the wrapped error's text, or every \
+                 raw-code arm of `link_creation_is_categorical` is unreachable for TAR"
+            );
+        }
+        // An error tar never wrapped (e.g. `ErrorKind::Unsupported` from a hypothetical unwrapped path)
+        // has no "(os error N)" text at all — recovery must fail closed to `None`, not invent a code.
+        assert_eq!(
+            recover_raw_os_error(&std::io::Error::new(ErrorKind::Unsupported, "no links here")),
+            None,
+            "an error with no OS code in its text must recover to None, not a made-up number"
+        );
+    }
+
+    /// **CPE-1813: TAR and ZIP must agree on the no-link-support refusal — checked as ONE test, per the
+    /// ticket, so a divergence between the two formats' routing cannot hide behind two green per-format
+    /// tests.**
+    ///
+    /// Neither trigger can be staged live on any CI runner (see
+    /// `cpe1759_link_creation_separates_a_categorical_refusal_from_a_failure`'s doc for why), so this
+    /// reproduces the SHAPE of error each format's link creation actually hands our code for the same
+    /// underlying OS condition and checks both translations agree with the one shared classifier,
+    /// [`link_creation_is_categorical`]. ZIP sees the raw syscall error directly
+    /// (`create_entry_symlink` → [`materialise_entry_symlink`]); TAR sees it only after
+    /// [`wrap_like_tar_unpack_in_symlink_failure`]'s two-level rewrap, translated back by
+    /// [`tar_link_creation_outcome`]. A mutation to either side's routing — or to
+    /// [`recover_raw_os_error`] — that stops the two agreeing turns this red without needing to name
+    /// which format broke.
+    #[test]
+    fn cpe1813_tar_and_zip_agree_on_the_no_link_support_refusal() {
+        use std::io::ErrorKind;
+        let (target, out) = (Path::new("some/target"), Path::new("dest/good_link"));
+
+        // (label, raw OS code, must this be a REFUSAL on both formats?)
+        let mut cases: Vec<(&str, i32, bool)> = Vec::new();
+        #[cfg(windows)]
+        {
+            cases.push(("ERROR_PRIVILEGE_NOT_HELD", ERROR_PRIVILEGE_NOT_HELD, true));
+            for code in WINDOWS_NO_LINK_SUPPORT {
+                cases.push(("WINDOWS_NO_LINK_SUPPORT", *code, true));
+            }
+            cases.push(("ERROR_ACCESS_DENIED", 5, false));
+        }
+        #[cfg(unix)]
+        {
+            cases.push(("EPERM", EPERM, true));
+            cases.push(("EACCES", 13, false));
+        }
+
+        for (label, code, must_refuse) in cases {
+            let raw = std::io::Error::from_raw_os_error(code);
+            let zip_refuses = link_creation_is_categorical(&raw);
+            assert_eq!(
+                zip_refuses, must_refuse,
+                "{label} (os error {code}): the classifier itself disagrees with this test's own \
+                 expectation — fix the case table, not the classifier"
+            );
+
+            let tar_wrapped = wrap_like_tar_unpack_in_symlink_failure(std::io::Error::from_raw_os_error(code));
+            let tar_outcome = tar_link_creation_outcome(target, out, &tar_wrapped);
+            let tar_refuses = matches!(tar_outcome, Ok(Some(_)));
+
+            assert_eq!(
+                tar_refuses, zip_refuses,
+                "{label} (os error {code}): TAR and ZIP DISAGREE on whether this is a refusal. ZIP \
+                 (direct syscall error) says {zip_refuses}; TAR (via `tar_link_creation_outcome` on \
+                 the tar-shaped wrapped error) says {tar_refuses}. This is the exact divergence CPE-1813 \
+                 exists to close — got {tar_outcome:?}"
+            );
+            // `tar_refuses == must_refuse` (asserted above) already pins `Ok(Some(_))` vs `Err(_)`; the
+            // non-refusal leg additionally checks the abort message names the entry, the way
+            // `link_creation_outcome`'s own abort message is required to.
+            if !must_refuse {
+                let msg = tar_outcome.expect_err("a non-refusal must abort, not silently succeed");
+                assert!(
+                    msg.contains("dest") || msg.contains("good_link"),
+                    "{label}: the abort message must name the entry it died on: {msg}"
+                );
+            }
+        }
+
+        // The `ErrorKind::Unsupported` arm survives the tar wrap too — via the `e.kind()` fallback in
+        // `tar_link_creation_outcome` when `recover_raw_os_error` finds no code to recover, not because
+        // some raw code happens to match.
+        let unsupported = std::io::Error::new(ErrorKind::Unsupported, "no links here");
+        assert!(
+            link_creation_is_categorical(&unsupported),
+            "precondition: ZIP treats this kind as categorical"
+        );
+        let tar_unsupported = wrap_like_tar_unpack_in_symlink_failure(unsupported);
+        assert!(
+            matches!(tar_link_creation_outcome(target, out, &tar_unsupported), Ok(Some(_))),
+            "TAR must treat the same `Unsupported`-kind error as a refusal too, via the `e.kind()` \
+             fallback when no OS code can be recovered from the wrapped text"
+        );
     }
 
     /// **CPE-1759 review round 3: the routing a deleted fixture used to cover.**
