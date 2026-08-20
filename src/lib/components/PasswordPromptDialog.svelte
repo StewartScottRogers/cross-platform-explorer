@@ -8,8 +8,9 @@
   import { displaySafeName } from "../filename";
 
   // CPE-1790: `title`/`message`/`error` arrive as free-text strings a caller has already composed
-  // around an escaped name (e.g. `` `Unlock ${displaySafeName(entry.name)}` ``) — this dialog has no way
-  // to know which substring, if any, is filesystem-derived, so every render below escapes the WHOLE
+  // around an escaped filesystem name (App.svelte's vault-unlock caller wraps it with displaySafeName
+  // before building the sentence) — this dialog has no way to know which substring, if any, is
+  // filesystem-derived, so every render below escapes the WHOLE
   // string on arrival instead of trusting the caller. That's safe unconditionally: `displaySafeName`
   // only replaces the twelve bidi/format control characters (never an ordinary letter), so it's a no-op
   // on plain prose and idempotent on a caller's own already-escaped substring (its replacement text is

@@ -189,8 +189,8 @@ const REGISTRY: Record<string, string[]> = {
   // own name first. The one remaining offender in each (`confirmLabel`) is a caller-chosen static verb
   // ("OK"/"Delete"/"Extract"/"Compress"/"Unlock"/"Delete permanently"/"Close all" — never a filesystem
   // name), the same "harmless, unprovable-but-not-a-name" shape most REGISTRY entries carry.
-  "ConfirmDialog.svelte": ["38:confirmLabel"],
-  "PasswordPromptDialog.svelte": ["77:confirmLabel"],
+  "ConfirmDialog.svelte": ["39:confirmLabel"],
+  "PasswordPromptDialog.svelte": ["78:confirmLabel"],
 };
 
 /** The subset of REGISTRY whose non-empty array is an ACTUAL disclosed "still renders a raw filesystem
@@ -437,7 +437,7 @@ describe("bidi/format-character escape guard (CPE-1757 round 2)", () => {
     const found = findUnsafeRenderLines(mutated, "ConfirmDialog.svelte (mutated: displaySafeName wrap dropped)");
     const recordedSorted = [...REGISTRY["ConfirmDialog.svelte"]].sort(compareOffenders);
 
-    expect(found, "the un-escaped message render must be flagged").toContain("34:message");
+    expect(found, "the un-escaped message render must be flagged").toContain("35:message");
     expect(JSON.stringify(found), "the mutated file's offender set must no longer equal what's recorded — this is what makes the real REGISTRY-equality test above red").not.toBe(
       JSON.stringify(recordedSorted),
     );

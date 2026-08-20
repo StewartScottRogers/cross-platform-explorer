@@ -4,8 +4,9 @@
   import { displaySafeName } from "../filename";
 
   // CPE-1790: `title`/`message` arrive as free-text strings a caller has already composed around an
-  // escaped name (e.g. `` `"${displaySafeName(item.name)}" will be moved...` ``) — this dialog has no
-  // way to know which substring, if any, is filesystem-derived. Escaping the WHOLE string on arrival is
+  // escaped filesystem name (`App.svelte`'s callers wrap the name with displaySafeName before building
+  // the sentence) — this dialog has no way to know which substring, if any, is filesystem-derived. Escaping
+  // the WHOLE string on arrival is
   // safe regardless: `displaySafeName` only replaces the twelve bidi/format control characters (never an
   // ordinary letter), so it's a no-op on plain prose and idempotent on a caller's own already-escaped
   // substring (its replacement text — `[RLO]`, `[LRM]`, … — is plain ASCII, containing none of the
