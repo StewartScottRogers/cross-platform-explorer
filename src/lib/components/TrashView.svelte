@@ -13,7 +13,7 @@
   import { createEventDispatcher, onMount } from "svelte";
   import { createChannel, rawInvoke, unwrap } from "../invoke";
   import { commands } from "../bindings.gen";
-  import type { TrashEntry } from "../bindings.gen";
+  import type { TrashEntry, TrashStreamSummary } from "../bindings.gen";
   import Icon from "./Icon.svelte";
   import HelpButton from "./HelpButton.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
@@ -31,6 +31,11 @@
   let entries: TrashEntry[] = [];
   let loading = true;
   let error = "";
+  /** CPE-1803: true when the last completed listing pass couldn't fully read the OS trash and degraded
+   *  to no entries (CPE-1791) rather than the Trash genuinely being empty — set from the `degraded` flag
+   *  on `list_trash_stream`'s resolved summary, never inferred from `entries` being empty (a healthy
+   *  empty Trash also has zero entries, and the two must render differently). */
+  let degraded = false;
   let selected = new Set<string>();
   /** Which empty confirm is pending ("all" = whole Trash via the toolbar button with nothing selected
    *  or the explicit "Empty Trash" action; "selected" = just the checked rows), or null when the
@@ -53,6 +58,7 @@
     selected = new Set();
     restoreErrors = [];
     error = "";
+    degraded = false;
     loading = true;
     try {
       const channel = createChannel<TrashEntry[]>();
@@ -61,7 +67,12 @@
         entries = entries.concat(batch);
         loading = false; // first real rows are in — reveal them
       };
-      await rawInvoke("list_trash_stream", { onEntry: channel });
+      // CPE-1803: `list_trash_stream` resolves with a `{ count, degraded }` summary once every batch has
+      // flushed — `degraded` is the backend's own signal (CPE-1791's caught-panic boundary), never
+      // inferred here from an empty `entries`, since a genuinely empty Trash looks identical over the
+      // channel (zero batches sent either way).
+      const summary = await rawInvoke<TrashStreamSummary>("list_trash_stream", { onEntry: channel });
+      if (gen === loadGen) degraded = summary.degraded;
     } catch (e) {
       if (gen === loadGen) error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -186,6 +197,11 @@
         <div class="tv-empty">{$t("trash.loading")}</div>
       {:else if error}
         <div class="tv-empty tv-edge error">{$t("trash.error", { error })}</div>
+      {:else if entries.length === 0 && degraded}
+        <!-- CPE-1803: a degraded listing must never render as "trash.empty" — an unreadable trash is
+             not the same claim as a genuinely empty one, and telling the user "empty" here would make
+             them stop looking for files that are still sitting in the trash. -->
+        <div class="tv-empty tv-edge error">{$t("trash.degraded")}</div>
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
       {:else}

@@ -201,7 +201,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     // 5320 -> 5330: CPE-1775 inserted `notice.archiveSkipped{One,Many}` into each of the 12 locale
     // blocks (2 lines apiece), so every entry below this file's Spanish block moved down. The `contains`
     // check is what makes a re-number safe: it re-anchors on the text, not on my arithmetic.
-    line: 5330,
+    // 5330 -> 5342: CPE-1803 added one `trash.degraded` line to several locale blocks above this line
+    // (including this line's own Portuguese block, ahead of "NÃO" itself). Re-anchored on `contains`
+    // below, same as the note above -- the exact arithmetic doesn't matter, only that this stays in sync.
+    line: 5342,
     kind: "mojibake",
     reason:
       'Legitimate Portuguese "NÃO" (N + A-tilde + O) -- Ã followed by the ASCII letter "O", not a CP1252 ' +

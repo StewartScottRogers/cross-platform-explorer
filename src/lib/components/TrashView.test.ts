@@ -55,10 +55,12 @@ function deliver(batch: ReturnType<typeof entry>[], callIndex = streamCalls.leng
   streamCalls[callIndex].args.onEntry.onmessage(batch);
 }
 
-/** Resolve a `list_trash_stream` call as finished (the real command resolves with the total count once
- *  every batch has flushed — a genuinely empty Trash resolves with 0 having sent no batches at all). */
-function finishStream(count: number, callIndex = streamCalls.length - 1) {
-  streamCalls[callIndex].resolve(count);
+/** Resolve a `list_trash_stream` call as finished (the real command resolves with a `{ count, degraded }`
+ *  summary once every batch has flushed — a genuinely empty Trash resolves with `{ count: 0, degraded:
+ *  false }` having sent no batches at all; CPE-1803's degraded case also sends no batches but resolves
+ *  with `degraded: true`, which is the whole point — the two are otherwise indistinguishable). */
+function finishStream(count: number, degraded = false, callIndex = streamCalls.length - 1) {
+  streamCalls[callIndex].resolve({ count, degraded });
 }
 
 beforeEach(() => {
@@ -87,12 +89,36 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     await settle();
     expect(screen.getByText("Loading Trash…")).toBeTruthy();
 
-    // A genuinely empty Trash: the command resolves with count 0 without ever calling onEntry.
-    finishStream(0);
+    // A genuinely empty Trash: the command resolves with count 0, degraded: false, without ever calling
+    // onEntry.
+    finishStream(0, false);
     await settle();
 
     expect(screen.queryByText("Loading Trash…")).toBeNull();
     expect(screen.getByText("Trash is empty")).toBeTruthy();
+    // CPE-1803: a genuinely empty Trash must NOT also render the degraded message — half of the
+    // distinguishability this ticket exists to prove is that these two zero-entry states diverge.
+    expect(screen.queryByText(/couldn't be fully read/i)).toBeNull();
+  });
+
+  // CPE-1803: a degraded listing (CPE-1791's caught-panic boundary) sends zero batches over the channel,
+  // same as a genuinely empty Trash — the ONLY difference the frontend has to go on is the `degraded`
+  // flag on the resolved summary. This test and the one above must both pass for the two states to be
+  // proven distinguishable; a suite that only asserted this one could pass even if `degraded` were
+  // ignored and both cases always rendered "Trash is empty".
+  it("shows a distinct degraded state — not 'Trash is empty' — when the listing degraded (CPE-1791/1803)", async () => {
+    render(TrashView);
+    await settle();
+    expect(screen.getByText("Loading Trash…")).toBeTruthy();
+
+    // A degraded pass: same shape as a genuinely empty Trash over the channel (no batches sent), but the
+    // resolved summary flags degraded: true.
+    finishStream(0, true);
+    await settle();
+
+    expect(screen.queryByText("Loading Trash…")).toBeNull();
+    expect(screen.getByText("Trash couldn't be fully read — it may not be empty")).toBeTruthy();
+    expect(screen.queryByText("Trash is empty")).toBeNull();
   });
 
   it("appends multiple batches across the same stream", async () => {

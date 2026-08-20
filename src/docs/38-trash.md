@@ -22,6 +22,12 @@ Trash with three columns:
 
 A large Trash paints progressively as it loads, so opening it never blocks on a big listing.
 
+If the listing shows **"Trash couldn't be fully read — it may not be empty,"** the OS trash itself
+couldn't be read this time (for example, one malformed entry on disk) — it does not mean your Trash
+is actually empty, and it's a different message from "Trash is empty" on purpose. Nothing in this
+view can fix that condition; try **Refresh**, since it can clear on its own once the underlying issue
+goes away, and any items still visible in the list remain safe to restore.
+
 ## Restoring items
 
 Check the box next to one or more items (or use **Select all**), then click **Restore selected**.
