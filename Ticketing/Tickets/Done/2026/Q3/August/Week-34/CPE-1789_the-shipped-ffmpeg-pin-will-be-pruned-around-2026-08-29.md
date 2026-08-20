@@ -3,7 +3,7 @@ id: CPE-1789
 title: the shipped ffmpeg pin will be pruned around 2026-08-29 — move it to a month-end anchor
 type: bug
 priority: High
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
