@@ -123,3 +123,36 @@ extends to `ci.yml`.
   Gates: YAML-parsed `ci.yml` (`python -c "import yaml; yaml.safe_load(...)"` — OK); `npm run check`
   (0 errors, 0 warnings); `npx vitest run` (318 files / 4195 tests passed, including the new guard
   file).
+
+- 2026-08-20 — **Reviewer round on PR #970 (approved, one required fix before merge).** Reviewer
+  confirmed no blocking defects against the three binding ACs, re-ran two red-proofs itself (matched),
+  confirmed the parser fails loud rather than silently, confirmed the ffmpeg pin guard job and the
+  CPE-1802 override-dispatch step were untouched, and reproduced the gates exactly. It also confirmed
+  two things the PR raised honestly rather than glossed: `Acquire::http::Timeout` genuinely bounds a
+  stalled mid-transfer (not just connection setup — `apt-transport-http(1)` documents it applying "to
+  the connection as well as the data timeout"), matching the observed symptom; and
+  `continue-on-error: true` does swallow a step killed by its own `timeout-minutes`, so sites 3 and 5
+  behave exactly as intended (fail fast and loud, then get swallowed) with no unintended job-outcome
+  change.
+
+  **Required fix**: the Reviewer applied pressure by injecting a brand-new, fully unhardened step into
+  the `backend` job using bare `apt update` / `apt install -y jq` (a common, functionally identical
+  alias to `apt-get`) with no `timeout-minutes` — all 6 guard tests still passed, because
+  `aptGetLines()` filtered lines on the literal substring `"apt-get"` only. Fixed by matching
+  `apt`/`apt-get` as an isolated command word via
+  `/(?<![\w-])apt(?:-get)?(?![\w-])/` (lookbehind/lookahead on non-word/non-hyphen boundaries), so it
+  does not false-positive on `apt-transport-https`, `adapter`, or `apt-get-wrapper`. Added a doc
+  comment on the new `APT_COMMAND_WORD` regex explaining which spellings it covers and why. Re-proved
+  by injecting the Reviewer's exact repro step (bare `apt update` / `apt install -y jq` in the
+  `backend` job) — regression guard failed, naming both injected lines by name
+  (`backend / TEMP unhardened bare-apt injection (red-proof, must not survive): sudo apt update` and
+  `... sudo apt install -y jq`) — then reverted with `git checkout -- .github/workflows/ci.yml`,
+  confirmed all 6 tests green again.
+
+  Scope held: did NOT touch the identical unhardened pattern the Reviewer also found in
+  `release.yml:49-54,201`, `release-sidecar.yml:130-138`, `ci.yml`'s `brew`/`choco` ffmpeg installs, or
+  the pdfium `curl` fetches missing `--max-time` — the Foreman is filing that as its own ticket.
+
+  Gates re-run on the fix: `python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"`
+  — OK; `npm run check` — 0 errors, 0 warnings; `npx vitest run` — 318 files / 4195 tests passed.
+  Pushed to `cpe-1787-apt-get-hardening` (`f65feb96`), PR #970 now MERGEABLE at that head.
