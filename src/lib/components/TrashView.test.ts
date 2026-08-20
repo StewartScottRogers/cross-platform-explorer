@@ -164,6 +164,32 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.queryByText("Trash couldn't be fully read — it may not be empty")).toBeNull();
   });
 
+  // CPE-1816 review round 2, finding 3: the degraded banner and the column header must occlude each
+  // other while the list scrolls only if they compete for the SAME sticky slot — jsdom doesn't compute
+  // real sticky/scroll layout, but it does build the real DOM, so this pins the STRUCTURAL fix (both
+  // inside one shared sticky container) that prevents that competition, rather than the pixel measurement
+  // only a real browser (the Visual Critic's tooling) can take.
+  it("wraps the degraded banner and the column header in one shared sticky container (CPE-1816 finding 3)", async () => {
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    finishStream(1, true, 1);
+    await settle();
+
+    const notice = screen.getByText("1 item in the Trash couldn't be read and isn't shown");
+    const headCheckbox = screen.getByLabelText("Select all");
+    const banner = notice.closest(".tv-degraded-banner");
+    const headRow = headCheckbox.closest(".tv-head-row");
+    expect(banner).toBeTruthy();
+    expect(headRow).toBeTruthy();
+    // Both must share the SAME sticky ancestor — that's what keeps them stacked in normal flow as one
+    // unit instead of each independently sticking to `top: 0` and covering one another.
+    const stack = banner?.closest(".tv-sticky-stack");
+    expect(stack).toBeTruthy();
+    expect(headRow?.closest(".tv-sticky-stack")).toBe(stack);
+  });
+
   // CPE-1816: the gap CPE-1803/CPE-1804/CPE-1805 left open — `degraded`/`skipped` ride on the summary,
   // which by construction resolves LAST, so between the first batch landing and that resolution the view
   // previously had no way to say "this might not be everything yet". This test observes exactly that
@@ -180,7 +206,9 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.getByText("a.txt")).toBeTruthy();
     // ...but the title bar must NOT assert a total this pass can't yet back.
     expect(screen.queryByText("1 item")).toBeNull();
-    // A caveat says so, reusing CPE-1805's banner-above-the-rows mechanism.
+    // A caveat says so, in the title bar's item-count slot (round-2 Visual Critic decision — moved out of
+    // a rows-above-the-list banner to avoid a layout jump on the ordinary clean path; see `noticeMessage`
+    // in TrashView.svelte for the full reasoning).
     expect(screen.getByText("Still loading…")).toBeTruthy();
 
     // Once the summary resolves clean, the provisional caveat is replaced by the real, final count.
@@ -188,6 +216,55 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     await settle();
     expect(screen.queryByText("Still loading…")).toBeNull();
     expect(screen.getByText("1 item")).toBeTruthy();
+  });
+
+  // CPE-1816 review round 2, a11y finding: the mid-stream caveat and the eventual final count share the
+  // SAME element, and that element must announce itself to a screen reader as a live region — otherwise
+  // this ticket's fix is visual-only and the underlying "partial list reads as complete" problem persists
+  // for anyone who can't see the title bar. Checks the region exists (by its accessible role) and that
+  // its announced content actually changes across the mid-stream -> resolved transition — a `role`
+  // present on the wrong node, or a region whose content never updates, both defeat the point.
+  it("announces the mid-stream caveat and the final count through one role=status region (CPE-1816)", async () => {
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+
+    const region = screen.getByRole("status");
+    expect(region.textContent).toContain("Still loading…");
+
+    finishStream(1, false, 0);
+    await settle();
+
+    // Same node (one persistent live region, not a fresh one per state) — its CONTENT is what changed.
+    expect(screen.getByRole("status")).toBe(region);
+    expect(region.textContent).toContain("1 item");
+    expect(region.textContent).not.toContain("Still loading…");
+  });
+
+  // CPE-1816 review round 2, BLOCKER 1: `complete` must be reset on every `load()` call, including a
+  // Refresh — otherwise a Refresh's brand-new, still-in-flight stream inherits the PREVIOUS pass's
+  // resolved `true`, and this exact bug reappears on the second load. Probe shape from the Reviewer:
+  // open, deliver, finish, Refresh, deliver again on the NEW stream without finishing it, and check that
+  // the stale resolved state doesn't leak through.
+  it("resets the in-flight caveat on Refresh, rather than keeping a stale resolved state from the previous pass (CPE-1816)", async () => {
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    finishStream(1, false, 0);
+    await settle();
+    expect(screen.getByText("1 item")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTitle("Refresh"));
+    await settle();
+    // The new stream (call index 1) delivers a batch but is deliberately left unresolved.
+    deliver([entry({ id: "b", name: "b.txt" })], 1);
+    await settle();
+
+    // The new pass hasn't resolved yet — it must not inherit the previous pass's "1 item" verdict.
+    expect(screen.queryByText("1 item")).toBeNull();
+    expect(screen.getByText("Still loading…")).toBeTruthy();
   });
 
   it("renders NO notice for an ordinary complete listing with the same rows (CPE-1805 asymmetry)", async () => {
@@ -297,6 +374,11 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
 });
 
 describe("TrashView — Restore (CPE-1560)", () => {
+  // CPE-1816 review round 2: resolves the stream (a clean, complete pass) before returning, rather than
+  // leaving it perpetually in flight as before. Restore/Empty are ordinarily clicked against a FINISHED
+  // listing, and leaving the stream unresolved here was itself masking a bug — see
+  // "does not claim 'Trash is empty' when Restore drains ... mid-stream" below, which exercises the
+  // in-flight case deliberately and explicitly instead.
   async function renderWithTwoEntries() {
     const utils = render(TrashView);
     await settle();
@@ -304,6 +386,8 @@ describe("TrashView — Restore (CPE-1560)", () => {
       entry({ id: "keep", name: "keep.txt" }),
       entry({ id: "gone", name: "gone.txt" }),
     ]);
+    await settle();
+    finishStream(2, false, 0);
     await settle();
     return utils;
   }
@@ -358,9 +442,36 @@ describe("TrashView — Restore (CPE-1560)", () => {
     expect(screen.getByText(/Couldn't restore gone\.txt/)).toBeTruthy();
     expect(screen.getByText(/Something already exists/)).toBeTruthy();
   });
+
+  // CPE-1816 review round 2, BLOCKER 2: the Reviewer demonstrated this is reachable, not theoretical —
+  // deliver a batch, leave the stream unresolved (a large/slow trash is exactly the case this ticket is
+  // about), select the visible row and restore it. Draining `entries` to zero must NOT fall through to
+  // "Trash is empty": the pass hasn't finished, so more rows could still be coming.
+  it("does not claim 'Trash is empty' when Restore drains the last visible row while the stream is still in flight (CPE-1816)", async () => {
+    invokeImpl = (cmd) => {
+      if (cmd === "restore_trash_items") {
+        return Promise.resolve([{ path: "C:\\restored\\a.txt", ok: true, error: "" }]);
+      }
+      return Promise.reject(new Error(`unexpected ${cmd}`));
+    };
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    // Deliberately no `finishStream` — the pass is still in flight when the user acts.
+
+    await fireEvent.click(screen.getByLabelText("a.txt"));
+    await fireEvent.click(screen.getByText("Restore selected"));
+    await settle();
+
+    expect(screen.queryByText("Trash is empty")).toBeNull();
+    expect(screen.getByText("Still loading…")).toBeTruthy();
+  });
 });
 
 describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENUS.md)", () => {
+  // CPE-1816 review round 2: resolves the stream before returning — see the matching note in the Restore
+  // describe block above. The in-flight case is exercised deliberately below instead.
   async function renderWithTwoEntries() {
     const utils = render(TrashView);
     await settle();
@@ -368,6 +479,8 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
       entry({ id: "a", name: "a.txt" }),
       entry({ id: "b", name: "b.txt" }),
     ]);
+    await settle();
+    finishStream(2, false, 0);
     await settle();
     return utils;
   }
@@ -436,6 +549,26 @@ describe("TrashView — Empty (CPE-1560, irreversible → ConfirmDialog per MENU
     await renderWithTwoEntries();
     const btn = screen.getByText("Delete selected permanently").closest("button") as HTMLButtonElement;
     expect(btn.disabled).toBe(true);
+  });
+
+  // CPE-1816 review round 2, BLOCKER 2: same shape as the Restore version above, via Empty Trash instead
+  // — `confirmEmptyAction`'s "all" branch also clears `entries` without touching `complete`.
+  it("does not claim 'Trash is empty' when Empty Trash drains the last visible row while the stream is still in flight (CPE-1816)", async () => {
+    invokeImpl = (cmd) => (cmd === "empty_trash" ? Promise.resolve(null) : Promise.reject(new Error(cmd)));
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    // Deliberately no `finishStream` — the pass is still in flight when the user acts.
+
+    await fireEvent.click(screen.getByText("Empty Trash"));
+    await settle();
+    const dialog = screen.getByText("Empty Trash?").closest(".dialog") as HTMLElement;
+    await fireEvent.click(within(dialog).getByText("Empty Trash"));
+    await settle();
+
+    expect(screen.queryByText("Trash is empty")).toBeNull();
+    expect(screen.getByText("Still loading…")).toBeTruthy();
   });
 });
 

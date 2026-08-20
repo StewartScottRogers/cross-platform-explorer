@@ -206,8 +206,10 @@ const ALLOWLIST: AllowlistEntry[] = [
     // below, same as the note above -- the exact arithmetic doesn't matter, only that this stays in sync.
     // 5342 -> 5357: CPE-1804 added `trash.skipped{One,Many}` to every locale block (2 lines apiece, plus
     // a 5-line explanatory comment in the English one), so 15 lines landed above this one. Same story.
-    // 5357 -> 5366: CPE-1816 added one `trash.stillLoading` line to each of the 9 locale blocks above
-    // this one (English's carries a 4-line explanatory comment). Same story, re-anchored on `contains`.
+    // 5357 -> 5366: CPE-1816 added one `trash.stillLoading` line to each of the 5 locale blocks above
+    // this one (en, es, de, fr, it -- Portuguese's own block gets the same line too, but further down,
+    // after this line, so it doesn't shift it). English's carries a 4-line explanatory comment, so that's
+    // 9 lines total (en's 5 + es/de/fr/it's 1 apiece), not 9 blocks. Same story, re-anchored on `contains`.
     line: 5366,
     kind: "mojibake",
     reason:

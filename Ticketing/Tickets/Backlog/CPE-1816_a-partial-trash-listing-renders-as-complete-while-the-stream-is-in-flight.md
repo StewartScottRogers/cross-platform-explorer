@@ -103,3 +103,103 @@ gates or bindings regen apply this round.
 Files changed: `src/lib/components/TrashView.svelte`, `src/lib/components/TrashView.test.ts`,
 `src/lib/i18n.ts`, `src/lib/bidiEscape.guard.test.ts`, `src/lib/mojibakeGuard.test.ts`,
 `src/docs/38-trash.md`.
+
+**2026-08-20, round 2** — Independent Reviewer returned CHANGES REQUESTED (two mutation-proven
+blockers) and a Visual Critic review (rendered + measured the states, four objective defects) landed
+on the same PR. Addressed both in the same worktree/branch (attempt 2 of 3).
+
+REVIEWER BLOCKER 1 — `complete` reset on Refresh was correct but untested, and the mutant (deleting
+the `complete = false;` reset line in `load()`) left all 21 existing tests green: a Refresh's new,
+still-in-flight stream inherited the PREVIOUS pass's resolved `true`, reproducing CPE-1816 verbatim on
+the second load. Added the twin of the CPE-1804 "clears a previous pass's skipped count on refresh"
+test, using the Reviewer's own probe shape (open → deliver → finish → Refresh → deliver again on the
+new stream without finishing it → assert no stale count and the caveat present). Also corrected the
+catch-branch `complete = true` comment, which had implied it was a covered/observable path — reworded
+to say plainly it's defensive-only and not currently test-observable (`error` already gates every
+branch that reads `complete`).
+
+REVIEWER BLOCKER 2 — "Trash is empty" was reachable mid-stream: the empty-pane branch was
+`{:else if degraded && entries.length === 0}`, so draining `entries` to zero via Restore or Empty
+while the stream was still in flight (`!complete`, more rows could still arrive) fell through to the
+plain "Trash is empty" branch — exactly the claim CPE-1803 exists to forbid, demonstrated live by the
+Reviewer via Restore. Fixed by widening the condition to `(degraded || !complete) && entries.length
+=== 0`, reusing the same message. Safe for a genuinely healthy empty Trash: `complete` and `loading`
+resolve in the same `finally` tick, so that case never observes `!complete` here — `loading` is still
+true and the branch above (the loading placeholder) renders first. Also surfaced and fixed a latent
+defect this exposed: the Restore/Empty test suites' shared `renderWithTwoEntries` helpers never called
+`finishStream`, so EVERY existing Restore/Empty test was already running against an unresolved stream
+by accident — after this fix, the ordinary "purge everything" test started asserting "Trash is empty"
+against a pass that was still (accidentally) incomplete and got "Still loading…" instead. Fixed the
+helpers to resolve a clean pass before returning (Restore/Empty are ordinarily clicked against a
+finished listing), then added two NEW, deliberate tests — one via Restore, one via Empty Trash — that
+render, deliver a batch, and explicitly do NOT call `finishStream` before draining the list, to prove
+the fix without relying on that accident.
+
+VISUAL CRITIC — rendered and measured (getBoundingClientRect/getComputedStyle), not eyeballed. Design
+decision (Foreman): move the mid-stream caveat OUT of a rows-above-the-list banner and INTO the title
+bar's item-count slot (dim italic text, in place of the count) — that slot is already reserved and
+empty in exactly this state, so swapping its text costs no layout. This one move closed three
+measured defects at once:
+- **Finding 1** (false affordance): the two-word "Still loading…" box collapsed to near-identical
+  dimensions/colours as the adjacent `.tv-btn` "Select all" button (101×34 vs 73×28, matching border/
+  radius/text colour) — read as clickable. Gone once the caveat isn't a bordered box at all.
+- **Finding 2** (55px jump on the common path): the banner's appear-then-vanish moved every row up
+  ~1.6 row-heights (34px rows) the instant a CLEAN stream resolved — rows are click targets with
+  checkboxes, so the row under the pointer changed mid-reach. Title-bar text swap moves nothing below
+  it.
+- **Finding 4** (one-frame flash): a typical trash flushes in one batch (`TRASH_LIST_BATCH = 256`,
+  one synchronous pass) so the banner's entire lifetime could be a single frame. Same fix, moot.
+The degraded-with-rows banner (CPE-1805's original mechanism) is now deliberately NOT also keyed on
+`!complete` — it's reserved for the resolved, known-degraded case only, and gets to keep its bordered
+box since that state isn't subject to the above three problems (it's already resolved by the time it
+shows, and rarer).
+
+- **Finding 3** (sticky-header occlusion, separate bug, fixed regardless of the above move): both
+  `.tv-degraded-banner` and `.tv-head-row` were independently `position: sticky; top: 0`, so once the
+  degraded case scrolled they competed for the same slot — the banner (taller) fully covered the
+  header INCLUDING its Select-all checkbox, unclickable. Fixed by wrapping both in one
+  `.tv-sticky-stack` container (the only sticky element); the pair now lays out in normal flow inside
+  it and stick as one unit, with no hard-coded pixel offset to break on text reflow. Added a
+  structural test pinning that both elements share the same `.tv-sticky-stack` ancestor.
+- **Finding 5** (narrow-window title reflow): at 584px the title wrapped to two lines and the toolbar
+  jumped 36px right when the count/caveat text appeared, because `.tv-title` had no `min-width: 0`.
+  Added `min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;` per the
+  Critic's own diagnosis.
+- **A11Y (blocking)** — the whole fix was visual-only: `.tv-degraded-banner` had no `role`/`aria-live`,
+  so CPE-1816's bug (a partial list reading as complete) persisted for a screen-reader user even after
+  the visual fix. Put `role="status"` on the title-bar count/caveat slot — the one node that carries
+  BOTH the mid-stream caveat and the eventual final count, kept persistent in the DOM (not toggled)
+  so content CHANGES announce reliably. Added a test asserting the region exists by role and that its
+  announced text actually changes across the mid-stream → resolved transition.
+- **Nit taken**: the selection count (`· N selected`) now rides alongside `trash.stillLoading` too,
+  same as it already does alongside the resolved item count — a fact the app genuinely knows
+  regardless of whether the pass itself has finished.
+- **Nit deferred**: the rows-still-shift-slightly-on-open cosmetic concern (banner box height vs. no
+  box) was left to the Visual Critic's own separate pass, per the Foreman's explicit instruction not
+  to pre-empt it.
+- **Finding 7** (this round's own comment-arithmetic error, corrected): `mojibakeGuard.test.ts`'s
+  ALLOWLIST comment had said "9 locale blocks" when only 5 blocks (en, es, de, fr, it) sit above the
+  anchored line — 9 was the LINE count (en's 5 lines including its comment, plus 1 apiece for the
+  other 4), not a block count. Reworded to state both numbers explicitly and not conflate them.
+
+Red-proofs this round, each applied, observed red, then reverted:
+- Commented out `complete = false;` in `load()`'s reset block → the new refresh-reset test reds on
+  `expect(screen.queryByText("1 item")).toBeNull()` (found a live `<span>1 item</span>` from the
+  stale prior pass).
+- Reverted the empty-pane condition to `{:else if degraded && entries.length === 0}` → BOTH new
+  Restore/Empty mid-stream-drain tests red on `expect(screen.queryByText("Trash is empty")).toBeNull()`
+  (found "Trash is empty").
+- Renamed the `.tv-sticky-stack` wrapper's class to break the selector (one-line class-name change) →
+  the new structural test reds on `expect(stack).toBeTruthy()` (banner and head row no longer share a
+  `.tv-sticky-stack` ancestor).
+- Removed `role="status"` from the title-bar count span → the new a11y test reds on
+  `screen.getByRole("status")` (element not found).
+
+Gates: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 4188 passed (4188), 0 failed (was
+4183 before this round; +5 net new tests: reset-on-refresh, two mid-stream-drain tests, sticky-stack
+structural test, role=status a11y test). Still no `.rs` files touched — frontend-only, no cargo gates
+or bindings regen this round either.
+
+Files changed this round: `src/lib/components/TrashView.svelte`, `src/lib/components/TrashView.test.ts`,
+`src/lib/bidiEscape.guard.test.ts` (REGISTRY line re-anchor only), `src/lib/mojibakeGuard.test.ts`
+(comment correction only), `src/docs/38-trash.md`.
