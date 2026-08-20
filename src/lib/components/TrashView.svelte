@@ -45,6 +45,14 @@
    *  has no per-item count to give, which is why the message below picks its wording from this rather
    *  than always claiming a number. */
   let skipped = 0;
+  /** CPE-1816: true once the current pass has fully resolved (summary received, or the invoke threw) —
+   *  false for the whole window between the first batch landing (which flips `loading` off, per
+   *  STREAMING.md) and that resolution. `degraded`/`skipped` ride on the summary, which by construction
+   *  arrives last, so during that window the app genuinely does not yet know whether this pass will turn
+   *  out degraded. Gates the same two things `degraded` already gates — the title-bar item count and the
+   *  banner above the rows — so a partial list can never render as if it were the finished one just
+   *  because the summary hasn't arrived yet. */
+  let complete = false;
   let selected = new Set<string>();
   /** Which empty confirm is pending ("all" = whole Trash via the toolbar button with nothing selected
    *  or the explicit "Empty Trash" action; "selected" = just the checked rows), or null when the
@@ -69,6 +77,7 @@
     error = "";
     degraded = false;
     skipped = 0;
+    complete = false;
     loading = true;
     try {
       const channel = createChannel<TrashEntry[]>();
@@ -86,9 +95,13 @@
       if (gen === loadGen) {
         degraded = summary.degraded;
         skipped = summary.skipped;
+        complete = true; // CPE-1816: only now is the verdict in — safe to assert a count or its absence
       }
     } catch (e) {
-      if (gen === loadGen) error = e instanceof Error ? e.message : String(e);
+      if (gen === loadGen) {
+        error = e instanceof Error ? e.message : String(e);
+        complete = true; // the pass is over (albeit unsuccessfully) — nothing further is "in flight"
+      }
     } finally {
       if (gen === loadGen) loading = false;
     }
@@ -170,6 +183,11 @@
         ? $t("trash.skippedOne")
         : $t("trash.skippedMany", { count: skipped })
       : $t("trash.degraded");
+  /** CPE-1816: the banner-above-the-rows mechanism CPE-1805 built for `degraded` is reused wholesale for
+   *  the mid-stream case — only the wording differs. `degraded` is authoritative once it's known
+   *  (`complete` is true by the time it's ever true), so it's checked first; otherwise, while the pass
+   *  is still in flight, the honest answer is "not sure yet", not "no problem so far". */
+  $: rowsNoteMessage = degraded ? degradedMessage : $t("trash.stillLoading");
   $: emptyConfirmMessage =
     confirmEmpty === "all"
       ? $t("trash.emptyConfirmMessageAll")
@@ -190,8 +208,13 @@
              CPE-1804 keeps that rule unchanged now that a degraded pass can also have rows: "5 items"
              would still be a claim about the Trash's contents that this pass can't back, since the
              skipped items are in the Trash and not in that number. The count the app DOES know — how
-             many it dropped — is in the notice instead. -->
-        {#if !loading && !error && !degraded}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
+             many it dropped — is in the notice instead.
+             CPE-1816: `degraded`/`skipped` themselves don't exist yet until the stream's summary
+             resolves, so the same suppression now also applies for the whole window between the first
+             batch landing and that resolution — `complete` is what tracks that. Without it a still-
+             streaming pass would assert "N items" using a count that is still growing, the exact claim
+             this ticket exists to stop the app making. -->
+        {#if !loading && !error && !degraded && complete}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
       </span>
       <div class="tv-tools">
         {#if entries.length > 0}
@@ -242,7 +265,7 @@
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
       {:else}
-        {#if degraded}
+        {#if degraded || !complete}
           <!-- CPE-1805: degraded-with-entries. Before CPE-1804 this branch was unreachable — the only
                degradation route (a caught `list()` panic) wiped the pass to zero entries, so the
                empty-only special case above was correct purely by accident, resting on an unstated
@@ -250,9 +273,17 @@
                surviving entries in place: a partial list is now the ORDINARY shape of an incomplete
                listing. Rendering it as a plain list would ship the same lie in a new place — the user
                sees rows, assumes that's everything, and stops looking. The notice is therefore driven by
-               `degraded` ALONE; `entries.length` only chooses where it sits, never whether it appears. -->
+               `degraded` ALONE; `entries.length` only chooses where it sits, never whether it appears.
+
+               CPE-1816: the same banner now also covers the mid-stream window (`!complete`) — `degraded`
+               itself doesn't exist yet until the summary resolves, so a still-streaming pass would
+               otherwise render its (possibly partial, possibly about-to-be-degraded) rows exactly like a
+               finished, clean listing. `degraded` wins once it's known (it's never true before `complete`
+               is), so this is "show SOME caveat whenever the truth isn't fully in yet", with only the
+               wording chosen from the data — reusing the mechanism CPE-1805 built rather than adding a
+               second banner. -->
           <div class="tv-degraded-banner">
-            <span class="tv-degraded-note">{degradedMessage}</span>
+            <span class="tv-degraded-note">{rowsNoteMessage}</span>
           </div>
         {/if}
         <div class="tv-head-row">

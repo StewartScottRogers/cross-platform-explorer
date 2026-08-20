@@ -164,6 +164,32 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.queryByText("Trash couldn't be fully read — it may not be empty")).toBeNull();
   });
 
+  // CPE-1816: the gap CPE-1803/CPE-1804/CPE-1805 left open — `degraded`/`skipped` ride on the summary,
+  // which by construction resolves LAST, so between the first batch landing and that resolution the view
+  // previously had no way to say "this might not be everything yet". This test observes exactly that
+  // mid-stream window (batch delivered, summary NOT yet resolved) rather than only the resolved state —
+  // a suite that only asserted the final render would pass today and would still pass with the bug intact.
+  it("does not assert a finished item count while the stream is still in flight, and says so", async () => {
+    render(TrashView);
+    await settle();
+
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+
+    // The row is visible (streaming still paints progressively)...
+    expect(screen.getByText("a.txt")).toBeTruthy();
+    // ...but the title bar must NOT assert a total this pass can't yet back.
+    expect(screen.queryByText("1 item")).toBeNull();
+    // A caveat says so, reusing CPE-1805's banner-above-the-rows mechanism.
+    expect(screen.getByText("Still loading…")).toBeTruthy();
+
+    // Once the summary resolves clean, the provisional caveat is replaced by the real, final count.
+    finishStream(1, false, 0);
+    await settle();
+    expect(screen.queryByText("Still loading…")).toBeNull();
+    expect(screen.getByText("1 item")).toBeTruthy();
+  });
+
   it("renders NO notice for an ordinary complete listing with the same rows (CPE-1805 asymmetry)", async () => {
     render(TrashView);
     await settle();
