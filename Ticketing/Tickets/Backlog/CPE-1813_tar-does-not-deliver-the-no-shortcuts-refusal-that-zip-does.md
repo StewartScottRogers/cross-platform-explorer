@@ -166,3 +166,91 @@ Related: **CPE-1759**, **CPE-1773/1774/1775**.
   warnings` — clean. `cargo test --manifest-path crates/server/Cargo.toml --lib` — 2249 passed, 0 failed,
   4 ignored (net +4 tests vs. round 1: two round-1 tests renamed/updated for the new function signatures,
   four new tests added for blockers 1–3).
+
+- 2026-08-20 — **Round 3 rework (attempt 3/3)**, on PR #965, after independent Reviewer round 2 verified
+  round 2's fixes itself (both mutations run, injection seam praised as the right call) and returned two
+  new BLOCKING findings, both cheap, both found by the Reviewer auditing the crate source directly rather
+  than accepting round 2's own enumeration.
+
+  **Finding 1 (round 2's own blocker-2 fix modelled the wrong nesting for its `set_symlink_file_times`
+  example) — closed, structurally rather than with another phrase to anchor on.** Round 2's
+  `wrap_like_tar_single_level_failure` modelled the mtime failure as ONE `TarError` wrap (correct for
+  `ensure_dir_created`, wrong for mtime). The real chain is two levels:
+  `outer(TarError "failed to unpack") -> mid(TarError "failed to set mtime for `{dst}`") -> raw`. `mid`'s
+  own rendered text embeds `{dst}` — the entry's own attacker-controlled destination path — and round 2's
+  marker search (`text.find(marker)`) read `mid` directly, so an entry named `a when symlinking b` put the
+  marker inside `mid`'s text with an `Unsupported`-kind mtime failure behind it; round 2's `starts_with`
+  hardening protected the CODE arm but the KIND-only fallback arm had no equivalent guard, so this
+  recovered `Some(io::Error{kind: Unsupported, ..})` and reported a symlink that already existed on disk
+  as a skip. Reproduced exactly (Reviewer's own numbers) before fixing.
+
+  Fixed structurally, not by enumerating more `TarError::desc` phrases: `recover_link_syscall_error` now
+  only trusts a `source()`-chain level that is a LEAF — has no `source()` of its own. `TarError::source`
+  unconditionally returns `Some(&self.io)`, so `mid` (and `ensure_dir_created`'s TarError wrapper) are
+  excluded on sight, regardless of wording, and the walk passes straight through to the raw OS error
+  underneath, which never carries the entry's name. This holds for every current and future
+  `TarError::desc` site without enumerating them — closing the actual gap the Reviewer's finding was
+  "your enumeration is not exhaustive" about.
+
+  **Audited beyond the finding, per the Reviewer's own method (grepped every `Error::new(kind,
+  format!(..))` site in `entry.rs`) rather than trusting round 2's list:** `validate_inside_dst`'s
+  hard-link leg (`entry.rs:543`) is ALSO a leaf-shaped wrap — `"{err} while canonicalizing {attacker
+  hard-link target}"` — so the leaf check alone does not exclude it. Added a second, narrow guard:
+  a level's prefix is never trusted if it contains `" while canonicalizing "`. Narrower trigger than the
+  mtime hole (needs a hard-link entry whose declared target does not resolve), but excluded on the same
+  principle rather than left as a theoretical gap the Reviewer would have found next round.
+
+  Also corrected the two marker-doc line citations the Reviewer flagged as approximated rather than
+  measured (`entry.rs:573` for the symlink wrap, `:552` for the hard-link wrap — not `559-568`/`544-553`),
+  scoped the `TarError::desc` enumeration explicitly to the sites reachable on a link entry's file/
+  symlink/hard-link arms (naming the ones that are NOT reachable rather than omitting them), and fixed
+  two stale `[`recover_raw_os_error`]` doc references left over from round 2's rename to
+  `recover_link_syscall_error`.
+
+  New tests: `cpe1813_an_mtime_failure_named_to_embed_the_marker_is_never_a_link_support_refusal`
+  (the Reviewer's exact repro, against the corrected two-level `wrap_like_tar_mtime_failure` fixture) and
+  `cpe1813_a_canonicalize_failure_named_to_embed_the_marker_is_never_a_link_support_refusal` (the
+  self-found `validate_inside_dst` case). `wrap_like_tar_single_level_failure` is now scoped to
+  `ensure_dir_created` only; its own test renamed to `cpe1813_a_parent_dir_failure_is_never_a_link_support_refusal`.
+
+  **Finding 2 (nothing pinned that the two call sites choose the right MARKER) — closed.** The Reviewer's
+  own mutation — collapsing `let marker = if entry_type.is_hard_link() { .. } else { .. }` to always
+  `TAR_SYMLINK_MARKER` at both `tar_unpack_with`/`extract_tar_stream_with` call sites — silently reverted
+  every hard-link entry to the pre-CPE-1813 abort with the full suite green, because both e2e seam tests
+  only exercised `EntryType::Symlink`. Fixed by parameterising the crafting fixture
+  (`craft_tar_with_symlink_in_the_middle` → `craft_tar_with_link_in_the_middle(entry_type, target)`) and
+  giving both `cpe1813_tar_unpack_routes_a_link_creation_refusal_through_the_shared_classifier` and
+  `cpe1813_extract_tar_stream_routes_a_link_creation_refusal_through_the_shared_classifier` a
+  `("hard link", tar::EntryType::hard_link(), TAR_HARDLINK_MARKER)` leg alongside the existing symlink one,
+  injecting a `TAR_HARDLINK_MARKER`-shaped failure and asserting the same skip/counted/recorded contract.
+
+  **Red-proofs, exactly as asked, each stated against the specific production change that reds it:**
+  - Removing the leaf-check guard (`std::error::Error::source(level).is_none()` → unconditionally `true`)
+    reds `cpe1813_an_mtime_failure_named_to_embed_the_marker_is_never_a_link_support_refusal` — observed
+    the exact garbled `Ok(Some("...failed to set mtime for `dest/a). Skipped..."))` the Reviewer measured,
+    then reverted.
+  - Removing the `" while canonicalizing "` guard reds
+    `cpe1813_a_canonicalize_failure_named_to_embed_the_marker_is_never_a_link_support_refusal` (had to
+    fix this test's own fixture first — its original `NotFound`-shaped inner error aborted on the
+    classifier's own merits regardless of the guard, so the test could not have failed either way; the
+    guard is only reachable via the kind-only fallback, so the fixture now uses an `Unsupported`-kind
+    inner error, matching the mtime test's own reasoning), then reverted.
+  - Collapsing both call sites' marker selection to always `TAR_SYMLINK_MARKER` reds BOTH
+    `cpe1813_tar_unpack_routes_a_link_creation_refusal_through_the_shared_classifier` and
+    `cpe1813_extract_tar_stream_routes_a_link_creation_refusal_through_the_shared_classifier` — on the
+    "hard link" leg specifically in each (the "symlink" leg stays green in both, confirming the mutation
+    is caught precisely rather than by a broader collateral failure), then reverted.
+
+  **A note on process:** an earlier attempt to apply the finding-1 fix via a large exact-string-match
+  block replacement accidentally dropped two round-2 tests
+  (`cpe1813_recover_link_syscall_error_reads_the_code_tar_rewrapped_away` and
+  `cpe1813_a_crafted_entry_name_cannot_forge_a_link_support_refusal`) when a subsequent, unrelated block
+  replacement's match boundary turned out wider than the diff review assumed. Caught by `grep -c "fn
+  cpe1813"` before running the final gates, not by the test run alone (both surviving tests still passed
+  a 6/6 run — the loss was silent). Both tests reinstated verbatim; `git diff` reviewed line by line
+  afterward to confirm nothing else was lost.
+
+  **Gates (round 3):** `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets -- -D
+  warnings` — clean. `cargo test --manifest-path crates/server/Cargo.toml --lib` — 2251 passed, 0 failed,
+  4 ignored (net +2 tests vs. round 2: two new regression tests for finding 1's two sub-cases; finding 2
+  added legs to two existing tests rather than new test functions).
