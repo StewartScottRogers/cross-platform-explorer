@@ -128,6 +128,23 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.queryByText("0 items")).toBeNull();
   });
 
+  // CPE-1816 review round 3, BLOCKING 2: the title bar's own live region goes "Still loading…" -> ""
+  // the instant the pass resolves degraded (nothing in its `{#if}` chain matches `complete && degraded`
+  // with nothing selected), so without a live region of its OWN, the empty-pane degraded note is
+  // announced to nobody — a screen-reader user who heard "Still loading…" a moment ago hears silence,
+  // not the actual verdict. This never went through a "Still loading…" phase in THIS specific route (a
+  // caught-panic pass sends no batches, so `loading` stays true until resolution), but the same node
+  // must still be a live region on its own merits: it's the ONLY place this information is ever stated.
+  it("announces the degraded-and-empty note through its own role=status region (CPE-1816)", async () => {
+    render(TrashView);
+    await settle();
+    finishStream(0, true, 0);
+    await settle();
+
+    const note = screen.getByText("Trash couldn't be fully read — it may not be empty");
+    expect(note.getAttribute("role")).toBe("status");
+  });
+
   // CPE-1804/CPE-1805 — the state this pair exists to prove is degraded-WITH-entries, which before
   // CPE-1804 the backend could not produce: the only degradation route wiped the pass to zero entries,
   // so `entries.length === 0 && degraded` covered every degraded case by accident. Per-item non-UTF-8
@@ -162,6 +179,10 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     // Not "Trash is empty" and not the unquantified panic wording — this pass knows the number.
     expect(screen.queryByText("Trash is empty")).toBeNull();
     expect(screen.queryByText("Trash couldn't be fully read — it may not be empty")).toBeNull();
+    // CPE-1816 review round 3, BLOCKING 2: the title bar's own live region has nothing to say once the
+    // pass resolves degraded (with nothing selected) — this banner is the ONLY place the verdict is
+    // announced, so it must carry its own live region rather than relying on the title bar's.
+    expect(notice.getAttribute("role")).toBe("status");
   });
 
   // CPE-1816 review round 2, finding 3: the degraded banner and the column header must occlude each
@@ -240,6 +261,29 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.getByRole("status")).toBe(region);
     expect(region.textContent).toContain("1 item");
     expect(region.textContent).not.toContain("Still loading…");
+  });
+
+  // CPE-1816 review round 3 (nit, promoted to a real assertion): Svelte trims the leading whitespace
+  // immediately inside an `{#if}` block's static text, so a naive `{#if selected.size > 0} ·
+  // {selectedCountLabel}{/if}` silently lost its leading space and read as "...· 1 selected" with no gap
+  // — audible to a screen reader reading this exact live region, not just a cosmetic gap. Covers BOTH
+  // places the separator appears: the pre-existing resolved-count branch (where the bug already lived)
+  // and the new mid-stream branch this ticket added (which would otherwise have duplicated it).
+  it("keeps a real space before the selection-count separator, mid-stream and resolved alike (CPE-1816 nit)", async () => {
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    await fireEvent.click(screen.getByLabelText("a.txt"));
+
+    // Mid-stream + selected.
+    expect(screen.getByRole("status").textContent).toBe("Still loading… · 1 selected");
+
+    finishStream(1, false, 0);
+    await settle();
+
+    // Resolved + selected — the pre-existing branch, fixed the same way rather than left to drift.
+    expect(screen.getByRole("status").textContent).toBe("1 item · 1 selected");
   });
 
   // CPE-1816 review round 2, BLOCKER 1: `complete` must be reset on every `load()` call, including a

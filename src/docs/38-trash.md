@@ -24,8 +24,8 @@ A large Trash paints progressively as it loads, so opening it never blocks on a 
 rows are still arriving, the title bar shows **"Still loading…"** in place of the item count — the
 running total isn't final yet, so the app doesn't claim one. If everything currently shown gets
 restored or deleted before loading finishes (rare, but possible on a large Trash you act on quickly),
-the same "Still loading…" wording appears in the body too, in place of "Trash is empty" — the pass
-hasn't finished, so more items could still turn up. Once loading finishes, "Still loading…" is
+that same "Still loading…" wording moves into the body instead, in place of "Trash is empty" — the
+pass hasn't finished, so more items could still turn up. Once loading finishes, "Still loading…" is
 replaced by either the real count or one of the two messages below, whichever applies.
 
 If the listing shows **"Trash couldn't be fully read — it may not be empty,"** the OS trash itself

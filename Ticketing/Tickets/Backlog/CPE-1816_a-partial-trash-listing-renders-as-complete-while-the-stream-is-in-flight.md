@@ -203,3 +203,98 @@ or bindings regen this round either.
 Files changed this round: `src/lib/components/TrashView.svelte`, `src/lib/components/TrashView.test.ts`,
 `src/lib/bidiEscape.guard.test.ts` (REGISTRY line re-anchor only), `src/lib/mojibakeGuard.test.ts`
 (comment correction only), `src/docs/38-trash.md`.
+
+**2026-08-20, round 3** — Reviewer APPROVED and most Visual Critic findings closed and verified
+(rows-jump/flash/false-affordance gone, sticky-stack occlusion fixed, `role="status"` shape correct,
+theme/contrast/focus PASS). The Critic found one of round 2's own fixes had broken the thing it was
+protecting, plus a new a11y gap it introduced. Attempt 3 of 3, addressed both.
+
+BLOCKING 1 — round 2's `.tv-title { min-width: 0; overflow: hidden; white-space: nowrap;
+text-overflow: ellipsis; }` stopped the wrap/jump bug (finding 5) but, paired with `.tv-tools` never
+shrinking (no `min-width: 0` of its own, so its full button-row content width was a de facto hard
+floor), dumped 100% of every width deficit onto `.tv-title`. At the app's own permitted minimum window
+(600px — `.min_inner_size(600.0, 400.0)`, `src-tauri/src/lib.rs:12438-12439`) the title collapsed to a
+few px, clipping the icon, "Trash", and the caveat itself — CPE-1816's original bug, reintroduced by
+its own fix, inside the app's supported width envelope (measured onset: intact >=880px, caveat clips
+with a selection <=860px, caveat clips with nothing selected <=800px, ~86% gone by <=740px, title and
+caveat entirely destroyed by <=684px). Also, `text-overflow: ellipsis` never worked: it truncates ONE
+block-level box's own text, and `.tv-title` is a flex CONTAINER holding three separate flex items
+(icon, an anonymous "Trash" text item, and the count span) — a flex container's ellipsis does not
+summarize its children's combined overflow, so the round-2 comment claiming a truncated "…" was simply
+wrong; the actual failure was a hard mid-word cut with no ellipsis ever rendered.
+
+Fixed by giving `.tv-title` a floor instead of an open `min-width: 0` (`min-width: 34ch`, reasoned —
+not pixel-measured, see the code comment for the full budget: icon+gaps ~4ch, "Trash" ~6ch, the
+longest `trash.stillLoading` translation among the 12 shipped locales ~22ch (Italian "Caricamento in
+corso…" / Russian "Продолжается загрузка…"), ~2ch safety margin for non-Latin glyph width uncertainty
+= ~34ch; covers the base caveat alone, not the caveat plus a live "· N selected" suffix, since the
+onset sweep showed that combination clipping starts at a materially wider ~860px, well outside the
+600px target, so it's accepted as a secondary, non-blocking degradation) and giving `.tv-tools`
+`min-width: 0` so it actually participates in the shrink instead of acting as an unyielding floor.
+Removed the non-functional `text-overflow: ellipsis` rather than trying to make it work (the offered
+alternative — moving truncation into a dedicated inner block-level span — was not taken, to avoid
+adding markup/structure this harness cannot pixel-verify without a real browser); corrected the
+comment that had claimed it worked. Exact pixel behaviour at 600px could not be verified here — jsdom
+does not apply component CSS to `getComputedStyle` under this project's vitest config (confirmed
+empirically: a `.tv-title` computed `min-width` reads back as `"auto"` regardless of the declared
+rule), so this is a reasoned, documented estimate awaiting the Visual Critic's real-browser
+confirmation, exactly as the Foreman's instructions anticipated for CSS-layout-only concerns.
+
+BLOCKING 2 (a11y, newly introduced by round 2's own fix) — on the degraded exit, the title bar's live
+region goes `"Still loading…"` -> `""` the instant the pass resolves degraded (nothing in its `{#if}`
+chain matches `complete && degraded` with nothing selected), and neither degraded-notice placement
+(`.tv-degraded-note`, used for both the empty-pane note and the entries-present rows banner) had a
+`role` or `aria-live` of its own — so a screen-reader user was told the listing was still loading and
+then told nothing: not a count, not "unreadable", nothing. Before this PR there was no live region at
+all, so the app never made a claim it failed to withdraw; round 2's fix introduced the claim without
+the withdrawal, and it also affects the round-2-introduced mid-stream-drain state (Restore/Empty
+draining to zero while still in flight), not only the fully-resolved-degraded case. Fixed by adding
+`role="status"` to BOTH `.tv-degraded-note` occurrences (the shared span used by both placements) —
+each mounts fresh exactly when it has something new to say, which is the correct live-region shape for
+genuinely new information (as opposed to the title-bar slot's persistent-node shape, chosen there
+because THAT slot's content changes in place across states rather than mounting fresh).
+
+NIT (fixed, not just noted) — the separator lost its leading space: the title-bar slot read "3
+items· 1 selected" / "Still loading…· 1 selected" because Svelte trims the leading whitespace
+immediately inside an `{#if}` block's static text. Pre-existing on the resolved-count branch (the
+Critic checked specifically to avoid mis-blaming this PR for it), but this round's mid-stream branch
+duplicated it into a second, now screen-reader-audible state. Fixed both occurrences with `&nbsp;·`
+(a literal entity survives where collapsible ASCII whitespace doesn't) rather than moving the space
+outside the block, to keep the two branches visually/structurally parallel.
+
+Two doc nits (Reviewer) — `src/docs/38-trash.md`: "the same wording appears in the body too" implied
+*in addition to* the title bar; the title slot is actually empty in that state, so the wording MOVES
+rather than duplicates — reworded to "moves into the body instead." The CSS comment claiming ellipsis
+truncation worked is corrected as part of the BLOCKING 1 fix above.
+
+Left alone, per the Foreman's explicit instruction — `.tv-sticky-stack`'s structural test (pins class
+nesting, not stickiness; deleting `position: sticky` leaves it green) is a disclosed, accepted
+limitation of jsdom's lack of layout, tracked separately as CPE-1822 for real-browser coverage; adding
+a fragile CSS-text assertion for it was explicitly declined. The caveat's 12px/italic/70%-opacity
+styling is confirmed correct (contrast 6.35:1 light / 7.06:1 dark — legibility was never the question,
+only emphasis, and calm reads right for a view with no motion) and left unchanged.
+
+Red-proofs this round, each applied, observed red, then reverted:
+- Removed `role="status"` from the empty-pane `.tv-degraded-note` → the new degraded-and-empty a11y
+  test reds on `expect(note.getAttribute("role")).toBe("status")` (found `null`).
+- Removed `role="status"` from the rows-banner `.tv-degraded-note` → the existing CPE-1805 notice test's
+  new assertion reds the same way.
+- Reverted the mid-stream branch's `&nbsp;·` back to a plain leading space (`{#if selected.size > 0}
+  · {selectedCountLabel}{/if}`) → the new separator-spacing test reds with the EXACT reported shape:
+  `"Still loading…· 1 selected"` (no gap) instead of the expected nbsp-separated string. Repeated for
+  the resolved-count branch's `&nbsp;·` → same test reds the same way, confirming the fix (not just an
+  incidental pass) on both occurrences.
+- `.tv-title`'s `min-width: 34ch` / `.tv-tools`'s `min-width: 0` are NOT independently red-proofable in
+  this harness: jsdom does not apply component-scoped CSS to `getComputedStyle` here (verified
+  empirically — see above), so no vitest assertion on these two declarations can ever go red or green
+  on real content; their correctness rests on the documented arithmetic and awaits the Critic's
+  real-browser confirmation, stated here plainly rather than papered over with an assertion that
+  cannot fail.
+
+Gates: `npm run check` — 0 errors, 0 warnings. `npx vitest run` — 4190 passed (4190), 0 failed (was
+4188 before this round; +2 net new tests: degraded-and-empty a11y test, separator-spacing test — the
+rows-banner a11y check was added as an assertion inside the existing CPE-1805 notice test rather than
+a new one). Still no `.rs` files touched — frontend-only, no cargo gates or bindings regen this round.
+
+Files changed this round: `src/lib/components/TrashView.svelte`, `src/lib/components/TrashView.test.ts`,
+`src/lib/bidiEscape.guard.test.ts` (REGISTRY line re-anchor only), `src/docs/38-trash.md`.

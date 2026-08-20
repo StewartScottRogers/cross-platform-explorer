@@ -252,13 +252,19 @@
              CPE-1816 review round 2 (nit): the selection count rides alongside `trash.stillLoading` too,
              same as it already does alongside the resolved item count — the app genuinely knows how many
              rows are checked regardless of whether the pass itself has finished, so there's no reason for
-             a mid-stream selection to go unacknowledged here just because the total is still unknown. -->
+             a mid-stream selection to go unacknowledged here just because the total is still unknown.
+             CPE-1816 review round 3 (nit): `&nbsp;·` instead of a plain leading space before the
+             separator — Svelte trims leading whitespace immediately inside an `{#if}` block's static
+             text, so the naive `{#if selected.size > 0} · {selectedCountLabel}{/if}` silently lost its
+             leading space and read as "3 items· 1 selected" (audible to a screen reader, not just a
+             visual nit — pre-existing on the resolved-count branch, now also fixed here rather than
+             duplicated). `&nbsp;` is a literal entity, not collapsible ASCII whitespace, so it survives. -->
         <span class="tv-count" role="status">
           {#if !loading && !error}
             {#if !degraded && complete}
-              {itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}
+              {itemCountLabel}{#if selected.size > 0}&nbsp;· {selectedCountLabel}{/if}
             {:else if !complete && entries.length > 0}
-              <span class="tv-count-loading">{$t("trash.stillLoading")}</span>{#if selected.size > 0} · {selectedCountLabel}{/if}
+              <span class="tv-count-loading">{$t("trash.stillLoading")}</span>{#if selected.size > 0}&nbsp;· {selectedCountLabel}{/if}
             {:else if selected.size > 0}
               {selectedCountLabel}
             {/if}
@@ -315,9 +321,19 @@
              still be coming), and before this fix that drained state fell through to the plain "Trash is
              empty" branch below. Safe for a genuinely empty Trash: `complete` and `loading` are set in
              the same `finally` tick as each other, so the healthy empty-Trash case never observes
-             `!complete` here — `loading` is still true and the branch above already renders first. -->
+             `!complete` here — `loading` is still true and the branch above already renders first.
+
+             CPE-1816 review round 3, BLOCKING 2 (a11y): `role="status"` on this span, not just the
+             title-bar slot. The title bar's own "Still loading…" only shows while `entries.length > 0`
+             (see its own guard), so when Restore/Empty drains the list to zero mid-stream, THIS is the
+             only place the caveat is visible at all — without a live region here, a screen reader that
+             heard "Still loading…" from the title bar a moment ago hears nothing when that text moves
+             here, and nothing again once it resolves either way. This is a freshly-mounted node each
+             time this branch's condition starts being true, which is the correct live-region shape for
+             genuinely NEW information (unlike the title-bar slot's persistent-node shape, chosen there
+             because that slot's content changes IN PLACE across states rather than mounting fresh). -->
         <div class="tv-empty">
-          <span class="tv-degraded-note">{noticeMessage}</span>
+          <span class="tv-degraded-note" role="status">{noticeMessage}</span>
         </div>
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
@@ -353,9 +369,18 @@
                  lives in the title bar's item-count slot instead (see the markup above), which is
                  already empty in that state, so swapping its text moves nothing below it. This banner is
                  reserved for `degraded`, a state that's rarer, already resolved by the time it shows,
-                 and worth the (smaller, one-time) layout cost of surfacing prominently. -->
+                 and worth the (smaller, one-time) layout cost of surfacing prominently.
+
+                 CPE-1816 review round 3, BLOCKING 2 (a11y): `role="status"` here closes the gap the
+                 Critic measured — the title-bar slot goes "Still loading…" -> "" the instant this
+                 branch's condition becomes true (no `degraded`-aware branch in that slot's `{#if}` chain
+                 shows anything once `complete && degraded`, other than a possible selection count), so
+                 without a live region on THIS element a screen reader hears the pass finish and then
+                 hears nothing — not a count, not "unreadable", nothing. This node mounts fresh exactly
+                 when it has something new to say, which is the live-region shape for it (see the
+                 empty-pane note above for the same reasoning spelled out). -->
             <div class="tv-degraded-banner">
-              <span class="tv-degraded-note">{degradedMessage}</span>
+              <span class="tv-degraded-note" role="status">{degradedMessage}</span>
             </div>
           {/if}
           <div class="tv-head-row">
@@ -433,20 +458,48 @@
     padding: 10px 14px;
     border-bottom: 1px solid var(--border);
   }
-  /* CPE-1816 review round 2 (finding 5): a bare flex child grows to its content width and can force the
-     row to wrap / the toolbar to jump at a narrow window width. `min-width: 0` lets `.tv-title` shrink
-     below that content width inside `.tv-titlebar`'s flex row instead of pushing `.tv-tools`; the
-     overflow/nowrap/ellipsis trio keeps a long title on one line, truncated, rather than wrapping the
-     titlebar onto two. */
+  /* CPE-1816 review round 2 (finding 5) / round 3 (BLOCKING 1): a bare flex child grows to its content
+     width and can force the row to wrap / the toolbar to jump at a narrow window width — that's what
+     round 2's plain `min-width: 0` was for. But round 2 shipped it WITHOUT a floor, and paired with
+     `.tv-tools` never shrinking at all (it had no `min-width: 0` of its own, so its content width was an
+     effective hard minimum), 100% of every width deficit landed on `.tv-title`: at the app's permitted
+     minimum window (600px, `.min_inner_size` in `src-tauri/src/lib.rs`) the round-2 CSS let the title
+     collapse to a few px, clipping the icon, the word "Trash", AND the caveat this ticket exists to keep
+     visible — CPE-1816's original bug, reintroduced by its own round-2 CSS fix.
+     Round 3 fixes both halves:
+     - `.tv-title` gets a FLOOR instead of an open-ended `min-width: 0` — small enough to still shrink and
+       stop the wrap/jump, large enough that the caveat never disappears down to 600px. Reasoned budget
+       (ch ≈ 7.5px at this component's ~13px font; not pixel-measured — a real-browser render is needed
+       to confirm exactly, which is the Visual Critic's tooling, not this harness): icon + its two 8px
+       flex gaps ≈ 31px ≈ 4ch; "Trash" ≈ 6ch; the longest `trash.stillLoading` translation across the 12
+       shipped locales (Italian "Caricamento in corso…" / Russian "Продолжается загрузка…", ~21-22
+       characters) ≈ 22ch; a few ch of safety margin for locales this reasoning underestimates (Cyrillic
+       glyphs commonly render wider than the Latin "0" `ch` is defined from) ≈ 2ch. Total ≈ 34ch. This
+       covers the BASE caveat alone, not the caveat plus a live "· N selected" suffix — the onset sweep
+       showed that combination clipping starts at a materially wider ~860px, well outside the reasoned
+       floor's target of the 600px minimum, so it's accepted as a secondary, non-blocking degradation
+       rather than budgeted for here.
+     - `.tv-tools` gets `min-width: 0` too (below), so it actually PARTICIPATES in the shrink instead of
+       acting as a hard floor equal to its full button-row content width. Below the point where both
+       floors are satisfied simultaneously (the toolbar alone is already wider than the entire budget at
+       600px — 4 text buttons plus 3 icon buttons — regardless of what `.tv-title` does), the toolbar's
+       own buttons visually crowd or overflow; that is a pre-existing toolbar-density limit this ticket
+       does not attempt to redesign, only stops from being paid for entirely out of the caveat's budget.
+     `text-overflow: ellipsis` is REMOVED, not kept: it never worked here. Ellipsis truncates ONE block-
+     level box's own text; `.tv-title` is the flex CONTAINER holding three separate flex items (the icon,
+     an anonymous text item for "Trash", and the `.tv-count` span), and a flex container's `ellipsis`
+     does not summarize its children's combined overflow — the round-2 comment claiming otherwise was
+     wrong, and the round-2 render showed a literal hard mid-word cut ("Tr"), never a "…". If content ever
+     exceeds the floor above (not expected within the supported width range), it hard-clips with no
+     ellipsis marker — a lesser problem than the false claim that a truncation indicator would appear. */
   .tv-title {
     display: flex;
     align-items: center;
     gap: 8px;
     font-weight: 600;
-    min-width: 0;
+    min-width: 34ch;
     overflow: hidden;
     white-space: nowrap;
-    text-overflow: ellipsis;
   }
   .tv-count { font-size: 12px; font-weight: 400; opacity: 0.7; }
   /* CPE-1816: the mid-stream caveat, sharing the title bar's item-count slot rather than a separate
@@ -454,7 +507,11 @@
      "provisional status text" from the plain count/selection text this same slot shows once resolved,
      without a second colour (the slot is already dim via `.tv-count`'s opacity). */
   .tv-count-loading { font-style: italic; }
-  .tv-tools { display: flex; align-items: center; gap: 8px; }
+  /* CPE-1816 review round 3 (BLOCKING 1, paired with `.tv-title`'s floor above): without this, `.tv-tools`
+     keeps flexbox's default `min-width: auto`, which resolves to its full button-row content width and
+     makes it a de facto hard minimum — every px of shrink at a narrow window was landing on `.tv-title`
+     alone. `min-width: 0` lets it shrink and share the deficit instead. */
+  .tv-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
   .tv-btn {
     font: inherit;
     font-size: 12px;
