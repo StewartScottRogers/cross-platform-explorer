@@ -92,18 +92,35 @@ rejected on the following grounds, both of which turn on a measurement rather th
 
 **Runner cost, honestly.** `cancel-in-progress: false` does not mean every push executes. GitHub keeps
 at most **one pending run per concurrency group**: a newly queued run cancels any previously *pending*
-one, which consumes no runner minutes. A burst of N merges landing inside one CI duration therefore
-costs **two** executed runs, not N — the one already running plus one coalesced run for the tip. With
-the `Server crates (windows-latest)` leg at ~55 min, essentially any realistic burst fits inside one
-CI duration. Accepted trade: intermediate commits get no run of their own, so a red on the coalesced
-run does not by itself say which merge caused it — strictly better than the status quo, where neither
-they nor the tip get a completed run.
+one, which consumes no runner minutes. Everything merged while a run is in flight coalesces into one
+follow-up run, so a burst costs **`1 + ceil(burst_span / run_duration)`** executed runs rather than one
+per merge. That is deliberately the formula and not a round number: a burst inside a single run
+duration costs 2, and with the `Server crates (windows-latest)` leg at ~55 min that covers most
+realistic bursts — but a burst spanning two durations costs 3, and the four-commit proof burst below
+is exactly that case (it cost three executed runs, not two). Accepted trade: intermediate commits get
+no run of their own, so a red on the coalesced run does not by itself say which merge caused it —
+strictly better than the status quo, where neither they nor the tip get a completed run.
 
-Keeping one group per ref (rather than giving `main` a separate never-cancelling group) is what
-preserves CPE-1266's anti-pile-up property on `main`: merges coalesce instead of launching dozens of
-parallel matrices. PR-branch behaviour is untouched — `github.ref` is `refs/pull/<n>/merge` there, the
-expression is `true`, CPE-1266 applies unchanged. No trigger was modified, so CPE-1781's
-`paths-ignore` is intact and still does its job.
+**Verdict latency roughly doubles, and that is the part with a consumer.** A merge landing mid-run now
+waits `pending` for the in-flight run before starting, so merge→verdict on `ci.yml` goes from ~55 min
+to as much as ~110. Flagged explicitly because this ticket cites the sprint ledger's
+`post_merge_defect` back-annotation as a motivation, and that window must now tolerate a ~2-hour lag:
+a Foreman that checks `main` a few minutes after merging and reads a still-`pending` run as clean
+would recreate this very false negative in a new shape. **Wait for a conclusion; never infer one from
+a status.** Still the right trade — a late verdict beats a cancelled one — but a real timing change.
+
+**Why the expression rather than a separate never-cancelling group for `main`: convenience, not
+capability.** A static `group: ci-main` with `cancel-in-progress: false` would coalesce identically
+and would **not** have reintroduced CPE-1266's pile-up — that pile-up came from having *no*
+`concurrency` block at all ("Compounded by NO `concurrency` groups anywhere", CPE-1266), so any group,
+expression or literal, resolves it. Recorded plainly because the alternative is easy to rediscover and
+a reader who does should not conclude something was being hidden. The expression wins only on keeping
+one rule in one place: no second concurrency block to keep in sync, and the `main`/not-`main`
+distinction written once where it is read.
+
+PR-branch behaviour is untouched — `github.ref` is `refs/pull/<n>/merge` there, the expression is
+`true`, CPE-1266 applies unchanged. No trigger was modified, so CPE-1781's `paths-ignore` is intact
+and still does its job.
 
 ## Work Log
 
@@ -141,10 +158,14 @@ expression is `true`, CPE-1266 applies unchanged. No trigger was modified, so CP
      discriminator: it is the same expression shape with the comparison flipped, and it **cancelled**.
      Had the expression been ignored, or the raw `${{ … }}` string coerced to truthy, B and C would
      have behaved identically. They did not, so the evaluated *value* is what drove the behaviour.
-  3. **The cost bound is real, not inferred.** Arm B's commit-3 run (`32369783822`) was superseded
-     while still `pending` and `GET /actions/runs/32369783822/jobs` returns an **empty `jobs` array** —
-     it never allocated a job, so it burned zero runner minutes. That is the mechanic behind the
-     "N merges cost 2 runs" claim above, observed rather than assumed.
+  3. **The coalescing mechanic is real, not inferred.** Arm B's commit-3 run (`32369783822`) was
+     superseded while still `pending` and `GET /actions/runs/32369783822/jobs` returns an **empty
+     `jobs` array** — it never allocated a job, so it burned zero runner minutes. That is the
+     mechanic behind the `1 + ceil(burst_span / run_duration)` cost above, observed rather than
+     assumed. Note the arithmetic on this very table: arm B executed **three** runs across four
+     commits (commits 1, 2 and 4), because the pushes were spaced ~2.5 min apart against a 5-min job
+     and so spanned about two run durations. That is the formula behaving exactly as written, and it
+     is why the cost is recorded as a formula rather than as "two".
 
   **What the proof does NOT establish**, stated plainly: it ran on a branch named `cpe-1799-proof`
   with that name substituted into the expression, not on `main` itself, and the jobs were 5-minute

@@ -91,11 +91,13 @@ on:
 # since CPE-1594, ratcheted against `known-failing.json` — are the only thing that catches an
 # interaction between two PRs that compiles perfectly and misbehaves at RUNTIME in the real built
 # app. Protecting one and not the other would leave the net with a hole shaped exactly like the
-# defects that are hardest to find by reading a diff. The pending-supersession bound described in
-# ci.yml means the cost of including this workflow is ~2 coalesced runs per merge burst rather than
-# one per merge, which is affordable; and the hang risk that motivated CPE-1266 is held by the
-# per-job `timeout-minutes` caps below — which are what actually stop a wedged WebDriver from
-# holding a slot — not by cancel-in-progress.
+# defects that are hardest to find by reading a diff. The pending-supersession mechanic described in
+# ci.yml means including this workflow costs `1 + ceil(burst_span / run_duration)` coalesced runs per
+# merge burst rather than one run per merge — 2 for a burst inside a single run duration, 3 for one
+# spanning two, not a flat number — which is affordable; and the hang risk that motivated CPE-1266 is
+# held by the per-job `timeout-minutes` caps below, which are what actually stop a wedged WebDriver
+# from holding a slot, not by cancel-in-progress. Verdict latency roughly doubles here too, for the
+# same queue-behind-the-in-flight-run reason ci.yml's LATENCY note spells out.
 #
 # Note the `schedule:` and `workflow_dispatch:` triggers above also carry `github.ref` =
 # `refs/heads/main`, so they stop being cancellable by an incoming merge as well. That is wanted:
