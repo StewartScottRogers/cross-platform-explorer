@@ -351,6 +351,49 @@ mod tests {
         }
     }
 
+    /// CPE-1818: assert `pid` is gone, but **bounded-poll** rather than checking once and panicking
+    /// immediately. `pid_is_alive` (above) asks the OS's own process table (`tasklist`/`ps`) whether the
+    /// PID is still enumerable, and closing our last handle to a child does not guarantee that table is
+    /// scrubbed synchronously -- on Windows in particular, `CloseHandle` schedules the process object's
+    /// deletion but doesn't have to complete it before the call returns, so `tasklist` can still see the
+    /// PID for a while after the handle is gone, worse under a loaded runner.
+    ///
+    /// The 10s deadline (matching this file's existing convention for output-drain polling elsewhere in
+    /// this module) is a **generous ceiling for a scheduling gap, not a tuned estimate** of how long
+    /// teardown "should" take. It costs nothing on the happy path -- the loop returns the instant
+    /// `pid_is_alive` goes false, which every idle run does in well under a second -- and it does not
+    /// weaken the guarantee this check pins: a PID that is genuinely still alive (a real leak) never
+    /// satisfies `!pid_is_alive` no matter how long you wait, so this still reds at the deadline,
+    /// deterministically, exactly like the single-shot assert did. It just no longer mistakes "not reaped
+    /// *yet*" for "not reaped at all". (CPE-1818 review round 1 measured a 2s deadline failing 1/10 under
+    /// heavy combined contention -- a parallel build *and* a second competing `cargo test` loop on a
+    /// 32-core box -- at 6.59s wall; 10s leaves headroom past that, and `windows-latest` CI runners are
+    /// weaker and more oversubscribed than any dev box, so a shorter number would still be a guess
+    /// dressed up as a measurement.)
+    ///
+    /// **Accepted residual: PID reuse.** `pid_is_alive` matches purely on the numeric PID (`tasklist /FI
+    /// "PID eq {pid}" /NH` containment, or `ps -p` on Unix) with no process-name or start-time
+    /// cross-check, so it cannot distinguish "our child is still alive" from "an unrelated process the OS
+    /// handed the same PID after ours exited". The pre-CPE-1818 single-shot check had a near-zero
+    /// exposure window to that race; polling widens it to the full deadline, and a 10s deadline widens it
+    /// further than 2s did. This is accepted rather than closed: Windows does not rapidly recycle
+    /// recently-freed PIDs (its allocator cycles through a large space before reusing one), so the odds
+    /// of an unrelated process landing on exactly this PID inside the poll window are low, and this
+    /// helper is test-only, never production. Closing it properly would mean cross-checking the child's
+    /// process start time or image name (e.g. `CreateToolhelp32Snapshot`/`GetProcessTimes` on Windows, or
+    /// parsing `tasklist`'s image-name column) against a value captured before teardown -- not done here,
+    /// out of scope for a flake fix, but written down so it isn't a silent unknown.
+    fn assert_pid_reaped_within(pid: u32, timeout: Duration, msg: &str) {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if !pid_is_alive(pid) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{msg}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
     #[test]
     fn runs_a_command_in_a_real_pty_and_streams_output() {
         let mut session = spawn_inline("echo pty-works");
@@ -507,7 +550,14 @@ mod tests {
         // would buy nothing, because `try_wait()` already covers that failure deterministically.
         // Deliberately left as-is with the attribution written down instead.
         drop(session); // release the last handle we hold to the child (see comment above)
-        assert!(!pid_is_alive(pid), "OS process should be gone once we drop our handle");
+        // CPE-1818: bounded-poll instead of a single immediate check -- see `assert_pid_reaped_within`'s
+        // doc comment. This is still the leak check the comment above describes, just no longer racing
+        // the OS's own asynchronous process-table teardown.
+        assert_pid_reaped_within(
+            pid,
+            Duration::from_secs(10),
+            "OS process should be gone once we drop our handle",
+        );
     }
 
     // --- PtyRegistry: the id-keyed session bookkeeping that backs open/write/resize/close_pty --------
@@ -603,7 +653,14 @@ mod tests {
             );
             // The OS-level check: not just "the registry forgot about it" but "the process is actually
             // dead" -- proving close_all() really kills (not merely drops/forgets) each session.
-            assert!(!pid_is_alive(pid), "OS process {pid} should be gone after close_all()");
+            // CPE-1818: bounded-poll, same reasoning as `assert_pid_reaped_within`'s doc comment -- the
+            // local `handles` Vec drops each session (and its last handle) before `close_all()` returns,
+            // but the OS's own process-table teardown after that `CloseHandle` is still asynchronous.
+            assert_pid_reaped_within(
+                pid,
+                Duration::from_secs(10),
+                &format!("OS process {pid} should be gone after close_all()"),
+            );
         }
     }
 
