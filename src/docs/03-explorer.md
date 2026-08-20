@@ -229,6 +229,15 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   mid-copy. It stays hidden when nothing is transferring. (Moves are near-instant same-folder-volume
   renames, so they don't need the panel.) If a copy would overwrite files that already exist, a prompt
   asks once how to handle the whole batch — **Replace**, **Keep both** (auto-numbered), or **Skip**.
+- **"…was free when this operation picked the name and is not free now"** — a copy or move can report
+  this against one item. It means something else — another app, a sync client like OneDrive or Dropbox,
+  a second window, a script — created a file, folder or shortcut at exactly the name the transfer had
+  already chosen, in the instant between choosing it and writing to it. **Nothing was overwritten and
+  nothing was written outside the folder you picked**: the destination name is claimed up front now, so
+  a name that gets taken in that gap fails loudly instead of quietly replacing what appeared there (or,
+  when the newcomer was a shortcut, following it and putting your file somewhere else entirely). The
+  rest of the batch continues; just run the operation again for the item that failed and it will pick a
+  fresh name.
 
 ## Add metadata columns
 

@@ -78,17 +78,17 @@ This is a class fix, not a one-liner — hence L. Sketch, not prescription:
 
 ## Acceptance criteria
 
-- [ ] A link planted at the picked name **between probe and write** cannot cause a copy to write outside the
+- [x] A link planted at the picked name **between probe and write** cannot cause a copy to write outside the
       destination folder. Demonstrate with the auditor's reproduction, showing the new behaviour.
-- [ ] The move/rename case is decided, documented per-OS, and tested on all three — not left implicit.
-- [ ] The failure is **loud**: a name taken in the gap surfaces an error naming the path, never a silent
+- [x] The move/rename case is decided, documented per-OS, and tested on all three — not left implicit.
+- [x] The failure is **loud**: a name taken in the gap surfaces an error naming the path, never a silent
       success and never a silent clobber.
-- [ ] Every name-picking write site is covered or explicitly listed as out of scope with a reason. A fix at
+- [x] Every name-picking write site is covered or explicitly listed as out of scope with a reason. A fix at
       three sites that leaves four siblings is how this class keeps returning.
-- [ ] Each test asserts the **harm** (where the bytes actually landed, whether the link survived) **before**
+- [x] Each test asserts the **harm** (where the bytes actually landed, whether the link survived) **before**
       unwrapping the `Result` — every defect in this family fails by succeeding, so an assertion after an
       `unwrap` is unreachable exactly when it matters.
-- [ ] The two `fsutil.rs` doc comments (`:116-118`, `:1757`) that currently say this is unfixed are updated
+- [x] The two `fsutil.rs` doc comments (`:116-118`, `:1757`) that currently say this is unfixed are updated
       to describe what is now true.
 
 ## Notes
@@ -96,3 +96,68 @@ This is a class fix, not a one-liner — hence L. Sketch, not prescription:
 Found by the Security Auditor on **PR #924 / CPE-1715**, 2026-08-17, during the batched sprint. Related:
 CPE-1715 (the dangling-link probe, which this sits underneath), CPE-1744, CPE-1758, CPE-1709 — the same
 "reports success, bytes elsewhere" family.
+
+## Work Log
+
+### 2026-08-20 — implemented (branch `cpe-1765-name-pick-write-gap`)
+
+**The decision: claim the name, don't re-check it.** New primitives in `crates/server/src/fsutil.rs`:
+`slot_taken_message` (pure, path-naming), `claim_file_slot` (`create_new`), `claim_dir_slot`
+(`create_dir`, **not** `create_dir_all`), `copy_file_into_claimed_slot`, `copy_tree_into_claimed_slot`,
+`SlotClaim` (RAII placeholder) and `rename_into_claimed_slot` returning
+`Renamed` / `SlotTaken(msg)` / `RenameFailed(io::Error)`. No new dependencies.
+
+**Measured first, then designed** (Windows 11, stable `rustc`, standalone probe):
+
+```text
+rename(dir  -> existing FILE)        Ok      the file was replaced by a directory
+rename(dir  -> existing EMPTY DIR)   Ok      contents moved in
+rename(dir  -> existing NONEMPTY)    Err DirectoryNotEmpty
+rename(file -> existing FILE)        Ok      bytes replaced
+rename(file -> existing DIR)         Err PermissionDenied
+rename(file -> junction)             Ok      LINK DESTROYED, no error   <- the defect
+create_dir(junction)                 Err AlreadyExists (os error 183)
+create_new(junction)                 Err PermissionDenied (os error 5)
+create_new(file symlink)             Err AlreadyExists (os error 80)
+fs::write(file symlink)              Ok  -> outside.txt now "USER CONTENT"  <- the escape
+```
+
+Rows 1–2 disproved the `MoveFileEx` folklore this design was nearly built on (modern `std` renames on
+Windows with POSIX semantics), which is why **one** mechanism serves all three platforms instead of a
+`cfg` split: the rename replaces this process's *own* placeholder — a file for a file source, an empty
+directory for a directory source — on Windows and POSIX alike. Pinned per-OS by
+`cpe_1765_a_free_name_still_moves_a_file_and_a_directory`, which CI runs on Linux, macOS and Windows.
+
+**Sites.** Fixed: `do_copy_into`, `do_move_into` (both split so the write half —
+`write_copy_into_picked_slot` / `write_move_into_picked_slot` — is callable from a test),
+`copy_dir_all` incl. every interior name, `run_transfer`'s move fast path, `copy_tree_streamed`
+(`create_dir_all` said `Ok` to a directory link — a whole tree left the folder that way),
+`stream_copy_file`, and `snapshot_capture::save_manifest` (a sibling the ticket did not name:
+`pick_manifest_id` proved an id free and `fs::write` then truncated whoever took it). Explicitly out of
+scope with reasons — `batch_media` (own planner + own reparse-tag classifier; converting it changes the
+transform pipeline's output contract), `backup::copy_one_verified` (derived mirror destination, not a
+picked name), `save_store` (one fixed name), `stage_and_replace` (edits an existing name, already
+atomic). The full table is in `fsutil.rs`'s CPE-1765 section header.
+
+**Trade-off accepted and recorded:** the file copier streams through the claimed handle, so Windows
+`CopyFileEx` extras (NTFS alternate data streams) are no longer carried. Permission bits still are. This
+makes `do_copy_into` agree with `stream_copy_file`, which has always been a manual byte loop.
+
+**Residual, stated rather than glossed:** a process that *deletes this process's placeholder* mid-move
+could still have its replacement renamed over. It cannot send bytes outside the folder (rename does not
+follow the final component) and needs an actor deleting files it did not create.
+
+**Evidence.** 11 new `fsutil` tests + 5 in `src-tauri` + 2 in `snapshot_capture`, all asserting the harm
+(where the bytes landed, whether the link/occupant survived) **before** touching the `Result`. Red-proofs
+run and reverted: `claim_file_slot`→`File::create` reds 4; `claim_dir_slot`→`create_dir_all` reds 2;
+`SlotClaim::drop` neutralised reds 1; reverting all four app write sites reds 4 (each printing
+`result Ok(...)` — the defect's exact signature); `save_manifest`→`fs::write` reds 1; a copier that
+refuses everything reds the parity tests, so an over-refusing "fix" cannot pass.
+
+**Not verified locally:** the Linux and macOS legs. Everything above was measured and run on Windows;
+the POSIX rows of the table are `rename(2)`'s specification, and CI's 3-OS backend matrix is what
+actually exercises them. The live-file-symlink leg announces a loud skip on a Windows runner without
+`SeCreateSymbolicLinkPrivilege`; a privilege-free hard-link leg asserts the same harm everywhere.
+
+Docs: `src/docs/03-explorer.md` explains the new per-item message. No new Section, so `sectionDocs.ts`
+is unchanged.

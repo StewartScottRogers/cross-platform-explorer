@@ -482,12 +482,26 @@ fn save_store(store_dir: &Path, store: &BlobStore) -> Result<(), String> {
     fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// **CPE-1765 — this is a name-picking write, so it CLAIMS the name.** Its one production caller runs
+/// [`fresh_manifest_id`] and then this, so the id was proved free by a probe and then handed to a plain
+/// `fs::write`: the exact probe-then-write shape the copy/move sites carried. Two things could get
+/// between them — a concurrent capture in another window landing on the same millisecond, and a link
+/// planted at `<id>.json`, which `fs::write` follows out of the store — and both ended with a truncated
+/// file and an `Ok`.
+///
+/// [`crate::fsutil::claim_file_slot`] makes the create its own existence check, so an id taken in that
+/// gap is a refusal naming the path instead of a lost manifest. Safe here precisely because the id is
+/// always fresh: this function has never had a legitimate reason to overwrite an existing manifest, and
+/// now it cannot. (Its sibling `save_store` writes a single fixed `index.json` the app owns and rewrites
+/// every capture — not a picked name, deliberately left alone.)
 fn save_manifest(store_dir: &Path, manifest: &PersistedManifest) -> Result<(), String> {
+    use std::io::Write as _;
     let dir = manifests_dir(store_dir);
     fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let json = serde_json::to_string_pretty(manifest).map_err(|e| e.to_string())?;
     let path = manifest_path(store_dir, &manifest.id);
-    fs::write(&path, json).map_err(|e| format!("{}: {e}", path.display()))
+    let mut f = crate::fsutil::claim_file_slot(&path)?;
+    f.write_all(json.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 fn load_manifest(store_dir: &Path, manifest_id: &str) -> Result<PersistedManifest, String> {
@@ -592,6 +606,57 @@ mod tests {
 
     fn scratch(tag: &str) -> crate::fsutil::ScratchDir {
         crate::fsutil::scratch_dir(&format!("cpe-snapcap-{tag}"))
+    }
+
+    /// **CPE-1765.** `fresh_manifest_id` proves an id free and `save_manifest` then writes to it; a second
+    /// capture landing on the same millisecond, or a link planted at `<id>.json`, fits between them. The
+    /// pre-fix `fs::write` truncated whatever was there and returned `Ok`, losing a whole snapshot's file
+    /// list. The bytes are asserted **before** the `Result`, because that is exactly the outcome the bug
+    /// produced.
+    #[test]
+    fn cpe_1765_save_manifest_refuses_an_id_taken_in_the_gap_instead_of_truncating_it() {
+        let d = scratch("cpe1765_manifest_gap");
+        let store = d.path();
+        std::fs::create_dir_all(manifests_dir(store)).unwrap();
+        let taken = manifest_path(store, "1786642033625");
+        std::fs::write(&taken, b"SOMEONE ELSE'S MANIFEST").unwrap();
+
+        let r = save_manifest(
+            store,
+            &PersistedManifest {
+                id: "1786642033625".to_string(),
+                created_ms: 0,
+                files: Default::default(),
+                skipped: Vec::new(),
+            },
+        );
+
+        assert_eq!(
+            std::fs::read_to_string(&taken).unwrap(),
+            "SOMEONE ELSE'S MANIFEST",
+            "the save truncated a manifest that took the id in the gap"
+        );
+        let e = r.expect_err("an id taken in the gap must not report success");
+        assert!(e.contains(&taken.display().to_string()), "the refusal must name the path: {e}");
+    }
+
+    /// Parity for the same change: a fresh id still writes a manifest that round-trips. A "fix" that
+    /// refused every save would pass the test above and break every capture.
+    #[test]
+    fn cpe_1765_save_manifest_still_writes_a_manifest_at_a_free_id() {
+        let d = scratch("cpe1765_manifest_ok");
+        let store = d.path();
+        save_manifest(
+            store,
+            &PersistedManifest {
+                id: "42".to_string(),
+                created_ms: 7,
+                files: Default::default(),
+                skipped: Vec::new(),
+            },
+        )
+        .expect("a free id must save");
+        assert_eq!(load_manifest(store, "42").unwrap().created_ms, 7);
     }
 
     /// Create a symlink at `link` pointing at `target`; returns false when creation isn't permitted (e.g.
