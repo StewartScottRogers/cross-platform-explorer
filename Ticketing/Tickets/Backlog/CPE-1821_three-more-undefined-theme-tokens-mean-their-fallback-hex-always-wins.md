@@ -80,3 +80,26 @@ Found by looking at rendered screenshots rather than by grepping, which is why C
 3. The methodology note is the durable finding: a token audit that greps for `var(--token, #hex)` is
    structurally blind to a bare hex that never referenced the token at all. Audit by **rendered colour
    value**, not by call shape.
+
+## Added 2026-08-20 (CPE-1810 Reviewer, round 2) — `--bg-dim` makes a whole pane untokenizable
+
+`SidecarManager.svelte:376` sets `.logs { background: var(--bg-dim, #0f0f0f) }`. Because `--bg-dim`
+is defined nowhere, that pane's real background is the literal `#0f0f0f` **in every theme** —
+including light and hc-light. Any token calibrated against `--surface`/`--bg` is therefore measured
+against the wrong reference on this surface.
+
+CPE-1810 hit this directly: tokenizing `.log-error`/`.log-warn` onto `--danger`/`--warn` produced
+**3.39:1 / 3.24:1 in light and 1.92:1 / 2.45:1 in hc-light** against the real `#0f0f0f`, where the
+old flat literals (`#d08b2b`, `#c9a227`) read **6.77:1 / 7.92:1**. That change was reverted with a
+comment pointing here; the pairing stays on literals until `--bg-dim` is real.
+
+So this ticket owns two things for the log pane, in order:
+- [ ] Define `--bg-dim` per theme so the pane has a real background.
+- [ ] Then tokenize `.log-error` → `--danger` and `.log-warn` → `--warn`, which fixes a genuine
+      semantic inversion (the caution token currently marks errors), and verify contrast **against
+      the pane's own resolved background**, not against `--surface`.
+
+**Guard gap worth closing here too:** no existing guard checks a token against a component-local
+fixed-literal background — `dark-contrast`, `solid-fill-contrast` and `warn-token` all reason about
+`--surface`/`--bg` or white. That is why this regression reached review instead of CI. A guard that
+resolves each rule's *actual* background chain before computing contrast would have caught it.
