@@ -41,7 +41,15 @@ name: ffmpeg/pdfium pin freshness check
 # concurrently-filed tickets.
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      override_ffmpeg_build_tag:
+        description: >-
+          Test hook (CPE-1763): override FFMPEG_BUILD_TAG instead of reading it from
+          release-sidecar.yml, to dry-run the stale-pin path without touching the real pin.
+          Leave empty for a normal run.
+        required: false
+        type: string
   schedule:
     - cron: "0 7 * * 1" # weekly, Mondays 07:00 UTC
 
@@ -60,6 +68,8 @@ jobs:
 
       - name: Extract pins from release-sidecar.yml (no second copy)
         id: pins
+        env:
+          OVERRIDE_FFMPEG_BUILD_TAG: ${{ inputs.override_ffmpeg_build_tag }}
         run: |
           set -euo pipefail
           extract() {
@@ -77,6 +87,15 @@ jobs:
           ffmpeg_build_tag="$(extract FFMPEG_BUILD_TAG)"
           ffmpeg_build_ver="$(extract FFMPEG_BUILD_VER)"
           pdfium_tag="$(extract PDFIUM_TAG)"
+
+          # Test hook (CPE-1763): a manual dispatch can override the extracted ffmpeg tag to dry-run
+          # the stale-pin path (e.g. against the known-pruned autobuild-2026-08-01-13-21) without
+          # ever touching the real pin in release-sidecar.yml. Empty on every scheduled run.
+          override="${OVERRIDE_FFMPEG_BUILD_TAG:-}"
+          if [ -n "$override" ]; then
+            echo "::notice::override_ffmpeg_build_tag set -- using '${override}' instead of the real pin '${ffmpeg_build_tag}' (test run only)"
+            ffmpeg_build_tag="$override"
+          fi
           echo "ffmpeg_build_tag=${ffmpeg_build_tag}" >> "$GITHUB_OUTPUT"
           echo "ffmpeg_build_ver=${ffmpeg_build_ver}" >> "$GITHUB_OUTPUT"
           echo "pdfium_tag=${pdfium_tag}" >> "$GITHUB_OUTPUT"
