@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "cross-platform-explorer"
-version = "0.57.67"
+version = "0.57.68"
 dependencies = [
  "base64 0.22.1",
  "cpe-mdns",
