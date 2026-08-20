@@ -1389,12 +1389,20 @@ fn parse_list_bucket_result(xml: &str, key_prefix: &str) -> Result<ListPage, Str
         let Some(leaf) = leaf_under_prefix(prefix_text, key_prefix) else { continue };
         raw_entries += 1;
         let leaf = leaf.trim_end_matches('/');
-        if leaf.is_empty() {
-            continue;
-        }
+        // CPE-1801: there used to be a separate `if leaf.is_empty() { continue; }` right here, dropping
+        // a slashes-only key (its `CommonPrefixes` rollup trims down to `""`) *before* the counting arm
+        // below — invisible AND uncounted, silently breaking CPE-1704's `entries.len() + filtered_count`
+        // delete-path total. Unlike `Contents`' own `leaf.is_empty()` arm just above (that one is the
+        // directory's own marker object — a distinct, legitimate object deliberately tracked via
+        // `raw_entries` instead, per `ListPage::raw_entries`'s doc), there is no marker here to exclude:
+        // a `CommonPrefixes` entry only exists when something sits beyond the requested prefix, so an
+        // empty leaf here means the object itself — the slashes-only key — has no displayable name, full
+        // stop. `is_safe_s3_leaf` already refuses `""` as one of its own arms, so removing the special
+        // case routes it through the same refusal as any other unsafe leaf: still invisible, but counted.
         if !is_safe_s3_leaf(leaf) {
             // AC5, the directory-entry mirror of the Contents check above; also counted. The CPE-1706
-            // item 3 length cap is inside `is_safe_s3_leaf`, so it mirrors here for free.
+            // item 3 length cap is inside `is_safe_s3_leaf`, so it mirrors here for free — and, since
+            // CPE-1801, so does the empty-leaf (slashes-only key) case.
             filtered_count += 1;
             continue;
         }
@@ -7245,13 +7253,18 @@ mod tests {
                 // A key of only slashes has an empty leaf, so it cannot be surfaced as a navigable child
                 // name. What it must NOT do is appear under an invented one.
                 //
-                // NAMED LIMITATION, not an assertion of correctness: `parse_list_bucket_result` drops an
-                // empty `<CommonPrefixes>` leaf with a bare `continue` *before* the `filtered_count`
-                // arm, so this key is invisible AND uncounted — the listing is quietly one shorter than
-                // the bucket. That is CPE-1704's counting contract, which the `delete` belt reads as
-                // `entries.len() + filtered_count`; changing it is a decision for that ticket, not a
-                // rider on a path-grammar fix. Pinned here as `0` so the day someone does count it, this
-                // test reds and the limitation gets revisited deliberately rather than drifting.
+                // CPE-1801: this used to be a NAMED LIMITATION pinned at `filtered == 0` —
+                // `parse_list_bucket_result` dropped an empty `<CommonPrefixes>` leaf with a bare
+                // `continue` *before* the `filtered_count` arm, so the key was invisible AND uncounted,
+                // quietly breaking CPE-1704's `entries.len() + filtered_count` delete-path total. Fixed
+                // by routing the empty leaf through the same `is_safe_s3_leaf` refusal as any other
+                // unsafe leaf (empty is one of that guard's own arms) instead of a separate early
+                // `continue` — so it is now counted, deliberately, at `1`. Still invisible: a slashes-only
+                // key genuinely has no displayable name, and surfacing one under an invented name would
+                // make `list` disagree with `stat` (which also reports `""` for this key) — exactly the
+                // two-projections-disagree bug this whole test exists to catch. Updated here rather than
+                // deleted so the guard keeps doing its job: touch this arithmetic again without reading
+                // this comment, and it reds.
                 None => {
                     assert!(
                         names.is_empty(),
@@ -7259,8 +7272,10 @@ mod tests {
                          it under an invented name; it returned {names:?}"
                     );
                     assert_eq!(
-                        filtered, 0,
-                        "pinning the known limitation: an empty-leaf key is currently dropped uncounted"
+                        filtered, 1,
+                        "CPE-1801: a slashes-only key's empty CommonPrefixes leaf must be counted into \
+                         filtered_count, not dropped uncounted, so entries.len() + filtered_count stays \
+                         a true total"
                     );
                 }
             }
