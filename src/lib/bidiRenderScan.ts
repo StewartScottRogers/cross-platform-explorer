@@ -652,14 +652,20 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  OWN NAME reads as a filesystem location, regardless of what expression eventually renders it; equally,
  *  `<p>{displaySafeName(message)}</p>` — a component whose OWN prop name is generic but which itself
  *  calls the escape helper on arrival.
- *  **Out of scope** (example): `StatusBar.svelte` as it stands today — item counts, a disk-free label, git
- *  branch/ahead/behind, a plain `notice` string. Nothing in it is a filesystem entry's name or path (or a
- *  variable NAMED like one), and it doesn't call either escape helper, so it doesn't match this pattern
- *  and carries no `REGISTRY` entry. The moment it (or any file) starts rendering one of these shapes,
- *  `isCandidateComponent` flags it and the membership test in `bidiEscape.guard.test.ts` reds until it's
- *  registered — registration becomes the thing you cannot forget, not the thing you must remember. See
- *  that test's own mutation-probe demonstration (CPE-1768 AC: the review's original `StatusBar.svelte`
- *  injected-render probe, reproduced without leaving a permanent unregistered fixture in the tree).
+ *  **Out of scope** (example): `Toolbar.svelte`'s `label` prop as it stands today — reads generic
+ *  ("`export let label: string;`"), but every real call site (`App.svelte` x3, `ExplorerPane.svelte`)
+ *  passes a static `$t(...)` i18n string, never anything filesystem- or agent-derived, and the file
+ *  doesn't call either escape helper, so it doesn't match this pattern and carries no `REGISTRY` entry.
+ *  **This is a call-site fact, not a shape fact** — CPE-1798 found the opposite conclusion once wrongly
+ *  recorded for `StatusBar.svelte`'s `notice` (fed 35 live backend-error strings) and `AgentMenu.svelte`'s
+ *  `sessionLabel` (built from an agent's own self-reported name), both of which now escape on arrival and
+ *  are `REGISTRY` candidates through the `displaySafeName(`-call trigger below; verify a component's
+ *  actual callers, not just its prop shape, before calling it static. The moment any file starts
+ *  rendering one of these shapes, `isCandidateComponent` flags it and the membership test in
+ *  `bidiEscape.guard.test.ts` reds until it's registered — registration becomes the thing you cannot
+ *  forget, not the thing you must remember. See that test's own mutation-probe demonstration (CPE-1768
+ *  AC: the review's original `StatusBar.svelte` injected-render probe, reproduced without leaving a
+ *  permanent unregistered fixture in the tree).
  *
  *  **Still not exhaustive (CPE-1790's own honest boundary):** a component with a generic prop name that
  *  neither matches a name/path SHAPE nor yet calls `displaySafeName`/`displaySafePath` — the exact bug

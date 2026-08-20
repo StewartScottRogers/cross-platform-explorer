@@ -5,14 +5,20 @@
   import { createEventDispatcher, onMount } from "svelte";
   import Icon from "./Icon.svelte";
   import { sessionColor, sessionNum } from "../sessionChip";
+  import { displaySafeName } from "../filename";
 
   export let x = 0;
   export let y = 0;
-  /** The close-all action's label (e.g. "Close all consoles"). */
+  /** The close-all action's label (e.g. "Close all consoles"). Every caller today passes a static
+      verb/`$t(...)` string, matching Toolbar.svelte's/Submenu.svelte's genuinely-static `label` prop —
+      no escape needed here. */
   export let label = "Close Agent Deck";
   /** When set, a per-session close is offered for this session id (CPE-489). */
   export let sessionId: string | undefined = undefined;
-  /** Human label for the per-session close item (e.g. "claude · sonnet-4.5"). */
+  /** Human label for the per-session close item (e.g. "claude · sonnet-4.5") — Sidebar.svelte's only
+      caller builds this from `s.agentName || s.agentId`, the agent's OWN self-reported identity string
+      (CPE-1798 sibling audit): not static UI copy, so it's escaped on arrival below, same leaf-escapes
+      model as StatusBar's `notice`. */
   export let sessionLabel = "this session";
 
   const dispatch = createEventDispatcher<{ confirm: void; closeOne: string; open: string; close: void }>();
@@ -50,12 +56,12 @@
     <!-- Open the Agent Deck focused on this session's tab (CPE-532). -->
     <button class="row" role="menuitem" on:click={() => { dispatch("open", sessionId); dispatch("close"); }}>
       <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>
-      Open {sessionLabel}
+      Open {displaySafeName(sessionLabel)}
     </button>
     <button class="row" role="menuitem" on:click={() => { dispatch("closeOne", sessionId); dispatch("close"); }}>
       <!-- The same colour+number chip as the leaf (CPE-493), so it's unambiguous which session closes. -->
       <span class="menu-chip" style="background:{sessionColor(sessionId)}">{sessionNum(sessionId)}</span>
-      Close {sessionLabel}
+      Close {displaySafeName(sessionLabel)}
     </button>
     <div class="sep" role="separator" />
   {/if}

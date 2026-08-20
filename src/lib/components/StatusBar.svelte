@@ -2,6 +2,7 @@
   import { createEventDispatcher } from "svelte";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { formatSize, formatDiskFree } from "../format";
+  import { displaySafeName } from "../filename";
 
   /** Begin an OS-window resize from the bottom-right corner when the grip is pressed (CPE-842).
       Guarded so it's a harmless no-op outside Tauri (e.g. the jsdom test harness). */
@@ -44,6 +45,12 @@
    *  line is data ABOUT the listing, never a fake ROW IN it — same convention as `hiddenShown` above,
    *  the closest existing precedent (a folder-scoped fact about what's/isn't currently shown). */
   export let filteredHidden = 0;
+  // CPE-1798: `notice` is fed raw backend error strings from 35 `showNotice(String(e), true)` call
+  // sites in `App.svelte` (plus one hand-built "Sync failed: " + e.message), and a Rust error routinely
+  // embeds the offending filesystem path — so escaping on arrival, same leaf-escapes-what-it-renders
+  // model CPE-1790 established for ConfirmDialog/PasswordPromptDialog, is required here too, not just
+  // for genuinely static UI copy. `displaySafeName` only replaces the twelve bidi/format control
+  // characters and is idempotent, so escaping the WHOLE message is a safe no-op on ordinary prose.
   export let notice = "";
   export let noticeIsError = false;
   /** Free / total bytes on the current drive (CPE-403); null ⇒ unknown (Home/archive/error). */
@@ -93,7 +100,7 @@
   {/if}
 
   {#if notice}
-    <span class="notice" class:error={noticeIsError} title={notice}>{notice}</span>
+    <span class="notice" class:error={noticeIsError} title={displaySafeName(notice)}>{displaySafeName(notice)}</span>
   {/if}
 
   {#if git && git.is_repo}
