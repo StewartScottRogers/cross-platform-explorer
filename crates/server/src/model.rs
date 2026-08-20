@@ -134,30 +134,48 @@ pub fn trash_entry(
 }
 
 /// Result of the collect-to-vec Trash listing (`list_trash`). Wraps `entries` with a `degraded` flag so a
-/// listing that came back empty because `trash::os_limited::list()` panicked and was caught at the
-/// boundary (CPE-1791) is distinguishable, on the frontend, from a genuinely empty Trash (CPE-1803) —
-/// the same `bool` the streamed command reports via [`TrashStreamSummary`]. Set by the adapter in
-/// `src-tauri/src/lib.rs`, which owns the panic-catching boundary; this DTO carries no `trash` crate
-/// dependency of its own.
+/// listing that could not be fully read is distinguishable, on the frontend, from a genuinely empty
+/// Trash (CPE-1803) — the same pair of fields the streamed command reports via [`TrashStreamSummary`].
+/// Set by the adapter in `src-tauri/src/lib.rs`, which owns both incompleteness sources; this DTO
+/// carries no `trash` crate dependency of its own.
 #[derive(Serialize, Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TrashListing {
     pub entries: Vec<TrashEntry>,
-    /// True when this pass could not fully read the OS trash and degraded to an empty page rather than
-    /// the whole Trash view crashing — NOT the same as a genuinely empty Trash. See CPE-1791/CPE-1803.
+    /// True when this pass could not fully read the OS trash — NOT the same as a genuinely empty Trash.
+    ///
+    /// Deliberately ONE flag for BOTH ways a pass can come back incomplete, because the frontend's
+    /// decision ("is what I am about to render the whole truth?") is the same for both:
+    /// - `trash::os_limited::list()` panicked and was caught at the boundary, degrading the whole pass
+    ///   to zero entries (CPE-1791/CPE-1803);
+    /// - one or more individual items were skipped because their id/name/original_parent isn't valid
+    ///   UTF-8, so `entries` holds only *some* of what is really in the Trash (CPE-1804).
+    ///
+    /// The second cause is the reason `degraded` must never be read as "and therefore empty":
+    /// degraded-with-entries is the ordinary shape of a partially-decodable Trash (CPE-1805).
     pub degraded: bool,
+    /// CPE-1804: how many items this pass dropped because a field wasn't valid UTF-8 — `0` for a clean
+    /// pass, and `0` for a caught panic too (that route degrades wholesale rather than per item, so it
+    /// has no per-item count to report). Non-zero always implies `degraded`.
+    ///
+    /// Carried as a count rather than folded into the bool so the UI can say "3 items couldn't be shown"
+    /// instead of an unqualified warning — the difference between a user knowing how much is missing and
+    /// only knowing that *something* is (the CPE-1704 counting-contract precedent).
+    pub skipped: usize,
 }
 
 /// Result of the streamed Trash listing (`list_trash_stream`), returned once every batch has gone out
-/// over the channel. `count` is the total number of entries streamed; `degraded` is the same
-/// caught-panic signal as [`TrashListing::degraded`], carried separately here because the streamed
-/// command can't attach it to the (already-sent) entries themselves.
+/// over the channel. `count` is the total number of entries streamed; `degraded`/`skipped` are the same
+/// incompleteness signals as on [`TrashListing`], carried separately here because the streamed command
+/// can't attach them to the (already-sent) entries themselves.
 #[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "specta", derive(specta::Type))]
 pub struct TrashStreamSummary {
     pub count: usize,
     /// See [`TrashListing::degraded`].
     pub degraded: bool,
+    /// See [`TrashListing::skipped`].
+    pub skipped: usize,
 }
 
 /// A sidebar quick-access location (special folder or drive).

@@ -55,12 +55,14 @@ function deliver(batch: ReturnType<typeof entry>[], callIndex = streamCalls.leng
   streamCalls[callIndex].args.onEntry.onmessage(batch);
 }
 
-/** Resolve a `list_trash_stream` call as finished (the real command resolves with a `{ count, degraded }`
- *  summary once every batch has flushed — a genuinely empty Trash resolves with `{ count: 0, degraded:
- *  false }` having sent no batches at all; CPE-1803's degraded case also sends no batches but resolves
- *  with `degraded: true`, which is the whole point — the two are otherwise indistinguishable). */
-function finishStream(count: number, degraded = false, callIndex = streamCalls.length - 1) {
-  streamCalls[callIndex].resolve({ count, degraded });
+/** Resolve a `list_trash_stream` call as finished (the real command resolves with a
+ *  `{ count, degraded, skipped }` summary once every batch has flushed — a genuinely empty Trash
+ *  resolves with `{ count: 0, degraded: false, skipped: 0 }` having sent no batches at all; CPE-1803's
+ *  degraded case also sends no batches but resolves with `degraded: true`, which is the whole point —
+ *  the two are otherwise indistinguishable. CPE-1804 adds a third shape: batches DID go out and the
+ *  summary still reports `degraded: true` with a non-zero `skipped`). */
+function finishStream(count: number, degraded = false, skipped = 0, callIndex = streamCalls.length - 1) {
+  streamCalls[callIndex].resolve({ count, degraded, skipped });
 }
 
 beforeEach(() => {
@@ -112,8 +114,9 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     expect(screen.getByText("Loading Trash…")).toBeTruthy();
 
     // A degraded pass: same shape as a genuinely empty Trash over the channel (no batches sent), but the
-    // resolved summary flags degraded: true.
-    finishStream(0, true);
+    // resolved summary flags degraded: true. `skipped: 0` — the caught-panic route loses the whole pass
+    // rather than n items, so it has no count to report and keeps CPE-1803's unquantified wording.
+    finishStream(0, true, 0);
     await settle();
 
     expect(screen.queryByText("Loading Trash…")).toBeNull();
@@ -123,6 +126,102 @@ describe("TrashView — streamed listing (CPE-1560)", () => {
     // hard "0 items" — that number is exactly what trash.degraded exists to say is NOT known. A stray
     // "0 items" here would contradict the message one line above it.
     expect(screen.queryByText("0 items")).toBeNull();
+  });
+
+  // CPE-1804/CPE-1805 — the state this pair exists to prove is degraded-WITH-entries, which before
+  // CPE-1804 the backend could not produce: the only degradation route wiped the pass to zero entries,
+  // so `entries.length === 0 && degraded` covered every degraded case by accident. Per-item non-UTF-8
+  // skips make a partial list the ordinary shape of an incomplete listing, and a partial list rendered
+  // as a plain list is the same lie in a new place — the user sees rows and stops looking.
+  //
+  // These two tests are an asymmetric pair on purpose. The first asserts the notice appears over a list;
+  // the second asserts an ordinary complete listing with the SAME rows shows no notice at all. Only the
+  // pair is meaningful: a suite with the first alone would pass with the notice rendered unconditionally,
+  // which would caveat every healthy Trash forever.
+  it("renders the incomplete-listing notice ABOVE the rows when a listing is degraded but has entries (CPE-1805)", async () => {
+    render(TrashView);
+    await settle();
+
+    // Real batches went out AND the pass was incomplete — the shape only CPE-1804's per-item skip
+    // produces, and the one the old `entries.length === 0 && degraded` branch fell straight through.
+    deliver([entry({ id: "a", name: "a.txt" }), entry({ id: "b", name: "b.txt" })]);
+    await settle();
+    finishStream(2, true, 3);
+    await settle();
+
+    // The surviving rows are still listed — degrading must not hide what WAS readable.
+    expect(screen.getByText("a.txt")).toBeTruthy();
+    expect(screen.getByText("b.txt")).toBeTruthy();
+    // ...and the notice says so, with the count, rather than the list passing itself off as complete.
+    const notice = screen.getByText("3 items in the Trash couldn't be read and aren't shown");
+    expect(notice).toBeTruthy();
+    // It must sit ABOVE the rows, not below them: a caveat under a list is read after the user has
+    // already concluded the list is everything.
+    const rowA = screen.getByText("a.txt");
+    expect(notice.compareDocumentPosition(rowA) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Not "Trash is empty" and not the unquantified panic wording — this pass knows the number.
+    expect(screen.queryByText("Trash is empty")).toBeNull();
+    expect(screen.queryByText("Trash couldn't be fully read — it may not be empty")).toBeNull();
+  });
+
+  it("renders NO notice for an ordinary complete listing with the same rows (CPE-1805 asymmetry)", async () => {
+    render(TrashView);
+    await settle();
+
+    deliver([entry({ id: "a", name: "a.txt" }), entry({ id: "b", name: "b.txt" })]);
+    await settle();
+    finishStream(2, false, 0);
+    await settle();
+
+    expect(screen.getByText("a.txt")).toBeTruthy();
+    expect(screen.getByText("b.txt")).toBeTruthy();
+    expect(screen.queryByText(/couldn't be read and aren't shown/i)).toBeNull();
+    expect(screen.queryByText(/couldn't be fully read/i)).toBeNull();
+    // The count is only suppressed for an incomplete pass — a healthy one still reports it.
+    expect(screen.getByText("2 items")).toBeTruthy();
+  });
+
+  it("uses the singular wording when exactly one item was skipped (CPE-1804)", async () => {
+    render(TrashView);
+    await settle();
+    deliver([entry({ id: "a", name: "a.txt" })]);
+    await settle();
+    finishStream(1, true, 1);
+    await settle();
+
+    expect(screen.getByText("1 item in the Trash couldn't be read and isn't shown")).toBeTruthy();
+    expect(screen.queryByText(/^1 items /)).toBeNull();
+  });
+
+  // CPE-1804's own harm, in its purest form: a Trash holding ONLY undecodable items. Zero rows arrive,
+  // exactly like a genuinely empty Trash, and before this fix the view said "Trash is empty" — the
+  // report that makes someone stop looking for a file that is still there.
+  it("an all-skipped listing reports the skipped count, never 'Trash is empty' (CPE-1804)", async () => {
+    render(TrashView);
+    await settle();
+    finishStream(0, true, 4);
+    await settle();
+
+    expect(screen.getByText("4 items in the Trash couldn't be read and aren't shown")).toBeTruthy();
+    expect(screen.queryByText("Trash is empty")).toBeNull();
+    expect(screen.queryByText("0 items")).toBeNull();
+  });
+
+  it("clears a previous pass's skipped count on refresh (CPE-1804)", async () => {
+    render(TrashView);
+    await settle();
+    finishStream(0, true, 4);
+    await settle();
+    expect(screen.getByText("4 items in the Trash couldn't be read and aren't shown")).toBeTruthy();
+
+    await fireEvent.click(screen.getByTitle("Refresh"));
+    await settle();
+    finishStream(0, false, 0, 1);
+    await settle();
+
+    // A healed Trash must not keep asserting a stale skip count from the pass before it.
+    expect(screen.queryByText(/couldn't be read and aren't shown/i)).toBeNull();
+    expect(screen.getByText("Trash is empty")).toBeTruthy();
   });
 
   it("appends multiple batches across the same stream", async () => {

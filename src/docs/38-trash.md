@@ -28,6 +28,15 @@ is actually empty, and it's a different message from "Trash is empty" on purpose
 view can fix that condition; try **Refresh**, since it can clear on its own once the underlying issue
 goes away, and any items still visible in the list remain safe to restore.
 
+A second message, **"3 items in the Trash couldn't be read and aren't shown,"** means individual
+items were dropped from this listing because their name or original location isn't text this app can
+represent — the count tells you exactly how many are missing. It appears **above the list**, not
+instead of it, so the items that could be read are still shown and still restorable; the Trash simply
+holds more than you can see here. If every item in the Trash is affected the list will be empty, but
+you will get this message rather than "Trash is empty" — an unreadable name never causes the app to
+report your Trash as empty when it isn't. The item count in the title bar is hidden whenever either
+message is showing, since the real total isn't known.
+
 ## Restoring items
 
 Check the box next to one or more items (or use **Select all**), then click **Restore selected**.

@@ -31,11 +31,20 @@
   let entries: TrashEntry[] = [];
   let loading = true;
   let error = "";
-  /** CPE-1803: true when the last completed listing pass couldn't fully read the OS trash and degraded
-   *  to no entries (CPE-1791) rather than the Trash genuinely being empty — set from the `degraded` flag
-   *  on `list_trash_stream`'s resolved summary, never inferred from `entries` being empty (a healthy
-   *  empty Trash also has zero entries, and the two must render differently). */
+  /** CPE-1803: true when the last completed listing pass couldn't fully read the OS trash rather than
+   *  the Trash genuinely being empty — set from the `degraded` flag on `list_trash_stream`'s resolved
+   *  summary, never inferred from `entries` being empty (a healthy empty Trash also has zero entries,
+   *  and the two must render differently).
+   *
+   *  CPE-1804/CPE-1805: this no longer implies `entries` is empty. It covers both the caught-panic route
+   *  (which does wipe the pass) and per-item non-UTF-8 skips (which don't), so it must be read strictly
+   *  as "what follows is not the whole truth", never as "there is nothing to show". */
   let degraded = false;
+  /** CPE-1804: how many items the last pass dropped because a field wasn't valid UTF-8 — the backend's
+   *  own count, straight off the summary. `0` with `degraded` true means the pass failed wholesale and
+   *  has no per-item count to give, which is why the message below picks its wording from this rather
+   *  than always claiming a number. */
+  let skipped = 0;
   let selected = new Set<string>();
   /** Which empty confirm is pending ("all" = whole Trash via the toolbar button with nothing selected
    *  or the explicit "Empty Trash" action; "selected" = just the checked rows), or null when the
@@ -59,6 +68,7 @@
     restoreErrors = [];
     error = "";
     degraded = false;
+    skipped = 0;
     loading = true;
     try {
       const channel = createChannel<TrashEntry[]>();
@@ -67,12 +77,16 @@
         entries = entries.concat(batch);
         loading = false; // first real rows are in — reveal them
       };
-      // CPE-1803: `list_trash_stream` resolves with a `{ count, degraded }` summary once every batch has
-      // flushed — `degraded` is the backend's own signal (CPE-1791's caught-panic boundary), never
-      // inferred here from an empty `entries`, since a genuinely empty Trash looks identical over the
-      // channel (zero batches sent either way).
+      // CPE-1803: `list_trash_stream` resolves with a `{ count, degraded, skipped }` summary once every
+      // batch has flushed — `degraded` is the backend's own signal, never inferred here from an empty
+      // `entries`, since a genuinely empty Trash looks identical over the channel (zero batches sent
+      // either way). CPE-1804: `skipped` counts the items the backend dropped for an undecodable field;
+      // that route DOES send batches, so nothing about the arriving rows reveals it either.
       const summary = await rawInvoke<TrashStreamSummary>("list_trash_stream", { onEntry: channel });
-      if (gen === loadGen) degraded = summary.degraded;
+      if (gen === loadGen) {
+        degraded = summary.degraded;
+        skipped = summary.skipped;
+      }
     } catch (e) {
       if (gen === loadGen) error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -144,6 +158,18 @@
     entries.length === 1 ? $t("trash.itemCountOne") : $t("trash.itemCountMany", { count: entries.length });
   $: selectedCountLabel =
     selected.size === 1 ? $t("trash.selectedCountOne") : $t("trash.selectedCountMany", { count: selected.size });
+  /** CPE-1804: one message for the one `degraded` state, worded from what the pass actually knows.
+   *  A per-item skip has a real count, and "3 items couldn't be shown" tells the user how much is
+   *  missing — enough to decide whether to go looking at the OS level — where an unqualified warning
+   *  only tells them that *something* is (the CPE-1704 counting-contract precedent). A caught panic has
+   *  no count to give (it lost the whole pass, not n items), so it keeps CPE-1803's wording, which was
+   *  written for exactly that: an unknown quantity of unseen entries. */
+  $: degradedMessage =
+    skipped > 0
+      ? skipped === 1
+        ? $t("trash.skippedOne")
+        : $t("trash.skippedMany", { count: skipped })
+      : $t("trash.degraded");
   $: emptyConfirmMessage =
     confirmEmpty === "all"
       ? $t("trash.emptyConfirmMessageAll")
@@ -158,9 +184,13 @@
     <div class="tv-titlebar">
       <span class="tv-title">
         <Icon name="delete" size={15} /> {$t("trash.title")}
-        <!-- CPE-1803 review: a degraded pass has zero entries but that count is NOT a known fact —
-             showing "0 items" here would sit right next to trash.degraded's whole point, which is that
-             the true count is unknown. Suppress the count entirely rather than assert a number. -->
+        <!-- CPE-1803 review: a degraded pass's entry count is NOT a known fact — showing "0 items" here
+             would sit right next to trash.degraded's whole point, which is that the true count is
+             unknown. Suppress the count entirely rather than assert a number.
+             CPE-1804 keeps that rule unchanged now that a degraded pass can also have rows: "5 items"
+             would still be a claim about the Trash's contents that this pass can't back, since the
+             skipped items are in the Trash and not in that number. The count the app DOES know — how
+             many it dropped — is in the notice instead. -->
         {#if !loading && !error && !degraded}<span class="tv-count">{itemCountLabel}{#if selected.size > 0} · {selectedCountLabel}{/if}</span>{/if}
       </span>
       <div class="tv-tools">
@@ -200,18 +230,31 @@
         <div class="tv-empty">{$t("trash.loading")}</div>
       {:else if error}
         <div class="tv-empty tv-edge error">{$t("trash.error", { error })}</div>
-      {:else if entries.length === 0 && degraded}
+      {:else if degraded && entries.length === 0}
         <!-- CPE-1803: a degraded listing must never render as "trash.empty" — an unreadable trash is
              not the same claim as a genuinely empty one, and telling the user "empty" here would make
              them stop looking for files that are still sitting in the trash. It must also read as its
              OWN state rather than borrowing the hard-failure "error" treatment (CPE-1803 review):
              restore still works, entries may still be there — this isn't a crash, it's a caution. -->
         <div class="tv-empty">
-          <span class="tv-degraded-note">{$t("trash.degraded")}</span>
+          <span class="tv-degraded-note">{degradedMessage}</span>
         </div>
       {:else if entries.length === 0}
         <div class="tv-empty">{$t("trash.empty")}</div>
       {:else}
+        {#if degraded}
+          <!-- CPE-1805: degraded-with-entries. Before CPE-1804 this branch was unreachable — the only
+               degradation route (a caught `list()` panic) wiped the pass to zero entries, so the
+               empty-only special case above was correct purely by accident, resting on an unstated
+               backend invariant. CPE-1804 makes per-item skips a second route, and that route leaves the
+               surviving entries in place: a partial list is now the ORDINARY shape of an incomplete
+               listing. Rendering it as a plain list would ship the same lie in a new place — the user
+               sees rows, assumes that's everything, and stops looking. The notice is therefore driven by
+               `degraded` ALONE; `entries.length` only chooses where it sits, never whether it appears. -->
+          <div class="tv-degraded-banner">
+            <span class="tv-degraded-note">{degradedMessage}</span>
+          </div>
+        {/if}
         <div class="tv-head-row">
           <span class="tv-cell tv-check">
             <input type="checkbox" checked={allSelected} on:change={toggleSelectAll} aria-label={$t("trash.selectAll")} />
@@ -348,6 +391,20 @@
     border-radius: var(--radius);
     padding: 8px 14px;
     font-size: 12px;
+  }
+  /* CPE-1805: the same note, sitting ABOVE a partial list instead of centred in an empty pane. Only the
+     placement differs — the note keeps its own `.tv-degraded-note` box so "incomplete" reads identically
+     whether or not any rows survived, and `sticky` keeps it visible while a long partial list scrolls,
+     since a caveat that scrolls away stops caveating. */
+  .tv-degraded-banner {
+    display: flex;
+    justify-content: center;
+    padding: 10px 14px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
   }
 
   .tv-head-row,
