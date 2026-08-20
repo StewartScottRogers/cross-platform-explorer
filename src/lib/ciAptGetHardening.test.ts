@@ -69,11 +69,22 @@ function findStep(job: WorkflowJob, name: string): WorkflowStep {
 const HARDENING_FLAGS =
   "-o Acquire::ForceIPv4=true -o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20";
 
-/** Every `sudo apt-get ...` invocation line inside a step's `run:` script, so each can be checked
+/** Matches `apt` or `apt-get` as an isolated COMMAND WORD -- e.g. `sudo apt-get update` or
+ *  `sudo apt install -y foo` -- not as a substring of something else. `apt` and `apt-get` are
+ *  functionally identical aliases a future site could plausibly be written with either way (a
+ *  Reviewer round on this ticket proved it: injecting a brand-new unhardened `apt update` /
+ *  `apt install` step sailed straight through an earlier version of this filter that only checked
+ *  for the substring `"apt-get"`). The lookbehind/lookahead require a non-word/non-hyphen
+ *  character (or line start/end) on both sides, so this does NOT match `apt` appearing inside a
+ *  longer identifier -- `apt-transport-https`, `adapter`, `apt-get-wrapper` -- only the bare
+ *  command token itself. */
+const APT_COMMAND_WORD = /(?<![\w-])apt(?:-get)?(?![\w-])/;
+
+/** Every `apt`/`apt-get` invocation line inside a step's `run:` script, so each can be checked
  *  individually rather than treating the whole multi-line script as one blob (a hardened `update`
  *  sitting next to an unhardened `install` would otherwise pass a whole-script substring check). */
 function aptGetLines(run: string | undefined): string[] {
-  return (run ?? "").split("\n").filter((line) => line.includes("apt-get"));
+  return (run ?? "").split("\n").filter((line) => APT_COMMAND_WORD.test(line));
 }
 
 describe("ci.yml apt-get sites carry the ForceIPv4/retry/timeout hardening (CPE-1787)", () => {
@@ -135,7 +146,7 @@ describe("ci.yml apt-get sites carry the ForceIPv4/retry/timeout hardening (CPE-
     expect(step["timeout-minutes"]).toBeGreaterThan(0);
   });
 
-  it("no apt-get invocation anywhere in ci.yml is left unhardened (regression guard against a future sixth site)", () => {
+  it("no apt/apt-get invocation anywhere in ci.yml is left unhardened (regression guard against a future sixth site)", () => {
     const unhardened: string[] = [];
     for (const [jobName, job] of Object.entries(doc.jobs)) {
       for (const step of job.steps) {
