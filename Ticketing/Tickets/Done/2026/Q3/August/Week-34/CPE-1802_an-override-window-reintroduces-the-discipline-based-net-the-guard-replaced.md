@@ -3,11 +3,11 @@ id: CPE-1802
 title: an ffmpeg pin override window reintroduces the discipline-based net the guard just replaced
 type: task
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-20
-closed:
+closed: 2026-08-20
 ---
 
 ## Problem
