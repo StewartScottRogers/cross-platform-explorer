@@ -3,7 +3,7 @@ id: CPE-1763
 title: A scheduled freshness check for the pinned ffmpeg autobuild, so the pin is bumped before a release needs it
 type: task
 priority: Medium
-status: Doing
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-17
@@ -171,3 +171,20 @@ Not yet proved (needs the workflow to exist on `main` first): a real `workflow_d
 stale-via-override, and dedupe-via-comment on a second stale run), and the `gh label create`/`gh issue
 create`/`gh issue comment` path firing for real. Will run immediately after merge and record the run
 links + issue link here before calling this ticket's acceptance criteria met.
+
+## Work Log — 2026-08-19 (Foreman, at merge)
+
+Merged as PR #938 after a Reviewer round, a UAT round, and a re-review whose first job was a **claims
+audit** — because the round-1 UAT caught the PR body asserting three demonstration runs that had never
+happened. The audit re-verified every remaining assertion against live data and found none false.
+
+**Escaped defect, caught within minutes.** The post-merge `workflow_dispatch` demonstration — the one
+step both reviews correctly identified as impossible before merge — was run immediately on merge. The
+fresh path passed. **The stale path was broken**: the check detected the pruned pin and then died on a
+bash quoting error before it could file anything. Tracked and fixed as **CPE-1792** (PR #943), with both
+paths now proven live.
+
+That is recorded here rather than quietly fixed because it is the honest outcome: the gate did its job
+in flagging that the notification path had never been exercised, everyone agreed it could not be
+exercised pre-merge, and the bug was exactly there. The lesson is that "verify post-merge" needs to be a
+scheduled action with an owner, not a note in a PR body.
