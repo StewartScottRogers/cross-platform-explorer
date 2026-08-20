@@ -146,7 +146,14 @@ Three independent protections apply automatically — you don't opt into any of 
   one. Every extraction now resolves a link entry's target against the destination folder and refuses any
   that lands outside it, whether it is spelled with `..`, as an absolute path, with mixed separators, or
   by pointing through another shortcut. Shortcuts that stay **inside** the extraction folder still work
-  normally — source tarballs legitimately contain them, so they are not blanket-refused.
+  normally — source tarballs legitimately contain them, so they are not blanket-refused. A link entry
+  that declares no target at all is skipped rather than aborting the extraction.
+  **One accepted false refusal, on Linux and macOS only:** a shortcut whose target is a file *literally
+  named* `..\secret` — legal and harmless there, since a backslash is an ordinary character on those
+  systems — is refused as though it were a Windows-style traversal. That entry is skipped and reported
+  rather than extracted. It is deliberate: the check treats a backslash as a separator everywhere so a
+  Windows-authored archive cannot slip a traversal past a Linux or macOS extraction by spelling it the
+  other way, and being too strict here costs a pathological filename while being too lax costs your files.
   Related, open work: the remaining differences between the one-shot and streamed extraction paths are
   tracked separately.
 - **Zip-bomb / expansion-ratio scoring**, via **Check archive safety…** — for the ordinary case, reads a

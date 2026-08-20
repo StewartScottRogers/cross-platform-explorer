@@ -13,7 +13,7 @@
  * `skipped` fails here.
  */
 import { describe, it, expect } from "vitest";
-import { archiveSkipNotice, type TransferReport } from "./transfers";
+import { archiveSkipNotice, transferReasonsLabel, type TransferReport } from "./transfers";
 import { translate } from "./i18n";
 
 const t = (key: string, params?: Record<string, string | number>) => translate("en", key, params);
@@ -73,6 +73,25 @@ describe("CPE-1775 archiveSkipNotice", () => {
     const msg = archiveSkipNotice(report({ skipped: 1, errors: [hostile] }), t);
     expect(msg).not.toContain("gnp.txt");
     expect(msg).not.toContain("‮");
+  });
+
+  it("labels the panel's disclosure button with a count and noun that agree", () => {
+    // Review nit: the first version took the NUMBER from `errors.length` and the NOUN from `skipped`.
+    // The archive paths keep those 1:1, so it read correctly there and the bug was invisible — but a
+    // copy/move row carries per-item conflict skips AND can carry a separate error line.
+    expect(transferReasonsLabel({ skipped: 2, failed: 0, errors: ["a", "b", "c"] })).toBe(
+      "· 2 skipped — why?",
+    );
+    // A genuine failure keeps the neutral wording and the error count; a skip must not be called a
+    // failure, nor a failure a skip.
+    expect(transferReasonsLabel({ skipped: 2, failed: 1, errors: ["a", "b", "c"] })).toBe(
+      "· 3 problems — why?",
+    );
+    expect(transferReasonsLabel({ skipped: 0, failed: 1, errors: ["a"] })).toBe("· 1 problem — why?");
+    expect(transferReasonsLabel({ skipped: 1, failed: 0, errors: ["a"] })).toBe("· 1 skipped — why?");
+    // Nothing to disclose ⇒ no button at all, so a clean run is visually unchanged.
+    expect(transferReasonsLabel({ skipped: 0, failed: 0, errors: [] })).toBeNull();
+    expect(transferReasonsLabel(undefined)).toBeNull();
   });
 
   it("is translated, not English-only, in every locale the app ships as complete", () => {

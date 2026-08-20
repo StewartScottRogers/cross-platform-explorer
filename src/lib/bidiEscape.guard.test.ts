@@ -167,7 +167,7 @@ const REGISTRY: Record<string, string[]> = {
   // ARCHIVE-CONTROLLED entry name and were the one genuine spoof surface in this file. They now render
   // through `displaySafePath` in a click-to-open list instead of a raw hover tooltip. What is left is
   // counts and literals (`whyLabel` builds "· N skipped — why?" from a number).
-  "TransferPanel.svelte": ["63:label(t)","76:percent(t)","77:t.done_items","77:t.total_items","82:whyLabel(t)"],
+  "TransferPanel.svelte": ["56:label(t)","69:percent(t)","70:t.done_items","70:t.total_items","80:transferReasonsLabel(t.report)"],
   "UserCommandsDialog.svelte": ["87:c.name","88:c.template","90:c.mode","91:s","119:s"],
   "VaultBadge.svelte": ["34:title"],
   "VaultBanner.svelte": ["36:locking ? $t(\"vault.lockingTitle\") : $t(\"vault.lockTitle\")","40:locking ? $t(\"vault.locking\") : $t(\"vault.lock\")"],

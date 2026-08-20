@@ -2,18 +2,11 @@
   // Operations panel (CPE-623, epic CPE-613): a bottom-corner drawer that lists active + just-finished
   // transfers with a progress bar, live counts, and cancel/dismiss. Idle-hidden — renders nothing when
   // no transfer is running, so the plain explorer is unaffected.
-  import { transfers, percent, cancelTransfer, dismissTransfer, type TransferState } from "../transfers";
+  import {
+    transfers, percent, cancelTransfer, dismissTransfer, transferReasonsLabel, type TransferState,
+  } from "../transfers";
   import Icon from "./Icon.svelte";
   import { displaySafePath } from "../filename";
-
-  /** The disclosure button's text (CPE-1775) — a count plus literals, no filesystem text of any kind.
-   *  A **skip** and a **failure** must read differently: a refused entry did not fail, and calling it a
-   *  failure is as wrong as the success toast this ticket removed. */
-  function whyLabel(t: TransferState): string {
-    const n = t.report?.errors.length ?? 0;
-    if ((t.report?.skipped ?? 0) > 0 && (t.report?.failed ?? 0) === 0) return `· ${n} skipped — why?`;
-    return `· ${n} problem${n === 1 ? "" : "s"} — why?`;
-  }
 
   /** Which finished rows have their reason list open (CPE-1775). Ids, so a dismissed row forgets. */
   let expanded = new Set<number>();
@@ -79,11 +72,16 @@
                reason to open — so a security refusal was effectively unreadable. A button instead, with
                the wording naming what actually happened (skipped vs failed) and the list one click away. -->
           {#if t.report && t.report.errors.length > 0}
-            <button class="why" aria-expanded={expanded.has(t.id)} on:click={() => toggleReasons(t.id)}>{whyLabel(t)}</button>
+            <button
+              class="why"
+              aria-expanded={expanded.has(t.id)}
+              aria-controls="op-reasons-{t.id}"
+              on:click={() => toggleReasons(t.id)}
+            >{transferReasonsLabel(t.report)}</button>
           {/if}
         </div>
         {#if t.report && expanded.has(t.id) && t.report.errors.length > 0}
-          <ul class="reasons">
+          <ul class="reasons" id="op-reasons-{t.id}">
             {#each t.report.errors as e}<li>{displaySafePath(e)}</li>{/each}
           </ul>
         {/if}

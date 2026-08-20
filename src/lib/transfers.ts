@@ -69,6 +69,30 @@ export interface TransferState extends TransferProgress {
  * failure is the headline, and a skip must never be mistaken for a failure or vice versa), and for the
  * ordinary case of nothing skipped — so an unremarkable extraction gains no new noise.
  */
+/**
+ * The operations panel's disclosure-button text for a finished row (CPE-1775) — `null` when there is
+ * nothing to disclose.
+ *
+ * Counts and literals only: the reason strings themselves embed an archive-controlled entry name and are
+ * rendered through `displaySafePath` in the list this button opens, never in the button.
+ *
+ * **The number and the noun must come from the same field.** The first version read `errors.length` for
+ * the count while branching on `skipped` for the noun. On the archive paths those are 1:1 by
+ * `ArchiveReport::skip`'s invariant, so it looked right — but a copy/move row can carry conflict-skips
+ * *and* a separate error line, and it would then have shown a number and a noun describing different
+ * things. Lives here rather than inside the component so it can be tested without a render harness.
+ */
+export function transferReasonsLabel(
+  r: Pick<TransferReport, "skipped" | "failed" | "errors"> | undefined,
+): string | null {
+  if (!r || r.errors.length === 0) return null;
+  // A refused entry did NOT fail. Calling it a failure is the mirror of the success toast this ticket
+  // removed, so the two read differently and each names its own count.
+  if (r.skipped > 0 && r.failed === 0) return `· ${r.skipped} skipped — why?`;
+  const n = r.errors.length;
+  return `· ${n} problem${n === 1 ? "" : "s"} — why?`;
+}
+
 export function archiveSkipNotice(
   r: Pick<TransferReport, "op" | "transferred" | "skipped" | "failed" | "cancelled">,
   t: (key: string, params?: Record<string, string | number>) => string,
