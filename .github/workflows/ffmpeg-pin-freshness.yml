@@ -1,0 +1,195 @@
+name: ffmpeg/pdfium pin freshness check
+
+# Scheduled canary for CPE-1762 (split out as CPE-1763). BtbN/FFmpeg-Builds publishes a fresh
+# autobuild-<date> release daily and PRUNES old ones, so FFMPEG_BUILD_TAG/FFMPEG_BUILD_VER in
+# release-sidecar.yml rot on a timescale of weeks -- silently, until the next release-sidecar run
+# 404s on the download (exactly what happened on 2026-08-15: the pinned asset was gone and all
+# three OS release legs failed, blocking release 0.57.66). This job HEAD-checks the EXACT asset
+# URLs release-sidecar.yml downloads, on a schedule, so a rotted pin turns into a ticket with days
+# of runway instead of a release-day surprise.
+#
+# ── Cadence: weekly, Mondays 07:00 UTC ──────────────────────────────────────────────────────────
+# (One hour after model-snapshot.yml's Monday 06:00 run, so the repo's two scheduled jobs don't
+# contend for runners.) Measured 2026-08-19: BtbN keeps ~38 daily autobuilds live before pruning,
+# so a freshly-set pin has roughly five weeks of runway -- weekly gives several chances to catch
+# the rot with days to spare, without polling far more often than the upstream actually changes.
+#
+# ── Staleness check: exact-URL reachability, not an age heuristic ──────────────────────────────
+# Each check is a HEAD request against the SAME URL release-sidecar.yml's "Stage native deps" step
+# downloads. A 200 means that step would succeed today; nothing else can turn this red, so it has
+# no false-positive path to cry wolf on -- it only fires when the real download would actually
+# fail. bblanchon/pdfium-binaries was confirmed NOT to prune (418 releases live back to
+# chromium/3218, years old) before adding its check, so that leg is a cheap extra safety net (one
+# more request) rather than a check expected to ever legitimately fire.
+#
+# ── No second copy of the pin (breaking this IS the point of the "Extract pins" step) ──────────
+# The tag/version values below are extracted FROM release-sidecar.yml's "Stage native deps" step
+# env: block at run time, not retyped here. Change the pin in release-sidecar.yml and this check
+# follows automatically; rename/reformat that env: block and "Extract pins" fails loudly instead
+# of silently checking stale values forever.
+#
+# ── Notification: a GitHub issue, not a red badge ───────────────────────────────────────────────
+# Nobody watches the Actions tab for a job that only exists to check dates -- a red scheduled run
+# would sit unseen the same way the rotted pin itself did before CPE-1762. On a non-200 this files
+# a GitHub issue (gh issue create, default GITHUB_TOKEN, issues:write -- no extra secrets) naming
+# the URL, the HTTP status, and the current live tag to bump to, which shows up in the repo's
+# Issues tab/notifications for anyone watching. Deduped against any already-open issue carrying
+# the `dep-pin-stale` label, so a still-broken pin doesn't refile every week until it's fixed. A
+# human (or the next sprint's Foreman, per Ticketing/wiki.md) converts it to a CPE-NNN ticket on
+# triage, same as any other externally-raised finding -- this workflow deliberately does not try
+# to compute/allocate a ticket ID itself and push to main, which would risk colliding with
+# concurrently-filed tickets.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 7 * * 1" # weekly, Mondays 07:00 UTC
+
+permissions:
+  contents: read
+  issues: write
+
+env:
+  RELEASE_SIDECAR_YML: .github/workflows/release-sidecar.yml
+
+jobs:
+  check-pins:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract pins from release-sidecar.yml (no second copy)
+        id: pins
+        run: |
+          set -euo pipefail
+          extract() {
+            local key="$1"
+            local val
+            val=$(grep -oP "^\s*${key}:\s*\"\K[^\"]+" "$RELEASE_SIDECAR_YML" | head -1)
+            if [ -z "$val" ]; then
+              echo "::error::could not extract ${key} from ${RELEASE_SIDECAR_YML} -- its env: block" \
+                   "moved or was reformatted, so this check can no longer see the real pin. Fix the" \
+                   "extraction in ffmpeg-pin-freshness.yml before trusting this workflow again."
+              exit 1
+            fi
+            printf '%s' "$val"
+          }
+          ffmpeg_build_tag="$(extract FFMPEG_BUILD_TAG)"
+          ffmpeg_build_ver="$(extract FFMPEG_BUILD_VER)"
+          pdfium_tag="$(extract PDFIUM_TAG)"
+          echo "ffmpeg_build_tag=${ffmpeg_build_tag}" >> "$GITHUB_OUTPUT"
+          echo "ffmpeg_build_ver=${ffmpeg_build_ver}" >> "$GITHUB_OUTPUT"
+          echo "pdfium_tag=${pdfium_tag}" >> "$GITHUB_OUTPUT"
+          echo "extracted from ${RELEASE_SIDECAR_YML}:"
+          echo "  FFMPEG_BUILD_TAG=${ffmpeg_build_tag}"
+          echo "  FFMPEG_BUILD_VER=${ffmpeg_build_ver}"
+          echo "  PDFIUM_TAG=${pdfium_tag}"
+
+      - name: HEAD-check pinned assets
+        id: check
+        timeout-minutes: 5
+        env:
+          FFMPEG_BUILD_TAG: ${{ steps.pins.outputs.ffmpeg_build_tag }}
+          FFMPEG_BUILD_VER: ${{ steps.pins.outputs.ffmpeg_build_ver }}
+          PDFIUM_TAG: ${{ steps.pins.outputs.pdfium_tag }}
+        run: |
+          set -uo pipefail # not -e: every asset must be checked even if an earlier one fails
+          failures=""
+
+          head_check() {
+            local label="$1" url="$2"
+            local code
+            # --retry (transient network/connection failures only, NOT http status codes -- a real
+            # 404 is returned as a status, not a curl error, so it is never retried into a false
+            # pass) guards against a blip getting mistaken for a rotted pin and crying wolf.
+            # --max-time bounds each attempt so a hang can't chain into the step's 5-minute timeout.
+            code=$(curl -sSL --max-time 30 --retry 3 --retry-delay 2 --retry-connrefused \
+              -o /dev/null -w '%{http_code}' --head "$url" || echo "000")
+            echo "  ${label}: HTTP ${code} (${url})"
+            if [ "$code" != "200" ]; then
+              failures="${failures}- **${label}**: HTTP ${code} - ${url}\n"
+            fi
+          }
+
+          echo "--- ffmpeg (BtbN/FFmpeg-Builds, tag ${FFMPEG_BUILD_TAG}) ---"
+          head_check "ffmpeg win64" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-win64-lgpl-8.1.zip"
+          head_check "ffmpeg linux64" \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/${FFMPEG_BUILD_TAG}/ffmpeg-${FFMPEG_BUILD_VER}-linux64-lgpl-8.1.tar.xz"
+
+          echo "--- pdfium (bblanchon/pdfium-binaries, tag ${PDFIUM_TAG}) ---"
+          # One representative asset: every platform archive in a pdfium-binaries release comes from
+          # the SAME GitHub release/tag, so if this one 200s the tag exists and the rest will too.
+          head_check "pdfium win64" \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/${PDFIUM_TAG}/pdfium-win-x64.tgz"
+
+          if [ -n "$failures" ]; then
+            echo "stale=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "failures<<PINFAIL_EOF"
+              echo -e "$failures"
+              echo "PINFAIL_EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "::warning::one or more pinned native-dep assets are unreachable -- see the failures list"
+          else
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            echo "all pinned assets reachable -- nothing to report"
+          fi
+
+      # Only spend extra API calls figuring out what to recommend when there's actually something
+      # to report -- the quiet (fresh-pin) path above stays at exactly 3 HEAD requests.
+      - name: Determine current live tags to recommend
+        id: live
+        if: steps.check.outputs.stale == 'true'
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          ffmpeg_live_tag=$(gh api repos/BtbN/FFmpeg-Builds/releases \
+            -q '[.[] | select(.tag_name | startswith("autobuild"))][0].tag_name' 2>/dev/null || true)
+          pdfium_live_tag=$(gh api repos/bblanchon/pdfium-binaries/releases/latest \
+            -q '.tag_name' 2>/dev/null || true)
+          echo "ffmpeg_live_tag=${ffmpeg_live_tag:-<could not query BtbN/FFmpeg-Builds -- check manually>}" >> "$GITHUB_OUTPUT"
+          echo "pdfium_live_tag=${pdfium_live_tag:-<could not query bblanchon/pdfium-binaries -- check manually>}" >> "$GITHUB_OUTPUT"
+
+      - name: File an issue (deduped) so a human sees it
+        if: steps.check.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FAILURES: ${{ steps.check.outputs.failures }}
+          FFMPEG_LIVE_TAG: ${{ steps.live.outputs.ffmpeg_live_tag }}
+          PDFIUM_LIVE_TAG: ${{ steps.live.outputs.pdfium_live_tag }}
+        run: |
+          set -uo pipefail
+          label="dep-pin-stale"
+          gh label create "$label" \
+            --color d93f0b \
+            --description "A pinned native-dep download (ffmpeg/pdfium) in release-sidecar.yml has gone stale" \
+            2>/dev/null || true # already exists -- fine
+
+          existing=$(gh issue list --state open --label "$label" --json number --jq '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ] && [ "$existing" != "null" ]; then
+            echo "an open issue already tracks this (#$existing) -- not filing a duplicate, so this doesn't cry wolf every week"
+            exit 0
+          fi
+
+          # Built with printf (one call per line) rather than an indented heredoc: this step's shell
+          # script is itself indented for YAML readability, and a heredoc would carry that indentation
+          # into the issue body, where 4+ leading spaces reads as a markdown code block.
+          run_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          body_file="$(mktemp)"
+          {
+            printf '%s\n\n' "The weekly ffmpeg/pdfium pin freshness check (\`.github/workflows/ffmpeg-pin-freshness.yml\`, run [${GITHUB_RUN_ID}](${run_url})) found one or more pinned native-dep downloads used by \`release-sidecar.yml\` are no longer reachable:"
+            echo -e "$FAILURES"
+            printf '\n%s\n' "Upstream's current live tags, to bump to:"
+            printf '%s\n' "- ffmpeg (BtbN/FFmpeg-Builds): \`${FFMPEG_LIVE_TAG}\`"
+            printf '%s\n\n' "- pdfium (bblanchon/pdfium-binaries): \`${PDFIUM_LIVE_TAG}\`"
+            printf '%s\n' "Update \`FFMPEG_BUILD_TAG\` / \`FFMPEG_BUILD_VER\` / \`PDFIUM_TAG\` in the \"Stage native deps\" step of \`.github/workflows/release-sidecar.yml\` (see CPE-1762). Then re-run this workflow via workflow_dispatch to confirm the new pin is reachable before it blocks a release."
+            printf '\n%s\n' "Filed automatically by CPE-1763. Please convert to a CPE-NNN ticket on triage."
+          } > "$body_file"
+
+          gh issue create \
+            --title "ffmpeg/pdfium pin has gone stale in release-sidecar.yml" \
+            --label "$label" \
+            --body-file "$body_file"
