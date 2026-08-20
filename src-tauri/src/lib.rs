@@ -14819,11 +14819,6 @@ mod tests {
         // forcing this call to (true, false) and confirming a CI=true run panics with the CPE-1717
         // message naming "trash_roundtrip", then reverting; the CI `skip-visibility guard (CPE-1717 /
         // CPE-1806)` step below (`.github/workflows/ci.yml`) re-proves the same panic on every run.
-        // CPE-1806: `supported_here = cfg!(target_os = "linux")` — see `trash_roundtrip_available`'s
-        // doc comment for the measured per-platform verdict this mirrors. Red-proofed by temporarily
-        // forcing this call to (true, false) and confirming a CI=true run panics with the CPE-1717
-        // message naming "trash_roundtrip", then reverting; the CI `skip-visibility guard (CPE-1717 /
-        // CPE-1806)` step below (`.github/workflows/ci.yml`) re-proves the same panic on every run.
         if !cpe_server::fsutil::require_staged(
             "trash_roundtrip",
             cfg!(target_os = "linux"),
