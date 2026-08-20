@@ -3,7 +3,7 @@ id: CPE-1798
 title: the status bar renders backend error strings raw, from 35 call sites
 type: bug
 priority: Low
-status: Backlog
+status: Done
 tags: ready
 estimate: S
 created: 2026-08-19
