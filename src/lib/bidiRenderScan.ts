@@ -676,14 +676,20 @@ export function findUnsafeRenderLines(fileSrc: string, fileLabel = "<source>"): 
  *  {macroParamPromptFor.macro.name}"`, and a macro can be imported from a pasted definition
  *  (`MacrosDialog.svelte`'s import flow), so `macro.name` is externally-supplied — the same
  *  accepted-but-disclosed raw render `MacroRunConfirm.svelte`'s own `REGISTRY` entry already carries for
- *  the run confirmation itself. `title`/`message` are now escaped on arrival (this bullet's trigger) and
- *  the file is registered; its `label` prop (the per-parameter field caption, taken from the macro's own
- *  `{ask:label}` token — also externally-supplied) is deliberately left unescaped and disclosed instead,
- *  since it doubles as the literal `for=`/`id=` value pairing a `<label>` with its `<input>` — escaping
- *  only the display text would desynchronize that pairing, a real fix but a different one, out of this
- *  ticket's scope. A durable comment that states a caller is static without checking is worse than no
- *  comment at all — it is the reason to check, not just assert, before writing "currently fed only
- *  static copy" about any other file.
+ *  the run confirmation itself. `title`/`message` are escaped on arrival (this bullet's trigger) and the
+ *  file is registered fully clean (`[]`). Its `label` prop (the per-parameter field caption, taken from
+ *  the macro's own `{ask:label}` token — also externally-supplied, same provenance as `macro.name`) is
+ *  escaped too, in its one render position (the `<label>` text node) — **review round 3 (PR #949)
+ *  rejected an earlier draft of this paragraph that left `label` raw**, reasoning it doubled as the
+ *  literal `for=`/`id=` value pairing a `<label>` with its `<input>` and that escaping only the display
+ *  text would desynchronize that pairing. That reasoning did not hold: `for=`/`id=`/`data-testid=` and
+ *  the `values[label]` object key all still reference the RAW `label` string unchanged — none of them
+ *  are DOM render positions this module's own engine scans (`title=`/`aria-label=`/`alt=`/body text
+ *  only; see `isRenderPosition` above), so a bidi override sitting in an un-rendered attribute value has
+ *  no spoofing effect to begin with, and wrapping only the text node touches the `for`/`id` pairing in
+ *  no way at all. A durable comment that states a caller is static without checking is worse than no
+ *  comment at all — the same is true of a plausible-sounding technical reason for leaving a disclosed gap
+ *  unfixed: check whether the constraint is real before writing it down, for this file or any other.
  *
  *  Deliberately broad and heuristic, not a parser — the exact inversion of the "regex zoo" this module's
  *  core engine (`isSafeExpr`/`findUnsafeRenderLines`) replaced. That's fine here because a false positive

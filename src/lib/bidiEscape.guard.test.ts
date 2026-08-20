@@ -195,20 +195,22 @@ const REGISTRY: Record<string, string[]> = {
   "ConfirmDialog.svelte": [],
   "PasswordPromptDialog.svelte": [],
 
-  // --- CPE-1790 (review round 2): MacroParamPrompt.svelte shares ConfirmDialog/PasswordPromptDialog's
+  // --- CPE-1790 (review round 2/3): MacroParamPrompt.svelte shares ConfirmDialog/PasswordPromptDialog's
   // exact `title`/`message` shape, and its one caller (App.svelte's run-macro flow, `title="Macro
   // parameters — {macroParamPromptFor.macro.name}"`) is NOT static — a macro can be imported from a
   // pasted definition (MacrosDialog.svelte's import flow), so `macro.name` is externally-supplied text,
   // the same accepted-but-disclosed raw render MacroRunConfirm.svelte's REGISTRY entry already carries
-  // for the run confirmation itself (`"81:macro.name"`, below). `title`/`message` are now escaped on
+  // for the run confirmation itself (`"81:macro.name"`, below). `title`/`message` are escaped on
   // arrival, the same leaf-escapes model as the other two dialogs, which is also what makes this file a
   // `CANDIDATE_PATTERN` match through the CPE-1790 `displaySafeName(`-call trigger rather than through
   // an incidental `.name` mention. `label` (the per-parameter field caption, taken from the macro's own
-  // `{ask:label}` token — also externally-supplied) is deliberately left unescaped and recorded here: it
-  // doubles as the literal `for=`/`id=` value pairing the `<label>` with its `<input>`, so escaping only
-  // the display text would desynchronize that pairing — a real fix, but a different one, out of this
-  // ticket's scope.
-  "MacroParamPrompt.svelte": ["75:label"],
+  // `{ask:label}` token — also externally-supplied, same as `macro.name`) is escaped too, in its one
+  // render position (the `<label>` text node) — review round 3 rejected an earlier draft that left it
+  // raw on the reasoning that it doubled as the `for=`/`id=` pairing value: that reasoning didn't hold,
+  // since `for=`/`id=`/`data-testid=` and the `values[label]` object key all still reference the RAW
+  // `label` string unchanged (none of them are DOM render positions this engine scans), so wrapping only
+  // the text node touches that pairing in no way at all. Fully provably safe: `[]`.
+  "MacroParamPrompt.svelte": [],
 };
 
 /** The subset of REGISTRY whose non-empty array is an ACTUAL disclosed "still renders a raw filesystem

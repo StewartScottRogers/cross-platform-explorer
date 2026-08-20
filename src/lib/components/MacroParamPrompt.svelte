@@ -20,10 +20,14 @@
   // is for the run confirmation itself. `message` is escaped too even though its one caller never
   // overrides the static default — true only BY CONVENTION, the same reasoning that put `confirmLabel`
   // under the same wrap in ConfirmDialog/PasswordPromptDialog. `label` (the per-parameter field caption,
-  // taken from the macro's own `{ask:label}` token — also externally-supplied) is deliberately left
-  // unescaped: it doubles as the literal `for=`/`id=` value used to associate the `<label>` with its
-  // `<input>`, so escaping only the display text would desynchronize that pairing — out of this
-  // ticket's scope; see the REGISTRY comment in bidiEscape.guard.test.ts.
+  // taken from the macro's own `{ask:label}` token — also externally-supplied) is escaped in its ONE
+  // render position (the `<label>` text node below) too — review round 3 (PR 949) rejected an earlier
+  // draft of this comment that left it raw, reasoning it doubled as the `for=`/`id=` value pairing the
+  // `<label>` with its `<input>`. That reasoning didn't hold: `for=`/`id=`/`data-testid=` and the
+  // `values[label]` object key all still reference the RAW `label` string unchanged below — none of
+  // them are DOM render positions this module's own engine scans (they're never drawn as glyphs), so
+  // wrapping only the text node touches that pairing in no way at all. See the REGISTRY comment in
+  // bidiEscape.guard.test.ts.
   export let title = "Macro parameters";
   export let message = "This macro asks for a few values before it runs:";
   /** The distinct `{ask:label}` labels to prompt for, in the order they first appear in the macro. */
@@ -72,7 +76,7 @@
       {/if}
       {#each labels as label (label)}
         <div class="field">
-          <label for="macro-param-{label}">{label}</label>
+          <label for="macro-param-{label}">{displaySafeName(label)}</label>
           <input
             id="macro-param-{label}"
             bind:value={values[label]}
