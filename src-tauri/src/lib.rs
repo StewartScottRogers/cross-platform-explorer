@@ -2997,6 +2997,53 @@ fn write_move_into_picked_slot(src: &Path, target: PathBuf) -> Result<PathBuf, S
         RenameIntoSlot::SlotTaken(msg) => return Err(msg),
         RenameIntoSlot::RenameFailed(_) => {}
     }
+    cross_volume_move_into_picked_slot(src, target)
+}
+
+/// The cross-volume tail of [`write_move_into_picked_slot`] — what runs once `fs::rename` has refused
+/// with `EXDEV`/`ERROR_NOT_SAME_DEVICE`.
+///
+/// **Extracted so a test can call the real one** (PR #968 review round 2, finding 1), the same argument
+/// as `cpe_server::fsutil::create_exclusive`'s. Round 2's F1 fix was tested only against a same-volume
+/// move, and a same-volume test cannot reach this branch at all — every fixture sits under one scratch
+/// directory. Rather than mock `EXDEV`, the test calls this directly, which is precisely the state the
+/// production path is in when the OS refuses the rename.
+fn cross_volume_move_into_picked_slot(src: &Path, target: PathBuf) -> Result<PathBuf, String> {
+    // CPE-1765 (PR #968 review round 2, finding 1) — THE CROSS-VOLUME HALF OF F1.
+    //
+    // Round 2's fix corrected the same-volume rename and stopped there, so this path was still the
+    // unfixed one: `write_copy_into_picked_slot` branches on `src.is_dir()`, which FOLLOWS the link, and
+    // the removal below used the same predicate. A directory shortcut moved to another volume was
+    // therefore dereferenced — its target's contents copied to the destination and the shortcut deleted —
+    // with `Ok` returned. Measured against production, C: to Z:, two real NTFS volumes:
+    //
+    //   result              = Ok("Z:\...\ssh-shortcut")   <- REPORTS SUCCESS
+    //   landed_is_link      = Ok(false)
+    //   id_rsa_on_Z         = true       id_rsa_contents = Some("PRIVATE KEY")
+    //   source_shortcut_left= false
+    //
+    // The doc comment justifying the same-volume fix used "move it to a USB stick" as its example. A USB
+    // stick is a different volume, so the scenario chosen to explain the severity was the one still open.
+    //
+    // **Refuse, rather than recreate.** Re-creating the link on the far volume would mean choosing
+    // between `symlink_dir` (needs `SeCreateSymbolicLinkPrivilege`), a junction (Windows-only, absolute
+    // targets only) and `symlink` (Unix), and deciding what a relative target means once the link has
+    // moved to a different root — a new mechanism, at the end of a review chain whose lesson is that new
+    // mechanisms are where the holes came from. Refusing is one branch, loses nothing the user had, and
+    // leaves both the link and its target exactly where they were. The message says what to do instead.
+    //
+    // Scoped to MOVE deliberately: `do_copy_into` dereferences a link and should — copying a shortcut to
+    // another volume and getting the contents is what a copy means, and `src/docs/03-explorer.md` says so.
+    if std::fs::symlink_metadata(src).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err(format!(
+            "\"{}\" is a shortcut (a symbolic link or junction), and the destination is on a different \
+             drive, so it cannot be moved there as a shortcut — nothing was moved, copied or deleted. \
+             Moving it would have had to copy out everything it points at instead, which is not what \
+             moving a shortcut means. Copy it instead if you want its contents on that drive, or recreate \
+             the shortcut there by hand.",
+            src.display()
+        ));
+    }
     // Cross-volume move: copy, then remove the original only if the copy fully succeeded.
     let target = write_copy_into_picked_slot(src, target)?;
     let removed = if src.is_dir() {
@@ -3410,10 +3457,21 @@ fn resolve_conflict(
             // that the old copy could not be deleted. Surfacing the removal error says what actually
             // happened and names the path, instead of blaming a race that did not occur.
             if base_target.is_dir() {
+                // The wording is deliberately "nothing new was written" and NOT "nothing was replaced"
+                // (PR #968 UAT round 2). `remove_dir_all` walks and deletes as it goes, so by the time it
+                // hits an undeletable entry it has already removed that entry's siblings. UAT staged a
+                // locked file and measured the folder afterwards holding ONLY the locked file — the two
+                // unlocked siblings were gone. Claiming the folder is untouched would be false, and this
+                // family's whole subject is messages that overclaim.
+                //
+                // Not a regression: the pre-CPE-1765 code made the identical unconditional
+                // `remove_dir_all` call and destroyed the same siblings while reporting SUCCESS. Refusing
+                // loudly is a strict improvement over that; it is just not a promise of intactness.
                 fs::remove_dir_all(base_target).map_err(|e| {
                     format!(
-                        "refusing to overwrite \"{}\": the existing folder could not be removed first, \
-                         so nothing was replaced — {e}",
+                        "refusing to overwrite \"{}\": the existing folder could not be fully removed, so \
+                         nothing new was written — {e}. Replace deletes the existing item before writing, \
+                         so part of it may already have been removed; check the folder before retrying",
                         base_target.display()
                     )
                 })?;
@@ -3426,7 +3484,27 @@ fn resolve_conflict(
                 // reparse point and Windows will not `DeleteFile` one. `remove_dir` removes the reparse
                 // point itself without following it, which is exactly the slot the user authorised
                 // replacing, and it is the call that actually succeeds here.
-                let _ = fs::remove_dir(base_target);
+                //
+                // CPE-1765 (PR #968 review round 2, finding 4): this arm's failure is no longer discarded
+                // either. The directory arm above was fixed in round 2 and this one was left, so Replace
+                // onto a FILE that is open in another program — the ordinary Windows case — still fell
+                // through to a claim that then failed with "the name was free when this operation picked
+                // it and is not free now". That message is untrue and misdirects: the user chose Replace,
+                // the name was never free, and the real problem is that the old file could not be deleted.
+                //
+                // Both removals have to fail before this refuses, because a junction reaches here having
+                // *legitimately* failed `remove_file` (see above) and succeeds on `remove_dir`.
+                if let Err(e) = fs::remove_dir(base_target) {
+                    // "nothing new was written", matching the directory arm above. A single file is
+                    // removed atomically so this arm really does leave it intact — but the two arms must
+                    // not disagree about what the same refusal means, and a user cannot tell from the
+                    // message which arm produced it.
+                    return Err(format!(
+                        "refusing to overwrite \"{}\": the existing item could not be removed, so nothing \
+                         new was written — {e}",
+                        base_target.display()
+                    ));
+                }
             }
             Ok(Some(base_target.to_path_buf()))
         }
@@ -18512,6 +18590,65 @@ overlay / overlay rw,relatime 0 0
             "the private key was copied into the destination as a real file"
         );
         r.expect("moving a shortcut onto a free name is an ordinary move");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **PR #968 review round 2, finding 1 — the CROSS-VOLUME half of F1, which round 2 left open.**
+    ///
+    /// The same-volume test above stages everything under one scratch directory, so it can never reach
+    /// the `RenameFailed(EXDEV)` branch. The Reviewer measured production across two real NTFS volumes:
+    ///
+    /// ```text
+    /// [REV2] result              = Ok("Z:\...\ssh-shortcut")   <- REPORTS SUCCESS
+    /// [REV2] landed_is_link      = Ok(false)
+    /// [REV2] id_rsa_on_Z         = true   id_rsa_contents = Some("PRIVATE KEY")
+    /// [REV2] source_shortcut_left= false
+    /// ```
+    ///
+    /// A USB stick is a different volume, which is the example the fix's own doc comment used. Rather
+    /// than simulate `EXDEV`, this drives the real branch by calling the cross-volume tail directly —
+    /// the rename is skipped, exactly as it is when the OS refuses it — so the assertion is about
+    /// production code and not about a mock.
+    #[test]
+    fn cpe_1765_a_cross_volume_move_of_a_shortcut_refuses_instead_of_copying_out_its_target() {
+        use std::io::Write;
+        let d = scratch("cpe1765_xvol_link");
+        let secret = d.join("secret_dir");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let shortcut = d.join("ssh-shortcut");
+        if !cpe_server::fsutil::make_dir_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the cross-volume shortcut leg: no directory link on this machine"
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+        let target = dest.join("ssh-shortcut");
+
+        // The cross-volume tail: what `write_move_into_picked_slot` runs once the rename returns EXDEV.
+        let r = cross_volume_move_into_picked_slot(&shortcut, target.clone());
+
+        // HARM FIRST — the pre-fix path returned Ok having copied the key out and deleted the shortcut.
+        assert!(
+            !target.join("id_rsa").exists(),
+            "the shortcut was dereferenced and the private key was copied onto the other volume \
+             (result {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&shortcut).is_ok_and(|m| m.file_type().is_symlink()),
+            "the user's shortcut was deleted (result {r:?})"
+        );
+        assert_eq!(
+            fs::read_to_string(secret.join("id_rsa")).unwrap(),
+            "PRIVATE KEY",
+            "the linked-to tree must be untouched"
+        );
+        let e = r.expect_err("a cross-volume move of a shortcut must refuse, not dereference");
+        assert!(e.contains("shortcut"), "the refusal must explain what it refused: {e}");
         let _ = fs::remove_dir_all(&d);
     }
 

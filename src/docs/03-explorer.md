@@ -238,14 +238,23 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   when the newcomer was a shortcut, following it and putting your file somewhere else entirely). The
   rest of the batch continues; just run the operation again for the item that failed and it will pick a
   fresh name.
-- **"the existing folder could not be removed first"** — from **Replace** only. The old folder at the
-  destination could not be fully deleted (most often something inside it is open in another program), so
-  nothing was replaced and the original is still intact. Close whatever is holding the file and try
-  again. Previously this case merged the new files into the old folder instead, which left a mixture of
-  both and reported success.
-- **Moving a shortcut moves the shortcut.** Dragging a symbolic link, junction or shortcut to a folder
-  moves *the shortcut itself* — it never copies out the contents of whatever it points at, and never
-  leaves the original behind. Copying one still copies what it points at, as before.
+- **Replace deletes before it writes.** Choosing **Replace** removes the existing item first and only
+  then writes the new one. That matters when the removal fails: if something inside an existing *folder*
+  is open in another program, the delete stops partway, so the folder can be left holding only the files
+  that could not be removed. The transfer then reports **"the existing folder could not be fully removed,
+  so nothing new was written"** and names the path — nothing new is written, but the old folder may
+  already be partly gone, so check it before retrying. A single *file* is removed in one step, so that
+  case really does leave the original untouched. Previously this situation merged the new files into the
+  old folder and reported success, which quietly left a mixture of both.
+- **Moving a shortcut moves the shortcut — on the same drive.** Dragging a symbolic link, junction or
+  shortcut to another folder on the **same drive** moves *the shortcut itself*: it does not copy out the
+  contents of whatever it points at, and does not leave the original behind.
+  **Moving one to a different drive is refused**, with a message naming it. A move across drives has to be
+  done as a copy-then-delete, and copying a shortcut follows it — so the move would have written out
+  everything the shortcut points at (which could be a whole home directory) and then deleted the shortcut.
+  Rather than do that silently, the app declines and leaves both the shortcut and its target alone. Copy
+  it instead if you want the contents on the other drive, or recreate the shortcut there by hand.
+  **Copying** a shortcut still copies what it points at, on any drive, as it always has.
 
 ## Add metadata columns
 

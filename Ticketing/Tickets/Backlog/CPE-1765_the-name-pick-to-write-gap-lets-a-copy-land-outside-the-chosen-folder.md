@@ -223,3 +223,69 @@ shared code path rather than by assertion; both `clippy.toml` copies updated (th
 **Still not verified locally:** Linux and macOS. F4's birth-mode test is `cfg(unix)` and has never run on
 this machine — CI's 3-OS matrix owns it. Every link leg was confirmed to genuinely *run* here (no
 `SKIPPED` lines in the test output), including the live-file-symlink one.
+
+### 2026-08-20 — attempt 3: cut the accretion, close the cross-volume half
+
+Three rounds each closed real findings and each introduced a smaller one *in the layer added to close
+the last*. The core survived 13+ attacks untouched. So this round removes rather than patches.
+
+**`carry_mark_of_the_web` DELETED, not guarded.** Three independent reasons, any one sufficient: it
+re-opened the destination BY PATH (`dst:Zone.Identifier` is a path), violating `claim_file_slot`'s own
+stated contract with a window spanning the whole copy — the auditor won that race first try, wrote
+outside the chosen folder, stripped a victim's `ZoneId=3`→`ZoneId=0` and returned `Ok(272629760)` with a
+0-byte symlink at the destination; it was silently defeated by a read-only source anyway, because
+`set_permissions` ran before it and the ADS write hit ACCESS_DENIED into a `let _ =`; and it gave away,
+two lines later, the never-re-open-by-path property the throughput cost was paid for. Guarding it was
+rejected because the only available guard (`placeholder_is_still_ours`) is forgeable and TOCTOU precisely
+on Windows, the only platform with alternate streams. The loss is now documented emphatically. **The
+mtime carry was tested against the same rule and KEPT** — `carry_file_times` calls `dst.set_times()` on
+the handle, never re-opening the path.
+
+**Cross-volume F1 (Reviewer finding 1) — the half round 2 left open.** `RenameFailed(EXDEV)` fell into
+`write_copy_into_picked_slot`, which branches on `src.is_dir()` (follows the link), so a shortcut moved to
+another volume was dereferenced and deleted. The fix's own doc used "move it to a USB stick" as its
+example — a USB stick is a different volume, so the scenario chosen to explain the severity was the one
+still broken. Now **refused loudly** rather than recreated: recreating a link on a far volume means
+choosing between `symlink_dir` (privilege), a junction (Windows, absolute-only) and `symlink`, plus
+deciding what a relative target means under a new root — a new mechanism at the end of a chain whose
+lesson is that new mechanisms are where the holes came from. The cross-volume tail is extracted as
+`cross_volume_move_into_picked_slot` so the test drives production rather than a mock.
+
+**Reviewer 3 — my tunnelling measurement was wrong, and it was load-bearing.** Re-measured 3/3:
+`created_preserved=true modified_preserved=true mod_delta=Some(0ns)`. Tunnelling restores **both**
+timestamps, and `FileTimesExt::set_created`/`set_modified` forge both trivially
+(`forged: created matches=true modified matches=true len=0 is_file=true`). The honest bound is now
+stated: the length and type checks do the real work; timestamps are a weak signal, not identity. It
+refuses accidents, sweepers and non-empty files; it does not resist a deliberate local attacker.
+
+**Also landed:** the file arm of `resolve_conflict`'s Overwrite now surfaces its removal failure
+(Reviewer 4); the `SlotClaim` directory arm is pinned by a test that plants a junction at a staked name
+(Reviewer 6 — deleting the guard previously left all 2264 tests green); both `clippy.toml` files fixed —
+my round-2 edit had left them naming `rename_into_slot_claimed_slot`, which does not exist (Reviewer 5);
+the pre-open stat is now the FIFO/device guard **only**, with `r.metadata()` from the open handle
+authoritative for `is_file`, `birth_mode_of` and `set_permissions` (Auditor R2-F3 — strictly stronger
+than both `fs::copy` and the previous round); and the auditor's `FILE_FLAG_OPEN_REPARSE_POINT` note is in
+the doc so nobody simplifies `create_new` away.
+
+**Finding C wording corrected after UAT.** UAT proved "nothing was replaced" overclaims: `remove_dir_all`
+deletes as it walks, so a locked file leaves the folder holding *only* the locked file — the unlocked
+siblings are already gone. Not a regression (the pre-fix code made the identical call and reported
+success), but the message now says "nothing **new** was written" and warns the item may be partly
+removed. Docs updated to state that Replace deletes before it writes.
+
+**Performance, stated plainly including where it disappointed.** UAT confirmed the large-file fix
+independently (77% of baseline, better than my 66% claim). It also found a small-file regime I had not
+measured: ~79% of baseline on 2000×8KB, diagnosed as per-file syscall overhead including the MotW stream
+read. **Deleting the MotW read did not recover it.** 2000×8KB, warm, best of 3, three separate runs —
+main 692/723/810 ms, round 2 779/865/1167 ms, attempt 3 804/749/1031 ms. Attempt 3 beat round 2 in two
+runs of three and lost in one; the variance swamps the effect. The residual small-file cost is the
+per-file metadata syscalls (claim + `set_permissions` + `set_times` + the guard stat), not the stream
+read and not the buffer. No improvement is claimed.
+
+**Not attempted, deliberately:** the tree-copier containment partial (CPE-1825) and a `CreateFileW`
+identity layer — both are new mechanisms, and this ticket's history says that is where the holes came
+from.
+
+**Still not verified locally:** Linux and macOS; the birth-mode test is `cfg(unix)` and has never run
+here. The cross-volume test drives the real `EXDEV` tail directly rather than staging two volumes, so the
+volume boundary itself is exercised by the Reviewer's C:→Z: measurement, not by CI.
