@@ -79,12 +79,83 @@ on:
 # CPE-1781 revisited this while adding the paths-ignore above and is keeping it as-is: it is still
 # correct for a burst of rapid CODE pushes to `main` (only the last commit's result needs to
 # survive), and now that bookkeeping-only pushes no longer start a run at all, they can no longer be
-# the thing a real code push's run gets cancelled by, or vice versa. The known cost — the last commit
-# of a fast batch is the only one whose CI result survives — is an accepted, chosen trade-off, not an
-# oversight.
+# the thing a real code push's run gets cancelled by, or vice versa.
+#
+# CPE-1799 carves `main` — and ONLY `main` — out of that cancellation. Everything CPE-1266 and
+# CPE-1781 say above about PR branches is unchanged and deliberate: on a PR only the newest push's
+# verdict is ever read, and `github.ref` there is `refs/pull/<n>/merge`, so the expression below is
+# `true` and those runs still supersede each other exactly as before. What CPE-1781 called "an
+# accepted, chosen trade-off" — the last commit of a fast batch being the only one whose result
+# survives — is the part being revisited, because on `main` specifically it is not a redundancy
+# trade, it is the whole signal.
+#
+# WHY `main` IS DIFFERENT IN KIND, NOT DEGREE. The post-merge run on `main` is the only thing that
+# can catch an INTERACTION between two PRs that were each green in isolation — the parallel-import
+# duplicate-symbol class this repo has actually hit, where both branches are individually MERGEABLE,
+# individually green, and broken only once combined. No PR's own CI can catch that by construction:
+# when each ran, the other change did not exist in its tree. So cancelling `main`'s run does not
+# discard a second copy of a signal already in hand; it discards the only copy of a signal nothing
+# else in this repo produces. Measured on the 20 CI runs on `main` immediately before this change:
+# 12 of the 19 that had completed ended `cancelled` — the escaped-defect net was simply absent for
+# about two thirds of merged commits, and absent *more* the faster the crew merged, which is exactly
+# backwards. It is also the input the sprint ledger's `post_merge_defect` field depends on (the
+# Foreman back-annotates a merged row to `ci-red` when `main` goes red on that commit); a cancelled
+# run can never produce that annotation, so the metric reads clean precisely when no verification
+# happened.
+#
+# COST — cheaper than "serialise every merge" sounds, because of a specific GitHub mechanic rather
+# than an optimistic reading. `cancel-in-progress: false` does NOT mean every push executes. Within
+# one concurrency group GitHub keeps at most ONE pending run: when a run is queued behind an
+# in-progress one, any previously pending run in the group is cancelled *while still pending*, having
+# burned no runner minutes. Everything merged while a run is in flight therefore COALESCES into one
+# follow-up run. The cost of a burst is `1 + ceil(burst_span / run_duration)` executed runs, not one
+# per merge — written as the formula rather than a round number because the round number is only
+# right for the common case. A burst that fits inside a single run duration costs 2 (the in-flight
+# run, which now survives — the entire point of this ticket — plus one coalesced run for whatever
+# the tip turned out to be), and with the `Server crates (windows-latest)` leg alone at ~55 minutes
+# that does cover most realistic bursts; a burst spanning two run durations costs 3, and so on.
+# CPE-1799's own four-commit proof burst is the honest illustration of the difference: it spanned
+# roughly two job durations and cost THREE executed runs, not two. Verified empirically on a
+# throwaway branch configured exactly like `main`, not taken from the docs — CPE-1799's Work Log
+# carries the run IDs, including the pending run that was cancelled without ever starting a job.
+#
+# LATENCY — the other half of the cost, and it roughly DOUBLES. A merge landing mid-run no longer
+# starts immediately: it waits `pending` for the in-flight run to finish and only then runs itself.
+# With the ~55-minute Windows leg that is up to ~110 minutes from merge to verdict on this workflow,
+# against ~55 before. Called out explicitly rather than left to be discovered, because the sprint
+# ledger's `post_merge_defect` back-annotation named above is one of the motivations for this change
+# and now has to tolerate a ~2-hour lag. Concretely: a Foreman that checks `main`'s health a few
+# minutes after merging and reads a still-`pending` run as clean would reintroduce the exact false
+# negative this ticket is about, wearing a different hat — so wait for a *conclusion*, never infer
+# one from a status. Still the right trade, since a late verdict is worth incomparably more than a
+# cancelled one, but it is a real change in timing rather than a free win.
+#
+# The trade now being accepted knowingly, in place of the old one: intermediate commits of a burst
+# get no run of their own, so a red on the coalesced run does not by itself identify WHICH merge
+# caused it. That is strictly better than the status quo, under which those commits get no completed
+# run either AND neither does the tip.
+#
+# WHY AN EXPRESSION RATHER THAN A SEPARATE NEVER-CANCELLING GROUP FOR `main`: convenience, not
+# capability. Stating that plainly, because the alternative is easy to rediscover and a reader who
+# does should not conclude this block is hiding a reason. A static `group: ci-main` with
+# `cancel-in-progress: false` would coalesce IDENTICALLY, and would NOT have reintroduced CPE-1266's
+# pile-up — that pile-up came from having no `concurrency` block AT ALL, so each of ~15 rapid pushes
+# spawned a full parallel run; ANY group, expression or literal, fixes it. (An earlier draft of this
+# comment asserted that a separate group would have "surrendered" CPE-1266's property. That was
+# false. It is corrected here rather than quietly dropped, because a wrong premise inside a block
+# whose whole purpose is to be trusted and not relitigated does not stay contained — it gets
+# believed and reasoned from.) The expression wins only on keeping ONE rule in ONE place: no second
+# concurrency block whose group name and settings must be kept in sync with this one, and the
+# `main`/not-`main` distinction written once, at the point where it is read.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # False on `main` (never cancel the post-merge net), true everywhere else (CPE-1266, unchanged).
+  # `concurrency:` is evaluated very early, before much of the run context exists, so "an expression
+  # is allowed here" was checked empirically rather than assumed: CPE-1799 ran this arm alongside a
+  # control arm carrying the INVERTED comparison on the same branch, and the inverted arm DID cancel
+  # while this shape survived. Only a genuinely evaluated value explains that split — had the
+  # expression been ignored, or the raw string coerced to truthy, both arms would have behaved alike.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   frontend:
