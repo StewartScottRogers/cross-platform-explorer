@@ -607,7 +607,22 @@ pub fn slot_taken_message(target: &Path, e: &std::io::Error) -> String {
 /// gap straight back: the claim proves *this* handle refers to a file this call created, and nothing
 /// about the *name* stays proven afterwards.
 pub fn claim_file_slot(target: &Path) -> Result<std::fs::File, String> {
-    create_exclusive(target).map_err(|e| slot_taken_message(target, &e))
+    claim_file_slot_with_mode(target, None)
+}
+
+/// [`claim_file_slot`] with an explicit Unix **birth mode** — the mode the file is created with, not one
+/// applied afterwards (PR #968 audit, F4). `None` takes the platform default (`0666 & ~umask`), which is
+/// right only for a site whose result carries no one else's bytes; a copy destination must pass the
+/// source's mode. See [`create_exclusive_with_mode`]'s doc for why the distinction is the whole point,
+/// and [`copy_file_into_claimed_slot`] for the window it closes. Ignored on Windows.
+///
+/// **`None` is deliberately still the platform default rather than a blanket `0600`.** Narrowing every
+/// claimed slot would have been a silent policy change for the sites that are not copies — a snapshot
+/// manifest, a rename placeholder — whose pre-CPE-1765 `fs::write` also created at `0666 & ~umask`. The
+/// audit finding was about a destination that carries **the source's** bytes, and it is fixed exactly
+/// there rather than by moving everything at once.
+pub fn claim_file_slot_with_mode(target: &Path, unix_mode: Option<u32>) -> Result<std::fs::File, String> {
+    create_exclusive_with_mode(target, unix_mode).map_err(|e| slot_taken_message(target, &e))
 }
 
 /// Claim `target` as a **brand-new directory**, atomically (CPE-1765) — [`claim_file_slot`]'s sibling for
@@ -637,28 +652,242 @@ pub fn claim_dir_slot(target: &Path) -> Result<(), String> {
 ///   executable that lost its `+x` would be a real regression. The order is copy-then-`set_permissions`
 ///   on the open handle, which is the same order `fs::copy` itself uses, so the brief window where the
 ///   new file is at the platform default rather than the source's mode is unchanged from before.
-/// - **Windows `CopyFileEx` extras are not.** `fs::copy` on Windows is `CopyFileExW`, which also brings
-///   across NTFS alternate data streams; a byte stream through one handle does not. That is a real,
-///   deliberate trade — the ticket's tiebreaker is that bytes must not leave the chosen folder — and it
-///   is **not a new inconsistency in this app**: `stream_copy_file`, the transfer engine that handles
-///   every copy the progress dialog shows, has always been a manual byte loop and has never carried ADS
-///   either. This makes the two agree instead of differing.
+/// - **The Mark-of-the-Web is carried; other alternate data streams are not.** `fs::copy` on Windows is
+///   `CopyFileExW`, which brings every NTFS alternate stream along; a byte stream through one handle
+///   brings none. The first cut disclosed that as "ADS loss" and undersold it: `Zone.Identifier` is an
+///   ADS, so copying a downloaded file through this app **silently disarmed SmartScreen and Protected
+///   View on the copy** — a security control removed without a word (PR #968 UAT). That specific stream
+///   is now copied explicitly by [`carry_mark_of_the_web`]. Any *other* stream a file carries is still
+///   dropped, because enumerating them needs `FindFirstStreamW`; that is the residual, and it has no
+///   known security consequence.
+///
+/// # Why not the kernel fast path — measured, and it is the Foreman's call, not a footnote
+///
+/// The obvious way to keep both the speed and the streams is `CopyFileExW` with
+/// `COPY_FILE_FAIL_IF_EXISTS`, which looks exactly like a kernel-provided claim. **It is not one. It was
+/// measured refusing every link shape but the one that matters:**
+///
+/// ```text
+/// destination planted with…   CopyFileExW+FAIL_IF_EXISTS   outside file afterwards
+/// a regular file              Err(80) ERROR_FILE_EXISTS     untouched
+/// a hard link                 Err(80)                       untouched
+/// a LIVE file symlink         Err(80)                       untouched, link survived
+/// an NTFS junction            Err(5)                        untouched, link survived
+/// a DANGLING symlink          Ok(())                        "USER CONTENT"  <- WROTE OUTSIDE
+/// ```
+///
+/// `FAIL_IF_EXISTS` asks whether the *resolved target* exists, exactly as `Path::try_exists` does — so a
+/// dangling link answers "nothing here", the copy follows it, and it **creates the link's target wherever
+/// it points**. That is the CPE-1715 escape this family exists to close, handed back by the kernel, and a
+/// dangling link is the *easiest* shape to plant because its target need not exist. So the flag is
+/// rejected on evidence, not on taste.
+///
+/// What is left is a genuine trade with no free option, and the numbers are in [`COPY_CHUNK`]:
+/// `create_new` + a 1 MiB stream reaches ~66% of `CopyFileExW`'s throughput and is airtight, while
+/// `create_new` + `CopyFileExW` over our own placeholder would reach 100% and keep every stream, at the
+/// price of re-opening the destination **by path** — which an actor who deletes our placeholder in that
+/// window can redirect, and unlike the rename path that redirection *can* put bytes outside the folder.
+/// This function takes the airtight option. Changing that is a judgement about how much speed a security
+/// property is worth, which belongs to whoever owns the release, not to this comment.
 /// - **A partial destination is left behind on a mid-copy error**, exactly as `fs::copy` leaves one.
 ///   Nothing is removed on the error path, because the only thing that could be removed is a name this
 ///   call proved was free — and a caller that falls back (`do_move_into`'s cross-volume path) re-claims
 ///   atomically anyway, so a stray partial turns into a loud refusal rather than a silent overwrite.
+///
+/// # The source is `stat`ed before it is opened, and that order is load-bearing (PR #968 audit, F5)
+///
+/// The first cut of this function opened the source and claimed the destination without ever asking what
+/// the source *was*, having dropped the `is_file()` check `fs::copy` performs. Three consequences, all
+/// Unix-only because Windows refuses each at the `open` (measured: `File::open(<directory>)` is
+/// `PermissionDenied`, os error 5):
+///
+/// - a **FIFO** in a copied tree makes `open(O_RDONLY)` block **indefinitely** — a frozen copy, no error,
+///   no progress;
+/// - a symlink to `/dev/zero` or `/dev/urandom` makes the stream write until the **volume fills**;
+/// - `File::open` on a **directory** succeeds, so the claim left a stray empty file at the picked name
+///   before the copy failed.
+///
+/// [`std::fs::metadata`] answers all three without opening anything, so this refuses before it can block
+/// and before it claims a name. It **follows** links, exactly as `fs::copy` does, so a symlink to a
+/// regular file still copies that file's contents — only a link to a non-regular file is refused. Note
+/// this is strictly stronger than `fs::copy`'s own guard, which opens first and *then* checks `is_file()`
+/// — and therefore still hangs on a FIFO.
+///
+/// # The destination is born at the source's mode on Unix (PR #968 audit, F4)
+///
+/// `claim_file_slot` alone creates at `0666 & ~umask`, so a copy of a `0600` secret was **world-readable
+/// for the entire duration of the copy** and only narrowed by the trailing `set_permissions`. That is the
+/// shape CPE-1739 already fixed once for staging files, and [`create_exclusive_with_mode`]'s doc carries
+/// the `strace` evidence for why it is real and not theoretical: **POSIX checks permission at `open`, not
+/// at `read`**, so a process that opens the name inside the window keeps a readable descriptor across the
+/// later `fchmod` — and the name need not be guessed, because an inotify/FSEvents watcher is woken by the
+/// create itself. `fs::copy` never had this window: it passes the source's mode to the creating `open`.
+/// This now does the same. When the source's mode cannot be read the birth mode is [`STAGING_MODE`]
+/// (`0600`) — narrow first, widen later, the only order with no gap.
+///
+/// The trailing [`std::fs::File::set_permissions`] still runs and now **propagates its error** rather
+/// than being swallowed by a `let _ =`. `fs::copy` uses `?` there; a best-effort carry meant a failed
+/// `fchmod` left the copy permanently at the default mode behind a success result, which is this repo's
+/// signature defect rather than a nicety. Windows is unaffected by all of this — it has no mode, and the
+/// only bit `set_permissions` carries there is read-only.
 pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String> {
-    // Open the SOURCE first: a source that cannot be read must not leave an empty file at the
-    // destination name (and must not be reported against the destination path either).
-    let mut r = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
-    let mut w = claim_file_slot(dst)?;
-    let copied = std::io::copy(&mut r, &mut w).map_err(|e| format!("{}: {e}", dst.display()))?;
-    if let Ok(m) = r.metadata() {
-        // Best-effort, exactly like `fs::copy`'s own trailing permission carry: a filesystem that cannot
-        // represent the mode is not a reason to fail a copy whose bytes are already on disk.
-        let _ = w.set_permissions(m.permissions());
+    // STAT FIRST — before any open, and before the destination name is claimed. See the doc above: on
+    // Unix, opening a FIFO blocks forever and opening a directory succeeds. `metadata` follows links,
+    // matching `fs::copy`'s subject.
+    let meta = std::fs::metadata(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "\"{}\" is not a regular file, so it was not copied — only ordinary files are copied by \
+             value (a device, socket, FIFO or directory at this path would either block the copy or \
+             fill the destination volume)",
+            src.display()
+        ));
     }
+    let mut r = std::fs::File::open(src).map_err(|e| format!("{}: {e}", src.display()))?;
+    let mut w = claim_file_slot_with_mode(dst, birth_mode_of(&meta))?;
+    let copied = stream_bytes(&mut r, &mut w).map_err(|e| format!("{}: {e}", dst.display()))?;
+    // `?`, not `let _ =` — `fs::copy` fails the copy when the mode cannot be carried, and so does this.
+    w.set_permissions(meta.permissions()).map_err(|e| format!("{}: {e}", dst.display()))?;
+    carry_file_times(&meta, &w);
+    carry_mark_of_the_web(src, dst);
     Ok(copied)
+}
+
+/// Carry the source's **modification time** onto the copy on Windows (PR #968 review, finding A).
+///
+/// `fs::copy` there is `CopyFileExW`, which brings file times across; a byte stream through a fresh
+/// handle stamps the copy "now". Measured:
+///
+/// ```text
+/// source   modified = 126444736000000000
+/// fs::copy modified = 126444736000000000   same_as_source = true
+/// claimed  modified = 134317332240518841   same_as_source = false   <- every copied file, re-dated
+/// ```
+///
+/// In a *file explorer* that is more visible than the ADS loss: it reorders every "sort by date modified"
+/// view the moment the user pastes. So it is restored rather than merely disclosed.
+///
+/// **Windows only, to match `fs::copy` exactly.** On Unix `fs::copy` does *not* carry times — a copy is
+/// born "now" there and always has been — so carrying them would be a different behaviour change wearing
+/// a bug fix's clothes. Best-effort: a filesystem that will not accept a time is not a reason to fail a
+/// copy whose bytes are already on disk, which is also how `CopyFileExW` behaves.
+///
+/// Note the app's *other* copy path, `stream_copy_file` (the transfer engine behind the progress panel),
+/// has never carried times either. This does not change that; it stops `do_copy_into` from having
+/// silently joined it.
+#[cfg(windows)]
+fn carry_file_times(src: &std::fs::Metadata, dst: &std::fs::File) {
+    if let Ok(mtime) = src.modified() {
+        let times = std::fs::FileTimes::new().set_modified(mtime);
+        let _ = dst.set_times(times);
+    }
+}
+
+#[cfg(not(windows))]
+fn carry_file_times(_src: &std::fs::Metadata, _dst: &std::fs::File) {}
+
+/// How much is moved per `read`/`write` pair by the portable arm of [`stream_bytes`].
+///
+/// **Measured, because the first cut of this function shipped a 4× throughput regression on the app's
+/// single hottest operation and PURPOSE.md's tiebreaker is fast/small/predictable** (PR #968 UAT). It used
+/// [`std::io::copy`], whose portable path moves 8 KiB at a time; the cost was the buffer, not the
+/// streaming. 200 MB, one NVMe volume, warm, best of three:
+///
+/// ```text
+/// CopyFileExW (what `fs::copy` calls, and what main did)   62.7 ms   3191 MB/s
+/// io::copy — 8 KiB                                        238.1 ms    840 MB/s   <- the regression
+/// 128 KiB                                                 100.4 ms   1992 MB/s
+/// 1 MiB                                                    95.2 ms   2101 MB/s
+/// 4 MiB                                                    93.9 ms   2129 MB/s
+/// 8 MiB                                                    97.2 ms   2058 MB/s
+/// ```
+///
+/// 1 MiB is where the curve flattens: it recovers 2.5× over the 8 KiB default and lands at ~66% of the
+/// kernel fast path, where 4 MiB and 8 MiB buy ~1% for 4–8× the memory per concurrent copy. See
+/// [`copy_file_into_claimed_slot`]'s "why not the kernel fast path" section for the remaining 1.5×.
+const COPY_CHUNK: usize = 1024 * 1024;
+
+/// Move `r`'s bytes into `w`, by the best route the platform gives us for two open file handles.
+///
+/// **Linux/Android keep [`std::io::copy`] deliberately.** `std` specialises it there to `copy_file_range`
+/// (falling back to `sendfile`), which is an in-kernel copy and, on btrfs/XFS, can be a **reflink** —
+/// i.e. effectively instant and using no new space. Replacing that with a hand-rolled buffer loop would
+/// have traded a Windows regression for a much larger Linux one. Everywhere else `io::copy` has no such
+/// specialisation and its 8 KiB buffer is the measured problem, so those platforms take the
+/// [`COPY_CHUNK`] loop.
+///
+/// Not verified on macOS — this machine is Windows and CI's matrix owns the other two legs. The reasoning
+/// there is that a 1 MiB loop cannot be worse than the same loop at 8 KiB, which is what `io::copy` would
+/// otherwise do.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File) -> std::io::Result<u64> {
+    std::io::copy(r, w)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn stream_bytes(r: &mut std::fs::File, w: &mut std::fs::File) -> std::io::Result<u64> {
+    use std::io::{Read as _, Write as _};
+    let mut buf = vec![0u8; COPY_CHUNK];
+    let mut total = 0u64;
+    loop {
+        let n = match r.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        w.write_all(&buf[..n])?;
+        total += n as u64;
+    }
+    Ok(total)
+}
+
+/// Carry the **Mark-of-the-Web** across a copy on Windows (PR #968 UAT, second finding).
+///
+/// `Zone.Identifier` is an NTFS alternate data stream, and it is how Windows remembers that a file came
+/// from the internet — it is what makes SmartScreen prompt and Office open in Protected View. `fs::copy`
+/// is `CopyFileExW`, which brings alternate streams along; a byte stream through one handle does not. So
+/// copying a downloaded installer through this app **silently disarmed it** — data loss that is also a
+/// security control being removed without saying so.
+///
+/// Streams are addressed as `path:name`, which is ordinary `std` file I/O once the name is built, so this
+/// needs no new API and no `unsafe`. Only `Zone.Identifier` is carried, not every stream: enumerating the
+/// rest needs `FindFirstStreamW`, and this is the one with a security consequence. That limit is stated
+/// again in [`copy_file_into_claimed_slot`]'s trade-off list rather than left for someone to discover.
+///
+/// **Best-effort on purpose, and this is the one place in this module where that is the right answer.** A
+/// destination that cannot hold alternate streams at all — FAT32 or exFAT, i.e. most USB sticks — must
+/// not fail the copy over it, because `CopyFileExW` does not either: Windows itself drops the stream
+/// there. Failing would mean this app could no longer copy a downloaded file to a memory stick.
+#[cfg(windows)]
+fn carry_mark_of_the_web(src: &Path, dst: &Path) {
+    let stream_of = |p: &Path| -> PathBuf {
+        let mut s = p.as_os_str().to_os_string();
+        s.push(":Zone.Identifier");
+        PathBuf::from(s)
+    };
+    if let Ok(zone) = std::fs::read(stream_of(src)) {
+        let _ = std::fs::write(stream_of(dst), zone);
+    }
+}
+
+/// No alternate data streams outside Windows; the Unix equivalent (`com.apple.quarantine` and friends)
+/// lives in extended attributes, which `fs::copy` does not carry either, so there is nothing to match.
+#[cfg(not(windows))]
+fn carry_mark_of_the_web(_src: &Path, _dst: &Path) {}
+
+/// The mode a copy's destination is **created** with on Unix: the source's own permission bits, so the
+/// new file is never, for any instant, more open than the file it is a copy of (PR #968 audit, F4).
+/// `None` on Windows, which has no mode.
+#[cfg(unix)]
+fn birth_mode_of(src: &std::fs::Metadata) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt as _;
+    Some(src.permissions().mode() & 0o777)
+}
+
+#[cfg(not(unix))]
+fn birth_mode_of(_src: &std::fs::Metadata) -> Option<u32> {
+    None
 }
 
 /// Recursively copy `src` into `dst`, claiming **every** directory and file name it creates
@@ -673,7 +902,46 @@ pub fn copy_file_into_claimed_slot(src: &Path, dst: &Path) -> Result<u64, String
 /// Symlinked entries are **not** descended, matching the pre-CPE-1765 walk exactly: the branch is
 /// [`std::fs::DirEntry::file_type`], which does not follow links, so a link to a directory falls to the
 /// file arm and its *contents* are copied (what `fs::copy` did before), never walked.
+///
+/// # The residual is NOT the same as the single-file copier's, and saying so once cost a finding
+///
+/// [`copy_file_into_claimed_slot`] writes through the handle it claimed, so its guarantee is absolute:
+/// the object written and the name claimed are the same object, and no link at that name can be followed.
+/// **This function does not inherit that**, and the PR #968 audit was right to separate them
+/// (F2). [`claim_dir_slot`] claims a *name*, not a handle, and every child is then written by
+/// re-resolving `dst.join(entry.file_name())` — so an actor who `rmdir`s the empty directory this call
+/// just created and plants a directory link there redirects every byte written afterwards:
+///
+/// ```text
+/// [A1] child write -> Ok(12)
+/// [A1] outside/child.txt = Ok("USER CONTENT")     <- bytes outside the chosen folder, operation Ok
+/// ```
+///
+/// **Honest about the odds, because that is the part that is easy to overstate in either direction.** The
+/// auditor could not win this race in-process on local NVMe — 0 successes in 100 attempts across two
+/// harnesses — but the primitive is deterministic once the swap lands, and the window recurs *per
+/// interior directory*, so a deep tree on a slow or network source is thousands of chances rather than
+/// one. It is a real hole, currently hard to hit.
+///
+/// **Why it is recorded rather than closed.** Closing it means opening each directory once and resolving
+/// its children *relative to that descriptor* — `openat`/`mkdirat`/`unlinkat`. `std` exposes no
+/// `*at`-family call on any platform, and on Windows [`std::fs::File::open`] cannot even open a directory
+/// (measured: `PermissionDenied`, os error 5) without `FILE_FLAG_BACKUP_SEMANTICS`. So it needs `libc`
+/// plus NT-level Windows calls and a rewritten walk — a different change from this one, with its own
+/// design and its own tests. It is a follow-up ticket, not a line edit here.
+///
+/// **Do not relax the `?` into skip-and-continue without re-running that race.** The audit found the
+/// abort-on-first-error behaviour is load-bearing: in its race harness the `?` fired in the gap between
+/// the attacker's `rmdir` and their symlink, and **zero files escaped**. It is a safety property here,
+/// not just an error-handling style, however much a skip-and-continue walk would match `list_dir`'s
+/// ethos elsewhere in this codebase.
 pub fn copy_tree_into_claimed_slot(src: &Path, dst: &Path) -> Result<(), String> {
+    // COVERAGE NOTE (PR #968 review): the tests pin the TOP-LEVEL claim — a link planted at `dst` — and
+    // no test plants one at an interior directory name. That is coverage by shared code path rather than
+    // by assertion: the recursion below calls this same function for every subdirectory, so an interior
+    // name is claimed by the identical `claim_dir_slot` line the top level is, and neutralising it reds
+    // the top-level tests. Stated rather than left implicit, because "the recursion shares the helper" is
+    // a claim about the code that a reader should be able to check in one glance, not an assumption.
     claim_dir_slot(dst)?;
     let rd = std::fs::read_dir(src).map_err(|e| format!("{}: {e}", src.display()))?;
     for entry in rd {
@@ -698,20 +966,35 @@ pub struct SlotClaim {
     path: PathBuf,
     is_dir: bool,
     live: bool,
+    /// The placeholder's own open handle, for the file case — [`Drop`]'s only way to tell its own
+    /// placeholder from whatever else may be at the path by then (PR #968 audit, F3). `None` for a
+    /// directory claim, where `remove_dir` plus an `is_dir` check already bounds the damage.
+    handle: Option<std::fs::File>,
 }
 
 impl SlotClaim {
     /// Stake `target`: create an empty file (or empty directory, matching what is about to be renamed
     /// onto it) at the name, atomically. `Err` is [`slot_taken_message`] — the name was taken in the gap.
+    ///
+    /// The file handle is **kept** (PR #968 audit, F3): [`Drop`] needs it to tell its own placeholder
+    /// apart from whatever else may be sitting at the path by then. It is not held for exclusivity —
+    /// measured on Windows, an open handle does **not** reserve the name, because `std`'s `remove_file`
+    /// deletes with POSIX semantics:
+    ///
+    /// ```text
+    /// remove_file(while our handle is open) = Ok(())
+    /// create_new(same name)                 = Ok(())     <- the name is free again immediately
+    /// ```
+    ///
+    /// so there is no platform where holding it substitutes for checking.
     pub fn stake(target: &Path, is_dir: bool) -> Result<Self, String> {
-        if is_dir {
+        let handle = if is_dir {
             claim_dir_slot(target)?;
+            None
         } else {
-            // The handle is dropped immediately: the placeholder's job is to OCCUPY the name, and holding
-            // it open buys nothing while risking a sharing interaction with the rename that replaces it.
-            drop(claim_file_slot(target)?);
-        }
-        Ok(Self { path: target.to_path_buf(), is_dir, live: true })
+            Some(claim_file_slot(target)?)
+        };
+        Ok(Self { path: target.to_path_buf(), is_dir, live: true, handle })
     }
 
     /// The rename consumed the placeholder — do not remove anything on drop.
@@ -721,18 +1004,85 @@ impl SlotClaim {
 }
 
 impl Drop for SlotClaim {
+    /// Remove the placeholder — **only once it is proved to still BE the placeholder** (PR #968 audit,
+    /// F3).
+    ///
+    /// This is a deletion primitive at a path, and it runs on every cross-volume (`EXDEV`) move — C: to
+    /// D:, to a USB stick, to a network share. The first version removed by path unconditionally on the
+    /// reasoning that it "only ever removes a name this process proved was free and then created". That
+    /// reasoning does not hold: the placeholder can be deleted by something else (a zero-byte sweeper, AV
+    /// quarantine, a sync client) and a **real file** written at the name, and the drop then deleted the
+    /// real file. The audit measured it.
+    ///
+    /// So the verdict is now [`placeholder_is_still_ours`], and **every uncertainty leaves the file
+    /// alone**: a stat that fails, a shape that does not match, an identity that cannot be read. Leaving
+    /// a stray zero-byte file behind is strictly better than deleting a stranger's data, and the caller's
+    /// fallback re-claims atomically anyway — so the worst case of not removing is a loud refusal, while
+    /// the worst case of removing wrongly is silent data loss.
     fn drop(&mut self) {
         if !self.live {
             return;
         }
-        // Only ever removes a name this process proved was free and then created. `remove_dir` (not
-        // `remove_dir_all`) deliberately: if anything at all ended up inside, it is not our empty
-        // placeholder any more and destroying it is not this type's business.
-        let _ = if self.is_dir {
-            std::fs::remove_dir(&self.path)
-        } else {
-            std::fs::remove_file(&self.path)
-        };
+        if self.is_dir {
+            // `remove_dir`, never `remove_dir_all`: it refuses a non-empty directory, and it unlinks a
+            // directory link without following it (both confirmed by the audit). The extra `is_dir`
+            // check keeps it from unlinking a *link* somebody planted at the name — bounded before, but
+            // it was still destroying something that was never ours.
+            if std::fs::symlink_metadata(&self.path).is_ok_and(|m| m.file_type().is_dir()) {
+                let _ = std::fs::remove_dir(&self.path);
+            }
+            return;
+        }
+        if self.handle.as_ref().is_some_and(|h| placeholder_is_still_ours(h, &self.path)) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Is the object at `path` still the placeholder `handle` refers to (PR #968 audit, F3)?
+///
+/// **Unix is exact.** `(dev, ino)` read from the open descriptor and from the path must match, so an
+/// unlink-and-recreate is caught no matter what the impostor looks like.
+///
+/// **Windows is a conservative approximation, and this says so rather than implying otherwise.** There is
+/// no *stable* way to read a handle's identity: `std::os::windows::fs::MetadataExt`'s
+/// `volume_serial_number()`/`file_index()` are still behind the unstable `windows_by_handle` feature
+/// (rust-lang/rust#63010), and the alternative is a `CreateFileW` + `GetFileInformationByHandle` block —
+/// which this crate does have precedent for, in `batch_media`, but which trades this module's
+/// zero-`unsafe` profile for it. Instead the path must be a **regular file** (excluding every reparse
+/// point and directory), of **length zero**, whose creation and modification timestamps both match the
+/// handle's. An impostor therefore has to be an empty regular file created within the same 100 ns NTFS
+/// timestamp tick — measured on this ticket, NTFS tunnelling did **not** preserve the creation time
+/// across a delete-and-recreate, so the timestamps genuinely move. The residual is deleting somebody
+/// else's *empty* file; the audit's measured case — a real file written at the name — is refused.
+///
+/// A `false` from here is always safe: it means the placeholder is left behind, never that something
+/// else is removed.
+fn placeholder_is_still_ours(handle: &std::fs::File, path: &Path) -> bool {
+    let (Ok(disk), Ok(ours)) = (std::fs::symlink_metadata(path), handle.metadata()) else {
+        return false; // cannot tell -> do not remove
+    };
+    if !disk.file_type().is_file() || disk.len() != 0 {
+        return false;
+    }
+    same_object(&disk, &ours)
+}
+
+/// The Unix half of [`placeholder_is_still_ours`] — exact identity from the descriptor.
+#[cfg(unix)]
+fn same_object(disk: &std::fs::Metadata, ours: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    disk.dev() == ours.dev() && disk.ino() == ours.ino()
+}
+
+/// The non-Unix half — see [`placeholder_is_still_ours`] for why this is timestamps rather than identity,
+/// and for exactly what it does and does not rule out. Both timestamps must be readable **and** equal; a
+/// filesystem that cannot report them answers "not ours", which leaves the file alone.
+#[cfg(not(unix))]
+fn same_object(disk: &std::fs::Metadata, ours: &std::fs::Metadata) -> bool {
+    match (disk.created(), ours.created(), disk.modified(), ours.modified()) {
+        (Ok(dc), Ok(oc), Ok(dm), Ok(om)) => dc == oc && dm == om,
+        _ => false,
     }
 }
 
@@ -779,6 +1129,21 @@ pub enum RenameIntoSlot {
 /// a folder mid-operation, and — unlike the defect this closes — it still cannot send bytes outside the
 /// folder, because `fs::rename` does not follow the final component. Recorded rather than closed.
 ///
+/// # Two costs of taking the name, both real and neither hypothetical (PR #968 review)
+///
+/// - **Crash litter.** A `SIGKILL`, a force-quit or a power loss between the stake and the rename leaves
+///   a 0-byte file (or an empty directory) at the picked name **forever** — [`Drop`] does not run when the
+///   process is killed. The user sees no error, and the *next* copy of the same item then auto-renames
+///   around the corpse and hands them `report - Copy.txt` for what should have been `report.txt`. There is
+///   no sweep for these, unlike `stage_and_replace`'s `.cpe-tmp` siblings, which are stamped and swept
+///   (CPE-1738); a placeholder is named exactly like the real file precisely so that it reserves that
+///   name, which is what makes it unsweepable by name.
+/// - **Watcher churn.** A same-volume move is now observable as create-then-rename rather than a single
+///   rename, so every move emits a spurious 0-byte create at the destination name to anything watching —
+///   OneDrive, Dropbox, and this app's own Agent Watch. Worth stating plainly because the ticket's whole
+///   premise is that a sync client rewriting a folder mid-operation is *ordinary*: the fix makes the
+///   thing it defends against slightly more likely to notice it.
+///
 /// # Per-OS, measured, because the two halves genuinely differ
 ///
 /// Everything above depends on `rename` being *willing* to replace our own placeholder. Measured
@@ -803,10 +1168,32 @@ pub enum RenameIntoSlot {
 /// on this machine before this function was written. That measurement is the reason one mechanism serves
 /// all three platforms instead of a `cfg`-split.
 pub fn rename_into_claimed_slot(src: &Path, target: &Path) -> RenameIntoSlot {
-    // `metadata`, not `symlink_metadata`: it mirrors the `src.is_dir()` the callers already branch on, so
-    // the placeholder's shape matches what the rename is about to put there. A link source falls to the
-    // file arm and is renamed as the link it is.
-    let src_is_dir = std::fs::metadata(src).map(|m| m.is_dir()).unwrap_or(false);
+    // `symlink_metadata`, NOT `metadata` — PR #968 audit, F1, a HIGH regression this ticket's first cut
+    // introduced and whose own doc comment then asserted the opposite.
+    //
+    // `metadata` FOLLOWS the link, so a symlink-or-junction-to-a-directory answered `is_dir = true`, a
+    // DIRECTORY placeholder was staked, and `rename(link -> empty dir)` then failed — after which
+    // `do_move_into` fell through to its cross-volume copy, which dereferenced the link a second time,
+    // copied the LINKED-TO tree into the destination and deleted the user's shortcut. "Move this
+    // shortcut" silently became "materialise everything it points at here, then delete the shortcut" —
+    // point it at `~/.ssh` and move it to a USB stick and that is where the keys go.
+    //
+    // What the rename is about to move is the LINK, not what it leads to, so the placeholder has to be
+    // shaped like a link — i.e. a file. Measured on Windows against an NTFS junction:
+    //
+    //   metadata(link).is_dir          = Ok(true)     <- the bug
+    //   symlink_metadata(link).is_dir  = Ok(false)    <- what the rename actually needs
+    //   rename(junction -> our FILE placeholder) = Ok(())
+    //   moved slot is a link?          = Ok(true)     linked-to tree intact, dest holds only the link
+    //
+    // and against the pre-fix shape, for contrast:
+    //
+    //   rename(junction -> our DIR placeholder)  = Err(PermissionDenied, os error 5)
+    //
+    // Pinned by `cpe_1765_a_directory_link_MOVED_as_a_source_stays_a_link_and_is_not_dereferenced`. The
+    // gap behind the gap: the first cut had eighteen tests and every one of them staged a link at the
+    // DESTINATION; none staged one as the SOURCE.
+    let src_is_dir = std::fs::symlink_metadata(src).map(|m| m.is_dir()).unwrap_or(false);
     let claim = match SlotClaim::stake(target, src_is_dir) {
         Ok(c) => c,
         Err(msg) => return RenameIntoSlot::SlotTaken(msg),
@@ -6131,6 +6518,264 @@ mod tests {
         );
         assert_eq!(std::fs::read_to_string(dir_dst.join("leaf.txt")).unwrap(), "leaf");
         assert!(!dir_src.exists(), "the source must be gone after a move");
+    }
+
+    /// **The leg that was missing, and the reason F1 shipped** (PR #968 — found independently by the
+    /// Security Auditor and the Reviewer). The first cut had eighteen tests and every one staged a link
+    /// at the *destination*; none staged one as the **source**. So nothing noticed that
+    /// `rename_into_claimed_slot` asked `metadata(src).is_dir()`, which FOLLOWS the link, staked a
+    /// directory placeholder for a symlink, failed the rename, and let the caller fall through to a copy
+    /// that dereferenced the link — materialising the linked-to tree in the destination and then deleting
+    /// the user's shortcut.
+    ///
+    /// Point that shortcut at `~/.ssh` and move it to a USB stick and that is where the private keys go,
+    /// with the operation reporting success. The assertions below are therefore about **what landed**, in
+    /// this order: the linked-to secret must be untouched, the destination must hold a link and not a
+    /// copy, and only then is the verdict examined.
+    #[test]
+    fn cpe_1765_a_directory_link_moved_as_the_source_stays_a_link_and_is_not_dereferenced() {
+        let d = scratch("cpe1765_move_link_source");
+        let secret = d.path().join("secret_dir");
+        std::fs::create_dir(&secret).unwrap();
+        std::fs::write(secret.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let shortcut = d.path().join("shortcut");
+        if !make_dir_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the link-as-move-source leg: this machine could not create a \
+                 directory link. NOTHING on this run covered the dereference route."
+            );
+            return;
+        }
+        let dest = d.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let picked = dest.join("shortcut");
+
+        let outcome = rename_into_claimed_slot(&shortcut, &picked);
+
+        // HARM FIRST. The pre-fix path returned Ok having copied the secret and deleted the link.
+        assert_eq!(
+            std::fs::read_to_string(secret.join("id_rsa")).unwrap(),
+            "PRIVATE KEY",
+            "the linked-to tree must not be touched by moving the link"
+        );
+        let landed: Vec<_> = std::fs::read_dir(&dest)
+            .unwrap()
+            .filter_map(|e| e.ok().map(|e| e.file_name()))
+            .collect();
+        assert_eq!(landed.len(), 1, "the destination must hold exactly the moved link: {landed:?}");
+        assert!(
+            std::fs::symlink_metadata(&picked).is_ok_and(|m| m.file_type().is_symlink()),
+            "what landed must still BE a link — a real directory here means the link was dereferenced \
+             and its target's contents were copied into the folder the user chose"
+        );
+        assert!(
+            !picked.join("id_rsa").exists() || std::fs::symlink_metadata(&picked).unwrap().file_type().is_symlink(),
+            "the secret must not have been materialised as a plain copy"
+        );
+        assert!(
+            matches!(outcome, RenameIntoSlot::Renamed),
+            "moving a link onto a free name is an ordinary rename: {outcome:?}"
+        );
+    }
+
+    /// The same shape for a **file** link, which takes a different `rename` path on POSIX and needs the
+    /// symlink privilege on Windows (hence the loud skip).
+    #[test]
+    fn cpe_1765_a_file_link_moved_as_the_source_stays_a_link() {
+        let d = scratch("cpe1765_move_filelink_source");
+        let secret = d.path().join("secret.txt");
+        std::fs::write(&secret, b"PRIVATE KEY").unwrap();
+        let shortcut = d.path().join("shortcut.txt");
+        if !make_file_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the file-link-as-move-source leg: no file symlink on this machine"
+            );
+            return;
+        }
+        let dest = d.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        let picked = dest.join("shortcut.txt");
+
+        let outcome = rename_into_claimed_slot(&shortcut, &picked);
+
+        assert!(
+            std::fs::symlink_metadata(&picked).is_ok_and(|m| m.file_type().is_symlink()),
+            "the moved entry must still be a link, not a copy of what it pointed at"
+        );
+        assert!(secret.exists(), "the link's target must be untouched");
+        assert!(matches!(outcome, RenameIntoSlot::Renamed), "{outcome:?}");
+    }
+
+    /// **PR #968 audit, F3.** The placeholder is deleted by something else and a REAL file is written at
+    /// the name; dropping the claim must not delete that file. Before the fix the drop removed by path
+    /// unconditionally, so it did.
+    #[test]
+    fn cpe_1765_a_dropped_claim_never_deletes_a_file_it_did_not_create() {
+        let d = scratch("cpe1765_claim_drop");
+        let picked = d.path().join("victim.txt");
+        {
+            let claim = SlotClaim::stake(&picked, false).expect("a free name must stake");
+            // The window: a zero-byte sweeper / AV quarantine / sync client removes our placeholder…
+            std::fs::remove_file(&picked).unwrap();
+            // …and a real file is written at the same name before the claim goes out of scope.
+            std::fs::write(&picked, b"SOMEONE ELSE'S REAL FILE").unwrap();
+            drop(claim);
+        }
+        assert_eq!(
+            std::fs::read_to_string(&picked).ok().as_deref(),
+            Some("SOMEONE ELSE'S REAL FILE"),
+            "dropping the claim deleted a file this process never created"
+        );
+    }
+
+    /// The other half of F3: when the placeholder IS still ours, the drop must still clean it up —
+    /// otherwise the identity check would have "fixed" the deletion by never deleting, and the
+    /// cross-volume fallback would meet its own litter.
+    #[test]
+    fn cpe_1765_a_dropped_claim_still_removes_its_own_untouched_placeholder() {
+        let d = scratch("cpe1765_claim_drop_ok");
+        let file_slot = d.path().join("f.txt");
+        drop(SlotClaim::stake(&file_slot, false).expect("stake"));
+        assert_eq!(file_slot.try_exists().ok(), Some(false), "our own file placeholder must be removed");
+
+        let dir_slot = d.path().join("t");
+        drop(SlotClaim::stake(&dir_slot, true).expect("stake"));
+        assert_eq!(dir_slot.try_exists().ok(), Some(false), "our own dir placeholder must be removed");
+    }
+
+    /// **PR #968 review.** Nothing pinned the drop under an UNWIND, only under a normal return — and the
+    /// whole point of RAII here is the paths that do not return normally. Same `catch_unwind` idiom this
+    /// module already uses for `ScratchDir`.
+    #[test]
+    fn cpe_1765_a_claim_removes_its_placeholder_even_when_the_caller_panics() {
+        let d = scratch("cpe1765_claim_unwind");
+        let picked = d.path().join("victim.txt");
+        let p = picked.clone();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _claim = SlotClaim::stake(&p, false).expect("a free name must stake");
+            panic!("the caller dies between the stake and the rename");
+        }));
+        assert!(r.is_err(), "the test's own premise: the closure must have panicked");
+        assert_eq!(
+            picked.try_exists().ok(),
+            Some(false),
+            "the placeholder outlived an unwind, so the name stays claimed and the next copy of this \
+             item auto-renames around a corpse"
+        );
+    }
+
+    /// **PR #968 audit, F5.** A non-regular-file source must be refused *before* the destination name is
+    /// claimed — otherwise a directory in a copied tree leaves a stray empty file at the claimed name
+    /// (and on Unix a FIFO would hang the copy forever, which no test can assert without hanging).
+    #[test]
+    fn cpe_1765_a_directory_source_is_refused_before_the_destination_name_is_claimed() {
+        let d = scratch("cpe1765_not_a_file");
+        let src = d.path().join("a_directory");
+        std::fs::create_dir(&src).unwrap();
+        let dst = d.path().join("dst.bin");
+
+        let r = copy_file_into_claimed_slot(&src, &dst);
+
+        assert_eq!(
+            dst.try_exists().ok(),
+            Some(false),
+            "the destination name was claimed before the source was checked, leaving a stray file"
+        );
+        let e = r.expect_err("a directory is not a file to copy by value");
+        assert!(e.contains("not a regular file"), "{e}");
+    }
+
+    /// **PR #968 audit, F4 — Unix only, because Windows has no mode.** The destination must never be
+    /// wider than the source *at any instant*, so it is created at the source's mode rather than
+    /// `0666 & ~umask` and narrowed afterwards. Asserting the final mode alone would not prove the birth
+    /// mode, so this asserts the mode observed on the **open handle before any byte is written** by
+    /// claiming the slot exactly as the copier does.
+    #[cfg(unix)]
+    #[test]
+    fn cpe_1765_a_copy_destination_is_born_at_the_sources_mode_not_the_umask_default() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let d = scratch("cpe1765_birth_mode");
+        let src = d.path().join("secret.env");
+        std::fs::write(&src, b"TOKEN=hunter2").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let meta = std::fs::metadata(&src).unwrap();
+
+        let slot = d.path().join("born.env");
+        let handle = claim_file_slot_with_mode(&slot, birth_mode_of(&meta)).expect("claim");
+        let at_birth = handle.metadata().unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            at_birth, 0o600,
+            "the destination was world-readable at birth and only narrowed after the copy — the window \
+             POSIX checks permission at `open`, not at `read`, makes exploitable"
+        );
+        drop(handle);
+        std::fs::remove_file(&slot).unwrap();
+
+        // …and the finished copy still ends at the source's mode.
+        let dst = d.path().join("copy.env");
+        copy_file_into_claimed_slot(&src, &dst).expect("copy");
+        assert_eq!(std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+
+    /// **PR #968 review, finding A — Windows only.** `fs::copy` is `CopyFileExW` and carries file times;
+    /// a streamed copy stamps the destination "now", which re-dates every pasted file and reorders every
+    /// "sort by date modified" view.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1765_a_windows_copy_carries_the_sources_modified_time() {
+        let d = scratch("cpe1765_mtime");
+        let src = d.path().join("old.txt");
+        std::fs::write(&src, b"USER CONTENT").unwrap();
+        // Backdate the source so "now" and "the source's time" cannot be confused.
+        let then = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&src)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(then))
+            .unwrap();
+        let want = std::fs::metadata(&src).unwrap().modified().unwrap();
+
+        let dst = d.path().join("copy.txt");
+        copy_file_into_claimed_slot(&src, &dst).expect("copy");
+
+        assert_eq!(
+            std::fs::metadata(&dst).unwrap().modified().unwrap(),
+            want,
+            "the copy was stamped with the time of the copy, not the time of the file"
+        );
+    }
+
+    /// **PR #968 review, second UAT finding — Windows only.** `Zone.Identifier` is the Mark-of-the-Web:
+    /// dropping it on copy silently disarms SmartScreen and Protected View for the copy.
+    #[cfg(windows)]
+    #[test]
+    fn cpe_1765_a_windows_copy_carries_the_mark_of_the_web() {
+        let d = scratch("cpe1765_motw");
+        let src = d.path().join("downloaded.exe");
+        std::fs::write(&src, b"payload").unwrap();
+        let mut zone = src.as_os_str().to_os_string();
+        zone.push(":Zone.Identifier");
+        if std::fs::write(PathBuf::from(&zone), b"[ZoneTransfer]\r\nZoneId=3\r\n").is_err() {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the Mark-of-the-Web leg: this filesystem has no alternate data streams"
+            );
+            return;
+        }
+
+        let dst = d.path().join("copy.exe");
+        copy_file_into_claimed_slot(&src, &dst).expect("copy");
+
+        let mut dst_zone = dst.as_os_str().to_os_string();
+        dst_zone.push(":Zone.Identifier");
+        assert_eq!(
+            std::fs::read_to_string(PathBuf::from(&dst_zone)).ok().as_deref(),
+            Some("[ZoneTransfer]\r\nZoneId=3\r\n"),
+            "the copy lost its Mark-of-the-Web, so SmartScreen will not fire on it"
+        );
     }
 
     /// A rename that fails for a reason other than the slot (here: a source that isn't there; in

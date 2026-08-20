@@ -238,6 +238,14 @@ The Home screen has **Quick access** tiles up top and a tabbed lower section wit
   when the newcomer was a shortcut, following it and putting your file somewhere else entirely). The
   rest of the batch continues; just run the operation again for the item that failed and it will pick a
   fresh name.
+- **"the existing folder could not be removed first"** — from **Replace** only. The old folder at the
+  destination could not be fully deleted (most often something inside it is open in another program), so
+  nothing was replaced and the original is still intact. Close whatever is holding the file and try
+  again. Previously this case merged the new files into the old folder instead, which left a mixture of
+  both and reported success.
+- **Moving a shortcut moves the shortcut.** Dragging a symbolic link, junction or shortcut to a folder
+  moves *the shortcut itself* — it never copies out the contents of whatever it points at, and never
+  leaves the original behind. Copying one still copies what it points at, as before.
 
 ## Add metadata columns
 

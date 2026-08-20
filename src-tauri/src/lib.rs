@@ -3401,8 +3401,22 @@ fn resolve_conflict(
             // action is removal.
             cpe_server::fsutil::contained_under(base_target, dest_dir)
                 .map_err(|e| format!("refusing to overwrite: {e}"))?;
+            // CPE-1765 (PR #968 review, finding C): this removal's failure used to be swallowed, which
+            // was survivable only because the write that followed was `create_dir_all` — it returned
+            // `Ok` on the surviving directory and the transfer merged into it file by file. Now that the
+            // write CLAIMS the name, a partial removal (a locked file inside, routine on Windows) fails
+            // the item with "the name was free when this operation picked it and is not free now" — which
+            // is simply untrue: the user chose Replace, the name was never free, and the real problem is
+            // that the old copy could not be deleted. Surfacing the removal error says what actually
+            // happened and names the path, instead of blaming a race that did not occur.
             if base_target.is_dir() {
-                let _ = fs::remove_dir_all(base_target);
+                fs::remove_dir_all(base_target).map_err(|e| {
+                    format!(
+                        "refusing to overwrite \"{}\": the existing folder could not be removed first, \
+                         so nothing was replaced — {e}",
+                        base_target.display()
+                    )
+                })?;
             } else if fs::remove_file(base_target).is_err() {
                 // CPE-1715: a dangling *directory* link — the NTFS junction `make_dangling_link` falls
                 // back to when `SeCreateSymbolicLinkPrivilege` is absent, which is what an unprivileged
@@ -3492,6 +3506,12 @@ fn copy_tree_streamed(
         // it, outside the folder the user chose. That is reachable in the shipped Overwrite path today:
         // on Unix `resolve_conflict`'s `remove_dir_all` fails on a symlink-to-directory and leaves it
         // standing. `create_dir` never follows the final component and refuses, naming the path.
+        //
+        // The push is the bare message where its siblings use `format!("{}: {e}", dst.display())`, and
+        // that asymmetry is deliberate rather than an oversight (PR #968 review): `slot_taken_message`
+        // already opens with the quoted destination path, so prefixing would print it twice in the
+        // operations panel. `run_transfer`'s own `SlotTaken` arm does prefix with `{name}`, because there
+        // the per-item report is keyed by the source's name, not the destination's.
         if let Err(e) = cpe_server::fsutil::claim_dir_slot(dst) {
             report.failed += 1;
             report.errors.push(e);
@@ -18433,6 +18453,65 @@ overlay / overlay rw,relatime 0 0
         assert!(src.exists(), "a refused move must leave the source where it was");
         let e = r.expect_err("a name taken in the gap must not report success");
         assert!(e.contains(&picked.display().to_string()), "the refusal must name the path: {e}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// **The F1 regression, at the production write half, exactly as both reviewers measured it**
+    /// (PR #968 — found independently by the Security Auditor and the code Reviewer).
+    ///
+    /// `write_move_into_picked_slot` asked `metadata(src).is_dir()`, which follows the link, so moving a
+    /// directory shortcut staked a *directory* placeholder, the rename failed, and the cross-volume
+    /// fallback then dereferenced the link a second time — copying the linked-to tree into the
+    /// destination and deleting the user's shortcut. The Reviewer's probe:
+    ///
+    /// ```text
+    /// [REV] result = Ok(".../dest/shortcut")        <- REPORTS SUCCESS
+    /// [REV] landed is a link                 = Ok(false)
+    /// [REV] landed is a real dir with a COPY = true
+    /// [REV] source shortcut still present    = false
+    /// ```
+    ///
+    /// Point the shortcut at `~/.ssh` or a password vault and move it to a USB stick, and that is where
+    /// the contents go. Every assertion here is about what landed, before the `Result` is read.
+    #[test]
+    fn cpe_1765_moving_a_directory_shortcut_moves_the_link_not_what_it_points_at() {
+        use std::io::Write;
+        let d = scratch("cpe1765_move_link_src");
+        let secret = d.join("secret_dir");
+        fs::create_dir(&secret).unwrap();
+        fs::write(secret.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let shortcut = d.join("shortcut");
+        if !cpe_server::fsutil::make_dir_link(&secret, &shortcut) {
+            let _ = writeln!(
+                std::io::stderr(),
+                "[CPE-1765] SKIPPED the move-a-shortcut leg: no directory link on this machine. NOTHING \
+                 on this run covered the dereference route."
+            );
+            let _ = fs::remove_dir_all(&d);
+            return;
+        }
+        let dest = d.join("dest");
+        fs::create_dir(&dest).unwrap();
+
+        let r = write_move_into_picked_slot(&shortcut, dest.join("shortcut"));
+
+        let landed = dest.join("shortcut");
+        assert_eq!(
+            fs::read_to_string(secret.join("id_rsa")).unwrap(),
+            "PRIVATE KEY",
+            "the linked-to tree must be untouched by moving the link (result {r:?})"
+        );
+        assert!(
+            fs::symlink_metadata(&landed).is_ok_and(|m| m.file_type().is_symlink()),
+            "what landed is not a link — the shortcut was dereferenced and its target's contents were \
+             materialised in the destination the user chose (result {r:?})"
+        );
+        assert!(
+            !landed.join("id_rsa").is_file()
+                || fs::symlink_metadata(&landed).unwrap().file_type().is_symlink(),
+            "the private key was copied into the destination as a real file"
+        );
+        r.expect("moving a shortcut onto a free name is an ordinary move");
         let _ = fs::remove_dir_all(&d);
     }
 

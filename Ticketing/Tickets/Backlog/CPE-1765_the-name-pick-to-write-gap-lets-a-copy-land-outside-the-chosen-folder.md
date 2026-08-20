@@ -161,3 +161,65 @@ actually exercises them. The live-file-symlink leg announces a loud skip on a Wi
 
 Docs: `src/docs/03-explorer.md` explains the new per-item message. No new Section, so `sectionDocs.ts`
 is unchanged.
+
+### 2026-08-20 — rework after review (Security Auditor + UAT + code Reviewer)
+
+Three independent reviews of the first cut. The claim-then-write mechanism was confirmed sound (13
+distinct attacks failed against it, and the Reviewer independently reproduced the Windows
+`FileRenameInfoEx` POSIX-semantics finding by proving `fs::rename` replaced a destination it was
+*holding open*, which `MoveFileExW` cannot do). Nine findings addressed:
+
+**F1 — a HIGH regression this ticket introduced, found independently by two reviewers.**
+`rename_into_claimed_slot` used `metadata(src).is_dir()`, which *follows* a link — so moving a directory
+shortcut staked a directory placeholder, the rename failed, and the fallback dereferenced the link,
+copied the linked-to tree into the destination and deleted the shortcut. Point it at `~/.ssh` and that is
+where the keys go, with `Ok` returned. One word: `symlink_metadata`. Measured after:
+`rename(junction -> our FILE placeholder) = Ok`, slot is still a link, linked-to tree untouched. **The
+gap behind the gap:** all 18 original tests staged a link at the *destination* and none as the *source*.
+Two tests added at each level.
+
+**Copy arm — the Foreman's `COPY_FILE_FAIL_IF_EXISTS` route was tested and REJECTED on evidence.** It
+refuses a regular file (80), a hard link (80), a live symlink (80) and a junction (5) — but on a
+**dangling** symlink it returns `Ok` and creates the link's target *outside the folder*. It asks whether
+the resolved target exists, exactly as `try_exists` does, so it is a kernel-side probe, not a claim, and
+it fails open on the easiest link shape to plant. Root cause of the throughput regression was instead
+`std::io::copy`'s 8 KiB buffer: 200 MB warm, best of 3 — `CopyFileExW` 3191 MB/s, `io::copy` 840 MB/s,
+1 MiB 2101 MB/s, 4 MiB 2129 MB/s. Now a 1 MiB loop (~66% of the kernel path, up from 26%), with
+Linux/Android deliberately keeping `std::io::copy` so `copy_file_range`/reflink is not lost. The residual
+1.5× is a real trade against the airtight property and is documented as the Foreman's call, not accepted
+silently.
+
+**F2** — the residual is now stated **per site**: the single-file copier is absolute (writes through the
+claimed handle); the tree copiers are not (they claim a *name* and re-resolve each child), and closing
+that needs `openat`-relative resolution, which `std` has on no platform (`File::open` cannot even open a
+directory on Windows — measured). Follow-up ticket, not a line edit. The `?` abort-on-first-error is
+documented as load-bearing per the auditor's race harness.
+
+**F3** — `SlotClaim::drop` no longer deletes by path unconditionally. It keeps the placeholder's handle
+and removes only what it proves is still its own: exact `(dev, ino)` on Unix; regular-file + zero-length +
+matching timestamps on Windows, where no *stable* handle-identity API exists. Every uncertainty leaves the
+file alone. Measured that a held handle is **not** protection: `remove_file` while open = `Ok`, then
+`create_new` at the same name = `Ok`.
+
+**F4** — the copy destination is now born at the source's mode instead of `0666 & ~umask`, closing a
+world-readable window that spanned the whole copy (the CPE-1739 shape). `set_permissions` now propagates
+instead of `let _ =`. **F5** — the source is `stat`ed *before* it is opened and non-regular files are
+refused, so a FIFO cannot hang the copy, a `/dev/urandom` link cannot fill the volume, and a directory
+cannot leave a stray file at the claimed name.
+
+**Review finding A** — Windows copies lost the modified time (`CopyFileExW` carries file times, a stream
+does not); every pasted file was re-dated, reordering "sort by date modified". Now carried.
+**UAT finding 2** — `Zone.Identifier` is an ADS, so copies silently lost the Mark-of-the-Web and
+SmartScreen stopped firing. Now carried explicitly. Other ADS are still dropped (needs `FindFirstStreamW`)
+and that limit is stated rather than glossed.
+**Review finding C** — `resolve_conflict`'s Overwrite arm swallowed its removal failure, which this change
+turned from "merge" into a refusal blaming a race that never happened. It now surfaces the real reason
+and names the path.
+
+Also: unwind test for the claim's drop; a comment recording that interior directory claims are covered by
+shared code path rather than by assertion; both `clippy.toml` copies updated (they still pointed at
+`rename_into_slot`); crash-litter and watcher-churn residuals documented.
+
+**Still not verified locally:** Linux and macOS. F4's birth-mode test is `cfg(unix)` and has never run on
+this machine — CI's 3-OS matrix owns it. Every link leg was confirmed to genuinely *run* here (no
+`SKIPPED` lines in the test output), including the live-file-symlink one.

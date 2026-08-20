@@ -23,5 +23,5 @@
 #   - The lint is warn-by-default. It only fails a build because CI passes `-D warnings`; a bare local
 #     `cargo clippy` prints a warning that scrolls past.
 disallowed-methods = [
-    { path = "std::fs::rename", reason = "replaces its destination silently and destroys a link at it — use fsutil::rename_into_slot for a user-named slot, or allow with a reason" },
+    { path = "std::fs::rename", reason = "replaces its destination silently and destroys a link at it — use fsutil::rename_into_slot_claimed_slot for a name a picker just chose (it CLAIMS the name, so a name taken in the gap is a loud refusal), or fsutil::rename_into_slot for a slot the user named directly, or allow with a reason" },
 ]
