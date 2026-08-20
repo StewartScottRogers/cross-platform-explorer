@@ -109,3 +109,60 @@ Related: **CPE-1759**, **CPE-1773/1774/1775**.
   other test in this classifier family (`cpe1759_link_creation_separates_a_categorical_refusal_from_a_failure`'s
   own doc explains why no CI leg can stage them). The new tests reproduce the *shape* of the error each
   format hands our code, not the live trigger — consistent with how CPE-1759 tested the same classifier.
+
+- 2026-08-20 — **Round 2 rework**, on PR #965, after independent Reviewer round 1 returned CHANGES
+  REQUESTED with three blockers (one a real security hole) plus a minor and a docs note. All addressed
+  on the same branch.
+
+  **Blocker 1 (security) — closed.** `recover_raw_os_error` (round 1) scraped `e.to_string()` first,
+  which is `unpack_in`'s own outermost `TarError::desc`, `"failed to unpack `{file_dst}`"` — entirely the
+  archive's own attacker-controlled entry path. The Reviewer's repro: a symlink entry named
+  `payload (os error 1)` recovered code 1 (in `WINDOWS_NO_LINK_SUPPORT`) from a genuine
+  `ERROR_ACCESS_DENIED` (5) failure, converting a real write failure into a silent skip. Fixed two ways,
+  independently: (a) `e` itself is never inspected any more — only `e.source()` onward, where tar's own
+  wrap text actually lives; (b) `parse_os_error_code` now requires the matched text to `starts_with` what
+  `Error::from_raw_os_error(code)` itself renders, so a match cannot be forged by attacker text appearing
+  later in a longer string. Confirmed each is independently load-bearing: reverting either alone still
+  leaves the new regression test green; reverting *both* together (reproducing round 1's exact code)
+  turns `cpe1813_a_crafted_entry_name_cannot_forge_a_link_support_refusal` red on the precise repro.
+
+  **Blocker 2 (parity) — closed.** Renamed `recover_raw_os_error` → `recover_link_syscall_error`, which
+  now only trusts a code/kind read off the ONE `source()`-chain level whose text is anchored to a literal
+  marker (`" when symlinking "` / `" when hard linking "`, new consts `TAR_SYMLINK_MARKER`/
+  `TAR_HARDLINK_MARKER`) — the exact text only `tar`'s own symlink/hard-link syscall wrap produces.
+  `ensure_dir_created` (parent-directory creation) and `set_symlink_file_times` (the mtime set that runs
+  *after* a symlink already exists on disk) both wrap their raw, unreformatted `io::Error` with no such
+  marker anywhere, so a genuine `EPERM` from either is now correctly aborted rather than misfiled as
+  "this volume has no links" — pinned by
+  `cpe1813_a_parent_dir_or_mtime_failure_is_never_a_link_support_refusal`, which reproduces both wrap
+  shapes with a categorical code and asserts abort.
+
+  **Blocker 3 (test adequacy) — closed.** Per the Foreman's follow-up: the UAT tester confirmed this
+  machine (Developer Mode on) and CI cannot stage a live 1314/FAT-stick refusal, so a probe-and-skip test
+  would self-skip everywhere and prove nothing. Added an injection seam instead — `tar_unpack`/
+  `extract_tar_stream` are now thin wrappers over `tar_unpack_with`/`extract_tar_stream_with`, which take
+  the per-entry unpack operation as a parameter (defaulting to real `Entry::unpack_in`). Two new
+  end-to-end tests build a REAL 3-entry tar (`a.txt`, a symlink `b`, `c.txt`) and inject a controlled,
+  tar-shaped `Err` only at `b`, letting every other entry flow through the real, unmodified production
+  loop. Mutation-proved exactly as asked: reverting `tar_unpack_with`'s routing to the pre-CPE-1813
+  unconditional `return Err(e.to_string())` turns `cpe1813_tar_unpack_routes_a_link_creation_refusal_through_the_shared_classifier`
+  red while the `extract_tar_stream` test stays green; reverting `extract_tar_stream_with`'s routing the
+  same way turns the other one red while the `tar_unpack` test stays green. Both reverted after
+  confirming red.
+
+  **Minor 4 (message parity) — addressed.** `tar_link_creation_outcome`'s doc now states explicitly why
+  the displayed message is the genuine syscall text rather than a synthesized one: a parsed code is
+  redisplayed via `Error::from_raw_os_error(code)`, whose `Display` is the same deterministic OS-strerror
+  lookup that produced the original wrapped text (same code, same platform ⇒ same string); the
+  `Unsupported`-kind fallback (no parseable code) keeps the *exact* original prefix text verbatim rather
+  than a generic message.
+
+  **Docs note — no change needed.** The Foreman flagged that `src/docs/explorer-archives.md`'s "anything
+  else about the write failing... still stops the extraction" sentence would be false under blockers 1/2.
+  With both fixed, it is true as written (verified: a parent-dir EPERM and a forged-name attack both now
+  abort, not skip) — the code was fixed rather than the sentence weakened, per direction.
+
+  **Gates (round 2):** `cargo clippy --manifest-path crates/server/Cargo.toml --all-targets -- -D
+  warnings` — clean. `cargo test --manifest-path crates/server/Cargo.toml --lib` — 2249 passed, 0 failed,
+  4 ignored (net +4 tests vs. round 1: two round-1 tests renamed/updated for the new function signatures,
+  four new tests added for blockers 1–3).
