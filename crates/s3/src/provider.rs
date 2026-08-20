@@ -1145,10 +1145,24 @@ fn leaf_under_prefix<'a>(key: &'a str, key_prefix: &str) -> Option<&'a str> {
 /// was CPE-1704's bug — a legal key like `colon:name.txt` vanished from every listing with no error, no
 /// warning, nothing.
 ///
-/// What this function checks is only what is actually about a leaf escaping the listed prefix once it is
-/// round-tripped back through [`provider_path_to_key_prefix`] into a later `list`/`stat`/`read` call's
-/// `path`: an embedded or leading path separator (`/` or `\`), a leaf that is exactly `..` or `.`, or a
-/// control byte (NUL, a raw newline/CR, …) that could corrupt a rendered listing or a log line.
+/// **Correction (CPE-1811):** this used to say the function checks *only* what is about a leaf escaping
+/// the listed prefix, and left `!leaf.is_empty()` off the list below entirely — the arm CPE-1801's fix now
+/// leans on (see [`parse_list_bucket_result`]'s `CommonPrefixes` loop). That framing was never true of
+/// `!leaf.is_empty()`, which is not an escaping check: an empty leaf has nothing in it to escape *with*.
+/// The seven arms, complete:
+///
+/// - An embedded or leading path separator (`/` or `\`), and a leaf that is exactly `..` or `.` — these
+///   four are genuinely about escaping the listed prefix once round-tripped back through
+///   [`provider_path_to_key_prefix`] into a later `list`/`stat`/`read` call's `path`.
+/// - A control byte (NUL, a raw newline/CR, …) that could corrupt a rendered listing or a log line — not
+///   an escape, but still unsafe to surface verbatim.
+/// - An *empty* leaf — also not an escape, but never addressable on its own: once
+///   `S3Provider::is_safe_leaf_name` (CPE-1704 round 3, below) made this guard run on every name
+///   `crates/vfs::connect::remote_dir_entries` sees, an accepted `""` would resolve to a self-referential
+///   row pointing back at the directory being listed, not merely fail to display inside
+///   `parse_list_bucket_result`.
+/// - A leaf longer than [`MAX_KEY_LEAF_BYTES`] — the length bound, documented in its own section below
+///   (CPE-1706 item 3) rather than repeated here.
 ///
 /// # CPE-1704 round 2: no percent-decoding here, on purpose
 ///
@@ -3566,9 +3580,22 @@ mod tests {
     /// the directory being listed — a row that navigates to itself.
     ///
     /// Each arm was disabled on its own (`!leaf.is_empty()` → `true`, then `leaf != "."` → `true`) and
-    /// each reds this test alone. Note the arms live in one `&&` chain in `is_safe_s3_leaf`, **not** in
-    /// `parse_list_bucket_result`'s separate `if leaf.is_empty() { continue }` — disabling the latter
-    /// changes nothing here, which is exactly why these two arms looked covered and were not.
+    /// each reds this test alone. Note the arms live in one `&&` chain in `is_safe_s3_leaf`, and this test
+    /// calls it directly — not through `parse_list_bucket_result` — so it stays green regardless of what
+    /// the parser does with an empty leaf on its own.
+    ///
+    /// **Correction (CPE-1811):** this used to add that disabling `parse_list_bucket_result`'s separate
+    /// `if leaf.is_empty() { continue }` "changes nothing here". CPE-1801 removed the `CommonPrefixes`
+    /// loop's copy of that check (see its own comment there), so the only one left is the `Contents` loop's
+    /// marker arm at `:1378` — a different thing entirely, not a redundant safety filter: it identifies the
+    /// directory's own zero-byte marker object and is `raw_entries`-only, deliberately never counted into
+    /// `filtered_count` (see [`ListPage::raw_entries`]). "Changes nothing here" is still true of *this*
+    /// test, for the reason above — but disabling that arm is not inert in general: it reds
+    /// `a_freshly_created_empty_directory_reports_nothing_filtered_so_no_phantom_hidden_entry_is_shown`
+    /// (confirmed by disabling it and observing `filtered == 1` instead of `0`), because the marker leaf
+    /// then falls through into `is_safe_s3_leaf("")`'s own refusal and gets counted as filtered instead of
+    /// ignored. The old wording read as "no `leaf.is_empty()` check anywhere matters to test coverage",
+    /// which was never true of the one that remains.
     #[test]
     fn is_safe_s3_leaf_rejects_the_two_arms_that_no_other_test_covers() {
         assert!(!is_safe_s3_leaf(""), "an empty leaf must never be addressable");
